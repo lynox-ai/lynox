@@ -184,12 +184,16 @@ function materializeDispatches(step: WorkflowStep): DispatchCall[] {
         '#!/bin/sh',
         'URL=""',
         'BODY=""',
+        // `shift 2` on a flag that lands last would fail and leave the loop
+        // spinning — and the orphaned shell survives the parent's SIGTERM, so
+        // it burns a core until the runner is torn down. `|| shift` makes a
+        // trailing flag terminate instead.
         'while [ $# -gt 0 ]; do',
         '  case "$1" in',
         // Consumed before the URL case, so a header value that happens to start
         // with `https://` cannot shadow the real target.
-        '    -H|--header|-X|--request|-o|--output) shift 2 ;;',
-        '    -d|--data|--data-raw|--data-binary|--data-ascii) BODY="$2"; shift 2 ;;',
+        '    -H|--header|-X|--request|-o|--output) shift 2 2>/dev/null || shift ;;',
+        '    -d|--data|--data-raw|--data-binary|--data-ascii) BODY="$2"; shift 2 2>/dev/null || shift ;;',
         '    http://*|https://*) URL="$1"; shift ;;',
         '    *) shift ;;',
         '  esac',
@@ -218,14 +222,17 @@ function materializeDispatches(step: WorkflowStep): DispatchCall[] {
     });
 
     const record = new RegExp(`<<<${nonce}\\n([\\s\\S]*?)\\n---${nonce}\\n([\\s\\S]*?)\\n>>>${nonce}`, 'g');
-    const calls = [...stdout.matchAll(record)].map((m) => ({
-      url: m[1]!,
-      body: JSON.parse(m[2]!) as unknown,
-    }));
-    if (calls.length === 0) {
-      throw new Error(`step did not reach curl with a body; stub saw:\n${stdout}`);
+    const raw = [...stdout.matchAll(record)].map((m) => ({ url: m[1]!, body: m[2]! }));
+    // Checked before parsing: a call that carried no body would otherwise
+    // surface as a bare JSON SyntaxError with no mention of which step it came
+    // from — the failure would be true but unactionable.
+    if (raw.length === 0) {
+      throw new Error(`step did not reach curl; stub saw:\n${stdout}`);
     }
-    return calls;
+    for (const { url, body } of raw) {
+      if (body === '') throw new Error(`step called ${url || '<no url>'} with no request body`);
+    }
+    return raw.map(({ url, body }) => ({ url, body: JSON.parse(body) as unknown }));
   } finally {
     rmSync(stubDir, { recursive: true, force: true });
   }
@@ -258,10 +265,11 @@ function expandTags(sourceForms: string[]): string[] {
 function imageRefs(text: string): Array<{ image: string; tag: string }> {
   // The registry host is matched generically, not anchored on the expected one:
   // a pattern that can only match `ghcr.io` can never report a second registry.
-  return [...text.matchAll(/([a-z0-9.-]+\.[a-z]{2,}\/[\w.-]+\/[\w.-]+):([^\s"']+)/g)].map((m) => ({
-    image: m[1]!,
-    tag: m[2]!,
-  }));
+  // The optional port matters for the same reason — `reg:5000/o/n:t` is a
+  // legal reference, and missing it would mean missing exactly the kind of
+  // registry someone would add without thinking of this file.
+  const pattern = /([a-z0-9.-]+\.[a-z]{2,}(?::\d+)?\/[\w.-]+\/[\w.-]+):([^\s"']+)/g;
+  return [...text.matchAll(pattern)].map((m) => ({ image: m[1]!, tag: m[2]! }));
 }
 
 /** Steps that push a tagged image, by either mechanism the repo uses. */
@@ -273,11 +281,23 @@ function imagePushSteps(): Array<{ file: string; step: WorkflowStep; tagForms: s
       out.push({ file, step, tagForms: imageRefs(step.run ?? '').map((r) => `${r.image}:${r.tag}`) });
       continue;
     }
-    // (b) build-push-action with `push: true` — the canary channel. Invisible to
-    // the shell sweep above, which is exactly how a publishing channel goes
-    // unpinned: the dispatch seam guards this same blind spot, so the image
-    // seam has to as well.
-    if (/docker\/build-push-action/.test(step.uses ?? '') && step.with?.['push'] === true) {
+    // (b) build-push-action — the canary channel. Invisible to the shell sweep
+    // above, which is exactly how a publishing channel goes unpinned: the
+    // dispatch seam guards this same blind spot, so the image seam has to too.
+    if (/docker\/build-push-action/.test(step.uses ?? '')) {
+      const push = step.with?.['push'];
+      // Anything that is not an explicit false counts as publishing. Testing
+      // for `=== true` would be fail-OPEN: YAML admits `push: 'true'`, and a
+      // `${{ … }}` expression is a string either way, so a new channel written
+      // in either form would publish while this sweep reported nothing.
+      // Absent means the action's own default, which is not to push.
+      if (push === undefined || push === false || push === 'false') continue;
+      if (typeof push === 'string' && push.includes('${{')) {
+        throw new Error(
+          `${file}: \`push\` is a workflow expression (${push}) — this pin cannot decide ` +
+            'statically whether the step publishes, and guessing "no" would hide a channel',
+        );
+      }
       const tags = String(step.with?.['tags'] ?? '');
       out.push({ file, step, tagForms: imageRefs(tags).map((r) => `${r.image}:${r.tag}`) });
     }
@@ -294,11 +314,21 @@ describe('pin instrument', () => {
     expect(workflowFiles().length).toBeGreaterThan(5);
   });
 
-  it('parses the workflow tree into a plausible number of steps', () => {
-    // Asserted across the directory rather than per file: a reusable-workflow
-    // job (`jobs.x.uses:`) legitimately has no steps, and failing on that would
-    // be the instrument breaking on valid input.
-    expect(allSteps().length).toBeGreaterThan(40);
+  it('parses every workflow into jobs with steps', () => {
+    // Per file, not summed across the directory: a directory-wide total stays
+    // comfortably above any threshold while one file silently parses to zero,
+    // and that file's seams would then be unpinned with everything green.
+    // Reusable-workflow jobs (`jobs.x.uses:`) legitimately have no steps, so
+    // a file consisting only of those is skipped rather than failed.
+    for (const file of workflowFiles()) {
+      const doc = parseYaml(readFileSync(join(workflowDir, file), 'utf8')) as {
+        jobs?: Record<string, { steps?: unknown[]; uses?: string }>;
+      };
+      const jobs = Object.values(doc.jobs ?? {});
+      expect(jobs.length, `${file} declares no jobs`).toBeGreaterThan(0);
+      if (jobs.every((j) => j.uses !== undefined)) continue;
+      expect(stepsOf(file).length, `${file} yielded no steps`).toBeGreaterThan(0);
+    }
   });
 
   it('resolves shell expansion through the real shell', () => {
@@ -423,13 +453,16 @@ describe('image tag seam', () => {
     expect(tagsOnly('staging.yml').sort()).toEqual([...PUBLISHED_TAGS.staging].sort());
   });
 
-  it('canary publishes the pinned tag prefixes', () => {
-    // Canary's tags resolve from GitHub expressions at run time, so only the
-    // prefixes are checkable — they are built in the metadata step's shell.
+  it('canary builds the pinned tag prefixes', () => {
+    // Canary's tags reach the push step through `steps.meta.outputs.*`, which
+    // only resolves at run time — so what is checkable here is the shell that
+    // *builds* them, not the tags that land. Named accordingly: this does not
+    // prove the built value is what gets published, only that the vocabulary
+    // the operator surface uses is still the one produced.
     const meta = stepsOf('canary-build.yml')
       .map(({ step }) => step.run ?? '')
       .join('\n');
-    const built = [...meta.matchAll(/^\s*[A-Z_]+_TAG="([a-z]+-)\$\{/gm)].map((m) => m[1]!);
+    const built = [...meta.matchAll(/[A-Z_]+_TAG="([a-z]+-)\$\{?[A-Z_]/g)].map((m) => m[1]!);
     expect([...new Set(built)].sort()).toEqual([...CANARY_TAG_PREFIXES].sort());
   });
 
