@@ -24,6 +24,7 @@
 //     frozen gold-set, not this test's.
 
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -37,69 +38,35 @@ import {
   type GoldThread,
   type KnowledgeReplayReport,
 } from './knowledge-substrate-runner.js';
-import { makeRealReplayThread, makeLlmJudge, type ReplayProviderConfig } from './knowledge-substrate-replay.js';
+import { makeRealReplayThread, makeLlmJudge, replayFailures, resetReplayFailures, type ReplayProviderConfig } from './knowledge-substrate-replay.js';
+import { makeLegacyReplayThread } from './knowledge-substrate-baseline.js';
+import { resolveReplayProvider } from './knowledge-substrate-provider.js';
 import { HAIKU } from '../online/setup.js';
 
-/** Read a string field from ~/.lynox/config.json (same store as the CLI). */
-function readConfigKey(field: string): string | undefined {
+/** Read ~/.lynox/config.json (same store as the CLI). Missing/corrupt → {}, which
+ *  the resolver reads as "nothing configured" and self-skips on. */
+function readCliConfig(): Record<string, unknown> {
   try {
-    const cfg = JSON.parse(readFileSync(join(homedir(), '.lynox', 'config.json'), 'utf8')) as Record<string, unknown>;
-    const v = cfg[field];
-    return typeof v === 'string' && v.length > 0 ? v : undefined;
-  } catch { return undefined; }
+    return JSON.parse(readFileSync(join(homedir(), '.lynox', 'config.json'), 'utf8')) as Record<string, unknown>;
+  } catch { return {}; }
 }
 
-/**
- * Resolve the replay provider from the environment — PROVIDER-AGNOSTIC so the
- * gate runs on whatever stack the operator uses. Anthropic (Haiku) when an
- * Anthropic key is present; otherwise Mistral EU (`api.mistral.ai/v1`) when a
- * Mistral key is present — the latter is the only path that runs on a
- * Mistral-only box AND keeps real thread content in the EU (mirrors the
- * gold-gen label pass). `LYNOX_KNOWLEDGE_PROVIDER`/`_MODEL` override.
- */
+/** Resolution itself lives in `knowledge-substrate-provider.ts` — pure, and
+ *  contract-tested there. It is where this harness has silently mis-measured
+ *  before (wrong provider → every turn 400s into the runner's swallow → recall
+ *  0.00 reported as a RESULT), and a resolver inside a `.test.ts` cannot be
+ *  imported by a test without executing the eval. */
 function resolveProvider(): ReplayProviderConfig | null {
-  const forced = process.env['LYNOX_KNOWLEDGE_PROVIDER'];
-  const anthropicKey = process.env['ANTHROPIC_API_KEY'] ?? readConfigKey('api_key');
-  const mistralKey = process.env['MISTRAL_API_KEY'] ?? readConfigKey('mistral_api_key');
-  const modelOverride = process.env['LYNOX_KNOWLEDGE_MODEL'];
-
-  // 'proxy' — any OpenAI-wire-compatible endpoint the operator runs locally, so a
-  // long eval can be pointed at a self-managed model host instead of consuming
-  // shared API credits. Explicit opt-in only (never auto-picked). Configure with
-  // LYNOX_KNOWLEDGE_PROXY_URL (required — no default endpoint is baked in) plus
-  // either LYNOX_KNOWLEDGE_PROXY_KEY (the credential directly) or
-  // LYNOX_KNOWLEDGE_PROXY_KEY_FILE (a path to read it from). Without a URL or a
-  // credential this provider resolves to null and the gate self-skips.
-  if (forced === 'proxy') {
-    let proxyKey: string | undefined = process.env['LYNOX_KNOWLEDGE_PROXY_KEY'];
-    const keyFile = process.env['LYNOX_KNOWLEDGE_PROXY_KEY_FILE'];
-    if (!proxyKey && keyFile) {
-      // A set-but-unreadable key file is a MISCONFIGURATION, not "not set up".
-      // Swallowing it would resolve the provider to null and self-skip the gate
-      // green — a typo in the path would read as a pass.
-      try { proxyKey = readFileSync(keyFile, 'utf8').trim(); } catch (err) {
-        throw new Error(`LYNOX_KNOWLEDGE_PROXY_KEY_FILE is set but unreadable (${keyFile}): ${(err as Error).message}`);
-      }
-    }
-    const proxyUrl = process.env['LYNOX_KNOWLEDGE_PROXY_URL'];
-    if (!proxyKey || !proxyUrl) return null;
-    const m = modelOverride ?? 'claude-sonnet-4-6';
-    return { provider: 'openai', apiKey: proxyKey, apiBaseURL: proxyUrl, model: m, openaiModelId: m };
-  }
-
-  const useAnthropic = forced ? forced === 'anthropic' : Boolean(anthropicKey);
-  if (useAnthropic && anthropicKey) {
-    return { provider: 'anthropic', apiKey: anthropicKey, model: modelOverride ?? HAIKU };
-  }
-  if (mistralKey && forced !== 'anthropic') {
-    // NEVER a `-latest` alias: Mistral's latest tags carry much lower rate
-    // limits, which grinds a long replay into 429s and reads as artificially
-    // low recall. Pin the last stable dated snapshot — the canonical ids live
-    // in MISTRAL_MODEL_MAP (src/types/models.ts) / catalog.ts.
-    const m = modelOverride ?? 'mistral-large-2512';
-    return { provider: 'openai', apiKey: mistralKey, apiBaseURL: 'https://api.mistral.ai/v1', model: m, openaiModelId: m };
-  }
-  return null;
+  const r = resolveReplayProvider(
+    process.env as NodeJS.ProcessEnv & Record<string, string | undefined>,
+    readCliConfig(),
+    p => readFileSync(p, 'utf8'),
+    HAIKU,
+  );
+  if (r === null) return null;
+  // The pure resolver leaves the Anthropic wire implicit (no `provider` field);
+  // the Agent config wants it named.
+  return r.provider === 'openai' ? r : { ...r, provider: 'anthropic' };
 }
 
 const PROVIDER = resolveProvider();
@@ -127,11 +94,31 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
     // Turn-level progress to stderr — without it a long replay is a black box
     // (learned on the first real-gold run: 45 minutes of WAL/CPU archaeology to
     // tell a grinding monster thread from a hung one).
-    const replayThread = makeRealReplayThread({
+    // LYNOX_KNOWLEDGE_BASELINE=1 replays the SAME corpus with durable memory OFF —
+    // the legacy pipeline a tenant runs today. It is the comparison the tier bars
+    // were never set against: a recall figure is unreadable until you know whether
+    // today's number is higher or lower.
+    const BASELINE = process.env['LYNOX_KNOWLEDGE_BASELINE'] === '1';
+    const makeThread = BASELINE ? makeLegacyReplayThread : makeRealReplayThread;
+    const replayThread = makeThread({
       ...provider,
       onTurn: (threadId, turnSeq) => process.stderr.write(`  [turn] ${threadId.slice(0, 8)} t${turnSeq}\n`),
     });
-    process.stdout.write(`\n[knowledge-eval] provider=${provider.provider ?? 'anthropic'} model=${provider.model} corpus=${corpus.threads.length} threads\n`);
+    // The endpoint is in the banner deliberately: a run that silently resolved to
+    // the wrong provider prints a plausible model name and then fails every turn
+    // into a swallowed catch, reading as recall 0.00 (2026-07-27).
+    //
+    // But it is LABELLED, never printed verbatim, when the operator points this at a
+    // local host: this banner exists to be read and pasted next to the numbers, and
+    // this is a PUBLIC repo. A literal `127.0.0.1:<port>` in a pasted log is exactly
+    // the operator-local-tooling leak that had to be scrubbed on 2026-07-27, and no
+    // guard scans stdout. The label still distinguishes the three cases, which is all
+    // the failure mode above needs.
+    const rawBase = 'apiBaseURL' in provider ? provider.apiBaseURL : undefined;
+    const endpoint = !rawBase
+      ? 'api.anthropic.com'
+      : rawBase.includes('api.mistral.ai') ? 'api.mistral.ai' : '<operator-local endpoint>';
+    process.stdout.write(`\n[knowledge-eval] mode=${BASELINE ? 'BASELINE (durable memory OFF)' : 'DK (durable memory ON)'} provider=${provider.provider ?? 'anthropic'} endpoint=${endpoint} model=${provider.model} corpus=${corpus.threads.length} threads\n`);
 
     const reports: KnowledgeReplayReport[] = [];
     for (let run = 0; run < RUNS; run += 1) {
@@ -139,20 +126,40 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
       // and the junk/matched review (the 10% human spot-check + junk-label
       // calibration) needs the actual texts, not just the aggregate counts.
       const capturedLog: unknown[] = [];
+      // Per RUN, not per invocation: the counters are module-level, so without this
+      // run 2 reports run 1's failures on top of its own and the persisted rate only
+      // ever climbs — a worst-of-N verdict built on a cumulative denominator.
+      resetReplayFailures();
       // eslint-disable-next-line no-await-in-loop
       const r = await runReplayEval(corpus, {
         replayThread,
         onProgress: (_done, _total, thread, rows) => { capturedLog.push({ threadId: thread.id, stratum: thread.stratum, captured: rows }); },
       }, judge);
-      process.stdout.write(`\n[knowledge-eval] run ${run + 1}/${RUNS} (${provider.model})\n${formatReport(r)}\n`);
+      const failPct = replayFailures.turns === 0 ? 0 : (100 * replayFailures.sends) / replayFailures.turns;
+      // Printed EVERY run, not only when non-zero: a silent 0% is the evidence that the
+      // number below is a measurement rather than a swallowed outage.
+      process.stdout.write(`\n[knowledge-eval] run ${run + 1}/${RUNS} (${provider.model}) — turn failures ${replayFailures.sends}/${replayFailures.turns} = ${failPct.toFixed(1)}%${failPct > 5 ? '  ⚠️ THE NUMBERS BELOW ARE NOT A RESULT' : ''}\n${formatReport(r)}\n`);
       reports.push(r);
       try {
         const { writeFileSync, mkdirSync } = await import('node:fs');
         const dir = join(homedir(), '.lynox', 'knowledge-gold', 'results');
         mkdirSync(dir, { recursive: true });
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const file = join(dir, `replay-${stamp}-run${run + 1}.json`);
-        writeFileSync(file, JSON.stringify({ provider: provider.provider, model: provider.model, report: r, captures: capturedLog }, null, 2));
+        const mode = BASELINE ? 'baseline' : 'dk';
+        const file = join(dir, `replay-${mode}-${stamp}-run${run + 1}.json`);
+        // mode + gold vintage + content hash are LOAD-BEARING, not metadata: without them
+        // two runs are indistinguishable after the fact, and a result cannot be tied to the
+        // gold it scored. Both bit us — the 2026-07-16 results could not be attributed to a
+        // gold vintage because the gold files had been overwritten, and the first DK/baseline
+        // pair differed only by timestamp.
+        const goldPath = process.env['LYNOX_KNOWLEDGE_GOLD'] ?? '(committed fixture)';
+        const goldHash = createHash('sha256').update(readFileSync(goldPath === '(committed fixture)' ? join(__dirname, 'knowledge-substrate-fixtures.json') : goldPath)).digest('hex').slice(0, 16);
+        writeFileSync(file, JSON.stringify({
+          mode, provider: provider.provider, model: provider.model,
+          gold: { path: goldPath, sha256: goldHash, threads: corpus.threads.length },
+          turnFailures: { sends: replayFailures.sends, turns: replayFailures.turns },
+          report: r, captures: capturedLog,
+        }, null, 2));
         process.stdout.write(`[knowledge-eval] captures + report persisted → ${file}\n`);
       } catch (err) {
         process.stderr.write(`[knowledge-eval] persist failed (non-fatal): ${String(err).slice(0, 120)}\n`);
@@ -161,8 +168,27 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
     const worst = worstOf(reports);
     process.stdout.write(`\n[knowledge-eval] WORST OF ${RUNS} — flip gate (recall≥${GATE.recall}, junk≤${GATE.junkRate}): ${meetsGate(worst) ? 'MET ✓ (canary flip is the operator\'s call)' : 'NOT MET (hold flip)'}\n${formatReport(worst)}\n`);
 
-    // HARD — deterministic H4 security invariant: no untrusted write may land active/pinned.
-    expect(worst.routing.violations, JSON.stringify(worst.routing.violations, null, 2)).toHaveLength(0);
+    // HARD — deterministic H4 security invariant: no untrusted write may land
+    // active/pinned. DK-ONLY, because it asserts a property of the DK write path.
+    //
+    // In BASELINE mode the legacy store has no review queue at all, so every
+    // untrusted write is a violation BY CONSTRUCTION and the assertion could only
+    // ever be red. That is a PRODUCT FINDING about the flag-off pipeline, not an
+    // instrument failure, and conflating the two is what this file avoids
+    // everywhere else (see the note on quality assertions below). The count is
+    // printed instead, so the finding is visible without the harness reporting
+    // itself broken.
+    if (BASELINE) {
+      // Two counts, deliberately NOT phrased as "N of M": `violations` is the UNION across
+      // runs and `untrustedWrites` the MIN (`worstOf`), so N can exceed M and the ratio is
+      // meaningless. And the exposure number is only readable if the untrusted path was
+      // reached at all — without this assertion a dead channel subscription prints zeros
+      // and reads as CLEAN, the same vacuous-pass this whole mode exists to end.
+      expect(worst.routing.untrustedWrites, 'BASELINE never exercised an untrusted write — the routing figure below would be vacuous').toBeGreaterThan(0);
+      process.stdout.write(`\n[knowledge-eval] BASELINE routing: ${worst.routing.violations.length} violation(s) [union across runs]; untrusted writes exercised ${worst.routing.untrustedWrites} [min across runs] — the legacy store has no review queue, so this is the exposure, not a harness failure\n`);
+    } else {
+      expect(worst.routing.violations, JSON.stringify(worst.routing.violations, null, 2)).toHaveLength(0);
+    }
     // HARD — wiring smoke: the agent actually used `remember` against the throwaway db.
     expect(worst.totalCaptured).toBeGreaterThan(0);
     // Deliberately NO quality assertions here. The first real-gold round measured
