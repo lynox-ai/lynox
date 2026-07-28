@@ -38,6 +38,7 @@ import {
   type KnowledgeReplayReport,
 } from './knowledge-substrate-runner.js';
 import { makeRealReplayThread, makeLlmJudge, type ReplayProviderConfig } from './knowledge-substrate-replay.js';
+import { makeLegacyReplayThread } from './knowledge-substrate-baseline.js';
 import { HAIKU } from '../online/setup.js';
 
 /** Read a string field from ~/.lynox/config.json (same store as the CLI). */
@@ -127,11 +128,21 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
     // Turn-level progress to stderr — without it a long replay is a black box
     // (learned on the first real-gold run: 45 minutes of WAL/CPU archaeology to
     // tell a grinding monster thread from a hung one).
-    const replayThread = makeRealReplayThread({
+    // LYNOX_KNOWLEDGE_BASELINE=1 replays the SAME corpus with durable memory OFF —
+    // the legacy pipeline a tenant runs today. It is the comparison the tier bars
+    // were never set against: 63.6% identity recall is unreadable until you know
+    // whether today's number is higher or lower (PRD §5.6 / §1).
+    const BASELINE = process.env['LYNOX_KNOWLEDGE_BASELINE'] === '1';
+    const makeThread = BASELINE ? makeLegacyReplayThread : makeRealReplayThread;
+    const replayThread = makeThread({
       ...provider,
       onTurn: (threadId, turnSeq) => process.stderr.write(`  [turn] ${threadId.slice(0, 8)} t${turnSeq}\n`),
     });
-    process.stdout.write(`\n[knowledge-eval] provider=${provider.provider ?? 'anthropic'} model=${provider.model} corpus=${corpus.threads.length} threads\n`);
+    // The endpoint is in the banner deliberately: a run that silently resolved to
+    // the wrong provider prints a plausible model name and then fails every turn
+    // into a swallowed catch, reading as recall 0.00 (2026-07-27).
+    const endpoint = 'apiBaseURL' in provider && provider.apiBaseURL ? provider.apiBaseURL : 'api.anthropic.com';
+    process.stdout.write(`\n[knowledge-eval] mode=${BASELINE ? 'BASELINE (durable memory OFF)' : 'DK (durable memory ON)'} provider=${provider.provider ?? 'anthropic'} endpoint=${endpoint} model=${provider.model} corpus=${corpus.threads.length} threads\n`);
 
     const reports: KnowledgeReplayReport[] = [];
     for (let run = 0; run < RUNS; run += 1) {

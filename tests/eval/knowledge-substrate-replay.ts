@@ -47,8 +47,11 @@ export const REPLAY_SYSTEM_PROMPT = [
   DURABLE_MEMORY_PROMPT_SUFFIX,
 ].join('\n');
 
-/** A per-thread stub `mail_read` — returns the payload staged for the current turn. */
-function makeMailReadStub(): { tool: ToolEntry; stage: (payload: string | undefined) => void } {
+/** A per-thread stub `mail_read` — returns the payload staged for the current turn.
+ *  Exported so the DK-OFF baseline replay drives the SAME stub: if the two runs
+ *  differed in how untrusted payloads reach the agent, their numbers would not be
+ *  comparable, which is the only thing the baseline exists to be. */
+export function makeMailReadStub(): { tool: ToolEntry; stage: (payload: string | undefined) => void } {
   let staged: string | undefined;
   const tool: ToolEntry = {
     definition: {
@@ -81,8 +84,9 @@ export interface ReplayProviderConfig {
   openaiModelId?: string | undefined;
 }
 
-/** The Agent config fragment that selects the provider (empty for direct Anthropic). */
-function providerAgentFields(cfg: ReplayProviderConfig): { provider: 'openai'; apiBaseURL: string; openaiModelId: string } | Record<string, never> {
+/** The Agent config fragment that selects the provider (empty for direct Anthropic).
+ *  Exported for the DK-OFF baseline — same provider wiring on both sides. */
+export function providerAgentFields(cfg: ReplayProviderConfig): { provider: 'openai'; apiBaseURL: string; openaiModelId: string } | Record<string, never> {
   if (cfg.provider === 'openai') {
     return {
       provider: 'openai',
@@ -128,8 +132,10 @@ const TURN_WATCHDOG_MS = 300_000;
  * A WatchdogError is NOT retried (post-abort agent state is mid-turn — the
  * caller decides: the replay abandons the thread, the judge scores no-match).
  * Other non-rate errors propagate to the caller's existing handling.
+ * Exported so the DK-OFF baseline retries identically — a harsher retry policy on
+ * one side of the comparison would move the number it is meant to establish.
  */
-async function sendWithRetry(agent: Agent, text: string, label: string): Promise<string> {
+export async function sendWithRetry(agent: Agent, text: string, label: string): Promise<string> {
   const maxAttempts = 5;
   for (let attempt = 1; ; attempt += 1) {
     let timer: NodeJS.Timeout | undefined;
