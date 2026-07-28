@@ -2063,6 +2063,26 @@ describe('httpRequestTool', () => {
       expect(result).toContain('hit the 24000-char cap');
     });
 
+    it('passes the FETCHED url through, so the page\'s links are listed', async () => {
+      // The wiring is the point: passing `undefined` as the base leaves this
+      // suite green, so nothing else would notice the links disappearing.
+      // MUTATION: `extractHtmlText(text, {})` at the call site.
+      mockDnsPublic();
+      const nav = Array.from({ length: 6 }, (_, i) => `<a href="/teil-${i}">Teil ${i}</a>`).join('');
+      const html = `<html><head><title>T</title></head><body>${nav}`
+        + `<p>${'Sichtbarer Fliesstext. '.repeat(1_600)}</p></body></html>`;
+      expect(html.length).toBeGreaterThan(30_000);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: html,
+      })));
+
+      const result = await handler({ url: 'https://example.com/start' }, htmlAgent());
+
+      expect(result).toContain('links (same-site');
+      expect(result).toContain('/teil-0 — Teil 0');
+    });
+
     it('honours http_html_extract: false for the scraping case', async () => {
       mockDnsPublic();
       const html = bigHtml('Aktuelle Tests');

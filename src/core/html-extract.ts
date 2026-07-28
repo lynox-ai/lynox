@@ -80,13 +80,12 @@ export const MIN_USEFUL_EXTRACT_CHARS = 200;
 /**
  * How many same-site links ride along with an extraction.
  *
- * Measured, not guessed: on five documentation pages the link the agent would
- * need NEXT (Stripe -> payments, Resend -> api-reference, Tailwind -> utility
- * classes, Svelte -> $state, Mistral -> capabilities) is inside the first 20 in
- * document order on 5/5. At 10 it is inside on 3/5; at 30 nothing is gained.
- * Cost across 18 real pages: 6.7% of the extraction, worst case 42.8% on a page
- * whose extraction is only 2470 characters — which is exactly where the list
- * carries the most.
+ * Chosen by measurement, not taste: across documentation pages the link an
+ * agent needs NEXT is inside the first twenty in document order far more often
+ * than inside the first ten, and going past twenty added nothing in two
+ * independent runs. The exact page-by-page figures are in PR #1083 — they are
+ * deliberately not repeated here, because no test defends them and the sites
+ * they were measured on will change.
  */
 export const MAX_EXTRACT_LINKS = 20;
 
@@ -104,6 +103,15 @@ export interface HtmlExtractResult {
   readonly title: string;
   readonly beforeChars: number;
   readonly afterChars: number;
+  /**
+   * Length of the BODY text alone — `afterChars` minus the title/meta/link
+   * header. This, not `afterChars`, tells a caller whether the page's CONTENT
+   * survived: meta lines and links are statements about the page, and a
+   * JS-rendered shell with a rich navigation menu is still a shell. Counting
+   * them let such a page clear `MIN_USEFUL_EXTRACT_CHARS` on navigation alone,
+   * discarding raw markup that still carried the data the shell would render.
+   */
+  readonly bodyChars: number;
   /** True when the extracted text itself hit `maxChars`. */
   readonly truncated: boolean;
 }
@@ -159,7 +167,8 @@ const META_CONTENT_RE = /content\s*=\s*["']([^"']*)["']/i;
 interface SpanPattern {
   readonly open: RegExp;
   readonly close: RegExp;
-  readonly dropUnterminated: boolean;
+  /** Only `removeSpans` reads this; `forEachSpan` always skips and continues. */
+  readonly dropUnterminated?: boolean;
 }
 
 const COMMENT_SPAN: SpanPattern = { open: /<!--/g, close: /-->/g, dropUnterminated: true };
@@ -174,17 +183,40 @@ const BLOCK_SPANS: SpanPattern[] = BLOCK_ELEMENTS.map(el => ({
 }));
 
 /** Anchors are COLLECTED, not removed — `forEachSpan` walks them in place. */
-const ANCHOR_SPAN: SpanPattern = { open: /<a\b[^<>]*>/gi, close: /<\/a\s*>/gi, dropUnterminated: true };
-const HREF_RE = /href\s*=\s*["']([^"']*)["']/i;
+const ANCHOR_SPAN: SpanPattern = { open: /<a\b[^<>]*>/gi, close: /<\/a\s*>/gi };
+/**
+ * Quoted OR bare attribute value. `href=/get-started/` is valid HTML5 and is
+ * what every minifier emits — requiring quotes silently produced ZERO links on
+ * exactly the large documentation sites this feature exists for (measured:
+ * 3057 of 3057 anchors on nodejs.org and 28 of 31 on docs.docker.com carry an
+ * unquoted href). The bare branch stops at whitespace, quotes and angle
+ * brackets, so it cannot run past the end of the tag.
+ */
+const HREF_RE = /href\s*=\s*(?:["']([^"']*)["']|([^\s"'<>`]+))/i;
 
 /**
  * Paths that answer a question nobody asked the agent. Note what is NOT here:
  * `/impressum` and `/about` stay, because on a business site they carry the
  * legal entity, location and history — the onboarding scan's actual target.
  */
-const UTILITY_LINK_RE = /\/(privacy|datenschutz|agb|terms|tos|cookies?|legal|login|signin|sign-in|register|signup|sign-up|cart|checkout|account|rss|feed)(\/|$|\?)/i;
+const UTILITY_SEGMENTS = new Set([
+  'privacy', 'datenschutz', 'agb', 'terms', 'tos', 'cookie', 'cookies', 'legal',
+  'login', 'signin', 'sign-in', 'register', 'signup', 'sign-up',
+  'cart', 'checkout', 'account', 'rss', 'feed',
+]);
 /** A binary is not a page the agent can read. */
-const ASSET_LINK_RE = /\.(pdf|zip|jpe?g|png|gif|svg|webp|mp4|mp3|dmg|exe|css|js)(\?|$)/i;
+const ASSET_EXT_RE = /\.(pdf|zip|jpe?g|png|gif|svg|webp|mp4|mp3|dmg|exe|css|js)$/i;
+
+/**
+ * Both tests look at the LAST path segment only. Matching anywhere in the path
+ * dropped real pages: `/feed/products/2026` is a product listing, not a feed,
+ * and `/next.js` is an article, not a script.
+ */
+function isUninterestingTarget(pathname: string): boolean {
+  const last = pathname.replace(/\/+$/, '').split('/').pop() ?? '';
+  if (last === '') return false;
+  return UTILITY_SEGMENTS.has(last.toLowerCase()) || ASSET_EXT_RE.test(last);
+}
 
 const HEADING_SPANS: SpanPattern[] = [1, 2, 3].map(lvl => ({
   open: new RegExp(`<h${lvl}\\b[^<>]*>`, 'gi'),
@@ -263,7 +295,22 @@ function forEachSpan(
     const innerStart = match.index + match[0].length;
     close.lastIndex = innerStart;
     const closer = close.exec(input);
-    if (closer === null) return;
+    if (closer === null) {
+      // No closer anywhere after this open tag. Simply returning discarded the
+      // span AND every later one — and for `<a>` that is total, because any
+      // later `</a>` would have belonged to THIS open, so a page with no closing
+      // anchor tags at all yielded nothing.
+      //
+      // Take the text up to the next tag as the span's content and carry on.
+      // That is what a browser shows for `<a href=x>Label<div>`, and it is the
+      // only reading that recovers anything here.
+      const nextTag = input.indexOf('<', innerStart);
+      const stop = nextTag === -1 ? input.length : nextTag;
+      if (!visit(match[0], input.slice(innerStart, stop))) return;
+      cursor = innerStart;
+      open.lastIndex = innerStart;
+      continue;
+    }
     if (!visit(match[0], input.slice(innerStart, closer.index))) return;
     cursor = closer.index + closer[0].length;
     open.lastIndex = cursor;
@@ -390,11 +437,16 @@ function collectLinks(cleanedHtml: string, baseUrl: string | undefined): string[
     return [];
   }
 
-  const seen = new Set<string>([canonicalLink(baseUrl)]); // never suggest the page itself
+  // Seed with BOTH forms of the page's own address: `canonicalLink` keeps the
+  // query, so a base of `/docs/?q=1` would not have matched a plain `/docs/`
+  // link and the page suggested itself.
+  const self = new URL(baseUrl);
+  const seen = new Set<string>([canonicalLink(baseUrl), canonicalLink(self.origin + self.pathname)]);
   const out: string[] = [];
 
   forEachSpan(cleanedHtml, ANCHOR_SPAN, (openTag, inner) => {
-    const href = HREF_RE.exec(openTag)?.[1];
+    const hrefMatch = HREF_RE.exec(openTag);
+    const href = hrefMatch?.[1] ?? hrefMatch?.[2];
     if (href === undefined || href === '') return true;
 
     let resolved: URL;
@@ -403,29 +455,47 @@ function collectLinks(cleanedHtml: string, baseUrl: string | undefined): string[
     } catch {
       return true;
     }
+    // Protocol first: for an opaque scheme `origin` is the STRING 'null', and
+    // `'null' !== 'null'` is false — so a `javascript:`/`data:`/`file:` base
+    // would have accepted same-scheme targets straight through the origin test.
+    if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return true;
     if (resolved.origin !== origin) return true;
 
-    const target = resolved.pathname + resolved.search;
-    if (UTILITY_LINK_RE.test(target) || ASSET_LINK_RE.test(target)) return true;
+    if (isUninterestingTarget(resolved.pathname)) return true;
 
     const canonical = canonicalLink(resolved.toString());
     if (seen.has(canonical)) return true;
 
-    // Anchor text is what makes a path decidable — `/x/42` alone tells nothing.
-    // Bound the raw slice before any regex work: an <a> wrapping a whole article
-    // is 250 KB of text we would clean and then throw away at 60 characters.
-    // The headroom leaves room for tags and entities inside the label.
-    const label = decodeEntities(inner.slice(0, MAX_LINK_TEXT_CHARS * 8).replace(TAG_RE, ' '))
-      .replace(/\s+/g, ' ')
-      .trim();
+    const label = anchorLabel(inner);
     if (label === '') return true;
 
     seen.add(canonical);
-    out.push(`${target} — ${label.slice(0, MAX_LINK_TEXT_CHARS)}`);
+    out.push(`${resolved.pathname + resolved.search} — ${label}`);
     return out.length < MAX_EXTRACT_LINKS;
   });
 
   return out;
+}
+
+/**
+ * Anchor text is what makes a path decidable — `/x/42` alone tells nothing.
+ *
+ * The raw slice is bounded BEFORE the regex work, because an `<a>` wrapping a
+ * whole article is 250 KB we would clean and then throw away at 60 characters.
+ * That cut can land inside a tag, though, and `TAG_RE` cannot match a `<span …`
+ * with no `>` — which put raw markup into real labels until the dangling
+ * fragment got its own sweep.
+ */
+function anchorLabel(inner: string): string {
+  return decodeEntities(
+    inner
+      .slice(0, MAX_LINK_TEXT_CHARS * 8)
+      .replace(TAG_RE, ' ')
+      .replace(/<[^<>]*$/, ' '),
+  )
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, MAX_LINK_TEXT_CHARS);
 }
 
 /** Dedup key. The hash is a position in one page; the QUERY is often the identity. */
@@ -446,11 +516,23 @@ function canonicalLink(href: string): string {
  * body text with `<h1>`–`<h3>` marked as `## heading` so the information
  * architecture survives — headings are what tell you what a site is about.
  */
+export interface HtmlExtractOptions {
+  /** Cap on the emitted text. Defaults to `DEFAULT_HTML_EXTRACT_MAX_CHARS`. */
+  readonly maxChars?: number;
+  /**
+   * The URL the markup was FETCHED FROM — the final hop, not the requested URL.
+   * Relative hrefs resolve against it and the same-origin filter is measured
+   * from it, so passing a pre-redirect URL would attribute an attacker's paths
+   * to the origin the agent trusts. Omit it and no links are collected.
+   */
+  readonly baseUrl?: string;
+}
+
 export function extractHtmlText(
   html: string,
-  maxChars: number = DEFAULT_HTML_EXTRACT_MAX_CHARS,
-  baseUrl?: string,
+  options: HtmlExtractOptions = {},
 ): HtmlExtractResult {
+  const maxChars = options.maxChars ?? DEFAULT_HTML_EXTRACT_MAX_CHARS;
   const beforeChars = html.length;
   const source = html.length > MAX_EXTRACT_INPUT_CHARS ? html.slice(0, MAX_EXTRACT_INPUT_CHARS) : html;
 
@@ -462,7 +544,7 @@ export function extractHtmlText(
   }
 
   const meta = extractMetaLines(cleaned);
-  const links = collectLinks(cleaned, baseUrl);
+  const links = collectLinks(cleaned, options.baseUrl);
 
   // <head> holds no visible text; its metadata was already captured above.
   let body = removeSpans(cleaned, HEAD_SPAN);
@@ -485,18 +567,28 @@ export function extractHtmlText(
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  // Links go ABOVE the body, next to the meta lines. Two reasons: the body opens
-  // with navigation prose on most pages, so structure first is the better read;
-  // and search enrichment only ever copies the first 4000 characters, which is
-  // where a link list earns its keep.
+  // Links go ABOVE the body, next to the meta lines: most pages open with
+  // navigation prose, so structure first is the better read.
+  //
+  // This is NOT free on the search-enrichment path, and the earlier claim that
+  // it "earns its keep" there was backwards. Enrichment copies only the first
+  // 4000 characters, where the cap BINDS — so the block evicts body text rather
+  // than adding to it. Above-the-body is still the right default, because a
+  // link the agent can follow beats a paragraph of menu labels, but the trade is
+  // real and belongs with the enrichment-window work, not hidden here.
   const header = [...meta.lines];
   if (links.length > 0) {
-    header.push('', `links (same-site, first ${links.length}):`, ...links);
+    if (header.length > 0) header.push('');
+    header.push(`links (same-site, first ${links.length}):`, ...links);
   }
 
   const composed = header.length > 0 ? `${header.join('\n')}\n\n${body}` : body;
   const truncated = composed.length > maxChars;
   const text = truncated ? composed.slice(0, maxChars) : composed;
 
-  return { text, title: meta.title, beforeChars, afterChars: text.length, truncated };
+  // How much of what SURVIVED the cap is body. A cap landing inside the header
+  // leaves no body at all, which is the honest answer there.
+  const bodyChars = Math.max(0, text.length - (composed.length - body.length));
+
+  return { text, title: meta.title, beforeChars, afterChars: text.length, bodyChars, truncated };
 }

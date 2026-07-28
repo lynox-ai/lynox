@@ -439,6 +439,70 @@ describe('extractContent', () => {
     await expect(extractContent('https://example.com/loop')).rejects.toThrow('Too many redirects');
   });
 
+  it('lists the page\'s links, resolved against the url that was fetched', async () => {
+    // The wiring is the point: passing `undefined` as the base leaves this suite
+    // green, so nothing would notice the links disappearing.
+    // MUTATION: `extractHtmlText(body, { maxChars: limit })` at the call site.
+    htmlResponse(
+      `<html><head><title>T</title></head><body>` +
+      '<a href="/kapitel-eins">Kapitel Eins</a><a href="unterseite">Relativ</a>' +
+      `<p>${'Fliesstext. '.repeat(40)}</p></body></html>`,
+    );
+
+    const result = await extractContent('https://example.com/docs/');
+
+    expect(result.content).toContain('/kapitel-eins — Kapitel Eins');
+    expect(result.content).toContain('/docs/unterseite — Relativ');
+  });
+
+  it('resolves links against the FINAL hop, never the requested url', async () => {
+    // A page reached through one redirect to another host had its links resolved
+    // and origin-filtered against the ORIGINAL, trusted origin: the attacker's
+    // own links were filtered out and only attacker-CHOSEN PATHS survived,
+    // presented as same-site links of the host the agent trusts — which
+    // http_request then calls with that host's credentials attached by hostname.
+    // MUTATION: pass the requested `url` instead of `finalUrl`.
+    let hop = 0;
+    mockFetch.mockImplementation(() => {
+      hop += 1;
+      if (hop === 1) {
+        return Promise.resolve({
+          ok: false, status: 302, statusText: 'Found',
+          headers: new Headers({ location: 'https://boese.example/seite' }),
+          body: null,
+        });
+      }
+      return Promise.resolve({
+        ok: true, status: 200,
+        headers: new Headers({ 'content-type': 'text/html' }),
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(
+              '<html><head><title>T</title></head><body>' +
+              // Absolute, on the host that actually served this: same-origin
+              // against the FINAL hop, off-origin against the requested one.
+              '<a href="https://boese.example/eigenes">Eigenes</a>' +
+              // Absolute, on the TRUSTED host: the payload. Same-origin only if
+              // the base is wrong, which is exactly the bug.
+              '<a href="https://vertrauenswuerdig.example/v1/transfers?to=angreifer">Payouts</a>' +
+              `<p>${'Fliesstext. '.repeat(40)}</p></body></html>`,
+            ));
+            controller.close();
+          },
+        }),
+      });
+    });
+
+    const result = await extractContent('https://vertrauenswuerdig.example/v1/docs');
+
+    // A relative-path assertion could not tell the two bases apart: the rendered
+    // line is `pathname + search`, so both bases produce identical text. Only
+    // ABSOLUTE links on each host distinguish them.
+    expect(result.content).toContain('/eigenes — Eigenes');            // final hop wins
+    expect(result.content).not.toContain('to=angreifer');              // trusted host is NOT ours
+    expect(result.url).toBe('https://vertrauenswuerdig.example/v1/docs');
+  });
+
   it('throws on redirect without location header', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,
