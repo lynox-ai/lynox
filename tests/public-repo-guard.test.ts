@@ -37,8 +37,12 @@ const PORT = 8300 + 17;
 /** The doubled-bracket link delimiters, built so this file carries no literal one. */
 const REF_OPEN = '['.repeat(2);
 const REF_CLOSE = ']'.repeat(2);
-/** A slug in the shape the private repo and the maintainer's notes use. */
+/** A ref in the shape the private repo and the maintainer's notes use. */
 const internalRef = (slug: string): string => `${REF_OPEN}${slug}${REF_CLOSE}`;
+/** Must match PRAGMA in scripts/public-repo-guard.sh. */
+const PRAGMA = ['public', 'repo', 'guard'].join('-') + ':allow';
+/** Legal TS that wears the same brackets as a ref — the false-positive case. */
+const DESTRUCTURE = `const ${REF_OPEN}first${REF_CLOSE} = rows;`;
 
 let dir: string;
 
@@ -164,6 +168,24 @@ describe('public-repo-guard — fires on planted leaks', () => {
     commitFile('src/leak.ts', `// tracked as ${internalRef('ITEM-0042')}\n`);
     expect(runGuard()).not.toBe(0);
   });
+
+  it('catches a free-text ref, not just a slug-shaped one', () => {
+    // This is the exact form of one of the refs the sweep removed. The first
+    // pattern allowed no spaces in the body, so this one — and only this one —
+    // could have been reintroduced with the guard green. Both other positive
+    // cases stayed green under that pattern, which is why this case exists.
+    commitFile('src/leak.ts', `// Per ${internalRef('bug 2026-05-24 staging-walk Case 26')}.\n`);
+    expect(runGuard()).not.toBe(0);
+  });
+
+  it('catches the opening line of a ref split across lines', () => {
+    // The same removed ref was ALSO wrapped across two comment lines. A
+    // line-based grep can never see the whole link, so the guard matches the
+    // opener instead. Asserting it here keeps that compromise honest rather
+    // than silently unhandled.
+    commitFile('src/leak.ts', `   * spawn fails. Per ${REF_OPEN}bug 2026-05-24\n   * staging-walk Case 26${REF_CLOSE}.\n`);
+    expect(runGuard()).not.toBe(0);
+  });
 });
 
 describe('public-repo-guard — does NOT fire on benign lines', () => {
@@ -179,11 +201,32 @@ describe('public-repo-guard — does NOT fire on benign lines', () => {
   });
 
   it('allows a nested array literal, which shares the bracket pair', () => {
-    // The reason the slug pattern demands a slug-shaped body rather than just
+    // The reason the ref pattern demands a slug-ish body rather than just
     // matching the bracket pair: this line is ordinary code and exists in the
     // tree today. A shape-only pattern would paint the guard red on it.
     commitFile('src/map.ts', `const m = new Map([[key, 'a\\nb']]);\n`);
     expect(runGuard()).toBe(0);
+  });
+
+  it('lets the pragma release a legal nested destructure', () => {
+    // A nested-array destructure is real TypeScript and wears the same brackets
+    // as a ref; no pattern that catches free-text bodies can tell them apart.
+    // There are zero such lines today, so the class starts clean — when one
+    // arrives, the pragma is the way past. Without that escape the only way past
+    // would be a hook bypass, which is strictly worse than the thing guarded.
+    // (Assembled, like every marker here: written out, this file would be the
+    // violation. Running the suite is not enough to notice — the cases execute
+    // in a temp repo, so only a guard run over THIS tree catches a planted one.)
+    commitFile('src/destructure.ts', `${DESTRUCTURE} // ${PRAGMA}: not a ref\n`);
+    expect(runGuard()).toBe(0);
+  });
+
+  it('still fires on the same shape WITHOUT the pragma', () => {
+    // The inverse of the case above. Without it, deleting the pattern entirely
+    // would leave the pragma test green — the escape hatch would be proving
+    // nothing about the guard it escapes.
+    commitFile('src/destructure.ts', `${DESTRUCTURE}\n`);
+    expect(runGuard()).not.toBe(0);
   });
 
   it('allows the configured env-var indirection that replaced the hard-coded path', () => {

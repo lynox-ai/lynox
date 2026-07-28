@@ -18,8 +18,9 @@
 	If the env is unset (older / unconfigured instance), the CTA disappears
 	entirely and only the support@ fallback shows. No more broken JSON 401.
 
-	Full engine→CP→Stripe SSO (1-click instead of 2-click) is specced separately
-	and deferred; this component deliberately stops at the 2-click flow.
+	Full engine→CP→Stripe SSO (1-click instead of 2-click) is deferred. Its spec
+	lives with the hosting control plane, not in this repo; this component
+	deliberately stops at the 2-click flow.
 
 	Tier-awareness audit (`managed` value from /api/config, canonical post-v1.8.0):
 	| Surface                  | null (self-host) | hosted (BYOK) | managed / managed_pro |

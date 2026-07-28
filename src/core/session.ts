@@ -2154,7 +2154,7 @@ export class Session {
       // self-host `openai_context_window`. Undefined for managed/Anthropic
       // (registry knows the size). Lets the agent trim against the real window.
       nativeContextWindow: this._profileOverride?.context_window ?? userConfig.openai_context_window,
-      // Provider-aware key resolution — pre-1.5.2 this
+      // Provider-aware key resolution via `llm/provider-keys.ts` — pre-1.5.2 this
       // read `userConfig.api_key` directly, which is empty for Mistral/Custom.
       // Cross-provider hybrid slot → use the slot's enriched creds (the vault/CP
       // key + Mistral host injected by enrichTierSetCreds / applyManagedTierSet-

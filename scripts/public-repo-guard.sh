@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 #
-# public-repo-guard.sh — block internal infra / control-plane / ops leaks and
-# internal cross-references from landing in this PUBLIC, source-available repo.
+# public-repo-guard.sh — block internal infra / control-plane / ops leaks, and
+# doubled-bracket cross-references, from landing in this PUBLIC repo.
 #
 # gitleaks + the pattern-scan catch classic *secrets* (API keys, private
 # keys). They do NOT catch internal infrastructure topology, control-plane
-# DB schema, SSH-as-root ops chains, staging hostnames, or references that
-# only resolve inside the private repo — none of which are "secrets" in the
-# regex sense, yet all of which belong only there. This guard fills that gap.
+# DB schema, SSH-as-root ops chains or staging hostnames — none of which are
+# "secrets" in the regex sense, yet all of which belong only in the private
+# repo. This guard fills that gap.
+#
+# Scope note, so the header is not read as a promise it does not keep: the
+# cross-reference class below matches ONE form — the doubled-bracket link. Plain
+# prose citing a path inside the private repo still passes, deliberately, because
+# some of those citations are load-bearing (the release script coordinates both
+# repos and would be worse without them). Triaging the rest is tracked separately.
 #
 # Two enforcement points (see lefthook.yml pre-push + the CI workflow):
 #   - pre-push hook   — scans the whole tracked tree, fast local feedback
@@ -76,18 +82,34 @@ _org='router'"-for-"'me'
 _port='83'"17"
 HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0\.1:${_port}|localhost:${_port}"
 
-# HARD, third class — internal cross-reference slugs in the doubled-bracket link
-# form. The private repo and the maintainer's own notes address items by slug that
-# way. Such an id resolves to nothing a reader of THIS repo can open, and the slug
-# names themselves expose how private material is filed — so they are noise here
-# at best. 11 predated this pattern; they were removed in the same commit, which
-# is why this can be HARD rather than a permanently-red SOFT rule.
+# Third class — internal cross-reference slugs in the doubled-bracket link form.
+# The private repo and the maintainer's own notes address items by slug that way.
+# Such an id resolves to nothing a reader of THIS repo can open, and the slug names
+# themselves expose how private material is filed — so they are noise here at best.
+# 16 instances across 12 files predated this pattern; all were removed in the same
+# commit, which is why it can start at zero rather than permanently red.
 #
-# The body must be slug-shaped, which is what keeps the pattern off nested array
-# literals (a `new Map([[k, v]])` is not a link). That false-positive case is
-# asserted in tests/public-repo-guard.test.ts — the markers live there, assembled
-# at runtime, so this file does not re-plant what it exists to keep out.
-HARD_INTERNAL_REF='\[\[[A-Za-z][A-Za-z0-9_.-]*\]\]'
+# The body must be slug-shaped: that keeps it off `new Map([[k, v]])`, whose body
+# holds a comma and a quote. Spaces ARE allowed in the body, because one of the 16
+# was free text (`[[bug <date> <words>]]`) — a slug-only class let that exact form
+# back in, which is what the review caught.
+#
+# Two honest limits, both asserted in tests/public-repo-guard.test.ts (markers live
+# there, assembled at runtime, so this file does not re-plant what it keeps out):
+#
+#  1. A line-based grep cannot see a link SPLIT ACROSS LINES, and one of the 16 was.
+#     REF_OPENER catches the opening line of that form; it has zero hits on the tree
+#     today, so it costs nothing. A link whose opener sits at a line end with no
+#     slug-ish text after it is still invisible — accepted, not solved.
+#  2. Legal TypeScript can produce the same shape: `const [[first]] = rows;` is a
+#     nested-array destructure, not a link, and no pattern that catches slugs can
+#     tell them apart. So this class — unlike the two HARD ones above — honours the
+#     inline pragma. Without that escape a legitimate destructure would hard-block a
+#     commit and the only way past would be a hook bypass, which is worse than the
+#     leak. There are zero such lines today; the pragma is for the one that comes.
+REF_SLUG_BODY='[A-Za-z0-9_][A-Za-z0-9_. /#|-]*'
+INTERNAL_REF="\\[\\[${REF_SLUG_BODY}\\]\\]"
+REF_OPENER="\\[\\[${REF_SLUG_BODY}\$"
 
 # SOFT — dual-use service hostnames. Legitimate in a few documented spots
 # (allow-file or inline pragma), but flagged everywhere else to catch the
@@ -166,15 +188,30 @@ while IFS= read -r f; do
     violations=$((violations + 1))
   done < <(grep -nIEi "$HARD_LOCAL_TOOLING" "$f" 2>/dev/null || true)
 
-  # HARD (internal cross-reference slug) — case-SENSITIVE and a separate grep:
-  # the pattern is anchored on bracket shape, so the -i of the run above would
-  # buy nothing and only widen it.
+  # Internal cross-reference slug — case-SENSITIVE and a separate grep: the pattern
+  # is anchored on bracket shape, so the -i of the run above would buy nothing and
+  # only widen it. Honours the inline pragma (see the class comment for why).
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    echo "❌ internal cross-reference slug in $f (state the reason inline instead):"
+    case "$line" in
+      *"$PRAGMA"*) continue ;;
+    esac
+    echo "❌ internal cross-reference in $f (state the reason inline instead):"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nIE "$HARD_INTERNAL_REF" "$f" 2>/dev/null || true)
+  done < <(grep -nIE "$INTERNAL_REF" "$f" 2>/dev/null || true)
+
+  # The opening line of a link split across lines. Reported separately so the
+  # message can say why it looks incomplete.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *"$PRAGMA"*) continue ;;
+    esac
+    echo "❌ internal cross-reference opened in $f and continued on the next line:"
+    echo "     ${line}"
+    violations=$((violations + 1))
+  done < <(grep -nIE "$REF_OPENER" "$f" 2>/dev/null || true)
 
   # SOFT — exempt if whole-file allowed or line carries the pragma.
   is_allow_file "$f" && continue
@@ -191,9 +228,11 @@ done < <(list_files)
 
 if [ "$violations" -gt 0 ]; then
   echo ""
-  echo "public-repo-guard: ${violations} leak marker(s) found — this is the PUBLIC repo."
-  echo "Move the offending content to the private pro repo, or (SOFT only) annotate"
-  echo "the line with '${PRAGMA}: <reason>' if the mention is genuinely public-safe."
+  echo "public-repo-guard: ${violations} marker(s) found — this is the PUBLIC repo."
+  echo "Move the offending content to the private pro repo; for a cross-reference,"
+  echo "state the reason inline instead of citing an id. If the mention is genuinely"
+  echo "public-safe, annotate the line with '${PRAGMA}: <reason>' — accepted for the"
+  echo "hostname and cross-reference classes, never for a HARD leak marker."
   exit 1
 fi
 
