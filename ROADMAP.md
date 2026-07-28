@@ -21,12 +21,12 @@ Recent capabilities that are live today, so you can tell them apart from plans:
 
 ## next
 
+- Reversible knowledge edits — being able to split or undo a merge, so the agent's memory is genuinely correctable rather than append-only. This one comes first: as long as merging two same-named things is a one-way door, everything built on top inherits that.
+- Durable Knowledge rollout — moving it from opt-in toward the default. Flipping a memory default changes behaviour on every existing instance, so it happens when the archival path clears the bar we set for it, not on a schedule. Until then, opt-in is the honest setting.
 - Calendar Integration (CalDAV + ICS imports, then create)
 - OpenAI Native Provider (first-class, alongside Anthropic + Mistral)
 - MCP Client (connect to Smithery catalog + custom servers)
 - OAuth Authorization-Code Callbacks (closes the remaining `api_setup` OAuth gap)
-- Durable Knowledge rollout — moving it from opt-in toward the default, once the recall quality bar is met
-- Reversible knowledge edits — being able to split or undo a merge, so the agent's memory is genuinely correctable rather than append-only
 
 ## later
 
