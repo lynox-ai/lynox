@@ -583,7 +583,11 @@ describe('extractHtmlText', () => {
     const label = (linkBlock(extractHtmlText(long, { maxChars: 50_000, baseUrl: BASE }).text).split(' — ')[1] ?? '');
     expect(label).toHaveLength(60);
 
-    const spanning = `<body>${PAD}<a href="/docs/tag">${'x'.repeat(470)}<span class="a b c">Ende</span></a></body>`;
+    // The dangling fragment has to land inside the FIRST 60 characters of the
+    // label, or the final cut hides it and the test cannot see the defect: a
+    // short visible text, then an attribute long enough that the 480-char
+    // pre-slice lands in the middle of it.
+    const spanning = `<body>${PAD}<a href="/docs/tag">Kurz<span class="${'a'.repeat(600)}">Ende</span></a></body>`;
     expect(linkBlock(extractHtmlText(spanning, { maxChars: 50_000, baseUrl: BASE }).text)).not.toContain('<span');
   });
 

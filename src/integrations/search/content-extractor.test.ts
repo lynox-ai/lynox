@@ -282,6 +282,21 @@ describe('extractContent', () => {
     expect(result.content).toContain('Marker aus dem Inline-JSON');
   });
 
+  it('does not let the LINK LIST fake a useful extraction', async () => {
+    // A JS-rendered shell with a navigation menu is still a shell. If the guard
+    // counts the whole extraction, the links alone push it past the threshold
+    // and the raw markup — which still holds the data the shell renders — is
+    // thrown away. MUTATION: gate on `afterChars` instead of `bodyChars`.
+    const nav = Array.from({ length: 14 }, (_, i) => `<a href="/bereich-${i}">Bereich ${i}</a>`).join('');
+    const shell = `<html><head><title>App</title></head><body><nav>${nav}</nav>`
+      + `<div id="root"></div><script>window.__D={"marker":"Inline-Nutzdaten"};${'/*p*/'.repeat(8_000)}</script></body></html>`;
+    expect(shell.length).toBeGreaterThan(30_000);
+    htmlResponse(shell);
+
+    const result = await extractContent('https://example.com/');
+    expect(result.content).toContain('Inline-Nutzdaten');
+  });
+
   it('does NOT keep raw markup just because a SMALL page is short', async () => {
     // The size condition is what turns "extraction was short" into a failure
     // signal. Without it a tiny document comes back as raw tags, which is
