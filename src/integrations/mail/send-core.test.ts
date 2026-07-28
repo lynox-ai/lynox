@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { sendMail, parseAddressList, buildSendPreview, previewAddressList, MASS_SEND_THRESHOLD, type SendCoreInput } from './send-core.js';
 import { singleLine } from '../../core/prompt-value.js';
 import type { MailAddress, MailProvider, MailSendResult } from './provider.js';
+import { flattenPrompt } from '../../core/prompt-value.js';
 
 vi.mock('./tools/rate-limit.js', () => {
   return {
@@ -273,7 +274,7 @@ describe('sendMail — provider errors', () => {
 
 describe('buildSendPreview', () => {
   it('renders the single-send preview with from/to/subject', () => {
-    const preview = buildSendPreview({
+    const preview = flattenPrompt(buildSendPreview({
       provider: { accountId: 'acct-1' } as MailProvider,
       accountConfig: null,
       to: [RECIPIENT],
@@ -283,7 +284,7 @@ describe('buildSendPreview', () => {
       body: 'Body text',
       isMassSend: false,
       uniqueRecipientCount: 1,
-    });
+    }));
     expect(preview).toContain('Send email?');
     expect(preview).toContain('alice@example.com');
     expect(preview).toContain('Hello');
@@ -291,7 +292,7 @@ describe('buildSendPreview', () => {
   });
 
   it('renders the mass-send warning above the threshold', () => {
-    const preview = buildSendPreview({
+    const preview = flattenPrompt(buildSendPreview({
       provider: { accountId: 'acct-1' } as MailProvider,
       accountConfig: null,
       to: Array.from({ length: 6 }, (_, i) => ({ address: `r${String(i)}@x.com` })),
@@ -301,13 +302,13 @@ describe('buildSendPreview', () => {
       body: 'Body',
       isMassSend: true,
       uniqueRecipientCount: 6,
-    });
+    }));
     expect(preview).toContain('MASS SEND');
     expect(preview).toContain('6 recipients');
   });
 
   function previewFor(body: string, isMassSend = false, subject = 'Subject'): string {
-    return buildSendPreview({
+    return flattenPrompt(buildSendPreview({
       provider: { accountId: 'acct-1' } as MailProvider,
       accountConfig: null,
       to: [RECIPIENT],
@@ -317,7 +318,7 @@ describe('buildSendPreview', () => {
       body,
       isMassSend,
       uniqueRecipientCount: 1,
-    });
+    }));
   }
 
   const flatten = (s: string): string => s.replace(/\s+/g, ' ').trim();

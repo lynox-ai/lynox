@@ -28,7 +28,35 @@ export interface PromptMeta {
   multiSelect?: boolean | undefined;
 }
 
-export type PromptUserFn = (question: string, options?: string[], meta?: PromptMeta) => Promise<string>;
+/**
+ * One span of a confirmation prompt, tagged with who authored it.
+ *
+ * `frame` is system text and may carry markdown — the prompts use bold field
+ * labels and blockquotes on purpose. `value` is whatever the caller
+ * interpolated and is rendered as a TEXT NODE, so it cannot open a markdown
+ * construct however many lines it has.
+ */
+export type PromptSegment =
+  | { readonly kind: 'frame'; readonly text: string }
+  | { readonly kind: 'value'; readonly text: string };
+
+/**
+ * Registered globally so the type here and the `pv` implementation in
+ * `core/prompt-value.ts` agree on one brand without importing each other.
+ */
+export const PROMPT_TEXT_BRAND: unique symbol = Symbol.for('lynox.promptText');
+
+/** A prompt whose frame and values are separated. Built only via `pv`. */
+export interface PromptText {
+  readonly [PROMPT_TEXT_BRAND]: true;
+  readonly segments: readonly PromptSegment[];
+}
+
+/**
+ * A plain string still means "all frame" — that is every un-migrated caller and
+ * every prompt restored from before the split, and it behaves exactly as it did.
+ */
+export type PromptUserFn = (question: string | PromptText, options?: string[], meta?: PromptMeta) => Promise<string>;
 export type PromptTabsFn = (questions: TabQuestion[], meta?: PromptMeta) => Promise<string[]>;
 
 /** Four distinct outcomes for an ask_secret prompt:

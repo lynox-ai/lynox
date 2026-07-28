@@ -9,6 +9,8 @@ import { createToolContext } from '../../core/tool-context.js';
 import { setDataDir } from '../../core/config.js';
 import { subjectsMergeTool } from './subjects-merge.js';
 import type { IAgent } from '../../types/index.js';
+import { flattenPrompt } from '../../core/prompt-value.js';
+import type { PromptText } from '../../types/index.js';
 
 /**
  * PR-C3 subjects_merge chat tool — the confirmed, reversible surface over
@@ -127,7 +129,8 @@ describe('subjects_merge tool (PR-C3)', () => {
     subjects.createSubject({ kind: 'person', name: crafted });
     const agent = makeAgent('Merge');
     await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: crafted }, agent);
-    const promptText = (agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
+    const promptRaw = (agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string | PromptText;
+    const promptText = flattenPrompt(promptRaw);
     expect(promptText).not.toContain('\n');                    // newline collapsed
     expect(promptText).not.toContain('\u202e');                // RTL-override stripped
     expect(promptText).not.toContain('\u2060');                // word-joiner stripped (new \p{Cf} coverage)

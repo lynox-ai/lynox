@@ -24,6 +24,7 @@ import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../co
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
+import { pv } from '../../core/prompt-value.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -1128,7 +1129,7 @@ Next steps before calling create:
           return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance of controller-responsibility — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
         }
         const answer = await agent.promptUser(
-          `⚠ api_setup: "${profile.name}" will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to non-vetted host(s):\n\n${disclosure}\n\nAccept controller-responsibility and save this profile?`,
+          pv`⚠ api_setup: "${profile.name}" will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to non-vetted host(s):\n\n${disclosure}\n\nAccept controller-responsibility and save this profile?`,
           ['Allow', 'Deny', '\x00'],
         );
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {

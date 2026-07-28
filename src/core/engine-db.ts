@@ -179,6 +179,7 @@ const MIGRATIONS: string[] = [
      answer_saved INTEGER,
      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
      questions_json TEXT,
+     segments_json TEXT,
      partial_answers_json TEXT,
      answer_error TEXT,
      multi_select INTEGER,

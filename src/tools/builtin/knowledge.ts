@@ -5,6 +5,7 @@ import { BlockEditError, BlockOverLimitError, MAX_KNOWLEDGE_ENTRY_CHARS } from '
 import { getErrorMessage } from '../../core/utils.js';
 import { appendCaptureTelemetry } from '../../core/capture-telemetry.js';
 import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
+import { pv } from '../../core/prompt-value.js';
 
 /**
  * Durable Knowledge Substrate tools (DK.1). The always-on capture/read surface that
@@ -286,7 +287,7 @@ export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
           : clip(input.new_text, 500))
       : clip(input.old_text ?? '', 500);
     const answer = await agent.promptUser(
-      `Edit the ${input.block} block (${input.mode}${preview ? `: "${preview}"` : ''})? This block loads into every future turn. This is reversible by editing it again.`,
+      pv`Edit the ${input.block} block (${input.mode}${preview ? pv`: "${preview}"` : ''})? This block loads into every future turn. This is reversible by editing it again.`,
       ['Apply', 'Cancel'],
     );
     if (answer !== 'Apply') return `Cancelled — the ${input.block} block is unchanged.`;
@@ -352,7 +353,7 @@ export const memoryRetireTool: ToolEntry<RetireInput> = {
 
     const reason = input.reason ? ` Reason: ${clip(input.reason)}.` : '';
     const answer = await agent.promptUser(
-      `Retire this memory entry? "${clip(entry.text)}"${reason} It stays on record as superseded and stops surfacing. This needs a new \`remember\` if a corrected fact should replace it.`,
+      pv`Retire this memory entry? "${clip(entry.text)}"${reason} It stays on record as superseded and stops surfacing. This needs a new \`remember\` if a corrected fact should replace it.`,
       ['Retire', 'Cancel'],
     );
     if (answer !== 'Retire') return 'Cancelled — the entry stays active.';

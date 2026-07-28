@@ -1,3 +1,5 @@
+import { PROMPT_TEXT_BRAND, type PromptSegment, type PromptText } from '../types/agent.js';
+
 /**
  * Helpers for interpolating VALUES into a `promptUser()` confirmation prompt.
  *
@@ -32,13 +34,25 @@
  * because a prompt that carries a security decision is only worth as much as
  * the reader's ability to tell which line the system wrote.
  *
- * ## Scope, honestly
+ * ## The structural answer: `pv`
  *
- * This is the per-caller variant of the fix: whoever adds the NEXT `promptUser`
- * caller can forget it. The structural version — `promptUser` taking frame and
- * values separately, so the boundary is carried by the type rather than by
- * convention — is the real answer and is still open. Do not read a call to
- * `singleLine` as a guarantee about the prompt as a whole.
+ * Everything above describes the per-caller fix, and its weakness was always
+ * that the next caller can forget it. `pv` removes the choice: it is a tagged
+ * template, so the LANGUAGE splits frame from value. Every interpolation is a
+ * value by construction — there is no way to write one that isn't marked, and
+ * no second sanitiser to remember.
+ *
+ *     promptUser(pv`Share file ${fileId} with ${email} as ${role}?`, ['Yes','No'])
+ *
+ * The segments travel to the renderer, which puts value spans in TEXT NODES —
+ * so a value cannot open a markdown construct at all, whether it is one line or
+ * twenty. `singleLine` survives for what it was actually good at: keeping a
+ * field that is single-line by nature from wrapping the display. It is no
+ * longer what carries the security boundary.
+ *
+ * A plain string still works and means "all frame, no values" — that is what
+ * every un-migrated caller and every prompt restored from before this change
+ * is, and it renders exactly as it did.
  */
 
 /**
@@ -71,4 +85,105 @@ export function singleLine(value: string): string {
   // Format characters removed outright; every break-ish character collapsed to
   // one space. `\s` misses most of C0 and all of C1, so both are named.
   return value.replace(/\p{Cf}/gu, '').replace(/[\s\u0000-\u001f\u0085]+/gu, ' ');
+}
+
+// --- The structural boundary: frame vs. value, carried by the type ---
+//
+// The TYPES live in `types/agent.ts` (the barrel is the single source of truth
+// for shared types, and `PromptUserFn` has to name them). The construction and
+// the reading of them live here.
+
+export function isPromptText(value: unknown): value is PromptText {
+  return typeof value === 'object' && value !== null && PROMPT_TEXT_BRAND in value;
+}
+
+/**
+ * Build a prompt whose frame and values are separated by the language itself.
+ *
+ * Every `${...}` is a value; everything between them is frame. That is the
+ * whole mechanism — there is no marker to strip, no escape to remember, and no
+ * way to interpolate something without marking it, because the tag sees the two
+ * halves as separate arguments before they are ever a string.
+ *
+ * Values compose: interpolating another `pv` splices its segments in, so a
+ * builder can hand back a fragment (`buildSendPreview`) without flattening it
+ * into an unmarked string. Anything else is stringified.
+ *
+ * Adjacent frames are merged and empty segments dropped, so the wire carries
+ * the shortest form and `[frame, value, frame]` is stable to assert on.
+ */
+export function pv(strings: TemplateStringsArray, ...values: unknown[]): PromptText {
+  const segments: PromptSegment[] = [];
+
+  const push = (segment: PromptSegment): void => {
+    if (segment.text === '') return;
+    const last = segments[segments.length - 1];
+    if (last?.kind === 'frame' && segment.kind === 'frame') {
+      segments[segments.length - 1] = { kind: 'frame', text: last.text + segment.text };
+      return;
+    }
+    segments.push(segment);
+  };
+
+  for (let i = 0; i < strings.length; i++) {
+    push({ kind: 'frame', text: strings[i] ?? '' });
+    if (i < values.length) {
+      const value = values[i];
+      if (isPromptText(value)) {
+        for (const segment of value.segments) push(segment);
+      } else {
+        push({ kind: 'value', text: String(value) });
+      }
+    }
+  }
+
+  return { [PROMPT_TEXT_BRAND]: true, segments };
+}
+
+/**
+ * Wrap an already-assembled string as a single VALUE.
+ *
+ * For the callers whose prompt IS one interpolated thing — `ask_user`, whose
+ * whole text is the agent's question, and `plan_task`, whose presentation is
+ * built line by line. Without this they would have to be frame, which would be
+ * the wrong claim: nothing in them was written by the system.
+ */
+export function promptValue(text: string): PromptText {
+  return { [PROMPT_TEXT_BRAND]: true, segments: text === '' ? [] : [{ kind: 'value', text }] };
+}
+
+/** Segments of either form — a plain string is all frame (the legacy meaning). */
+export function promptSegments(prompt: string | PromptText): readonly PromptSegment[] {
+  if (isPromptText(prompt)) return prompt.segments;
+  return prompt === '' ? [] : [{ kind: 'frame', text: prompt }];
+}
+
+/**
+ * Flatten to the plain string, for consumers that cannot show the distinction:
+ * the CLI, logs, and the `question` column kept for prompts restored by an
+ * older client. Flattening LOSES the boundary — never flatten on the way to a
+ * renderer that could parse the result.
+ */
+export function flattenPrompt(prompt: string | PromptText): string {
+  if (!isPromptText(prompt)) return prompt;
+  return prompt.segments.map((s) => s.text).join('');
+}
+
+/**
+ * Join built prompts with a frame separator.
+ *
+ * For a prompt assembled line by line (`plan_task`), where writing one big
+ * template is not an option. The separator is FRAME — it is the caller's own
+ * text — while every part keeps its own segments, so a value in the middle of
+ * the list stays a value.
+ */
+export function joinPrompts(parts: readonly PromptText[], separator: string): PromptText {
+  const segments: PromptSegment[] = [];
+  parts.forEach((part, i) => {
+    if (i > 0 && separator !== '') segments.push({ kind: 'frame', text: separator });
+    segments.push(...part.segments);
+  });
+  // Re-run through `pv` so adjacent frames merge exactly as they do there,
+  // instead of leaving the wire shape dependent on how the caller sliced it.
+  return pv`${{ [PROMPT_TEXT_BRAND]: true, segments } as PromptText}`;
 }

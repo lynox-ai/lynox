@@ -16,6 +16,7 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
 import { Engine } from '../core/engine.js';
+import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
 import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
 import { extractDocumentText, DocumentExtractError } from '../core/document-extract.js';
@@ -44,7 +45,7 @@ import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onb
 import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding-domain.js';
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
-import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
+import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import type { HealthBody, UsageSummaryResponse } from '../contract/http.js';
@@ -2335,15 +2336,24 @@ export class LynoxHTTPApi {
       let hasActivePendingPrompt = false;
 
       // Wire promptUser — writes prompt to SQLite, event-driven wait.
-      session.promptUser = async (question: string, options?: string[], meta?: PromptMeta): Promise<string> => {
+      session.promptUser = async (rawQuestion: string | PromptText, options?: string[], meta?: PromptMeta): Promise<string> => {
         if (!promptStore) return 'n'; // fallback if store unavailable
-        const promptId = promptStore.insertAskUser(sessionId, question, options, meta?.multiSelect === true);
+        // Both forms go out: `segments` is what a client that understands the
+        // frame/value split renders, `question` is the flattened text every
+        // older client, the CLI and the logs already expect. They must agree —
+        // the flattened form IS the concatenation of the segments.
+        const segments = promptSegments(rawQuestion);
+        const question = flattenPrompt(rawQuestion);
+        const promptId = promptStore.insertAskUser(sessionId, question, options, meta?.multiSelect === true, segments);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         // Best-effort SSE notification (client may not be connected).
         if (!aborted && !res.writableEnded) {
           const data = JSON.stringify({
             promptId, question, options, timeoutMs: PROMPT_TIMEOUT_MS,
+            // Omitted when there is nothing to distinguish (an all-frame
+            // prompt), so the payload does not grow for un-migrated callers.
+            segments: segments.some((s: PromptSegment) => s.kind === 'value') ? segments : undefined,
             step_id: meta?.stepId, step_task: meta?.stepTask,
             // Multi-select pills (toggle several + Send). The client posts the
             // chosen labels back as a JSON array string via the normal /reply;
@@ -2833,6 +2843,11 @@ export class LynoxHTTPApi {
         promptType: row.prompt_type,
         kind,
         question: row.question,
+        // Restore the frame/value split too (v51). Without this a reload would
+        // silently downgrade a restored prompt to all-frame — the boundary
+        // would hold right up until someone refreshed the page, which is the
+        // worst possible place for it to stop holding.
+        segments: row.segments_json ? JSON.parse(row.segments_json) as unknown[] : undefined,
         options: row.options_json ? JSON.parse(row.options_json) as string[] : undefined,
         // Restore the multi-select-pills opt-in (v33) so a reconnect mid-prompt
         // re-renders multi-select instead of degrading to single-select.

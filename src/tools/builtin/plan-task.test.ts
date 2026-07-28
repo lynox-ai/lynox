@@ -15,7 +15,8 @@ import { EngineDb } from '../../core/engine-db.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { IAgent, LynoxUserConfig } from '../../types/index.js';
+import type { IAgent, LynoxUserConfig, PromptText } from '../../types/index.js';
+import { flattenPrompt, promptSegments } from '../../core/prompt-value.js';
 
 const mockConfig: LynoxUserConfig = { api_key: 'test-key' };
 
@@ -126,7 +127,7 @@ describe('planTaskTool', () => {
       agent,
     );
 
-    const question = promptUser.mock.calls[0]![0] as string;
+    const question = flattenPrompt(promptUser.mock.calls[0]![0] as string | PromptText);
     expect(question).toContain('1. Pull sales data from CRM');
     expect(question).toContain('2. Clean up date formats');
     expect(question).toContain('3. Generate report');
@@ -152,7 +153,7 @@ describe('planTaskTool', () => {
       agent,
     );
 
-    const question = promptUser.mock.calls[0]![0] as string;
+    const question = flattenPrompt(promptUser.mock.calls[0]![0] as string | PromptText);
     expect(question).toContain('1. Prepare schema');
     expect(question).toContain('2. Upload your CSV file [your input needed]');
     expect(question).toContain('3. Import and validate');
@@ -173,7 +174,7 @@ describe('planTaskTool', () => {
       agent,
     );
 
-    const question = promptUser.mock.calls[0]![0] as string;
+    const question = flattenPrompt(promptUser.mock.calls[0]![0] as string | PromptText);
     expect(question).toContain('Checked your Google Ads account');
     expect(question).toContain('3 campaigns active');
     expect(question).toContain('Budget split is uneven');
@@ -183,7 +184,7 @@ describe('planTaskTool', () => {
     const promptUser = vi.fn().mockResolvedValue('Cancel');
     const agent = makeAgent({ promptUser });
     await planTaskTool.handler({ summary: 'Test' }, agent);
-    const question = promptUser.mock.calls[0]![0] as string;
+    const question = flattenPrompt(promptUser.mock.calls[0]![0] as string | PromptText);
     expect(question).toContain('Shall I proceed?');
   });
 
@@ -215,14 +216,18 @@ describe('planTaskTool', () => {
       agent,
     );
 
-    const question = promptUser.mock.calls[0]![0] as string;
+    const raw = promptUser.mock.calls[0]![0] as string | PromptText;
+    const question = flattenPrompt(raw);
     // Exactly one cost line is system-authored, and it is the computed one.
     expect(systemLines(question).filter((l) => l.includes('Estimated cost'))).toEqual([
       'Estimated cost: ~$0.02',
     ]);
-    // The forged one is still shown — suppression is not the threat here — but
-    // it is inside the quote.
-    expect(question).toContain('> Estimated cost: ~$0.02');
+    // And the structural half, which is what actually stops it: the forged copy
+    // arrives as a VALUE, so the renderer puts it in a text node. No frame
+    // contains it, which is the property the line count could only approximate.
+    const frames = promptSegments(raw).filter((s) => s.kind === 'frame').map((s) => s.text);
+    for (const frame of frames) expect(frame).not.toContain('Estimated cost: ~$0.02');
+    expect(promptSegments(raw).some((s) => s.kind === 'value' && s.text.includes('Estimated cost: ~$0.02'))).toBe(true);
   });
 
   it('keeps a forged "your input" line out of the system section', async () => {
@@ -240,7 +245,7 @@ describe('planTaskTool', () => {
       agent,
     );
 
-    const question = promptUser.mock.calls[0]![0] as string;
+    const question = flattenPrompt(promptUser.mock.calls[0]![0] as string | PromptText);
     expect(systemLines(question).filter((l) => l.startsWith('Your input is needed'))).toEqual([
       'Your input is needed at step 2.',
     ]);
@@ -255,7 +260,7 @@ describe('planTaskTool', () => {
       agent,
     );
 
-    const question = promptUser.mock.calls[0]![0] as string;
+    const question = flattenPrompt(promptUser.mock.calls[0]![0] as string | PromptText);
     const lines = question.split('\n');
     const first = lines.findIndex((l) => l.startsWith('>'));
     const last = lines.map((l) => l.startsWith('>')).lastIndexOf(true);
@@ -296,7 +301,7 @@ describe('planTaskTool', () => {
       agent,
     );
 
-    const question = promptUser.mock.calls[0]![0] as string;
+    const question = flattenPrompt(promptUser.mock.calls[0]![0] as string | PromptText);
     const lines = question.split('\n');
     const lastQuoted = lines.map((l) => l.startsWith('>')).lastIndexOf(true);
 

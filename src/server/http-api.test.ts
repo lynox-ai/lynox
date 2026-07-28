@@ -1278,6 +1278,7 @@ describe('LynoxHTTPApi', () => {
         question TEXT NOT NULL,
         options_json TEXT,
         questions_json TEXT,
+      segments_json TEXT,
         partial_answers_json TEXT,
         secret_name TEXT,
         secret_key_type TEXT,
@@ -1364,6 +1365,7 @@ describe('LynoxHTTPApi', () => {
         question TEXT NOT NULL,
         options_json TEXT,
         questions_json TEXT,
+      segments_json TEXT,
         partial_answers_json TEXT,
         secret_name TEXT,
         secret_key_type TEXT,
@@ -1709,7 +1711,7 @@ describe('LynoxHTTPApi', () => {
       db.prepare(`CREATE TABLE pending_prompts (
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
         prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
-        question TEXT NOT NULL, options_json TEXT, questions_json TEXT,
+        question TEXT NOT NULL, options_json TEXT, questions_json TEXT, segments_json TEXT,
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
@@ -1817,7 +1819,7 @@ describe('LynoxHTTPApi', () => {
       db.prepare(`CREATE TABLE pending_prompts (
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
         prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
-        question TEXT NOT NULL, options_json TEXT, questions_json TEXT,
+        question TEXT NOT NULL, options_json TEXT, questions_json TEXT, segments_json TEXT,
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
@@ -3440,7 +3442,7 @@ describe('LynoxHTTPApi', () => {
       db.prepare(`CREATE TABLE pending_prompts (
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
         prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
-        question TEXT NOT NULL, options_json TEXT, questions_json TEXT,
+        question TEXT NOT NULL, options_json TEXT, questions_json TEXT, segments_json TEXT,
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),

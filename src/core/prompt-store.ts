@@ -15,7 +15,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import type { TabQuestion, SecretOutcome } from '../types/index.js';
+import type { PromptSegment, TabQuestion, SecretOutcome } from '../types/index.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -29,6 +29,9 @@ export interface PendingPromptRow {
   question: string;
   options_json: string | null;
   questions_json: string | null;
+  /** Frame/value segments (v51). NULL = all frame, i.e. every prompt from
+   *  before the split and every caller still passing a plain string. */
+  segments_json: string | null;
   partial_answers_json: string | null;
   secret_name: string | null;
   secret_key_type: string | null;
@@ -108,13 +111,22 @@ export class PromptStore {
   /** Insert a single-question ask_user prompt. Throws PromptConflictError if
    * this session already has a pending prompt. `multiSelect` persists the
    * multi-select-pills opt-in so a reconnect can restore it (v33). */
-  insertAskUser(sessionId: string, question: string, options?: string[], multiSelect?: boolean): string {
+  insertAskUser(
+    sessionId: string,
+    question: string,
+    options?: string[],
+    multiSelect?: boolean,
+    segments?: readonly PromptSegment[],
+  ): string {
     return this._insert({
       sessionId,
       promptType: 'ask_user',
       question,
       optionsJson: options ? JSON.stringify(options) : null,
       questionsJson: null,
+      // Only stored when there is a distinction to preserve — an all-frame
+      // prompt is exactly what NULL already means.
+      segmentsJson: segments?.some((s) => s.kind === 'value') ? JSON.stringify(segments) : null,
       secretName: null,
       secretKeyType: null,
       multiSelect: multiSelect === true,
@@ -201,6 +213,7 @@ export class PromptStore {
     question: string;
     optionsJson: string | null;
     questionsJson: string | null;
+    segmentsJson?: string | null;
     secretName: string | null;
     secretKeyType: string | null;
     multiSelect: boolean;
@@ -216,6 +229,7 @@ export class PromptStore {
         args.question,
         args.optionsJson,
         args.questionsJson,
+        args.segmentsJson ?? null,
         args.secretName,
         args.secretKeyType,
         null, // answer
@@ -406,9 +420,9 @@ export class PromptStore {
   private _getInsertStmt(): Database.Statement {
     return (this._stmtInsert ??= this.db.prepare(`
       INSERT INTO pending_prompts
-        (id, session_id, prompt_type, question, options_json, questions_json,
+        (id, session_id, prompt_type, question, options_json, questions_json, segments_json,
          secret_name, secret_key_type, answer, answer_saved, status, expires_at, multi_select, payload_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `));
   }
 

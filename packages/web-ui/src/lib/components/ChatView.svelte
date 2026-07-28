@@ -78,7 +78,7 @@
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
 	import { isArtifactContentInline, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
 	import { isPipelineRunning } from '../utils/pipeline-status.js';
-	import { renderPromptMarkdown } from '../utils/prompt-markdown.js';
+	import { renderPromptMarkdown, renderPromptSegments } from '../utils/prompt-markdown.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
@@ -3030,7 +3030,9 @@
 						     long token — a tracking URL in a body preview — scrolls the
 						     prompt sideways. -->
 						<div class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
-							{@html renderPromptMarkdown(pendingPermission.question)}
+							{@html pendingPermission.segments
+								? renderPromptSegments(pendingPermission.segments)
+								: renderPromptMarkdown(pendingPermission.question)}
 						</div>
 					{/if}
 					<div class="flex items-center gap-1.5 shrink-0">

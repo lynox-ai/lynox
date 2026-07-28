@@ -23,6 +23,7 @@ import type {
   PromptMailConnectFn,
   MailConnectPromptData,
   PromptMeta,
+  PromptText,
 } from '../types/index.js';
 import { effectiveContextWindow } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, hybridSlotClientConfig } from './tier-resolver.js';
@@ -77,6 +78,7 @@ import type { SecretStore } from './secret-store.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
 import type { DataStore } from './data-store.js';
+import { pv } from './prompt-value.js';
 import type { BatchIndex } from './batch-index.js';
 import type { PluginManager } from './plugins.js';
 
@@ -438,7 +440,7 @@ export class Session {
     this._promptUser = fn;
     if (this.agent) {
       this.agent.promptUser = fn
-        ? (q: string, opts?: string[], meta?: PromptMeta) => fn(q, opts, meta)
+        ? (q: string | PromptText, opts?: string[], meta?: PromptMeta) => fn(q, opts, meta)
         : undefined;
     }
   }
@@ -628,7 +630,7 @@ export class Session {
       }
       if (inputCheck.action === 'flag' && this.agent.promptUser) {
         const answer = await this.agent.promptUser(
-          `⚠ Content policy flag: ${inputCheck.reason ?? 'suspicious content'} — Allow this request?`,
+          pv`⚠ Content policy flag: ${inputCheck.reason ?? 'suspicious content'} — Allow this request?`,
           ['Allow', 'Deny', '\x00'],
         );
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
@@ -2122,7 +2124,7 @@ export class Session {
           }
         : undefined,
       promptUser: this._promptUser
-        ? (q: string, opts?: string[], meta?: PromptMeta) => this._promptUser!(q, opts, meta)
+        ? (q: string | PromptText, opts?: string[], meta?: PromptMeta) => this._promptUser!(q, opts, meta)
         : undefined,
       promptTabs: this._promptTabs
         ? (qs: TabQuestion[], meta?: PromptMeta) => this._promptTabs!(qs, meta)
