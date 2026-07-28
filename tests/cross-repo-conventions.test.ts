@@ -184,10 +184,14 @@ function materializeDispatches(step: WorkflowStep): DispatchCall[] {
         '#!/bin/sh',
         'URL=""',
         'BODY=""',
-        // `shift 2` on a flag that lands last would fail and leave the loop
-        // spinning — and the orphaned shell survives the parent's SIGTERM, so
-        // it burns a core until the runner is torn down. `|| shift` makes a
-        // trailing flag terminate instead.
+        // `shift 2` on a flag that lands last leaves the loop spinning where
+        // /bin/sh is bash, and the orphaned shell survives the parent's
+        // SIGTERM (the timeout signals the shell we started, not its children),
+        // so it burns a core until the runner is torn down. Measured: 42s
+        // versus 3s with the guard. Where /bin/sh is dash the shift is a
+        // special-builtin error that aborts the script outright, so `|| shift`
+        // is unreachable there — it is the fix for the hanging case, not for
+        // both.
         'while [ $# -gt 0 ]; do',
         '  case "$1" in',
         // Consumed before the URL case, so a header value that happens to start
@@ -230,7 +234,7 @@ function materializeDispatches(step: WorkflowStep): DispatchCall[] {
       throw new Error(`step did not reach curl; stub saw:\n${stdout}`);
     }
     for (const { url, body } of raw) {
-      if (body === '') throw new Error(`step called ${url || '<no url>'} with no request body`);
+      if (body.trim() === '') throw new Error(`step called ${url || '<no url>'} with no request body`);
     }
     return raw.map(({ url, body }) => ({ url, body: JSON.parse(body) as unknown }));
   } finally {
@@ -272,13 +276,28 @@ function imageRefs(text: string): Array<{ image: string; tag: string }> {
   return [...text.matchAll(pattern)].map((m) => ({ image: m[1]!, tag: m[2]! }));
 }
 
-/** Steps that push a tagged image, by either mechanism the repo uses. */
-function imagePushSteps(): Array<{ file: string; step: WorkflowStep; tagForms: string[] }> {
-  const out: Array<{ file: string; step: WorkflowStep; tagForms: string[] }> = [];
+interface PushStep {
+  file: string;
+  step: WorkflowStep;
+  /** Fully-qualified `image:tag` forms this step publishes, if any. */
+  tagForms: string[];
+  /** Images this step names, whether or not it attaches a readable tag. */
+  imageNames: string[];
+}
+
+/** Steps that push an image, by any mechanism the repo uses. */
+function imagePushSteps(): PushStep[] {
+  const out: PushStep[] = [];
   for (const { file, step } of allSteps()) {
     // (a) a manifest stitched by hand in shell
     if (/imagetools create/.test(step.run ?? '')) {
-      out.push({ file, step, tagForms: imageRefs(step.run ?? '').map((r) => `${r.image}:${r.tag}`) });
+      const refs = imageRefs(step.run ?? '');
+      out.push({
+        file,
+        step,
+        tagForms: refs.map((r) => `${r.image}:${r.tag}`),
+        imageNames: refs.map((r) => r.image),
+      });
       continue;
     }
     // (b) build-push-action — the canary channel. Invisible to the shell sweep
@@ -286,20 +305,33 @@ function imagePushSteps(): Array<{ file: string; step: WorkflowStep; tagForms: s
     // dispatch seam guards this same blind spot, so the image seam has to too.
     if (/docker\/build-push-action/.test(step.uses ?? '')) {
       const push = step.with?.['push'];
-      // Anything that is not an explicit false counts as publishing. Testing
-      // for `=== true` would be fail-OPEN: YAML admits `push: 'true'`, and a
-      // `${{ … }}` expression is a string either way, so a new channel written
-      // in either form would publish while this sweep reported nothing.
-      // Absent means the action's own default, which is not to push.
-      if (push === undefined || push === false || push === 'false') continue;
+      const outputs = String(step.with?.['outputs'] ?? '');
+      // `push:` absent normally means the action's own default, which is not to
+      // push — but this repo also publishes through `outputs=…,push=true`,
+      // which turns pushing on without the key being present at all. Reading
+      // only `push:` would classify those two steps as non-publishing.
+      const viaOutputs = /(?:^|,)\s*push=true\s*(?:,|$)/.test(outputs);
+      if (!viaOutputs && (push === undefined || push === false || push === 'false')) continue;
+      // Anything else counts as publishing. Testing for `=== true` would be
+      // fail-OPEN: YAML admits `push: 'true'`, and a `${{ … }}` expression is a
+      // string either way, so a new channel written in either form would
+      // publish while this sweep reported nothing.
       if (typeof push === 'string' && push.includes('${{')) {
         throw new Error(
           `${file}: \`push\` is a workflow expression (${push}) — this pin cannot decide ` +
             'statically whether the step publishes, and guessing "no" would hide a channel',
         );
       }
-      const tags = String(step.with?.['tags'] ?? '');
-      out.push({ file, step, tagForms: imageRefs(tags).map((r) => `${r.image}:${r.tag}`) });
+      const tagRefs = imageRefs(String(step.with?.['tags'] ?? ''));
+      // A digest-only push names its image without attaching a readable tag,
+      // so the name has to come out of `outputs` or it goes unchecked.
+      const named = [...outputs.matchAll(/(?:^|,)\s*name=([^,]+)/g)].map((m) => m[1]!.trim());
+      out.push({
+        file,
+        step,
+        tagForms: tagRefs.map((r) => `${r.image}:${r.tag}`),
+        imageNames: [...tagRefs.map((r) => r.image), ...named],
+      });
     }
   }
   return out;
@@ -437,9 +469,11 @@ describe('image tag seam', () => {
     return expandTags(publishedForms(file)).map((ref) => ref.slice(ref.lastIndexOf(':') + 1));
   }
 
-  it('only the pinned workflows publish a tagged image', () => {
+  it('only the pinned workflows publish an image at all', () => {
     // A new publishing channel is a new tag vocabulary the control plane has
     // never seen. It has to arrive here before it arrives on the registry.
+    // Digest-only pushes count: they attach no readable tag today, but they
+    // are a push, and the step that would attach one is one edit away.
     expect([...new Set(imagePushSteps().map((s) => s.file))].sort()).toEqual(
       [...PUBLISHING_WORKFLOWS].sort(),
     );
@@ -467,9 +501,10 @@ describe('image tag seam', () => {
   });
 
   it('every publishing channel names the one image the control plane pulls', () => {
-    const images = imagePushSteps().flatMap((s) =>
-      s.tagForms.map((f) => f.slice(0, f.lastIndexOf(':'))),
-    );
+    // Includes the digest-only pushes, which name the image in `outputs`
+    // rather than in a tag — a second registry could otherwise be introduced
+    // there without any tag ever mentioning it.
+    const images = imagePushSteps().flatMap((s) => s.imageNames);
     expect(images.length, 'no image references found across publishing steps').toBeGreaterThan(0);
     expect([...new Set(images)]).toEqual([PUBLISHED_IMAGE]);
   });
