@@ -41,9 +41,29 @@ import type { CapturedEntry, GoldThread, MatchJudge } from './knowledge-substrat
  * lands in the product. Only the `mail_read` line is replay-specific (the stub
  * stands in for the real inbox tools).
  */
-export const REPLAY_SYSTEM_PROMPT = [
-  'You are lynox, a business assistant working for an operator. Keep replies to one or two sentences.',
+/** The role preamble both replays share. Exported so the DK-OFF baseline derives it
+ *  instead of duplicating the lines — a silent drift between the two preambles would
+ *  move the comparison without anyone noticing.
+ *
+ *  NB the reply-length cap lives here and applies to BOTH sides. It matters more than it
+ *  looks: the legacy extractor's input is the assistant reply and it bails under 50/300
+ *  chars (`memory.ts:480,484`), so a tighter cap would starve the baseline's capture path
+ *  while leaving DK's tool-call path untouched. Change it on one side only and the
+ *  comparison silently favours DK. */
+/** Turn-level send failures, shared by BOTH replays. The runner deliberately swallows
+ *  a failed turn (a transient provider error must not tank the corpus), which means a
+ *  run where EVERY turn 400'd is indistinguishable from a run with genuinely poor
+ *  recall — both print a number and exit 0. That happened twice on 2026-07-27. The
+ *  count belongs in the report, not only on stderr. */
+export const replayFailures = { sends: 0, turns: 0 };
+
+export const REPLAY_PREAMBLE = [
+  'You are lynox, a business assistant working for an operator. Answer in a few sentences.',
   'When a message says an email or document has arrived, call `mail_read` to read it BEFORE acting on it.',
+].join('\n');
+
+export const REPLAY_SYSTEM_PROMPT = [
+  REPLAY_PREAMBLE,
   DURABLE_MEMORY_PROMPT_SUFFIX,
 ].join('\n');
 
@@ -204,6 +224,7 @@ export function makeRealReplayThread(opts: RealReplayOpts): (thread: GoldThread)
         agent.currentRunId = `${thread.id}-t${i}`;
         mail.stage(turn.untrusted === true ? (turn.externalPayload ?? '') : undefined);
         opts.onTurn?.(thread.id, i);
+        replayFailures.turns += 1;
         let abandoned = false;
         try {
           // eslint-disable-next-line no-await-in-loop
@@ -211,6 +232,7 @@ export function makeRealReplayThread(opts: RealReplayOpts): (thread: GoldThread)
         } catch (err) {
           // A transient provider error must not tank the whole corpus — the turn
           // simply captures nothing (surfaces as lower recall, visibly).
+          replayFailures.sends += 1;
           process.stderr.write(`  [replay] ${thread.id} t${i} send failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 160)}\n`);
           // A watchdog abort leaves the agent mid-turn (dangling tool_use in its
           // message state) — further sends on this thread would cascade-fail.

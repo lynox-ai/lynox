@@ -24,6 +24,7 @@
 //     frozen gold-set, not this test's.
 
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -37,7 +38,7 @@ import {
   type GoldThread,
   type KnowledgeReplayReport,
 } from './knowledge-substrate-runner.js';
-import { makeRealReplayThread, makeLlmJudge, type ReplayProviderConfig } from './knowledge-substrate-replay.js';
+import { makeRealReplayThread, makeLlmJudge, replayFailures, type ReplayProviderConfig } from './knowledge-substrate-replay.js';
 import { makeLegacyReplayThread } from './knowledge-substrate-baseline.js';
 import { HAIKU } from '../online/setup.js';
 
@@ -148,7 +149,17 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
     // The endpoint is in the banner deliberately: a run that silently resolved to
     // the wrong provider prints a plausible model name and then fails every turn
     // into a swallowed catch, reading as recall 0.00 (2026-07-27).
-    const endpoint = 'apiBaseURL' in provider && provider.apiBaseURL ? provider.apiBaseURL : 'api.anthropic.com';
+    //
+    // But it is LABELLED, never printed verbatim, when the operator points this at a
+    // local host: this banner exists to be read and pasted next to the numbers, and
+    // this is a PUBLIC repo. A literal `127.0.0.1:<port>` in a pasted log is exactly
+    // the operator-local-tooling leak that had to be scrubbed on 2026-07-27, and no
+    // guard scans stdout. The label still distinguishes the three cases, which is all
+    // the failure mode above needs.
+    const rawBase = 'apiBaseURL' in provider ? provider.apiBaseURL : undefined;
+    const endpoint = !rawBase
+      ? 'api.anthropic.com'
+      : rawBase.includes('api.mistral.ai') ? 'api.mistral.ai' : '<operator-local endpoint>';
     process.stdout.write(`\n[knowledge-eval] mode=${BASELINE ? 'BASELINE (durable memory OFF)' : 'DK (durable memory ON)'} provider=${provider.provider ?? 'anthropic'} endpoint=${endpoint} model=${provider.model} corpus=${corpus.threads.length} threads\n`);
 
     const reports: KnowledgeReplayReport[] = [];
@@ -162,15 +173,31 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
         replayThread,
         onProgress: (_done, _total, thread, rows) => { capturedLog.push({ threadId: thread.id, stratum: thread.stratum, captured: rows }); },
       }, judge);
-      process.stdout.write(`\n[knowledge-eval] run ${run + 1}/${RUNS} (${provider.model})\n${formatReport(r)}\n`);
+      const failPct = replayFailures.turns === 0 ? 0 : (100 * replayFailures.sends) / replayFailures.turns;
+      // Printed EVERY run, not only when non-zero: a silent 0% is the evidence that the
+      // number below is a measurement rather than a swallowed outage.
+      process.stdout.write(`\n[knowledge-eval] run ${run + 1}/${RUNS} (${provider.model}) — turn failures ${replayFailures.sends}/${replayFailures.turns} = ${failPct.toFixed(1)}%${failPct > 5 ? '  ⚠️ THE NUMBERS BELOW ARE NOT A RESULT' : ''}\n${formatReport(r)}\n`);
       reports.push(r);
       try {
         const { writeFileSync, mkdirSync } = await import('node:fs');
         const dir = join(homedir(), '.lynox', 'knowledge-gold', 'results');
         mkdirSync(dir, { recursive: true });
         const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const file = join(dir, `replay-${stamp}-run${run + 1}.json`);
-        writeFileSync(file, JSON.stringify({ provider: provider.provider, model: provider.model, report: r, captures: capturedLog }, null, 2));
+        const mode = BASELINE ? 'baseline' : 'dk';
+        const file = join(dir, `replay-${mode}-${stamp}-run${run + 1}.json`);
+        // mode + gold vintage + content hash are LOAD-BEARING, not metadata: without them
+        // two runs are indistinguishable after the fact, and a result cannot be tied to the
+        // gold it scored. Both bit us — the 2026-07-16 results could not be attributed to a
+        // gold vintage because the gold files had been overwritten, and the first DK/baseline
+        // pair differed only by timestamp.
+        const goldPath = process.env['LYNOX_KNOWLEDGE_GOLD'] ?? '(committed fixture)';
+        const goldHash = createHash('sha256').update(readFileSync(goldPath === '(committed fixture)' ? join(__dirname, 'knowledge-substrate-fixtures.json') : goldPath)).digest('hex').slice(0, 16);
+        writeFileSync(file, JSON.stringify({
+          mode, provider: provider.provider, model: provider.model,
+          gold: { path: goldPath, sha256: goldHash, threads: corpus.threads.length },
+          turnFailures: { sends: replayFailures.sends, turns: replayFailures.turns },
+          report: r, captures: capturedLog,
+        }, null, 2));
         process.stdout.write(`[knowledge-eval] captures + report persisted → ${file}\n`);
       } catch (err) {
         process.stderr.write(`[knowledge-eval] persist failed (non-fatal): ${String(err).slice(0, 120)}\n`);
