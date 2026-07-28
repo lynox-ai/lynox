@@ -4,7 +4,8 @@ import { matchesSecretPattern, maskSecretPatterns } from '../../core/secret-stor
 import { BlockEditError, BlockOverLimitError, MAX_KNOWLEDGE_ENTRY_CHARS } from '../../core/knowledge-store.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { appendCaptureTelemetry } from '../../core/capture-telemetry.js';
-import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
+import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted-signals.js';
+import { appendUntrustedCauseLog } from '../../core/untrusted-cause-log.js';
 import { pv } from '../../core/prompt-value.js';
 
 /**
@@ -89,6 +90,16 @@ export const rememberTool: ToolEntry<RememberInput> = {
     // ingested untrusted content on any prior turn still in context (a deferred injected
     // "remember … next turn" writes on a clean-latch turn otherwise). Untrusted → pending_review.
     const sourceUntrusted = deriveTurnUntrusted(agent);
+    // Record WHICH signal fired. The gate needs only the boolean; the review queue needs the
+    // attribution, or the cost of the sticky (F5) half of the union stays unmeasurable.
+    void appendUntrustedCauseLog({
+      ts: Date.now(),
+      site: 'remember',
+      cause: describeTurnUntrusted(agent),
+      untrusted: sourceUntrusted,
+      threadId: agent.currentThreadId,
+      runId: agent.currentRunId,
+    });
 
     const result = ks.write({
       text,

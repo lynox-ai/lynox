@@ -28,7 +28,8 @@ import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
 import { CostGuard } from './cost-guard.js';
-import { deriveTurnUntrusted } from './untrusted-signals.js';
+import { deriveTurnUntrusted, describeTurnUntrusted } from './untrusted-signals.js';
+import { appendUntrustedCauseLog } from './untrusted-cause-log.js';
 import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import { isDangerous } from '../tools/permission-guard.js';
@@ -829,7 +830,21 @@ export class Agent implements IAgent {
       });
       return;
     }
-    if (turnUntrusted) return;
+    if (turnUntrusted) {
+      // The heaviest consequence of the union, and until now the least visible: on the legacy
+      // path an untrusted turn does not ROUTE the capture, it CANCELS it. There is no queue
+      // entry to find afterwards, so this abstention is the one cost that leaves no trace at
+      // all unless it is recorded here.
+      void appendUntrustedCauseLog({
+        ts: Date.now(),
+        site: 'auto-extract',
+        cause: describeTurnUntrusted(this),
+        untrusted: true,
+        threadId: this.currentThreadId,
+        runId: this.currentRunId,
+      });
+      return;
+    }
     const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
     this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
   }
