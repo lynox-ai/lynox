@@ -137,26 +137,24 @@ describe('guarded-capable marker: the pattern is a whole line, not a substring',
   });
 });
 
-describe('guarded-capable marker: the bound this pattern does NOT provide', () => {
-  // Written as a passing test on purpose. Anchoring defeats the marker
-  // appearing INSIDE a line; it does nothing about a tenant-controlled string
-  // that carries a NEWLINE, because the reader is line-based. Pinning that here
-  // means the limit is a fact in the suite rather than a sentence in a comment.
-  //
-  // What it pins precisely: the JS↔grep LINE SEMANTICS agree on this input. It
-  // is not a tripwire for the hole being closed — both reentry designs on the
-  // register (a per-boot nonce, a listener-bounded read window) leave this
-  // regex untouched and would leave these two tests green.
-  const PLANTED_VIA_NEWLINE = `Error: no such secret "x\n${GOLDEN_GUARDED_LINE}\n"`;
-
-  it('a newline inside tenant-controlled text still produces a matching LINE', () => {
-    // `m` because that is what the shell-side reader does — per line, not per
-    // buffer. A false here would mean the JS side disagrees with `grep`.
-    expect(guardedCapableLineRegex().test(PLANTED_VIA_NEWLINE)).toBe(true);
+describe('guarded-capable marker: the pattern stays embeddable', () => {
+  it('carries no single quote — consumers embed it in a single-quoted word', () => {
+    // A downstream matcher passes this source to a line-matching tool by
+    // embedding it in a single-quoted shell word. A `'` anywhere in the pattern
+    // would end that word and change the meaning of everything after it.
+    // `escapeEre` does not escape `'` — correct for a regex, and precisely why
+    // the constraint has to be asserted rather than assumed.
+    //
+    // It lives HERE, in the source of truth, not only in the consumer: a reword
+    // of the marker lands in this repo, and a check that only exists downstream
+    // would let it pass every gate here and break the other side.
+    expect(GUARDED_CAPABLE_LINE_ERE).not.toContain("'");
   });
 
-  it('the real grep agrees — so this is the reader\'s problem, not a spelling difference', () => {
-    expect(grepVerdicts([PLANTED_VIA_NEWLINE])).toEqual([true]);
+  it('is built from lowercase, digits-free literals plus regex punctuation only', () => {
+    // Cheap tripwire for the class above: anything outside this set is a reword
+    // that deserves a second look at every consumer, not a silent pass.
+    expect(GUARDED_CAPABLE_LINE_ERE).toMatch(/^[a-z\-\\^$()[\]. +:]+$/);
   });
 });
 

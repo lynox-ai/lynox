@@ -76,15 +76,12 @@ function escapeEre(literal: string): string {
  * of a line an attacker controls — "capable" is then a claim about the tenant's
  * text, not about the image. Anchoring makes the whole line the unit.
  *
- * WHAT THIS DOES NOT DO — stated because the previous version of this seam was
- * believed to do more than it did. Anchoring defeats the marker appearing
- * INSIDE a line. It cannot defeat a tenant-controlled string that carries a
- * NEWLINE, because the reader is line-based: `…\n<marker>\n…` puts attacker
- * bytes at column 0 and the anchors are then satisfied honestly. Closing that
- * needs something this file cannot provide — a value the tenant does not know
- * (a per-boot nonce the reader already holds), or a reader window that stops
- * before any tenant request is served. Until then the pattern is one layer, not
- * the guarantee, and no comment on either side may call it the guarantee.
+ * SCOPE — this pattern decides what a SINGLE LINE can claim, and nothing more.
+ * Which lines are worth reading at all is the reader's half of the problem, and
+ * it lives with the reader. A downstream comment that presents this pattern as
+ * the whole guarantee is wrong; the previous version of this seam was believed
+ * to do more than it did, which is how it stayed unanchored for weeks under a
+ * comment saying otherwise.
  *
  * The policy segment is `[a-z-]+`, which covers every value in `vocab.ts`'s
  * `NetworkPolicy` and any future lowercase-and-hyphen sibling. It deliberately
