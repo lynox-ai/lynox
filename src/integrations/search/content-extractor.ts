@@ -42,7 +42,18 @@ export function assertEgressAllowed(rawUrl: string, ctx?: ToolContext | undefine
 
 // --- Fetch with redirect validation ---
 
-async function fetchWithRedirects(url: string, ctx?: ToolContext | undefined): Promise<Response> {
+/**
+ * Returns the final hop alongside the response. The URL matters to the caller,
+ * not just the bytes: link extraction resolves relative hrefs against it and
+ * filters on its origin, so handing back the REQUESTED url would let one 302
+ * to an attacker attribute the attacker's paths to the origin the agent trusts.
+ * `response.url` cannot serve here — `fetchPinned` constructs its Responses,
+ * so that field is always empty.
+ */
+async function fetchWithRedirects(
+  url: string,
+  ctx?: ToolContext | undefined,
+): Promise<{ response: Response; finalUrl: string }> {
   let currentUrl = url;
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
     assertEgressAllowed(currentUrl, ctx);
@@ -55,7 +66,7 @@ async function fetchWithRedirects(url: string, ctx?: ToolContext | undefined): P
       },
       signal: AbortSignal.timeout(30_000),
     });
-    if (!REDIRECT_STATUSES.has(response.status)) return response;
+    if (!REDIRECT_STATUSES.has(response.status)) return { response, finalUrl: currentUrl };
     const location = response.headers.get('location');
     if (!location) throw new Error(`Redirect without location header (${response.status})`);
     if (i === MAX_REDIRECTS) throw new Error(`Too many redirects (>${MAX_REDIRECTS})`);
@@ -135,7 +146,7 @@ function isMarkupContentType(contentType: string): boolean {
 export async function extractContent(url: string, maxChars?: number, ctx?: ToolContext | undefined): Promise<ExtractedContent> {
   const limit = maxChars ?? DEFAULT_MAX_CHARS;
 
-  const response = await fetchWithRedirects(url, ctx);
+  const { response, finalUrl } = await fetchWithRedirects(url, ctx);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} ${response.statusText}`);
   }
@@ -157,7 +168,7 @@ export async function extractContent(url: string, maxChars?: number, ctx?: ToolC
     return { title: new URL(url).hostname, content, url, wordCount: countWords(content), truncated };
   }
 
-  const extracted = extractHtmlText(body, limit);
+  const extracted = extractHtmlText(body, { maxChars: limit, baseUrl: finalUrl });
 
   // Same keep-raw guard `http_request` applies: a JS-rendered shell, or a body
   // byte-cut at MAX_HTML_BYTES inside an open <script>, extracts to almost
@@ -170,7 +181,7 @@ export async function extractContent(url: string, maxChars?: number, ctx?: ToolC
   // threshold; this path extracts every body, so it must ask explicitly. On a
   // small document a short extraction is simply a short document, and handing
   // back its raw markup instead would be strictly worse.
-  if (extracted.afterChars < MIN_USEFUL_EXTRACT_CHARS && body.length > DEFAULT_HTML_EXTRACT_THRESHOLD_CHARS) {
+  if (extracted.bodyChars < MIN_USEFUL_EXTRACT_CHARS && body.length > DEFAULT_HTML_EXTRACT_THRESHOLD_CHARS) {
     const truncated = body.length > limit;
     const content = truncated ? body.slice(0, limit) : body;
     return { title: extracted.title || new URL(url).hostname, content, url, wordCount: countWords(content), truncated };

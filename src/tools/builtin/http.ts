@@ -98,7 +98,14 @@ export async function fetchWithValidatedRedirects(
   // for a full-control surface under `guarded`. Computed in the handler (where
   // the ApiStore resolves) and re-checked here per redirect hop.
   guardedAckHosts?: ReadonlySet<string> | undefined,
-): Promise<Response> {
+  // Returns the FINAL hop alongside the response. Callers need the URL, not
+  // just the bytes: cost attribution profiles by hostname, and link extraction
+  // resolves relative hrefs against it and filters on its origin — so handing
+  // back the REQUESTED url lets one 302 to an attacker attribute the attacker's
+  // paths to the origin the agent trusts, which it will then call WITH the
+  // credentials that origin's api_profile carries. `response.url` cannot serve
+  // here: fetchPinned constructs its Responses, so that field is always empty.
+): Promise<{ response: Response; finalUrl: string }> {
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
   let body = init.body;
@@ -124,7 +131,7 @@ export async function fetchWithValidatedRedirects(
     const response = await fetchPinned(currentUrl, requestInit);
 
     if (!REDIRECT_STATUSES.has(response.status)) {
-      return response;
+      return { response, finalUrl: currentUrl };
     }
 
     const location = response.headers.get('location');
@@ -658,7 +665,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         ? (nextUrl: string, redirectMethod: string): boolean =>
             contractGrants('http_request', { url: nextUrl, method: redirectMethod }, contract)
         : undefined;
-      const response = await Promise.race([
+      const { response, finalUrl: finalRequestUrl } = await Promise.race([
         fetchWithValidatedRedirects(input.url, opts, 'full-control', toolContext, redirectGuard, guardedAckHosts),
         wallTimeout,
       ]);
@@ -730,10 +737,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           body = text;
         }
       } else if (isHtml && htmlExtractEnabled && text.length > DEFAULT_HTML_EXTRACT_THRESHOLD_CHARS) {
-        const extracted = extractHtmlText(text);
+        const extracted = extractHtmlText(text, { baseUrl: finalRequestUrl });
         // A near-empty extraction means the page is JS-rendered — the raw markup
         // still carries more (inline JSON, data attributes), so keep it.
-        if (extracted.afterChars >= MIN_USEFUL_EXTRACT_CHARS) {
+        if (extracted.bodyChars >= MIN_USEFUL_EXTRACT_CHARS) {
           htmlExtracted = extracted;
           body = extracted.text;
         } else {
@@ -798,11 +805,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // show "$0.0006" alongside the tool_result. per_token / per_unit are
       // deferred — we have no reliable token counter for arbitrary HTTP bodies.
       try {
-        // Use the response's final URL (after redirects) for attribution so a
-        // redirect chain that lands on a different host is profiled against
-        // its actual endpoint, not the original request URL.
-        const finalUrl = response.url || input.url;
-        const parsedFinal = new URL(finalUrl);
+        // Attribute to the final URL after redirects, so a chain landing on a
+        // different host is profiled against its actual endpoint. This used to
+        // read `response.url || input.url`, and `response.url` is always ''
+        // because fetchPinned constructs the Response — so it silently did the
+        // opposite of what this comment promised.
+        const parsedFinal = new URL(finalRequestUrl);
         const profile = toolContext?.apiStore?.getByHostname(parsedFinal.hostname);
         if (profile?.cost?.model === 'per_call' && isFeatureEnabled('api-cost-display')) {
           const streamHandler = toolContext?.streamHandler;
