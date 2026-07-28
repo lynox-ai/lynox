@@ -830,21 +830,22 @@ export class Agent implements IAgent {
       });
       return;
     }
-    if (turnUntrusted) {
-      // The heaviest consequence of the union, and until now the least visible: on the legacy
-      // path an untrusted turn does not ROUTE the capture, it CANCELS it. There is no queue
-      // entry to find afterwards, so this abstention is the one cost that leaves no trace at
-      // all unless it is recorded here.
-      void appendUntrustedCauseLog({
-        ts: Date.now(),
-        site: 'auto-extract',
-        cause: describeTurnUntrusted(this),
-        untrusted: true,
-        threadId: this.currentThreadId,
-        runId: this.currentRunId,
-      });
-      return;
-    }
+    // Recorded on BOTH branches, because a numerator without a denominator answers
+    // nothing: the whole question is what SHARE of extractions the union cancels, and
+    // `capture_eligible` above only fires when DK is ON, so it cannot serve as the
+    // denominator for this DK-OFF path. The clean case logs `cause:'none'`.
+    void appendUntrustedCauseLog(this.toolContext?.userConfig?.retrieval_shadow_log === true, {
+      ts: Date.now(),
+      site: 'auto-extract',
+      cause: describeTurnUntrusted(this),
+      untrusted: turnUntrusted,
+      threadId: this.currentThreadId,
+      runId: this.currentRunId,
+    });
+    // The heaviest consequence of the union, and the least visible: on the legacy path an
+    // untrusted turn does not ROUTE the capture, it CANCELS it. There is no queue entry to
+    // find afterwards, so without the line above this abstention leaves no trace at all.
+    if (turnUntrusted) return;
     const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
     this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
   }

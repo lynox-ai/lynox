@@ -40,7 +40,7 @@ describe('untrusted-cause log', () => {
   };
 
   it('records the cause, the site and the verdict', async () => {
-    await appendUntrustedCauseLog({
+    await appendUntrustedCauseLog(true, {
       ts: 1, site: 'remember', cause: 'conversation', untrusted: true,
       threadId: 'th-1', runId: 'run-1',
     });
@@ -55,7 +55,7 @@ describe('untrusted-cause log', () => {
   // fails. That is the whole guard: the record must never be able to carry the memory body,
   // because a `secret:`-resolved value or PII would then land in a plain file next to the db.
   it('carries NO field that could hold the memory body', async () => {
-    await appendUntrustedCauseLog({
+    await appendUntrustedCauseLog(true, {
       ts: 2, site: 'auto-extract', cause: 'external-tool', untrusted: true, threadId: 'th-2',
     });
     const [row] = await readLines();
@@ -66,13 +66,34 @@ describe('untrusted-cause log', () => {
     expect(keys.sort()).toEqual(['cause', 'site', 'threadId', 'ts', 'untrusted']);
   });
 
-  // The sink must never be able to break a durable write. MUTATION: drop the try/catch in
-  // `appendBoundedJsonl` → an unwritable data dir rejects here and the `void`-ed call at the
-  // write site becomes an unhandled rejection.
-  it('never rejects, even when the data dir is unwritable', async () => {
-    process.env['LYNOX_DATA_DIR'] = join(dir, 'does', 'not', 'exist', 'and-is-a-file\0bad');
-    await expect(appendUntrustedCauseLog({
-      ts: 3, site: 'memory-store', cause: 'marker', untrusted: true,
-    })).resolves.toBeUndefined();
+  // MUTATION: drop the `if (!enabled)` early return → a plaintext per-thread write-activity
+  // trace is created on EVERY tenant by default, with no off-switch. Every other sink on this
+  // primitive gates at the call site; the module promises "one flag, one retention story".
+  it('writes NOTHING when the measurement flag is off', async () => {
+    await appendUntrustedCauseLog(false, {
+      ts: 9, site: 'remember', cause: 'conversation', untrusted: true, threadId: 'th-9',
+    });
+    await new Promise(r => setTimeout(r, 60));
+    await expect(readFile(join(dir, UNTRUSTED_CAUSE_LOG_FILE), 'utf8')).rejects.toThrow();
+  });
+
+  // The sink must never be able to break a durable write — one emit site runs BEFORE the
+  // write it accompanies. This asserts the reachable half: an unwritable directory must
+  // neither throw nor reject.
+  //
+  // ⚠️ It does NOT prove the synchronous half. `appendBoundedJsonl` resolves its path inside
+  // a guard so a throw from `dataDir()`/`path.join` cannot escape the promise — but no
+  // env-reachable input makes those throw today (`path.join` tolerates NUL; only the later
+  // `fs` calls reject, and those are already inside the async try). Removing that guard does
+  // not fail this test. It is defence-in-depth against a future `dataDir()` that validates,
+  // stated here rather than dressed up as coverage.
+  it('never throws or rejects on an unwritable data dir', async () => {
+    process.env['LYNOX_DATA_DIR'] = join(dir, 'nope\0bad');
+    let thrown: unknown;
+    let pr: Promise<void> | undefined;
+    try { pr = appendUntrustedCauseLog(true, { ts: 3, site: 'memory-store', cause: 'marker', untrusted: true }); }
+    catch (e) { thrown = e; }
+    expect(thrown, 'must not throw synchronously').toBeUndefined();
+    await expect(pr).resolves.toBeUndefined();
   });
 });

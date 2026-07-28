@@ -92,7 +92,7 @@ export const rememberTool: ToolEntry<RememberInput> = {
     const sourceUntrusted = deriveTurnUntrusted(agent);
     // Record WHICH signal fired. The gate needs only the boolean; the review queue needs the
     // attribution, or the cost of the sticky (F5) half of the union stays unmeasurable.
-    void appendUntrustedCauseLog({
+    void appendUntrustedCauseLog(agent.toolContext.userConfig?.retrieval_shadow_log === true, {
       ts: Date.now(),
       site: 'remember',
       cause: describeTurnUntrusted(agent),

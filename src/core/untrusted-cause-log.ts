@@ -24,6 +24,15 @@ import type { UntrustedCause } from './untrusted-signals.js';
  * The number bounds the cost; it cannot decide the trade-off. (`agent.ts` records a MEASURED
  * poisoning from gating on the bare marker alone, 2026-07-20.)
  *
+ * ⚠️ OPT-IN, like every other sink on this primitive. `bounded-jsonl-log.ts` promises
+ * "one flag, one retention story", and all five siblings gate at the CALL SITE
+ * (`retrieval_shadow_log`, `context_cost_log`, `appendCaptureTelemetry(enabled,…)`).
+ * A first draft of this file gated nothing and would have created a plaintext
+ * per-thread write-activity trace on every self-hosted and managed tenant by default,
+ * with no off-switch — the header claimed parity with the sibling while omitting that
+ * the sibling's rule IS the flag. It rides `retrieval_shadow_log` rather than adding a
+ * key, so the promise stays literally one flag.
+ *
  * ⚠️ PII discipline, same rule as `memory-write-decision-log.ts`: the emit sites sit next to the
  * full memory body, which can hold PII or a `secret:`-resolved value. This record carries ONLY
  * the cause, an opaque thread/run id and the low-cardinality write kind — never the text.
@@ -60,9 +69,13 @@ export interface UntrustedCauseEntry {
 
 /**
  * Append one untrusted-cause record to the size-bounded sink.
+ *
+ * @param enabled the tenant's measurement flag (`retrieval_shadow_log`). Off ⇒ no file is
+ *   ever created, which is the default posture on every tenant.
  * Fire-and-forget: callers do `void appendUntrustedCauseLog(...)` and never await. Any FS error
  * is swallowed — telemetry must never be able to fail a durable write.
  */
-export function appendUntrustedCauseLog(entry: UntrustedCauseEntry): Promise<void> {
+export function appendUntrustedCauseLog(enabled: boolean, entry: UntrustedCauseEntry): Promise<void> {
+  if (!enabled) return Promise.resolve();
   return appendBoundedJsonl(UNTRUSTED_CAUSE_LOG_FILE, entry);
 }

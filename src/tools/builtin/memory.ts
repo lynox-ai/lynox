@@ -277,7 +277,7 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
     // Wave 1.3 re-derives the tier from the write-boundary channel, not the agent.
     const sourceUntrusted = deriveTurnUntrusted(agent);
     // Same attribution as the DK path, so the two pipelines stay comparable in the data.
-    void appendUntrustedCauseLog({
+    void appendUntrustedCauseLog(agent.toolContext?.userConfig?.retrieval_shadow_log === true, {
       ts: Date.now(),
       site: 'memory-store',
       cause: describeTurnUntrusted(agent),
