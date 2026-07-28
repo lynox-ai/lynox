@@ -91,6 +91,7 @@ const ADMIN_SCOPED_ROUTES = ['GET /api/export'] as const;
 interface WorkflowStep {
   name?: string;
   run?: string;
+  uses?: string;
   env?: Record<string, string>;
   with?: Record<string, string>;
 }
@@ -159,13 +160,21 @@ function materializeDispatch(step: WorkflowStep): { url: string; body: unknown }
     );
     chmodSync(stub, 0o755);
 
-    const env: Record<string, string> = {
-      PATH: `${stubDir}:${process.env['PATH'] ?? ''}`,
-      HOME: process.env['HOME'] ?? '',
-    };
+    // Deliberately minimal PATH: the stub, plus the system tools the emit sites
+    // genuinely use (jq, coreutils). The sweep that selects steps is textual and
+    // therefore over-broad by construction — it will eventually match a step
+    // that is not an emitter, and that step must fail fast rather than run the
+    // repository's own toolchain. Without this, a step mentioning the dispatch
+    // API next to a build command would run the build. The timeout is the
+    // backstop for anything that gets past the PATH.
+    const env: Record<string, string> = { PATH: `${stubDir}:/usr/bin:/bin` };
     for (const name of Object.keys(step.env ?? {})) env[name] = stubEnvValue(name);
 
-    const stdout = execFileSync('bash', ['-c', step.run ?? ''], { env, encoding: 'utf8' });
+    const stdout = execFileSync('bash', ['-c', step.run ?? ''], {
+      env,
+      encoding: 'utf8',
+      timeout: 20_000,
+    });
 
     const url = /<<<URL\n([\s\S]*?)\n>>>URL/.exec(stdout)?.[1];
     const body = /<<<BODY\n([\s\S]*?)\n>>>BODY/.exec(stdout)?.[1];
@@ -213,6 +222,16 @@ describe('dispatch seam', () => {
 
   it('sweep finds exactly the emitters the pins cover', () => {
     expect(emitters.length).toBe(Object.keys(DISPATCH_EMITS).length);
+  });
+
+  it('no emitter uses a form this pin cannot read', () => {
+    // The sweep above reads shell. An action-based emitter
+    // (`peter-evans/repository-dispatch` and friends) declares its payload in
+    // `with:` and would be counted by neither the sweep nor the pins — it would
+    // be an unpinned emitter that leaves every assertion here green. There are
+    // none today; this fails loudly the day one appears, instead of going blind.
+    const actionEmitters = allSteps().filter(({ step }) => /repository-dispatch/.test(step.uses ?? ''));
+    expect(actionEmitters.map(({ file }) => file)).toEqual([]);
   });
 
   it('every emitted payload matches its pinned key set, and nothing else emits', () => {
@@ -322,7 +341,18 @@ describe('container seam', () => {
   it('probes the health path it serves', () => {
     const healthcheck = /^HEALTHCHECK[\s\S]*?\n(?!\s)/m.exec(dockerfile)?.[0] ?? '';
     expect(healthcheck, 'no HEALTHCHECK in Dockerfile').not.toBe('');
-    expect(healthcheck).toContain(HEALTH_PATHS[0]);
+    const raw = /https?:\/\/\S+/.exec(healthcheck)?.[0];
+    expect(raw, 'HEALTHCHECK probes no http URL').toBeDefined();
+    // Parsed, not substring-matched: the probe URL carries a `${VAR:-default}`
+    // so it has to go through the shell first, and comparing the resolved
+    // pathname is what makes `/healthz` a failure — `toContain('/health')`
+    // cannot fail on a path that merely starts with it.
+    const url = new URL(execFileSync('bash', ['-c', `printf '%s' "${raw!}"`], {
+      env: { PATH: '/usr/bin:/bin' },
+      encoding: 'utf8',
+    }));
+    expect(url.port).toBe(CONTAINER_PORT);
+    expect(url.pathname).toBe(HEALTH_PATHS[0]);
   });
 });
 
