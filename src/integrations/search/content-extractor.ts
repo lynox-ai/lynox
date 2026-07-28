@@ -1,4 +1,10 @@
 import { fetchPinned, assertHostPolicy } from '../../core/network-guard.js';
+import {
+  extractHtmlText,
+  isHtmlContentType,
+  MIN_USEFUL_EXTRACT_CHARS,
+  DEFAULT_HTML_EXTRACT_THRESHOLD_CHARS,
+} from '../../core/html-extract.js';
 import type { ToolContext } from '../../core/tool-context.js';
 
 export interface ExtractedContent {
@@ -91,21 +97,39 @@ async function readBodyLimited(response: Response, maxBytes: number): Promise<st
   }
 }
 
-// --- HTML to text extraction ---
+// --- Body to text ---
+//
+// WHY there is no "pick the article" step here: this path used to run Mozilla
+// Readability and fall back to tag-stripping only when Readability threw or
+// returned nothing. On documentation and JS-rendered sites its article
+// heuristic routinely scored a code sample or the nav bar highest and returned
+// that alone; a short-but-non-empty wrong answer is truthy, so the fallback
+// never fired.
+//
+// The obvious repair — keep Readability, detect when it underperforms — is not
+// buildable: correct and broken extractions overlap on every cheap signal that
+// was measured (retained-text ratio, coverage of the page's own heading). So
+// this path strips the whole document instead of selecting part of it.
+// Stripping cannot silently lose content; it can only carry boilerplate, which
+// costs tokens but never fails the task. Measurements are in PR #1081.
 
-function stripHtmlTags(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim();
+/** `''.split(/\s+/)` is `['']`, so a plain `.length` reports 1 word for an empty page. */
+function countWords(text: string): number {
+  const t = text.trim();
+  return t === '' ? 0 : t.split(/\s+/).length;
+}
+
+/**
+ * Content types whose body is markup and must be stripped to text. Wider than
+ * `isHtmlContentType`, which gates the `http_request` tool and is deliberately
+ * strict: this function's outer gate already admits anything containing `html`
+ * or `text`, so routing on the strict predicate alone handed `text/xml` and
+ * `application/html` to the model as raw tags — something the previous
+ * tag-stripping path never did.
+ */
+function isMarkupContentType(contentType: string): boolean {
+  const ct = contentType.toLowerCase();
+  return isHtmlContentType(ct) || ct.includes('html') || ct.includes('xml');
 }
 
 export async function extractContent(url: string, maxChars?: number, ctx?: ToolContext | undefined): Promise<ExtractedContent> {
@@ -121,40 +145,42 @@ export async function extractContent(url: string, maxChars?: number, ctx?: ToolC
     throw new Error(`Unsupported content type: ${contentType}`);
   }
 
-  const html = await readBodyLimited(response, MAX_HTML_BYTES);
+  const body = await readBodyLimited(response, MAX_HTML_BYTES);
 
-  let title = '';
-  let content = '';
-
-  // Try Readability first (dynamic import for tree-shaking)
-  try {
-    const { parseHTML } = await import('linkedom');
-    const { Readability } = await import('@mozilla/readability');
-    const { document } = parseHTML(html);
-    const article = new Readability(document).parse();
-    if (article) {
-      title = article.title ?? '';
-      content = (article.textContent ?? '').replace(/\s+/g, ' ').trim();
-    }
-  } catch {
-    // Readability failed — fall back to tag stripping
+  // Markup goes through the extractor; everything else is served as received.
+  // Plain text must NOT be extracted: it has no markup, and stripping would eat
+  // real prose that merely looks like a tag (`if 3 <b and b> 4`, `<config>` in
+  // a log line).
+  if (!isMarkupContentType(contentType)) {
+    const truncated = body.length > limit;
+    const content = truncated ? body.slice(0, limit) : body;
+    return { title: new URL(url).hostname, content, url, wordCount: countWords(content), truncated };
   }
 
-  // Fallback: strip HTML tags
-  if (!content) {
-    content = stripHtmlTags(html);
-    const titleMatch = /<title[^>]*>([^<]+)<\/title>/i.exec(html);
-    if (titleMatch?.[1]) title = titleMatch[1].trim();
-  }
+  const extracted = extractHtmlText(body, limit);
 
-  const truncated = content.length > limit;
-  if (truncated) content = content.slice(0, limit);
+  // Same keep-raw guard `http_request` applies: a JS-rendered shell, or a body
+  // byte-cut at MAX_HTML_BYTES inside an open <script>, extracts to almost
+  // nothing — measured 197 characters for a 500 KB news homepage. Handing back
+  // that much boilerplate loses what the markup still carries (inline JSON,
+  // data attributes) and guarantees the agent refetches, paying twice.
+  //
+  // The SIZE condition is what makes it a failure signal rather than a
+  // description. `http_request` gets it for free by only extracting above the
+  // threshold; this path extracts every body, so it must ask explicitly. On a
+  // small document a short extraction is simply a short document, and handing
+  // back its raw markup instead would be strictly worse.
+  if (extracted.afterChars < MIN_USEFUL_EXTRACT_CHARS && body.length > DEFAULT_HTML_EXTRACT_THRESHOLD_CHARS) {
+    const truncated = body.length > limit;
+    const content = truncated ? body.slice(0, limit) : body;
+    return { title: extracted.title || new URL(url).hostname, content, url, wordCount: countWords(content), truncated };
+  }
 
   return {
-    title: title || new URL(url).hostname,
-    content,
+    title: extracted.title || new URL(url).hostname,
+    content: extracted.text,
     url,
-    wordCount: content.split(/\s+/).length,
-    truncated,
+    wordCount: countWords(extracted.text),
+    truncated: extracted.truncated,
   };
 }

@@ -33,7 +33,12 @@ const INJECTION_PATTERNS: Array<{ pattern: RegExp; label: string; requires?: Reg
   { pattern: /<\|end\|>/i, label: 'end token injection' },
 
   // Boundary escape — attacker tries to close untrusted_data wrapper (literal + entity encoded)
-  { pattern: /<\/untrusted_data>/i, label: 'boundary escape' },
+  // `\s*` mirrors the entity variants below. Without it `</untrusted_data >`
+  // — which HTML accepts as a closing tag — passed both this detector and the
+  // neutralizer. Reachable since web_research began surfacing <meta> attribute
+  // values: `content="&lt;/untrusted_data &gt;"` is entity-decoded by the
+  // extractor into the literal form, landing at the TOP of the wrapped block.
+  { pattern: /<\s*\/\s*untrusted_data\s*>/i, label: 'boundary escape' },
   { pattern: /&lt;\s*\/\s*untrusted_data\s*&gt;/i, label: 'boundary escape (entity)' },
   { pattern: /(&#0*60;|&#x0*3c;)\s*\/\s*untrusted_data\s*(&#0*62;|&#x0*3e;)/i, label: 'boundary escape (numeric entity)' },
 
@@ -176,8 +181,10 @@ function neutralizeBoundaryTags(text: string): string {
     .replace(/&lt;\s*\/\s*untrusted_data\s*&gt;/gi, '[blocked:boundary_escape]')
     // Numeric entity encoded: &#60;/untrusted_data&#62; or &#x3c;/untrusted_data&#x3e;
     .replace(/(&#0*60;|&#x0*3c;)\s*\/\s*untrusted_data\s*(&#0*62;|&#x0*3e;)/gi, '[blocked:boundary_escape]')
-    // Literal closing tag last — produces entity-escaped output that won't be re-matched
-    .replace(/<\/untrusted_data>/gi, '&lt;/untrusted_data&gt;');
+    // Literal closing tag last — produces entity-escaped output that won't be
+    // re-matched. `\s*` mirrors the entity patterns above; without it the
+    // whitespace form `</untrusted_data >` escaped the wrapper untouched.
+    .replace(/<\s*\/\s*untrusted_data\s*>/gi, '&lt;/untrusted_data&gt;');
 }
 
 export function wrapUntrustedData(content: string, source: string): string {

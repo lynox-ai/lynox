@@ -9,25 +9,12 @@ vi.mock('node:dns/promises', () => ({
   },
 }));
 
-// Mock linkedom and readability for dynamic imports
-vi.mock('linkedom', () => ({
-  parseHTML: vi.fn().mockImplementation(() => ({
-    document: { documentElement: {} },
-  })),
-}));
-
-vi.mock('@mozilla/readability', () => {
-  const mockParse = vi.fn().mockReturnValue({
-    title: 'Extracted Title',
-    textContent: 'Extracted content from the article.',
-  });
-  return {
-    Readability: vi.fn().mockImplementation(function() {
-      return { parse: mockParse };
-    }),
-    __mockParse: mockParse,
-  };
-});
+// NOTE: this file used to mock `linkedom` + `@mozilla/readability` and then
+// assert that the MOCK's canned strings came back out. Those assertions passed
+// no matter what the real extraction did — they stayed green through the
+// measured 2026-07-28 failures (a Stripe quickstart reduced to 237 chars of nav,
+// a GitHub reference reduced to a JSON payload). The extraction is now driven
+// with real HTML end-to-end, so the assertions can actually fail.
 
 const mockFetch = vi.fn();
 
@@ -83,11 +70,14 @@ function htmlResponse(html: string): ReturnType<typeof mockFetch> {
 
 describe('extractContent', () => {
   it('extracts content from HTML page', async () => {
-    htmlResponse('<html><body><p>Hello</p></body></html>');
+    htmlResponse(
+      '<html><head><title>Acme Robotics</title></head>' +
+      '<body><p>We build warehouse robots.</p></body></html>',
+    );
 
     const result = await extractContent('https://example.com');
-    expect(result.title).toBe('Extracted Title');
-    expect(result.content).toBe('Extracted content from the article.');
+    expect(result.title).toBe('Acme Robotics');
+    expect(result.content).toContain('We build warehouse robots.');
     expect(result.url).toBe('https://example.com');
     expect(result.wordCount).toBeGreaterThan(0);
     expect(result.truncated).toBe(false);
@@ -164,13 +154,7 @@ describe('extractContent', () => {
   });
 
   it('truncates long content', async () => {
-    // Override the mock for this test
-    const readability = await import('@mozilla/readability');
-    const mockParse = (readability as Record<string, unknown>)['__mockParse'] as ReturnType<typeof vi.fn>;
-    const longContent = 'word '.repeat(20_000);
-    mockParse.mockReturnValueOnce({ title: 'Long', textContent: longContent });
-
-    htmlResponse('<html><body></body></html>');
+    htmlResponse(`<html><head><title>Long</title></head><body><p>${'word '.repeat(20_000)}</p></body></html>`);
 
     const result = await extractContent('https://example.com', 100);
     expect(result.truncated).toBe(true);
@@ -179,11 +163,7 @@ describe('extractContent', () => {
 
   // --- Advanced edge cases ---
 
-  it('falls back to tag stripping when Readability returns null', async () => {
-    const readability = await import('@mozilla/readability');
-    const mockParse = (readability as Record<string, unknown>)['__mockParse'] as ReturnType<typeof vi.fn>;
-    mockParse.mockReturnValueOnce(null);
-
+  it('keeps the document title and the body prose', async () => {
     htmlResponse('<html><head><title>Fallback Title</title></head><body><p>Fallback content here</p></body></html>');
 
     const result = await extractContent('https://example.com');
@@ -192,14 +172,151 @@ describe('extractContent', () => {
   });
 
   it('uses hostname as title when no title found', async () => {
-    const readability = await import('@mozilla/readability');
-    const mockParse = (readability as Record<string, unknown>)['__mockParse'] as ReturnType<typeof vi.fn>;
-    mockParse.mockReturnValueOnce(null);
-
     htmlResponse('<html><body>No title anywhere</body></html>');
 
     const result = await extractContent('https://notitle.example.com');
     expect(result.title).toBe('notitle.example.com');
+  });
+
+  // --- Regression: no article SELECTION step (2026-07-28) ---
+
+  it('keeps every region of a docs page, not just the one an article picker would choose', async () => {
+    // Shaped after the real failures: a docs page whose biggest single element is
+    // a JSON sample, with the actual guidance split across a sidebar, a heading
+    // and body prose. Mozilla Readability scored the code block highest here and
+    // returned it alone — docs.stripe.com/ and the GitHub REST reference both
+    // came back as bare JSON payloads.
+    //
+    // MUTATION that kills this test: reintroduce a step that picks a subtree
+    // BELOW <body> as "the article". The four regions below sit in four
+    // different subtrees, so any such pick drops at least one assertion.
+    htmlResponse(`<html><head><title>Send an email</title></head><body>
+      <nav><a href="/docs/auth">Authentication</a><a href="/docs/webhooks">Webhooks</a></nav>
+      <aside>Requires the emails.send scope.</aside>
+      <main>
+        <h2>Send an email</h2>
+        <p>POST to the messages endpoint with a bearer token.</p>
+        <pre>{"id":"1","object":"email","from":null,"to":null,"subject":null,
+             "html":null,"text":null,"cc":null,"bcc":null,"reply_to":null,
+             "created_at":null,"last_event":null,"headers":null,"tags":null}</pre>
+      </main>
+    </body></html>`);
+
+    const result = await extractContent('https://example.com/docs/send');
+
+    expect(result.content).toContain('Authentication');            // nav region
+    expect(result.content).toContain('emails.send scope');          // aside region
+    expect(result.content).toContain('bearer token');               // the actual guidance
+    expect(result.content).toContain('## Send an email');           // heading structure survives
+  });
+
+  it('keeps meta description when the body carries no text', async () => {
+    // Bot-walled and JS-rendered pages serve an empty body; the meta tags are
+    // then the only description of the page that exists. Readability returned 0
+    // characters for exactly this shape (measured on anthropic.com).
+    // MUTATION: drop the meta-line block from the extractor.
+    htmlResponse(
+      '<html><head><title>Acme</title>' +
+      '<meta name="description" content="Warehouse robotics for mid-size logistics.">' +
+      '</head><body><div id="root"></div></body></html>',
+    );
+
+    const result = await extractContent('https://example.com');
+    expect(result.content).toContain('Warehouse robotics for mid-size logistics.');
+  });
+
+  it('does not run the HTML extractor over a text/plain body', async () => {
+    // The content-type gate admits text/plain. Prose containing `<` would lose
+    // everything up to the next `>` if it went through tag-stripping.
+    // MUTATION: drop the isHtmlContentType branch — `if 3 <b and b> 4 then` loses
+    // its middle and the assertion fails.
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/plain' }),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('if 3 <b and b> 4 then stop'));
+          controller.close();
+        },
+      }),
+    });
+
+    const result = await extractContent('https://example.com/readme.txt');
+    expect(result.content).toBe('if 3 <b and b> 4 then stop');
+  });
+
+  it('still honours maxChars on a text/plain body', async () => {
+    // MUTATION: `truncated = false; content = body` in the plain-text branch.
+    // Without this test that passes 54/54, and a 500 KB text/plain body walks
+    // straight into the model's context — the exact blowup this path caps.
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-type': 'text/plain; charset=utf-8' }),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('x'.repeat(5_000)));
+          controller.close();
+        },
+      }),
+    });
+
+    const result = await extractContent('https://example.com/big.txt', 100);
+    expect(result.content.length).toBe(100);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('keeps the raw body when a LARGE page extracts to almost nothing', async () => {
+    // A JS-rendered shell, or a body byte-cut inside an open <script>, strips to
+    // a few dozen characters — measured 197 for a 500 KB news homepage. The raw
+    // markup still carries inline JSON and data attributes, so it beats the
+    // boilerplate. MUTATION: drop the guard, and the assertion on the payload fails.
+    const shell = `<html><head><title>News</title></head><body><div id="app"></div>` +
+      `<script>window.__DATA__={"headline":"Marker aus dem Inline-JSON"};${'/*pad*/'.repeat(6_000)}` +
+      `</body></html>`;
+    expect(shell.length).toBeGreaterThan(30_000);
+    htmlResponse(shell);
+
+    const result = await extractContent('https://example.com');
+    expect(result.content).toContain('Marker aus dem Inline-JSON');
+  });
+
+  it('does NOT keep raw markup just because a SMALL page is short', async () => {
+    // The size condition is what turns "extraction was short" into a failure
+    // signal. Without it a tiny document comes back as raw tags, which is
+    // strictly worse than its own text.
+    // MUTATION: drop `body.length > DEFAULT_HTML_EXTRACT_THRESHOLD_CHARS`.
+    htmlResponse('<html><head><title>Kurz</title></head><body><p>Wenig Text.</p></body></html>');
+
+    const result = await extractContent('https://example.com');
+    expect(result.content).toContain('Wenig Text.');
+    expect(result.content).not.toContain('<p>');
+  });
+
+  it('strips markup for content types beyond text/html', async () => {
+    // The outer gate admits anything containing `html` or `text`, but
+    // `isHtmlContentType` only matches text/html and application/xhtml. Routing
+    // on it alone handed text/xml and application/html back as raw tags, which
+    // the previous tag-stripping path never did.
+    // MUTATION: route on isHtmlContentType instead of isMarkupContentType.
+    for (const ct of ['text/xml', 'application/html']) {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers({ 'content-type': ct }),
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('<root><item>Nutzdaten</item></root>'));
+            controller.close();
+          },
+        }),
+      });
+
+      const result = await extractContent('https://example.com/feed');
+      expect(result.content).toContain('Nutzdaten');
+      expect(result.content).not.toContain('<item>');
+    }
   });
 
   it('blocks 172.16.x.x private range', async () => {
@@ -259,10 +376,6 @@ describe('extractContent', () => {
   });
 
   it('handles empty body gracefully', async () => {
-    const readability = await import('@mozilla/readability');
-    const mockParse = (readability as Record<string, unknown>)['__mockParse'] as ReturnType<typeof vi.fn>;
-    mockParse.mockReturnValueOnce(null);
-
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
@@ -277,10 +390,6 @@ describe('extractContent', () => {
   });
 
   it('handles response with no body at all', async () => {
-    const readability = await import('@mozilla/readability');
-    const mockParse = (readability as Record<string, unknown>)['__mockParse'] as ReturnType<typeof vi.fn>;
-    mockParse.mockReturnValueOnce(null);
-
     mockFetch.mockResolvedValue({
       ok: true,
       status: 200,
@@ -341,11 +450,20 @@ describe('extractContent', () => {
   });
 
   it('counts words correctly', async () => {
+    htmlResponse('<html><body><p>Extracted content from the article.</p></body></html>');
+
+    const result = await extractContent('https://example.com');
+    expect(result.wordCount).toBe(5);
+  });
+
+  it('reports zero words for an empty document, not one', async () => {
+    // `''.split(/\s+/)` is `['']` — a naive `.length` reports 1 word for a page
+    // with no text at all. Mutation: drop the empty-string branch in countWords.
     htmlResponse('<html><body></body></html>');
 
     const result = await extractContent('https://example.com');
-    // Default mock returns "Extracted content from the article." = 5 words
-    expect(result.wordCount).toBe(5);
+    expect(result.content).toBe('');
+    expect(result.wordCount).toBe(0);
   });
 
   // T1-4: DNS-rebinding regression. The legacy validate-then-fetch flow
