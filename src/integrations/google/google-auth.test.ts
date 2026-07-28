@@ -761,9 +761,13 @@ describe('setTokens — OAuth claim fixture (contract §2.3 #5)', () => {
       const { auth: vaultAuth } = makeVaultAuth();
       const mutated = { ...fixture };
       delete mutated[field];
+      // Named field, not just /Invalid token data/: all four guards share that
+      // prefix, so the loose form passes even when a DIFFERENT guard fired —
+      // which would mean the field under test is unguarded and the probe is
+      // reporting someone else's rejection.
       await expect(
         vaultAuth.setTokens(mutated as unknown as Parameters<GoogleAuth['setTokens']>[0]),
-      ).rejects.toThrow(/Invalid token data/);
+      ).rejects.toThrow(new RegExp(`Invalid token data: ${field}`));
     });
   }
 

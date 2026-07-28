@@ -41,13 +41,34 @@ import {
  */
 const GOLDEN_GUARDED_LINE = '[lynox] egress policy: guarded (guarded-capable build)';
 
-/** Lines a tenant could plausibly get into the same stream. */
+/** Ask the real `grep -E` binary whether the pattern matches each line. */
+function grepVerdicts(lines: string[]): boolean[] {
+  return lines.map((line) => {
+    try {
+      // -c so a non-match is exit 1 with "0"; -- so a line starting with `-`
+      // is not read as a flag. Input via stdin, never through the shell.
+      const out = execFileSync('grep', ['-cE', '--', GUARDED_CAPABLE_LINE_ERE], {
+        input: `${line}\n`,
+        encoding: 'utf8',
+      });
+      return Number.parseInt(out.trim(), 10) > 0;
+    } catch {
+      // grep exits 1 on zero matches.
+      return false;
+    }
+  });
+}
+
+/** Single-line strings a tenant could plausibly get into the same stream. */
 const TENANT_PLANTED = [
-  // Tool result echoing user input.
+  // Tool result echoing user input — marker as a SUFFIX (probes `^`).
   `tool result: ${GOLDEN_GUARDED_LINE}`,
+  // Marker as a PREFIX (probes `$`) — without this, dropping the trailing
+  // anchor passes every other case in the corpus.
+  `${GOLDEN_GUARDED_LINE} — replayed from an old container`,
   // Agent text quoting the marker.
   `I checked and this is a ${GUARDED_CAPABLE_MARKER}`,
-  // Error echoing a crafted argument, marker at the end of the line.
+  // Error echoing a crafted argument, marker inside quotes.
   `Error: could not parse "[lynox] egress policy: guarded (guarded-capable build)"`,
   // Leading whitespace — still not the engine's own line.
   `  ${GOLDEN_GUARDED_LINE}`,
@@ -71,6 +92,13 @@ const NEAR_MISSES = [
   'egress policy: guarded (guarded-capable build)',
   '[LYNOX] EGRESS POLICY: GUARDED (GUARDED-CAPABLE BUILD)',
   'l egress policy: guarded (guarded-capable build)',
+  // Real prefix, real suffix, GARBAGE where the policy belongs. Without this
+  // line the policy segment is untested: widening `[a-z-]+` to `.+` passes
+  // every other case, because nothing else in the corpus starts with the real
+  // prefix while carrying a bogus middle.
+  '[lynox] egress policy: guarded" pwned (guarded-capable build)',
+  '[lynox] egress policy: GUARDED (guarded-capable build)',
+  '[lynox] egress policy: policy7 (guarded-capable build)',
 ];
 
 describe('guarded-capable marker: golden pin', () => {
@@ -106,25 +134,26 @@ describe('guarded-capable marker: the pattern is a whole line, not a substring',
   });
 });
 
-describe('guarded-capable marker: one pattern, two regex engines', () => {
-  /** Ask the real `grep -E` binary whether the pattern matches each line. */
-  function grepVerdicts(lines: string[]): boolean[] {
-    return lines.map((line) => {
-      try {
-        // -c so a non-match is exit 1 with "0"; -- so a line starting with `-`
-        // is not read as a flag. Input via stdin, never through the shell.
-        const out = execFileSync('grep', ['-cE', '--', GUARDED_CAPABLE_LINE_ERE], {
-          input: `${line}\n`,
-          encoding: 'utf8',
-        });
-        return Number.parseInt(out.trim(), 10) > 0;
-      } catch {
-        // grep exits 1 on zero matches.
-        return false;
-      }
-    });
-  }
+describe('guarded-capable marker: the bound this pattern does NOT provide', () => {
+  // Written as a passing test on purpose. Anchoring defeats the marker
+  // appearing INSIDE a line; it does nothing about a tenant-controlled string
+  // that carries a NEWLINE, because the reader is line-based. Pinning that here
+  // means the limit is a fact in the suite rather than a sentence in a comment —
+  // and if someone later closes the hole, this test fails and makes them say so.
+  const PLANTED_VIA_NEWLINE = `Error: no such secret "x\n${GOLDEN_GUARDED_LINE}\n"`;
 
+  it('a newline inside tenant-controlled text still produces a matching LINE', () => {
+    // `m` because that is what the shell-side reader does — per line, not per
+    // buffer. A false here would mean the JS side disagrees with `grep`.
+    expect(guardedCapableLineRegex().test(PLANTED_VIA_NEWLINE)).toBe(true);
+  });
+
+  it('the real grep agrees — so this is the reader\'s problem, not a spelling difference', () => {
+    expect(grepVerdicts([PLANTED_VIA_NEWLINE])).toEqual([true]);
+  });
+});
+
+describe('guarded-capable marker: one pattern, two regex engines', () => {
   const corpus = [
     GOLDEN_GUARDED_LINE,
     guardedCapableBootLine('allow-all'),

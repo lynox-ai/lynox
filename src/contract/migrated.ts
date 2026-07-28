@@ -77,7 +77,6 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'TYPED_MIRRORS', contractFile: 'fixtures/mirrors.ts', twinPattern: valueTwin('TYPED_MIRRORS') },
   // K-W3 — auth + OAuth wire shapes.
   { name: 'MagicLinkVerifyRequest', contractFile: 'http.ts', twinPattern: typeTwin('MagicLinkVerifyRequest') },
-  { name: 'MagicLinkVerifyResponse', contractFile: 'http.ts', twinPattern: typeTwin('MagicLinkVerifyResponse') },
   { name: 'MAGIC_LINK_ERROR_CODES', contractFile: 'http.ts', twinPattern: valueTwin('MAGIC_LINK_ERROR_CODES') },
   { name: 'MagicLinkErrorCode', contractFile: 'http.ts', twinPattern: typeTwin('MagicLinkErrorCode') },
   { name: 'isMagicLinkErrorCode', contractFile: 'http.ts', twinPattern: valueTwin('isMagicLinkErrorCode') },

@@ -22,8 +22,13 @@ import {
  * The union is the control plane's wire codes (`MagicLinkErrorCode`, owned by
  * the contract) PLUS the outcomes this route decides on its own and that never
  * cross the wire. Spelling the wire half out again here is what let the two
- * drift before; deriving it means a widened wire union fails to compile until
- * the mapping below handles the new value.
+ * drift before.
+ *
+ * Deriving it does NOT give a compile-time gate: widening the wire union widens
+ * this one too, and `isMagicLinkErrorCode` then forwards the new value without
+ * anything failing. What deriving buys is that the two can no longer disagree
+ * about WHICH codes exist. The set itself is pinned by a hand-written golden
+ * assertion in the test, because that is the part a derivation cannot check.
  */
 export type MagicLinkReason =
 	| MagicLinkErrorCode

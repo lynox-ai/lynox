@@ -45,13 +45,23 @@ export function guardedCapableBootLine(policy: string): string {
 }
 
 /**
- * Escape a literal for use inside a POSIX ERE.
+ * Escape a literal for use inside a POSIX ERE that a JS RegExp must read the
+ * same way.
  *
- * The set is exactly the characters that are special in BOTH POSIX ERE and JS
- * RegExp, so one escaped source works in `grep -E` and in `new RegExp`. `-` and
- * `/` are deliberately absent: neither is special outside a bracket expression
- * in either flavour, while `\-` is undefined behaviour in POSIX ERE — escaping
- * them would be the one way to make the two engines disagree.
+ * The set is the JS-RegExp special characters, minus `-` and `/`, which are not
+ * special outside a bracket expression in either flavour. It is NOT the exact
+ * intersection with POSIX-ERE specials — `]` and `}` are also harmless
+ * unescaped in an ERE, and they are escaped here anyway. That asymmetry is
+ * deliberate rather than tidy: GNU, BSD and busybox `grep -E` all accept `\]`
+ * and `\}` as the literal character, so escaping them costs nothing, while
+ * leaving them raw would depend on each implementation's handling of an
+ * unmatched bracket. `\-` is the case where that bet does NOT hold, so `-` is
+ * left alone.
+ *
+ * Pinned by the cross-engine test, which runs the real `grep` binary and the JS
+ * RegExp over the same corpus and compares verdicts — if this reasoning is
+ * wrong on some platform, that test says so instead of this comment being
+ * believed.
  */
 function escapeEre(literal: string): string {
   return literal.replace(/[.[\]()*+?{}|^$\\]/g, '\\$&');
@@ -66,11 +76,23 @@ function escapeEre(literal: string): string {
  * of a line an attacker controls — "capable" is then a claim about the tenant's
  * text, not about the image. Anchoring makes the whole line the unit.
  *
- * The policy segment is a character class rather than an alternation over
- * today's four values: a future fifth policy must not make a genuinely capable
- * image read as incapable. That direction of drift is fail-closed and silent,
- * which is the expensive kind — the alternation would buy nothing, since the
- * marker suffix is what carries the capability claim.
+ * WHAT THIS DOES NOT DO — stated because the previous version of this seam was
+ * believed to do more than it did. Anchoring defeats the marker appearing
+ * INSIDE a line. It cannot defeat a tenant-controlled string that carries a
+ * NEWLINE, because the reader is line-based: `…\n<marker>\n…` puts attacker
+ * bytes at column 0 and the anchors are then satisfied honestly. Closing that
+ * needs something this file cannot provide — a value the tenant does not know
+ * (a per-boot nonce the reader already holds), or a reader window that stops
+ * before any tenant request is served. Until then the pattern is one layer, not
+ * the guarantee, and no comment on either side may call it the guarantee.
+ *
+ * The policy segment is `[a-z-]+`, which covers every value in `vocab.ts`'s
+ * `NetworkPolicy` and any future lowercase-and-hyphen sibling. It deliberately
+ * does not enumerate today's four: a new policy must not make a genuinely
+ * capable image read as incapable, and that direction of drift is fail-closed
+ * and silent, which is the expensive kind. A policy containing a digit or an
+ * uppercase letter would NOT match — accepted, because the config layer
+ * validates the value against the enum before it reaches the log line.
  *
  * Written as an ERE (not a JS RegExp literal) because the matching side is a
  * shell `grep -E`; `guardedCapableLineRegex()` builds the in-process equivalent
@@ -79,7 +101,16 @@ function escapeEre(literal: string): string {
 export const GUARDED_CAPABLE_LINE_ERE =
   `^${escapeEre(EGRESS_POLICY_LOG_PREFIX)} [a-z-]+ \\(${escapeEre(GUARDED_CAPABLE_MARKER)}\\)$`;
 
-/** In-process equivalent of `GUARDED_CAPABLE_LINE_ERE`, for tests and parsers. */
+/**
+ * In-process equivalent of `GUARDED_CAPABLE_LINE_ERE`, for tests and parsers.
+ *
+ * The `m` flag is what makes "equivalent" true. `grep` is line-based: it applies
+ * the pattern to each line of its input, so `^`/`$` mean line boundaries. A JS
+ * RegExp without `m` reads them as buffer boundaries, so handed a multi-line log
+ * buffer it returns false where `grep` returns a match — a silent divergence in
+ * the fail-closed direction, and exactly the kind of thing an export advertised
+ * as "the same pattern" must not have.
+ */
 export function guardedCapableLineRegex(): RegExp {
-  return new RegExp(GUARDED_CAPABLE_LINE_ERE);
+  return new RegExp(GUARDED_CAPABLE_LINE_ERE, 'm');
 }

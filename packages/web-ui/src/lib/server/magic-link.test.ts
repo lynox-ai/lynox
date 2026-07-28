@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { decideMagicLinkOutcome, type MagicLinkDeps } from './magic-link.js';
+import { decideMagicLinkOutcome, type MagicLinkDeps, type MagicLinkReason } from './magic-link.js';
 import { MAGIC_LINK_ERROR_CODES } from '../contract/http.js';
 
 // A token that satisfies the shape gate (≥100 chars) — actual content doesn't
@@ -159,12 +159,21 @@ describe('decideMagicLinkOutcome — CP request shape', () => {
 // ── The error_code vocabulary is the contract's, not a local copy ───────────
 //
 // Before K-W3 this route matched `error_code` against a hand-listed union that
-// happened to agree with the control plane's. The tests below fail on the two
-// ways that agreement can break: a code the CP sends that the engine no longer
-// maps (drop one arm of the loop's source and it is red), and a code the engine
-// accepts that the CP never sends (an unvalidated CP string reaching the user's
-// redirect URL).
+// happened to agree with the control plane's. What follows guards the two ways
+// that agreement can break: the SET itself changing, and the route accepting a
+// code the control plane never sends.
 describe('decideMagicLinkOutcome — wire error_code vocabulary', () => {
+	// The golden pin. Everything else in this block is DERIVED from
+	// MAGIC_LINK_ERROR_CODES, so shrinking that array just shrinks the loop and
+	// stays green — verified: deleting 'expired' left all 23 tests passing,
+	// because the older per-code tests below use statuses (410/401/429) whose
+	// fallback chain returns the same reason anyway. Only this hand-written line
+	// makes the vocabulary a decision rather than whatever the array happens to
+	// hold. It is the same third-party role the golden line plays for the marker.
+	it('is exactly the set the control plane emits (hand-written pin)', () => {
+		expect([...MAGIC_LINK_ERROR_CODES]).toEqual(['rate_limited', 'expired', 'replay', 'invalid']);
+	});
+
 	it.each(MAGIC_LINK_ERROR_CODES)('maps the wire code %s straight through to a reason', async (code) => {
 		const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ error: 'x', error_code: code }), { status: 400 }));
 		const outcome = await decideMagicLinkOutcome(mkDeps({ fetchImpl }));
@@ -191,9 +200,22 @@ describe('decideMagicLinkOutcome — wire error_code vocabulary', () => {
 
 	it('every reason the route can return is a safe URL token', () => {
 		// The reason is interpolated into `/login?error=magic_<reason>`. Keeping
-		// the set closed is what makes that interpolation safe; this pins the
-		// property rather than leaving it to the reader of the route.
-		for (const reason of [...MAGIC_LINK_ERROR_CODES, 'missing_token', 'unmanaged', 'cp_unreachable']) {
+		// the set closed is what makes that interpolation safe.
+		//
+		// `satisfies Record<MagicLinkReason, true>` is what keeps this honest: a
+		// hand-listed array would silently stop covering a newly added local
+		// reason, whereas this fails to compile (web-ui is type-checked, unlike
+		// the root repo's tests/ dir).
+		const ALL_REASONS = {
+			rate_limited: true,
+			expired: true,
+			replay: true,
+			invalid: true,
+			missing_token: true,
+			unmanaged: true,
+			cp_unreachable: true,
+		} satisfies Record<MagicLinkReason, true>;
+		for (const reason of Object.keys(ALL_REASONS)) {
 			expect(reason).toMatch(/^[a-z_]+$/);
 		}
 	});

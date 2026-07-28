@@ -146,10 +146,11 @@ export interface MagicLinkVerifyRequest {
   instanceId: string;
 }
 
-/** Success body. The engine reads only the status; the field is the CP's contract with itself. */
-export interface MagicLinkVerifyResponse {
-  valid: true;
-}
+// There is deliberately NO type here for the success body. The control plane
+// answers `{valid: true}`, but the engine branches on `res.ok` and never reads
+// the field — so the wire does not depend on the two sides agreeing about it,
+// which is the membership test in `README.md`. Pinning it would have looked
+// thorough and quietly widened the contract to cover something no one parses.
 
 /**
  * Reasons the control plane can refuse a magic link, as sent on the wire.
