@@ -40,75 +40,33 @@ import {
 } from './knowledge-substrate-runner.js';
 import { makeRealReplayThread, makeLlmJudge, replayFailures, type ReplayProviderConfig } from './knowledge-substrate-replay.js';
 import { makeLegacyReplayThread } from './knowledge-substrate-baseline.js';
+import { resolveReplayProvider } from './knowledge-substrate-provider.js';
 import { HAIKU } from '../online/setup.js';
 
-/** Read a string field from ~/.lynox/config.json (same store as the CLI). */
-function readConfigKey(field: string): string | undefined {
+/** Read ~/.lynox/config.json (same store as the CLI). Missing/corrupt → {}, which
+ *  the resolver reads as "nothing configured" and self-skips on. */
+function readCliConfig(): Record<string, unknown> {
   try {
-    const cfg = JSON.parse(readFileSync(join(homedir(), '.lynox', 'config.json'), 'utf8')) as Record<string, unknown>;
-    const v = cfg[field];
-    return typeof v === 'string' && v.length > 0 ? v : undefined;
-  } catch { return undefined; }
+    return JSON.parse(readFileSync(join(homedir(), '.lynox', 'config.json'), 'utf8')) as Record<string, unknown>;
+  } catch { return {}; }
 }
 
-/**
- * Resolve the replay provider from the environment — PROVIDER-AGNOSTIC so the
- * gate runs on whatever stack the operator uses. Anthropic (Haiku) when an
- * Anthropic key is present; otherwise Mistral EU (`api.mistral.ai/v1`) when a
- * Mistral key is present — the latter is the only path that runs on a
- * Mistral-only box AND keeps real thread content in the EU (mirrors the
- * gold-gen label pass). `LYNOX_KNOWLEDGE_PROVIDER`/`_MODEL` override.
- */
+/** Resolution itself lives in `knowledge-substrate-provider.ts` — pure, and
+ *  contract-tested there. It is where this harness has silently mis-measured
+ *  before (wrong provider → every turn 400s into the runner's swallow → recall
+ *  0.00 reported as a RESULT), and a resolver inside a `.test.ts` cannot be
+ *  imported by a test without executing the eval. */
 function resolveProvider(): ReplayProviderConfig | null {
-  const forced = process.env['LYNOX_KNOWLEDGE_PROVIDER'];
-  // BOTH spellings: the CLI config stores the Anthropic credential under
-  // `anthropic_api_key`, so reading only `api_key` silently found nothing and let
-  // the resolver fall through to Mistral — while `LYNOX_KNOWLEDGE_MODEL` still
-  // carried an Anthropic model id. Every turn then 400'd into the runner's
-  // deliberate swallow-and-continue, and a full corpus would have reported
-  // recall 0.00 as a result rather than as a misconfiguration (2026-07-27).
-  const anthropicKey = process.env['ANTHROPIC_API_KEY']
-    ?? readConfigKey('anthropic_api_key') ?? readConfigKey('api_key');
-  const mistralKey = process.env['MISTRAL_API_KEY'] ?? readConfigKey('mistral_api_key');
-  const modelOverride = process.env['LYNOX_KNOWLEDGE_MODEL'];
-
-  // 'proxy' — any OpenAI-wire-compatible endpoint the operator runs locally, so a
-  // long eval can be pointed at a self-managed model host instead of consuming
-  // shared API credits. Explicit opt-in only (never auto-picked). Configure with
-  // LYNOX_KNOWLEDGE_PROXY_URL (required — no default endpoint is baked in) plus
-  // either LYNOX_KNOWLEDGE_PROXY_KEY (the credential directly) or
-  // LYNOX_KNOWLEDGE_PROXY_KEY_FILE (a path to read it from). Without a URL or a
-  // credential this provider resolves to null and the gate self-skips.
-  if (forced === 'proxy') {
-    let proxyKey: string | undefined = process.env['LYNOX_KNOWLEDGE_PROXY_KEY'];
-    const keyFile = process.env['LYNOX_KNOWLEDGE_PROXY_KEY_FILE'];
-    if (!proxyKey && keyFile) {
-      // A set-but-unreadable key file is a MISCONFIGURATION, not "not set up".
-      // Swallowing it would resolve the provider to null and self-skip the gate
-      // green — a typo in the path would read as a pass.
-      try { proxyKey = readFileSync(keyFile, 'utf8').trim(); } catch (err) {
-        throw new Error(`LYNOX_KNOWLEDGE_PROXY_KEY_FILE is set but unreadable (${keyFile}): ${(err as Error).message}`);
-      }
-    }
-    const proxyUrl = process.env['LYNOX_KNOWLEDGE_PROXY_URL'];
-    if (!proxyKey || !proxyUrl) return null;
-    const m = modelOverride ?? 'claude-sonnet-4-6';
-    return { provider: 'openai', apiKey: proxyKey, apiBaseURL: proxyUrl, model: m, openaiModelId: m };
-  }
-
-  const useAnthropic = forced ? forced === 'anthropic' : Boolean(anthropicKey);
-  if (useAnthropic && anthropicKey) {
-    return { provider: 'anthropic', apiKey: anthropicKey, model: modelOverride ?? HAIKU };
-  }
-  if (mistralKey && forced !== 'anthropic') {
-    // NEVER a `-latest` alias: Mistral's latest tags carry much lower rate
-    // limits, which grinds a long replay into 429s and reads as artificially
-    // low recall. Pin the last stable dated snapshot — the canonical ids live
-    // in MISTRAL_MODEL_MAP (src/types/models.ts) / catalog.ts.
-    const m = modelOverride ?? 'mistral-large-2512';
-    return { provider: 'openai', apiKey: mistralKey, apiBaseURL: 'https://api.mistral.ai/v1', model: m, openaiModelId: m };
-  }
-  return null;
+  const r = resolveReplayProvider(
+    process.env as NodeJS.ProcessEnv & Record<string, string | undefined>,
+    readCliConfig(),
+    p => readFileSync(p, 'utf8'),
+    HAIKU,
+  );
+  if (r === null) return null;
+  // The pure resolver leaves the Anthropic wire implicit (no `provider` field);
+  // the Agent config wants it named.
+  return r.provider === 'openai' ? r : { ...r, provider: 'anthropic' };
 }
 
 const PROVIDER = resolveProvider();

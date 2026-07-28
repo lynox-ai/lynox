@@ -36,14 +36,22 @@
 // one captured entry; new lines after a turn are attributed to that turn, which
 // mirrors how the DK path attributes new `knowledge_entries` rows.
 //
-// KNOWN ASYMMETRIES — both are real product differences, NOT harness bias, and
-// the report must name them rather than silently score them:
-//   · the legacy store has no subject link, so subject-attribution is 0 by
-//     construction. It cannot answer "whose fact is this?" at all.
+// KNOWN ASYMMETRIES — real product differences, NOT harness bias, and the report
+// must name them rather than silently score them:
+//   · the legacy store has no subject link, so every entry carries `subject: null`.
+//     Its subject-attribution number is therefore NOT a link-quality measurement:
+//     `scoreCaptures` counts both-null as CORRECT, so the score is simply the share
+//     of matched gold facts that were themselves unscoped — free credit for the side
+//     that has no subjects at all, tilting toward the baseline. Read it as "how many
+//     gold facts had no subject either", never as "how well it attributed".
+//     (An earlier revision of this comment claimed the number is "0 by construction".
+//     It is not: the 2026-07-28 full run scored 22.9%, and a 4-thread preflight 40%.
+//     The wrong claim was the more dangerous half — it invited citing the number.)
 //   · the legacy store has no trust routing, so every entry reads as `active`
 //     while `sourceUntrusted` is derived from the turn. A legacy `memory_store`
 //     after a `mail_read` genuinely does land external text active — that is a
-//     real H4 exposure the routing metric should SEE, not a vacuous pass.
+//     real H4 exposure the routing metric should SEE, not a vacuous pass. It does:
+//     the 2026-07-28 baseline run recorded 32 violations against DK's 0.
 
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -80,10 +88,15 @@ export const BASELINE_SYSTEM_PROMPT = [
   '**Knowledge**: `memory_store` (persist facts), `memory_recall` (search), `memory_update`/`memory_delete` (maintain accuracy), `memory_promote` (share across projects). Store insights, not raw data. Entity relationships are tracked automatically.',
 ].join('\n');
 
-/** Split a namespace blob into entries. The legacy store is line-oriented; blank
- *  lines and markdown bullets are normalised so a bullet list does not read as
- *  one giant entry. */
-function linesOf(blob: string | null): string[] {
+/** Split a namespace blob into entries. The legacy store is line-oriented —
+ *  `Memory.appendScoped` writes exactly one line per entry (`memory.ts:395`) — so
+ *  the newline split is faithful and a bundled multi-fact entry (joined with
+ *  `'; '` by `coerceExtractionValue`) correctly stays ONE entry. Blank lines and
+ *  markdown bullets/headings are normalised so a list does not read as one giant
+ *  entry and a section header is not scored as a captured fact.
+ *  Exported for the contract test: this is the baseline's entire readback, and a
+ *  wrong split silently moves its junk-rate. */
+export function linesOf(blob: string | null): string[] {
   if (!blob) return [];
   return blob
     .split('\n')
