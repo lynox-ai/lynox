@@ -60,7 +60,14 @@ function readConfigKey(field: string): string | undefined {
  */
 function resolveProvider(): ReplayProviderConfig | null {
   const forced = process.env['LYNOX_KNOWLEDGE_PROVIDER'];
-  const anthropicKey = process.env['ANTHROPIC_API_KEY'] ?? readConfigKey('api_key');
+  // BOTH spellings: the CLI config stores the Anthropic credential under
+  // `anthropic_api_key`, so reading only `api_key` silently found nothing and let
+  // the resolver fall through to Mistral — while `LYNOX_KNOWLEDGE_MODEL` still
+  // carried an Anthropic model id. Every turn then 400'd into the runner's
+  // deliberate swallow-and-continue, and a full corpus would have reported
+  // recall 0.00 as a result rather than as a misconfiguration (2026-07-27).
+  const anthropicKey = process.env['ANTHROPIC_API_KEY']
+    ?? readConfigKey('anthropic_api_key') ?? readConfigKey('api_key');
   const mistralKey = process.env['MISTRAL_API_KEY'] ?? readConfigKey('mistral_api_key');
   const modelOverride = process.env['LYNOX_KNOWLEDGE_MODEL'];
 
@@ -130,8 +137,8 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
     // tell a grinding monster thread from a hung one).
     // LYNOX_KNOWLEDGE_BASELINE=1 replays the SAME corpus with durable memory OFF —
     // the legacy pipeline a tenant runs today. It is the comparison the tier bars
-    // were never set against: 63.6% identity recall is unreadable until you know
-    // whether today's number is higher or lower (PRD §5.6 / §1).
+    // were never set against: a recall figure is unreadable until you know whether
+    // today's number is higher or lower.
     const BASELINE = process.env['LYNOX_KNOWLEDGE_BASELINE'] === '1';
     const makeThread = BASELINE ? makeLegacyReplayThread : makeRealReplayThread;
     const replayThread = makeThread({

@@ -5,12 +5,13 @@
 // measures what the SAME corpus produces with the flag OFF — the legacy
 // pipeline that a tenant runs today.
 //
-// WHY this exists: the 0.90 tier-1 bar was set as an absolute ("if the agent
-// can't reliably remember who a client is, the memory is useless"), never
-// against a comparison. But a flip gate answers "is this better than what we
-// run today?", and PRD §1 measured today as 450 subjects / 90% ghosts /
-// 32-of-32 low-trust memories in one session. Without this number, 63.6% is
-// unreadable: it could be a regression or a large improvement.
+// WHY this exists: the tier-1 bar was set as an absolute ("if the agent can't
+// reliably remember who a client is, the memory is useless"), never against a
+// comparison. But a flip gate answers "is this better than what we run today?",
+// and the legacy pipeline's own failure mode is measured (see the private PRD
+// §1) but was never in the harness. Without a baseline the DK number is
+// unreadable in either direction: it could be a regression or a large
+// improvement, and nothing in the run tells you which.
 //
 // Faithfulness — the flag is flipped exactly where production flips it:
 //   - `durableMemoryEnabled: false` on the Agent, which is what gates the
