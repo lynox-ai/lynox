@@ -299,7 +299,8 @@ jobs:
   # Security: release tag + sha go through env vars (never interpolated
   # directly into the shell command), and the JSON payload is built with
   # `jq -n` to avoid injection via a crafted tag. PRO_DISPATCH_TOKEN is a
-  # fine-grained PAT with actions:write on lynox-ai/lynox-pro only.
+  # fine-grained PAT scoped to the deployment repository; treat it as a
+  # write credential there and rotate it like one.
   dispatch-pro-release:
     needs: [docker-manifest, npm]
     runs-on: ubuntu-latest
