@@ -34,6 +34,12 @@ const UPPER_VAR = ['CLI', 'PROXY', 'API', 'KEY'].join('_');
 const INFRA_HOST = ['control', 'staging'].join('-') + '.lynox.cloud';
 const PORT = 8300 + 17;
 
+/** The doubled-bracket link delimiters, built so this file carries no literal one. */
+const REF_OPEN = '['.repeat(2);
+const REF_CLOSE = ']'.repeat(2);
+/** A slug in the shape the private repo and the maintainer's notes use. */
+const internalRef = (slug: string): string => `${REF_OPEN}${slug}${REF_CLOSE}`;
+
 let dir: string;
 
 /** Run the guard in --staged mode inside `dir`; return the exit code. */
@@ -146,6 +152,18 @@ describe('public-repo-guard — fires on planted leaks', () => {
     commitFile('src/leak.ts', `const h = "${INFRA_HOST}";\n`);
     expect(runGuard()).not.toBe(0);
   });
+
+  it('catches an internal cross-reference slug in the underscore form', () => {
+    commitFile('src/leak.ts', `// deferred, see ${internalRef('project_some_private_note')}\n`);
+    expect(runGuard()).not.toBe(0);
+  });
+
+  it('catches the hyphen+digit id form too', () => {
+    // Separate case on purpose: the underscore form alone stays green if the
+    // character class loses its digit or hyphen, which is how ids are written.
+    commitFile('src/leak.ts', `// tracked as ${internalRef('ITEM-0042')}\n`);
+    expect(runGuard()).not.toBe(0);
+  });
 });
 
 describe('public-repo-guard — does NOT fire on benign lines', () => {
@@ -157,6 +175,14 @@ describe('public-repo-guard — does NOT fire on benign lines', () => {
         `const b = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];\n` +
         `const c = process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'];\n`,
     );
+    expect(runGuard()).toBe(0);
+  });
+
+  it('allows a nested array literal, which shares the bracket pair', () => {
+    // The reason the slug pattern demands a slug-shaped body rather than just
+    // matching the bracket pair: this line is ordinary code and exists in the
+    // tree today. A shape-only pattern would paint the guard red on it.
+    commitFile('src/map.ts', `const m = new Map([[key, 'a\\nb']]);\n`);
     expect(runGuard()).toBe(0);
   });
 

@@ -18,7 +18,7 @@ const DEFAULT_SESSION_COST_USD = 50;
  * out as "masquerades as per-session state."
  *
  * `_maxSessionCostUSD` stays module-level: it's process-wide config set
- * once at engine init (engine = 1 tenant per [[feedback_one_engine_per_tenant]])
+ * once at engine init (one engine serves exactly one tenant)
  * and read against every Session's counters object on the hot path.
  */
 let _maxSessionCostUSD = DEFAULT_SESSION_COST_USD;
@@ -82,7 +82,7 @@ let _monthlyCapUSD = DEFAULT_MONTHLY_CAP_USD;
  * without a reservation each reads the same pre-run recorded total, all pass,
  * and collectively overshoot the cap. Each money-minting task reserves its
  * worst-case cost before dispatch and releases it once the run records. One
- * engine = one tenant ([[feedback_one_engine_per_tenant]]), so a module-level
+ * engine = one tenant, so a module-level
  * accumulator is process-correct.
  */
 let _reservedInFlightUSD = 0;

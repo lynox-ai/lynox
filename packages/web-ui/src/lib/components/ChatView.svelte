@@ -138,7 +138,7 @@
 	// 2-3 concrete, context-grounded JOBS via suggest_follow_ups (rendered as clickable
 	// pills) instead of enumerating generic capabilities — propose→react, not a feature menu.
 	// ⚠ Prompt-behaviour change (Step-1 questions + Step-3 closing) — validate cross-provider
-	// on real models before ship ([[fb_validate_prompt_change]]). The no-sequence-marker
+	// on real models before ship. The no-sequence-marker
 	// constraint above still holds.
 	const ONBOARDING_CONTEXT = [
 		`The user's website is: {url} — scan it now. Use web_research with action='read', which returns the page already extracted to text: read the homepage, then 1-3 key sub-pages that add substance (about, services, imprint). Never call http_request on a URL you already read with web_research — use http_request only if web_research returns nothing usable for that URL. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Ground every finding in content you actually read; do not infer from asset filenames, script URLs or CSS paths. Record each concrete finding as durable knowledge with the {memoryTool} tool. Present a structured summary. Be fast and direct — no clarifying questions. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,

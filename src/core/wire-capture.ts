@@ -160,8 +160,8 @@ const DEFAULT_SINK_DIR = join(tmpdir(), 'lynox-wire-sink');
  * This is an operator DEBUGGING tool, NOT an auth boundary: the gate file is a convenience, not
  * a permission (`/tmp` is world-writable), so it must NOT be enabled on a customer/production
  * instance — that would write their (secret-scrubbed but still personal) data to disk. Real
- * per-instance consent + non-`/tmp` at-rest live in the step-2 operator surface; here the
- * boundary is operator discipline (see [[DEF-wire-capture-prod-gate]]).
+ * per-instance consent + non-`/tmp` at-rest belong to the operator surface that would make this
+ * safe to expose; until that exists, the boundary here is operator discipline.
  */
 export function isWireSinkEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const gate = env['LYNOX_DEBUG_WIRE_GATE_FILE'] ?? DEFAULT_GATE_FILE;
@@ -221,7 +221,7 @@ const DEFAULT_RAW_SINK_DIR = join(tmpdir(), 'lynox-wire-sink-raw');
  * ⚠️ Contains the FULL secrets catalog (names + last-4), memory blocks, and KG — it is NOT
  * redacted (redacting would defeat replay fidelity). Therefore it is DEV/STAGING-EVAL ONLY, on
  * the owner's OWN instance, behind a SEPARATE, more deliberate gate (`/tmp/wire-sink-raw-on`) —
- * never the operator export, never a customer/production instance (see [[DEF-wire-capture-prod-gate]]).
+ * never the operator export, never a customer/production instance.
  */
 export interface RawWireBody {
   runId: string | undefined;

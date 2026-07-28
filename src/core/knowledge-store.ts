@@ -440,7 +440,7 @@ export class KnowledgeStore {
    *  answer to a NON-credential field (the onboarding Step-0 basics) should bias toward
    *  rejection — a bare token there is more likely a pasted credential than a business fact.
    *  Catches vendor-prefixed keys, JWT/Bearer, 40+ char tokens, and known vault values; it
-   *  does NOT catch every short non-vendor credential ([[DEF-onboarding-secret-heuristic]]). */
+   *  does NOT catch every short non-vendor credential. */
   looksLikeSecret(text: string): boolean {
     return matchesSecretPatternStrict(text) !== null || this.secretStore?.containsSecret(text) === true;
   }

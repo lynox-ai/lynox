@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# public-repo-guard.sh — block internal infra / control-plane / ops leaks
-# from landing in this PUBLIC, source-available repo.
+# public-repo-guard.sh — block internal infra / control-plane / ops leaks and
+# internal cross-references from landing in this PUBLIC, source-available repo.
 #
 # gitleaks + the pattern-scan catch classic *secrets* (API keys, private
 # keys). They do NOT catch internal infrastructure topology, control-plane
-# DB schema, SSH-as-root ops chains or staging hostnames — none of which
-# are "secrets" in the regex sense, yet all of which belong only in the
-# private pro repo. This guard fills that gap.
+# DB schema, SSH-as-root ops chains, staging hostnames, or references that
+# only resolve inside the private repo — none of which are "secrets" in the
+# regex sense, yet all of which belong only there. This guard fills that gap.
 #
 # Two enforcement points (see lefthook.yml pre-push + the CI workflow):
 #   - pre-push hook   — scans the whole tracked tree, fast local feedback
@@ -75,6 +75,19 @@ HARD='control-staging\.lynox\.cloud|root@control|managed_tenant_hosts|ssh_privat
 _org='router'"-for-"'me'
 _port='83'"17"
 HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0\.1:${_port}|localhost:${_port}"
+
+# HARD, third class — internal cross-reference slugs in the doubled-bracket link
+# form. The private repo and the maintainer's own notes address items by slug that
+# way. Such an id resolves to nothing a reader of THIS repo can open, and the slug
+# names themselves expose how private material is filed — so they are noise here
+# at best. 11 predated this pattern; they were removed in the same commit, which
+# is why this can be HARD rather than a permanently-red SOFT rule.
+#
+# The body must be slug-shaped, which is what keeps the pattern off nested array
+# literals (a `new Map([[k, v]])` is not a link). That false-positive case is
+# asserted in tests/public-repo-guard.test.ts — the markers live there, assembled
+# at runtime, so this file does not re-plant what it exists to keep out.
+HARD_INTERNAL_REF='\[\[[A-Za-z][A-Za-z0-9_.-]*\]\]'
 
 # SOFT — dual-use service hostnames. Legitimate in a few documented spots
 # (allow-file or inline pragma), but flagged everywhere else to catch the
@@ -152,6 +165,16 @@ while IFS= read -r f; do
     echo "     ${line}"
     violations=$((violations + 1))
   done < <(grep -nIEi "$HARD_LOCAL_TOOLING" "$f" 2>/dev/null || true)
+
+  # HARD (internal cross-reference slug) — case-SENSITIVE and a separate grep:
+  # the pattern is anchored on bracket shape, so the -i of the run above would
+  # buy nothing and only widen it.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    echo "❌ internal cross-reference slug in $f (state the reason inline instead):"
+    echo "     ${line}"
+    violations=$((violations + 1))
+  done < <(grep -nIE "$HARD_INTERNAL_REF" "$f" 2>/dev/null || true)
 
   # SOFT — exempt if whole-file allowed or line carries the pragma.
   is_allow_file "$f" && continue
