@@ -9,8 +9,10 @@
 // the current code would pass just as happily on the buggy version it replaced.
 
 import { describe, it, expect } from 'vitest';
-import { resolveReplayProvider, pickKey, MISTRAL_REPLAY_MODEL, PROXY_DEFAULT_MODEL } from './knowledge-substrate-provider.js';
-import { linesOf } from './knowledge-substrate-baseline.js';
+import { resolveReplayProvider, pickKey } from './knowledge-substrate-provider.js';
+import { linesOf, attributeNewLines } from './knowledge-substrate-baseline.js';
+import { ALL_NAMESPACES } from '../../src/types/index.js';
+import type { MemoryNamespace } from '../../src/types/index.js';
 
 const HAIKU = 'claude-haiku-4-5-20251001';
 const noFile = (p: string): string => { throw new Error(`ENOENT: ${p}`); };
@@ -50,11 +52,36 @@ describe('resolveReplayProvider', () => {
 
   // MUTATION: return null instead of resolving Mistral → a Mistral-only box
   // self-skips the gate green.
+  // Literals, NOT the imported constants: asserting `toBe(MISTRAL_REPLAY_MODEL)`
+  // passes for whatever that constant happens to hold, including a `-latest` alias.
   it('falls back to Mistral EU on a Mistral-only box, pinned to a dated snapshot', () => {
     const r = resolve({}, { mistral_api_key: 'mk' });
-    expect(r?.model).toBe(MISTRAL_REPLAY_MODEL);
+    expect(r?.model).toBe('mistral-large-2512');
     expect(r?.model).not.toMatch(/-latest$/); // rate-limited alias grinds a long replay into 429s
-    expect(r?.openaiModelId).toBe(MISTRAL_REPLAY_MODEL);
+    expect(r?.openaiModelId).toBe('mistral-large-2512');
+  });
+
+  // MUTATION: drop `provider: 'openai'` from the Mistral branch. Verified 2026-07-28:
+  // WITHOUT this assertion all 22 other cases still passed, and the caller
+  // (`knowledge-substrate-eval.test.ts`) then relabels the result `anthropic` —
+  // a Mistral key on the Anthropic wire, which is precisely the 2026-07-27 outage
+  // this whole file exists to prevent. The suite had its hole on the one field
+  // that carries the historical bug.
+  it('names the openai wire on EVERY non-Anthropic branch', () => {
+    expect(resolve({}, { mistral_api_key: 'mk' })?.provider).toBe('openai');
+    expect(resolve(
+      { LYNOX_KNOWLEDGE_PROVIDER: 'proxy', LYNOX_KNOWLEDGE_PROXY_URL: 'http://h/v1', LYNOX_KNOWLEDGE_PROXY_KEY: 'k', LYNOX_KNOWLEDGE_MODEL: 'm' },
+    )?.provider).toBe('openai');
+  });
+
+  // MUTATION: drop the unknown-value check → a typo runs the corpus on the wrong
+  // provider and reports the number as if it were the one asked for.
+  it('throws on an unrecognised provider instead of silently picking one', () => {
+    expect(() => resolve({ LYNOX_KNOWLEDGE_PROVIDER: 'antropic' }, { mistral_api_key: 'mk' })).toThrow(/not a known provider/);
+  });
+
+  it('still accepts an explicit mistral selection', () => {
+    expect(resolve({ LYNOX_KNOWLEDGE_PROVIDER: 'mistral' }, { mistral_api_key: 'mk' })?.apiKey).toBe('mk');
   });
 
   // MUTATION: honour the Mistral key even when anthropic is forced → the run
@@ -96,12 +123,44 @@ describe('resolveReplayProvider', () => {
 
   it('reads the proxy credential from the key file and trims it', () => {
     const r = resolve(
-      { LYNOX_KNOWLEDGE_PROVIDER: 'proxy', LYNOX_KNOWLEDGE_PROXY_URL: 'http://h/v1', LYNOX_KNOWLEDGE_PROXY_KEY_FILE: '/k' },
+      { LYNOX_KNOWLEDGE_PROVIDER: 'proxy', LYNOX_KNOWLEDGE_PROXY_URL: 'http://h/v1', LYNOX_KNOWLEDGE_PROXY_KEY_FILE: '/k', LYNOX_KNOWLEDGE_MODEL: 'pinned-1' },
       {},
       () => '  secret\n',
     );
     expect(r?.apiKey).toBe('secret');
-    expect(r?.model).toBe(PROXY_DEFAULT_MODEL);
+    expect(r?.model).toBe('pinned-1');
+  });
+
+  // MUTATION: fall through to `return null` on a blank key file → the gate
+  // self-skips GREEN and the HARD routing assertion never runs, so a truncated
+  // credential file reads as a pass.
+  it('THROWS on an empty key file instead of self-skipping green', () => {
+    expect(() => resolve(
+      { LYNOX_KNOWLEDGE_PROVIDER: 'proxy', LYNOX_KNOWLEDGE_PROXY_URL: 'http://h/v1', LYNOX_KNOWLEDGE_PROXY_KEY_FILE: '/k' },
+      {},
+      () => '   \n',
+    )).toThrow(/empty file/);
+  });
+
+  // MUTATION: re-introduce a default proxy model → a public repo states what the
+  // operator's local endpoint fronts.
+  it('requires an explicit model for the proxy — no default is assumed', () => {
+    expect(() => resolve(
+      { LYNOX_KNOWLEDGE_PROVIDER: 'proxy', LYNOX_KNOWLEDGE_PROXY_URL: 'http://h/v1', LYNOX_KNOWLEDGE_PROXY_KEY: 'k' },
+    )).toThrow(/requires LYNOX_KNOWLEDGE_MODEL/);
+  });
+
+  // MUTATION: interpolate `${keyFile}` back into the message → the path to the
+  // operator's credential lands in every pasted log.
+  it('never echoes the key-file PATH in the error', () => {
+    const secretPath = '/Users/someone/.private/creds/eval-key';
+    try {
+      resolve({ LYNOX_KNOWLEDGE_PROVIDER: 'proxy', LYNOX_KNOWLEDGE_PROXY_URL: 'http://h/v1', LYNOX_KNOWLEDGE_PROXY_KEY_FILE: secretPath });
+      expect.unreachable('should have thrown');
+    } catch (err) {
+      expect((err as Error).message).not.toContain(secretPath);
+      expect((err as Error).message).not.toContain('.private');
+    }
   });
 
   // MUTATION: drop the `?? defaultAnthropicModel` → model '' reaches the API.
@@ -165,5 +224,56 @@ describe('linesOf — the legacy-store readback', () => {
   // agent actually stored.
   it('keeps the status-namespace date prefix', () => {
     expect(linesOf('[2026-07-28] shipped v2')).toEqual(['[2026-07-28] shipped v2']);
+  });
+});
+
+describe('attributeNewLines — where the baseline numbers are actually made', () => {
+  const freshSeen = (): Map<MemoryNamespace, Set<string>> => {
+    const m = new Map<MemoryNamespace, Set<string>>();
+    for (const ns of ALL_NAMESPACES) m.set(ns, new Set());
+    return m;
+  };
+  const snap = (lines: string[]): Map<MemoryNamespace, string[]> =>
+    new Map<MemoryNamespace, string[]>([['knowledge' as MemoryNamespace, lines]]);
+
+  // MUTATION: drop the `seen` check → every turn re-counts the whole store, so a
+  // 20-turn thread reports 20x its real writes and the junk-rate denominator explodes.
+  it('credits a line to the turn it FIRST appeared in, never again', () => {
+    const seen = freshSeen();
+    const t0 = attributeNewLines(snap(['alpha']), seen, new Set(), 'T', 0);
+    const t1 = attributeNewLines(snap(['alpha', 'beta']), seen, new Set(), 'T', 1);
+    expect(t0.map(c => c.text)).toEqual(['alpha']);
+    expect(t1.map(c => c.text)).toEqual(['beta']);
+    expect(t1[0]?.turnSeq).toBe(1);
+  });
+
+  // MUTATION: hardcode `sourceUntrusted: false` → the harness's only HARD security
+  // assertion becomes unfailable on this side. That is exactly what the withdrawn
+  // first version did.
+  it('marks a write the write-path reported as untrusted', () => {
+    const [c] = attributeNewLines(snap(['leaked fact']), freshSeen(), new Set(['leaked fact']), 'T', 0);
+    expect(c?.sourceUntrusted).toBe(true);
+  });
+
+  // MUTATION: mark everything in a turn untrusted (the gold-label approach) → a
+  // late-settling extraction from a CLEAN turn is scored as a routing violation.
+  it('leaves an unrelated line in the same turn trusted', () => {
+    const rows = attributeNewLines(snap(['leaked fact', 'clean fact']), freshSeen(), new Set(['leaked fact']), 'T', 0);
+    expect(rows.find(r => r.text === 'clean fact')?.sourceUntrusted).toBe(false);
+  });
+
+  // The stored line is not byte-identical to the published content: `appendScoped`
+  // masks secrets and the `status` namespace prefixes a date, so exact equality
+  // would silently under-count untrusted writes.
+  it('matches a stored line against the published content by containment', () => {
+    const rows = attributeNewLines(snap(['[2026-07-28] acme owes 500']), freshSeen(), new Set(['acme owes 500']), 'T', 0);
+    expect(rows[0]?.sourceUntrusted).toBe(true);
+  });
+
+  it('reports the legacy store honestly: no subject link, no review queue', () => {
+    const [c] = attributeNewLines(snap(['alpha']), freshSeen(), new Set(), 'T', 0);
+    expect(c?.subject).toBeNull();
+    expect(c?.status).toBe('active');
+    expect(c?.pinned).toBe(false);
   });
 });

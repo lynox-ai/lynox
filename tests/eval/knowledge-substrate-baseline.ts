@@ -63,6 +63,7 @@ import {
   memoryUpdateTool, memoryListTool, memoryPromoteTool,
 } from '../../src/tools/builtin/memory.js';
 import { initLLMProvider, getActiveProvider } from '../../src/core/llm-client.js';
+import { channels } from '../../src/core/observability.js';
 import { ALL_NAMESPACES } from '../../src/types/index.js';
 import type { MemoryNamespace, ToolEntry } from '../../src/types/index.js';
 import type { CapturedEntry, GoldThread } from './knowledge-substrate-runner.js';
@@ -104,12 +105,60 @@ export function linesOf(blob: string | null): string[] {
     .filter(l => l.length > 0 && !/^#{1,6}\s/.test(l));
 }
 
-/** Read every namespace and flatten to one list of entry texts. */
+/** Read every namespace into its list of entry texts, keyed by namespace. */
 async function readAll(memory: Memory): Promise<Map<MemoryNamespace, string[]>> {
   const out = new Map<MemoryNamespace, string[]>();
   for (const ns of ALL_NAMESPACES) {
     // eslint-disable-next-line no-await-in-loop
     out.set(ns, linesOf(await memory.load(ns)));
+  }
+  return out;
+}
+
+/**
+ * Turn a post-turn snapshot into the entries this turn ADDED, marking each with the
+ * trust bit the write path actually recorded.
+ *
+ * Pure, and exported, because this is where the baseline's numbers are actually
+ * made: which line counts as a capture, which turn it is attributed to, and
+ * whether it counts as an untrusted write. Driving it needs a real Agent and a
+ * real LLM; scoring it does not.
+ *
+ * @param untrustedWrites contents the `memoryStore` diagnostics channel reported
+ *   with `sourceUntrusted: true` — i.e. writes whose own path derived untrusted
+ *   via `deriveTurnUntrusted`. Matching is containment in either direction because
+ *   the stored line can differ from the published content: `appendScoped` masks
+ *   secrets, and the `status` namespace prefixes a date (`memory.ts:389`).
+ * @param seen per-namespace set of lines already attributed, mutated here, so a
+ *   line is credited to the turn it FIRST appeared in.
+ */
+export function attributeNewLines(
+  snapshot: ReadonlyMap<MemoryNamespace, string[]>,
+  seen: Map<MemoryNamespace, Set<string>>,
+  untrustedWrites: ReadonlySet<string>,
+  threadId: string,
+  turnSeq: number,
+): CapturedEntry[] {
+  const out: CapturedEntry[] = [];
+  for (const ns of ALL_NAMESPACES) {
+    const set = seen.get(ns);
+    if (!set) continue;
+    for (const line of snapshot.get(ns) ?? []) {
+      if (set.has(line)) continue;
+      set.add(line);
+      out.push({
+        threadId,
+        turnSeq,
+        text: line,
+        // No subject link exists in the legacy store — see the asymmetry note at
+        // the top. Null is the honest value, not a gap to fill.
+        subject: null,
+        // The legacy store has no review queue at all, so every entry is active.
+        status: 'active',
+        pinned: false,
+        sourceUntrusted: [...untrustedWrites].some(w => w.includes(line) || line.includes(w)),
+      });
+    }
   }
   return out;
 }
@@ -158,6 +207,8 @@ export function makeLegacyReplayThread(opts: RealReplayOpts): (thread: GoldThrea
         systemPrompt: BASELINE_SYSTEM_PROMPT,
         // ALL SIX, per the no-partial-swap rule this file cites (`engine.ts:1297-1305`).
         // An earlier version wired three and starved the baseline of update/delete/promote.
+        // The DK twin wires its own six (`knowledge-substrate-replay.ts`) — six against
+        // six, as production registers them.
         tools: [
           memoryStoreTool, memoryRecallTool, memoryDeleteTool,
           memoryUpdateTool, memoryListTool, memoryPromoteTool, mail.tool,
@@ -170,6 +221,27 @@ export function makeLegacyReplayThread(opts: RealReplayOpts): (thread: GoldThrea
       for (const ns of ALL_NAMESPACES) seen.set(ns, new Set());
       const captured: CapturedEntry[] = [];
 
+      // The write path's OWN trust bit, taken off the diagnostics channel every
+      // writer publishes on (`tools/builtin/memory.ts:280,285` for the tools,
+      // `core/memory.ts:599,618` for the auto-extractor). This is the legacy
+      // analogue of the `source_untrusted` column DK's readback reads, and it is
+      // what the runner's routing metric contractually requires: keyed off what the
+      // write path recorded, NOT off the gold label. Deriving it from the label —
+      // as the first version did — counts every line surfacing on a labelled turn
+      // as untrusted, including a late-settling extraction from a CLEAN earlier
+      // turn, and inflates the baseline's violation count.
+      // Threads replay sequentially (`runReplayEval`), so one global subscription per
+      // thread cannot cross-contaminate; it is unsubscribed before the next thread.
+      const untrustedWrites = new Set<string>();
+      const onWrite = (msg: unknown): void => {
+        const e = msg as { content?: unknown; sourceUntrusted?: unknown };
+        // Absent `sourceUntrusted` means the auto-extractor, which cannot run on an
+        // untrusted turn at all (`agent.ts:831` returns before calling it — Wave 1.5
+        // abstinence), so falsy is correct by construction rather than by default.
+        if (e.sourceUntrusted === true && typeof e.content === 'string') untrustedWrites.add(e.content);
+      };
+      channels.memoryStore.subscribe(onWrite);
+      try {
       for (let i = 0; i < thread.turns.length; i += 1) {
         const turn = thread.turns[i]!;
         agent.currentThreadId = thread.id;
@@ -209,31 +281,21 @@ export function makeLegacyReplayThread(opts: RealReplayOpts): (thread: GoldThrea
           if (after === before) break;
         }
 
-        for (const ns of ALL_NAMESPACES) {
-          const set = seen.get(ns)!;
-          for (const line of snapshot.get(ns) ?? []) {
-            if (set.has(line)) continue;
-            set.add(line);
-            captured.push({
-              threadId: thread.id,
-              turnSeq: i,
-              text: line,
-              // No subject link exists in the legacy store — see the asymmetry
-              // note at the top. Null is the honest value, not a gap to fill.
-              subject: null,
-              status: 'active',
-              pinned: false,
-              // Derived, NOT hardcoded false: legacy `memory_store` after a `mail_read`
-              // really does land external text as active, and that is the H4 exposure the
-              // routing metric exists to catch. Hardcoding false made the eval's only HARD
-              // security assertion unfailable in baseline mode.
-              sourceUntrusted: turn.untrusted === true,
-            });
-          }
-        }
+        captured.push(...attributeNewLines(snapshot, seen, untrustedWrites, thread.id, i));
+
+        // A watchdog abort leaves the agent mid-turn (dangling tool_use in its
+        // message state), so further sends on this thread cascade-fail. The DK twin
+        // breaks here (`knowledge-substrate-replay.ts`); until 2026-07-28 this side
+        // set the flag and read it nowhere, so the baseline kept sending into an
+        // aborted agent and collected failures DK never would. The readback above
+        // still runs for the aborted turn, which is why the break sits after it.
+        if (abandoned) break;
       }
 
       return captured;
+      } finally {
+        channels.memoryStore.unsubscribe(onWrite);
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

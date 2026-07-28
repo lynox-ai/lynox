@@ -38,7 +38,7 @@ import {
   type GoldThread,
   type KnowledgeReplayReport,
 } from './knowledge-substrate-runner.js';
-import { makeRealReplayThread, makeLlmJudge, replayFailures, type ReplayProviderConfig } from './knowledge-substrate-replay.js';
+import { makeRealReplayThread, makeLlmJudge, replayFailures, resetReplayFailures, type ReplayProviderConfig } from './knowledge-substrate-replay.js';
 import { makeLegacyReplayThread } from './knowledge-substrate-baseline.js';
 import { resolveReplayProvider } from './knowledge-substrate-provider.js';
 import { HAIKU } from '../online/setup.js';
@@ -126,6 +126,10 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
       // and the junk/matched review (the 10% human spot-check + junk-label
       // calibration) needs the actual texts, not just the aggregate counts.
       const capturedLog: unknown[] = [];
+      // Per RUN, not per invocation: the counters are module-level, so without this
+      // run 2 reports run 1's failures on top of its own and the persisted rate only
+      // ever climbs — a worst-of-N verdict built on a cumulative denominator.
+      resetReplayFailures();
       // eslint-disable-next-line no-await-in-loop
       const r = await runReplayEval(corpus, {
         replayThread,
@@ -164,8 +168,21 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
     const worst = worstOf(reports);
     process.stdout.write(`\n[knowledge-eval] WORST OF ${RUNS} — flip gate (recall≥${GATE.recall}, junk≤${GATE.junkRate}): ${meetsGate(worst) ? 'MET ✓ (canary flip is the operator\'s call)' : 'NOT MET (hold flip)'}\n${formatReport(worst)}\n`);
 
-    // HARD — deterministic H4 security invariant: no untrusted write may land active/pinned.
-    expect(worst.routing.violations, JSON.stringify(worst.routing.violations, null, 2)).toHaveLength(0);
+    // HARD — deterministic H4 security invariant: no untrusted write may land
+    // active/pinned. DK-ONLY, because it asserts a property of the DK write path.
+    //
+    // In BASELINE mode the legacy store has no review queue at all, so every
+    // untrusted write is a violation BY CONSTRUCTION and the assertion could only
+    // ever be red. That is a PRODUCT FINDING about the flag-off pipeline, not an
+    // instrument failure, and conflating the two is what this file avoids
+    // everywhere else (see the note on quality assertions below). The count is
+    // printed instead, so the finding is visible without the harness reporting
+    // itself broken.
+    if (BASELINE) {
+      process.stdout.write(`\n[knowledge-eval] BASELINE routing: ${worst.routing.violations.length} untrusted write(s) landed active of ${worst.routing.untrustedWrites} exercised — the legacy store has no review queue, so this is the exposure, not a harness failure\n`);
+    } else {
+      expect(worst.routing.violations, JSON.stringify(worst.routing.violations, null, 2)).toHaveLength(0);
+    }
     // HARD — wiring smoke: the agent actually used `remember` against the throwaway db.
     expect(worst.totalCaptured).toBeGreaterThan(0);
     // Deliberately NO quality assertions here. The first real-gold round measured

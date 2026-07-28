@@ -37,11 +37,12 @@ export interface ReplayEnv {
 }
 
 /**
- * Pick a credential from an ordered list of candidates, treating empty/blank as
- * ABSENT. Extracted because the historical bug was exactly a missed candidate
- * spelling, and because "" from a half-written config must not count as a key —
- * an empty string is truthy enough to reach the API and produce a 401 that the
- * runner swallows.
+ * Pick a credential from an ordered list of candidates, treating blank as ABSENT.
+ * Extracted because the historical bug was exactly a missed candidate spelling,
+ * and because a blank value from a half-written config must not shadow a real key
+ * further down the list: `a ?? b` falls through only on null/undefined, so an
+ * env var set to the empty string used to win over a valid stored credential and
+ * silently route the run to a different provider.
  */
 export function pickKey(...candidates: (string | undefined)[]): string | undefined {
   for (const c of candidates) {
@@ -50,12 +51,15 @@ export function pickKey(...candidates: (string | undefined)[]): string | undefin
   return undefined;
 }
 
-/** Mistral's dated stable snapshot. NEVER a `-latest` alias: those carry much
- *  lower rate limits, which grinds a long replay into 429s and reads as
- *  artificially low recall. Canonical ids live in MISTRAL_MODEL_MAP. */
+/** Mistral's dated stable snapshot for the replay. NEVER a `-latest` alias: those
+ *  carry much lower rate limits, which grinds a long replay into 429s and reads as
+ *  artificially low recall.
+ *  NOT from MISTRAL_MODEL_MAP — that map holds the per-TIER ids
+ *  (`ministral-8b-2512` fast / `mistral-medium-2604` deep). This is a deliberate
+ *  replay pin, declared in MODEL_CAPABILITIES (`src/types/models.ts:745`).
+ *  ⚠️ Mistral Large 3 is being deprecated to a legacy option (`models.ts:82-87`);
+ *  re-pin to `mistral-medium-2604` when the replay is next run on Mistral. */
 export const MISTRAL_REPLAY_MODEL = 'mistral-large-2512';
-/** Default for the operator-local OpenAI-wire endpoint. */
-export const PROXY_DEFAULT_MODEL = 'claude-sonnet-4-6';
 
 /**
  * Resolve the replay provider — PROVIDER-AGNOSTIC, so the gate runs on whatever
@@ -90,18 +94,39 @@ export function resolveReplayProvider(
     let proxyKey = pickKey(env.LYNOX_KNOWLEDGE_PROXY_KEY);
     const keyFile = env.LYNOX_KNOWLEDGE_PROXY_KEY_FILE;
     if (!proxyKey && keyFile !== undefined && keyFile.length > 0) {
+      let raw: string;
       try {
-        proxyKey = pickKey(readKeyFile(keyFile).trim());
+        raw = readKeyFile(keyFile);
       } catch (err) {
-        throw new Error(`LYNOX_KNOWLEDGE_PROXY_KEY_FILE is set but unreadable (${keyFile}): ${(err as Error).message}`);
+        // The PATH is not echoed. This message is printed at module-load time by
+        // vitest and lands in any pasted log, and "where the operator keeps the
+        // credential" is the same disclosure class that had to be scrubbed from
+        // this repo on 2026-07-27. The code is enough to act on.
+        const code = err instanceof Error && 'code' in err ? String((err as { code?: unknown }).code) : 'unknown';
+        throw new Error(`LYNOX_KNOWLEDGE_PROXY_KEY_FILE is set but unreadable (${code}) — fix the path or unset it`);
       }
+      proxyKey = pickKey(raw.trim());
+      // A set-but-EMPTY key file must not fall through to `return null`: that
+      // self-skips the whole gate GREEN, including the HARD routing assertion, so
+      // a truncated credential file would read as a pass.
+      if (!proxyKey) throw new Error('LYNOX_KNOWLEDGE_PROXY_KEY_FILE points at an empty file — the gate would self-skip green');
     }
     const proxyUrl = pickKey(env.LYNOX_KNOWLEDGE_PROXY_URL);
-    // No URL baked in: a default endpoint in a PUBLIC repo is an operator-local
-    // tooling leak. Without URL *or* credential the gate self-skips.
+    // No URL and no model baked in: a default endpoint — or a default model that
+    // reveals what the endpoint fronts — is an operator-local tooling detail, and
+    // this is a public repo. Without URL *or* credential the gate self-skips.
     if (!proxyKey || !proxyUrl) return null;
-    const m = modelOverride ?? PROXY_DEFAULT_MODEL;
-    return { provider: 'openai', apiKey: proxyKey, apiBaseURL: proxyUrl, model: m, openaiModelId: m };
+    if (!modelOverride) throw new Error('LYNOX_KNOWLEDGE_PROVIDER=proxy requires LYNOX_KNOWLEDGE_MODEL — no default is assumed for an operator-local endpoint');
+    return { provider: 'openai', apiKey: proxyKey, apiBaseURL: proxyUrl, model: modelOverride, openaiModelId: modelOverride };
+  }
+
+  // An unrecognised value is a TYPO, not a request for the default. Falling through
+  // silently is how `LYNOX_KNOWLEDGE_PROVIDER=antropic` would run the whole corpus
+  // on Mistral and report the result as if it were the provider asked for — the
+  // 2026-07-27 failure with a different first cause. `mistral` stays valid: before
+  // this check, ANY value other than anthropic/proxy selected the Mistral branch.
+  if (forced !== undefined && forced !== '' && forced !== 'anthropic' && forced !== 'mistral') {
+    throw new Error(`LYNOX_KNOWLEDGE_PROVIDER="${forced}" is not a known provider (expected: anthropic | mistral | proxy)`);
   }
 
   // BOTH spellings — see the header. `api_key` stays as a fallback for older

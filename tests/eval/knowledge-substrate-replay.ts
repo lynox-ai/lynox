@@ -28,7 +28,10 @@ import { EngineDb } from '../../src/core/engine-db.js';
 import { SubjectStore } from '../../src/core/subject-store.js';
 import { KnowledgeStore } from '../../src/core/knowledge-store.js';
 import { createToolContext } from '../../src/core/tool-context.js';
-import { rememberTool, recallTool } from '../../src/tools/builtin/knowledge.js';
+import {
+  rememberTool, recallTool, memoryBlockEditTool,
+  memoryRetireTool, memoryFocusTool, archiveSearchTool,
+} from '../../src/tools/builtin/knowledge.js';
 import { DURABLE_MEMORY_PROMPT_SUFFIX } from '../../src/core/prompts.js';
 import type { ToolEntry } from '../../src/types/index.js';
 import type { CapturedEntry, GoldThread, MatchJudge } from './knowledge-substrate-runner.js';
@@ -41,6 +44,21 @@ import type { CapturedEntry, GoldThread, MatchJudge } from './knowledge-substrat
  * lands in the product. Only the `mail_read` line is replay-specific (the stub
  * stands in for the real inbox tools).
  */
+/** Turn-level send failures, shared by BOTH replays. The runner deliberately swallows
+ *  a failed turn (a transient provider error must not tank the corpus), which means a
+ *  run where EVERY turn 400'd is indistinguishable from a run with genuinely poor
+ *  recall — both print a number and exit 0. That happened twice on 2026-07-27. The
+ *  count belongs in the report, not only on stderr. */
+export const replayFailures = { sends: 0, turns: 0 };
+
+/** Zero the counters. MUST run before each run of a multi-run invocation: the object is
+ *  module-level, so without this run 2 reports run 1's failures on top of its own and the
+ *  persisted `turnFailures` is cumulative — a rate that only ever climbs. */
+export function resetReplayFailures(): void {
+  replayFailures.sends = 0;
+  replayFailures.turns = 0;
+}
+
 /** The role preamble both replays share. Exported so the DK-OFF baseline derives it
  *  instead of duplicating the lines — a silent drift between the two preambles would
  *  move the comparison without anyone noticing.
@@ -50,13 +68,6 @@ import type { CapturedEntry, GoldThread, MatchJudge } from './knowledge-substrat
  *  chars (`memory.ts:480,484`), so a tighter cap would starve the baseline's capture path
  *  while leaving DK's tool-call path untouched. Change it on one side only and the
  *  comparison silently favours DK. */
-/** Turn-level send failures, shared by BOTH replays. The runner deliberately swallows
- *  a failed turn (a transient provider error must not tank the corpus), which means a
- *  run where EVERY turn 400'd is indistinguishable from a run with genuinely poor
- *  recall — both print a number and exit 0. That happened twice on 2026-07-27. The
- *  count belongs in the report, not only on stderr. */
-export const replayFailures = { sends: 0, turns: 0 };
-
 export const REPLAY_PREAMBLE = [
   'You are lynox, a business assistant working for an operator. Answer in a few sentences.',
   'When a message says an email or document has arrived, call `mail_read` to read it BEFORE acting on it.',
@@ -210,7 +221,19 @@ export function makeRealReplayThread(opts: RealReplayOpts): (thread: GoldThread)
         // Erase the per-tool input generics into the registry's ToolEntry[] shape
         // (the engine does this via `registry.register<T>`; a literal array needs
         // the cast because ToolHandler's input param is contravariant).
-        tools: [rememberTool, recallTool, mail.tool] as ToolEntry[],
+        //
+        // ALL SIX DK tools, matching what `engine.ts:1290-1296` registers when the
+        // flag is on. Wiring only remember/recall — as this file did until
+        // 2026-07-28 — handed the comparison a DK side that could not curate its
+        // own writes (`memory_retire`, `memory_block_edit`) or reach its archive
+        // (`archive_search`, `memory_focus`), while the DK-OFF baseline ran with
+        // its full production set of six. That asymmetry ran AGAINST DK, which is
+        // why it survived a review pass that was looking for the opposite: the
+        // fix for the baseline's own 3-of-6 tool gap was applied to one side only.
+        tools: [
+          rememberTool, recallTool, memoryBlockEditTool,
+          memoryRetireTool, memoryFocusTool, archiveSearchTool, mail.tool,
+        ] as ToolEntry[],
         ...providerAgentFields(opts),
       });
 
