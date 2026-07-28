@@ -25,10 +25,10 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     tmpDirs.length = 0;
   });
 
-  it('creates the database and stamps schema_version v10', () => {
+  it('creates the database and stamps schema_version v11', () => {
     const e = createEngineDb();
     const row = e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(10); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather) + v7 (subjects.merged_into) + v8 (memories evidence: source_channel/source_untrusted) + v9 (knowledge_entries + memory_blocks — Durable Knowledge Substrate) + v10 (onboarding_flags — Onboarding Wave 1)
+    expect(row.v).toBe(11); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather) + v7 (subjects.merged_into) + v8 (memories evidence: source_channel/source_untrusted) + v9 (knowledge_entries + memory_blocks — Durable Knowledge Substrate) + v10 (onboarding_flags — Onboarding Wave 1) + v11 (onboarding backfill for pre-W1 instances)
     // v5 (B1): the exactly-once boot-backfill marker table is created + seeded done=0.
     const marker = e.getDb().prepare('SELECT done FROM verb_backfill_marker WHERE id = 1').get() as { done: number } | undefined;
     expect(marker?.done).toBe(0);
@@ -159,7 +159,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     expect(byId['g-workflow']).toBeNull();
     expect(byId['g-backup']).toBeNull();
     expect(byId['g-notify']).toBeNull();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(10);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
     e.close();
   });
 
@@ -185,7 +185,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const row = e.getDb().prepare('SELECT id, name, merged_into FROM subjects WHERE id = ?').get('s1') as
       { id: string; name: string; merged_into: string | null };
     expect(row).toEqual({ id: 's1', name: 'Dr. Ada Lovelace', merged_into: null });   // survived, column added NULL
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(10);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
     e.close();
   });
 
@@ -219,7 +219,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       text: 'a fact from before v8', source_type: 'user_asserted',
       source_channel: null, source_untrusted: 0, embedding_model: null,
     });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(10);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
     e.close();
   });
 
@@ -234,6 +234,11 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
       INSERT INTO schema_version (version) VALUES (8);
       CREATE TABLE subjects (id TEXT PRIMARY KEY, kind TEXT, name TEXT, archived_at TEXT, parent_id TEXT, merged_into TEXT, updated_at TEXT DEFAULT '2024-01-01');
+      -- v11's backfill predicate reads memories/subjects/knowledge_entries, so a v8 fixture
+      -- must carry the v1 memories table or the migration throws and _openOrRecreate wipes
+      -- (same reason v7 needed the subjects table here — a hand-built fixture has to keep up
+      -- with every later migration that reads a baseline table).
+      CREATE TABLE memories (id TEXT PRIMARY KEY, created_at TEXT);
       CREATE TABLE threads (id TEXT PRIMARY KEY);
     `);
     raw.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s-old','organization','ACME')").run();
@@ -246,7 +251,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // The two v9 tables exist and are empty.
     expect((db.prepare("SELECT COUNT(*) c FROM knowledge_entries").get() as { c: number }).c).toBe(0);
     expect((db.prepare("SELECT COUNT(*) c FROM memory_blocks").get() as { c: number }).c).toBe(0);
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(10);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
 
     // H6 (pin is a store invariant): an active, trusted row MAY pin.
     expect(() =>
@@ -407,7 +412,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e2 = new EngineDb(path, '');
     const row = e2.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(10); // no re-migration on reopen — stays at the latest applied
+    expect(row.v).toBe(11); // no re-migration on reopen — stays at the latest applied
     expect(e2.getDb().prepare("SELECT name FROM subjects WHERE id='keep'").get()).toMatchObject({ name: 'Keep' });
     e2.close();
   });
@@ -541,7 +546,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // boot backfill re-populating from the still-present legacy history.db).
     expect((db.prepare('SELECT COUNT(*) c FROM verb_backfill_marker').get() as { c: number }).c).toBe(1);
     // The schema itself survives — version stays at the latest, no re-migration on next open.
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(10);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
     // And the DB is still usable (inserts work — the tables weren't dropped).
     expect(() =>
       db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3','person','Bob')").run(),
@@ -552,7 +557,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
   it('deleteAllData is idempotent on an already-empty database', () => {
     const e = createEngineDb();
     expect(() => { e.deleteAllData(); e.deleteAllData(); }).not.toThrow();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(10);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
     e.close();
   });
 
@@ -567,7 +572,104 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A .corrupt-* sidecar of the original was created.
     expect(readdirSync(dir).some(f => f.startsWith('engine.db.corrupt-'))).toBe(true);
     // The fresh DB is usable and stamped at the latest schema version.
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(10);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
     e.close();
+  });
+});
+
+describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
+  const tmpDirs: string[] = [];
+  const dbPath = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-onb-'));
+    tmpDirs.push(dir);
+    return join(dir, 'engine.db');
+  };
+  afterEach(() => {
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  const flags = (e: EngineDb): Array<{ flag: string; value: string }> =>
+    e.getDb().prepare('SELECT flag, value FROM onboarding_flags').all() as Array<{ flag: string; value: string }>;
+
+  /** Take a db to v10 exactly, then close it — the state every pre-W1 instance is in. */
+  const openAtV10 = (p: string): void => {
+    const e = new EngineDb(p, '');
+    e.getDb().prepare('DELETE FROM schema_version WHERE version = 11').run();
+    e.getDb().prepare('DELETE FROM onboarding_flags').run();
+    e.close();
+  };
+
+  // THE case this migration exists for. MUTATION: drop the v11 entry → an instance that
+  // has been in use for months is walked through a first-run onboarding.
+  it('marks an instance that already holds content, so the stepper stays hidden', () => {
+    const p = dbPath();
+    openAtV10(p);
+    const seed = new Database(p);
+    seed.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1', 'organization', 'Acme')").run();
+    seed.close();
+
+    const e = new EngineDb(p, '');
+    const rows = flags(e);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.flag).toBe('skipped');
+    e.close();
+  });
+
+  // The other half, and the one that would hurt a real customer. MUTATION: drop the
+  // EXISTS(...) content guard → every brand-new instance is marked on first boot and NO
+  // ONE ever sees the onboarding again.
+  it('leaves a genuinely fresh instance alone, so it still gets its onboarding', () => {
+    const e = new EngineDb(dbPath(), '');
+    expect(flags(e)).toHaveLength(0);
+    e.close();
+  });
+
+  // MUTATION: drop the `NOT EXISTS (SELECT 1 FROM onboarding_flags)` guard → a returning
+  // operator who genuinely COMPLETED the flow gets a second, contradictory row.
+  it('never touches an instance that already recorded its own onboarding state', () => {
+    const p = dbPath();
+    openAtV10(p);
+    const seed = new Database(p);
+    seed.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1', 'organization', 'Acme')").run();
+    seed.prepare("INSERT INTO onboarding_flags (owner_user_id, flag, value) VALUES ('system','knowledge_done','th-42')").run();
+    seed.close();
+
+    const e = new EngineDb(p, '');
+    const rows = flags(e);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.flag).toBe('knowledge_done');
+    expect(rows[0]?.value).toBe('th-42');
+    e.close();
+  });
+
+  // The funnel must be able to tell a backfill from a real user skip. MUTATION: write a
+  // bare timestamp like the UI does → the two become indistinguishable and every
+  // pre-existing tenant is counted as an operator who chose to skip onboarding.
+  it('records provenance in the value so the funnel can exclude it', () => {
+    const p = dbPath();
+    openAtV10(p);
+    const seed = new Database(p);
+    seed.prepare("INSERT INTO knowledge_entries (id, text) VALUES ('k1', 'x')").run();
+    seed.close();
+
+    const e = new EngineDb(p, '');
+    expect(flags(e)[0]?.value).toMatch(/^backfill:pre-w1:\d{4}-\d{2}-\d{2}T/);
+    e.close();
+  });
+
+  // MUTATION: use INSERT (not the NOT EXISTS guard) → reopening throws on the PK.
+  it('is idempotent across reopens', () => {
+    const p = dbPath();
+    openAtV10(p);
+    const seed = new Database(p);
+    seed.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1', 'organization', 'Acme')").run();
+    seed.close();
+
+    for (let i = 0; i < 3; i += 1) {
+      const e = new EngineDb(p, '');
+      expect(flags(e)).toHaveLength(1);
+      e.close();
+    }
   });
 });

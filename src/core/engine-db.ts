@@ -647,6 +647,38 @@ const MIGRATIONS: string[] = [
      updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
      PRIMARY KEY (owner_user_id, flag)
    );`,
+
+  // ── v11: don't show a first-run onboarding to someone who is not on their first run ──
+  //
+  //   v10 created onboarding_flags EMPTY, and the UI dismisses the stepper only on a
+  //   knowledge_done/skipped row (`ChatView.svelte`: `if (data.knowledgeDone ||
+  //   data.skipped) onboardingDismissed = true`). An instance that has been in use for
+  //   months therefore reads as brand new the moment W1 reaches it, and every existing
+  //   operator is walked through a first-run flow. v10 cannot be edited to fix this — it
+  //   is already applied on the canary, and an edited applied migration never re-runs.
+  //
+  //   The predicate is "does engine.db already hold durable content?". `subjects` /
+  //   `knowledge_entries` / `memories` are all empty in a freshly created db (they fill
+  //   on first use), so a genuinely new instance running v1..v11 in one go at first boot
+  //   matches nothing and still gets its onboarding. Thread history would be the more
+  //   direct signal but lives in the run-history db, which a migration here cannot see.
+  //
+  //   Recorded as `skipped` because that is the only forward-declared flag that means
+  //   "do not show this" without also claiming the operator COMPLETED a flow they never
+  //   saw — and the CHECK cannot gain a fifth value without a table rebuild (see v10).
+  //   The provenance goes in \`value\` instead, which nothing parses (the status derives
+  //   booleans from row PRESENCE, `onboarding-flag-store.ts`), so the onboarding funnel
+  //   can still tell a backfill apart from a real user skip rather than counting it.
+  //
+  //   Idempotent by construction: the guard is "no onboarding_flags row exists at all",
+  //   so re-running is a no-op and a later genuine completion is never overwritten.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (11);
+   INSERT INTO onboarding_flags (owner_user_id, flag, value)
+   SELECT 'system', 'skipped', 'backfill:pre-w1:' || strftime('%Y-%m-%dT%H:%M:%SZ','now')
+   WHERE NOT EXISTS (SELECT 1 FROM onboarding_flags)
+     AND (EXISTS (SELECT 1 FROM subjects)
+       OR EXISTS (SELECT 1 FROM knowledge_entries)
+       OR EXISTS (SELECT 1 FROM memories));`,
 ];
 
 /**
