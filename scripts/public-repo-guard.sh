@@ -90,14 +90,17 @@ HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0
 # 17 instances across 12 files predated this pattern; all were removed in the same
 # commit, which is why it can start at zero rather than permanently red.
 #
-# The body must be slug-shaped: a comma is what keeps the pattern off a nested array
-# literal, which is otherwise the same bracket pair. Spaces ARE allowed in the body,
-# because one of the 17 was free text rather than a slug — a slug-only class let that
-# exact form back in, which is what the review caught.
+# Spaces ARE allowed in the body, because one of the 17 was free text rather than a
+# slug — a slug-only class let that exact form back in, which is what review caught.
+# What the body class excludes is punctuation like a comma or a quote, which is why
+# `new Map([[k, v]])` does not match. It does NOT separate refs from every nested
+# array: a bare `[[42]]` or `[[key]]` matches, and cannot be told from a ref by shape.
+# That is what limit 2 below is about, and why the pragma exists.
 #
-# Two honest limits, both asserted in tests/public-repo-guard.test.ts. Every marker
-# lives THERE, assembled at runtime; this file names none, which is why SELF_EXCLUDE
-# is a convenience here and not the thing holding the guard up.
+# Two honest limits, both asserted in tests/public-repo-guard.test.ts, where every
+# marker lives and is assembled at runtime. SELF_EXCLUDE stays load-bearing for the
+# HARD classes above, which this file necessarily spells out; the reference class
+# needs it only because the pattern definitions themselves look like what they match.
 #
 #  1. A line-based grep cannot see a link SPLIT ACROSS LINES, and one of the 17 was.
 #     REF_OPENER catches the opening line of that form; it has zero hits on the tree
@@ -105,11 +108,11 @@ HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0
 #     slug-ish text after it is still invisible — accepted, not solved.
 #  2. Legal TypeScript wears the same brackets — a nested-array destructure or a
 #     nested numeric literal — and no pattern that catches free-text bodies can tell
-#     them apart. So INTERNAL_REF, unlike the two HARD classes above, honours the
-#     inline pragma. Without that escape a legitimate line would hard-block a commit
-#     and the only way past would be a hook bypass, which is worse than what is
-#     guarded. There are zero such lines today; the pragma is for the one that comes.
-#     REF_OPENER needs no pragma branch of its own — see the loop below.
+#     them apart. So BOTH reference patterns, unlike the two HARD classes above,
+#     honour the inline pragma. Without that escape a legitimate line would hard-block
+#     a commit and the only way past would be a hook bypass, which is worse than what
+#     is guarded. There are zero such lines today; the pragma is for the one that
+#     comes — and one round of this review proved how easily it gets removed.
 REF_SLUG_BODY='[A-Za-z0-9_][A-Za-z0-9_. /#|-]*'
 INTERNAL_REF="\\[\\[${REF_SLUG_BODY}\\]\\]"
 # The trailing anchor is `\$` — ONE backslash. In double quotes that yields a bare
@@ -211,13 +214,18 @@ while IFS= read -r f; do
   # The opening line of a link split across lines. Reported separately so the
   # message can say why it looks incomplete.
   #
-  # No pragma check here, unlike the loop above, and that is not an oversight: this
-  # pattern anchors to END OF LINE, and the pragma contains a colon, which the body
-  # class excludes. Annotating such a line therefore stops it matching at all — the
-  # escape works, it just works one step earlier. A pragma branch here would be
-  # unreachable, and the test asserting it would pass no matter what the branch did.
+  # The pragma check is load-bearing here, and a round of this review removed it on
+  # the theory that it was unreachable — the pragma carries a colon, the body class
+  # excludes one, so an annotated line cannot match. That holds only when the pragma
+  # sits AFTER the opener. Put it BEFORE, which the header explicitly permits, and
+  # the opener still ends the line and still matches. Removing the branch turned a
+  # working escape into a hard block, and the error text below tells the reader to
+  # use exactly the escape that had stopped working.
   while IFS= read -r line; do
     [ -n "$line" ] || continue
+    case "$line" in
+      *"$PRAGMA"*) continue ;;
+    esac
     echo "❌ internal cross-reference opened in $f and continued on the next line:"
     echo "     ${line}"
     violations=$((violations + 1))
