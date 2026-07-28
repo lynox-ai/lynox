@@ -670,12 +670,18 @@ const MIGRATIONS: string[] = [
   //   booleans from row PRESENCE, `onboarding-flag-store.ts`), so the onboarding funnel
   //   can still tell a backfill apart from a real user skip rather than counting it.
   //
-  //   Idempotent by construction: the guard is "no onboarding_flags row exists at all",
-  //   so re-running is a no-op and a later genuine completion is never overwritten.
+  //   The guard is "no DISMISSING row yet" — knowledge_done or skipped — not "no row at
+  //   all". `first_session_at` is a render-ack, not a completion: the UI dismisses on
+  //   `knowledgeDone || skipped` only. Guarding on any row would let a single app open
+  //   during the window between W1 and this migration reaching a tenant write
+  //   `first_session_at` and permanently block the backfill, leaving that operator with a
+  //   first-run stepper forever. That window is open on the canary right now.
+  //   Idempotent either way: re-running is a no-op and a genuine completion is never
+  //   overwritten (and the PK is per-flag, so a first_session_at row does not collide).
   `INSERT OR IGNORE INTO schema_version (version) VALUES (11);
    INSERT INTO onboarding_flags (owner_user_id, flag, value)
    SELECT 'system', 'skipped', 'backfill:pre-w1:' || strftime('%Y-%m-%dT%H:%M:%SZ','now')
-   WHERE NOT EXISTS (SELECT 1 FROM onboarding_flags)
+   WHERE NOT EXISTS (SELECT 1 FROM onboarding_flags WHERE flag IN ('knowledge_done','skipped'))
      AND (EXISTS (SELECT 1 FROM subjects)
        OR EXISTS (SELECT 1 FROM knowledge_entries)
        OR EXISTS (SELECT 1 FROM memories));`,

@@ -658,6 +658,26 @@ describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
     e.close();
   });
 
+  // The window that actually exists today: W1 reached the canary, v11 has not. One app
+  // open writes `first_session_at` — a render-ack, NOT a completion (the UI dismisses on
+  // knowledgeDone || skipped only). MUTATION: guard on "no row at all" instead of the two
+  // dismissing flags → that single ack blocks the backfill and the operator keeps a
+  // first-run stepper forever.
+  it('still backfills when only a render-ack row exists', () => {
+    const p = dbPath();
+    openAtV10(p);
+    const seed = new Database(p);
+    seed.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s1', 'organization', 'Acme')").run();
+    seed.prepare("INSERT INTO onboarding_flags (owner_user_id, flag, value) VALUES ('system','first_session_at','2026-07-27T10:00:00Z')").run();
+    seed.close();
+
+    const e = new EngineDb(p, '');
+    const rows = flags(e);
+    expect(rows.map(r => r.flag).sort()).toEqual(['first_session_at', 'skipped']);
+    expect(rows.find(r => r.flag === 'skipped')?.value).toMatch(/^backfill:pre-w1:/);
+    e.close();
+  });
+
   // MUTATION: use INSERT (not the NOT EXISTS guard) → reopening throws on the PK.
   it('is idempotent across reopens', () => {
     const p = dbPath();
