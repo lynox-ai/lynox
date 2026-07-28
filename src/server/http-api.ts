@@ -48,7 +48,12 @@ import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
-import type { HealthBody, UsageSummaryResponse } from '../contract/http.js';
+import type {
+  HealthBody,
+  UsageSummaryResponse,
+  OAuthClaimRequest,
+  OAuthClaimResponse,
+} from '../contract/http.js';
 import { WallClockBudget } from './wall-clock-budget.js';
 import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
@@ -5977,7 +5982,10 @@ export class LynoxHTTPApi {
             'Content-Type': 'application/json',
             'x-instance-secret': httpSecret,
           },
-          body: JSON.stringify({ instance_id: instanceId, claim_nonce: claimNonce }),
+          body: JSON.stringify({
+            instance_id: instanceId,
+            claim_nonce: claimNonce,
+          } satisfies OAuthClaimRequest),
         });
 
         if (!claimRes.ok) {
@@ -5986,12 +5994,9 @@ export class LynoxHTTPApi {
           return;
         }
 
-        const tokens = (await claimRes.json()) as {
-          access_token: string;
-          refresh_token: string;
-          expires_at: number;
-          scopes: string[];
-        };
+        // Shape owned by the wire contract — the control plane compiles the same
+        // declaration, so a field rename cannot land on one side alone.
+        const tokens = (await claimRes.json()) as OAuthClaimResponse;
 
         await google.setTokens(tokens);
         jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });

@@ -21,6 +21,8 @@ import type {
   UsageStatusResponse,
   UsageSummaryResponse,
   HealthBody,
+  MagicLinkVerifyRequest,
+  OAuthClaimResponse,
 } from '../http.js';
 import type { ModelProfile } from '../shapes.js';
 
@@ -86,6 +88,24 @@ export const TYPED_MIRRORS: Record<string, unknown> = {
     ...HEALTH_BASE,
     build_sha: 'aaaaaaaaaabbbbbbbbbbccccccccccdddddddddd',
   } satisfies HealthBody,
+  'magic-link-verify-request.json': {
+    token: 'TEST-MAGIC-TOKEN',
+    instanceId: 'TEST-INSTANCE-1',
+  } satisfies MagicLinkVerifyRequest,
+  'oauth-claim-response.json': {
+    access_token: 'TEST-ACCESS-TOKEN',
+    refresh_token: 'TEST-REFRESH-TOK',
+    // Epoch MILLISECONDS (2100-01-01T00:00:00Z) — the unit is the field's
+    // contract; a seconds-valued emit would land decades in the past and the
+    // engine's token guard would reject it as already expired. Far future on
+    // purpose: the engine-side parser rejects stale timestamps, so a fixture
+    // pinned near today would start failing its own pair test with time.
+    expires_at: 4102444800000,
+    scopes: [
+      'https://scopes.example.invalid/auth/test-read',
+      'https://scopes.example.invalid/auth/test-write',
+    ],
+  } satisfies OAuthClaimResponse,
   'model-profile.json': {
     provider: 'openai',
     api_base_url: 'https://llm.example.invalid/v1',

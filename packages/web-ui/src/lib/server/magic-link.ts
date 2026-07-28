@@ -5,18 +5,36 @@
  * without spinning up SvelteKit. The route is a thin wrapper that reads env,
  * mints the cookie on success, and turns the returned outcome into a redirect.
  *
- * Cross-ref: `lynox-ai/lynox-pro#149` for the CP's verify-magic endpoint.
+ * The wire half of this route — the request body and the `error_code`
+ * vocabulary — comes from the vendored wire contract (`$lib/contract/http.js`),
+ * not from local re-declarations.
  */
+import {
+	isMagicLinkErrorCode,
+	type MagicLinkErrorCode,
+	type MagicLinkVerifyRequest,
+	type AuthErrorBody,
+} from '../contract/http.js';
 
-/** Reason codes surfaced to the user on /login?error=magic_<reason>. */
+/**
+ * Reason codes surfaced to the user on /login?error=magic_<reason>.
+ *
+ * The union is the control plane's wire codes (`MagicLinkErrorCode`, owned by
+ * the contract) PLUS the outcomes this route decides on its own and that never
+ * cross the wire. Spelling the wire half out again here is what let the two
+ * drift before.
+ *
+ * Deriving it does NOT give a compile-time gate: widening the wire union widens
+ * this one too, and `isMagicLinkErrorCode` then forwards the new value without
+ * anything failing. What deriving buys is that the two can no longer disagree
+ * about WHICH codes exist. The set itself is pinned by a hand-written golden
+ * assertion in the test, because that is the part a derivation cannot check.
+ */
 export type MagicLinkReason =
+	| MagicLinkErrorCode
 	| 'missing_token'
-	| 'rate_limited'
 	| 'unmanaged'
-	| 'cp_unreachable'
-	| 'invalid'
-	| 'expired'
-	| 'replay';
+	| 'cp_unreachable';
 
 export type MagicLinkOutcome =
 	| { type: 'already_logged_in' }
@@ -72,7 +90,10 @@ export async function decideMagicLinkOutcome(deps: MagicLinkDeps): Promise<Magic
 				'x-instance-secret': deps.instanceSecret,
 				'x-login-ip': deps.clientIp,
 			},
-			body: JSON.stringify({ token, instanceId: deps.managed.instanceId }),
+			body: JSON.stringify({
+				token,
+				instanceId: deps.managed.instanceId,
+			} satisfies MagicLinkVerifyRequest),
 			signal: AbortSignal.timeout(CP_FETCH_TIMEOUT_MS),
 		});
 	} catch {
@@ -83,17 +104,22 @@ export async function decideMagicLinkOutcome(deps: MagicLinkDeps): Promise<Magic
 
 	deps.onFailedLogin();
 
-	// Translate CP error_code to user-visible reason. The Pro side returns
-	// a structured `{error, error_code}` body per its verify-magic contract
-	// (lynox-ai/lynox-pro#149). Status code is the fallback when error_code
-	// is missing (older CPs / non-JSON 5xx).
-	const body = await res.json().catch(() => null) as { error_code?: string } | null;
-	const code = body?.error_code;
-	if (code === 'expired' || code === 'replay' || code === 'invalid' || code === 'rate_limited') {
-		return { type: 'redirect_login', reason: code };
+	// Translate the CP's error_code to a user-visible reason. Membership is
+	// tested against the contract's closed set, so a code the CP starts sending
+	// without the engine learning about it stays an UNKNOWN and takes the
+	// conservative branch below rather than being silently accepted.
+	const body = await res.json().catch(() => null) as Partial<AuthErrorBody> | null;
+	if (isMagicLinkErrorCode(body?.error_code)) {
+		return { type: 'redirect_login', reason: body.error_code };
 	}
+	// Status code is the fallback when error_code is missing or unrecognised
+	// (older CPs, non-JSON 5xx, a newer CP's widened vocabulary).
 	if (res.status === 410) return { type: 'redirect_login', reason: 'expired' };
 	if (res.status === 401 || res.status === 403) return { type: 'redirect_login', reason: 'invalid' };
 	if (res.status === 429) return { type: 'redirect_login', reason: 'rate_limited' };
+	// Anything else — including a status the CP has newly started using — is
+	// reported as "could not reach a control plane I understand". Telling the
+	// user their link is invalid would be a guess, and the wrong guess sends
+	// them to request a replacement for a link that was fine.
 	return { type: 'redirect_login', reason: 'cp_unreachable' };
 }

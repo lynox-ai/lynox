@@ -57,6 +57,7 @@ vi.mock('./project.js', () => ({
 }));
 
 import { generateInitBriefing, initMemoryInstance, configureBudgetAndRateLimits, initScopes } from './engine-init.js';
+import { guardedCapableLineRegex, GUARDED_CAPABLE_MARKER } from '../contract/marker.js';
 import { resolveActiveScopes } from './scope-resolver.js';
 import { createToolContext } from './tool-context.js';
 import type { LynoxContext, LynoxConfig, LynoxUserConfig } from '../types/index.js';
@@ -248,17 +249,46 @@ describe('configureBudgetAndRateLimits — http-tool security wiring', () => {
     expect(ctx.allowedHosts).toEqual(new Set(['ops.example.com']));
   });
 
-  it('boot-logs the active posture with the guarded-capable marker (rollout-order gate greps it)', () => {
+  // ── Guarded-capable boot marker (rollout-order gate; contract `marker.ts`) ──
+  //
+  // Half of the emit↔match pair. This end proves the REAL emit site produces a
+  // line the contract's pattern accepts; `tests/contract-marker.test.ts` proves
+  // that pattern is still the one the control plane was built against (golden
+  // pin) and that it rejects tenant-planted near-misses. Asserting against the
+  // pattern rather than a literal here is deliberate: hand-typing the line in
+  // BOTH places would make the pair pass by construction — the pin belongs in
+  // exactly one file, and this is not it.
+  function captureBootLines(policy: 'allow-all' | 'guarded' | 'deny-all'): string[] {
     const ctx = createToolContext(base);
     const writeSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-    let lines: string[] = [];
     try {
-      configureBudgetAndRateLimits(mockRunHistory, { ...base, network_policy: 'guarded' }, ctx);
+      configureBudgetAndRateLimits(mockRunHistory, { ...base, network_policy: policy }, ctx);
       // Read the captured calls BEFORE mockRestore() (which resets mock.calls).
-      lines = writeSpy.mock.calls.map((c) => String(c[0]));
+      return writeSpy.mock.calls.map((c) => String(c[0]));
     } finally {
       writeSpy.mockRestore();
     }
-    expect(lines.some((l) => l.includes('egress policy: guarded') && l.includes('guarded-capable build'))).toBe(true);
+  }
+
+  it.each(['allow-all', 'guarded', 'deny-all'] as const)(
+    'boot-logs a line the capability pattern matches, under policy %s',
+    (policy) => {
+      const marked = captureBootLines(policy).filter((l) =>
+        guardedCapableLineRegex().test(l.replace(/\n$/, '')),
+      );
+      // Exactly one — a second marked line would mean the gate's `grep -c` count
+      // no longer tells capability apart from log volume.
+      expect(marked).toHaveLength(1);
+      expect(marked[0]).toContain(policy);
+    },
+  );
+
+  it('emits the marker unconditionally — the gate must not read the ACTIVE policy as the capability', () => {
+    // The whole point of the marker: an image that is merely CAPABLE of
+    // honouring `guarded` must say so while still running allow-all, because
+    // the control plane checks capability BEFORE it emits the value. If this
+    // ever became conditional the gate would deadlock (never capable, so never
+    // emitted, so never capable) and the symptom would be silence.
+    expect(captureBootLines('allow-all').some((l) => l.includes(GUARDED_CAPABLE_MARKER))).toBe(true);
   });
 });

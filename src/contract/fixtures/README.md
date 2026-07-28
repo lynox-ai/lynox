@@ -32,4 +32,6 @@ this mechanically for every string leaf.
 | `usage-summary-response.not-managed.json` | `UsageSummaryResponse` | control plane, non-managed branch (pair test in the private repo) | engine `src/core/managed-usage-summary.ts` |
 | `health-body.json` | `HealthBody` | engine `src/server/http-api.ts` `_collectHealthMetrics()` — shape-verified in `src/server/http-api.test.ts` | control plane (pair test in the private repo) |
 | `health-body.with-sha.json` | `HealthBody` (non-null `build_sha` variant) | same serializer, `BUILD_SHA` build-arg set | control plane (pair test in the private repo) |
+| `magic-link-verify-request.json` | `MagicLinkVerifyRequest` | HAND-WRITTEN, not captured — `decideMagicLinkOutcome()` rejects tokens under 100 chars, so it cannot emit an obviously-fake one; the emitted KEY SET is pinned in its test instead | control plane (pair test in the private repo) |
+| `oauth-claim-response.json` | `OAuthClaimResponse` | control plane (pair test in the private repo) | engine `src/integrations/google/google-auth.ts` `setTokens()` — driven in its test, incl. drop-a-field probes |
 | `model-profile.json` | `shapes.ts` `ModelProfile` | control plane config generator (pair test in the private repo); guarded here by `isModelProfile` in `tests/contract-http.test.ts` | engine `src/core/config.ts` via `isModelProfile` |

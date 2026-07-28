@@ -10,6 +10,7 @@ import { homedir } from 'node:os';
 import type Anthropic from '@anthropic-ai/sdk';
 import { getErrorMessage } from './utils.js';
 import { writeFileAtomicSync } from './atomic-write.js';
+import { guardedCapableBootLine } from '../contract/marker.js';
 import type {
   LynoxConfig,
   LynoxUserConfig,
@@ -107,7 +108,10 @@ export function configureBudgetAndRateLimits(
   // gate (Pro CP) greps the fleet boot logs for it to confirm an image can honour
   // `guarded` BEFORE emitting LYNOX_NETWORK_POLICY=guarded (a pre-W1 image would
   // silently drop the unknown value to allow-all). See PRD-EGRESS-POSTURE §3.4.
-  process.stderr.write(`[lynox] egress policy: ${resolvedPolicy} (guarded-capable build)\n`);
+  // The line is BUILT from the wire contract (`src/contract/marker.ts`), which
+  // is also where the matching pattern comes from — rewording it here is a
+  // contract change, not a log tweak.
+  process.stderr.write(`${guardedCapableBootLine(resolvedPolicy)}\n`);
 }
 
 export function setupHistorySubscriptions(

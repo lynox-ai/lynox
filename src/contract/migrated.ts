@@ -27,7 +27,13 @@ export interface MigratedSymbol {
   /** Exported symbol name. */
   name: string;
   /** Contract file that owns it now. */
-  contractFile: 'vocab.ts' | 'shapes.ts' | 'env-registry.ts' | 'http.ts' | 'fixtures/mirrors.ts';
+  contractFile:
+    | 'vocab.ts'
+    | 'shapes.ts'
+    | 'env-registry.ts'
+    | 'http.ts'
+    | 'marker.ts'
+    | 'fixtures/mirrors.ts';
   /** The declaration pattern the orphan-twin test hunts (regex source, applied per line). */
   twinPattern: string;
 }
@@ -69,4 +75,19 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'UsageSummaryResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryResponse') },
   { name: 'HealthBody', contractFile: 'http.ts', twinPattern: typeTwin('HealthBody') },
   { name: 'TYPED_MIRRORS', contractFile: 'fixtures/mirrors.ts', twinPattern: valueTwin('TYPED_MIRRORS') },
+  // K-W3 — auth + OAuth wire shapes.
+  { name: 'MagicLinkVerifyRequest', contractFile: 'http.ts', twinPattern: typeTwin('MagicLinkVerifyRequest') },
+  { name: 'MAGIC_LINK_ERROR_CODES', contractFile: 'http.ts', twinPattern: valueTwin('MAGIC_LINK_ERROR_CODES') },
+  { name: 'MagicLinkErrorCode', contractFile: 'http.ts', twinPattern: typeTwin('MagicLinkErrorCode') },
+  { name: 'isMagicLinkErrorCode', contractFile: 'http.ts', twinPattern: valueTwin('isMagicLinkErrorCode') },
+  { name: 'AuthErrorBody', contractFile: 'http.ts', twinPattern: typeTwin('AuthErrorBody') },
+  { name: 'OAuthClaimRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimRequest') },
+  { name: 'OAuthClaimResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimResponse') },
+  // K-W3 — the guarded-capable boot marker. The literal existed twice by hand
+  // across the repo boundary; a local re-declaration is that failure returning.
+  { name: 'GUARDED_CAPABLE_MARKER', contractFile: 'marker.ts', twinPattern: valueTwin('GUARDED_CAPABLE_MARKER') },
+  { name: 'EGRESS_POLICY_LOG_PREFIX', contractFile: 'marker.ts', twinPattern: valueTwin('EGRESS_POLICY_LOG_PREFIX') },
+  { name: 'guardedCapableBootLine', contractFile: 'marker.ts', twinPattern: valueTwin('guardedCapableBootLine') },
+  { name: 'GUARDED_CAPABLE_LINE_ERE', contractFile: 'marker.ts', twinPattern: valueTwin('GUARDED_CAPABLE_LINE_ERE') },
+  { name: 'guardedCapableLineRegex', contractFile: 'marker.ts', twinPattern: valueTwin('guardedCapableLineRegex') },
 ];

@@ -4,15 +4,15 @@ Everything in this directory is **wire contract**: values and shapes that the
 engine (this repo), the web-ui package, and the private control plane
 (`lynox-pro`) must agree on because they are parsed off the wire — env vars the
 control plane writes into tenant containers, JSON blobs inside them, the
-money/health HTTP bodies (`http.ts`), and (in a later wave) the capability
-boot-marker.
+money/health/auth/OAuth HTTP bodies (`http.ts`), and the capability boot-marker
+the engine writes and the control plane matches (`marker.ts`).
 
 **A change here is never local.** Two consumers compile byte-identical vendored
 copies of these files:
 
 | Consumer | Copy | Guard |
 |---|---|---|
-| web-ui (`packages/web-ui/src/lib/contract/`) | in-repo, currently `vocab.ts` only | every file present there must be byte-equal to its twin here (`tests/contract-drift.test.ts`) |
+| web-ui (`packages/web-ui/src/lib/contract/`) | in-repo, currently `vocab.ts` + `http.ts` | every file present there must be byte-equal to its twin here (`tests/contract-drift.test.ts`) |
 | control plane (private repo, `packages/managed/src/vendor/contract/`) | SHA-pinned (`CONTRACT.lock`, git tree hash) | required `contract-sync` CI job + a release-path freshness gate | <!-- drift-guard:allow: path lives in the private lynox-pro repo (created by its contract-sync wave) -->
 
 Rules:
