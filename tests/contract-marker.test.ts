@@ -77,12 +77,15 @@ const TENANT_PLANTED = [
 /**
  * Lines that are close to the marker but are not it.
  *
- * The last two are not "near misses" a human would write — they are probes for
- * the two ways the pattern itself can quietly stop being the pattern:
- * case-folding (a JS-side flag the shell would not have) and losing the escape
- * on `[lynox]`, which without it is a character class matching ONE character
- * from {l,y,n,o,x}. Without such a line in the corpus, both mutations pass the
- * cross-engine check unnoticed — every other line agrees either way.
+ * Several of these are not "near misses" a human would write — they are probes
+ * for ways the pattern can quietly stop being the pattern, each of which passed
+ * unnoticed until its line existed:
+ * - `[LYNOX] …` — case-folding, a JS-side flag the shell would not have.
+ * - `l egress policy: …` — losing the escape on `[lynox]`, which unescaped is a
+ *   character class matching ONE character from {l,y,n,o,x}.
+ * - `guarded" pwned`, `GUARDED`, `policy7` — the policy segment. Widening
+ *   `[a-z-]+` to `.+` passed every other line in the corpus, because nothing
+ *   else started with the real prefix while carrying a bogus middle.
  */
 const NEAR_MISSES = [
   '[lynox] egress policy: guarded',
@@ -138,8 +141,12 @@ describe('guarded-capable marker: the bound this pattern does NOT provide', () =
   // Written as a passing test on purpose. Anchoring defeats the marker
   // appearing INSIDE a line; it does nothing about a tenant-controlled string
   // that carries a NEWLINE, because the reader is line-based. Pinning that here
-  // means the limit is a fact in the suite rather than a sentence in a comment —
-  // and if someone later closes the hole, this test fails and makes them say so.
+  // means the limit is a fact in the suite rather than a sentence in a comment.
+  //
+  // What it pins precisely: the JS↔grep LINE SEMANTICS agree on this input. It
+  // is not a tripwire for the hole being closed — both reentry designs on the
+  // register (a per-boot nonce, a listener-bounded read window) leave this
+  // regex untouched and would leave these two tests green.
   const PLANTED_VIA_NEWLINE = `Error: no such secret "x\n${GOLDEN_GUARDED_LINE}\n"`;
 
   it('a newline inside tenant-controlled text still produces a matching LINE', () => {
