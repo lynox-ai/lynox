@@ -221,6 +221,17 @@ describe('public-repo-guard — does NOT fire on benign lines', () => {
     expect(runGuard()).toBe(0);
   });
 
+  it('releases an annotated opener line, via the end-of-line anchor', () => {
+    // The opener pattern must run to END OF LINE, and the pragma carries a colon
+    // that the body class excludes — so annotating the line stops it matching at
+    // all. That is why the opener loop has no pragma branch: one would be
+    // unreachable, and a test for it would pass however the branch behaved (this
+    // case originally did exactly that, and deleting the branch left it green).
+    // Mutating the `$` off REF_OPENER is what makes this case bite.
+    commitFile('src/open.ts', `const g = ${REF_OPEN}42 // ${PRAGMA}: numeric literal\n`);
+    expect(runGuard()).toBe(0);
+  });
+
   it('still fires on the same shape WITHOUT the pragma', () => {
     // The inverse of the case above. Without it, deleting the pattern entirely
     // would leave the pragma test green — the escape hatch would be proving

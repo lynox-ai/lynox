@@ -33,9 +33,10 @@
 #   1. Whole-file allow: add the path to ALLOW_FILES below (only for docs
 #      that describe the public managed service by design).
 #   2. Inline allow: put the pragma `public-repo-guard:allow` anywhere on
-#      the offending line, ideally with a short reason. Use sparingly and
-#      only for the SOFT (dual-use hostname) patterns — HARD markers are
-#      never exempt.
+#      the offending line, ideally with a short reason. Use sparingly.
+#      Accepted for the SOFT (dual-use hostname) class and for the
+#      cross-reference class, whose shape legal code can also produce —
+#      HARD markers are never exempt.
 
 set -euo pipefail
 
@@ -86,29 +87,35 @@ HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0
 # The private repo and the maintainer's own notes address items by slug that way.
 # Such an id resolves to nothing a reader of THIS repo can open, and the slug names
 # themselves expose how private material is filed — so they are noise here at best.
-# 16 instances across 12 files predated this pattern; all were removed in the same
+# 17 instances across 12 files predated this pattern; all were removed in the same
 # commit, which is why it can start at zero rather than permanently red.
 #
-# The body must be slug-shaped: that keeps it off `new Map([[k, v]])`, whose body
-# holds a comma and a quote. Spaces ARE allowed in the body, because one of the 16
-# was free text (`[[bug <date> <words>]]`) — a slug-only class let that exact form
-# back in, which is what the review caught.
+# The body must be slug-shaped: a comma is what keeps the pattern off a nested array
+# literal, which is otherwise the same bracket pair. Spaces ARE allowed in the body,
+# because one of the 17 was free text rather than a slug — a slug-only class let that
+# exact form back in, which is what the review caught.
 #
-# Two honest limits, both asserted in tests/public-repo-guard.test.ts (markers live
-# there, assembled at runtime, so this file does not re-plant what it keeps out):
+# Two honest limits, both asserted in tests/public-repo-guard.test.ts. Every marker
+# lives THERE, assembled at runtime; this file names none, which is why SELF_EXCLUDE
+# is a convenience here and not the thing holding the guard up.
 #
-#  1. A line-based grep cannot see a link SPLIT ACROSS LINES, and one of the 16 was.
+#  1. A line-based grep cannot see a link SPLIT ACROSS LINES, and one of the 17 was.
 #     REF_OPENER catches the opening line of that form; it has zero hits on the tree
 #     today, so it costs nothing. A link whose opener sits at a line end with no
 #     slug-ish text after it is still invisible — accepted, not solved.
-#  2. Legal TypeScript can produce the same shape: `const [[first]] = rows;` is a
-#     nested-array destructure, not a link, and no pattern that catches slugs can
-#     tell them apart. So this class — unlike the two HARD ones above — honours the
-#     inline pragma. Without that escape a legitimate destructure would hard-block a
-#     commit and the only way past would be a hook bypass, which is worse than the
-#     leak. There are zero such lines today; the pragma is for the one that comes.
+#  2. Legal TypeScript wears the same brackets — a nested-array destructure or a
+#     nested numeric literal — and no pattern that catches free-text bodies can tell
+#     them apart. So INTERNAL_REF, unlike the two HARD classes above, honours the
+#     inline pragma. Without that escape a legitimate line would hard-block a commit
+#     and the only way past would be a hook bypass, which is worse than what is
+#     guarded. There are zero such lines today; the pragma is for the one that comes.
+#     REF_OPENER needs no pragma branch of its own — see the loop below.
 REF_SLUG_BODY='[A-Za-z0-9_][A-Za-z0-9_. /#|-]*'
 INTERNAL_REF="\\[\\[${REF_SLUG_BODY}\\]\\]"
+# The trailing anchor is `\$` — ONE backslash. In double quotes that yields a bare
+# `$`, which grep -E reads as end-of-line. Writing `\\$` yields a literal `\$`,
+# i.e. a dollar CHARACTER, and the pattern silently stops anchoring. Tried it while
+# tidying the quoting; the split-line test caught it, which is the point of having it.
 REF_OPENER="\\[\\[${REF_SLUG_BODY}\$"
 
 # SOFT — dual-use service hostnames. Legitimate in a few documented spots
@@ -203,11 +210,14 @@ while IFS= read -r f; do
 
   # The opening line of a link split across lines. Reported separately so the
   # message can say why it looks incomplete.
+  #
+  # No pragma check here, unlike the loop above, and that is not an oversight: this
+  # pattern anchors to END OF LINE, and the pragma contains a colon, which the body
+  # class excludes. Annotating such a line therefore stops it matching at all — the
+  # escape works, it just works one step earlier. A pragma branch here would be
+  # unreachable, and the test asserting it would pass no matter what the branch did.
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    case "$line" in
-      *"$PRAGMA"*) continue ;;
-    esac
     echo "❌ internal cross-reference opened in $f and continued on the next line:"
     echo "     ${line}"
     violations=$((violations + 1))
