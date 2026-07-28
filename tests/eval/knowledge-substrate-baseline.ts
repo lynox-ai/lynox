@@ -90,9 +90,12 @@ export const BASELINE_SYSTEM_PROMPT = [
 ].join('\n');
 
 /** Split a namespace blob into entries. The legacy store is line-oriented —
- *  `Memory.appendScoped` writes exactly one line per entry (`memory.ts:395`) — so
+ *  `Memory.appendScoped` appends its argument as ONE line (`memory.ts:395`) — so
  *  the newline split is faithful and a bundled multi-fact entry (joined with
- *  `'; '` by `coerceExtractionValue`) correctly stays ONE entry. Blank lines and
+ *  `'; '` by `coerceExtractionValue`) correctly stays ONE entry. NB this is a property
+ *  of the WRITER, not a guarantee about the file: `memory_store` writes `input.content`
+ *  verbatim, so a model that passes a multi-line string does produce several lines here
+ *  and is counted as several entries. Blank lines and
  *  markdown bullets/headings are normalised so a list does not read as one giant
  *  entry and a section header is not scored as a captured fact.
  *  Exported for the contract test: this is the baseline's entire readback, and a
@@ -132,6 +135,10 @@ async function readAll(memory: Memory): Promise<Map<MemoryNamespace, string[]>> 
  * @param seen per-namespace set of lines already attributed, mutated here, so a
  *   line is credited to the turn it FIRST appeared in.
  */
+/** Below this length a published write is too generic to attribute by containment —
+ *  a bare name or "ok" would match unrelated lines and manufacture violations. */
+const UNTRUSTED_MATCH_MIN_CHARS = 12;
+
 export function attributeNewLines(
   snapshot: ReadonlyMap<MemoryNamespace, string[]>,
   seen: Map<MemoryNamespace, Set<string>>,
@@ -156,7 +163,14 @@ export function attributeNewLines(
         // The legacy store has no review queue at all, so every entry is active.
         status: 'active',
         pinned: false,
-        sourceUntrusted: [...untrustedWrites].some(w => w.includes(line) || line.includes(w)),
+        // Directional on purpose. The STORED line may carry additions the published
+        // content lacks — `appendScoped` masks secrets and the `status` namespace prefixes
+        // a date (`memory.ts:389`) — so `line.includes(w)` is the honest direction. The
+        // reverse (`w.includes(line)`) marks any clean line that merely happens to be a
+        // SUBSTRING of some untrusted write anywhere in the thread, which over-counts
+        // routing violations on the baseline side, i.e. in DK's favour. The length floor
+        // stops a trivially short line ("ok", a bare name) from matching by accident.
+        sourceUntrusted: [...untrustedWrites].some(w => w.length >= UNTRUSTED_MATCH_MIN_CHARS && line.includes(w)),
       });
     }
   }

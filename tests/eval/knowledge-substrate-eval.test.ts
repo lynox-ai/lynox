@@ -179,7 +179,13 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
     // printed instead, so the finding is visible without the harness reporting
     // itself broken.
     if (BASELINE) {
-      process.stdout.write(`\n[knowledge-eval] BASELINE routing: ${worst.routing.violations.length} untrusted write(s) landed active of ${worst.routing.untrustedWrites} exercised — the legacy store has no review queue, so this is the exposure, not a harness failure\n`);
+      // Two counts, deliberately NOT phrased as "N of M": `violations` is the UNION across
+      // runs and `untrustedWrites` the MIN (`worstOf`), so N can exceed M and the ratio is
+      // meaningless. And the exposure number is only readable if the untrusted path was
+      // reached at all — without this assertion a dead channel subscription prints zeros
+      // and reads as CLEAN, the same vacuous-pass this whole mode exists to end.
+      expect(worst.routing.untrustedWrites, 'BASELINE never exercised an untrusted write — the routing figure below would be vacuous').toBeGreaterThan(0);
+      process.stdout.write(`\n[knowledge-eval] BASELINE routing: ${worst.routing.violations.length} violation(s) [union across runs]; untrusted writes exercised ${worst.routing.untrustedWrites} [min across runs] — the legacy store has no review queue, so this is the exposure, not a harness failure\n`);
     } else {
       expect(worst.routing.violations, JSON.stringify(worst.routing.violations, null, 2)).toHaveLength(0);
     }

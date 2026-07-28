@@ -251,15 +251,17 @@ describe('attributeNewLines — where the baseline numbers are actually made', (
   // assertion becomes unfailable on this side. That is exactly what the withdrawn
   // first version did.
   it('marks a write the write-path reported as untrusted', () => {
-    const [c] = attributeNewLines(snap(['leaked fact']), freshSeen(), new Set(['leaked fact']), 'T', 0);
+    const fact = 'Acme Corp switched to net-30 payment terms';
+    const [c] = attributeNewLines(snap([fact]), freshSeen(), new Set([fact]), 'T', 0);
     expect(c?.sourceUntrusted).toBe(true);
   });
 
   // MUTATION: mark everything in a turn untrusted (the gold-label approach) → a
   // late-settling extraction from a CLEAN turn is scored as a routing violation.
   it('leaves an unrelated line in the same turn trusted', () => {
-    const rows = attributeNewLines(snap(['leaked fact', 'clean fact']), freshSeen(), new Set(['leaked fact']), 'T', 0);
-    expect(rows.find(r => r.text === 'clean fact')?.sourceUntrusted).toBe(false);
+    const tainted = 'Acme Corp switched to net-30 payment terms';
+    const rows = attributeNewLines(snap([tainted, 'The operator prefers morning meetings']), freshSeen(), new Set([tainted]), 'T', 0);
+    expect(rows.find(r => r.text === 'The operator prefers morning meetings')?.sourceUntrusted).toBe(false);
   });
 
   // The stored line is not byte-identical to the published content: `appendScoped`
@@ -268,6 +270,21 @@ describe('attributeNewLines — where the baseline numbers are actually made', (
   it('matches a stored line against the published content by containment', () => {
     const rows = attributeNewLines(snap(['[2026-07-28] acme owes 500']), freshSeen(), new Set(['acme owes 500']), 'T', 0);
     expect(rows[0]?.sourceUntrusted).toBe(true);
+  });
+
+  // MUTATION: add back the `w.includes(line)` direction → a clean line that is merely a
+  // SUBSTRING of some untrusted write anywhere in the thread is scored as a routing
+  // violation, inflating the baseline's exposure in DK's favour.
+  it('does not mark a clean line just because an untrusted write contains it', () => {
+    const rows = attributeNewLines(snap(['acme']), freshSeen(), new Set(['acme owes 500 francs']), 'T', 0);
+    expect(rows[0]?.sourceUntrusted).toBe(false);
+  });
+
+  // MUTATION: drop the length floor → a short generic published write matches unrelated
+  // lines by accident and manufactures violations.
+  it('ignores a published write too short to attribute by containment', () => {
+    const rows = attributeNewLines(snap(['acme is a client']), freshSeen(), new Set(['acme']), 'T', 0);
+    expect(rows[0]?.sourceUntrusted).toBe(false);
   });
 
   it('reports the legacy store honestly: no subject link, no review queue', () => {

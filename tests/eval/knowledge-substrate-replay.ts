@@ -30,10 +30,10 @@ import { KnowledgeStore } from '../../src/core/knowledge-store.js';
 import { createToolContext } from '../../src/core/tool-context.js';
 import {
   rememberTool, recallTool, memoryBlockEditTool,
-  memoryRetireTool, memoryFocusTool, archiveSearchTool,
+  memoryRetireTool, memoryFocusTool,
 } from '../../src/tools/builtin/knowledge.js';
 import { DURABLE_MEMORY_PROMPT_SUFFIX } from '../../src/core/prompts.js';
-import type { ToolEntry } from '../../src/types/index.js';
+import type { ToolEntry, PromptUserFn } from '../../src/types/index.js';
 import type { CapturedEntry, GoldThread, MatchJudge } from './knowledge-substrate-runner.js';
 
 /**
@@ -208,7 +208,21 @@ export function makeRealReplayThread(opts: RealReplayOpts): (thread: GoldThread)
       const ks = new KnowledgeStore(engine, subjects);
       const ctx = createToolContext({} as never);
       ctx.knowledgeStore = ks;
+      // `memory_focus` returns "not available" without this (`tools/builtin/knowledge.ts`
+      // reads `toolContext.subjectStore`, which `createToolContext` defaults to null). The
+      // store was already built one line up and simply never reached the context, so the
+      // tool was registered and dead.
+      ctx.subjectStore = subjects;
       const mail = makeMailReadStub();
+
+      // `memory_block_edit` and `memory_retire` refuse outright when the agent has no
+      // interactive channel (`!agent.promptUser`). Auto-CONFIRM rather than auto-deny,
+      // because the comparison decides it: the six legacy `memory_*` tools call
+      // `promptUser` ZERO times — they execute unconfirmed. Denying here would leave DK
+      // two tools that always refuse while the baseline mutates freely, which is the same
+      // asymmetry in a new coat. It approximates a cooperative operator, which is the
+      // closest a replay can get to "the tool is available".
+      const confirmStub: PromptUserFn = (_q, options) => Promise.resolve(options?.[0] ?? 'yes');
 
       const agent = new Agent({
         name: `replay-${thread.id}`,
@@ -218,21 +232,30 @@ export function makeRealReplayThread(opts: RealReplayOpts): (thread: GoldThread)
         durableMemoryEnabled: true,
         systemPrompt: REPLAY_SYSTEM_PROMPT,
         toolContext: ctx,
+        promptUser: confirmStub,
         // Erase the per-tool input generics into the registry's ToolEntry[] shape
         // (the engine does this via `registry.register<T>`; a literal array needs
         // the cast because ToolHandler's input param is contravariant).
         //
-        // ALL SIX DK tools, matching what `engine.ts:1290-1296` registers when the
-        // flag is on. Wiring only remember/recall — as this file did until
-        // 2026-07-28 — handed the comparison a DK side that could not curate its
-        // own writes (`memory_retire`, `memory_block_edit`) or reach its archive
-        // (`archive_search`, `memory_focus`), while the DK-OFF baseline ran with
-        // its full production set of six. That asymmetry ran AGAINST DK, which is
-        // why it survived a review pass that was looking for the opposite: the
-        // fix for the baseline's own 3-of-6 tool gap was applied to one side only.
+        // FIVE of the six DK tools `engine.ts:1290-1296` registers, all of them
+        // FUNCTIONAL. Two rounds were needed to get here and the second is the
+        // instructive one:
+        //   · until 2026-07-28 only remember/recall were wired, against a baseline
+        //     holding its full production set — an asymmetry that ran AGAINST DK and
+        //     therefore survived a review pass hunting bias in the other direction.
+        //   · the first repair added the other four to this array and changed nothing:
+        //     block_edit/retire refuse without `promptUser`, focus/archive_search return
+        //     "not available" without their tool-context deps. DK still ran 2-of-6
+        //     FUNCTIONAL while a comment here claimed the gap was closed — and each dead
+        //     call still burned one of the six `maxIterations`, which is the concrete
+        //     mechanism behind DK scoring WORSE after the "fix".
+        // Registering a tool is not wiring it. `archive_search` is deliberately absent:
+        // it reads the legacy archive via `toolContext.knowledgeLayer`, and a throwaway
+        // per-thread db has no archive, so it could only ever return empty — registering
+        // it would buy nothing and cost an iteration per call.
         tools: [
           rememberTool, recallTool, memoryBlockEditTool,
-          memoryRetireTool, memoryFocusTool, archiveSearchTool, mail.tool,
+          memoryRetireTool, memoryFocusTool, mail.tool,
         ] as ToolEntry[],
         ...providerAgentFields(opts),
       });
