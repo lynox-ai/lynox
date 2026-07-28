@@ -34,7 +34,7 @@
  *     divergence between them is exactly what this catches.)
  *
  * What is NOT decided here: which lines reach a matcher at all. That is the
- * reader's half and it is guarded in the reader's own repo.
+ * reader's half, and it is tracked — unresolved — in the reader's own repo.
  */
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';

@@ -22,9 +22,11 @@
  *
  * SCOPE — deliberately just the emitted line and the pattern that matches it.
  * HOW the downstream reader bounds its search is the reader's business and
- * stays there; a matcher that reads the wrong bytes is not a problem this file
- * can fix, and spelling the read discipline out here would publish operational
- * detail the contract has no use for.
+ * stays there; a matcher that reads the wrong bytes is not a problem this
+ * pattern ALONE can fix, and spelling the read discipline out here would
+ * publish operational detail the contract has no use for. "Alone" is load-
+ * bearing: a future design that gives the marker an unguessable per-boot
+ * component would change the emitted line, and would therefore land here.
  *
  * This file must stay DEPENDENCY-FREE (pure literals, types, and functions) —
  * consumers compile it standalone.
