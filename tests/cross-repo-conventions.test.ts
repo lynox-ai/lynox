@@ -18,8 +18,12 @@
  * WHAT IT CANNOT DO: it cannot see the other repo. Nothing here proves the
  * control plane agrees; this is a change-DETECTOR, not a cross-repo enforcer.
  * Its job is to make a one-sided edit impossible to make *silently* — you have
- * to come here, and the pin tells you a second repo is watching. The twin file
- * pins the same values from the consuming side.
+ * to come here, and the pin tells you a second repo is watching.
+ *
+ * THE TWIN: `packages/managed/src/cross-repo-conventions.test.ts` in the
+ * control-plane repo pins the same values from the consuming side. Neither file
+ * can verify the other, so an unnamed twin is the one that gets orphaned —
+ * hence the path, spelled out.
  *
  * WHY EXECUTE THE DISPATCH STEP INSTEAD OF PATTERN-MATCHING IT: the two emit
  * sites build their payload in two different ways (a `jq` filter vs. an escaped
@@ -33,6 +37,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -60,6 +65,19 @@ const PUBLISHED_TAGS = {
   staging: ['staging', 'staging-e3b0c44298fc1c149afbf4c8996fb92427ae41e4'],
 } as const;
 
+/**
+ * The canary channel publishes to the same image but its tags come from GitHub
+ * expressions resolved at run time, so they cannot be expanded here. Only the
+ * prefixes are pinned — and deliberately nothing more: no control-plane *code*
+ * derives or matches a canary tag (they arrive as opaque operator-supplied
+ * strings through the admin API), so a tighter pin would assert something no
+ * code depends on.
+ */
+const CANARY_TAG_PREFIXES = ['branch-', 'sha-'] as const;
+
+/** Workflows allowed to push a tagged image, and the channel each one is. */
+const PUBLISHING_WORKFLOWS = ['release.yml', 'staging.yml', 'canary-build.yml'] as const;
+
 /** Substitutions used to expand the source tag forms into the strings above. */
 const TAG_EXPANSION = {
   VERSION: '2.10.0',
@@ -80,8 +98,11 @@ const DISPATCH_EMITS = {
 const DISPATCH_TARGET = 'https://api.github.com/repos/lynox-ai/lynox-pro/dispatches';
 
 /** Container wiring the control plane writes into every tenant's compose file. */
-const CONTAINER_PORT = '3000';
+const CONTAINER_PORT = 3000;
+const CONTAINER_HOST = '127.0.0.1';
+/** Container probes use the bare path; the control plane uses the `/api` one. */
 const HEALTH_PATHS = ['/health', '/api/health'] as const;
+const HEALTH_METHOD = 'GET';
 
 /** Routes the control plane reaches with the instance admin bearer. */
 const ADMIN_SCOPED_ROUTES = ['GET /api/export'] as const;
@@ -93,7 +114,7 @@ interface WorkflowStep {
   run?: string;
   uses?: string;
   env?: Record<string, string>;
-  with?: Record<string, string>;
+  with?: Record<string, string | boolean>;
 }
 
 interface WorkflowDoc {
@@ -122,21 +143,38 @@ function allSteps(): Array<{ file: string; step: WorkflowStep }> {
  * A plausible value for a workflow env var, derived from its name. Used to
  * expand the real step; only the two known events get their values asserted,
  * so an unrecognised name still materialises a payload whose *keys* are checked.
+ * Suffix-anchored so a name ending in one token is not claimed by another it
+ * merely contains.
  */
 function stubEnvValue(name: string): string {
-  if (/SHA/.test(name)) return TAG_EXPANSION.SHA;
-  if (/TAG/.test(name)) return `v${TAG_EXPANSION.VERSION}`;
-  if (/TOKEN|SECRET|PASSWORD/.test(name)) return 'stub-credential';
-  if (/VERSION/.test(name)) return TAG_EXPANSION.VERSION;
+  if (/SHA$/.test(name)) return TAG_EXPANSION.SHA;
+  if (/TAG$/.test(name)) return `v${TAG_EXPANSION.VERSION}`;
+  if (/(TOKEN|SECRET|PASSWORD)$/.test(name)) return 'stub-credential';
+  if (/VERSION$/.test(name)) return TAG_EXPANSION.VERSION;
   return 'stub';
+}
+
+interface DispatchCall {
+  url: string;
+  body: unknown;
 }
 
 /**
  * Run a step's shell with `curl` replaced by a stub that prints what it was
- * handed, and return the parsed dispatch. This is the emitted payload itself,
- * not a reading of the source that produces it.
+ * handed, and return every dispatch it made. This is the emitted payload
+ * itself, not a reading of the source that produces it.
+ *
+ * The stub frames ONE record per invocation and the caller asserts there is
+ * exactly one. Reading a URL and a body as two independent first-matches would
+ * silently pair the URL of one call with the body of another — a preflight
+ * request to the same host ahead of the real POST is enough to do it.
+ *
+ * Delimiters carry a per-run nonce because the payload is attacker-shaped in
+ * the only sense that matters here: it is arbitrary repository text, and a
+ * fixed delimiter appearing inside it would truncate the capture.
  */
-function materializeDispatch(step: WorkflowStep): { url: string; body: unknown } {
+function materializeDispatches(step: WorkflowStep): DispatchCall[] {
+  const nonce = randomBytes(8).toString('hex');
   const stubDir = mkdtempSync(join(tmpdir(), 'lynox-dispatch-pin-'));
   try {
     const stub = join(stubDir, 'curl');
@@ -144,16 +182,19 @@ function materializeDispatch(step: WorkflowStep): { url: string; body: unknown }
       stub,
       [
         '#!/bin/sh',
-        '# Delimited, because one emit site hands curl pretty-printed JSON: a',
-        '# line-oriented protocol here would truncate the body to its first line',
-        '# and the parse would fail somewhere far from the cause.',
+        'URL=""',
+        'BODY=""',
         'while [ $# -gt 0 ]; do',
         '  case "$1" in',
-        "    -d) printf '<<<BODY\\n%s\\n>>>BODY\\n' \"$2\"; shift 2 ;;",
-        "    https://*) printf '<<<URL\\n%s\\n>>>URL\\n' \"$1\"; shift ;;",
+        // Consumed before the URL case, so a header value that happens to start
+        // with `https://` cannot shadow the real target.
+        '    -H|--header|-X|--request|-o|--output) shift 2 ;;',
+        '    -d|--data|--data-raw|--data-binary|--data-ascii) BODY="$2"; shift 2 ;;',
+        '    http://*|https://*) URL="$1"; shift ;;',
         '    *) shift ;;',
         '  esac',
         'done',
+        `printf '<<<${nonce}\\n%s\\n---${nonce}\\n%s\\n>>>${nonce}\\n' "$URL" "$BODY"`,
         '',
       ].join('\n'),
       'utf8',
@@ -176,22 +217,72 @@ function materializeDispatch(step: WorkflowStep): { url: string; body: unknown }
       timeout: 20_000,
     });
 
-    const url = /<<<URL\n([\s\S]*?)\n>>>URL/.exec(stdout)?.[1];
-    const body = /<<<BODY\n([\s\S]*?)\n>>>BODY/.exec(stdout)?.[1];
-    if (url === undefined || body === undefined) {
-      throw new Error(`step did not reach curl with a URL and a body; stub saw:\n${stdout}`);
+    const record = new RegExp(`<<<${nonce}\\n([\\s\\S]*?)\\n---${nonce}\\n([\\s\\S]*?)\\n>>>${nonce}`, 'g');
+    const calls = [...stdout.matchAll(record)].map((m) => ({
+      url: m[1]!,
+      body: JSON.parse(m[2]!) as unknown,
+    }));
+    if (calls.length === 0) {
+      throw new Error(`step did not reach curl with a body; stub saw:\n${stdout}`);
     }
-    return { url, body: JSON.parse(body) };
+    return calls;
   } finally {
     rmSync(stubDir, { recursive: true, force: true });
   }
 }
 
+/** The single dispatch a step makes — fails if it makes more than one. */
+function materializeDispatch(step: WorkflowStep): DispatchCall {
+  const calls = materializeDispatches(step);
+  expect(calls.length, 'step made more than one request; only the first would be pinned').toBe(1);
+  return calls[0]!;
+}
+
 /** Expand `${VAR}` forms with the pinned substitutions, via the shell itself. */
 function expandTags(sourceForms: string[]): string[] {
   const script = sourceForms.map((t) => `printf '%s\\n' "${t}"`).join('\n');
-  const env: Record<string, string> = { PATH: process.env['PATH'] ?? '', ...TAG_EXPANSION };
-  return execFileSync('bash', ['-c', script], { env, encoding: 'utf8' }).trim().split('\n');
+  // Same minimal PATH as the dispatch harness. The tag forms come out of a
+  // regex over the workflow, and `[^\s"]+` admits `$(…)` — so this expands
+  // whatever the file says, and a form that is not a tag should die without a
+  // toolchain to reach for rather than run against the full environment.
+  const env: Record<string, string> = { PATH: '/usr/bin:/bin', ...TAG_EXPANSION };
+  const out = execFileSync('bash', ['-c', script], { env, encoding: 'utf8', timeout: 20_000 });
+  // Strip only the final newline, never `.trim()`: a tag form referencing an
+  // unset variable expands to the empty string, and trimming would drop that
+  // entry entirely — so a fourth, unpinned tag reaching the registry would
+  // leave the count matching and the comparison green.
+  return out.replace(/\n$/, '').split('\n');
+}
+
+/** Every `<registry>/<owner>/<name>:<tag>` reference in a chunk of text. */
+function imageRefs(text: string): Array<{ image: string; tag: string }> {
+  // The registry host is matched generically, not anchored on the expected one:
+  // a pattern that can only match `ghcr.io` can never report a second registry.
+  return [...text.matchAll(/([a-z0-9.-]+\.[a-z]{2,}\/[\w.-]+\/[\w.-]+):([^\s"']+)/g)].map((m) => ({
+    image: m[1]!,
+    tag: m[2]!,
+  }));
+}
+
+/** Steps that push a tagged image, by either mechanism the repo uses. */
+function imagePushSteps(): Array<{ file: string; step: WorkflowStep; tagForms: string[] }> {
+  const out: Array<{ file: string; step: WorkflowStep; tagForms: string[] }> = [];
+  for (const { file, step } of allSteps()) {
+    // (a) a manifest stitched by hand in shell
+    if (/imagetools create/.test(step.run ?? '')) {
+      out.push({ file, step, tagForms: imageRefs(step.run ?? '').map((r) => `${r.image}:${r.tag}`) });
+      continue;
+    }
+    // (b) build-push-action with `push: true` — the canary channel. Invisible to
+    // the shell sweep above, which is exactly how a publishing channel goes
+    // unpinned: the dispatch seam guards this same blind spot, so the image
+    // seam has to as well.
+    if (/docker\/build-push-action/.test(step.uses ?? '') && step.with?.['push'] === true) {
+      const tags = String(step.with?.['tags'] ?? '');
+      out.push({ file, step, tagForms: imageRefs(tags).map((r) => `${r.image}:${r.tag}`) });
+    }
+  }
+  return out;
 }
 
 // ── The instrument itself ───────────────────────────────────────────────────
@@ -203,14 +294,28 @@ describe('pin instrument', () => {
     expect(workflowFiles().length).toBeGreaterThan(5);
   });
 
-  it('parses every workflow into jobs with steps', () => {
-    for (const file of workflowFiles()) {
-      expect(stepsOf(file).length, `${file} yielded no steps`).toBeGreaterThan(0);
-    }
+  it('parses the workflow tree into a plausible number of steps', () => {
+    // Asserted across the directory rather than per file: a reusable-workflow
+    // job (`jobs.x.uses:`) legitimately has no steps, and failing on that would
+    // be the instrument breaking on valid input.
+    expect(allSteps().length).toBeGreaterThan(40);
   });
 
   it('resolves shell expansion through the real shell', () => {
     expect(expandTags(['a-${VERSION}', 'plain'])).toEqual([`a-${TAG_EXPANSION.VERSION}`, 'plain']);
+  });
+
+  it('surfaces an expansion that resolves to nothing', () => {
+    // The instrument's own sharpest failure mode: an unset variable expands to
+    // the empty string, and a trimming reader would drop it silently.
+    expect(expandTags(['${UNSET_ON_PURPOSE}', 'x'])).toEqual(['', 'x']);
+  });
+
+  it('reads image references without anchoring on the expected registry', () => {
+    expect(imageRefs('docker.io/other/thing:1.0 and ghcr.io/lynox-ai/lynox:latest')).toEqual([
+      { image: 'docker.io/other/thing', tag: '1.0' },
+      { image: 'ghcr.io/lynox-ai/lynox', tag: 'latest' },
+    ]);
   });
 });
 
@@ -225,13 +330,18 @@ describe('dispatch seam', () => {
   });
 
   it('no emitter uses a form this pin cannot read', () => {
-    // The sweep above reads shell. An action-based emitter
-    // (`peter-evans/repository-dispatch` and friends) declares its payload in
-    // `with:` and would be counted by neither the sweep nor the pins — it would
-    // be an unpinned emitter that leaves every assertion here green. There are
-    // none today; this fails loudly the day one appears, instead of going blind.
-    const actionEmitters = allSteps().filter(({ step }) => /repository-dispatch/.test(step.uses ?? ''));
-    expect(actionEmitters.map(({ file }) => file)).toEqual([]);
+    // The sweep above reads shell. Two other forms would emit a dispatch that
+    // is counted by neither the sweep nor the pins, leaving every assertion
+    // here green: a dedicated action declaring its payload in `with:`, and
+    // `actions/github-script` calling the REST client — which this repo already
+    // uses a few steps below the emitter, for deployments.
+    const hidden = allSteps().filter(
+      ({ step }) =>
+        /repository-dispatch/.test(step.uses ?? '') ||
+        (/github-script/.test(step.uses ?? '') &&
+          /createDispatchEvent|\/dispatches/.test(String(step.with?.['script'] ?? ''))),
+    );
+    expect(hidden.map(({ file }) => file)).toEqual([]);
   });
 
   it('every emitted payload matches its pinned key set, and nothing else emits', () => {
@@ -284,32 +394,51 @@ describe('dispatch seam', () => {
 // ── Seam: published image tags ──────────────────────────────────────────────
 
 describe('image tag seam', () => {
-  /** Tag source forms from the steps that actually create registry manifests. */
-  function manifestTags(file: string): string[] {
-    const steps = stepsOf(file).filter(({ step }) => /imagetools create/.test(step.run ?? ''));
-    expect(steps.length, `${file} has no manifest-creating step`).toBe(1);
-    const run = steps[0]!.step.run ?? '';
-    const forms = [...run.matchAll(/ghcr\.io\/lynox-ai\/lynox:([^\s"]+)/g)].map((m) => m[1]!);
-    expect(forms.length, `${file} manifest step lists no tags`).toBeGreaterThan(0);
+  /** Tag source forms from the steps that actually publish, for one workflow. */
+  function publishedForms(file: string): string[] {
+    const steps = imagePushSteps().filter((s) => s.file === file);
+    expect(steps.length, `${file} publishes no image`).toBeGreaterThan(0);
+    const forms = steps.flatMap((s) => s.tagForms);
+    expect(forms.length, `${file} publishes without naming a tag`).toBeGreaterThan(0);
     return [...new Set(forms)];
   }
 
+  function tagsOnly(file: string): string[] {
+    return expandTags(publishedForms(file)).map((ref) => ref.slice(ref.lastIndexOf(':') + 1));
+  }
+
+  it('only the pinned workflows publish a tagged image', () => {
+    // A new publishing channel is a new tag vocabulary the control plane has
+    // never seen. It has to arrive here before it arrives on the registry.
+    expect([...new Set(imagePushSteps().map((s) => s.file))].sort()).toEqual(
+      [...PUBLISHING_WORKFLOWS].sort(),
+    );
+  });
+
   it('release publishes exactly the pinned tags', () => {
-    expect(expandTags(manifestTags('release.yml')).sort()).toEqual([...PUBLISHED_TAGS.release].sort());
+    expect(tagsOnly('release.yml').sort()).toEqual([...PUBLISHED_TAGS.release].sort());
   });
 
   it('staging publishes exactly the pinned tags', () => {
-    expect(expandTags(manifestTags('staging.yml')).sort()).toEqual([...PUBLISHED_TAGS.staging].sort());
+    expect(tagsOnly('staging.yml').sort()).toEqual([...PUBLISHED_TAGS.staging].sort());
   });
 
-  it('every published tag names the one image the control plane pulls', () => {
-    for (const file of ['release.yml', 'staging.yml']) {
-      const steps = stepsOf(file).filter(({ step }) => /imagetools create/.test(step.run ?? ''));
-      const run = steps[0]!.step.run ?? '';
-      const images = [...run.matchAll(/(ghcr\.io\/[a-z0-9-]+\/[a-z0-9-]+)[:@]/g)].map((m) => m[1]!);
-      expect(images.length, `${file} references no image`).toBeGreaterThan(0);
-      expect([...new Set(images)]).toEqual([PUBLISHED_IMAGE]);
-    }
+  it('canary publishes the pinned tag prefixes', () => {
+    // Canary's tags resolve from GitHub expressions at run time, so only the
+    // prefixes are checkable — they are built in the metadata step's shell.
+    const meta = stepsOf('canary-build.yml')
+      .map(({ step }) => step.run ?? '')
+      .join('\n');
+    const built = [...meta.matchAll(/^\s*[A-Z_]+_TAG="([a-z]+-)\$\{/gm)].map((m) => m[1]!);
+    expect([...new Set(built)].sort()).toEqual([...CANARY_TAG_PREFIXES].sort());
+  });
+
+  it('every publishing channel names the one image the control plane pulls', () => {
+    const images = imagePushSteps().flatMap((s) =>
+      s.tagForms.map((f) => f.slice(0, f.lastIndexOf(':'))),
+    );
+    expect(images.length, 'no image references found across publishing steps').toBeGreaterThan(0);
+    expect([...new Set(images)]).toEqual([PUBLISHED_IMAGE]);
   });
 });
 
@@ -326,19 +455,20 @@ describe('container seam', () => {
     expect(dockerfile).toMatch(new RegExp(`^EXPOSE ${CONTAINER_PORT}$`, 'm'));
   });
 
-  it('answers on both health spellings', () => {
-    // Container probes use the bare path, the control plane uses the /api one.
-    // They are one handler; dropping either alternative breaks a different half
-    // of the fleet, and neither half is exercised by the other's tests.
+  it('answers on both health spellings, for the method the probes use', () => {
+    // Built FROM the pins rather than matched against a hand-written pattern:
+    // a regex containing both paths would be satisfied by its own literal, so
+    // the loop could never fail. The method belongs in the pin too — flipping
+    // it to POST breaks the container probe and the control-plane poll alike,
+    // and a path-only pin would not notice.
     const api = readFileSync(resolve(repoRoot, 'src', 'server', 'http-api.ts'), 'utf8');
-    const guard = /pathname === '\/health' \|\| pathname === '\/api\/health'/.exec(api);
-    expect(guard, 'health guard not found in http-api.ts').not.toBeNull();
-    for (const path of HEALTH_PATHS) {
-      expect(guard![0]).toContain(`'${path}'`);
-    }
+    const clause = `method === '${HEALTH_METHOD}' && (${HEALTH_PATHS.map(
+      (p) => `pathname === '${p}'`,
+    ).join(' || ')})`;
+    expect(api).toContain(clause);
   });
 
-  it('probes the health path it serves', () => {
+  it('probes the health path it serves, on the loopback interface', () => {
     const healthcheck = /^HEALTHCHECK[\s\S]*?\n(?!\s)/m.exec(dockerfile)?.[0] ?? '';
     expect(healthcheck, 'no HEALTHCHECK in Dockerfile').not.toBe('');
     const raw = /https?:\/\/\S+/.exec(healthcheck)?.[0];
@@ -350,8 +480,10 @@ describe('container seam', () => {
     const url = new URL(execFileSync('bash', ['-c', `printf '%s' "${raw!}"`], {
       env: { PATH: '/usr/bin:/bin' },
       encoding: 'utf8',
+      timeout: 20_000,
     }));
-    expect(url.port).toBe(CONTAINER_PORT);
+    expect(url.hostname).toBe(CONTAINER_HOST);
+    expect(url.port).toBe(String(CONTAINER_PORT));
     expect(url.pathname).toBe(HEALTH_PATHS[0]);
   });
 });
@@ -384,6 +516,17 @@ describe('export route seam', () => {
     // whole surface admin-scoped — which would lock every tenant out of their
     // own instance while this test stayed green.
     expect(lookupScope('GET', '/api/threads')).toBe('user');
+  });
+
+  it('the scope is keyed on the method, not the path alone', () => {
+    expect(lookupScope('POST', '/api/export')).toBeNull();
+  });
+
+  it('the trailing-slash variant keeps the admin scope', () => {
+    // The dispatcher's own router 404s this today, but the lookup answers it
+    // deliberately: if a future normalisation routes it to the same handler,
+    // the admin gate has to already be there.
+    expect(lookupScope('GET', '/api/export/')).toBe('admin');
   });
 
   it('an unrouted path resolves to no scope', () => {
