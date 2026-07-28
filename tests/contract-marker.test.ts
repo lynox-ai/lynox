@@ -4,7 +4,7 @@
  * The marker answers "will this image actually honour `guarded`?" before the
  * value is handed to it. Getting it wrong is invisible: the failure is
  * fail-closed, so a broken marker looks like "`guarded` can no longer be
- * granted", not like an error. Three properties are guarded here, each with a
+ * granted", not like an error. Four properties are guarded here, each with a
  * different way of going wrong:
  *
  * (a) GOLDEN PIN — the emitted line is pinned against a hand-written literal.
@@ -20,11 +20,21 @@
  *     carries tenant-influenceable output. A pattern that accepts the marker as
  *     a SUBSTRING would let a tenant's own text vouch for the image.
  *
- * (c) CROSS-ENGINE AGREEMENT — the matching side is a shell `grep -E`, this
+ * (c) EMBEDDABILITY — consumers put this source inside a single-quoted shell
+ *     word. The escape helper does not escape a quote (right for a regex, wrong
+ *     for that sink), so the constraint is asserted rather than assumed — and
+ *     asserted HERE, in the source of truth, because a reword lands in this
+ *     repo and a check that only exists downstream would let it pass every gate
+ *     on this side.
+ *
+ * (d) CROSS-ENGINE AGREEMENT — the matching side is a shell `grep -E`, this
  *     side is a JS RegExp. One escaped source is supposed to mean the same
  *     thing to both; that claim is checked against the real `grep` binary
  *     rather than assumed. (CI runs GNU grep, macOS runs BSD grep — a
  *     divergence between them is exactly what this catches.)
+ *
+ * What is NOT decided here: which lines reach a matcher at all. That is the
+ * reader's half and it is guarded in the reader's own repo.
  */
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
