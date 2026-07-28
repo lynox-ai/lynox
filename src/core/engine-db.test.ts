@@ -5,6 +5,26 @@ import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { EngineDb } from './engine-db.js';
 
+/**
+ * Top up a hand-built fixture with the v1-baseline tables it omitted.
+ *
+ * Every fixture in this file constructs a partial database at some old version, and every
+ * later migration that READS a baseline table then throws on it — v4 needed `memories`, v7
+ * needed `subjects`, v11 needs the verb tables. Three rounds of the same edit is the signal:
+ * the fixtures encode "what this migration touches", not "what a real db at that version
+ * looks like", and a REAL pre-v11 db has all of these (v1 creates them). `IF NOT EXISTS`
+ * so a fixture that defines its own richer shape keeps it.
+ */
+function topUpBaselineTables(raw: Database.Database): void {
+  raw.exec(`
+    CREATE TABLE IF NOT EXISTS subjects (id TEXT PRIMARY KEY, kind TEXT, name TEXT);
+    CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, created_at TEXT);
+    CREATE TABLE IF NOT EXISTS workflows (id TEXT PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS triggers (id TEXT PRIMARY KEY, source TEXT, effect TEXT);
+    CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY);
+  `);
+}
+
 describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
   const tmpDirs: string[] = [];
 
@@ -93,6 +113,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     seed.run('r-reminder-bound', 'reminder', '{}', 'wf-g');
     seed.run('r-weird', 'zzz-unexpected', '{}', null);   // an unknown value must fail safe
     seed.run('r-corrupt', 'scheduled', 'not-json', null); // malformed condition_json → json_valid guard
+    topUpBaselineTables(raw);
     raw.close();
 
     const e = new EngineDb(dbPath, '');
@@ -148,6 +169,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     seed.run('g-workflow', 'cron', 'run_workflow');
     seed.run('g-backup', 'cron', 'backup');
     seed.run('g-notify', 'cron', 'notify');
+    topUpBaselineTables(raw);
     raw.close();
 
     const e = new EngineDb(dbPath, '');
@@ -179,6 +201,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       CREATE TABLE memories (id TEXT PRIMARY KEY);   -- v8 ALTERs it (adds evidence columns)
     `);
     raw.prepare('INSERT INTO subjects (id, name) VALUES (?, ?)').run('s1', 'Dr. Ada Lovelace');
+    topUpBaselineTables(raw);
     raw.close();
 
     const e = new EngineDb(dbPath, '');
@@ -209,6 +232,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     `);
     raw.prepare('INSERT INTO memories (id, text, namespace, scope_type, scope_id, source_type) VALUES (?, ?, ?, ?, ?, ?)')
       .run('m-old', 'a fact from before v8', 'knowledge', 'context', 'c1', 'user_asserted');
+    topUpBaselineTables(raw);
     raw.close();
 
     const e = new EngineDb(dbPath, '');
@@ -235,13 +259,17 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       INSERT INTO schema_version (version) VALUES (8);
       CREATE TABLE subjects (id TEXT PRIMARY KEY, kind TEXT, name TEXT, archived_at TEXT, parent_id TEXT, merged_into TEXT, updated_at TEXT DEFAULT '2024-01-01');
       -- v11's backfill predicate reads memories/subjects/knowledge_entries, so a v8 fixture
-      -- must carry the v1 memories table or the migration throws and _openOrRecreate wipes
-      -- (same reason v7 needed the subjects table here — a hand-built fixture has to keep up
-      -- with every later migration that reads a baseline table).
+      -- must carry the v1 memories table or the migration THROWS and the open fails loud —
+      -- engine-db.ts:740-748 runs migrations OUTSIDE the corruption catch precisely so a
+      -- migration fault is never mistaken for corruption; the file stays intact, the engine
+      -- boots with engineDb=null. (Same reason v7 needed the subjects table here: a
+      -- hand-built fixture has to keep up with every later migration that reads a baseline
+      -- table.)
       CREATE TABLE memories (id TEXT PRIMARY KEY, created_at TEXT);
       CREATE TABLE threads (id TEXT PRIMARY KEY);
     `);
     raw.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s-old','organization','ACME')").run();
+    topUpBaselineTables(raw);
     raw.close();
 
     const e = new EngineDb(dbPath, '');
@@ -285,6 +313,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       CREATE TABLE subjects (id TEXT PRIMARY KEY, name TEXT NOT NULL, merged_into TEXT);
     `);
     raw.prepare('INSERT INTO subjects (id, name) VALUES (?, ?)').run('keep-me', 'Real Data');
+    topUpBaselineTables(raw);
     raw.close();
 
     // The open THROWS (fail loud), rather than silently recreating.
@@ -590,7 +619,7 @@ describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
   });
 
   const flags = (e: EngineDb): Array<{ flag: string; value: string }> =>
-    e.getDb().prepare('SELECT flag, value FROM onboarding_flags').all() as Array<{ flag: string; value: string }>;
+    e.getDb().prepare("SELECT flag, value FROM onboarding_flags WHERE owner_user_id = 'system'").all() as Array<{ flag: string; value: string }>;
 
   /** Take a db to v10 exactly, then close it — the state every pre-W1 instance is in. */
   const openAtV10 = (p: string): void => {
@@ -655,6 +684,47 @@ describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
 
     const e = new EngineDb(p, '');
     expect(flags(e)[0]?.value).toMatch(/^backfill:pre-w1:\d{4}-\d{2}-\d{2}T/);
+    e.close();
+  });
+
+  // THE state the refuter surfaced, and the one the fleet is actually in. Both
+  // `subject_graph_enabled` and `durable_memory_enabled` default OFF, so subjects /
+  // memories / knowledge_entries are EMPTY on an instance used for months — its real
+  // content sits in agent-memory.db and history.db. Only the verb-graph tables are
+  // written unconditionally. MUTATION: key the predicate on the three flag-gated tables
+  // only → the migration becomes a no-op for exactly the instances it exists for and
+  // fires solely on the flag-ON canaries.
+  it('backfills a flag-default instance whose content is only in the verb tables', () => {
+    const p = dbPath();
+    openAtV10(p);
+    const seed = new Database(p);
+    seed.prepare("INSERT INTO triggers (id, title, source, effect) VALUES ('t1', 'Nightly backup', 'cron', 'backup')").run();
+    seed.close();
+
+    const e = new EngineDb(p, '');
+    const rows = flags(e);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.flag).toBe('skipped');
+    e.close();
+  });
+
+  // MUTATION: drop the `owner_user_id = 'system'` filter from the guard → a future second
+  // owner's skip suppresses the system owner's backfill.
+  it('is scoped to the owner it inserts for', () => {
+    const p = dbPath();
+    openAtV10(p);
+    const seed = new Database(p);
+    seed.prepare("INSERT INTO triggers (id, title, source, effect) VALUES ('t1', 'Nightly backup', 'cron', 'backup')").run();
+    seed.prepare("INSERT INTO onboarding_flags (owner_user_id, flag, value) VALUES ('someone-else','skipped','x')").run();
+    seed.close();
+
+    const e = new EngineDb(p, '');
+    // The system owner still gets its backfill; the other owner's row is untouched.
+    const mine = flags(e);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]?.value).toMatch(/^backfill:pre-w1:/);
+    const all = e.getDb().prepare('SELECT COUNT(*) c FROM onboarding_flags').get() as { c: number };
+    expect(all.c).toBe(2);
     e.close();
   });
 

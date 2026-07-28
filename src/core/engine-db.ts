@@ -657,11 +657,28 @@ const MIGRATIONS: string[] = [
   //   operator is walked through a first-run flow. v10 cannot be edited to fix this — it
   //   is already applied on the canary, and an edited applied migration never re-runs.
   //
-  //   The predicate is "does engine.db already hold durable content?". `subjects` /
-  //   `knowledge_entries` / `memories` are all empty in a freshly created db (they fill
-  //   on first use), so a genuinely new instance running v1..v11 in one go at first boot
-  //   matches nothing and still gets its onboarding. Thread history would be the more
-  //   direct signal but lives in the run-history db, which a migration here cannot see.
+  //   The predicate is "does engine.db already hold durable content?" — and it must lead
+  //   with the FLAG-FREE tables. `subjects` / `memories` fill only behind
+  //   `subject_graph_enabled` and `knowledge_entries` only behind `durable_memory_enabled`,
+  //   both default OFF, so a fleet-default instance in use for months has all three EMPTY
+  //   and keeps its real content in agent-memory.db / history.db. Keying on those alone
+  //   made this migration a no-op for the exact state it exists for, firing only on the
+  //   flag-ON canaries. `workflows` / `triggers` / `tasks` are written unconditionally:
+  //   `setVerbGraph` (run-history.ts) is called with no flag check (`engine.ts:942`) and
+  //   the first two are the SOLE authority for their writes, the third an additive mirror
+  //   — only the assignee→subject resolution is flag-coupled.
+  //   All six are empty in a freshly created db and nothing is seeded at first boot, so a
+  //   genuinely new instance running v1..v11 in one go still matches nothing and keeps its
+  //   onboarding. ⚠️ That last property is load-bearing: if a later wave seeds starter
+  //   tasks/workflows into a NEW instance, this predicate starts marking new operators and
+  //   must be re-cut. Thread history would be the most direct signal but lives in the
+  //   run-history db, which a migration here cannot reach.
+  //
+  //   Direction of the risk, stated deliberately: over-marking is repairable (the
+  //   `backfill:` value makes it a one-line DELETE), under-marking is NOT — the operator's
+  //   own reaction to the bug writes a genuine `skipped` row (`ChatView.svelte`), so a
+  //   later migration can no longer tell "v11 missed me" from "I chose to skip". The
+  //   symptom destroys the evidence, which is why the predicate errs wide.
   //
   //   Recorded as `skipped` because that is the only forward-declared flag that means
   //   "do not show this" without also claiming the operator COMPLETED a flow they never
@@ -678,11 +695,19 @@ const MIGRATIONS: string[] = [
   //   first-run stepper forever. That window is open on the canary right now.
   //   Idempotent either way: re-running is a no-op and a genuine completion is never
   //   overwritten (and the PK is per-flag, so a first_session_at row does not collide).
+  //   The guard filters `owner_user_id` to match the row it inserts — engine.db has no
+  //   users table today, but an unfiltered guard would let a future second owner's skip
+  //   suppress the system owner's backfill.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (11);
    INSERT INTO onboarding_flags (owner_user_id, flag, value)
    SELECT 'system', 'skipped', 'backfill:pre-w1:' || strftime('%Y-%m-%dT%H:%M:%SZ','now')
-   WHERE NOT EXISTS (SELECT 1 FROM onboarding_flags WHERE flag IN ('knowledge_done','skipped'))
-     AND (EXISTS (SELECT 1 FROM subjects)
+   WHERE NOT EXISTS (
+       SELECT 1 FROM onboarding_flags
+       WHERE owner_user_id = 'system' AND flag IN ('knowledge_done','skipped'))
+     AND (EXISTS (SELECT 1 FROM workflows)
+       OR EXISTS (SELECT 1 FROM triggers)
+       OR EXISTS (SELECT 1 FROM tasks)
+       OR EXISTS (SELECT 1 FROM subjects)
        OR EXISTS (SELECT 1 FROM knowledge_entries)
        OR EXISTS (SELECT 1 FROM memories));`,
 ];
