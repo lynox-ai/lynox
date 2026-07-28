@@ -729,7 +729,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           body = text;
         }
       } else if (isHtml && htmlExtractEnabled && text.length > DEFAULT_HTML_EXTRACT_THRESHOLD_CHARS) {
-        const extracted = extractHtmlText(text);
+        const extracted = extractHtmlText(text, undefined, input.url);
         // A near-empty extraction means the page is JS-rendered — the raw markup
         // still carries more (inline JSON, data attributes), so keep it.
         if (extracted.afterChars >= MIN_USEFUL_EXTRACT_CHARS) {

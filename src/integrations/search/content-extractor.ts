@@ -157,7 +157,7 @@ export async function extractContent(url: string, maxChars?: number, ctx?: ToolC
     return { title: new URL(url).hostname, content, url, wordCount: countWords(content), truncated };
   }
 
-  const extracted = extractHtmlText(body, limit);
+  const extracted = extractHtmlText(body, limit, url);
 
   // Same keep-raw guard `http_request` applies: a JS-rendered shell, or a body
   // byte-cut at MAX_HTML_BYTES inside an open <script>, extracts to almost

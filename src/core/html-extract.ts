@@ -77,6 +77,22 @@ export const MAX_EXTRACT_INPUT_CHARS = 512_000;
  */
 export const MIN_USEFUL_EXTRACT_CHARS = 200;
 
+/**
+ * How many same-site links ride along with an extraction.
+ *
+ * Measured, not guessed: on five documentation pages the link the agent would
+ * need NEXT (Stripe -> payments, Resend -> api-reference, Tailwind -> utility
+ * classes, Svelte -> $state, Mistral -> capabilities) is inside the first 20 in
+ * document order on 5/5. At 10 it is inside on 3/5; at 30 nothing is gained.
+ * Cost across 18 real pages: 6.7% of the extraction, worst case 42.8% on a page
+ * whose extraction is only 2470 characters — which is exactly where the list
+ * carries the most.
+ */
+export const MAX_EXTRACT_LINKS = 20;
+
+/** Anchor text past this is cut — a nav label is short, a paragraph in an <a> is not. */
+const MAX_LINK_TEXT_CHARS = 60;
+
 export interface HtmlExtractResult {
   /** Extracted text: title, meta lines, then heading-marked body text. */
   readonly text: string;
@@ -157,6 +173,19 @@ const BLOCK_SPANS: SpanPattern[] = BLOCK_ELEMENTS.map(el => ({
   dropUnterminated: true,
 }));
 
+/** Anchors are COLLECTED, not removed — `forEachSpan` walks them in place. */
+const ANCHOR_SPAN: SpanPattern = { open: /<a\b[^<>]*>/gi, close: /<\/a\s*>/gi, dropUnterminated: true };
+const HREF_RE = /href\s*=\s*["']([^"']*)["']/i;
+
+/**
+ * Paths that answer a question nobody asked the agent. Note what is NOT here:
+ * `/impressum` and `/about` stay, because on a business site they carry the
+ * legal entity, location and history — the onboarding scan's actual target.
+ */
+const UTILITY_LINK_RE = /\/(privacy|datenschutz|agb|terms|tos|cookies?|legal|login|signin|sign-in|register|signup|sign-up|cart|checkout|account|rss|feed)(\/|$|\?)/i;
+/** A binary is not a page the agent can read. */
+const ASSET_LINK_RE = /\.(pdf|zip|jpe?g|png|gif|svg|webp|mp4|mp3|dmg|exe|css|js)(\?|$)/i;
+
 const HEADING_SPANS: SpanPattern[] = [1, 2, 3].map(lvl => ({
   open: new RegExp(`<h${lvl}\\b[^<>]*>`, 'gi'),
   close: new RegExp(`<\\/h${lvl}\\s*>`, 'gi'),
@@ -209,6 +238,36 @@ function removeSpans(
     open.lastIndex = cursor;
   }
   return out + input.slice(cursor);
+}
+
+/**
+ * Walk every `open … close` span, handing the callback the open TAG and the
+ * inner text. Same forward-only scan as `removeSpans`; the input is untouched.
+ * Stops early once the callback has taken enough.
+ */
+function forEachSpan(
+  input: string,
+  { open, close }: SpanPattern,
+  visit: (openTag: string, inner: string) => boolean,
+): void {
+  open.lastIndex = 0;
+  close.lastIndex = 0;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = open.exec(input)) !== null) {
+    if (match.index < cursor) {
+      open.lastIndex = cursor;
+      continue;
+    }
+    const innerStart = match.index + match[0].length;
+    close.lastIndex = innerStart;
+    const closer = close.exec(input);
+    if (closer === null) return;
+    if (!visit(match[0], input.slice(innerStart, closer.index))) return;
+    cursor = closer.index + closer[0].length;
+    open.lastIndex = cursor;
+  }
 }
 
 /**
@@ -305,6 +364,82 @@ function extractMetaLines(cleanedHtml: string): { lines: string[]; title: string
 }
 
 /**
+ * Collect the same-site links a follow-up read could target.
+ *
+ * WHY this exists: nothing on any path gave the model a single href. Readability
+ * discarded nav wholesale and the tag strip destroys every `<a>`, so an agent
+ * asked to look further into a site had to GUESS slugs from priors — measured
+ * over 15 runs it produced `/ueber-uns`, `/leistungen`, `/impressum` regardless
+ * of what the site actually published, and a miss costs a full round-trip.
+ *
+ * SAME-SITE ONLY, and same-ORIGIN at that. The job is navigating a domain the
+ * agent is already reading; off-site links are mostly social and partner noise,
+ * and following them is what `web_research action='search'` is for. A docs
+ * subdomain linking to its own marketing site is the known false negative —
+ * cheap to widen later, expensive to un-widen.
+ *
+ * Read from CLEANED html for the same reason meta is (invariant 2): an `<a>`
+ * inside a comment or a script string must not become a suggestion.
+ */
+function collectLinks(cleanedHtml: string, baseUrl: string | undefined): string[] {
+  if (baseUrl === undefined) return [];
+  let origin: string;
+  try {
+    origin = new URL(baseUrl).origin;
+  } catch {
+    return [];
+  }
+
+  const seen = new Set<string>([canonicalLink(baseUrl)]); // never suggest the page itself
+  const out: string[] = [];
+
+  forEachSpan(cleanedHtml, ANCHOR_SPAN, (openTag, inner) => {
+    const href = HREF_RE.exec(openTag)?.[1];
+    if (href === undefined || href === '') return true;
+
+    let resolved: URL;
+    try {
+      resolved = new URL(decodeEntities(href), baseUrl);
+    } catch {
+      return true;
+    }
+    if (resolved.origin !== origin) return true;
+
+    const target = resolved.pathname + resolved.search;
+    if (UTILITY_LINK_RE.test(target) || ASSET_LINK_RE.test(target)) return true;
+
+    const canonical = canonicalLink(resolved.toString());
+    if (seen.has(canonical)) return true;
+
+    // Anchor text is what makes a path decidable — `/x/42` alone tells nothing.
+    // Bound the raw slice before any regex work: an <a> wrapping a whole article
+    // is 250 KB of text we would clean and then throw away at 60 characters.
+    // The headroom leaves room for tags and entities inside the label.
+    const label = decodeEntities(inner.slice(0, MAX_LINK_TEXT_CHARS * 8).replace(TAG_RE, ' '))
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (label === '') return true;
+
+    seen.add(canonical);
+    out.push(`${target} — ${label.slice(0, MAX_LINK_TEXT_CHARS)}`);
+    return out.length < MAX_EXTRACT_LINKS;
+  });
+
+  return out;
+}
+
+/** Dedup key. The hash is a position in one page; the QUERY is often the identity. */
+function canonicalLink(href: string): string {
+  try {
+    const u = new URL(href);
+    u.hash = '';
+    return (u.pathname + u.search).replace(/\/$/, '') || '/';
+  } catch {
+    return href;
+  }
+}
+
+/**
  * Strip an HTML document to the text an analysis task needs.
  *
  * Output shape: meta lines first (title, description, OG/Twitter), then the
@@ -314,6 +449,7 @@ function extractMetaLines(cleanedHtml: string): { lines: string[]; title: string
 export function extractHtmlText(
   html: string,
   maxChars: number = DEFAULT_HTML_EXTRACT_MAX_CHARS,
+  baseUrl?: string,
 ): HtmlExtractResult {
   const beforeChars = html.length;
   const source = html.length > MAX_EXTRACT_INPUT_CHARS ? html.slice(0, MAX_EXTRACT_INPUT_CHARS) : html;
@@ -326,6 +462,7 @@ export function extractHtmlText(
   }
 
   const meta = extractMetaLines(cleaned);
+  const links = collectLinks(cleaned, baseUrl);
 
   // <head> holds no visible text; its metadata was already captured above.
   let body = removeSpans(cleaned, HEAD_SPAN);
@@ -348,7 +485,16 @@ export function extractHtmlText(
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  const composed = meta.lines.length > 0 ? `${meta.lines.join('\n')}\n\n${body}` : body;
+  // Links go ABOVE the body, next to the meta lines. Two reasons: the body opens
+  // with navigation prose on most pages, so structure first is the better read;
+  // and search enrichment only ever copies the first 4000 characters, which is
+  // where a link list earns its keep.
+  const header = [...meta.lines];
+  if (links.length > 0) {
+    header.push('', `links (same-site, first ${links.length}):`, ...links);
+  }
+
+  const composed = header.length > 0 ? `${header.join('\n')}\n\n${body}` : body;
   const truncated = composed.length > maxChars;
   const text = truncated ? composed.slice(0, maxChars) : composed;
 
