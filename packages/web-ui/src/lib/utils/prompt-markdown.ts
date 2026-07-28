@@ -262,3 +262,70 @@ function sanitizePromptHtml(html: string): string {
 		ALLOW_DATA_ATTR: false,
 	});
 }
+
+// --- Segmented prompts: values render as TEXT, never as markdown ---
+
+/**
+ * One span of a prompt as the engine sends it (engine v51).
+ *
+ * The shape is duplicated rather than imported: this package has no dependency
+ * on the engine, and this is a wire payload, so a local declaration is what the
+ * boundary actually is. `stores/chat.svelte.ts` validates it on arrival.
+ */
+export interface RenderablePromptSegment {
+	kind: 'frame' | 'value';
+	text: string;
+}
+
+/**
+ * The placeholder values are swapped out for. NUL is used deliberately: it has
+ * no meaning in markdown, `marked` passes it through untouched, and — the part
+ * that makes it sound rather than merely unlikely — it is REMOVED from every
+ * value first, so a value cannot contain one however it was crafted. That is a
+ * property we enforce, not a secret we hope holds.
+ */
+const VALUE_SLOT = String.fromCharCode(0);
+
+/**
+ * Render a prompt whose frame and values are separated.
+ *
+ * Why one pass over placeholders instead of rendering each segment on its own:
+ * block structure crosses segment boundaries. `plan_task` puts the `> ` in a
+ * frame and the quoted text in the value; `**Host:** ` is a frame whose value
+ * belongs on the same line. Rendering segments individually would produce an
+ * empty blockquote next to an unquoted value — correct-looking markup that says
+ * something false.
+ *
+ * So: frames keep their markdown, each value becomes a placeholder, the whole
+ * thing goes through the same hardened chain as any other prompt, and the
+ * placeholders are then replaced with HTML-ESCAPED text. Escaped text can only
+ * ever become a text node, so a value cannot open a construct, forge a line, or
+ * introduce an element — regardless of how many lines it has. This is what the
+ * per-caller `singleLine`/quoting could only approximate.
+ *
+ * The one assumption, stated because it is not enforced here: a frame must not
+ * place a value in ATTRIBUTE position (`<a href="${value}">`). No frame does —
+ * and the link override already rejects a non-allowlisted target — but a future
+ * frame that did would put escaped text somewhere escaping is not sufficient.
+ */
+export function renderPromptSegments(segments: readonly RenderablePromptSegment[]): string {
+	if (segments.length === 0) return renderPromptMarkdown('');
+
+	const values: string[] = [];
+	const withSlots = segments
+		.map((segment) => {
+			if (segment.kind === 'frame') return segment.text;
+			values.push(segment.text.split(VALUE_SLOT).join(''));
+			return VALUE_SLOT;
+		})
+		.join('');
+
+	const html = renderPromptMarkdown(withSlots);
+
+	let index = 0;
+	return html.split(VALUE_SLOT).reduce((acc, part, i) => {
+		if (i === 0) return part;
+		const value = values[index++] ?? '';
+		return acc + escapeHtml(value) + part;
+	}, '');
+}

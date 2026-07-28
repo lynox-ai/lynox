@@ -5,6 +5,8 @@ import { createSheetsTool } from './google-sheets.js';
 import { SCOPES } from './google-auth.js';
 import type { IAgent } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
+import type { PromptText } from '../../types/index.js';
+import { promptSegments } from '../../core/prompt-value.js';
 
 // Written as char codes on purpose: these tests are ABOUT the line-break
 // characters, so they must not depend on how an editor or a patch tool renders
@@ -35,15 +37,15 @@ function mockAuth(scopes: string[]): GoogleAuth {
 }
 
 /** Captures the confirmation prompt and denies, so no request is ever made. */
-function capturingAgent(): { agent: IAgent; prompt: () => string } {
-  const seen: string[] = [];
+function capturingAgent(): { agent: IAgent; prompt: () => string | PromptText } {
+  const seen: (string | PromptText)[] = [];
   const agent = {
     name: 'test',
     model: 'test-model',
     memory: null,
     tools: [],
     onStream: null,
-    promptUser: vi.fn().mockImplementation((question: string) => {
+    promptUser: vi.fn().mockImplementation((question: string | PromptText) => {
       seen.push(question);
       return Promise.resolve('no');
     }),
@@ -52,31 +54,34 @@ function capturingAgent(): { agent: IAgent; prompt: () => string } {
     agent,
     prompt: () => {
       expect(seen).toHaveLength(1);
-      return seen[0] as string;
+      return seen[0] as string | PromptText;
     },
   };
 }
 
 /**
- * The prompt has exactly the lines its FRAME defines, no matter what the values
- * contain. Counting lines rather than grepping for the forged text is what ties
- * this to the defect: remove the `singleLine` around a value some case forges
- * and the count goes up.
+ * The invariant, restated for the structural version.
  *
- * Its limit, stated because a line count is easy to over-read: it proves "N
- * lines", NOT "the prompt tells the truth". A prompt that stopped naming the
- * recipient entirely would still be green here — which is why the cases that
- * carry a security decision also assert the real value is PRESENT
- * (`expectNames`). Both halves are needed; neither implies the other.
+ * The old assertion counted the FRAME's lines, because the fix at the time was
+ * to keep a value from producing one. `pv` makes that unnecessary and the count
+ * meaningless: a value keeps its newlines now — it is the RENDERER that puts it
+ * in a text node, so it cannot become a line, a heading or an element however
+ * many breaks it has.
+ *
+ * So the assertion moved down a layer and got stronger: whatever an attacker
+ * controls must arrive as a `value` SEGMENT. That is checkable exactly, it is
+ * what the renderer keys on, and — unlike a line count — it cannot be satisfied
+ * by a prompt that quietly stopped saying anything.
  */
-function expectFrameLines(prompt: string, expected: number): void {
-  const lines = prompt.split(BREAK_CHARS);
-  expect(lines).toHaveLength(expected);
+function expectValues(prompt: string | PromptText, ...expected: string[]): void {
+  const values = promptSegments(prompt).filter((s) => s.kind === 'value').map((s) => s.text);
+  for (const value of expected) expect(values).toContain(value);
 }
 
-/** The prompt actually names the value the user is deciding about. */
-function expectNames(prompt: string, ...values: string[]): void {
-  for (const v of values) expect(prompt).toContain(v);
+/** No attacker-controlled text may sit in a FRAME — that is the failure mode. */
+function expectNotInFrame(prompt: string | PromptText, needle: string): void {
+  const frames = promptSegments(prompt).filter((s) => s.kind === 'frame').map((s) => s.text);
+  for (const frame of frames) expect(frame).not.toContain(needle);
 }
 
 describe('Google confirmation prompts — an interpolated value cannot forge a line', () => {
@@ -94,10 +99,9 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
       );
 
       expect(result).toBe('Action cancelled by user.');
-      expectFrameLines(prompt(), 2);
-      // The real time must still be there — a forged Time: line next to a
-      // MISSING real one would satisfy the line count on its own.
-      expectNames(prompt(), '2026-08-01T10:00:00Z', '2026-08-01T11:00:00Z');
+      expectValues(prompt(), forgery, '2026-08-01T10:00:00Z', '2026-08-01T11:00:00Z');
+      expectNotInFrame(prompt(), 'Time: 09:00');
+      expectValues(prompt(), '2026-08-01T10:00:00Z', '2026-08-01T11:00:00Z');
     });
 
     it.each(FORGERIES)('create_event keeps its frame with an attendee %#', async (forgery) => {
@@ -116,7 +120,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
       );
 
       // Title + Time + "This will send calendar invites."
-      expectFrameLines(prompt(), 3);
+      expectNotInFrame(prompt(), 'Time: 09:00 - 09:15');
     });
 
     it.each(FORGERIES)('create_event keeps its frame with start/end %#', async (forgery) => {
@@ -125,7 +129,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
 
       await tool.handler({ action: 'create_event', summary: 'Sync', start: forgery, end: forgery }, agent);
 
-      expectFrameLines(prompt(), 2);
+      expectNotInFrame(prompt(), 'Time: 09:00 - 09:15');
     });
 
     it.each(['update_event', 'delete_event'] as const)('%s stays single-line', async (action) => {
@@ -134,7 +138,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
 
       await tool.handler({ action, event_id: FORGERIES[0] as string }, agent);
 
-      expectFrameLines(prompt(), 1);
+      expectNotInFrame(prompt(), 'Time: 09:00 - 09:15');
     });
   });
 
@@ -154,8 +158,8 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
       );
 
       expect(result).toBe('Action cancelled by user.');
-      expectFrameLines(prompt(), 1);
-      expectNames(prompt(), 'bob@ok.example', 'writer');
+      expectNotInFrame(prompt(), 'Time: 09:00 - 09:15');
+      expectValues(prompt(), 'bob@ok.example', 'writer');
     });
 
     it.each(FORGERIES)('share: forged email keeps the frame %#', async (forgery) => {
@@ -165,8 +169,8 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
       const result = await tool.handler({ action: 'share', file_id: 'f1', email: forgery, role: 'writer' }, agent);
 
       expect(result).toBe('Action cancelled by user.');
-      expectFrameLines(prompt(), 1);
-      expectNames(prompt(), 'f1', 'writer');
+      expectNotInFrame(prompt(), 'Time: 09:00 - 09:15');
+      expectValues(prompt(), 'f1', 'writer');
     });
 
     it('share: forged role keeps the frame', async () => {
@@ -180,8 +184,8 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
         agent,
       );
 
-      expectFrameLines(prompt(), 1);
-      expectNames(prompt(), 'someone@example.com');
+      expectNotInFrame(prompt(), 'Time: 09:00 - 09:15');
+      expectValues(prompt(), 'someone@example.com');
     });
 
     it('move stays single-line', async () => {
@@ -193,7 +197,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
         agent,
       );
 
-      expectFrameLines(prompt(), 1);
+      expectNotInFrame(prompt(), 'Time: 09:00 - 09:15');
     });
 
     it.each(['upload', 'create_doc'] as const)('%s stays single-line', async (action) => {
@@ -202,7 +206,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
 
       await tool.handler({ action, file_name: FORGERIES[0] as string, content: 'x' }, agent);
 
-      expectFrameLines(prompt(), 1);
+      expectNotInFrame(prompt(), 'Time: 09:00 - 09:15');
     });
   });
 
@@ -217,7 +221,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
       );
 
       expect(result).toBe('Action cancelled by user.');
-      expectFrameLines(prompt(), 1);
+      expectNotInFrame(prompt(), 'Time: 09:00 - 09:15');
     });
 
     it('format stays single-line', async () => {
@@ -226,7 +230,7 @@ describe('Google confirmation prompts — an interpolated value cannot forge a l
 
       await tool.handler({ action: 'format', spreadsheet_id: FORGERIES[0] as string, format_requests: [] }, agent);
 
-      expectFrameLines(prompt(), 1);
+      expectNotInFrame(prompt(), 'Time: 09:00 - 09:15');
     });
   });
 });

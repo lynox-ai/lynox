@@ -1,9 +1,9 @@
-import type { ToolEntry, IAgent } from '../../types/index.js';
+import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
-import { singleLine } from '../../core/prompt-value.js';
+import { pv } from '../../core/prompt-value.js';
 
 // === Types ===
 
@@ -158,12 +158,13 @@ export function createSheetsTool(auth: GoogleAuth): ToolEntry<SheetsInput> {
           return `Error: "${input.action}" requires user confirmation but no interactive prompt is available (autonomous/background mode). Use assistant mode for this action.`;
         }
         if (CONFIRM_ACTIONS.has(input.action) && agent.promptUser) {
-          // Values are single-lined so they cannot forge a line the system did
-          // not write — see core/prompt-value.ts. An id and an A1 range are
-          // never legitimately multi-line.
-          const confirmMsg = input.action === 'format'
-            ? `Apply batch changes to spreadsheet ${singleLine(input.spreadsheet_id ?? '(unknown)')}? Formatting requests can delete or overwrite cells and sheets.`
-            : `Overwrite range "${singleLine(input.range ?? '(unspecified)')}" in spreadsheet ${singleLine(input.spreadsheet_id ?? '(unknown)')}? This will replace existing data.`;
+          // `pv` splits frame from value, so the renderer can put the id and
+          // the range in text nodes — see core/prompt-value.ts. They are no
+          // longer collapsed on the way in, which means the prompt now shows
+          // the value that is actually about to be used.
+          const confirmMsg: PromptText = input.action === 'format'
+            ? pv`Apply batch changes to spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? Formatting requests can delete or overwrite cells and sheets.`
+            : pv`Overwrite range "${input.range ?? '(unspecified)'}" in spreadsheet ${input.spreadsheet_id ?? '(unknown)'}? This will replace existing data.`;
           const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
           if (answer.toLowerCase() !== 'yes' && answer !== '1') {
             return 'Action cancelled by user.';

@@ -58,6 +58,8 @@ vi.mock('./observability.js', () => ({
 
 import { Agent, RunAbortedError, LAZY_DEFERRED_TOOLS } from './agent.js';
 import type { WireSnapshot } from './wire-capture.js';
+import { flattenPrompt } from './prompt-value.js';
+import type { PromptText } from '../types/index.js';
 import { buildDedupReference } from './tool-result-hygiene.js';
 import { TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { getBetasForProvider } from '../types/index.js';
@@ -1753,10 +1755,13 @@ describe('Agent', () => {
       });
       await agent.send('Call API');
 
-      expect(promptUser).toHaveBeenCalledWith(
-        expect.stringContaining('MY_KEY'),
-        ['Allow', 'Deny', '\x00'],
-      );
+      // The prompt is now a PromptText (frame/value split), so assert on the
+      // flattened text rather than on a raw string — the secret NAME still has
+      // to be in what the user is shown.
+      expect(promptUser).toHaveBeenCalledTimes(1);
+      const [question, options] = promptUser.mock.calls[0] as [string | PromptText, string[]];
+      expect(flattenPrompt(question)).toContain('MY_KEY');
+      expect(options).toEqual(['Allow', 'Deny', '\x00']);
       expect(store.recordConsent).toHaveBeenCalledWith('MY_KEY');
     });
 

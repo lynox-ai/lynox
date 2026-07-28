@@ -1,9 +1,9 @@
-import type { ToolEntry, IAgent } from '../../types/index.js';
+import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
-import { singleLine } from '../../core/prompt-value.js';
+import { pv } from '../../core/prompt-value.js';
 
 // === Types ===
 
@@ -214,22 +214,22 @@ export function createCalendarTool(auth: GoogleAuth): ToolEntry<CalendarInput> {
           return `Error: "${input.action}" requires user confirmation but no interactive prompt is available (autonomous/background mode). Use assistant mode for this action.`;
         }
         if (CONFIRM_ACTIONS.has(input.action) && agent.promptUser) {
-          // Every interpolated value goes through `singleLine`: this prompt has
-          // a real FIELD STRUCTURE (`Time:` on its own line), so a newline in a
-          // value would render as another field line the reader cannot tell
-          // from a system-authored one. See core/prompt-value.ts. None of these
-          // fields is ever legitimately multi-line.
-          let confirmMsg = '';
+          // `pv` splits frame from value — this prompt has a real FIELD
+          // STRUCTURE (`Time:` on its own line), which is exactly what a
+          // newline in a value used to be able to imitate. The renderer puts
+          // values in text nodes, so a forged field line is no longer possible
+          // rather than merely unlikely. See core/prompt-value.ts.
+          let confirmMsg: PromptText = pv``;
           switch (input.action) {
             case 'create_event': {
               const attendeeStr = input.attendees?.length
-                ? ` with ${input.attendees.map((a) => singleLine(a)).join(', ')}`
+                ? ` with ${input.attendees.map((a) => a).join(', ')}`
                 : '';
-              confirmMsg = `Create event "${singleLine(input.summary ?? '(untitled)')}"\nTime: ${singleLine(input.start ?? '?')} – ${singleLine(input.end ?? '?')}${attendeeStr}${input.attendees?.length ? '\nThis will send calendar invites.' : ''}`;
+              confirmMsg = pv`Create event "${input.summary ?? '(untitled)'}"\nTime: ${input.start ?? '?'} – ${input.end ?? '?'}${attendeeStr}${input.attendees?.length ? '\nThis will send calendar invites.' : ''}`;
               break;
             }
-            case 'update_event': confirmMsg = `Update event ${singleLine(input.event_id ?? '(unknown)')}?`; break;
-            case 'delete_event': confirmMsg = `Delete event ${singleLine(input.event_id ?? '(unknown)')}? This cannot be undone.`; break;
+            case 'update_event': confirmMsg = pv`Update event ${input.event_id ?? '(unknown)'}?`; break;
+            case 'delete_event': confirmMsg = pv`Delete event ${input.event_id ?? '(unknown)'}? This cannot be undone.`; break;
           }
           const answer = await agent.promptUser(confirmMsg, ['Yes', 'No']);
           if (answer.toLowerCase() !== 'yes' && answer !== '1') {

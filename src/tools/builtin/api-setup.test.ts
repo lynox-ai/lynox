@@ -23,6 +23,7 @@ import { ApiStore } from '../../core/api-store.js';
 import type { ApiProfile } from '../../core/api-store.js';
 import * as llmHelper from '../../core/llm-helper.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
+import { flattenPrompt } from '../../core/prompt-value.js';
 
 // Mock getLynoxDir to use temp dir
 let mockLynoxDir: string;
@@ -259,7 +260,7 @@ describe('api_setup tool', () => {
       const result = await apiSetupTool.handler({ action: 'create', profile: customProfile }, agent);
       // The acceptance is an OUT-OF-BAND human answer, surfaced with the host.
       expect(promptUser).toHaveBeenCalledTimes(1);
-      expect(String(promptUser.mock.calls[0]?.[0])).toContain('my-litellm-proxy.example.com');
+      expect(flattenPrompt(promptUser.mock.calls[0]?.[0] as string)).toContain('my-litellm-proxy.example.com');
       expect(result).toContain('Created API profile');
       expect(store.get('custom-proxy-confirmed')).toBeDefined();
     });

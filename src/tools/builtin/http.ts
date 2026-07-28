@@ -17,6 +17,7 @@ import {
   MIN_USEFUL_EXTRACT_CHARS,
 } from '../../core/html-extract.js';
 import type { HtmlExtractResult } from '../../core/html-extract.js';
+import { pv } from '../../core/prompt-value.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
 // HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
@@ -553,7 +554,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           return `Blocked: ${exfilWarning}`;
         }
         const answer = await agent.promptUser(
-          `⚠ http_request: ${exfilWarning} — Allow?`,
+          pv`⚠ http_request: ${exfilWarning} — Allow?`,
           ['Allow', 'Deny', '\x00'],
         );
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
@@ -599,7 +600,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           pending = (async () => {
             try {
               const answer = await promptUser(
-                `⚠ http_request: ${method} to ${hostname} — Allow outbound data?`,
+                pv`⚠ http_request: ${method} to ${hostname} — Allow outbound data?`,
                 ['Allow', 'Deny', '\x00'],
               );
               const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());

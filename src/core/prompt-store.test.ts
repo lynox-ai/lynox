@@ -15,6 +15,7 @@ function makeDb(): Database.Database {
       question TEXT NOT NULL,
       options_json TEXT,
       questions_json TEXT,
+      segments_json TEXT,
       partial_answers_json TEXT,
       secret_name TEXT,
       secret_key_type TEXT,

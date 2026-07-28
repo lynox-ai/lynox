@@ -6,6 +6,8 @@ import { storePipeline, getPipeline } from './pipeline.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
 import type { RunHistory } from '../../core/run-history.js';
+import type { PromptText } from '../../types/index.js';
+import { pv, joinPrompts } from '../../core/prompt-value.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -109,62 +111,51 @@ export function phasesToPipelineSteps(phases: PlanPhase[]): InlinePipelineStep[]
 // --- Business-friendly presentation ---
 
 /**
- * Split a model-authored value into lines so each one can be quoted.
+ * Build the confirmation the user approves.
  *
- * `marked` only ever treats CR and LF as line endings, so those are what can
- * start a new markdown construct. U+2028/U+2029 are included anyway: the
- * BROWSER breaks on them even though the parser does not, and a line that looks
- * separate to the reader should be marked as quoted like any other.
+ * This prompt mixes two kinds of text: what the model wrote (summary, findings,
+ * step names) and what the system computed (the cost estimate from
+ * `estimatePipelineCost` over the run history, and who has to act). The cost
+ * line is the only number here the model did not choose, which is what made it
+ * worth forging.
+ *
+ * `pv` is what makes that impossible rather than merely awkward: every
+ * interpolation below is a VALUE, and the renderer puts values in text nodes,
+ * so model text cannot produce a heading, a quote, a code fence or a line that
+ * reads like a system statement — however many newlines it contains.
+ *
+ * The `> ` prefixes stay, and they are NOT merely decorative — this prompt has
+ * two audiences. The web UI gets the segments and is safe on its own. The CLI
+ * gets the FLATTENED string and renders no markdown, so there the quote marks
+ * are the only thing telling the two kinds of text apart. `quoteLines` puts the
+ * prefix in the FRAME and each line in its own value, which satisfies both: the
+ * flat form is quoted line by line, and every line is still a text node in the
+ * renderer. Neither mechanism covers both surfaces alone.
  */
-const MODEL_TEXT_LINE_BREAK = /\r\n|[\r\n\u2028\u2029]/;
-
 /**
- * Prefix every line of a model-authored value with `> ` so it renders inside a
- * blockquote.
- *
- * This prompt mixes two kinds of text in ONE string: what the model wrote (the
- * summary, the findings, the step names) and what the system computed (the cost
- * estimate, the "[your input needed]" marker). The cost line is the only number
- * here the model did not choose — it comes from `estimatePipelineCost` over the
- * run history — which makes it precisely the line worth forging.
- *
- * Unlike the confirmation prompts in `integrations/google`, the values here sit
- * at the START of a line, so an unguarded one can open real markdown BLOCK
- * constructs, not just fake a line. And `singleLine` is the wrong tool: a plan
- * summary is legitimately multi-line, so flattening it would damage the feature
- * to protect the display. Quoting keeps multi-line values intact and moves the
- * boundary to where the reader can see it — a forged "Estimated cost" line
- * appears inside the quote, the real one outside it.
- *
- * EVERY line has to be prefixed, blank ones included: a bare empty line ends
- * the blockquote in CommonMark, and everything after it would be outside the
- * quote again — which is the exact escape this is built to prevent.
+ * Quote a model-written value line by line — prefix in the frame, each line its
+ * own value. A value spanning lines would otherwise be quoted only on its first
+ * one in the flattened form, which is exactly what the CLI shows.
  */
-function quoteModelText(value: string): string[] {
-  return value.split(MODEL_TEXT_LINE_BREAK).map((line) => (line === '' ? '>' : `> ${line}`));
+function quoteLines(value: string, indent = ''): PromptText[] {
+  return value
+    .split(/\r\n|[\r\n\u2028\u2029]/)
+    .map((line) => (line === '' ? pv`>` : pv`> ${indent}${line}`));
 }
+function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | undefined): PromptText {
+  const quoted: PromptText[] = [];
 
-function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | undefined): string {
-  const quoted: string[] = [];
-
-  // Context — brief, conversational
   if (input.context) {
-    quoted.push(...quoteModelText(input.context.summary));
-    if (input.context.findings && input.context.findings.length > 0) {
-      for (const f of input.context.findings) {
-        quoted.push(...quoteModelText(`  - ${f}`));
-      }
+    quoted.push(...quoteLines(input.context.summary));
+    for (const f of input.context.findings ?? []) {
+      quoted.push(...quoteLines(f, '  - '));
     }
-    quoted.push('>');
+    quoted.push(pv`>`);
   }
 
-  quoted.push(...quoteModelText(input.summary));
-  quoted.push('>');
+  quoted.push(...quoteLines(input.summary));
+  quoted.push(pv`>`);
 
-  // Phased plan or flat steps. The step number and the marker are system text
-  // sitting on a model-written line, so they are inside the quote and a step
-  // name could imitate them — the authoritative statement about who has to act
-  // is the system line below, outside the quote.
   const userStepNumbers: number[] = [];
   if (input.phases && input.phases.length > 0) {
     for (let p = 0; p < input.phases.length; p++) {
@@ -172,27 +163,28 @@ function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | un
       const isUser = phase.assignee === 'user';
       if (isUser) userStepNumbers.push(p + 1);
       const marker = isUser ? ' [your input needed]' : '';
-      quoted.push(...quoteModelText(`${p + 1}. ${phase.name}${marker}`));
+      quoted.push(...quoteLines(`${String(p + 1)}. ${phase.name}${marker}`));
     }
   } else if (input.steps && input.steps.length > 0) {
     for (let i = 0; i < input.steps.length; i++) {
-      quoted.push(...quoteModelText(`${i + 1}. ${input.steps[i] ?? ''}`));
+      quoted.push(...quoteLines(`${String(i + 1)}. ${input.steps[i] ?? ''}`));
     }
   }
 
-  // Everything from here is system-authored and deliberately OUTSIDE the quote.
-  const lines = [...quoted, ''];
+  // System text, kept out of the quote so a reader can see the difference. The
+  // blank line before it also keeps CommonMark's lazy continuation from folding
+  // these lines INTO the blockquote — measured, not assumed.
+  const parts = [joinPrompts(quoted, '\n'), pv``];
 
   if (userStepNumbers.length > 0) {
-    lines.push(`Your input is needed at step ${userStepNumbers.join(', ')}.`);
+    parts.push(pv`Your input is needed at step ${userStepNumbers.join(', ')}.`);
   }
   if (estimatedCostUsd !== undefined && estimatedCostUsd > 0.01) {
-    lines.push(`Estimated cost: ~$${estimatedCostUsd.toFixed(2)}`);
+    parts.push(pv`Estimated cost: ~$${estimatedCostUsd.toFixed(2)}`);
   }
-  if (lines[lines.length - 1] !== '') lines.push('');
+  parts.push(pv``, pv`Shall I proceed?`);
 
-  lines.push('Shall I proceed?');
-  return lines.join('\n');
+  return joinPrompts(parts, '\n');
 }
 
 // --- Pipeline bridge ---

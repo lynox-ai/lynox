@@ -14,7 +14,8 @@ import { fetchPinned } from './network-guard.js';
 import { readBodyCapped, stripUntrustedSeparators } from './sanitize.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
-import type { TriggerRecord } from '../types/index.js';
+import type { TriggerRecord, PromptText } from '../types/index.js';
+import { flattenPrompt } from './prompt-value.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
 import { reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling } from './session-budget.js';
 
@@ -481,7 +482,11 @@ export class WorkerLoop {
     session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous', profile: workerProfile });
 
     // Wire promptUser so background tasks can ask questions via notifications
-    session.promptUser = (question: string, options?: string[]): Promise<string> => {
+    session.promptUser = (rawQuestion: string | PromptText, options?: string[]): Promise<string> => {
+      // A background task surfaces through a notification body, which is plain
+      // text with no renderer — so the frame/value split has nothing to protect
+      // here and the flattened form is the honest one.
+      const question = flattenPrompt(rawQuestion);
       return new Promise<string>((resolve) => {
         const active = this.activeTasks.get(task.id);
         if (active) {

@@ -38,7 +38,8 @@ import {
   checkRecipientDedup,
   recordMailSend,
 } from './tools/rate-limit.js';
-import { singleLine } from '../../core/prompt-value.js';
+import { pv, singleLine } from '../../core/prompt-value.js';
+import type { PromptText } from '../../types/index.js';
 
 /**
  * Recipient count above which callers should force explicit confirmation
@@ -273,10 +274,10 @@ const BODY_PREVIEW_CHARS = 200;
  * for *credential*-shaped content, not for bulk data). So when the body does
  * not fit, say how large it really is and that the remainder is unseen.
  */
-export function buildBodyBlock(body: string): string {
+export function buildBodyBlock(body: string): PromptText {
   const flat = body.replace(/\s+/g, ' ').trim();
-  if (flat.length === 0) return '> _(empty body)_';
-  if (flat.length <= BODY_PREVIEW_CHARS) return `> ${flat}`;
+  if (flat.length === 0) return pv`> _(empty body)_`;
+  if (flat.length <= BODY_PREVIEW_CHARS) return pv`> ${flat}`;
   const shown = truncate(flat, BODY_PREVIEW_CHARS);
   // Count from the rendered string (minus the ellipsis truncate appends) rather
   // than re-deriving truncate's own `max - 1`: a change there would otherwise
@@ -284,18 +285,24 @@ export function buildBodyBlock(body: string): string {
   // the raw `body.length` would overstate the hidden volume for any normal
   // multi-line mail, since collapsing only ever shortens.
   const shownChars = shown.length - 1;
-  return (
-    `> ${shown}\n\n` +
-    `⚠ **Body is ${String(flat.length)} chars — only the first ${String(shownChars)} are shown above.**`
-  );
+  return pv`> ${shown}\n\n⚠ **Body is ${String(flat.length)} chars — only the first ${String(shownChars)} are shown above.**`;
 }
 
-// `singleLine` lives in core/prompt-value.ts — the same forgery applies to
-// every confirmation prompt, not just mail. What is mail-SPECIFIC is why it
-// bites hardest here: on `mail_reply` the Subject is chosen by whoever sent
-// the mail, so the value is attacker-controlled without any model in the
-// loop. Headers are single-line by definition, so it costs a legitimate
-// subject nothing.
+// Two mechanisms, and they cover DIFFERENT surfaces — this is the rule, not a
+// belt-and-braces habit:
+//   `pv`         separates frame from value, and the web renderer puts values
+//                in text nodes. That is what makes a value inert where markdown
+//                is parsed.
+//   `singleLine` collapses a value that is single-line BY NATURE (a header, an
+//                address, an id). The CLI renders the FLATTENED string with no
+//                markdown at all, so nothing there distinguishes a value's
+//                newline from the frame's — the collapse is what protects that
+//                surface, and only there does it cost a legitimate value
+//                nothing.
+// A legitimately multi-line value (a body, a plan summary) gets `pv` alone; a
+// header field gets both. On `mail_reply` the Subject is chosen by whoever sent
+// the mail, so it is attacker-controlled with no model in the loop — which is
+// why this file was the first to need either.
 
 /**
  * Render an address list for a preview: one line, each address flattened.
@@ -316,29 +323,31 @@ export function previewAddressList(addrs: ReadonlyArray<MailAddress>): string {
  * user. Kept in send-core so the inbox-pane (if it ever surfaces a
  * preview elsewhere) can render the same shape.
  */
-export function buildSendPreview(ctx: SendCoreBeforeSendCtx): string {
+export function buildSendPreview(ctx: SendCoreBeforeSendCtx): PromptText {
   const personaLine = ctx.accountConfig
     ? `\n  Persona: ${truncate(personaFor(ctx.accountConfig), 160)}`
     : '';
   const bodyPreview = buildBodyBlock(ctx.body);
   if (ctx.isMassSend) {
-    return (
-      `⚠ **MASS SEND** — ${String(ctx.uniqueRecipientCount)} recipients\n\n` +
-      `**Account:** ${ctx.provider.accountId}${personaLine ? `\n**Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}\n` +
-      `**Recipients:**\n${[...ctx.to, ...ctx.cc, ...ctx.bcc].map((a) => `  • ${singleLine(a.address)}`).join('\n')}\n` +
-      `**Subject:** ${singleLine(ctx.subject)}\n\n` +
-      bodyPreview
-    );
+    return pv`⚠ **MASS SEND** — ${String(ctx.uniqueRecipientCount)} recipients
+
+**Account:** ${ctx.provider.accountId}${personaLine ? pv`
+**Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}
+**Recipients:**
+${[...ctx.to, ...ctx.cc, ...ctx.bcc].map((a) => `  • ${singleLine(a.address)}`).join('\n')}
+**Subject:** ${singleLine(ctx.subject)}
+
+${bodyPreview}`;
   }
-  return (
-    `**Send email?**\n\n` +
-    `**To:** ${previewAddressList(ctx.to)}` +
-    `${ctx.cc.length > 0 ? `\n**Cc:** ${previewAddressList(ctx.cc)}` : ''}` +
-    `${ctx.bcc.length > 0 ? `\n**Bcc:** ${previewAddressList(ctx.bcc)}` : ''}\n` +
-    `**Subject:** ${singleLine(ctx.subject)}\n` +
-    `**From:** ${ctx.provider.accountId}${personaLine ? ` · _${truncate(personaFor(ctx.accountConfig!), 80)}_` : ''}\n\n` +
-    bodyPreview
-  );
+  return pv`**Send email?**
+
+**To:** ${previewAddressList(ctx.to)}${ctx.cc.length > 0 ? pv`
+**Cc:** ${previewAddressList(ctx.cc)}` : ''}${ctx.bcc.length > 0 ? pv`
+**Bcc:** ${previewAddressList(ctx.bcc)}` : ''}
+**Subject:** ${singleLine(ctx.subject)}
+**From:** ${ctx.provider.accountId}${personaLine ? pv` · _${truncate(personaFor(ctx.accountConfig!), 80)}_` : ''}
+
+${bodyPreview}`;
 }
 
 /**

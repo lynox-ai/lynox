@@ -1223,6 +1223,15 @@ const MIGRATIONS: string[] = [
      captured_at INTEGER NOT NULL,
      PRIMARY KEY (run_id, turn_index)
    );`,
+
+  // v51: Frame/value segments for confirmation prompts. `question` stays the
+  // flattened text (the CLI, the logs and any client that predates this read
+  // it); `segments_json` carries which spans the SYSTEM wrote and which were
+  // interpolated, so the renderer can put values in text nodes instead of
+  // parsing them as markdown. NULL means "all frame" — every prompt written
+  // before this migration, and every caller still passing a plain string.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (51);
+   ALTER TABLE pending_prompts ADD COLUMN segments_json TEXT;`,
 ];
 
 export class RunHistory {

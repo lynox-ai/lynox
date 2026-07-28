@@ -9,6 +9,8 @@ import { createToolContext } from '../../core/tool-context.js';
 import { rememberTool, recallTool, memoryBlockEditTool, memoryRetireTool, memoryFocusTool, archiveSearchTool } from './knowledge.js';
 import type { IAgent } from '../../types/index.js';
 import { appendBoundedJsonl } from '../../core/bounded-jsonl-log.js';
+import { flattenPrompt } from '../../core/prompt-value.js';
+import type { PromptText } from '../../types/index.js';
 
 // Mock the capture-telemetry sink so we can assert the propose_shown funnel event fires
 // from the emit site (the real appendCaptureTelemetry gate still runs — see the DK-flag cases).
@@ -378,7 +380,7 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
   it('B6: memory_block_edit replace-mode preview shows the NEW standing rule (old→new), not just old_text', async () => {
     const { agent } = make();
     const seen: string[] = [];
-    (agent as unknown as { promptUser: (q: string) => Promise<string> }).promptUser = async (q: string) => { seen.push(q); return 'Apply'; };
+    (agent as unknown as { promptUser: (q: string | PromptText) => Promise<string> }).promptUser = async (q: string | PromptText) => { seen.push(flattenPrompt(q)); return 'Apply'; };
     // seed the block so the replace has an old_text to match
     await memoryBlockEditTool.handler({ block: 'playbook', mode: 'append', new_text: 'ask before sending invoices' }, agent);
     seen.length = 0;

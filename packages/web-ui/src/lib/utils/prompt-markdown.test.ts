@@ -4,6 +4,7 @@ import { marked } from 'marked';
 import { parseHTML } from 'linkedom';
 import {
 	renderPromptMarkdown,
+	renderPromptSegments,
 	isSafePromptHref,
 	PROMPT_EMITTED_TAGS,
 	PROMPT_STRIPPED_TAGS,
@@ -337,6 +338,81 @@ describe('renderPromptMarkdown — the prompt still reads as intended', () => {
 });
 
 /**
+ * The segmented path — where the frame/value split actually pays off.
+ *
+ * The engine tags each span; here a value must be unable to become anything but
+ * text. These assert the RENDERED html, not the input, because the whole point
+ * is what the approver ends up looking at.
+ */
+describe('renderPromptSegments', () => {
+	const LF = String.fromCharCode(0x0a);
+	const NUL = String.fromCharCode(0);
+	const frame = (text: string) => ({ kind: 'frame' as const, text });
+	const value = (text: string) => ({ kind: 'value' as const, text });
+
+	it('keeps frame markdown and renders values as text', () => {
+		const out = renderPromptSegments([frame('**Host:** '), value('**not bold**')]);
+		expect(out).toContain('<strong>Host:</strong>');
+		expect(out).toContain('**not bold**');
+		expect(out).not.toMatch(/<strong>not bold<\/strong>/);
+	});
+
+	it('a value cannot forge a field line, however many newlines it has', () => {
+		const forged = `attacker.example${LF}**Host:** api.stripe.com`;
+		const out = renderPromptSegments([frame('**Host:** '), value(forged)]);
+		// The real label is markup; the forged one is literal text. That is the
+		// difference the approver can see, and it is what the per-caller fixes
+		// could only approximate.
+		expect(out).toContain('<strong>Host:</strong>');
+		expect(out).toContain('**Host:** api.stripe.com');
+		expect((out.match(/<strong>Host:<\/strong>/g) ?? []).length).toBe(1);
+	});
+
+	it('a value cannot open a block construct', () => {
+		const out = renderPromptSegments([frame('Plan: '), value(`x${LF}# heading${LF}> quote${LF}\`\`\`code`)]);
+		expect(out).not.toMatch(/<h1|<blockquote|<code|<pre/);
+		expect(out).toContain('# heading');
+	});
+
+	it('a value cannot introduce an element', () => {
+		const out = renderPromptSegments([frame('File: '), value('<img src=x onerror=alert(1)>')]);
+		expect(out).not.toMatch(/<img/i);
+		expect(out).toContain('&lt;img');
+	});
+
+	it('block structure may cross a segment boundary', () => {
+		// The reason values are not rendered one by one: the quote marker lives
+		// in the frame and the quoted text in the value.
+		const out = renderPromptSegments([
+			frame('> '),
+			value(`line 1${LF}line 2`),
+			frame(`${LF}${LF}Estimated cost: ~$42.50`),
+		]);
+		expect(out).toMatch(/<blockquote>[\s\S]*line 1[\s\S]*<\/blockquote>/);
+		const afterQuote = out.slice(out.lastIndexOf('</blockquote>'));
+		expect(afterQuote).toContain('Estimated cost: ~$42.50');
+	});
+
+	it('a value containing the placeholder cannot shift the others', () => {
+		// The placeholder is removed from every value first, so this is a
+		// property we enforce rather than a collision we hope against.
+		const out = renderPromptSegments([frame('A: '), value(`x${NUL}y`), frame(' B: '), value('second')]);
+		expect(out).toContain('xy');
+		expect(out).toContain('second');
+		expect(out).not.toContain(NUL);
+	});
+
+	it('renders an all-frame prompt exactly like the unsegmented path', () => {
+		const text = '**Bold** and `code`';
+		expect(renderPromptSegments([frame(text)])).toBe(renderPromptMarkdown(text));
+	});
+
+	it('falls back to the missing-text notice for an empty prompt', () => {
+		expect(renderPromptSegments([])).toBe(renderPromptMarkdown(''));
+	});
+});
+
+/**
  * The wiring guard. There is no DOM environment or svelte plugin in the vitest
  * config, so a component test cannot exist here — which means without this,
  * reverting the call site to MarkdownRenderer would leave the whole suite green
@@ -349,10 +425,14 @@ describe('ChatView wiring', () => {
 		'utf-8',
 	);
 
-	it('renders the prompt through renderPromptMarkdown', () => {
+	it('renders the prompt through this module, segments first', () => {
 		// Whitespace-tolerant: a formatter run must not silently disarm the guard.
-		expect(source).toMatch(/\{@html\s+renderPromptMarkdown\(\s*pendingPermission\.question\s*\)\s*\}/);
-		expect(source).toMatch(/import\s*\{\s*renderPromptMarkdown\s*\}\s*from\s*'\.\.\/utils\/prompt-markdown\.js'/);
+		// Both branches are asserted, because the fallback is the one that stays
+		// reachable forever (an older engine sends no segments) and the segment
+		// branch is the one that carries the boundary.
+		expect(source).toMatch(/pendingPermission\.segments[\s\S]{0,120}renderPromptSegments\(\s*pendingPermission\.segments\s*\)/);
+		expect(source).toMatch(/renderPromptMarkdown\(\s*pendingPermission\.question\s*\)/);
+		expect(source).toMatch(/import\s*\{[^}]*renderPromptSegments[^}]*\}\s*from\s*'\.\.\/utils\/prompt-markdown\.js'/);
 	});
 
 	// An allowlist of every MarkdownRenderer call, not a search for one bad

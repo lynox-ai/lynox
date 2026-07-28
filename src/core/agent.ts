@@ -65,6 +65,7 @@ import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-key.js';
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
+import { pv } from './prompt-value.js';
 
 /**
  * Per-image token estimate for occupancy accounting. Anthropic bills vision by
@@ -2105,7 +2106,7 @@ export class Agent implements IAgent {
         if (unconsented.length > 0) {
           if (this.promptUser) {
             const answer = await this.promptUser(
-              `Tool "${tc.name}" wants to use secret(s): ${unconsented.join(', ')}. Allow?`,
+              pv`Tool "${tc.name}" wants to use secret(s): ${unconsented.join(', ')}. Allow?`,
               ['Allow', 'Deny', '\x00'],
             );
             if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {

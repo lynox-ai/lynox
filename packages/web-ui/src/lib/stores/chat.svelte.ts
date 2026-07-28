@@ -146,8 +146,38 @@ export interface PipelineInfo {
 	steps: PipelineStepInfo[];
 }
 
+/** One span of a prompt, tagged with who wrote it (engine v51). */
+export interface PromptSegment {
+	kind: 'frame' | 'value';
+	text: string;
+}
+
+/**
+ * Read the frame/value segments off a wire payload.
+ *
+ * Deliberately strict: anything malformed collapses to `undefined`, i.e. the
+ * all-frame rendering that predates the split. A half-parsed segment list would
+ * be worse than none — it would claim a boundary it cannot back.
+ */
+function parsePromptSegments(raw: unknown): PromptSegment[] | undefined {
+	if (!Array.isArray(raw) || raw.length === 0) return undefined;
+	const out: PromptSegment[] = [];
+	for (const item of raw) {
+		if (typeof item !== 'object' || item === null) return undefined;
+		const kind = (item as Record<string, unknown>)['kind'];
+		const text = (item as Record<string, unknown>)['text'];
+		if ((kind !== 'frame' && kind !== 'value') || typeof text !== 'string') return undefined;
+		out.push({ kind, text });
+	}
+	return out;
+}
+
 export interface PermissionPrompt {
+	/** Flattened text. Always present; the only form an older engine sends. */
 	question: string;
+	/** Frame/value split, when the engine provides it. Absent means all-frame,
+	 *  which is exactly how this rendered before the split existed. */
+	segments?: PromptSegment[];
 	options?: string[];
 	/** Timeout in ms from server — used for countdown display */
 	timeoutMs?: number;
@@ -1411,6 +1441,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			if (!pendingPermission) runPromptCount++;
 			pendingPermission = {
 				question: String(data['question'] ?? ''),
+				segments: parsePromptSegments(data['segments']),
 				options: data['options'] as string[] | undefined,
 				timeoutMs: data['timeoutMs'] as number | undefined,
 				receivedAt: Date.now(),
@@ -1993,6 +2024,7 @@ export async function checkPendingPrompt(): Promise<void> {
 		} else if (promptType === 'ask_user') {
 			pendingPermission = {
 				question: String(data['question'] ?? ''),
+				segments: parsePromptSegments(data['segments']),
 				options: data['options'] as string[] | undefined,
 				timeoutMs: data['timeoutMs'] as number | undefined,
 				receivedAt: Date.now(),

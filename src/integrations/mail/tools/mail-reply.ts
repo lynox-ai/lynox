@@ -16,7 +16,7 @@ import {
 } from '../provider.js';
 import type { MailContext } from '../context.js';
 import { buildBodyBlock, previewAddressList } from '../send-core.js';
-import { singleLine } from '../../../core/prompt-value.js';
+import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
 import {
@@ -199,12 +199,14 @@ export function createMailReplyTool(registry: MailRegistry, ctx?: MailContext): 
         // prompt (see singleLine's doc).
         const bodyPreview = buildBodyBlock(input.body);
 
-        const preview = `**Reply to "${singleLine(original.envelope.subject || '(no subject)')}"?**\n\n` +
-          `**To:** ${previewAddressList(toAddrs)}` +
-          `${ccAddrs.length > 0 ? `\n**Cc:** ${previewAddressList(ccAddrs)}` : ''}\n` +
-          `**Subject:** ${singleLine(subject)}\n` +
-          `**From:** ${sendProvider.accountId}${smartNote}${personaNote}\n\n` +
-          bodyPreview;
+        const preview = pv`**Reply to "${singleLine(original.envelope.subject || '(no subject)')}"?**
+
+**To:** ${previewAddressList(toAddrs)}${ccAddrs.length > 0 ? pv`
+**Cc:** ${previewAddressList(ccAddrs)}` : ''}
+**Subject:** ${singleLine(subject)}
+**From:** ${sendProvider.accountId}${smartNote}${personaNote}
+
+${bodyPreview}`;
 
         const answer = await agent.promptUser(preview, ['Yes', 'No']);
         if (!isApproval(answer)) {

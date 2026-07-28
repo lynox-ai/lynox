@@ -2,6 +2,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import { runMerge } from '../../core/subject-merge-runner.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { pv } from '../../core/prompt-value.js';
 
 // Foundation Rework v2 — subject dedup (PR-C3). The chat-native surface over the
 // SubjectStore.mergeSubjects primitive: when two person entries turn out to be the
@@ -75,7 +76,7 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
       n.replace(/\p{Cf}/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 60);
     const dupSafe = clip(dup.name), canonSafe = clip(canon.name);
     const answer = await agent.promptUser(
-      `Merge "${dupSafe}" into "${canonSafe}"? Every note, task and mention of "${dupSafe}" moves to "${canonSafe}", and "${dupSafe}" is archived. This is reversible.`,
+      pv`Merge "${dupSafe}" into "${canonSafe}"? Every note, task and mention of "${dupSafe}" moves to "${canonSafe}", and "${dupSafe}" is archived. This is reversible.`,
       ['Merge', 'Cancel'],
     );
     if (answer !== 'Merge') return `Cancelled — "${dup.name}" and "${canon.name}" were left as separate entries.`;
