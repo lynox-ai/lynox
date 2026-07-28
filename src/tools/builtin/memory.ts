@@ -4,7 +4,8 @@ import { channels } from '../../core/observability.js';
 import { DATE_PREFIX_RE } from '../../core/memory-facade.js';
 import { parseScopeString, formatScopeRef, isMoreSpecific, SCOPE_PARAM_DESCRIPTION } from '../../core/scope-resolver.js';
 import { estimateTokens } from '../../core/llm-helper.js';
-import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
+import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted-signals.js';
+import { appendUntrustedCauseLog } from '../../core/untrusted-cause-log.js';
 
 // KnowledgeLayer accessed via agent.toolContext.knowledgeLayer
 
@@ -275,6 +276,15 @@ export const memoryStoreTool: ToolEntry<MemoryStoreInput> = {
     // most; PRD §2.8). A genuine user fact still lands, honestly as agent_inferred;
     // Wave 1.3 re-derives the tier from the write-boundary channel, not the agent.
     const sourceUntrusted = deriveTurnUntrusted(agent);
+    // Same attribution as the DK path, so the two pipelines stay comparable in the data.
+    void appendUntrustedCauseLog(agent.toolContext?.userConfig?.retrieval_shadow_log === true, {
+      ts: Date.now(),
+      site: 'memory-store',
+      cause: describeTurnUntrusted(agent),
+      untrusted: sourceUntrusted,
+      threadId: agent.currentThreadId,
+      runId: agent.currentRunId,
+    });
     if (scopeRef) {
       await agent.memory.appendScoped(input.namespace, input.content, scopeRef);
       channels.memoryStore.publish({ namespace: input.namespace, content: input.content, scopeType: scopeRef.type, scopeId: scopeRef.id, sourceThreadId: agent.currentThreadId, sourceChannel: 'agent', sourceRunId: agent.currentRunId, sourceUntrusted });
