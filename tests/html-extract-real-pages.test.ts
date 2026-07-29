@@ -88,11 +88,24 @@ describe('html extraction under a hostile page', () => {
     expect(timeExtract(hostile(9000))).toBeLessThan(4000);
   });
 
-  it('does not blow up superlinearly beyond the size cap', () => {
-    // The cap is what makes the quadratic term survivable. If it ever stops
-    // bounding the input, doubling stops being ~flat here and this fails.
-    const a = timeExtract(hostile(36_000));
-    const b = timeExtract(hostile(72_000));
-    expect(b).toBeLessThan(a * 2.5);
-  });
+  // A scaling assertion used to sit here, comparing 36k against 72k anchors to
+  // show the cost went flat. It is gone, and BOTH reasons are worth writing down.
+  //
+  // It was too expensive: two runs of several seconds each, on every CI run, and
+  // it blew the 10 s test timeout on a shared runner.
+  //
+  // And its premise was WRONG, which is the part that matters here. It claimed
+  // the flattening came from "the size cap". There is no input-side cap:
+  // `DEFAULT_HTML_EXTRACT_MAX_CHARS` (24 000) truncates the EMITTED TEXT at the
+  // end (`html-extract.ts:587`), while `collectLinks` runs over the whole cleaned
+  // input before that (`:547`). The plateau came from the link walk stopping at
+  // `MAX_EXTRACT_LINKS`, not from any bound on what it reads.
+  //
+  // So the honest position is the opposite of reassuring: the anchor walk is
+  // quadratic in INPUT size with no input-side bound, and a page crafted to
+  // produce no links keeps it walking. That is a register item to fix, not a
+  // property to pin — and a test asserting a comforting ratio would have made it
+  // look handled. This file exists because a performance claim shipped without
+  // anything able to falsify it; shipping a second one here would be the joke
+  // writing itself.
 });
