@@ -90,7 +90,8 @@ export function matchesSecretPattern(text: string): string | null {
  * free text, but wrong when the field should hold NO credential at all (an onboarding
  * business-fact answer). There a bare 40-99 char token is far more likely a pasted
  * credential than a company/role/goal, so bias toward rejection. Does NOT close the
- * sub-40-char class (short app-passwords, TOTP seeds) — that stays [[DEF-onboarding-secret-heuristic]].
+ * sub-40-char class (short app-passwords, TOTP seeds): treat this as a filter that
+ * raises the cost of a mistake, never as a guarantee that a field holds no credential.
  */
 export function matchesSecretPatternStrict(text: string): string | null {
   for (const pattern of SECRET_PATTERNS) {

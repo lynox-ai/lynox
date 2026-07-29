@@ -250,8 +250,8 @@ export class Agent implements IAgent {
    * config.json file), which on managed-tier engines is stale after the
    * user switches provider via the LLM Settings UI — sub-agent gets
    * undefined apiBaseURL → llm-client throws "OpenAI provider requires
-   * apiBaseURL and openaiModelId" → spawn fails. Per [[bug 2026-05-24
-   * staging-walk Case 26]].
+   * apiBaseURL and openaiModelId" → spawn fails. Found on a staging walk
+   * on 2026-05-24.
    */
   private readonly inheritedApiKey: string | undefined;
   private readonly inheritedApiBaseURL: string | undefined;

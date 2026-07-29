@@ -230,8 +230,7 @@ const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
  * arbitrary tool credentials without filing a support ticket. The previous
  * allowlist (`BYOK_USER_WRITABLE_SECRETS` — only LLM provider keys) violated
  * that promise — every integration the agent wanted to use needed admin
- * provisioning. Inverted 2026-05-18 after rafael's QA: see
- * [[feedback_canary_pinning]] + [[project_managed_user_secrets_promise]].
+ * provisioning. Inverted 2026-05-18 after QA on a real managed instance.
  *
  * **Deny-list — admin-only patterns** (cookie users get 403 for these):
  *  - `LYNOX_*`        engine-internal infra (HTTP_SECRET, VAULT_KEY, BUGSINK_DSN, etc.)
@@ -4426,8 +4425,7 @@ export class LynoxHTTPApi {
       // Account/Billing page can render a working CTA that drops the customer
       // into Stripe's email-OTP login (Stripe handles auth + portal — no
       // cross-domain cookie tanz). Set per-instance via `sync-env` admin API
-      // until the PR 3 sprint moves it into the CP config-generator pipeline.
-      // See [[project_pr3_stripe_portal_sso_deferred]] for the full SSO plan.
+      // until the CP config-generator pipeline takes it over.
       const stripePortalUrl = process.env['LYNOX_STRIPE_PORTAL_LOGIN_URL'];
       if (stripePortalUrl && /^https:\/\/billing\.stripe\.com\//.test(stripePortalUrl)) {
         redacted['stripe_portal_login_url'] = stripePortalUrl;

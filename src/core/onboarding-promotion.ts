@@ -99,8 +99,7 @@ export function promoteOnboardingBasics(
     // Secret-shape gate — write() does NOT scan, and this promotion writes DIRECTLY. A
     // credential-shaped answer (the dictation residual, S1b) must never land agent-readable
     // in recall. Best-effort: catches vendor keys, JWT/Bearer, 40+ char tokens, and known
-    // vault values; it does NOT catch every short non-vendor credential
-    // ([[DEF-onboarding-secret-heuristic]]).
+    // vault values; it does NOT catch every short non-vendor credential.
     if (deps.knowledgeStore.looksLikeSecret(value)) {
       rejected++;
       continue;

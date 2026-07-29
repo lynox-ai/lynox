@@ -21,7 +21,7 @@ function oneLine(s: string): string {
 }
 
 /** Render the consent surface (PRD §5 A3) as a chat message — no bespoke import
- *  UI ([[fb_chat_mit_kontext]]). Reports what the workflow does, what it needs
+ *  UI. Reports what the workflow does, what it needs
  *  re-bound, what unattended access it REQUESTED (but did not receive), and any
  *  caution signals, so the human confirms with eyes open. */
 function renderConsent(
