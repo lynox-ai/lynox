@@ -99,8 +99,9 @@ HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0
 #
 # Two honest limits, both asserted in tests/public-repo-guard.test.ts, where every
 # marker lives and is assembled at runtime. SELF_EXCLUDE stays load-bearing for the
-# HARD classes above, which this file necessarily spells out; the reference class
-# needs it only because the pattern definitions themselves look like what they match.
+# HARD classes above, which this file necessarily spells out; for the reference
+# class it covers only the worked examples in the prose below — the pattern
+# definitions themselves do not match, since the backslashes break the brackets.
 #
 #  1. A line-based grep cannot see a link SPLIT ACROSS LINES, and one of the 17 was.
 #     REF_OPENER catches the opening line of that form; it has zero hits on the tree
@@ -198,6 +199,13 @@ while IFS= read -r f; do
     violations=$((violations + 1))
   done < <(grep -nIEi "$HARD_LOCAL_TOOLING" "$f" 2>/dev/null || true)
 
+  # Whole-file allow applies from here down. It sits ABOVE the reference loops on
+  # purpose: those match a bracket shape that legal content can produce, and an
+  # allow-listed file may have no comment syntax to hang a pragma on — a JSON
+  # document with a nested array had no way past at all while this check came
+  # after. The HARD classes above stay outside it, as their comment says.
+  is_allow_file "$f" && continue
+
   # Internal cross-reference slug — case-SENSITIVE and a separate grep: the pattern
   # is anchored on bracket shape, so the -i of the run above would buy nothing and
   # only widen it. Honours the inline pragma (see the class comment for why).
@@ -231,8 +239,8 @@ while IFS= read -r f; do
     violations=$((violations + 1))
   done < <(grep -nIE "$REF_OPENER" "$f" 2>/dev/null || true)
 
-  # SOFT — exempt if whole-file allowed or line carries the pragma.
-  is_allow_file "$f" && continue
+  # SOFT — exempt if the line carries the pragma. Whole-file allow already
+  # returned above, so it needs no second check here.
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in

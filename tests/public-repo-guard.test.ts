@@ -43,6 +43,8 @@ const internalRef = (slug: string): string => `${REF_OPEN}${slug}${REF_CLOSE}`;
 const PRAGMA = ['public', 'repo', 'guard'].join('-') + ':allow';
 /** Legal TS that wears the same brackets as a ref — the false-positive case. */
 const DESTRUCTURE = `const ${REF_OPEN}first${REF_CLOSE} = rows;`;
+/** A dual-use SOFT hostname, assembled like every other marker here. */
+const SOFT_HOST = ['engine', 'lynox', 'cloud'].join('.');
 
 let dir: string;
 
@@ -169,6 +171,13 @@ describe('public-repo-guard — fires on planted leaks', () => {
     expect(runGuard()).not.toBe(0);
   });
 
+  it('flags a SOFT hostname with no pragma and no allow-listing', () => {
+    // The inverse of the two SOFT release cases below. Without this one, deleting
+    // the SOFT loop outright leaves both of them green.
+    commitFile('src/soft.ts', `const h = '${SOFT_HOST}';\n`);
+    expect(runGuard()).not.toBe(0);
+  });
+
   it('catches a free-text ref, not just a slug-shaped one', () => {
     // This is the exact form of one of the refs the sweep removed. The first
     // pattern allowed no spaces in the body, so this one — and only this one —
@@ -245,6 +254,20 @@ describe('public-repo-guard — does NOT fire on benign lines', () => {
     // nothing about the guard it escapes.
     commitFile('src/destructure.ts', `${DESTRUCTURE}\n`);
     expect(runGuard()).not.toBe(0);
+  });
+
+  it('releases a SOFT hostname line carrying the pragma', () => {
+    // The SOFT class had no coverage at all: deleting its pragma branch, or the
+    // whole loop, or making is_allow_file always true, each survived every test.
+    // The middle one is the same defect this suite already caught twice on the
+    // reference class, so it gets asserted here rather than assumed.
+    commitFile('src/soft.ts', `const h = '${SOFT_HOST}'; // ${PRAGMA}: documented on purpose\n`);
+    expect(runGuard()).toBe(0);
+  });
+
+  it('allows a SOFT hostname inside an allow-listed file', () => {
+    commitFile('SECURITY.md', `Reach the service at ${SOFT_HOST}.\n`);
+    expect(runGuard()).toBe(0);
   });
 
   it('allows the configured env-var indirection that replaced the hard-coded path', () => {
