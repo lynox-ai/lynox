@@ -96,7 +96,13 @@ describe('layer 2 leaves the slot alone — the substitution path', () => {
 		// count reconciles to 2 slots against 1 value, so the fallback fires with
 		// the sanitizer leaving the character alone. That is exactly when the
 		// degraded path has to strip it itself.
-		const out = renderPromptSegments([frame(`Host${VALUE_SLOT}: `), value('api.example.com')]);
+		// BOTH sides carry a slot on purpose. With only a slot-bearing frame,
+		// stripping just the frames passed the whole file — and a slot inside a
+		// VALUE is the case the docstring actually names (an attacker-controlled
+		// mail subject).
+		const out = renderPromptSegments([
+			frame(`Host${VALUE_SLOT}: `), value(`api${VALUE_SLOT}.example.com`),
+		]);
 		expect(out).toContain('<pre>');           // the fallback really fired
 		expect(out).not.toContain(VALUE_SLOT);    // …and left nothing behind
 		expect(out).toContain('api.example.com');

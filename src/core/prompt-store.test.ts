@@ -183,12 +183,49 @@ describe('PromptStore', () => {
     });
 
     it('leaves another session alone', () => {
+      // s1 must have its OWN blocker, or the insert below succeeds outright and
+      // the expire never runs — which is what the first version of this test
+      // did. It then proved nothing: widening the WHERE to `(session_id = ? OR
+      // 1=1)` passed the whole file.
+      store.insertOnboardingBasics('s1', [{ question: 'q' }], ['company']);
       store.insertOnboardingBasics('s2', [{ question: 'q' }], ['company']);
       store.insertAskUser('s1', 'q1');
-      const row = db
+      const other = db
         .prepare(`SELECT status FROM pending_prompts WHERE session_id = 's2'`)
         .get() as { status: string };
-      expect(row.status).toBe('pending');
+      expect(other.status).toBe('pending');
+    });
+
+    it('never touches a card the user already answered', () => {
+      // The `status = 'pending'` clause is what stands between a saved card and
+      // silent data loss: flipping an ANSWERED row to expired makes `/promote`
+      // refuse it ("Prompt not answered yet"), so the basics the user typed
+      // never reach durable knowledge. Deleting that clause passed 36/36.
+      const card = store.insertOnboardingBasics('s1', [{ question: 'q' }], ['company']);
+      store.answerUserTabs(card, ['ACME Ltd']);
+      store.insertAskUser('s1', 'q1');
+      const row = db
+        .prepare(`SELECT status FROM pending_prompts WHERE id = ?`)
+        .get(card) as { status: string };
+      expect(row.status).toBe('answered');
+    });
+
+    it('retries once, not until it wins', () => {
+      // The retry flag is the only thing bounding a catch block that calls
+      // itself; removing it passed 36/36. Simulated here by leaving a SECOND
+      // pending row behind that the expire cannot clear, so an unbounded
+      // version would keep going.
+      store.insertOnboardingBasics('s1', [{ question: 'q' }], ['company']);
+      db.prepare(
+        `INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at)
+         VALUES ('ghost', 's1', 'ask_user', 'q', 'answered', datetime('now', '+1 day'))`,
+      ).run();
+      // The expire clears the card; the retry then succeeds exactly once.
+      expect(() => store.insertAskUser('s1', 'q2')).not.toThrow();
+      const pending = db
+        .prepare(`SELECT COUNT(*) AS c FROM pending_prompts WHERE session_id = 's1' AND status = 'pending'`)
+        .get() as { c: number };
+      expect(pending.c).toBe(1);
     });
   });
 

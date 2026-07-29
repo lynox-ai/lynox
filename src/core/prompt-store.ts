@@ -307,8 +307,17 @@ export class PromptStore {
   private _expireAbandonedOnboardingBasics(sessionId: string): boolean {
     const result = this.db
       .prepare(
+        // `json_valid` first: `json_extract` THROWS on malformed JSON, and this
+        // runs inside the UNIQUE-conflict catch — so a bad row would replace a
+        // PromptConflictError with a raw SQLite error escaping through it. Every
+        // caller stringifies today, which makes it latent rather than fine.
+        // `status = 'pending'` is load-bearing, not tidiness: without it an
+        // ANSWERED card gets flipped to expired, and `/promote` then refuses it
+        // with "Prompt not answered yet" — the basics the user typed never reach
+        // durable knowledge.
         `UPDATE pending_prompts SET status = 'expired'
           WHERE session_id = ? AND status = 'pending'
+            AND json_valid(payload_json)
             AND json_extract(payload_json, '$.kind') = 'onboarding_basics'`,
       )
       .run(sessionId);
