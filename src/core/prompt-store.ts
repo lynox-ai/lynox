@@ -242,11 +242,49 @@ export class PromptStore {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('UNIQUE') || msg.includes('unique')) {
+        // An ABANDONED onboarding card must not wedge the session for 24h.
+        //
+        // The Step-0 basics prompt is written by the UI, not by a run, and the
+        // UI settles it only on SAVE (`/reply-tabs`). Its three other exits —
+        // the "Skip — just start chatting" button and both fail-open error
+        // paths in OnboardingBasics — return without telling the server
+        // anything, and a closed tab does not either. The row then sits
+        // `pending` for the full TTL, and because the per-session UNIQUE index
+        // covers exactly that, EVERY later ask_user / ask_secret on the session
+        // threw. It was invisible too: the pending endpoint reports
+        // `onboarding_basics` as `pending: false`, so the client showed no
+        // prompt while the row blocked the thread.
+        //
+        // An agent prompt therefore supersedes it. This is deliberately not
+        // symmetric: an onboarding card never displaces an agent prompt (the
+        // recursion guard below), because the agent's question is the one a run
+        // is blocked on. Expired rather than deleted, so the row is still
+        // there to explain what happened.
+        if (args.payloadJson === null || !args.payloadJson.includes('onboarding_basics')) {
+          const superseded = this._expireAbandonedOnboardingBasics(args.sessionId);
+          if (superseded) return this._insert(args);
+        }
         throw new PromptConflictError(args.sessionId);
       }
       throw err;
     }
     return id;
+  }
+
+  /**
+   * Expire a pending `onboarding_basics` row for this session, if that is what
+   * is holding the per-session lock. Returns whether one was expired — so the
+   * caller retries ONCE and, if something else holds the lock, still conflicts.
+   */
+  private _expireAbandonedOnboardingBasics(sessionId: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE pending_prompts SET status = 'expired'
+          WHERE session_id = ? AND status = 'pending'
+            AND json_extract(payload_json, '$.kind') = 'onboarding_basics'`,
+      )
+      .run(sessionId);
+    return result.changes > 0;
   }
 
   // ── Answer ──────────────────────────────────────────────────────────────

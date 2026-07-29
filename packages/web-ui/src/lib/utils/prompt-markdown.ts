@@ -358,14 +358,30 @@ export function renderPromptSegments(segments: readonly RenderablePromptSegment[
 }
 
 /**
- * The degraded rendering: the whole prompt as escaped text in a `<pre>`.
+ * The degraded rendering: no markdown is parsed at all, so nothing a value
+ * carries can become markup.
  *
- * It is the same shape the Allow/Deny prompts already use, and it is immune by
- * construction — no markdown is parsed at all, so nothing a value carries can
- * become markup. It loses the frame's formatting, which is the right thing to
- * lose: an approver can decide from unformatted text, and cannot decide from a
- * sentence whose values are missing.
+ * It must still keep the frame/value DISTINCTION, which is the whole point of
+ * the module. A first version escaped everything into one flat `<pre>`, and that
+ * was a quiet own-goal: with no markup left, the system's `**Host:** ` renders
+ * with its asterisks showing, exactly like a value that forged `**Host:**
+ * api.stripe.com` — so the forged label reads MORE like a label than the real
+ * one. And because this path fires for every prompt at once when a parser eats
+ * the slot, that would disable the release's anti-spoofing property fleet-wide
+ * rather than in one prompt. So values go in `<code>`: still text nodes, still
+ * incapable of opening a construct, but visibly not frame.
+ *
+ * The slot is stripped here too. `plainTextPrompt` receives the ORIGINAL
+ * segments, not the cleaned values from the caller, so without this a value
+ * carrying U+E000 — an attacker-controlled mail subject, say — would emit a raw
+ * private-use code point into the DOM.
  */
 function plainTextPrompt(segments: readonly RenderablePromptSegment[]): string {
-	return sanitizePromptHtml(`<pre>${escapeHtml(segments.map((s) => s.text).join(''))}</pre>`);
+	const body = segments
+		.map((s) => {
+			const text = escapeHtml(s.text.split(VALUE_SLOT).join(''));
+			return s.kind === 'value' ? `<code>${text}</code>` : text;
+		})
+		.join('');
+	return sanitizePromptHtml(`<pre>${body}</pre>`);
 }

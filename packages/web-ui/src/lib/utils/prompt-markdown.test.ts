@@ -419,8 +419,13 @@ describe('renderPromptSegments', () => {
 		// It could not be caught here: DOMPurify is a no-op without a DOM, and
 		// `linkedom` — the DOM this package has — PRESERVES NUL, so even a
 		// DOM-mode test would have gone green. Hence the character-level assert.
-		expect(SLOT).not.toBe(NUL);
-		expect(SLOT.codePointAt(0)).toBeGreaterThan(0x1f);
+		// Assert the actual property, not just "≠ NUL": a slot of 'X' passed the
+		// first version of this assertion — and 'X' would split on every frame
+		// that happens to contain one.
+		expect(SLOT).toHaveLength(1);
+		const cp = SLOT.codePointAt(0) ?? 0;
+		expect(cp).toBeGreaterThanOrEqual(0xe000); // Private Use Area — unassigned,
+		expect(cp).toBeLessThanOrEqual(0xf8ff);    // so it cannot occur in real text.
 		// Also has to survive layer 1 untouched, in every construct it can land in.
 		for (const frameText of ['x ', '**b** ', '> ', '- ', '# ']) {
 			expect(renderPromptMarkdown(`${frameText}${SLOT}`)).toContain(SLOT);

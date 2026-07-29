@@ -135,6 +135,53 @@ describe('PromptStore', () => {
     });
   });
 
+  describe('an abandoned onboarding card does not wedge the session', () => {
+    // The Step-0 basics prompt is written by the UI and settled only on SAVE.
+    // Its skip button and both fail-open error paths return without telling the
+    // server, and a closed tab does not either — so the row sat `pending` for
+    // the full 24h TTL and the per-session UNIQUE index made every later
+    // ask_user / ask_secret throw. Invisible, too: the pending endpoint reports
+    // onboarding_basics as `pending: false`.
+    it('lets an agent prompt supersede a pending onboarding_basics row', () => {
+      const orphan = store.insertOnboardingBasics('s1', [{ question: 'What is the company called?' }], ['company']);
+      expect(() => store.insertAskUser('s1', 'q2')).not.toThrow();
+      const row = db
+        .prepare(`SELECT status FROM pending_prompts WHERE id = ?`)
+        .get(orphan) as { status: string };
+      // Expired, not deleted — the row still explains what happened.
+      expect(row.status).toBe('expired');
+    });
+
+    it('supersedes it for ask_secret too, not just ask_user', () => {
+      store.insertOnboardingBasics('s1', [{ question: 'q' }], ['company']);
+      expect(() => store.insertAskSecret('s1', 'need a key', 'STRIPE_KEY', 'api_key')).not.toThrow();
+    });
+
+    it('does NOT let an onboarding card displace a live agent prompt', () => {
+      // The asymmetry is the point: a run is blocked on the agent's question,
+      // so that one wins. Without this the fix would trade one wedge for a
+      // worse one.
+      store.insertAskUser('s1', 'q1');
+      expect(() => store.insertOnboardingBasics('s1', [{ question: 'q' }], ['company'])).toThrow(PromptConflictError);
+    });
+
+    it('still conflicts when the blocker is a normal prompt', () => {
+      // The retry must be scoped to the abandoned card. A second agent prompt
+      // has to keep throwing, or the UNIQUE index stops meaning anything.
+      store.insertAskUserTabs('s1', [{ question: 'q1' }]);
+      expect(() => store.insertAskUser('s1', 'q2')).toThrow(PromptConflictError);
+    });
+
+    it('leaves another session alone', () => {
+      store.insertOnboardingBasics('s2', [{ question: 'q' }], ['company']);
+      store.insertAskUser('s1', 'q1');
+      const row = db
+        .prepare(`SELECT status FROM pending_prompts WHERE session_id = 's2'`)
+        .get() as { status: string };
+      expect(row.status).toBe('pending');
+    });
+  });
+
   describe('abort signal', () => {
     it('resolves with aborted outcome immediately when signal already aborted', async () => {
       const id = store.insertAskUser('s1', 'q');
