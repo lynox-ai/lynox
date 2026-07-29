@@ -278,13 +278,31 @@ export interface RenderablePromptSegment {
 }
 
 /**
- * The placeholder values are swapped out for. NUL is used deliberately: it has
- * no meaning in markdown, `marked` passes it through untouched, and — the part
- * that makes it sound rather than merely unlikely — it is REMOVED from every
- * value first, so a value cannot contain one however it was crafted. That is a
- * property we enforce, not a secret we hope holds.
+ * The placeholder values are swapped out for. It must survive BOTH stages of
+ * `renderPromptMarkdown`, and the second one is the trap:
+ *
+ * NUL was the original choice, and it is correct about layer 1 — `marked` does
+ * pass it through. But layer 2 parses through the browser's HTML parser, and
+ * that parser DELETES U+0000 outright (measured in Chrome 150: `innerHTML`,
+ * `DOMParser` and `<template>` all drop it, without even leaving U+FFFD). Every
+ * slot therefore vanished before the split below, `split` found one part, and
+ * EVERY interpolated value was silently dropped — "Delete event ? This cannot be
+ * undone." with the id gone, in the browser only.
+ *
+ * Nothing could see it: layer 2 is a no-op without a DOM, so the whole suite is
+ * blind to it by construction, and `linkedom` — the DOM the package does have —
+ * preserves NUL, so even a DOM-mode test would have passed.
+ *
+ * U+E000 is a Private Use Area code point: permanently unassigned by Unicode, no
+ * meaning in markdown, and verified to survive `marked` and all three browser
+ * parse paths. It keeps NUL's actual load-bearing property — it is REMOVED from
+ * every value first, so a value cannot carry one however it was crafted.
+ *
+ * The choice is still an assumption about someone else's parser, so it is no
+ * longer the only thing standing between a value and silence: the reconciliation
+ * below checks that every slot came back and fails LOUDLY if one did not.
  */
-const VALUE_SLOT = String.fromCharCode(0);
+export const VALUE_SLOT = '\uE000';
 
 /**
  * Render a prompt whose frame and values are separated.
@@ -322,10 +340,48 @@ export function renderPromptSegments(segments: readonly RenderablePromptSegment[
 
 	const html = renderPromptMarkdown(withSlots);
 
+	// Reconcile before substituting. `VALUE_SLOT` is a bet on what two parsers we
+	// do not own leave alone, and when that bet lost, the failure was SILENT: the
+	// slots were gone, `split` returned one part, and the loop below emitted the
+	// frame with every value missing — a confirmation prompt asking about nothing.
+	// A wrong count means the chain ate a slot, so refuse to guess which values
+	// belong where and fall back to a rendering that cannot lose one.
+	const parts = html.split(VALUE_SLOT);
+	if (parts.length - 1 !== values.length) return plainTextPrompt(segments);
+
 	let index = 0;
-	return html.split(VALUE_SLOT).reduce((acc, part, i) => {
+	return parts.reduce((acc, part, i) => {
 		if (i === 0) return part;
 		const value = values[index++] ?? '';
 		return acc + escapeHtml(value) + part;
 	}, '');
+}
+
+/**
+ * The degraded rendering: no markdown is parsed at all, so nothing a value
+ * carries can become markup.
+ *
+ * It must still keep the frame/value DISTINCTION, which is the whole point of
+ * the module. A first version escaped everything into one flat `<pre>`, and that
+ * was a quiet own-goal: with no markup left, the system's `**Host:** ` renders
+ * with its asterisks showing, exactly like a value that forged `**Host:**
+ * api.stripe.com` — so the forged label reads MORE like a label than the real
+ * one. And because this path fires for every prompt at once when a parser eats
+ * the slot, that would disable the release's anti-spoofing property fleet-wide
+ * rather than in one prompt. So values go in `<code>`: still text nodes, still
+ * incapable of opening a construct, but visibly not frame.
+ *
+ * The slot is stripped here too. `plainTextPrompt` receives the ORIGINAL
+ * segments, not the cleaned values from the caller, so without this a value
+ * carrying U+E000 — an attacker-controlled mail subject, say — would emit a raw
+ * private-use code point into the DOM.
+ */
+function plainTextPrompt(segments: readonly RenderablePromptSegment[]): string {
+	const body = segments
+		.map((s) => {
+			const text = escapeHtml(s.text.split(VALUE_SLOT).join(''));
+			return s.kind === 'value' ? `<code>${text}</code>` : text;
+		})
+		.join('');
+	return sanitizePromptHtml(`<pre>${body}</pre>`);
 }
