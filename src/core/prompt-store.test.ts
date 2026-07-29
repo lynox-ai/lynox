@@ -172,6 +172,16 @@ describe('PromptStore', () => {
       expect(() => store.insertAskUser('s1', 'q2')).toThrow(PromptConflictError);
     });
 
+    it('judges the payload by its kind, not by a substring', () => {
+      // payload_json is caller-supplied on connect_mail, so a substring test
+      // would misread any account id or folder name that happens to contain
+      // those characters — and would then refuse to supersede, wedging the
+      // session for the same 24h the fix exists to prevent.
+      store.insertOnboardingBasics('s1', [{ question: 'q' }], ['company']);
+      const decoyPayload = JSON.stringify({ kind: 'connect_mail', accountId: 'onboarding_basics@example.com' });
+      expect(() => store.insertConnectMail('s1', 'connect?', decoyPayload)).not.toThrow();
+    });
+
     it('leaves another session alone', () => {
       store.insertOnboardingBasics('s2', [{ question: 'q' }], ['company']);
       store.insertAskUser('s1', 'q1');

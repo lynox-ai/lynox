@@ -67,6 +67,28 @@ export type PromptOutcome =
   | { status: 'expired' }
   | { status: 'aborted' };
 
+/**
+ * Is this payload the engine-posed onboarding card?
+ *
+ * Parsed, not substring-matched. `payload_json` is caller-supplied on
+ * `insertConnectMail`, so a `.includes('onboarding_basics')` would misread an
+ * account id or folder name that merely contains those characters — and it must
+ * agree with the `json_extract(... '$.kind')` the SQL uses, or the two halves of
+ * the same rule can disagree. Malformed JSON is not an onboarding card.
+ */
+function isOnboardingBasicsPayload(payloadJson: string | null): boolean {
+  if (payloadJson === null) return false;
+  try {
+    const parsed: unknown = JSON.parse(payloadJson);
+    return (
+      typeof parsed === 'object' && parsed !== null &&
+      (parsed as { kind?: unknown }).kind === 'onboarding_basics'
+    );
+  } catch {
+    return false;
+  }
+}
+
 export class PromptConflictError extends Error {
   constructor(sessionId: string) {
     super(`Session ${sessionId} already has a pending prompt`);
@@ -218,7 +240,7 @@ export class PromptStore {
     secretKeyType: string | null;
     multiSelect: boolean;
     payloadJson: string | null;
-  }): string {
+  }, retry = false): string {
     const id = randomUUID();
     const expiresAt = new Date(Date.now() + PROMPT_TTL_MS).toISOString();
     try {
@@ -260,9 +282,15 @@ export class PromptStore {
         // recursion guard below), because the agent's question is the one a run
         // is blocked on. Expired rather than deleted, so the row is still
         // there to explain what happened.
-        if (args.payloadJson === null || !args.payloadJson.includes('onboarding_basics')) {
+        // Retry ONCE. The expire below is a separate statement from the insert
+        // that follows it, so "I just cleared the lock" is not a guarantee that
+        // the retry gets it — and if the retry can itself supersede, the depth
+        // is governed by whatever else is writing, not by this function. One
+        // retry is all the fix needs: the card it clears is the only thing it
+        // claims to clear.
+        if (!retry && !isOnboardingBasicsPayload(args.payloadJson)) {
           const superseded = this._expireAbandonedOnboardingBasics(args.sessionId);
-          if (superseded) return this._insert(args);
+          if (superseded) return this._insert(args, true);
         }
         throw new PromptConflictError(args.sessionId);
       }
