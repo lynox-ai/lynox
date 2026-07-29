@@ -1320,6 +1320,24 @@ export class Session {
     // summary run below only *appends* (the summary prompt + reply), so the
     // snapshot still captures every result that is about to be reset away.
     const preCompactionMessages = this.saveMessages();
+    // DK.1 F5: capture the sticky conversation taint at the TOP, and re-arm it on
+    // every exit below.
+    //
+    // Two separate things clear it, which is why this sits here and not next to
+    // the reset. The obvious one is `reset()` further down — the
+    // fresh-conversation path, whose post-compaction seed carries no untrusted
+    // marker for `loadMessages` to re-derive from. The one that actually fires
+    // first is the SUMMARISER RUN itself (`this.run(..., { internal: true })`
+    // below): it is a nested run over a rewritten message set, and it lands the
+    // latch on false before compaction has decided anything. So even the
+    // early-return path at `if (!summary)` — which deliberately leaves the thread
+    // intact — came back with the durable-write gate disarmed.
+    //
+    // Strictly one-way: a compaction may keep the gate armed, never disarm it.
+    const taintedBeforeCompaction = this.agent?.conversationSawUntrusted ?? false;
+    const rearmTaint = (): void => {
+      if (taintedBeforeCompaction) this.agent?.restoreConversationTaint();
+    };
     // Debug-export Tier 2: capture the triggering occupancy AND the active run id
     // BEFORE the summary run below mutates the agent's last-usage anchor and (via
     // its own run() finally) nulls currentRunId. For auto-compaction this is the
@@ -1393,6 +1411,7 @@ export class Session {
     // context on a transient blip — and a returned block string was even injected
     // as the authoritative summary, corrupting the thread.)
     if (!summary) {
+      rearmTaint();
       return { success: false, summary: '' };
     }
 
@@ -1427,6 +1446,17 @@ export class Session {
     // byte cap; empty for the common no-image thread (zero behaviour change).
     const carriedImages = evictImagesFrom(preCompactionMessages);
 
+    // DK.1 F5: carry the sticky conversation taint ACROSS the rewrite.
+    //
+    // Compaction goes through `reset()` — the fresh-conversation path, which
+    // clears the latch by design — and then `loadMessages()`, which re-derives
+    // it from the new context. But the post-compaction seed is a summary: no
+    // wrapped-untrusted marker, no `tool_use` block naming an external-content
+    // tool. So the re-derivation lands on false and the durable-write gate
+    // disarms on a conversation that HAS ingested untrusted data. Auto-compaction
+    // fires on context pressure, so this hit exactly the long research threads
+    // most likely to be tainted.
+    //
     this.reset();
     if (summary) {
       this.loadMessages(
@@ -1477,8 +1507,10 @@ export class Session {
           });
         } catch { /* fire-and-forget */ }
       }
+      rearmTaint();
       return { success: true, summary };
     }
+    rearmTaint();
     return { success: false, summary: '' };
   }
 

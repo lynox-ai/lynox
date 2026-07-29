@@ -462,6 +462,25 @@ export class Agent implements IAgent {
    *  Also arms the sticky conversation latch (DK.1 F5). */
   noteUntrustedData(): void { this._sawUntrustedData = true; this._conversationSawUntrusted = true; }
   /**
+   * Re-arm ONLY the sticky conversation latch, without touching the run-scoped
+   * marker.
+   *
+   * For compaction. Compaction rewrites the context of the SAME conversation,
+   * but it does it through `reset()` — which is the fresh-conversation path and
+   * therefore clears the latch by design — and then `loadMessages()`, which
+   * re-derives the latch from the new context. The post-compaction seed is a
+   * summary: it carries no wrapped-untrusted marker and no `tool_use` block
+   * naming an external-content tool, so the re-derivation lands on FALSE and the
+   * durable-write gate silently disarms on a conversation that HAS ingested
+   * untrusted data. Auto-compaction fires on context pressure, so the threads
+   * this hits are exactly the long research ones most likely to be tainted.
+   *
+   * `noteUntrustedData()` is the wrong tool here: it would also arm the
+   * run-scoped marker, claiming this turn saw untrusted content when it only
+   * inherited the conversation's history.
+   */
+  restoreConversationTaint(): void { this._conversationSawUntrusted = true; }
+  /**
    * DK.1 (H4): the set of tool NAMES executed on THIS run. The `_sawUntrustedData` content
    * marker is allowlist-by-omission — `bash`/`curl`/`read_file`/`media_process`/`api_setup`
    * return external content WITHOUT wrapping it, so the marker can stay false on a turn that
