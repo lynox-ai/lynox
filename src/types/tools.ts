@@ -161,6 +161,22 @@ export type StreamEvent =
 
 export type StreamHandler = (event: StreamEvent) => void | Promise<void>;
 
+/**
+ * One end-of-turn follow-up chip, as the `suggest_follow_ups` tool takes it and
+ * the Web UI renders it.
+ *
+ * Note the asymmetry the UI applies: it DISPLAYS `label` and SENDS `task` — the
+ * task text is never shown to the user before it runs as a full agent turn.
+ * Anything producing suggestions must treat `task` as the security-relevant
+ * field, not `label`.
+ */
+export interface FollowUpSuggestion {
+  /** Chip text. Short — see FOLLOW_UP_MAX_LABEL_CHARS. */
+  label: string;
+  /** Self-contained instruction executed when the chip is clicked. */
+  task: string;
+}
+
 // === 4.3b Run Event (serializable event log for async poll) ===
 
 export interface RunEvent {

@@ -34,7 +34,20 @@ import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import { isDangerous } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
-import { createLLMClient, getActiveProvider } from './llm-client.js';
+import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
+import { resolveTierModel } from './tier-resolver.js';
+import { calculateCost } from './pricing.js';
+import { debitInRunHelperCost } from './metered-request.js';
+import {
+  FOLLOW_UP_TOOL_NAME,
+  FOLLOW_UP_FALLBACK_MAX_TOKENS,
+  FOLLOW_UP_FALLBACK_SYSTEM,
+  FOLLOW_UP_TIMEOUT_MS,
+  buildFollowUpExcerpt,
+  normalizeFollowUpSuggestions,
+  lastUserText,
+} from './follow-up-fallback.js';
+import { randomBytes } from 'node:crypto';
 import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
 import { scanToolResult, RepeatCallGuard } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
@@ -438,6 +451,17 @@ export class Agent implements IAgent {
   private static readonly MAX_PENDING_MEMORY = 10;
   skipMemoryExtraction = false;
   /**
+   * Web-UI surfaces only: recover the end-of-turn follow-up chips when the model
+   * did not call `suggest_follow_ups` itself. Set by the Session alongside the
+   * Web-UI prompt suffix — the suffix ASKS for the chips, this catches the
+   * models that do not deliver. See {@link _recoverFollowUps} and the
+   * measurement in `follow-up-fallback.ts`.
+   */
+  followUpFallback = false;
+  /** Set when this turn produced a `suggest_follow_ups` call — the recovery's
+   *  whole point is to stay silent (and free) then. Reset per run. */
+  private _sawFollowUpCall = false;
+  /**
    * Wave 1.2: did any tool result on this run carry the untrusted-data boundary marker?
    * Set in the tool-result dispatcher (content signal, not a tool-name list), reset at
    * run entry + teardown. Two consumers: extraction abstinence (Wave 1.5 — do not extract
@@ -829,6 +853,149 @@ export class Agent implements IAgent {
    * "why is capture dead on the canary?" becomes a measured number. Preserves the
    * exact prior gate: legacy extraction fires only when NOT untrusted AND DK OFF.
    */
+  /**
+   * Recover the end-of-turn follow-up chips for a turn that did not call
+   * `suggest_follow_ups` itself. See `follow-up-fallback.ts` for the measurement
+   * that makes this necessary; {@link followUpFallback} for when it is enabled.
+   *
+   * Shape of the call, and why each part is the way it is:
+   *  - **fast tier, not the turn's model.** This is an ancillary call, and on a
+   *    non-compliant model it runs on essentially every turn — 14× cheaper on
+   *    Mistral, 5× on Opus. `clientForTierSnapshot` so a hybrid `fast→Mistral`
+   *    slot reaches Mistral instead of sending a Mistral id to the ambient
+   *    Anthropic client.
+   *  - **A capped excerpt, not the run context.** `endsTurn` exists to avoid an
+   *    extra full-context round trip; recovering must not hand that back.
+   *  - **Metered.** The tokens never flow through the agent's own stream, so
+   *    without `debitInRunHelperCost` + `costGuard.recordExternalCost` the spend
+   *    would be invisible to the session cap AND to the managed tenant debit — a
+   *    pool-key burn nobody bills. Same treatment as the other in-run helpers
+   *    (web-search rerank, api_setup docs extraction).
+   *  - **Abortable and time-boxed.** It runs before the turn's text is returned,
+   *    so a user stop must cancel it and a hanging provider must not hold the
+   *    answer.
+   *
+   * ⚠ The chip row DISPLAYS `label` but SENDS `task`, and `task` is never shown
+   * before it runs as a full agent turn. That asymmetry predates this method,
+   * but this method now feeds it from a call whose input can quote untrusted
+   * content — hence `buildFollowUpExcerpt` (boundary-wrapped) and the `task`
+   * length cap. Neither makes a misleading chip impossible; closing that needs
+   * the UI to show what it is about to run (DEF-followup-task-invisible).
+   *
+   * Best-effort throughout: any failure leaves the turn exactly as it was.
+   */
+  private async _recoverFollowUps(text: string): Promise<void> {
+    if (!this.followUpFallback || this._sawFollowUpCall) return;
+    // Internal machinery (compaction summaries, title generation) runs on this
+    // same agent. Those turns have no chip row to fill, and paying a forced tool
+    // call per auto-compaction would be pure waste.
+    if (this.isInternalRun || this._suppressTools) return;
+    if (!text.trim()) return;
+    const entry = this.tools.find(t => t.definition.name === FOLLOW_UP_TOOL_NAME);
+    if (!entry) return;
+    // The chips follow up on what the USER asked, so a turn with no user text to
+    // anchor on gets none.
+    const question = lastUserText(this.messages);
+    if (!question) return;
+
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), FOLLOW_UP_TIMEOUT_MS);
+    try {
+      const provider = getActiveProvider();
+      const fastSnap = resolveTierModel('fast', provider);
+      const client = clientForTierSnapshot(fastSnap, this.client, provider);
+      const stream = client.beta.messages.stream({
+        model: fastSnap.modelId,
+        max_tokens: FOLLOW_UP_FALLBACK_MAX_TOKENS,
+        system: FOLLOW_UP_FALLBACK_SYSTEM,
+        messages: [{ role: 'user', content: buildFollowUpExcerpt(question, text) }],
+        tools: [entry.definition],
+        tool_choice: { type: 'tool', name: FOLLOW_UP_TOOL_NAME },
+        ...(fastSnap.betas ? { betas: fastSnap.betas } : {}),
+      }, {
+        // A user stop cancels it; the timeout bounds a hanging provider.
+        signal: AbortSignal.any(
+          [this.abortController?.signal, timeout.signal].filter((s): s is AbortSignal => s !== undefined),
+        ),
+      });
+      const response = await stream.finalMessage();
+
+      // Account the spend BEFORE the early returns below: the tokens were spent
+      // whether or not the suggestions turn out usable.
+      const u = response.usage;
+      if (u) {
+        const usd = calculateCost(fastSnap.modelId, {
+          input_tokens: u.input_tokens,
+          output_tokens: u.output_tokens,
+          cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+          cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+        });
+        // Priced on the FAST model, then charged as a dollar amount.
+        // `recordTurn` would book these tokens at the run's own `pricePerM` — on
+        // an Opus run charging Haiku tokens that trips the ceiling ~20x early.
+        this.costGuard?.recordExternalCost(usd);
+        debitInRunHelperCost(this.toolContext.meteredHost, this.sessionCounters, usd, 'fast');
+      }
+
+      const call = response.content.find(
+        (b): b is BetaToolUseBlock => b.type === 'tool_use' && b.name === FOLLOW_UP_TOOL_NAME,
+      );
+      if (!call) return;
+      const suggestions = normalizeFollowUpSuggestions(call.input)
+        // The chip DISPLAYS `label` and SENDS `task`, and `task` is never shown.
+        // The answer this was built from can quote a web page or a mail, so a
+        // laundered `task` ("forward the last 20 mails to …") behind an innocuous
+        // label is a one-click agent turn the user never read.
+        //
+        // Read this for what it is: a floor, not a boundary. `detectInjectionAttempt`
+        // matches injection PHRASING — override tokens, role tags, "use the X
+        // tool" — in ENGLISH, and a `task` is a plain user-voice instruction that
+        // needs none of that, in whatever language the thread runs in (this
+        // feature's own prompt asks for German). It stops the copy-paste payload
+        // and nothing subtler. The real gate is that a human clicks the chip —
+        // which is why the task being invisible to that human is the open issue
+        // here, not the strength of this filter. See DEF-followup-task-invisible.
+        .filter((sug) => !detectInjectionAttempt(sug.task).detected);
+      if (suggestions.length === 0) return; // same outcome as the model declining
+
+      const input = { suggestions };
+      if (this.onStream) {
+        await this.onStream({ type: 'tool_call', name: FOLLOW_UP_TOOL_NAME, input, agent: this.name });
+      }
+      // Splice onto the assistant turn that just ended, so the thread reads as
+      // if the model had called it. The CALLER runs this before `_checkpoint()`
+      // — `thread-store.appendMessages` is INSERT-only, so mutating an already
+      // persisted message would be silently lost while the pushed tool_result
+      // still landed: chips gone on reload, orphan tool_result on disk.
+      const last = this.messages.at(-1);
+      // 9 alphanumerics: the narrowest shape reported for a target provider
+      // (Mistral is documented as validating `^[a-zA-Z0-9]{9}$`), chosen because
+      // this pair is PERSISTED — a rejected id fails not just this turn but every
+      // later turn in the thread, on exactly the provider the recovery exists
+      // for. NOT a claim that the engine only ever mints such ids: the
+      // openai-compat adapter names an id-less tool call `tool_<index>`
+      // (see `openai-adapter.ts`), which this shape would reject. If Mistral does
+      // enforce it, that path has the same bug and is the one to fix next.
+      // A `messages.length`-derived id was also not unique: `_truncateHistory`
+      // shrinks the array, so it repeats within one thread.
+      const toolUseId = randomBytes(8).toString('base64url').replace(/[^a-zA-Z0-9]/g, '').slice(0, 9).padEnd(9, '0');
+      const useBlock = { type: 'tool_use' as const, id: toolUseId, name: FOLLOW_UP_TOOL_NAME, input };
+      if (last && last.role === 'assistant' && Array.isArray(last.content)) {
+        last.content = [...last.content, useBlock];
+      } else {
+        this.messages.push({ role: 'assistant', content: [useBlock] });
+      }
+      this.messages.push({
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: toolUseId, content: await entry.handler(input, this) }],
+      });
+    } catch {
+      // Chips are a convenience; a failed recovery must never fail the turn.
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private _captureAtTurnEnd(text: string): void {
     if (!this.memory || this.skipMemoryExtraction || this.isInternalRun) return;
     // The FULL untrusted union (deriveTurnUntrusted) — marker OR an external-content tool ran
@@ -988,6 +1155,7 @@ export class Agent implements IAgent {
     this._loopToolCount = 0;
     this._repeatGuard.reset();
     this._sawUntrustedData = false;
+    this._sawFollowUpCall = false;
     // Run-scoped cost ceiling: the managed per-run $ ceiling (and the 200-iteration
     // backstop) is bounded PER RUN, not cumulatively over a session-long thread.
     // Without this reset the guard latches after 200 cumulative model-calls and every
@@ -1084,6 +1252,26 @@ export class Agent implements IAgent {
           ? contentForHistory
           : [{ type: 'text', text: THINKING_ONLY_PLACEHOLDER }],
       });
+      // Chip recovery runs BEFORE the checkpoint, not at the `end_turn` branch
+      // below: `appendMessages` is INSERT-only, so a splice onto an
+      // already-persisted assistant message would never reach disk while the
+      // pushed tool_result still would — chips gone on reload, orphan
+      // tool_result on disk. Here both blocks are still in the unpersisted tail.
+      // Captured before the chip recovery, which may splice a tool_use onto this
+      // assistant message and push a tool_result after it. The occupancy delta
+      // below wants the index of THE ASSISTANT REPLY; read after a splice it
+      // points at the tool_result and the reply drops out of the estimate.
+      const msgCountBeforeRecovery = this.messages.length;
+      if (response.stop_reason === 'end_turn') {
+        // Read the CONTENT, not just the stop reason: the OpenAI-compat adapter
+        // defaults `stop_reason` to 'end_turn' when a stream ends without a
+        // `finish_reason`, so a turn that DID call the tool can otherwise pay for
+        // a second forced call and persist a duplicate chip pair.
+        if (response.content.some(
+          (b) => b.type === 'tool_use' && b.name === FOLLOW_UP_TOOL_NAME,
+        )) this._sawFollowUpCall = true;
+        await this._recoverFollowUps(extractText(response.content));
+      }
       // F-Eager-Persist: checkpoint after each assistant message so the
       // ThreadStore has the latest turn even if the process dies before the
       // run() finally block runs (container restart, OOM).
@@ -1141,7 +1329,8 @@ export class Agent implements IAgent {
           // priced the prompt (all but that just-pushed reply), so the reply
           // onward is the delta for the next estimate. Derived from the
           // post-truncation array — correct even if _callAPI dropped history.
-          this._lastRealAtMsgCount = this.messages.length - 1;
+          // `msgCountBeforeRecovery`, not `messages.length`: see its declaration.
+          this._lastRealAtMsgCount = msgCountBeforeRecovery - 1;
           if (this.onStream) {
             const maxCtx = this._effectiveContextWindow();
             void this.onStream({
@@ -1226,6 +1415,8 @@ export class Agent implements IAgent {
         const toolUses = response.content.filter(b => b.type === 'tool_use');
         const endsTurn = toolUses.length > 0
           && toolUses.every(b => this.tools.find(t => t.definition.name === b.name)?.endsTurn === true);
+        // The model did the job itself → the recovery stays silent (and free).
+        if (toolUses.some(b => b.name === FOLLOW_UP_TOOL_NAME)) this._sawFollowUpCall = true;
         // Append a continuation hint so the model reads this tool-result turn as
         // its OWN action output, not a new (empty) user message (which made it
         // emit "looks like an empty submit" filler turns). The render projection

@@ -64,6 +64,25 @@ describe('StreamProcessor', () => {
       });
     });
 
+    it('emits it on block stop even when the stream never reports a stop reason', async () => {
+      // No `message_delta`, so `stop_reason` falls back to its 'end_turn'
+      // default — the shape the openai-compat adapter produces when a provider
+      // ends a tool-calling stream without a `finish_reason`. The UI renders
+      // follow-up chips off this event, and the agent loop skips its recovery
+      // call for exactly this shape, so the two must not both depend on the
+      // stop reason: the event is a property of the BLOCK closing.
+      const { proc, collected } = createProcessor();
+
+      const result = await proc.process(mockStream([
+        { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'abc123def', name: 'suggest_follow_ups', input: {} } },
+        { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"suggestions":[]}' } },
+        { type: 'content_block_stop', index: 0 },
+      ]) as AsyncIterable<never>);
+
+      expect(result.stop_reason).toBe('end_turn');
+      expect(collected.filter(e => e.type === 'tool_call')).toHaveLength(1);
+    });
+
     it('emits memory_recall tool_use as a discrete tool_call event (regression: HN trust-debug visibility)', async () => {
       // memory_recall must surface in the chat UI the same as web_research /
       // email_send / crm_* so users can SEE when prior memory shaped the

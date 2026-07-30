@@ -25,6 +25,20 @@ const FOLLOW_UP_LOOSE_RE = /\[\s*\{[\s\S]*?"label"[\s\S]*?"task"[\s\S]*?\}\s*\]/
 const MAX_FOLLOW_UPS = 4;
 const MAX_LABEL_LENGTH = 40;
 
+/**
+ * Remove characters that render as nothing.
+ *
+ * A chip's `task` is executed on one click, so text in it that a reader cannot
+ * see is a smuggling channel with no legitimate use: Unicode tag characters
+ * (U+E0000 block) carry a full ASCII payload invisibly, and zero-width joiners
+ * and bidi overrides can reorder what is displayed away from what is sent.
+ * Stripped at parse, before anything compares or renders them — a guard that
+ * runs later is guarding a string it has already shown.
+ */
+function stripInvisible(s: string): string {
+	return s.replace(/[\p{Cf}\p{Cc}]/gu, '').trim();
+}
+
 export function parseFollowUps(text: string): { suggestions: FollowUpSuggestion[]; cleanText: string } {
 	// Locate the follow-up block: preferred wrapped <follow_ups>…</follow_ups>, else a bare array
 	// anchored at the end, else the LAST label+task array anywhere (so trailing prose after the
@@ -99,8 +113,8 @@ function normalizeSuggestions(parsed: unknown): FollowUpSuggestion[] {
 		if (typeof item !== 'object' || item === null) continue;
 		const obj = item as Record<string, unknown>;
 		if (typeof obj['label'] !== 'string' || typeof obj['task'] !== 'string') continue;
-		const label = obj['label'].trim().slice(0, MAX_LABEL_LENGTH);
-		const task = obj['task'].trim();
+		const label = stripInvisible(obj['label']).slice(0, MAX_LABEL_LENGTH);
+		const task = stripInvisible(obj['task']);
 		if (!label || !task) continue;
 		if (seen.has(label)) continue;
 		seen.add(label);
@@ -120,6 +134,43 @@ function normalizeSuggestions(parsed: unknown): FollowUpSuggestion[] {
 export function followUpsFromToolInput(input: unknown): FollowUpSuggestion[] {
 	if (typeof input !== 'object' || input === null) return [];
 	return normalizeSuggestions((input as Record<string, unknown>)['suggestions']);
+}
+
+/**
+ * What the chip must SHOW beneath its label, or null when the label already says
+ * it.
+ *
+ * A chip displays `label` and, on click, sends `task` as a full agent turn with
+ * the whole tool set and no second confirmation. `task` used to be rendered
+ * nowhere at all, so the click — the only consent gate there is — was given
+ * against text the user had never read. That is a defect on its own, and it got
+ * sharper when the engine began MINTING chips from an excerpt of the reply,
+ * which can quote a web page, a mail, or a tool result.
+ *
+ * Returning null when the task adds nothing is not cosmetic: a second line that
+ * merely restates the label trains people to stop reading the second line, which
+ * is the one case where it matters.
+ *
+ * The comparison suppresses ONLY on whitespace, case and trailing sentence
+ * punctuation. It was briefly looser — it flattened every non-letter/digit — and
+ * that hid exactly the payloads this exists to reveal, because the difference
+ * between a label and a dangerous task is usually made of punctuation:
+ *
+ *   "Datei .env lesen"        vs "Datei ../../../.env lesen"   → was hidden
+ *   "Mail an anna beispiel de" vs "Mail an anna@beispiel.de"    → was hidden
+ *   "Bericht senden"           vs "Bericht senden <tag chars>"  → was hidden
+ *
+ * The last is the worst: Unicode tag characters are invisible AND were being
+ * normalised away, so a whole smuggled instruction compared equal to the label.
+ * That is the same mistake as suppressing on `startsWith`, wearing a different
+ * hat — an innocuous opening with the payload behind it. When in doubt, show.
+ */
+export function taskPreview(fu: FollowUpSuggestion): string | null {
+	const task = fu.task.trim();
+	if (!task) return null;
+	const tidy = (s: string): string =>
+		s.replace(/\s+/g, ' ').trim().replace(/[.!]+$/, '').toLowerCase();
+	return tidy(task) === tidy(fu.label) ? null : task;
 }
 
 /**
