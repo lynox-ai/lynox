@@ -145,7 +145,7 @@
       value={currentTier}
       onchange={onChange}
       disabled={pending || getIsStreaming()}
-      class="max-w-[13rem] truncate bg-transparent border border-border rounded-[var(--radius-md)] px-2 py-1.5 text-xs text-text-subtle hover:text-text outline-none focus:border-accent cursor-pointer transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      class="max-w-[16rem] truncate bg-transparent border border-border rounded-[var(--radius-md)] px-2 py-1.5 text-xs text-text-subtle hover:text-text outline-none focus:border-accent cursor-pointer transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
       aria-label="{t('chat.thread_model.label')} — {t('chat.thread_model.change')}"
       title={t('chat.thread_model.change')}
     >
