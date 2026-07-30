@@ -21,7 +21,13 @@
  *
  *   engagement                → `findOrCreateEngagement`
  *   person, from EXTRACTION   → `resolvePersonSubject`  (subset fold)
+ *   the SELF person           → `createSubject` directly (no dedup at all)
  *   EVERYTHING ELSE           → `findOrCreate`          (no subset fold)
+ *
+ * The third row is `resolveAssigneeToSubjectId('user')` → `findOrCreateSelfPerson`,
+ * which mints in a reserved owner scope and never consults a resolver. It cannot
+ * collide with the rest because the owner differs — noted so the table reads as
+ * complete rather than as three cases someone stopped enumerating.
  *
  * The second line has exactly two sites — `knowledge-layer.ts:807` and `:995`,
  * the two arms of extraction. Every other resolution in the codebase is the
@@ -82,7 +88,8 @@ describe('subject folding, per resolver', () => {
 
   describe('findOrCreate — organization, product, service', () => {
     /** Create `first`, then offer `second`. Did the second land on the first? */
-    function folds(first: string, second: string, kind = 'organization' as const): boolean {
+    type DedupKind = 'organization' | 'product' | 'service';
+    function folds(first: string, second: string, kind: DedupKind = 'organization'): boolean {
       const store = makeStore();
       const a = store.findOrCreate({ kind, name: first });
       // Anchors the negatives: without this, every `toBe(false)` below also
@@ -160,14 +167,18 @@ describe('subject folding, per resolver', () => {
       expect(short.resolved).toBe('subset');
     });
 
-    it('folds a title-stripped variant through the equal-key branch', () => {
+    it('folds a title-stripped variant onto the plain name, and records it', () => {
       const store = makeStore();
       const plain = store.resolvePersonSubject('Ada Lovelace');
       const titled = store.resolvePersonSubject('Dr. Ada Lovelace');
       expect(titled.id).toBe(plain.id);
-      // Which branch matters: this one shares a token key, the test above is a
-      // strict subset. Without the assertion the two are indistinguishable.
-      expect(titled.resolved).toBe('canonical');
+      expect(JSON.parse(store.getSubject(plain.id)!.aliases))
+        .toEqual(['Ada Lovelace', 'Dr. Ada Lovelace']);
+      // NOT asserting `resolved: 'canonical'`, though it is: three separate
+      // branches return that label (exact hit, normalised fallback, equal-key),
+      // so it would look like it identified the path taken while proving only
+      // that some fold happened. The alias list is the observable that does not
+      // over-state.
     });
 
     it('REFUSES an ambiguous subset — mints rather than guesses, and still folds a clear one', () => {
@@ -256,7 +267,11 @@ describe('subject folding, per resolver', () => {
     // correctly denies for its own kinds — and has an orphan-adopt path that
     // RE-PARENTS an existing row, the one place any of this mutates a subject
     // rather than appending to it. Different rules, different risks; pinning
-    // them belongs with the engagement work. This test exists so that reading
+    // them belongs with the engagement work — including
+    // `allowParentedReuseOnNullParent` (reached from `set-thread-context.ts`),
+    // which reuses `matches[0]` under an ARBITRARY client by `updated_at DESC`:
+    // the same scan-order hazard this file flags for shared aliases above.
+    // This test exists so that reading
     // only the blocks above does not read as coverage of the whole graph.
     const store = makeStore();
     const a = store.findOrCreateEngagement('Projekt Orion', null);
