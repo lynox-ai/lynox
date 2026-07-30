@@ -145,7 +145,6 @@ export function parseAnnouncedSubAgents(raw: unknown): AnnouncedSubAgent[] {
 	return out;
 }
 
-/** Register a batch and its children. Idempotent on replay of the same `spawnId`. */
 /**
  * The ONE rule for a dollar figure arriving on the wire — used by both the
  * per-child spend and the batch's up-front reservation.
@@ -155,14 +154,17 @@ export function parseAnnouncedSubAgents(raw: unknown): AnnouncedSubAgent[] {
  * "we don't know". A NaN or a stringified amount is a malformed frame; letting
  * either through puts NaN in a total that is then rendered.
  *
- * Callers must NOT re-check the result. An identical guard downstream masks
- * every mutation of this one, which is exactly how the first version of this
- * passed its own malformed-input test with the check deleted.
+ * No REDUCER may re-check the result. An identical guard inside the reducers
+ * masks every mutation of this one, which is exactly how the first version of
+ * this passed its own malformed-input test with the check deleted. A template
+ * asking "is there a number to render here?" is a different question and is
+ * free to ask it.
  */
 function reportableUsd(value: unknown): number | undefined {
 	return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
+/** Register a batch and its children. Idempotent on replay of the same `spawnId`. */
 function startSpawn(
 	state: AttributionState,
 	spawnId: string,
@@ -366,9 +368,13 @@ export function applyChildDone(state: AttributionState, data: Record<string, unk
 export function batchTotals(state: AttributionState, spawnId: string): {
 	children: SubAgentActivity[];
 	running: SubAgentActivity[];
+	/** What the batch has actually spent so far. Never an estimate. */
 	costUsd: number;
-	/** True when `costUsd` is the engine's up-front reservation, not spend. */
-	costIsEstimate: boolean;
+	/**
+	 * The engine's up-front CEILING for the batch, or null when it should not be
+	 * shown — because spend is known, or nothing is running any more.
+	 */
+	estimateMaxUsd: number | null;
 	settledElapsedS: number | null;
 } {
 	const batch = state.spawns?.[spawnId];
@@ -377,19 +383,24 @@ export function batchTotals(state: AttributionState, spawnId: string): {
 		.filter((c): c is SubAgentActivity => !!c);
 	const running = children.filter((c) => c.status === 'running');
 	const spent = children.reduce((sum, c) => sum + (c.costUsd ?? 0), 0);
-	// Until the first child settles there is no spend to report, and a batch
-	// showing nothing where a cost will appear reads as "this is free". The
-	// engine reserved a figure before it started — show THAT, marked as the
-	// estimate it is, and let real spend replace it the moment there is any.
+	// Two different numbers, never merged into one. The engine's figure is a
+	// CEILING — `estimateSpawnCost` prices maxIterations × a full output fill —
+	// so presenting it as "roughly what this cost" overstates a finished batch,
+	// often by a lot. The CLI has always labelled it "est. max"; so does the panel.
+	//
+	// It is shown only while something is still RUNNING. Without that condition a
+	// batch whose children all report zero cost (a model with no pricing entry —
+	// the case `reportableUsd` exists for) would keep displaying the ceiling next
+	// to "done", forever, as if that were the bill.
+	//
 	// Deliberately NOT re-validated here — `reportableUsd` already decided, and a
 	// second `> 0` at this line would make every mutation of that one invisible.
 	const estimate = batch?.estimatedCostUSD;
-	const costIsEstimate = spent === 0 && estimate !== undefined;
 	return {
 		children,
 		running,
-		costUsd: costIsEstimate ? estimate : spent,
-		costIsEstimate,
+		costUsd: spent,
+		estimateMaxUsd: spent === 0 && running.length > 0 && estimate !== undefined ? estimate : null,
 		settledElapsedS: running.length > 0 || children.length === 0
 			? null
 			: Math.max(...children.map((c) => c.elapsedS ?? 0)),

@@ -452,28 +452,55 @@ describe('batchTotals — the up-front reservation', () => {
 		return state;
 	};
 
-	it('stands in for spend while nothing has settled, marked as an estimate', () => {
+	it('is offered as a ceiling while the batch is still running', () => {
 		const t = batchTotals(withEstimate(0.04), 's1');
-		expect(t.costUsd).toBe(0.04);
-		expect(t.costIsEstimate).toBe(true);
+		expect(t.estimateMaxUsd).toBe(0.04);
+		// Kept OUT of `costUsd`: that field means spend, and this is not spend.
+		expect(t.costUsd).toBe(0);
 	});
 
 	it('is REPLACED by real spend the moment a child settles', () => {
 		const state = withEstimate(0.04);
 		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 9, costUsd: 0.0021 });
 		const t = batchTotals(state, 's1');
-		// Not 0.0421, and not still 0.04: the reservation was a prediction of this
-		// very number, so keeping either alongside it double-counts the batch.
 		expect(t.costUsd).toBe(0.0021);
-		expect(t.costIsEstimate).toBe(false);
+		expect(t.estimateMaxUsd).toBeNull();
+	});
+
+	/**
+	 * The state that got the first version of this merged past its own tests.
+	 * `reportableUsd` leaves `costUsd` unset for a model with no pricing entry,
+	 * so a FINISHED batch still had `spent === 0` — and kept rendering the
+	 * ceiling beside "done", forever, as if that were the bill.
+	 */
+	it('retires the ceiling when the batch finishes having spent nothing measurable', () => {
+		const state = withEstimate(0.42);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 9, costUsd: 0 });
+		const t = batchTotals(state, 's1');
+		expect(t.running).toHaveLength(0);
+		expect(t.costUsd).toBe(0);
+		expect(t.estimateMaxUsd).toBeNull();
+	});
+
+	it('drops the ceiling as soon as ANY child has settled, siblings still running', () => {
+		const state: AttributionState = {};
+		recordSpawn(state, {
+			...batch('s1', [{ id: 's1:0', name: 'a' }, { id: 's1:1', name: 'b' }]),
+			estimatedCostUSD: 0.42,
+		}, 1000);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 9, costUsd: 0.0021 });
+		const t = batchTotals(state, 's1');
+		expect(t.running).toHaveLength(1);
+		// Both numbers at once would be two costs on one row, one of them an
+		// order of magnitude larger, with nothing saying which is which.
+		expect(t.costUsd).toBe(0.0021);
+		expect(t.estimateMaxUsd).toBeNull();
 	});
 
 	it('claims nothing when the engine sent no estimate', () => {
 		const t = batchTotals(withDelegation(), 's1');
 		expect(t.costUsd).toBe(0);
-		// `costIsEstimate` false with a zero cost is what makes the caller render
-		// nothing at all, rather than a "~$0.0000" that reads as "this is free".
-		expect(t.costIsEstimate).toBe(false);
+		expect(t.estimateMaxUsd).toBeNull();
 	});
 
 	it('ignores a malformed estimate rather than rendering NaN', () => {
@@ -483,16 +510,24 @@ describe('batchTotals — the up-front reservation', () => {
 		for (const bad of ['0.04', Number.NaN, Number.POSITIVE_INFINITY, -1, null, undefined]) {
 			const t = batchTotals(withEstimate(bad), 's1');
 			expect(t.costUsd).toBe(0);
-			expect(t.costIsEstimate).toBe(false);
+			expect(t.estimateMaxUsd).toBeNull();
 		}
 	});
 });
 
 /**
- * The event-type strings. Their only use is the `switch` in `chat.svelte.ts`,
- * which vitest cannot import — so a typo there is a case that never runs, with
- * nothing in CI to notice. This does not verify them against the engine (no
- * cross-repo type is reachable here); it makes changing them a deliberate act.
+ * The event-type strings.
+ *
+ * What actually fixed the problem is the constants themselves: the `switch` in
+ * `chat.svelte.ts` — which vitest cannot import — now uses the same symbols, so
+ * a `case 'spawn_progres':` typo is no longer expressible. This test cannot
+ * catch that class and does not claim to.
+ *
+ * What it does is pin the VALUES, so changing one is a deliberate edit of a
+ * test. It is an attestation, not a verification: the engine's own literals sit
+ * in `src/types/tools.ts` of this repo, but this package imports nothing from
+ * the engine's `src/` (only the vendored `contract/`), so nothing here can
+ * compare against them. Cross-check by hand against that file.
  */
 describe('wire event types', () => {
 	it('are the names the engine emits', () => {

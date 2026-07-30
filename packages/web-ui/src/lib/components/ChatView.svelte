@@ -537,9 +537,10 @@
 		return `${parsed.toLocaleDateString(locale, { day: 'numeric', month: 'short' })} ${time}`;
 	}
 
-	// `worstStatus` and the rank table it reads now live in `chat-attribution.ts`
-	// beside `foldToolRows`, which both the parent transcript and the sub-agent
-	// panel fold with. Two copies of "which status wins" is one copy too many.
+	// `worstStatus` and the rank table it reads now live in `chat-attribution.ts`,
+	// beside `foldToolRows`. It is the ONLY thing the transcript's fold below and
+	// the sub-agent panel's share — the two loops are separate implementations.
+	// Two copies of "which status wins" was one copy too many.
 
 	/** Group consecutive tool calls with same action, extract plan + step blocks */
 	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): GroupedBlock[] {
@@ -2041,13 +2042,18 @@
 					<span>{t('spawn.done')}</span>
 				{/if}
 				<span class="text-text-subtle/50">{children.length - running.length}/{children.length}</span>
+				<!-- Spend when it is known, otherwise the engine's CEILING while the
+				     batch is still running — `≤`, never `~`, because that figure is
+				     maxIterations × a full output fill and the real bill is usually a
+				     fraction of it. `batchTotals` decides which of the two exists;
+				     asking `> 0` here is a rendering question, not a second guard. -->
 				{#if totals.costUsd > 0}
 					<span class="text-text-subtle/50" aria-hidden="true">·</span>
-					<!-- Marked `~` while it is still the engine's up-front reservation:
-					     a batch showing no cost at all reads as free, and the reserved
-					     figure is the only honest number before the first child settles.
-					     Real spend replaces it the moment there is any. -->
-					<span class="text-text-subtle/70">{totals.costIsEstimate ? '~' : ''}{formatCost(totals.costUsd)}</span>
+					<span class="text-text-subtle/70">{formatCost(totals.costUsd)}</span>
+				{:else if totals.estimateMaxUsd !== null}
+					<span class="text-text-subtle/50" aria-hidden="true">·</span>
+					<span class="text-text-subtle/70" title={t('spawn.est_max_hint')}
+						>≤ {formatCost(totals.estimateMaxUsd)}</span><span class="sr-only">{t('spawn.est_max_hint')}</span>
 				{/if}
 				{#if elapsed >= 120 && running.length > 0}
 					<span class="text-warning">{t('spawn.slow')}</span>
