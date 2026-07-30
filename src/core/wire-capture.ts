@@ -15,7 +15,7 @@
  * SDK-type-free by design: callers extract plain strings/arrays, so this module has
  * no Anthropic-SDK dependency and is reusable by the eval's wire-replay consumer.
  */
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, lstatSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Short } from './utils.js';
@@ -218,19 +218,42 @@ export function isProvisionedInstance(env: NodeJS.ProcessEnv = process.env): boo
  * That is the whole difference between this and the marker file it guards. Not "env is safer than
  * files" in general — env is a poor secret channel — but here, for THIS threat, env is the one
  * channel the attacker is outside of.
+ *
+ * ⚠️ OPERATIONAL LIMIT, and it is real: the control plane has no emit path for this variable. It
+ * matches the `LYNOX_DEBUG_WIRE_*` glob in `contract/env-registry.ts` SELF_HOST_ONLY, whose text
+ * says the CP never emits them — yet the workflow this hatch exists for runs on managed tenants.
+ * So today it must be hand-added to the tenant `.env`, and the next `sync-env` REWRITES that file
+ * wholesale and drops it (`pro services/instance-env.ts` says so in its own header). Re-arm after
+ * every sync-env, or give it a CP column. Tracked as DEF-wire-capture-hatch-not-cp-emitted.
  */
 export function provisionedCaptureAcknowledged(env: NodeJS.ProcessEnv = process.env): boolean {
   return (env['LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED'] ?? '') === '1';
 }
 
 /** Refuse when this is a provisioned instance AND no operator acknowledgement is present. */
+let refusalAnnounced = false;
 function captureRefused(env: NodeJS.ProcessEnv): boolean {
-  return isProvisionedInstance(env) && !provisionedCaptureAcknowledged(env);
+  const refused = isProvisionedInstance(env) && !provisionedCaptureAcknowledged(env);
+  // Say it once. An operator who armed the marker and sees nothing appear needs to be able to
+  // tell "refused" from "wrong path" from "never armed" — and the default path moved in the
+  // same change, so both silent failures are newly plausible at once. Once per process, because
+  // this sits on the per-turn hot path.
+  if (refused && !refusalAnnounced) {
+    refusalAnnounced = true;
+    process.stderr.write(
+      '[lynox] wire capture refused: this instance was provisioned by the control plane. '
+      + 'Set LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED=1 in the tenant env to allow it.\n',
+    );
+  }
+  return refused;
 }
+
+/** Test seam — the announcement is once per process by design. */
+export function _resetCaptureRefusalNotice(): void { refusalAnnounced = false; }
 
 /**
  * The dev/eval sink is armed by a runtime FILE-GATE: a file must exist at the gate path
- * (default `/tmp/wire-sink-on`), matching the original spike. Arming is a deliberate `touch`,
+ * (default `<dataDir>/wire-sink-on`), matching the original spike. Arming is a deliberate `touch`,
  * not a value flip — but the invariant is the FILE's existence, not "env can't reach it":
  * both the gate path (`LYNOX_DEBUG_WIRE_GATE_FILE`) and the destination dir
  * (`LYNOX_DEBUG_WIRE_SINK`, see `wireSinkDir`) are env-configurable, so the environment
@@ -258,13 +281,39 @@ export function wireSinkDir(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 /**
+ * Prepare a sink directory, and REFUSE rather than write into a suspicious one.
+ *
+ * `mkdirSync(dir, { mode })` applies the mode only when it CREATES the directory. An existing
+ * `~/.lynox/wire-sink` at 0755 keeps 0755, and an existing symlink is followed to wherever it
+ * points — so a pre-planted path defeats the move off `/tmp` entirely. `DEF-wire-capture-prod-gate`
+ * asks for exactly this ("incl. tightening a pre-existing loose/symlinked dir"), which the mode
+ * argument alone does not deliver.
+ *
+ * Returns null when the path must not be used; the callers already swallow failures.
+ */
+function prepareSinkDir(dir: string): string | null {
+  const existing = lstatSync(dir, { throwIfNoEntry: false });
+  if (existing) {
+    // A symlink is refused outright rather than "fixed": following it would write the capture
+    // wherever the link points, and re-pointing someone's deliberate link is not our call.
+    if (existing.isSymbolicLink()) return null;
+    if (!existing.isDirectory()) return null;
+    // Tighten a loose mode in place. 0o777 masks off the file-type bits.
+    if ((existing.mode & 0o777) !== 0o700) chmodSync(dir, 0o700);
+    return dir;
+  }
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
+}
+
+/**
  * Best-effort write of a snapshot to the dev sink dir at 0600 (dir created 0700). NEVER
  * throws into the hot path — a sink failure must not affect a real turn.
  */
 export function writeWireSnapshot(snapshot: WireSnapshot, env: NodeJS.ProcessEnv = process.env): void {
   try {
-    const dir = wireSinkDir(env);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const dir = prepareSinkDir(wireSinkDir(env));
+    if (dir === null) return;
     const safeRun = (snapshot.runId ?? 'norun').replace(/[^A-Za-z0-9_-]/g, '_');
     const file = join(dir, `wire-${safeRun}-t${snapshot.turnIndex}-${snapshot.capturedAt}.json`);
     writeFileSync(file, JSON.stringify(snapshot, null, 2), { mode: 0o600 });
@@ -308,7 +357,7 @@ function defaultRawSinkDir(env: NodeJS.ProcessEnv): string {
  *
  * ⚠️ Contains the FULL secrets catalog (names + last-4), memory blocks, and KG — it is NOT
  * redacted (redacting would defeat replay fidelity). Therefore it is DEV/STAGING-EVAL ONLY, on
- * the owner's OWN instance, behind a SEPARATE, more deliberate gate (`/tmp/wire-sink-raw-on`) —
+ * the owner's OWN instance, behind a SEPARATE, more deliberate gate (`<dataDir>/wire-sink-raw-on`) —
  * never the operator export, never a customer/production instance.
  */
 export interface RawWireBody {
@@ -342,8 +391,8 @@ export function rawWireSinkDir(env: NodeJS.ProcessEnv = process.env): string {
 /** Best-effort 0600 write of the raw body. NEVER throws into the hot path. */
 export function writeRawWireBody(body: RawWireBody, env: NodeJS.ProcessEnv = process.env): void {
   try {
-    const dir = rawWireSinkDir(env);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const dir = prepareSinkDir(rawWireSinkDir(env));
+    if (dir === null) return;
     const safeRun = (body.runId ?? 'norun').replace(/[^A-Za-z0-9_-]/g, '_');
     const file = join(dir, `raw-${safeRun}-t${body.turnIndex}-${body.capturedAt}.json`);
     writeFileSync(file, JSON.stringify(body, null, 2), { mode: 0o600 });

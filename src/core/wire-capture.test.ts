@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeAll } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Short } from './utils.js';
@@ -401,5 +401,71 @@ describe('capture sinks refuse on a control-plane-provisioned instance', () => {
   it('fails closed on a PARTIAL provisioning env', () => {
     // Only one of the three present — a provisioning bug, not a licence.
     expect(isProvisionedInstance({ LYNOX_MANAGED_INSTANCE_ID: 'x' })).toBe(true);
+  });
+});
+
+// ── The two surviving mutants an adversarial pass found ─────────────────────
+const SNAP = buildWireSnapshot({
+  runId: 'r1', turnIndex: 0, model: 'm', provider: 'p', systemText: 's',
+  userMessage: 'u', toolNames: [], maxTokens: 1, ephemeralTailChars: 0,
+});
+
+describe('sink defaults that no test was pinning', () => {
+  it('gives the RAW sink its own marker path, not the redacted sink\'s', () => {
+    // MUTATION THIS KILLS: collapsing the raw default onto `wire-sink-on`.
+    // Every other test supplies explicit gate overrides, so the default raw
+    // path was unexercised — and one `touch ~/.lynox/wire-sink-on` would then
+    // have armed the FULL secrets-catalog + KG dump alongside the redacted one,
+    // destroying the "separate, more deliberate opt-in" this file promises.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-defaults-'));
+    writeFileSync(join(dir, 'wire-sink-on'), '');   // arm ONLY the redacted marker
+    const env = { LYNOX_DATA_DIR: dir };
+    expect(isWireSinkEnabled(env)).toBe(true);
+    expect(isRawWireSinkEnabled(env)).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('honours the legacy LYNOX_DIR alias when resolving the data dir', () => {
+    // MUTATION THIS KILLS: dropping `?? env['LYNOX_DIR']`. A self-hoster on the
+    // legacy alias would silently resolve to `~/.lynox` instead of their real
+    // data dir — capture armed in one place, looked for in another.
+    expect(wireSinkDir({ LYNOX_DIR: '/legacy/lx' })).toBe('/legacy/lx/wire-sink');
+    expect(rawWireSinkDir({ LYNOX_DIR: '/legacy/lx' })).toBe('/legacy/lx/wire-sink-raw');
+    // Canonical wins when both are present.
+    expect(wireSinkDir({ LYNOX_DIR: '/legacy/lx', LYNOX_DATA_DIR: '/new/lx' })).toBe('/new/lx/wire-sink');
+  });
+});
+
+describe('a sink dir that already exists is not trusted as found', () => {
+  it('refuses a symlinked sink dir rather than following it', () => {
+    // `mkdirSync(dir, {mode})` sets the mode only when it CREATES the dir, so a
+    // pre-planted symlink survived the move off /tmp untouched and redirected
+    // the capture wherever it pointed. DEF-wire-capture-prod-gate asks for this
+    // explicitly ("incl. tightening a pre-existing loose/symlinked dir").
+    const base = mkdtempSync(join(tmpdir(), 'lynox-symlink-'));
+    const elsewhere = join(base, 'elsewhere');
+    mkdirSync(elsewhere);
+    const sink = join(base, 'sink');
+    symlinkSync(elsewhere, sink);
+
+    writeWireSnapshot(SNAP, { LYNOX_DEBUG_WIRE_SINK: sink });
+
+    // MUTATION THIS KILLS: reverting to a bare mkdirSync — the file lands in
+    // the symlink target and this directory is no longer empty.
+    expect(readdirSync(elsewhere)).toHaveLength(0);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it('tightens a pre-existing world-readable sink dir to 0700', () => {
+    const base = mkdtempSync(join(tmpdir(), 'lynox-loose-'));
+    const sink = join(base, 'sink');
+    mkdirSync(sink, { mode: 0o755 });
+    expect(statSync(sink).mode & 0o777).toBe(0o755);
+
+    writeWireSnapshot(SNAP, { LYNOX_DEBUG_WIRE_SINK: sink });
+
+    expect(statSync(sink).mode & 0o777).toBe(0o700);
+    expect(readdirSync(sink)).toHaveLength(1);   // and it still wrote
+    rmSync(base, { recursive: true, force: true });
   });
 });

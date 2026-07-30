@@ -3801,22 +3801,75 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('survives a vault value whose characters would break the JSON round-trip', async () => {
-      // The scrub is a string replacement over `JSON.stringify(bundle)`, so a
-      // careless mask could inject a quote or a backslash and make JSON.parse
-      // throw — turning a hardening step into a 500 on the export route. The
-      // argument that it cannot is real but subtle (a value containing `"` or
-      // `\` appears ESCAPED in the JSON, so the literal never matches and no
-      // replacement happens), and an argument is not a test.
-      vi.stubEnv('LYNOX_SECRET_QUOTED', 'abc"def\\ghi');
-      vi.stubEnv('LYNOX_SECRET_NEWLINE', 'tok\nen\tvalue');
+    // ⚠️ The FIRST version of this block asserted that a document-level scrub
+    // "survives" adversarial values, and it passed — because it picked
+    // `abc"def\\ghi`, a backslash MID-value, which JSON escapes so the literal
+    // never matches. That is the one arrangement where the argument holds. The
+    // cases below are the ones that do not, each verified to throw against the
+    // string-level form, and they are why the scrub now walks the structure.
+    it.each([
+      ['a short value made of JSON structure', '":'],
+      ['a short value ending in a backslash', 'x\\'],
+      // Above the export's length floor, so it is masked for real — and it is
+      // the case that distinguishes a walk from a string replacement. A vault
+      // holds whatever its owner put there; "no one would store that" is not a
+      // property the scrub may rely on.
+      ['a LONG value that is itself JSON structure', ',"runs":'],
+      ['a long value spanning a key boundary', '","title":"'],
+    ])('does not corrupt the document for %s', async (_label, secret) => {
+      vi.stubEnv('LYNOX_SECRET_ADVERSARIAL', secret);
+      const store = new SecretStore();
+      await swapEngine({
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: `x ${secret} y` }), getMessages: () => [] }),
+        getRunHistory: () => ({
+          getRunsBySession: () => [],
+          getCompactionEventsBySession: () => [],
+          getWireSnapshotsForRun: () => [],
+        }),
+        getSecretStore: () => store,
+      }, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        // MUTATION THIS KILLS: scrubbing `JSON.stringify(bundle)` as one string
+        // instead of walking it. That form throws a SyntaxError on re-parse and
+        // the route answers 500.
+        expect(res.status).toBe(200);
+        const body = await res.json() as { thread: { id: string } };
+        expect(body.thread.id).toBe('t1');
+      });
+    });
+
+    it('leaves ordinary prose alone — a short vault value is not a credential', async () => {
+      // Masking by value across a whole document with the historical floor of 2
+      // rewrites every incidental occurrence: a vault value of `ab` turns
+      // "about the cabbage table" into "***out the c***bage t***le", silently
+      // destroying what a debug export exists to show.
+      vi.stubEnv('LYNOX_SECRET_TINY', 'ab');
+      const store = new SecretStore();
+      await swapEngine({
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'about the cabbage table' }), getMessages: () => [] }),
+        getRunHistory: () => ({
+          getRunsBySession: () => [],
+          getCompactionEventsBySession: () => [],
+          getWireSnapshotsForRun: () => [],
+        }),
+        getSecretStore: () => store,
+      }, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        const body = await res.json() as { thread: { title: string } };
+        // MUTATION THIS KILLS: dropping EXPORT_MASK_MIN_LEN and inheriting the
+        // default floor of 2.
+        expect(body.thread.title).toBe('about the cabbage table');
+      });
+    });
+
+    it('still masks the values that ARE long enough, through the walk', async () => {
       vi.stubEnv('LYNOX_SECRET_UNICODE', 'schlüssel-Ω-value');
-      vi.stubEnv('LYNOX_SECRET_SHORT', 'ab');   // <= 4 chars → mask is a bare '***'
+      vi.stubEnv('LYNOX_SECRET_NEWLINE', 'tok\nen\tvalue');
       const store = new SecretStore();
 
       await swapEngine({
         getThreadStore: () => ({
-          getThread: () => ({ id: 't1', title: 'abc"def\\ghi / tok\nen\tvalue / schlüssel-Ω-value / ab' }),
+          getThread: () => ({ id: 't1', title: 'schlüssel-Ω-value and tok\nen\tvalue' }),
           getMessages: () => [],
         }),
         getRunHistory: () => ({
@@ -3827,12 +3880,13 @@ describe('LynoxHTTPApi', () => {
         getSecretStore: () => store,
       }, async () => {
         const res = await jsonFetch('/api/threads/t1/debug-export');
-        // The whole point: still 200 and still parseable JSON.
         expect(res.status).toBe(200);
         const body = await res.json() as { thread: { id: string } };
         expect(body.thread.id).toBe('t1');
-        // And the values that DO appear literally in the JSON are masked.
+        // Masked inside the string value — and the document still parses, which
+        // the string-level form could not promise for these characters.
         expect(JSON.stringify(body)).not.toContain('schlüssel-Ω-value');
+        expect(JSON.stringify(body)).not.toContain('tok\nen\tvalue');
       });
     });
 

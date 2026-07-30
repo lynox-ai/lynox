@@ -23,7 +23,7 @@ export interface SecretStoreLike {
   /** Agent-visible stored names that normalize-collide with `requested` (near-identical name reconciliation). */
   findNameMatches?(requested: string): string[];
   containsSecret(text: string): boolean;
-  maskSecrets(text: string): string;
+  maskSecrets(text: string, minLength?: number): string;
   recordConsent(name: string): void;
   hasConsent(name: string): boolean;
   isExpired(name: string): boolean;
