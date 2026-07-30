@@ -12,6 +12,8 @@
  * commits land).
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
 import { evaluate, extractRecord, requiredGates } from '../scripts/gate-record.mjs';
 
@@ -60,6 +62,22 @@ describe('gate-record — the SHA pin', () => {
     expect(v.ok).toBe(false);
     expect(v.errors.join(' ')).toContain('`head:`');
   });
+
+  it('accepts the same SHA in upper case', () => {
+    // A false red on a legitimate PR is how a guard earns a bypass and then a
+    // deletion. Some tools echo SHAs upper-cased; it is the same commit.
+    expect(evaluate({ body: record({ head: HEAD.slice(0, 8).toUpperCase() }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('tells a placeholder apart from a stale SHA', () => {
+    // Both are red, but the instruction differs: one says "fill this in", the
+    // other says "your gates are older than your code". Collapsing them sends
+    // the reader looking for commits that do not exist.
+    const v = evaluate({ body: record({ head: '<short SHA>' }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toContain('not a commit SHA');
+    expect(v.errors.join(' ')).not.toContain('Commits landed');
+  });
 });
 
 describe('gate-record — the record itself', () => {
@@ -67,6 +85,24 @@ describe('gate-record — the record itself', () => {
     const v = evaluate({ body: '## Summary\n\nJust a description.\n', head: HEAD, files: CODE });
     expect(v.ok).toBe(false);
     expect(v.errors.join(' ')).toContain('no gate record');
+  });
+
+  it('does not see a record hidden inside an HTML comment', () => {
+    // GitHub renders no HTML comment, so such a record is invisible to every
+    // human who opens the PR while satisfying the check — the durable record
+    // evaporates and the tick stays green. It is one missing `-->` away in the
+    // template, where the instructions sit directly above the block.
+    const v = evaluate({ body: `<!--\n${record()}\n-->`, head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toContain('no gate record');
+  });
+
+  it('does not accept a record indented into some other block', () => {
+    // A fenced block is defined at the start of a line. Indented, it is a code
+    // sample inside a list item or a quoted diff — someone else's record pasted
+    // for discussion, not a claim about this PR.
+    const indented = record().split('\n').map((l) => (l ? '    ' + l : l)).join('\n');
+    expect(evaluate({ body: indented, head: HEAD, files: CODE }).ok).toBe(false);
   });
 
   it('rejects TWO records rather than picking one', () => {
@@ -168,6 +204,17 @@ describe('gate-record — who is exempt', () => {
     expect(v.ok).toBe(false);
   });
 
+  it('does NOT exempt a diff it could not see at all', () => {
+    // "No files changed" is not "only documentation changed". They were one
+    // branch, so the check passed whenever the file list failed to arrive — a
+    // wrong diff range, a shallow clone, a cherry-pick already in base. A guard
+    // that opens when its input goes missing is worse than none: the tick still
+    // appears, and it is the tick people read.
+    const v = evaluate({ body: 'no record here', head: HEAD, files: [] });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toContain('could not see');
+  });
+
   it('exempts a bot, because its PRs merge through a different workflow', () => {
     const v = evaluate({ body: '', head: HEAD, files: CODE, author: 'dependabot[bot]' });
     expect(v.ok).toBe(true);
@@ -176,6 +223,35 @@ describe('gate-record — who is exempt', () => {
   it('does NOT exempt a human whose name merely ends in "bot"', () => {
     const v = evaluate({ body: '', head: HEAD, files: CODE, author: 'talbot' });
     expect(v.ok).toBe(false);
+  });
+});
+
+/**
+ * The template is part of the guard, and it was the hole.
+ *
+ * The first version shipped `gates: code-review, delta`, `delta: clean` and
+ * `mutations: 0 killed, 0 survived` pre-filled, with only `head:` blank. Passing
+ * meant pasting seven hex characters — every attestation answered in advance, by
+ * the same file that asks the question. A guard satisfiable by ritual is the
+ * failure it exists to prevent, wearing a green tick.
+ */
+describe('gate-record — the shipped template does not answer its own questions', () => {
+  const TEMPLATE = readFileSync(
+    fileURLToPath(new URL('../.github/pull_request_template.md', import.meta.url)),
+    'utf-8',
+  );
+
+  it('is REJECTED as shipped', () => {
+    const v = evaluate({ body: TEMPLATE, head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+  });
+
+  it('is rejected on EVERY field, not just the blank one', () => {
+    const errors = evaluate({ body: TEMPLATE, head: HEAD, files: CODE }).errors.join(' ');
+    expect(errors).toContain('not a commit SHA');
+    expect(errors).toContain('unknown gate');
+    expect(errors).toContain('`delta:`');
+    expect(errors).toContain('`mutations:`');
   });
 });
 

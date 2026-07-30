@@ -20,6 +20,9 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened, ready_for_review]
 
+permissions:
+  contents: read
+
 jobs:
   gate-record:
     runs-on: ubuntu-latest
@@ -45,7 +48,11 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$PR_BODY" > /tmp/pr-body.txt
-          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > /tmp/pr-files.txt
+          # Three dots: what the BRANCH changed, from the merge base. Two dots
+          # compares the two trees, so once main moves ahead every file changed
+          # there shows up as this PR's — which reds a docs-only PR the moment
+          # somebody else lands code, and the script's own list is then wrong.
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" > /tmp/pr-files.txt
           node scripts/gate-record.mjs \
             --body-file /tmp/pr-body.txt \
             --head "$HEAD_SHA" \

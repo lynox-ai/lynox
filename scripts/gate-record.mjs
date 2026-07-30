@@ -87,8 +87,15 @@ function parseArgs(argv) {
  * mean two claims, and picking either silently is how a stale one survives.
  */
 export function extractRecord(body, mark = MARK) {
-  const fence = new RegExp('```' + mark + '\\s*\\n([\\s\\S]*?)```', 'g');
-  const found = [...body.matchAll(fence)];
+  // HTML comments come out FIRST. GitHub renders none of them, so a record
+  // inside one is invisible to every human who opens the PR while satisfying
+  // this check — and the template puts an instruction comment directly above the
+  // block, which makes "forgot to close the comment" a one-character path to a
+  // green tick over a record nobody can read.
+  const visible = body.replace(/<!--[\s\S]*?-->/g, '');
+  // Both fences anchored to the start of a line, as a fenced block is defined.
+  const fence = new RegExp('^```' + mark + '[ \\t]*\\n([\\s\\S]*?)^```', 'gm');
+  const found = [...visible.matchAll(fence)];
   if (found.length === 0) return null;
   if (found.length > 1) return { error: `found ${found.length} record blocks; a body may carry one` };
 
@@ -100,8 +107,17 @@ export function extractRecord(body, mark = MARK) {
   return { fields };
 }
 
-/** Gates this diff requires, given the files it changes. */
+/**
+ * Gates this diff requires, given the files it changes. `null` means exempt.
+ *
+ * An EMPTY list is not exempt. "No files changed" and "only documentation
+ * changed" are different facts, and conflating them makes the check pass
+ * whenever the file list fails to arrive — a wrong diff range, a cherry-pick
+ * already in base, a shallow clone. A guard that opens when its input goes
+ * missing is worse than no guard, because the tick still appears.
+ */
 export function requiredGates(files) {
+  if (files.length === 0) return 'empty';
   const code = files.filter((f) => !DOC_ONLY.some((p) => p.test(f)));
   if (code.length === 0) return null; // docs-only: exempt
   const gates = new Set(['code-review', 'delta']);
@@ -123,6 +139,12 @@ export function evaluate({ body, head, files, author }) {
   }
 
   const required = requiredGates(files);
+  if (required === 'empty') {
+    return {
+      ok: false,
+      errors: ['no changed files were reported — refusing to pass on a diff this check could not see'],
+    };
+  }
   if (required === null) {
     return { ok: true, notes: ['diff touches documentation only'] };
   }
@@ -145,9 +167,18 @@ export function evaluate({ body, head, files, author }) {
   // The load-bearing check. Everything else here is an attestation; this one is
   // a fact CI can establish on its own, and it is the failure that actually
   // recurs — gates run, then more commits land.
-  if (!f.head) {
+  // Compared case-insensitively: a SHA pasted from a tool that upper-cases it is
+  // the same commit, and a false red here is how a guard earns a bypass.
+  const pinned = (f.head ?? '').toLowerCase();
+  if (!pinned) {
     errors.push('record has no `head:` — without it nothing ties the gates to this code');
-  } else if (!head.startsWith(f.head) || f.head.length < 7) {
+  } else if (!/^[0-9a-f]+$/.test(pinned)) {
+    // Catches the template placeholder and anything else that is not a SHA,
+    // separately from a real-but-stale one. Same red, different instruction.
+    errors.push(`\`head: ${f.head}\` is not a commit SHA — fill it in with \`git rev-parse --short HEAD\``);
+  } else if (pinned.length < 7) {
+    errors.push(`\`head: ${f.head}\` is too short to name one commit — use at least 7 characters`);
+  } else if (!head.toLowerCase().startsWith(pinned)) {
     errors.push(
       `record pins head \`${f.head}\`, but this PR's head is \`${head.slice(0, 12)}\`. ` +
       'Commits landed after the gates ran: re-run them and update the record.',
