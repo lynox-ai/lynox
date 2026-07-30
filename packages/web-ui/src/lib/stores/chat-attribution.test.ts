@@ -7,7 +7,6 @@ import {
 	applySpawnProgress,
 	applyChildDone,
 	parseAnnouncedSubAgents,
-	hasRunningChildren,
 	batchTotals,
 	type AttributionState,
 } from './chat-attribution.js';
@@ -174,6 +173,28 @@ describe('recordToolCall', () => {
 		recordToolCall(state, { name: 'read_file', input: { path: 'x' } });
 		expect(state.toolCalls).toHaveLength(1);
 	});
+
+	it('dedups a repeated running call from a CHILD too', () => {
+		const state = withDelegation();
+		recordToolCall(state, { name: 'read_file', input: { path: 'x' }, subAgentId: 's1:0' });
+		recordToolCall(state, { name: 'read_file', input: { path: 'x' }, subAgentId: 's1:0' });
+		// A re-attach replays frames from the last applied seq. Without the guard
+		// the duplicate row sits at "running" forever, because the incoming
+		// tool_result closes the FIRST match.
+		expect(state.subAgents!['s1:0']!.toolCalls).toHaveLength(1);
+		recordToolResult(state, { name: 'read_file', result: 'ok', subAgentId: 's1:0' });
+		expect(state.subAgents!['s1:0']!.toolCalls.every((c) => c.status === 'done')).toBe(true);
+	});
+
+	it('treats a `subAgent` without `subAgentId` as a child, not the main agent', () => {
+		const state = withDelegation();
+		// An older engine — or a frame that lost the id — still says the event came
+		// from a child. Falling back to the main agent's list would restore exactly
+		// the misattribution this module exists to remove, so it drops instead.
+		const where = recordToolCall(state, { name: 'bash', input: {}, subAgent: 'researcher' });
+		expect(where).toBe('dropped');
+		expect(state.toolCalls ?? []).toEqual([]);
+	});
 });
 
 describe('recordToolResult', () => {
@@ -212,6 +233,17 @@ describe('recordToolResult', () => {
 		expect(state.subAgents!['s1:1']!.toolCalls[0]).toMatchObject({ status: 'error' });
 	});
 
+	it('falls back to the last matching call when none is still running', () => {
+		const state = withDelegation();
+		recordToolCall(state, { name: 'read_file', input: { path: 'a' } });
+		recordToolResult(state, { name: 'read_file', result: 'first' });
+		// A late or duplicated result for an already-closed call must update that
+		// call, not vanish. Without the findLast fallback the `find(running)` misses
+		// and the result is silently dropped.
+		const { call } = recordToolResult(state, { name: 'read_file', result: 'second' });
+		expect(call).toMatchObject({ result: 'second', status: 'done' });
+	});
+
 	it('drops a result for an unknown child instead of closing a parent call', () => {
 		const state = withDelegation();
 		recordToolCall(state, { name: 'read_file', input: {} });
@@ -225,14 +257,14 @@ describe('recordToolResult', () => {
 describe('progress and completion', () => {
 	it('marks a child done and records its wall-clock', () => {
 		const state = withDelegation();
-		applyChildDone(state, 's1:0', true, 12);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 12 });
 		expect(state.subAgents!['s1:0']).toMatchObject({ status: 'done', elapsedS: 12 });
 		expect(state.subAgents!['s1:1']!.status).toBe('running');
 	});
 
 	it('marks a failed child as error, not done', () => {
 		const state = withDelegation();
-		applyChildDone(state, 's1:1', false, 3);
+		applyChildDone(state, { subAgentId: 's1:1', ok: false, elapsedS: 3 });
 		expect(state.subAgents!['s1:1']!.status).toBe('error');
 	});
 
@@ -241,7 +273,7 @@ describe('progress and completion', () => {
 		// The heartbeat is the only correction path for a dropped
 		// `spawn_child_done`: a child the engine no longer lists as running has
 		// finished, whether or not we saw it finish.
-		applySpawnProgress(state, 's1', 20, ['s1:1']);
+		applySpawnProgress(state, { spawnId: 's1', elapsedS: 20, running: ['s1:1'] });
 		expect(state.subAgents!['s1:0']!.status).toBe('done');
 		expect(state.subAgents!['s1:1']!.status).toBe('running');
 		expect(state.spawns!['s1']!.elapsedS).toBe(20);
@@ -249,31 +281,24 @@ describe('progress and completion', () => {
 
 	it('does not resurrect a child that already failed', () => {
 		const state = withDelegation();
-		applyChildDone(state, 's1:0', false, 2);
-		applySpawnProgress(state, 's1', 20, []);
+		applyChildDone(state, { subAgentId: 's1:0', ok: false, elapsedS: 2 });
+		applySpawnProgress(state, { spawnId: 's1', elapsedS: 20, running: [] });
 		expect(state.subAgents!['s1:0']!.status).toBe('error');
 	});
 
 	it('leaves a batch it does not know alone', () => {
 		const state = withDelegation();
-		applySpawnProgress(state, 's9', 99, []);
+		applySpawnProgress(state, { spawnId: 's9', elapsedS: 99, running: [] });
 		expect(state.subAgents!['s1:0']!.status).toBe('running');
 		expect(state.spawns!['s1']!.elapsedS).toBe(0);
 	});
 
-	it('reports whether anything is still working', () => {
-		const state = withDelegation();
-		expect(hasRunningChildren(state)).toBe(true);
-		applyChildDone(state, 's1:0', true, 1);
-		applyChildDone(state, 's1:1', true, 1);
-		expect(hasRunningChildren(state)).toBe(false);
-	});
 });
 
 describe('cost per sub-agent', () => {
 	it('records what a child spent when it finishes', () => {
 		const state = withDelegation();
-		applyChildDone(state, 's1:0', true, 12, 0.0143);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 12, costUsd: 0.0143 });
 		expect(state.subAgents!['s1:0']!.costUsd).toBe(0.0143);
 	});
 
@@ -281,13 +306,13 @@ describe('cost per sub-agent', () => {
 		const state = withDelegation();
 		// A child that died halfway still burned tokens. Dropping its cost would
 		// make the batch total quietly understate the turn.
-		applyChildDone(state, 's1:1', false, 4, 0.0021);
+		applyChildDone(state, { subAgentId: 's1:1', ok: false, elapsedS: 4, costUsd: 0.0021 });
 		expect(state.subAgents!['s1:1']).toMatchObject({ status: 'error', costUsd: 0.0021 });
 	});
 
 	it('leaves cost UNSET when the engine reports zero', () => {
 		const state = withDelegation();
-		applyChildDone(state, 's1:0', true, 12, 0);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 12, costUsd: 0 });
 		// A model with no pricing entry reports 0. "$0.0000" reads as "this was
 		// free"; absent reads as "we don't know", which is the truth.
 		expect(state.subAgents!['s1:0']!.costUsd).toBeUndefined();
@@ -295,23 +320,23 @@ describe('cost per sub-agent', () => {
 
 	it('ignores a malformed cost instead of poisoning the batch total', () => {
 		const state = withDelegation();
-		applyChildDone(state, 's1:0', true, 1, 'lots');
-		applyChildDone(state, 's1:1', true, 1, Number.NaN);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 1, costUsd: 'lots' });
+		applyChildDone(state, { subAgentId: 's1:1', ok: true, elapsedS: 1, costUsd: Number.NaN });
 		expect(batchTotals(state, 's1').costUsd).toBe(0);
 	});
 
 	it('sums the batch from its children', () => {
 		const state = withDelegation();
-		applyChildDone(state, 's1:0', true, 12, 0.01);
-		applyChildDone(state, 's1:1', false, 4, 0.005);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 12, costUsd: 0.01 });
+		applyChildDone(state, { subAgentId: 's1:1', ok: false, elapsedS: 4, costUsd: 0.005 });
 		expect(batchTotals(state, 's1').costUsd).toBeCloseTo(0.015, 6);
 	});
 
 	it('does not mix two batches into one total', () => {
 		const state = withDelegation();
 		recordSpawn(state, batch('s2', [{ id: 's2:0', name: 'other' }]), 2000);
-		applyChildDone(state, 's1:0', true, 1, 0.01);
-		applyChildDone(state, 's2:0', true, 1, 0.99);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 1, costUsd: 0.01 });
+		applyChildDone(state, { subAgentId: 's2:0', ok: true, elapsedS: 1, costUsd: 0.99 });
 		expect(batchTotals(state, 's1').costUsd).toBe(0.01);
 		expect(batchTotals(state, 's2').costUsd).toBe(0.99);
 	});
@@ -320,14 +345,14 @@ describe('cost per sub-agent', () => {
 describe('batchTotals elapsed', () => {
 	it('is null while anything is still running — the caller uses wall-clock', () => {
 		const state = withDelegation();
-		applyChildDone(state, 's1:0', true, 17, 0.01);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 17, costUsd: 0.01 });
 		expect(batchTotals(state, 's1').settledElapsedS).toBeNull();
 	});
 
 	it('is the LONGEST child once every child has stopped', () => {
 		const state = withDelegation();
-		applyChildDone(state, 's1:0', true, 17, 0.01);
-		applyChildDone(state, 's1:1', true, 11, 0.01);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 17, costUsd: 0.01 });
+		applyChildDone(state, { subAgentId: 's1:1', ok: true, elapsedS: 11, costUsd: 0.01 });
 		// The heartbeat freezes at its last 5s tick, so the batch used to read
 		// "12s" directly above a child row reading "17s".
 		expect(batchTotals(state, 's1').settledElapsedS).toBe(17);
@@ -366,8 +391,8 @@ describe('two children sharing a name', () => {
 
 	it('keeps their outcomes apart', () => {
 		const state = twins();
-		applyChildDone(state, 's1:0', true, 5);
-		applyChildDone(state, 's1:1', false, 9);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 5 });
+		applyChildDone(state, { subAgentId: 's1:1', ok: false, elapsedS: 9 });
 		expect(state.subAgents!['s1:0']).toMatchObject({ status: 'done', elapsedS: 5 });
 		expect(state.subAgents!['s1:1']).toMatchObject({ status: 'error', elapsedS: 9 });
 	});

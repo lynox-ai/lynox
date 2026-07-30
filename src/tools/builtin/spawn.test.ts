@@ -660,11 +660,15 @@ describe('spawn_agent tool', () => {
         makeAgent({ onStream: onStream as StreamHandler }),
       );
 
+      const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
+      const subs = spawn['subAgents'] as Array<{ id: string }>;
       const done = streamEvents(onStream).filter((e) => e['type'] === 'spawn_child_done');
       expect(done).toHaveLength(2);
-      // Whatever the order, the two costs must not be the same value — a single
-      // shared read would report one child's spend for both.
-      expect(new Set(done.map((e) => e['costUsd']))).toEqual(new Set(costs));
+      // Per child id, not a set: set-equality also passes when the two costs are
+      // swapped, which is precisely the mis-attribution being tested for.
+      const byId = new Map(done.map((e) => [e['subAgentId'], e['costUsd']]));
+      expect(byId.get(subs[0]!.id)).toBe(costs[0]);
+      expect(byId.get(subs[1]!.id)).toBe(costs[1]);
     });
 
     it('keys the heartbeat by child id, so same-named children stay separable', async () => {

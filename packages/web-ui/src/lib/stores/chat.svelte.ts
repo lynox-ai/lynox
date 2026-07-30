@@ -1193,8 +1193,14 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 function syncSpawnContext(msg: ChatMessage): void {
 	const children = Object.values(msg.subAgents ?? {});
 	if (children.length === 0) return;
+	// Keyed by NAME because that is what the panel renders — which means an
+	// ambiguous name gets NO entry rather than one twin's tool shown for both.
+	// The inline transcript is the exact, id-keyed view.
+	const nameCounts = new Map<string, number>();
+	for (const c of children) nameCounts.set(c.name, (nameCounts.get(c.name) ?? 0) + 1);
 	const lastTool: Record<string, string> = {};
 	for (const c of children) {
+		if (nameCounts.get(c.name) !== 1) continue;
 		const last = c.toolCalls[c.toolCalls.length - 1];
 		if (last) lastTool[c.name] = last.name;
 	}
@@ -1404,17 +1410,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		}
 		case 'spawn_progress': {
-			applySpawnProgress(
-				msg,
-				data['spawnId'],
-				Number(data['elapsedS'] ?? 0),
-				Array.isArray(data['running']) ? (data['running'] as string[]) : [],
-			);
+			applySpawnProgress(msg, data);
 			syncSpawnContext(msg);
 			break;
 		}
 		case 'spawn_child_done': {
-			applyChildDone(msg, data['subAgentId'], data['ok'] === true, Number(data['elapsedS'] ?? 0), data['costUsd']);
+			applyChildDone(msg, data);
 			syncSpawnContext(msg);
 			break;
 		}

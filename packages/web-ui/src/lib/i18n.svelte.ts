@@ -81,7 +81,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'spawn.status_ok': { de: 'erfolgreich', en: 'succeeded' },
 	'spawn.status_fail': { de: 'fehlgeschlagen', en: 'failed' },
 	'spawn.subagents': { de: 'Subagenten', en: 'Sub-agents' },
-	'spawn.slow': { de: 'ungewöhnlich lang', en: 'unusually long' },
+	'spawn.slow': { de: 'ungewöhnlich lang', en: 'taking unusually long' },
 	'spawn.waiting': { de: 'wartet', en: 'waiting' },
 	'spawn.region_label': { de: 'Aktivität der Subagenten', en: 'Sub-agent activity' },
 

@@ -127,7 +127,7 @@ export function parseAnnouncedSubAgents(raw: unknown): AnnouncedSubAgent[] {
 }
 
 /** Register a batch and its children. Idempotent on replay of the same `spawnId`. */
-export function startSpawn(
+function startSpawn(
 	state: AttributionState,
 	spawnId: string,
 	children: AnnouncedSubAgent[],
@@ -164,13 +164,13 @@ export function startSpawn(
  * the exact defect this module exists to remove, so an unattributable event is
  * dropped instead.
  */
-export function childFor(state: AttributionState, subAgentId: unknown): SubAgentActivity | null {
+function childFor(state: AttributionState, subAgentId: unknown): SubAgentActivity | null {
 	if (typeof subAgentId !== 'string' || subAgentId.length === 0) return null;
 	return state.subAgents?.[subAgentId] ?? null;
 }
 
 /** True when the engine attributed this event to a child, known to us or not. */
-export function isChildEvent(subAgentId: unknown, subAgent: unknown): boolean {
+function isChildEvent(subAgentId: unknown, subAgent: unknown): boolean {
 	return (typeof subAgentId === 'string' && subAgentId.length > 0)
 		|| (typeof subAgent === 'string' && subAgent.length > 0);
 }
@@ -183,7 +183,7 @@ export function isChildEvent(subAgentId: unknown, subAgent: unknown): boolean {
  * PARENT's still-running `read_file` — two agents doing the same thing at the
  * same time is the normal case for a delegation, not an edge case.
  */
-export function matchToolResult(calls: ToolCallInfo[], name: string): ToolCallInfo | undefined {
+function matchToolResult(calls: ToolCallInfo[], name: string): ToolCallInfo | undefined {
 	return calls.find((t) => t.name === name && t.status === 'running')
 		?? calls.findLast((t) => t.name === name);
 }
@@ -206,19 +206,25 @@ export function recordToolCall(
 	onTextBlockCompleted?: (text: string, blockIndex: number) => void,
 ): Attribution {
 	const name = String(ev.name ?? '');
+	// Dedup: a re-delivered frame must not append a second row, because
+	// `matchToolResult` closes the FIRST match and the duplicate would sit at
+	// "running" forever. Applied to both sides — the child's events ride the same
+	// stream and the same re-attach replay as the parent's.
+	const isDuplicate = (calls: readonly ToolCallInfo[]): boolean => {
+		const last = calls[calls.length - 1];
+		return !!last && last.name === name && last.status === 'running'
+			&& JSON.stringify(last.input) === JSON.stringify(ev.input);
+	};
 	if (isChildEvent(ev.subAgentId, ev.subAgent)) {
 		const child = childFor(state, ev.subAgentId);
 		if (!child) return 'dropped';
-		child.toolCalls.push({ name, input: ev.input, status: 'running' });
+		if (!isDuplicate(child.toolCalls)) {
+			child.toolCalls.push({ name, input: ev.input, status: 'running' });
+		}
 		return 'child';
 	}
 	state.toolCalls = state.toolCalls ?? [];
-	// Dedup: skip if the last call has the same name, input, and is still running.
-	const last = state.toolCalls[state.toolCalls.length - 1];
-	if (last && last.name === name && last.status === 'running'
-		&& JSON.stringify(last.input) === JSON.stringify(ev.input)) {
-		return 'parent';
-	}
+	if (isDuplicate(state.toolCalls)) return 'parent';
 	const index = state.toolCalls.length;
 	state.toolCalls.push({ name, input: ev.input, status: 'running' });
 	state.blocks = state.blocks ?? [];
@@ -272,13 +278,21 @@ export function recordSpawn(state: AttributionState, data: Record<string, unknow
 	return true;
 }
 
-/** Apply a `spawn_progress` heartbeat. `running` holds child ids. */
-export function applySpawnProgress(
-	state: AttributionState,
-	spawnId: unknown,
-	elapsedS: number,
-	running: readonly string[],
-): void {
+/**
+ * Apply a `spawn_progress` heartbeat.
+ *
+ * Takes the raw payload rather than pre-extracted arguments, and so do its
+ * siblings. The caller is `chat.svelte.ts`, which this repo's vitest cannot
+ * import (no svelte plugin — a `.svelte.ts` module throws on `$state`), so
+ * every field name read THERE is a name no test can check: `data['subAgent']`
+ * where `data['subAgentId']` was meant type-checks fine, both being `unknown`,
+ * and children would simply never settle. Reading the wire here puts those
+ * names under test.
+ */
+export function applySpawnProgress(state: AttributionState, data: Record<string, unknown>): void {
+	const spawnId = data['spawnId'];
+	const elapsedS = Number(data['elapsedS'] ?? 0);
+	const running = Array.isArray(data['running']) ? (data['running'] as string[]) : [];
 	if (typeof spawnId !== 'string') return;
 	const batch = state.spawns?.[spawnId];
 	if (!batch) return;
@@ -293,18 +307,13 @@ export function applySpawnProgress(
 	}
 }
 
-/** Apply a `spawn_child_done`. */
-export function applyChildDone(
-	state: AttributionState,
-	subAgentId: unknown,
-	ok: boolean,
-	elapsedS: number,
-	costUsd?: unknown,
-): void {
-	const child = childFor(state, subAgentId);
+/** Apply a `spawn_child_done`. Reads the wire itself — see `applySpawnProgress`. */
+export function applyChildDone(state: AttributionState, data: Record<string, unknown>): void {
+	const child = childFor(state, data['subAgentId']);
 	if (!child) return;
-	child.status = ok ? 'done' : 'error';
-	child.elapsedS = elapsedS;
+	const costUsd = data['costUsd'];
+	child.status = data['ok'] === true ? 'done' : 'error';
+	child.elapsedS = Number(data['elapsedS'] ?? 0);
 	// A model with no pricing entry reports 0. Showing "$0.0000" would read as
 	// "this was free" rather than "we don't know", so leave it unset instead.
 	if (typeof costUsd === 'number' && Number.isFinite(costUsd) && costUsd > 0) child.costUsd = costUsd;
@@ -337,9 +346,4 @@ export function batchTotals(state: AttributionState, spawnId: string): {
 			? null
 			: Math.max(...children.map((c) => c.elapsedS ?? 0)),
 	};
-}
-
-/** True while any child of any batch on this message is still working. */
-export function hasRunningChildren(state: AttributionState): boolean {
-	return Object.values(state.subAgents ?? {}).some((c) => c.status === 'running');
 }
