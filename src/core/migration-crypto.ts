@@ -86,7 +86,7 @@ export interface MigrationManifest {
 
 export interface MigrationChunkMeta {
   seq: number;
-  type: 'secrets' | 'sqlite_db' | 'artifacts' | 'config';
+  type: 'secrets' | 'sqlite_db' | 'artifacts' | 'config' | 'memory';
   name: string;                     // e.g. 'history.db', 'vault_secrets'
   originalSize: number;             // bytes before encryption
   checksum: string;                 // SHA-256 of plaintext

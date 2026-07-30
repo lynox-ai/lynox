@@ -2,6 +2,8 @@ import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import type { MemoryRow, ScoredMemoryRow } from './agent-memory-db.js';
 import { blobToEmbed, cosineSimilarity } from './embedding.js';
+import { canSupersede } from './provenance.js';
+import type { ProvenanceKind } from '../types/memory.js';
 
 /** The columns {@link MemoryGraphStore.getStub} reads back (test/inspection). */
 export interface MemoryStubRow {
@@ -38,7 +40,8 @@ const DEDUP_EXHAUSTIVE_SCAN_LIMIT = 5_000;
 const RECALL_COLS =
   'id, text, namespace, subject_id, scope_type, scope_id, source_run_id, provider, embedding, ' +
   'confidence, is_active, superseded_by, retrieval_count, confirmation_count, ' +
-  'last_retrieved_at, created_at, updated_at, source_type, source_tool_name';
+  'last_retrieved_at, created_at, updated_at, source_type, source_tool_name, ' +
+  'source_channel, source_untrusted, embedding_model';
 
 /** Same column list, `m.`-qualified for the graph-expand JOINs. */
 const RECALL_COLS_M = RECALL_COLS.split(', ').map(c => `m.${c}`).join(', ');
@@ -64,6 +67,11 @@ interface EngineMemoryRaw {
   updated_at: string;
   source_type: string;
   source_tool_name: string | null;
+  // v8 Wave 1 evidence — the derivation inputs for source_type (nullable channel on
+  // pre-evidence rows; untrusted default 0) + the embedding-model identity (§1.7).
+  source_channel: string | null;
+  source_untrusted: number;
+  embedding_model: string | null;
 }
 
 /**
@@ -113,6 +121,12 @@ export class MemoryGraphStore {
     sourceRunId?: string | null | undefined;
     sourceType?: string | undefined;
     sourceToolName?: string | null | undefined;
+    // v8 Wave 1 evidence. Like `source_type`: written on the fresh insert and PRESERVED
+    // on a re-upsert (absent from the ON CONFLICT SET) — the write-boundary evidence is
+    // set at creation, not silently reset by a bare re-store.
+    sourceChannel?: string | null | undefined;
+    sourceUntrusted?: boolean | undefined;
+    embeddingModel?: string | null | undefined;
     provider?: string | null | undefined;
     // S5a memory-consolidation additions. The live mirror passes `embedding` (so
     // engine.db carries the vector for the S5b recall cutover); the backfill also
@@ -150,9 +164,9 @@ export class MemoryGraphStore {
     // raw in ON CONFLICT to preserve-on-omit.
     this.db.prepare(`
       INSERT INTO memories (id, text, namespace, subject_id, scope_type, scope_id,
-        source_run_id, source_type, source_tool_name, provider,
+        source_run_id, source_type, source_tool_name, source_channel, source_untrusted, embedding_model, provider,
         embedding, is_active, superseded_by, confidence, confirmation_count, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 1), ?, COALESCE(?, 0.75),
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 0), ?, ?, ?, COALESCE(?, 1), ?, COALESCE(?, 0.75),
         COALESCE(?, 0), COALESCE(?, datetime('now')))
       ON CONFLICT(id) DO UPDATE SET
         text = excluded.text,
@@ -169,6 +183,9 @@ export class MemoryGraphStore {
       params.sourceRunId ?? null,
       params.sourceType ?? 'agent_inferred',
       params.sourceToolName ?? null,
+      params.sourceChannel ?? null,
+      params.sourceUntrusted === undefined ? null : (params.sourceUntrusted ? 1 : 0),
+      params.embeddingModel ?? null,
       params.provider ?? null,
       params.embedding ?? null,
       params.isActive ?? null,
@@ -225,7 +242,21 @@ export class MemoryGraphStore {
    * row. The `supersedes` provenance junction is intentionally NOT mirrored in
    * S1b (its FK needs both stubs present); S2 recomputes it authoritatively.
    */
-  markSuperseded(memoryId: string, supersededById: string): void {
+  markSuperseded(memoryId: string, supersededById: string, opts?: { newTier?: ProvenanceKind | undefined }): void {
+    // Memory Foundation Wave 2 — the write-trust gate BACKSTOP (defense-in-depth).
+    // Unlike the legacy store, this mirror fires BEFORE the new memory's stub exists
+    // (upsertStub runs after markSuperseded in the store() mirror) and holds only the
+    // engine.db handle — so it CANNOT DB-look-up the incoming tier. The caller passes it
+    // as `opts.newTier` (like the resolution). We look up the OLD stub's tier (it exists —
+    // it's the row being retired) and REFUSE a strictly-lower-trust retire. An UNDEFINED
+    // `newTier` (flag off, OR the consolidation mirror whose keeper-sort already guarantees
+    // keeper ≥ victim) skips the backstop → byte-identical / a safe no-op. If the old stub
+    // is absent the UPDATE no-ops anyway (nothing to protect).
+    if (opts?.newTier !== undefined) {
+      const old = this.db.prepare('SELECT source_type FROM memories WHERE id = ?')
+        .get(memoryId) as { source_type: string } | undefined;
+      if (old && !canSupersede(opts.newTier, old.source_type as ProvenanceKind)) return;
+    }
     this.db.prepare(`
       UPDATE memories SET is_active = 0, superseded_by = ?, updated_at = datetime('now')
       WHERE id = ?
@@ -284,6 +315,25 @@ export class MemoryGraphStore {
   }
 
   /**
+   * Refresh an existing memory stub's text + embedding after a text correction.
+   * The caller gates this on the WRITE flag (subject_graph_enabled), NOT the read
+   * flag — so a redaction/correction made during the dual-write window (write-on,
+   * read-off) is present in engine.db when reads flip on, instead of recall serving
+   * the stale pre-edit text (the same privacy divergence the deactivate mirror
+   * closes). No-op if the memory has no stub (never resolved a subject) — like the
+   * other mirror updates it never CREATES a stub. `text` is PII → encrypted at rest;
+   * a null embedding preserves the stored vector (the caller always supplies the
+   * re-embedded vector for the new text).
+   */
+  updateStubText(memoryId: string, text: string, embedding: Buffer | null): void {
+    this.db.prepare(`
+      UPDATE memories
+      SET text = ?, embedding = COALESCE(?, embedding), updated_at = datetime('now')
+      WHERE id = ?
+    `).run(this.engine.enc(text), embedding, memoryId);
+  }
+
+  /**
    * Record a supersession provenance edge (the `supersedes` junction, the S2/S5
    * successor to legacy `supersedes`). Idempotent on the (new, old) pair. Both
    * memory stubs must exist — the guarded INSERT skips a pair whose endpoints are
@@ -336,11 +386,19 @@ export class MemoryGraphStore {
   // not a mechanical port of the legacy orphan-entity delete.
 
   /**
-   * Delete memory stubs by id — the S5b'-c thread-purge via id-parity (a stub shares
-   * the legacy memory id). The caller passes the thread's ids read from the legacy
-   * store (which owns `source_thread_id`; engine.db's column is NULL-by-design until
-   * the S5b'-d thread-spine cutover). Chunked under SQLite's 999-variable limit; one
-   * transaction (atomic per purge). Returns the number of stubs deleted.
+   * Hard-delete memory stubs by id — the id-parity reap behind both the S5b'-c
+   * thread-purge and the erasure path (a stub shares the legacy memory id). The caller
+   * passes ids read from the legacy store (which owns the plaintext / `source_thread_id`;
+   * engine.db text is encrypted, its `source_thread_id` NULL-by-design until the S5b'-d
+   * thread-spine cutover). Chunked under SQLite's 999-variable limit; one transaction.
+   *
+   * Reaps relationships SOURCED from the erased memories in the SAME step — legacy parity
+   * (`AgentMemoryDb` deletes `relations WHERE source_memory_id IN (…)`). The FK is
+   * ON DELETE SET NULL, so without this the relationship row would SURVIVE the memory
+   * delete carrying its `description`/`notes` text — derived content a hard delete must
+   * remove too. memory_subjects / supersedes / conflicts still ride their ON DELETE
+   * CASCADE. Orphaned SUBJECTS (durable cross-verb-layer substrate) are a deferred
+   * lifecycle slice — see the header note above. Returns the number of stubs deleted.
    */
   purgeMemories(ids: string[]): number {
     if (ids.length === 0) return 0;
@@ -350,6 +408,9 @@ export class MemoryGraphStore {
       for (let i = 0; i < ids.length; i += CHUNK) {
         const chunk = ids.slice(i, i + CHUNK);
         const placeholders = chunk.map(() => '?').join(',');
+        this.db.prepare(
+          `DELETE FROM relationships WHERE source_memory_id IN (${placeholders})`,
+        ).run(...chunk);
         deleted += this.db.prepare(
           `DELETE FROM memories WHERE id IN (${placeholders})`,
         ).run(...chunk).changes;
@@ -431,6 +492,8 @@ export class MemoryGraphStore {
       last_retrieved_at: raw.last_retrieved_at,
       created_at: raw.created_at, updated_at: raw.updated_at,
       source_type: raw.source_type, source_tool_name: raw.source_tool_name,
+      source_channel: raw.source_channel, source_untrusted: raw.source_untrusted,
+      embedding_model: raw.embedding_model,
     };
   }
 
@@ -571,6 +634,7 @@ export class MemoryGraphStore {
     const rows = this.db.prepare(`
       SELECT DISTINCT ${RECALL_COLS_M} FROM memories m
       JOIN memory_subjects ms ON m.id = ms.memory_id
+      JOIN subjects s ON s.id = ms.subject_id AND s.archived_at IS NULL
       JOIN relationships r ON (ms.subject_id = r.from_subject_id OR ms.subject_id = r.to_subject_id)
       WHERE (r.from_subject_id = ? OR r.to_subject_id = ?)
         AND ms.subject_id != ?

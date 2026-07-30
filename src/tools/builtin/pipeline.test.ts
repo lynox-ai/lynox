@@ -29,6 +29,15 @@ vi.mock('../../orchestrator/validate.js', () => ({
   MAX_STEPS: 20,
 }));
 
+// Spy the billing debit so the money-leak fix can be asserted: an in-session
+// run_workflow must report its aggregated step cost (partial mock — keep every
+// other export real).
+const mockReportMeteredCost = vi.fn();
+vi.mock('../../core/metered-request.js', async (importActual) => {
+  const actual = await importActual<typeof import('../../core/metered-request.js')>();
+  return { ...actual, reportMeteredCost: (...args: unknown[]) => mockReportMeteredCost(...args) };
+});
+
 import {
   runWorkflowTool,
   storePipeline,
@@ -50,7 +59,7 @@ import { buildRunCtx } from '../../orchestrator/runner.js';
 
 const mockConfig: LynoxUserConfig = {
   api_key: 'test-key',
-  api_base_url: 'http://localhost:8317',
+  api_base_url: 'http://localhost:11434',
 };
 
 const mockTools: ToolEntry[] = [
@@ -66,7 +75,9 @@ function makePipelineAgent(opts?: { config?: LynoxUserConfig | null; tools?: Too
     (ctx as Record<string, unknown>)['userConfig'] = null;
   }
   ctx.tools = opts?.tools ?? mockTools;
-  return { toolContext: ctx } as unknown as IAgent;
+  // noteUntrustedData: the parent-taint seam (CORE-9) — a workflow run must latch
+  // the parent's untrusted signal so its end-of-run memory extraction abstains.
+  return { toolContext: ctx, noteUntrustedData: vi.fn() } as unknown as IAgent;
 }
 
 function makeRunState(overrides?: Partial<RunState>): RunState {
@@ -203,6 +214,20 @@ describe('run_workflow — inline steps', () => {
     expect(parsed['pipelineId']).toBe('test-run-id');
     expect(mockValidateManifest).toHaveBeenCalledTimes(1);
     expect(mockRunManifest).toHaveBeenCalledTimes(1);
+  });
+
+  it('CORE-9: seats the parent untrusted latch after a workflow runs (delegated output not persisted as trusted)', async () => {
+    const agent = makePipelineAgent();
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const result = await runWorkflowTool.handler(
+      { name: 'single', steps: [makeStep('s1', 'do thing')] },
+      agent,
+    );
+    // Result shape preserved (structured JSON, NOT wrapped) so callers still read it…
+    expect((JSON.parse(result) as Record<string, unknown>)['status']).toBe('completed');
+    // …and the parent's untrusted latch is seated so end-of-run extraction abstains,
+    // exactly as spawn_agent propagates a sub-agent's taint.
+    expect(agent.noteUntrustedData).toHaveBeenCalledTimes(1);
   });
 
   it('successfully executes multi-step pipeline with input_from', async () => {
@@ -371,6 +396,92 @@ describe('run_workflow — inline steps', () => {
     );
 
     expect(result).toBe('Error: Workflow execution failed: Agent crashed');
+  });
+});
+
+describe('run_workflow — in-session cost is billed (money-leak fix)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetPipelineStore();
+    mockValidateManifest.mockImplementation((m: unknown) => m);
+  });
+
+  // A run on a managed instance: meteredHost drives the CP debit. The fix uses
+  // reportMeteredCost (CP-only), NOT debitInRunHelperCost — the steps already
+  // charged the local session cap via the runner, so a recordSessionCost here
+  // would double-count it (see the fn comment). meteredHost is a sentinel; the
+  // runId is a fresh uuid, so it's asserted as expect.any(String).
+  function makeBillableAgent(): { agent: IAgent; meteredHost: unknown } {
+    const agent = makePipelineAgent();
+    const meteredHost = { sentinel: 'metered-host' };
+    (agent.toolContext as Record<string, unknown>)['meteredHost'] = meteredHost;
+    return { agent, meteredHost };
+  }
+
+  function twoStepState(): RunState {
+    return makeRunState({
+      outputs: new Map<string, AgentOutput>([
+        ['a', { stepId: 'a', result: 'r', startedAt: '', completedAt: '', durationMs: 1, tokensIn: 1, tokensOut: 1, costUsd: 0.002, skipped: false }],
+        ['b', { stepId: 'b', result: 'r', startedAt: '', completedAt: '', durationMs: 1, tokensIn: 1, tokensOut: 1, costUsd: 0.01, skipped: false }],
+      ]),
+    });
+  }
+
+  it('reports the AGGREGATED step cost to CP billing for an inline run', async () => {
+    // The core money property: two steps at 0.002 + 0.01 must be billed as 0.012.
+    // Before the fix this spend was written only as excluded pipeline_step rows,
+    // so it escaped the daily/monthly cap and the managed-billing debit entirely.
+    const { agent, meteredHost } = makeBillableAgent();
+    mockRunManifest.mockResolvedValueOnce(twoStepState());
+
+    await runWorkflowTool.handler({ name: 'w', steps: [makeStep('a', 'x'), makeStep('b', 'y')] }, agent);
+
+    expect(mockReportMeteredCost).toHaveBeenCalledTimes(1);
+    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.012, 'balanced');
+  });
+
+  it('reports a stored-workflow (workflow_id) run too', async () => {
+    const { agent, meteredHost } = makeBillableAgent();
+    const pipelineId = seedStoredPipeline([{ id: 'only', task: 'do it' }]);
+    mockRunManifest.mockResolvedValueOnce(makeRunState()); // costUsd 0.001
+
+    await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+
+    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.001, 'balanced');
+  });
+
+  it('does NOT report on self-host / BYOK (no metered host)', async () => {
+    // No meteredHost → no CP balance to debit; the local session cap is the only
+    // ceiling there, and the runner already charges it. Guards against a stray debit.
+    const agent = makePipelineAgent();
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+
+    await runWorkflowTool.handler({ name: 'w', steps: [makeStep('a', 'x')] }, agent);
+
+    expect(mockReportMeteredCost).not.toHaveBeenCalled();
+  });
+
+  it('REFUSES an unconfirmed workflow from an AUTONOMOUS session (F1 tool-path gate)', async () => {
+    // The other headless path: run_workflow is reachable from an autonomous worker
+    // session. An unconfirmed (e.g. imported) workflow must not run there without a
+    // per-action approver — the same consent gate the /run route + cron enforce.
+    const agent = makePipelineAgent();
+    (agent as Record<string, unknown>)['autonomy'] = 'autonomous';
+    const pipelineId = seedStoredPipeline([{ id: 's1', task: 'x' }]); // seeded UNCONFIRMED
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(result).toContain('first-run confirmation');
+    expect(mockRunManifest).not.toHaveBeenCalled();
+  });
+
+  it('ALLOWS an unconfirmed workflow from an INTERACTIVE session (each step still prompts)', async () => {
+    // autonomy undefined = interactive chat: the per-step approver is present, so
+    // run_workflow stays the safe way to trial an imported workflow. Not gated.
+    const { agent } = makeBillableAgent();
+    const pipelineId = seedStoredPipeline([{ id: 's1', task: 'x' }]);
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const result = await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
+    expect(result).not.toContain('first-run confirmation');
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -708,14 +819,13 @@ describe('getPipeline — legacy mode backfill', () => {
       estimatedCost: 0,
       createdAt: new Date().toISOString(),
       executed: false,
-      // No `mode`, no `executionMode`, no `template` — full legacy row.
+      // No `mode`, no `template` — full legacy row.
     };
     const fakeRunHistory = {
       getPlannedPipeline: () => ({ id: pipelineId, manifest_json: JSON.stringify(legacyPlanned) }),
     };
     const planned = getPipeline(pipelineId, fakeRunHistory as never);
     expect(planned?.mode).toBe('autonomous');
-    expect(planned?.executionMode).toBe('orchestrated');
     expect(planned?.template).toBe(false);
   });
 
@@ -809,7 +919,8 @@ describe('getPipeline — legacy mode backfill', () => {
 
 // PRD-WORKFLOW-UX D13 — Saved Workflows library "Run" path.
 describe('runSavedWorkflow', () => {
-  // Minimal RunHistory stub — persistPipelineRun fire-and-forgets these.
+  // Minimal RunHistory stub — the run row is written by runManifest (2a) and
+  // the tool-layer persistStepResults fire-and-forgets the step rows.
   const fakeRunHistory = {
     getPlannedPipeline: () => undefined,
     insertPipelineRun: vi.fn(),
@@ -1179,6 +1290,7 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
 const RUN_CTX_KEYS = [
   'autonomy', 'parentTools', 'parentToolContext', 'parentMemory', 'userTimezone',
   'parentPrompt', 'parentSessionCounters', 'runHistory', 'hooks', 'capabilityContract',
+  'secretStore',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
@@ -1259,6 +1371,34 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     // Value assertion: the agent's tool context + tools actually flow through.
     expect(opts['parentToolContext']).toBe(agent.toolContext);
     expect(opts['parentTools']).toBe(agent.toolContext.tools);
+  });
+
+  it('threads the parent agent secretStore into the run options (value, not just key)', async () => {
+    // The security fix: run_workflow forwards agent.secretStore so each step
+    // sub-agent's tools resolve `secret:NAME` refs + fire the fail-loud guard —
+    // instead of sending the literal `secret:NAME` to the external service.
+    // Mirrors spawn.ts threading `parentAgent.secretStore` for spawn_agent.
+    const agent = makeAutonomyAgent('autonomous');
+    const secretStore = { maskSecrets: (t: string) => t } as unknown as IAgent['secretStore'];
+    (agent as unknown as { secretStore: unknown }).secretStore = secretStore;
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'call api with secret')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['secretStore']).toBe(secretStore);
+  });
+
+  it('leaves secretStore undefined for a chat agent with no vault (backward-compat)', async () => {
+    const agent = makeAutonomyAgent(undefined); // no secretStore set
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'no secret')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['secretStore']).toBeUndefined();
   });
 
   it('in-session stored run inherits undefined autonomy from a normal chat agent', async () => {

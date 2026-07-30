@@ -9,6 +9,7 @@ import {
   type ExtractSchema,
 } from './llm-helper.js';
 import type { IAgent, ProviderConfigSnapshot } from '../types/index.js';
+import { MODEL_MAP } from '../types/models.js';
 
 const SCHEMA: ExtractSchema = {
   type: 'object',
@@ -303,13 +304,14 @@ describe('callForStructuredJson — provider-aware model resolution', () => {
   /** Capture the `model` the SDK is asked to invoke + the create-call payload. */
   function captureClient(toolInput: unknown): {
     client: Anthropic;
-    lastCall: { model?: string };
+    lastCall: { model?: string; thinking?: unknown };
   } {
-    const lastCall: { model?: string } = {};
+    const lastCall: { model?: string; thinking?: unknown } = {};
     const client = {
       messages: {
-        create: async (req: { model: string }) => {
+        create: async (req: { model: string; thinking?: unknown }) => {
           lastCall.model = req.model;
+          lastCall.thinking = req.thinking;
           return {
             id: 'msg_test',
             type: 'message',
@@ -416,5 +418,72 @@ describe('callForStructuredJson — provider-aware model resolution', () => {
     });
 
     expect(lastCall.model).toBe('claude-sonnet-4-6');
+  });
+
+  it('blocklist covering the Anthropic default falls back to the fast tier (trial cost-leak guard)', async () => {
+    // The managed-trial shape: Anthropic provider, premium ids blocked. Without
+    // the blocklist thread-through the docs-bootstrap call would run the Sonnet
+    // default on the CP pool key — the exact blocked, billable call the feature
+    // exists to stop. It must resolve to the fast tier (Haiku) instead.
+    const { client, lastCall } = captureClient({ name: 'a', count: 1, level: 'low' });
+    const agent = stubAgent({
+      provider: 'anthropic',
+      apiKey: 'sk-ant-test',
+      apiBaseURL: undefined,
+      openaiModelId: undefined,
+      openaiAuth: undefined,
+    });
+
+    await callForStructuredJson({
+      system: 'Extract.',
+      user: 'Sample',
+      schema: SCHEMA,
+      agent,
+      client,
+      blockedModelIds: ['claude-sonnet-', 'claude-opus-', 'claude-fable-'],
+    });
+
+    expect(lastCall.model).toBe(MODEL_MAP.fast);
+    // Concrete broken impl this would catch: a blocklist that is ignored (or
+    // only checked on the pinned-`model` path) leaves the Sonnet default here.
+    expect(lastCall.model).not.toBe('claude-sonnet-4-6');
+  });
+
+  it('blocklist NOT covering the resolved model leaves it unchanged', async () => {
+    const { client, lastCall } = captureClient({ name: 'a', count: 1, level: 'low' });
+    const agent = stubAgent({
+      provider: 'anthropic',
+      apiKey: 'sk-ant-test',
+      apiBaseURL: undefined,
+      openaiModelId: undefined,
+      openaiAuth: undefined,
+    });
+
+    await callForStructuredJson({
+      system: 'Extract.',
+      user: 'Sample',
+      schema: SCHEMA,
+      agent,
+      client,
+      blockedModelIds: ['some-other-model-'],
+    });
+
+    expect(lastCall.model).toBe('claude-sonnet-4-6');
+  });
+
+  it('sends explicit thinking:{type:disabled} (Sonnet 5 adaptive-on-omit guard)', async () => {
+    // Omitting `thinking` = thinking-off on 4.6 but adaptive-ON on Sonnet 5,
+    // which would spend reasoning inside the small extraction max_tokens cap and
+    // bill extra output. The extraction call must set disabled explicitly.
+    const { client, lastCall } = captureClient({ name: 'a', count: 1, level: 'low' });
+
+    await callForStructuredJson({
+      system: 'Extract.',
+      user: 'Sample',
+      schema: SCHEMA,
+      client,
+    });
+
+    expect(lastCall.thinking).toEqual({ type: 'disabled' });
   });
 });

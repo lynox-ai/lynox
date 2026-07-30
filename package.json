@@ -1,6 +1,6 @@
 {
   "name": "@lynox-ai/core",
-  "version": "2.0.0",
+  "version": "2.11.0",
   "description": "source-available professional agent that learns your business — connect any API, remember everything, run while you sleep",
   "author": "Rafael Burlet",
   "license": "Elastic-2.0",
@@ -66,19 +66,19 @@
     "prepare": "lefthook install || true",
     "security": "sh scripts/security-scan.sh && vitest run tests/security/",
     "lint": "eslint src/",
+    "tokens:contract": "node packages/web-ui/scripts/check-token-contract.mjs",
+    "shapes:contract": "node packages/web-ui/scripts/check-shape-contract.mjs",
     "prepack": "find dist -name '*.js.map' -o -name '*.d.ts.map' | xargs rm -f",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.98.0",
     "@huggingface/transformers": "^4.2.0",
-    "@mozilla/readability": "^0.6.0",
     "@sentry/node": "^10.46.0",
     "better-sqlite3": "^12.6.2",
     "email-reply-parser": "^2.3.5",
     "iconv-lite": "^0.7.2",
     "imapflow": "^1.0.181",
-    "linkedom": "^0.18.12",
     "mammoth": "^1.12.0",
     "nodemailer": "^9.0.1",
     "unpdf": "^1.6.2",
@@ -93,7 +93,8 @@
     ],
     "overrides": {
       "path-to-regexp": "^8.4.0",
-      "brace-expansion": "^5.0.5",
+      "brace-expansion": ">=5.0.8",
+      "postcss": ">=8.5.18",
       "lodash-es": ">=4.18.0",
       "cookie": ">=0.7.0",
       "esbuild": ">=0.28.1",
@@ -101,11 +102,13 @@
       "@hono/node-server": ">=1.19.13",
       "vite": ">=8.0.16",
       "protobufjs": ">=8.6.0",
+      "sharp": ">=0.35.0",
       "@opentelemetry/core": ">=2.8.0",
       "nodemailer": ">=9.0.1",
       "fast-uri": ">=3.1.2",
       "ip-address": ">=10.1.1",
-      "uuid": ">=11.1.1"
+      "uuid": ">=11.1.1",
+      "adm-zip": ">=0.6.0"
     }
   },
   "peerDependencies": {
@@ -136,6 +139,7 @@
     "google-auth-library": "^10.6.2",
     "tsx": "^4.0.0",
     "typescript": "^5.7.0",
-    "vitest": "^4.1.4"
+    "vitest": "^4.1.4",
+    "yaml": "^2.9.0"
   }
 }

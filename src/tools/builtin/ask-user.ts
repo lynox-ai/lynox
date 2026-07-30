@@ -70,9 +70,8 @@ export const askUserTool: ToolEntry<AskUserInput> = {
                   label: { type: 'string', description: 'Display text for this option' },
                   hint: {
                     type: 'object',
-                    description: 'Configuration hint for the next step when this option is selected',
+                    description: 'Execution hint for the next step when this option is selected — tunes thinking/effort only (the model tier is never agent-driven)',
                     properties: {
-                      model: { type: 'string', enum: ['deep', 'balanced', 'fast'], description: 'Preferred capability tier (fast/balanced/deep)' },
                       thinking: { type: 'string', enum: ['adaptive', 'enabled', 'disabled'], description: 'Thinking mode' },
                       effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'], description: 'Effort level' },
                     },
@@ -107,7 +106,6 @@ export const askUserTool: ToolEntry<AskUserInput> = {
                         hint: {
                           type: 'object',
                           properties: {
-                            model: { type: 'string', enum: ['deep', 'balanced', 'fast'] },
                             thinking: { type: 'string', enum: ['adaptive', 'enabled', 'disabled'] },
                             effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
                           },

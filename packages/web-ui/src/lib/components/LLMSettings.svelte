@@ -26,13 +26,19 @@
 	import { t } from '../i18n.svelte.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
+	import { clearTierConfigCache } from '../utils/tier-config.js';
+	import { buildMainModelOptions, selectMainModelKey, mainModelOptionKey, findMainModelOptionByKey, isExpensiveModel, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
-	import { isManaged, cpSuppliesLLMKey, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
+	import { isManaged, cpSuppliesLLMKeyForInstance, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
-	// Local enum mirror — the engine type lives in src/types/models.ts but
-	// web-ui doesn't import core types directly (avoids dist/ rebuild churn).
-	type LLMProvider = 'anthropic' | 'vertex' | 'openai' | 'custom';
+	import Icon from '../primitives/Icon.svelte';
+	import type { IconName } from '../primitives/icons.js';
+	import { buildRoutingUpdate, type Strategy } from '../utils/llm-routing-update.js';
+	import { tierPickerModels, defaultTierModelId, isHybridTierOption, presetTierSeed } from '../utils/llm-tier-picker.js';
+	// Shared vocabulary from the vendored wire-contract copy (byte-identical to
+	// core `src/contract/vocab.ts`) — replaces the old local enum mirrors.
+	import type { LLMProvider, ModelTier } from '../contract/vocab.js';
 
 	interface CatalogModel {
 		id: string;
@@ -43,6 +49,8 @@
 		residency: string;
 		notes?: string;
 	}
+	// MainChatOption (the server-computed catalog.ts `main_chat_models` shape) +
+	// the picker helpers live in ../utils/llm-main-model.js — imported above.
 	interface CatalogProvider {
 		provider: LLMProvider;
 		/**
@@ -53,11 +61,35 @@
 		preset_id?: string;
 		display_name: string;
 		models: CatalogModel[];
+		/**
+		 * Per-tier picker options for a free-text tile (server catalog.ts). Only
+		 * feeds the hybrid per-tier editor — `models: []` keeps the tile's
+		 * free-text semantics untouched (the standard-mode model field stays a
+		 * text input, keyed off `models.length`).
+		 */
+		tier_models?: CatalogModel[];
+		/** Standard-mode "Main chat model" picker options (server-computed). */
+		main_chat_models?: MainChatOption[];
 		requires_base_url: boolean;
 		requires_region: boolean;
 		default_residency: string;
 		/** Pre-filled api_base_url for presets that pin a fixed endpoint. */
 		base_url_default?: string;
+		/**
+		 * How far the entry is proven (server-side `catalog.ts`). 'experimental'
+		 * means tool-calling through it is NOT verified — lynox is an agent, so
+		 * that is a real caveat and the tile must say so. Optional here only to
+		 * stay tolerant of an older engine that predates the field.
+		 */
+		verification?: 'native' | 'verified' | 'experimental';
+		/**
+		 * Vault slot this entry's key lives in. `null` = endpoint takes no credential
+		 * (loopback runtime) → render no key field at all. `undefined` = older engine
+		 * that predates the field → fall back to the provider map.
+		 */
+		vault_slot?: string | null;
+		/** Example model id for the free-text field an empty-catalog entry renders. */
+		model_placeholder?: string;
 		notes?: string;
 	}
 
@@ -69,8 +101,8 @@
 
 	// Provider-agnostic routing (PR-4). Canonical tier band — the catalog and
 	// the engine both speak 'fast' | 'balanced' | 'deep' (legacy haiku/sonnet/opus
-	// only survive as normaliser input). Display + iteration order is cheap→deep.
-	type ModelTier = 'fast' | 'balanced' | 'deep';
+	// only survive as normaliser input; `ModelTier` imported from the contract
+	// copy above). Display + iteration order is cheap→deep.
 	const TIER_ORDER: ReadonlyArray<ModelTier> = ['fast', 'balanced', 'deep'];
 
 	// One tier's provider+model assignment in a hybrid Tier-Set. Mirrors
@@ -87,6 +119,13 @@
 		gcp_project_id?: string;
 		gcp_region?: string;
 		default_tier?: string;
+		// Served-Sonnet variant the Anthropic `balanced` band resolves to (4.6 ↔ 5).
+		// GET /api/config always sends a resolved value (defaults to Sonnet 4.6).
+		balanced_model?: string;
+		// CP-emitted tier ceiling (env → seed as a lock). Options above it render
+		// disabled with a tooltip. Vestigial today (managed + hosted both 'deep'),
+		// kept as the safety seam so a future lower ceiling greys correctly.
+		max_tier?: string;
 		openai_model_id?: string;
 		custom_endpoints?: CustomEndpoint[];
 		// 'standard' (default) = one provider for all tiers (lynox routes per task
@@ -95,6 +134,10 @@
 		// Per-tier {provider, model_id} — only consulted by the engine when
 		// routing_mode === 'hybrid'. An unset tier falls back to the base provider.
 		tier_set?: TierSet;
+		// Named hybrid strategy (model-presets W4). Config-sugar: the engine expands
+		// it to {routing_mode:'hybrid', tier_set} at load. Returned verbatim by GET,
+		// so the "Modell-Strategie" cards read it to highlight the active preset.
+		tier_preset?: string;
 		// Server-persisted disclosure acceptances for non-allowlisted custom
 		// endpoints (host + timestamp). Read from /api/config; replaces the old
 		// per-tab sessionStorage flag so acceptance survives reload / new device.
@@ -104,8 +147,8 @@
 		// different provider tile + Save will succeed against config.json but
 		// have zero runtime effect because `LYNOX_LLM_PROVIDER` keeps winning
 		// on the next reload. Surface this so we can render a banner instead
-		// of accepting the click in silence (rafael self-found 2026-05-27 while
-		// verifying #42 — turned the provider-switch fix into a silent no-op
+		// of accepting the click in silence (found during demo-walk hardening
+		// while verifying a provider switch — turned the fix into a silent no-op
 		// under the env-recommending docs path).
 		env_overrides?: { provider?: boolean };
 		// F1b: effective active provider + base, surfaced ONLY when env-pinned
@@ -133,7 +176,36 @@
 		// `requires_base_url === true` (OpenAI-compat, Anthropic-compat) are
 		// disabled.
 		custom_provider_endpoints?: { reason: string };
+		// model-presets W4: set on managed when the CP can't back a preset (e.g. ⚡
+		// efficient's Fireworks slot without the operator opt-in) → that card renders
+		// disabled with the contact CTA rather than silently downgrading.
+		tier_preset?: { reason: string; contact_cta?: { href: string; label: string } };
 	}
+
+	// The GET /api/config `available_tier_presets` signal (server-authoritative;
+	// web-ui can't import @lynox-ai/core). Per preset: the resolved per-tier model
+	// (+ catalog label + provenance + R2-gated host disclosure) and whether the
+	// instance can back it (managed drops a preset whose slot the CP lacks a key for).
+	interface PresetTierInfo {
+		tier: ModelTier;
+		model_id: string;
+		label: string;
+		provenance?: 'US' | 'EU' | 'CN';
+		residency?: string;
+		transferBasis?: string | null;
+		posture?: string;
+		pricing?: { input: number; output: number };
+	}
+	interface PresetInfo {
+		name: string;
+		tiers: PresetTierInfo[];
+		available: boolean;
+	}
+	// The five strategy cards. 'standard' = one provider, lynox routes per turn;
+	// the three preset names are hybrid tier_presets; 'custom' = manual hybrid.
+	// `Strategy` + `buildRoutingUpdate` (the persistence mapping) live in a plain
+	// .ts helper so the body-building is unit-testable (this .svelte has no seam).
+	const PRESET_NAMES: ReadonlyArray<'efficient' | 'balanced' | 'max-quality'> = ['efficient', 'balanced', 'max-quality'];
 
 	let providers = $state<CatalogProvider[]>([]);
 	let config = $state<UserConfig>({});
@@ -173,6 +245,21 @@
 		deep: { catalogKey: '', modelId: '' },
 	});
 
+	// ── model-presets W4 — "Modell-Strategie" cards ──
+	// `strategy` is the selected card; it drives routingMode + what persists.
+	// Derived from config on load (a stored tier_preset → that card; else hybrid →
+	// 'custom'; else 'standard'). The card the user clicks stages locally (no
+	// auto-save — rafael's explicit-save model); Save materializes it.
+	let strategy = $state<Strategy>('standard');
+	// Server signal: which presets exist + their resolved tiers + availability.
+	let availablePresets = $state<Record<string, PresetInfo>>({});
+	// Per-card "Details" expand state (the full three-axis disclosure).
+	let expandedDetails = $state<Record<string, boolean>>({});
+	// Explicit-save model (rafael): every change stages `dirty`; the Save button
+	// commits, the "Ungespeicherte Änderungen" bar shows meanwhile. No auto-save.
+	let dirty = $state(false);
+	function markDirty(): void { if (loaded) dirty = true; }
+
 	// Vault slot per provider — keeps existing keys when user switches.
 	// Each provider has a DISTINCT slot so flipping anthropic → custom → anthropic
 	// doesn't clobber the original Anthropic key. Vertex has no slot (auth is
@@ -186,6 +273,21 @@
 	function slotFor(p: LLMProvider | null): string {
 		if (!p) return '';
 		return VAULT_SLOTS[p] ?? '';
+	}
+	/**
+	 * The vault slot for a CATALOG ENTRY — the authoritative one. `provider` alone
+	 * cannot decide it: Mistral, Groq, Together and a local Ollama all serialise to
+	 * `provider: 'openai'`, so a provider-keyed lookup would write a Groq key into
+	 * the Mistral slot (and hand the Mistral key to Groq on the next request).
+	 * Mirrors `vaultSlotForEndpoint` in core/src/core/llm/catalog.ts.
+	 *
+	 * Returns '' when the endpoint needs no credential (loopback) — callers use
+	 * that to hide the key field entirely.
+	 */
+	function slotForEntry(entry: CatalogProvider | null | undefined): string {
+		if (!entry) return '';
+		if (entry.vault_slot === null) return '';
+		return entry.vault_slot ?? slotFor(entry.provider);
 	}
 
 	/**
@@ -201,22 +303,49 @@
 	 * cannot accidentally activate the Mistral preset. Apex/api/subdomain
 	 * all match the registered preset; foreign-host suffixes do not.
 	 *
+	 * EXCEPT for loopback presets: Ollama (:11434), LM Studio (:1234), vLLM
+	 * (:8000) and LocalAI (:8080) all share the hostname `localhost` and are
+	 * told apart only by port. Matching on hostname alone resolves every one of
+	 * them to whichever sits first in the catalog, so a user who saved LM Studio
+	 * would come back to the Ollama tile. Compare host:port for those.
+	 *
 	 * Fallback order: single-entry → that entry; multi-preset without a
 	 * match → the `requires_base_url` preset (so the user sees the input
 	 * they need to fill in); else first candidate.
 	 */
+	function isLoopbackHost(hostname: string): boolean {
+		return hostname === 'localhost'
+			|| hostname === '127.0.0.1'
+			|| hostname === '0.0.0.0'
+			|| hostname === '[::1]'
+			|| hostname === '::1';
+	}
+
 	function resolveCatalogKey(provider: LLMProvider, baseUrl?: string): string {
 		const candidates = providers.filter((p) => p.provider === provider);
 		if (candidates.length === 0) return provider;
 		if (candidates.length === 1) return catalogEntryKey(candidates[0]!);
 		if (baseUrl) {
 			let host = '';
-			try { host = new URL(baseUrl).hostname.toLowerCase(); } catch { /* invalid */ }
+			let hostPort = '';
+			try {
+				const u = new URL(baseUrl);
+				host = u.hostname.toLowerCase();
+				hostPort = u.host.toLowerCase();
+			} catch { /* invalid — falls through to the generic tile */ }
 			if (host) {
 				const matched = candidates.find((c) => {
 					if (!c.base_url_default) return false;
 					let defHost = '';
-					try { defHost = new URL(c.base_url_default).hostname.toLowerCase(); } catch { return false; }
+					let defHostPort = '';
+					try {
+						const d = new URL(c.base_url_default);
+						defHost = d.hostname.toLowerCase();
+						defHostPort = d.host.toLowerCase();
+					} catch { return false; }
+					// Loopback: only the port distinguishes the runtimes. A non-default
+					// port falls through to the generic tile, which is the safe direction.
+					if (isLoopbackHost(defHost)) return hostPort === defHostPort;
 					if (host === defHost) return true;
 					const apex = defHost.replace(/^api\./, '');
 					return host === apex || host.endsWith(`.${apex}`);
@@ -238,9 +367,10 @@
 			if (!catRes.ok || !configRes.ok) throw new Error(`HTTP ${catRes.status} / ${configRes.status}`);
 			const catBody = (await catRes.json()) as { providers: CatalogProvider[] };
 			providers = catBody.providers;
-			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks };
+			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks; available_tier_presets?: Record<string, PresetInfo> };
 			config = configBody;
 			locks = configBody.locks ?? {};
+			availablePresets = configBody.available_tier_presets ?? {};
 			// F1b: when env-pinned the provider isn't on disk, so fall back to the
 			// effective `active_provider` the engine surfaces. An env-pinned
 			// provider IS an explicit choice (just made via env) → count it for
@@ -259,14 +389,22 @@
 			// Mistral tenant (api_base_url not on disk) resolves the Mistral
 			// preset instead of the generic OpenAI-compat tile.
 			activeCatalogKey = resolveCatalogKey(activeProvider, configBody.api_base_url ?? effProvider?.api_base_url);
-			// Starting tier is NOT exposed in standard mode — lynox auto-routes per
-			// turn from the engine's own balanced default, so we leave default_tier
-			// untouched (undefined → engine default; a managed CP value resends as a
-			// no-op). This avoids a two-way-bind footgun and a managed-save 403.
+			// `config = configBody` above already carries default_tier + balanced_model
+			// + max_tier — the standard-mode "Main chat model" picker binds to them via
+			// `mainModelSelection`/`setMainModel`. An unset default_tier resolves to the
+			// balanced option (the engine default). Background tasks/subagents still
+			// auto-route across bands regardless of this pick.
 			// PR-4 routing state: hybrid only when explicitly persisted; seed the
 			// per-tier {provider, model} slots from the saved tier_set (else defaults).
 			routingMode = configBody.routing_mode === 'hybrid' ? 'hybrid' : 'standard';
 			seedTierSlots(configBody.tier_set);
+			// Derive the active strategy card: a stored tier_preset wins (returned
+			// verbatim by GET); else a persisted hybrid tier_set is a manual "Eigene";
+			// else Standard. On a fresh load nothing is dirty.
+			strategy = (configBody.tier_preset && PRESET_NAMES.includes(configBody.tier_preset as typeof PRESET_NAMES[number]))
+				? (configBody.tier_preset as Strategy)
+				: routingMode === 'hybrid' ? 'custom' : 'standard';
+			dirty = false;
 			if (statusRes.ok) {
 				const status = (await statusRes.json()) as { configured?: { api_key?: boolean } };
 				apiKeyConfigured = status.configured?.api_key === true;
@@ -292,26 +430,14 @@
 		return entry.models[0]?.id;
 	}
 
-	/**
-	 * A model is "expensive" when its output price is in Opus territory
-	 * ($20+/M out). The catalog's deep Claude (Opus, $75/M) trips this; Sonnet
-	 * ($15), Haiku ($4) and every Mistral model ($≤1.50) do not — so the ⚡ cue
-	 * lands exactly on the budget-heavy choices the user should think twice
-	 * about (D8: no gating, cost-transparency instead).
-	 */
+	// The ⚡ "expensive" cue ($20+/M out) — threshold owned by the picker helper
+	// (isExpensiveModel) so the hybrid editor + the main picker can't drift apart.
 	function isExpensive(m: CatalogModel): boolean {
-		return typeof m.pricing?.output === 'number' && m.pricing.output >= 20;
+		return isExpensiveModel(m.pricing);
 	}
 
-	/**
-	 * Default model id for a tier within a provider's catalog: the first model
-	 * tagged with that tier, falling back to the first model overall. Used to
-	 * seed the hybrid per-tier dropdowns. (Mistral lists two `fast` models —
-	 * this picks the first; the user freely re-picks in the dropdown.)
-	 */
-	function defaultTierModelId(entry: CatalogProvider, tier: ModelTier): string {
-		return (entry.models.find((m) => m.tier === tier) ?? entry.models[0])?.id ?? '';
-	}
+	// `defaultTierModelId` (first model tagged with the tier, else first overall
+	// — tier_models-aware) lives in ../utils/llm-tier-picker.js, imported above.
 
 	/** Catalog entry for a UI key ('anthropic' | 'mistral' | …), if present. */
 	function catalogEntryByKey(key: string): CatalogProvider | undefined {
@@ -319,10 +445,20 @@
 	}
 
 	// Providers selectable per tier in hybrid mode: the catalogued, key-via-vault
-	// ones (Anthropic + Mistral). Free-text endpoints (custom / openai-compat) and
-	// the retired Vertex tile are out of scope for the per-tier picker for now.
+	// ones (Anthropic + Mistral) PLUS free-text tiles that pin per-tier options
+	// via `tier_models` (Fireworks — its two measured preset-slot models; the
+	// tile itself stays free-text). Fully free-text endpoints (custom /
+	// openai-compat, local runtimes) and the retired Vertex tile remain out of
+	// scope. On a CP-supplied instance a tier_models entry is offered only when
+	// the CP demonstrably backs it — evidenced by the server's
+	// `available_tier_presets` signal (same loader hardening that keeps/drops
+	// the slot at config-load), so the editor never offers a provider whose
+	// save could only 403 (predicate unit-tested in ../utils/llm-tier-picker.js).
 	const hybridProviderOptions = $derived(
-		providers.filter((p) => p.models.length > 0 && p.provider !== 'vertex'),
+		providers.filter((p) => isHybridTierOption(p, {
+			cpSuppliesKey: cpSuppliesLLMKeyForInstance(),
+			availablePresets,
+		})),
 	);
 
 	/** Seed each tier's {provider, model} from a saved tier_set, else defaults. */
@@ -350,7 +486,9 @@
 				const entry = catalogEntryByKey(resolved);
 				if (entry && opts.some((o) => catalogEntryKey(o) === resolved)) {
 					key = resolved;
-					if (entry.models.some((m) => m.id === slot.model_id)) modelId = slot.model_id;
+					// tierPickerModels: a saved Fireworks slot's model lives in
+					// `tier_models` (the tile's `models` is free-text-empty).
+					if (tierPickerModels(entry).some((m) => m.id === slot.model_id)) modelId = slot.model_id;
 				}
 			}
 			const entry = catalogEntryByKey(key);
@@ -380,23 +518,69 @@
 		return set;
 	}
 
-	function setRoutingMode(mode: 'standard' | 'hybrid'): void {
-		if (routingMode === mode) return;
-		routingMode = mode;
-		if (mode === 'hybrid') seedTierSlots(config.tier_set);
-		if (loaded) void saveConfig();
+	// Pick a "Modell-Strategie" card. Stages locally (rafael's explicit-save model):
+	// a disabled preset (CP can't back it) is a no-op. `strategy` drives which
+	// controls show (provider picker for Standard, per-tier editor for Eigene, the
+	// inline detail for a preset); what persists is decided in runSaveConfig from it.
+	//
+	// The five cards (order = Standard → cheap → flagship → manual). `key` is the
+	// i18n stem (hyphenated ids can't be a translation-key segment). Icons are the
+	// monochrome set: ✓ Standard · ⚡ Efficient · ⚖️ Balanced · 💎 Max-Quality ·
+	// sliders for the manual Eigene.
+	const STRATEGY_CARDS: ReadonlyArray<{ id: Strategy; key: string; icon: IconName; recommended?: boolean }> = [
+		{ id: 'standard', key: 'standard', icon: 'check_circle', recommended: true },
+		{ id: 'efficient', key: 'efficient', icon: 'bolt' },
+		{ id: 'balanced', key: 'balanced', icon: 'scale' },
+		{ id: 'max-quality', key: 'max_quality', icon: 'gem' },
+		{ id: 'custom', key: 'custom', icon: 'sliders' },
+	];
+	/** The server preset signal for a card, or undefined for Standard/Custom. */
+	function presetInfoFor(id: Strategy): PresetInfo | undefined {
+		return id !== 'standard' && id !== 'custom' ? availablePresets[id] : undefined;
+	}
+	/** A preset card the CP can't back → disabled (Standard/Custom always available). */
+	function cardDisabled(id: Strategy): boolean {
+		const p = presetInfoFor(id);
+		return !!p && !p.available;
+	}
+	function toggleDetails(id: string): void {
+		expandedDetails = { ...expandedDetails, [id]: !expandedDetails[id] };
+	}
+	// The active preset's resolved per-tier rows (for the inline detail panel).
+	const activePresetTiers = $derived(presetInfoFor(strategy)?.tiers ?? []);
+
+	function selectStrategy(next: Strategy): void {
+		if (next === strategy) return;
+		const preset = next !== 'standard' && next !== 'custom' ? availablePresets[next] : undefined;
+		if (preset && !preset.available) return; // disabled card — no-op
+		const prev = strategy;
+		strategy = next;
+		// Entering Eigene seeds the per-tier editor from the persisted tier_set (a
+		// manual hybrid the user saved before), else provider defaults — then, when
+		// coming FROM a preset card, overlays that preset's resolved slots (the GET
+		// /api/config `available_tier_presets` rows carry each slot's model_id, and
+		// every preset slot now has a per-tier provider option — Fireworks included,
+		// via `tier_models`). So preset→Eigene starts from the preset's actual
+		// models instead of silently dropping to defaults.
+		if (next === 'custom') {
+			seedTierSlots(config.tier_set);
+			const fromPreset = prev !== 'standard' && prev !== 'custom' ? availablePresets[prev] : undefined;
+			const seed = presetTierSeed(fromPreset, hybridProviderOptions.map((p) => ({ key: catalogEntryKey(p), entry: p })));
+			if (Object.keys(seed).length > 0) tierSlots = { ...tierSlots, ...seed };
+		}
+		markDirty();
 	}
 
 	function setTierProvider(tier: ModelTier, catalogKey: string): void {
 		const entry = catalogEntryByKey(catalogKey);
 		const modelId = entry ? defaultTierModelId(entry, tier) : '';
 		tierSlots = { ...tierSlots, [tier]: { catalogKey, modelId } };
-		if (loaded) void saveConfig();
+		markDirty();
 	}
 
 	function setTierModel(tier: ModelTier, modelId: string): void {
 		tierSlots = { ...tierSlots, [tier]: { ...tierSlots[tier], modelId } };
-		if (loaded) void saveConfig();
+		markDirty();
 	}
 
 	// Distinct provider tiles used across the slots — drives the per-provider key
@@ -430,6 +614,12 @@
 		// empty, the dropdown looked unselected, and "Verbindung testen"
 		// failed because no model was wired.
 		const defaultForNewProvider = pickDefaultModelIdForEntry(entry);
+		// A pinned preset with an EMPTY model catalog (Ollama, Groq, …) has no
+		// default to stamp — the model id is free-text. Carrying the previous
+		// provider's id across is worse than leaving it blank: `mistral-large-2512`
+		// saves cleanly (200), readiness reports green, and every single chat then
+		// 404s against Ollama, which has never heard of that model.
+		const freeTextModel = entry.models.length === 0;
 		if (entry.base_url_default && !entry.requires_base_url) {
 			// Pinned preset (e.g. Mistral → api.mistral.ai). Stamp it so
 			// save→reload round-trips back to this preset and the user
@@ -437,7 +627,9 @@
 			config = {
 				...config,
 				api_base_url: entry.base_url_default,
-				...(defaultForNewProvider ? { openai_model_id: defaultForNewProvider } : {}),
+				...(defaultForNewProvider
+					? { openai_model_id: defaultForNewProvider }
+					: freeTextModel ? { openai_model_id: '' } : {}),
 			};
 		} else if (entry.requires_base_url
 			&& config.api_base_url
@@ -465,9 +657,18 @@
 		// caught by HN-launch staging probe 2026-05-23. Custom-endpoint tiles
 		// still defer to the explicit Save button (api_base_url + model id
 		// are required cross-field, server returns 400 if absent).
-		if (!entry.requires_base_url && loaded) {
-			void saveConfig();
-		}
+		//
+		// A pinned preset with a free-text model is the SAME case, even though its
+		// URL is pinned: the server rejects provider:'openai' without an
+		// openai_model_id. Auto-saving it fires a 400 the instant the user clicks
+		// the tile — before they have had any chance to type the model. So hold the
+		// save until the id is there, exactly as the free-text tiles do.
+		// Explicit-save model (rafael W4): a tile click now STAGES the change; the
+		// "Ungespeicherte Änderungen" bar + Save button commit it — no surprise write
+		// on every click. Replaces the former tile-click auto-save (fear of silently
+		// navigating away on the old provider, HN-launch staging 2026-05-23); the
+		// unsaved bar makes the pending change visible instead.
+		markDirty();
 	}
 
 	// Custom-Endpoint Confirm-Banner (PRD Security Model): the SSRF guard
@@ -510,7 +711,7 @@
 		testing = true;
 		testResult = null;
 		try {
-			const slot = slotFor(activeProvider);
+			const slot = slotForEntry(activeProviderEntry);
 			const apiKey = slot ? (keys[slot] ?? '') : '';
 			const res = await fetch(`${getApiBase()}/llm/test`, {
 				method: 'POST',
@@ -552,7 +753,7 @@
 		// starter (BYOK) go through the gate per the comment intent.
 		// Pre-fix this used isManaged() which incorrectly returned true for
 		// `starter` BYOK too, dropping the gate where it was needed.
-		if (cpSuppliesLLMKey()) return false;
+		if (cpSuppliesLLMKeyForInstance()) return false;
 		if (provider !== 'custom' && provider !== 'openai') return false;
 		if (!url || url.trim().length === 0) return false;
 		if (isAllowlistedEndpoint(url)) return false;
@@ -567,6 +768,14 @@
 	function isHostAlreadyAccepted(url: string): boolean {
 		const host = disclosureHostname(url);
 		return (config.accepted_custom_endpoints ?? []).some((e) => e.host === host);
+	}
+
+	// Discard staged changes (explicit-save model): drop the unsaved key inputs and
+	// re-fetch the server truth, which re-derives strategy/routing/tierSlots + clears
+	// `dirty`. Cheaper than tracking a per-field snapshot for a settings page.
+	function discardChanges(): void {
+		keys = {};
+		void load();
 	}
 
 	async function saveConfig(): Promise<void> {
@@ -609,6 +818,7 @@
 					gcp_project_id: config.gcp_project_id,
 					gcp_region: config.gcp_region,
 					default_tier: config.default_tier,
+					balanced_model: config.balanced_model,
 					openai_model_id: config.openai_model_id,
 					custom_endpoints: config.custom_endpoints,
 				},
@@ -627,24 +837,17 @@
 				(activeProvider === 'custom' || activeProvider === 'openai') &&
 				typeof url === 'string' && url.trim().length > 0 &&
 				!isAllowlistedEndpoint(url);
-			// PR-4: persist routing_mode + tier_set for BOTH self-host and managed.
-			// Managed is allow-listed for these fields (MANAGED_USER_WRITABLE_CONFIG)
-			// and sanitised server-side at config-load (applyManagedTierSetConstraints
-			// drops off-allowlist providers, strips tenant keys/base_urls, sources CP
-			// keys). The UI never sends a key in the slot — keys go to the vault. In
-			// standard mode CLEARS any previously-saved tier_set (sends `{}` — the
-			// schema rejects null, and an empty set is the "no per-tier slots"
-			// state) so switching Hybrid→Standard leaves no stale slots in
-			// config.json for a future reader to misinterpret. The engine ignores
-			// tier_set unless routing_mode === 'hybrid' regardless.
-			const routingUpdate: { routing_mode?: 'standard' | 'hybrid'; tier_set?: TierSet } = {
-				routing_mode: routingMode,
-			};
-			if (routingMode === 'hybrid') {
-				routingUpdate.tier_set = currentTierSet();
-			} else if (config.tier_set && Object.keys(config.tier_set).length > 0) {
-				routingUpdate.tier_set = {};
-			}
+			// model-presets W4 — persist the chosen "Modell-Strategie" card. The
+			// strategy→body mapping (preset-by-name / clear-to-standard / custom hybrid,
+			// including the load-bearing tier_preset:null CLEAR) lives in the unit-tested
+			// `buildRoutingUpdate` helper. Managed is allow-listed for these fields
+			// (MANAGED_USER_WRITABLE_CONFIG) and sanitised server-side at load; the UI
+			// never sends a key in a slot — keys go to the vault.
+			const isPreset = strategy !== 'standard' && strategy !== 'custom';
+			const routingUpdate = buildRoutingUpdate(strategy, {
+				existingTierSet: config.tier_set,
+				customTierSet: strategy === 'custom' ? currentTierSet() : {},
+			});
 			const body = needsConfirm
 				? { ...update, ...routingUpdate, confirm_custom_endpoint: true }
 				: { ...update, ...routingUpdate };
@@ -665,6 +868,11 @@
 				} catch { /* non-JSON body — keep the status string */ }
 				throw new Error(reason);
 			}
+			// The routing/tier config may have changed → drop the shared tier-config
+			// cache so the composer + header model pickers re-fetch the new per-tier
+			// model labels immediately (else they'd show the pre-save model, e.g. the
+			// "Mistral Large 3" stale-label after switching balanced to Ministral 14B).
+			clearTierConfigCache();
 			// Mirror the server-recorded acceptance locally so the modal doesn't
 			// re-fire for this host before the next config reload.
 			if (needsConfirm && typeof url === 'string') {
@@ -674,11 +882,16 @@
 					config.accepted_custom_endpoints = [...prior, { host, accepted_at: new Date().toISOString() }];
 				}
 			}
+			// Persist committed → clear the unsaved-changes state (explicit-save model)
+			// and mirror the chosen strategy into local config so a later re-derive
+			// (without a full reload) stays consistent with what was written.
+			dirty = false;
+			config.tier_preset = isPreset ? strategy : undefined;
 			addToast(t('llm.saved'), 'success', 3000);
 			// Tell the StatusBar (and any other live provider indicator) to refresh
 			// NOW instead of waiting up to 30s for its next poll — otherwise the
 			// footer keeps showing the previous provider after a switch and the user
-			// thinks the save didn't take (rafael 2026-05-27/29 Anthropic↔Mistral).
+			// thinks the save didn't take (found during demo-walk hardening, Anthropic↔Mistral).
 			if (typeof window !== 'undefined') {
 				window.dispatchEvent(new CustomEvent('lynox:provider-changed'));
 			}
@@ -699,18 +912,77 @@
 		providers.find((p) => catalogEntryKey(p) === activeCatalogKey)
 		?? providers.find((p) => p.provider === activeProvider),
 	);
+	// model-presets W4: the "Modell-Strategie" cards replace the Standard/Hybrid
+	// toggle. `presetSelected` = a fixed preset card is active (its tiers show
+	// read-only ON the card, so the provider picker + per-tier editor both hide).
+	// `hybridActive` = the manual "Eigene" card → the per-tier editor shows. The
+	// provider picker + main-model picker show ONLY for the Standard card.
+	const presetSelected = $derived(strategy !== 'standard' && strategy !== 'custom');
 	// Hybrid mode is active (managed OR self-host): the per-tier editor replaces
 	// the single-provider flow (tiles + one key + residency/test). The per-tier
-	// PROVIDER choices are the catalogued allowlist (Anthropic + Mistral), which
-	// is exactly the managed curated set — so managed hybrid reuses the same UI;
-	// only the per-provider key fields are self-host-only (managed: CP supplies,
+	// PROVIDER choices are the catalogued allowlist (Anthropic + Mistral, plus
+	// tier_models tiles like Fireworks where the instance backs them) — on
+	// managed that matches the loader's slot allowlist exactly (see
+	// hybridProviderOptions), so managed hybrid reuses the same UI; only the
+	// per-provider key fields are self-host-only (managed: CP supplies,
 	// server-side `applyManagedTierSetConstraints` sources the keys at load).
-	const hybridActive = $derived(routingMode === 'hybrid');
+	const hybridActive = $derived(strategy === 'custom');
 	const providerLocked = $derived(!!locks.provider);
 	const customEndpointsLocked = $derived(!!locks.custom_provider_endpoints);
 	// `LYNOX_LLM_PROVIDER` is set → any provider switch is rejected (env wins on
 	// reload + backend 403s the save). Drives the read-only tile state below.
 	const providerEnvPinned = $derived(!!config.env_overrides?.provider);
+
+	// On CP-supplied managed tiers (managed / managed_pro) the provider is capped to
+	// the curated set {Anthropic, Mistral}: the backend `enforceManagedProviderConstraints`
+	// rejects anything else on save. Every BYOK/self-host preset carries a
+	// `base_url_default` (so `requires_base_url` is false), which means the
+	// `customEndpointsLocked` tile-lock never covers them — they showed as fully
+	// selectable and a save just 403'd. Filter them OUT of the tile list entirely so a
+	// managed customer is never offered a provider whose save can't land. Hosted-BYOK
+	// (customer's own key, `cpSuppliesLLMKeyForInstance() === false`) keeps the full list.
+	const isManagedCuratedProvider = (p: CatalogProvider): boolean =>
+		p.provider === 'anthropic' || (p.provider === 'openai' && p.preset_id === 'mistral');
+	const providersForDisplay = $derived(
+		providers.filter((p) => {
+			if (p.provider === 'vertex' && activeProvider !== 'vertex') return false;
+			if (cpSuppliesLLMKeyForInstance() && !isManagedCuratedProvider(p)) return false;
+			return true;
+		}),
+	);
+
+	// ── Standard-mode "Main chat model" picker (PR model-select · arch-v2 Simple
+	// view). The main chat runs on `default_tier` (+ the Anthropic `balanced_model`
+	// variant); this select lets the user set it directly instead of hiding the
+	// knob. Options come verbatim from the server-computed `main_chat_models`, so
+	// the UI never mirrors the tier→model map (drift-free; Grok/Gemini providers
+	// get options for free). Background tasks + subagents keep auto-routing across
+	// bands regardless — this only pins the main-chat starting model. The option-
+	// derivation + selection-matching logic is unit-tested in ../utils/llm-main-model.js. ──
+	const mainModelOptions = $derived.by<MainModelOption[]>(
+		() => buildMainModelOptions(activeProviderEntry, config.max_tier),
+	);
+	// Tier-qualified key (`${tier}:${id}`), not a bare id: a provider whose
+	// balanced and deep bands resolve to the SAME model (Mistral Medium 3.5) emits
+	// two options sharing an id, so a bare-id `<select value>`/each-key collides
+	// (Svelte `each_key_duplicate` crash; the deep option unselectable). The
+	// composite keeps each option a distinct, selectable identity.
+	const mainModelSelection = $derived.by<string>(
+		() => selectMainModelKey(mainModelOptions, config.default_tier, config.balanced_model),
+	);
+
+	function setMainModel(key: string): void {
+		// Resolve BY TIER-QUALIFIED KEY — a bare-id `find` would collapse a deep
+		// pick onto the first (balanced) option when they share a model id.
+		const opt = findMainModelOptionByKey(mainModelOptions, key);
+		if (!opt || opt.overCeiling) return;
+		config.default_tier = opt.tier;
+		// Only the Anthropic balanced band carries a variant. Set it when the
+		// picked option specifies one; leave the stored preference otherwise (so
+		// switching to Opus and back to a balanced pick remembers Sonnet 4.6/5).
+		if (opt.balanced_model) config.balanced_model = opt.balanced_model;
+		markDirty();
+	}
 
 	// Per-tile predicate — extracted to ../utils/llm-tile-lock.js so the
 	// env-pin / lock matrix is unit-tested. On Managed only free-text endpoints
@@ -804,30 +1076,117 @@
 		</div>
 	{/if}
 
-	<!-- Model routing (PR-4) — the PRIMARY axis: decide Standard vs Hybrid
-	     FIRST, the model controls below adapt to it. Standard = one provider,
-	     lynox auto-routes per turn (zero knobs). Hybrid = each tier picks its own
-	     provider + model. Available on managed too: the provider choices are the
-	     curated allowlist (Anthropic + Mistral) and the CP supplies the keys
-	     (server-side `applyManagedTierSetConstraints` sanitises + sources them).
-	     NO capability gating (D8 2026-06-17). -->
+	<!-- Modell-Strategie (model-presets W4) — the PRIMARY axis. Replaces the
+	     Standard/Hybrid toggle with five cards: Standard (one provider, lynox routes
+	     per turn) · ⚡ Efficient · ⚖️ Balanced · 💎 Max-Quality (named hybrid presets)
+	     · Eigene (manual hybrid). A preset the CP can't back renders disabled with a
+	     lock reason (locks.tier_preset) — never a silent downgrade. The controls
+	     below adapt: Standard → provider picker + main-model; a preset → the inline
+	     tier detail below; Eigene → the per-tier editor. NO capability gating for the
+	     enabled set (D8 2026-06-17). -->
 	{#if loaded}
-		<section aria-labelledby="llm-routing-heading" class="space-y-2">
-			<h2 id="llm-routing-heading" class="text-lg font-medium">{t('llm.routing.heading')}</h2>
-			<div role="group" aria-label={t('llm.routing.heading')}
-				class="inline-flex rounded-md border border-border overflow-hidden text-sm">
-				<button type="button" aria-pressed={routingMode === 'standard'} disabled={providerLocked}
-					onclick={() => setRoutingMode('standard')}
-					class="px-4 py-1.5 transition-colors disabled:opacity-50 {routingMode === 'standard' ? 'bg-accent text-accent-fg' : 'bg-bg hover:bg-accent/5'}">
-					{t('llm.routing.standard')}
-				</button>
-				<button type="button" aria-pressed={routingMode === 'hybrid'} disabled={providerLocked}
-					onclick={() => setRoutingMode('hybrid')}
-					class="px-4 py-1.5 border-l border-border transition-colors disabled:opacity-50 {routingMode === 'hybrid' ? 'bg-accent text-accent-fg' : 'bg-bg hover:bg-accent/5'}">
-					{t('llm.routing.hybrid')}
-				</button>
+		<section aria-labelledby="llm-strategy-heading" class="space-y-3">
+			<div class="space-y-0.5">
+				<h2 id="llm-strategy-heading" class="text-lg font-medium">{t('llm.preset.heading')}</h2>
+				<p class="text-xs text-text-muted">{t('llm.preset.subheading')}</p>
 			</div>
-			<p class="text-xs text-text-muted">{routingMode === 'hybrid' ? t('llm.routing.hybrid_desc') : t('llm.routing.standard_desc')}</p>
+			<div role="radiogroup" aria-label={t('llm.preset.heading')}
+				class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+				{#each STRATEGY_CARDS as card (card.id)}
+					{@const disabled = cardDisabled(card.id)}
+					{@const active = strategy === card.id}
+					<button type="button" role="radio" aria-checked={active} disabled={disabled || providerLocked}
+						onclick={() => selectStrategy(card.id)}
+						class="text-left p-3 rounded-[var(--radius-md)] border-2 transition-colors flex flex-col gap-1.5 h-full
+							{active ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'}
+							disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-border">
+						<div class="flex items-center gap-x-2 gap-y-1 flex-wrap">
+							<Icon name={card.icon} size="sm" class={active ? 'text-accent' : 'text-text-muted'} />
+							<span class="font-medium text-sm">{t(`llm.preset.${card.key}`)}</span>
+							{#if card.recommended}
+								<span class="text-[10px] font-normal uppercase tracking-wide px-1 py-px rounded border border-accent/40 text-accent whitespace-nowrap">
+									{t('llm.preset.recommended')}
+								</span>
+							{/if}
+						</div>
+						<p class="text-xs text-text-muted leading-snug">{t(`llm.preset.${card.key}_desc`)}</p>
+						{#if disabled}
+							<p class="text-[11px] text-warning mt-auto pt-1">{t('llm.preset.unavailable')}</p>
+						{/if}
+					</button>
+				{/each}
+			</div>
+
+			<!-- Contact CTA for a preset the plan can't back — the card button is
+			     disabled (no interactive child allowed), so the action lives here.
+			     Server-driven: shown only when the CP sends locks.tier_preset. -->
+			{#if locks.tier_preset?.contact_cta}
+				<p class="text-xs text-text-muted">
+					{t('llm.preset.unavailable')}
+					<a href={locks.tier_preset.contact_cta.href} class="text-accent hover:underline ml-1">
+						{t('llm.preset.unavailable_cta')}
+					</a>
+				</p>
+			{/if}
+
+			<!-- Inline tier detail for the active PRESET (rafael: "kompakt inline +
+			     Detail auf Klick"). Compact per-tier model + provenance chip; the
+			     "Details" toggle reveals the full three-axis, R2-gated disclosure. -->
+			{#if presetSelected && activePresetTiers.length > 0}
+				<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-3 space-y-2">
+					{#each activePresetTiers as tier (tier.tier)}
+						<div class="flex items-center gap-2 text-sm flex-wrap">
+							<span class="text-text-muted w-24 shrink-0">{t(`llm.tier.${tier.tier}`)}</span>
+							<span class="font-medium">{tier.label}</span>
+							<!-- Compact chips: the model's WEIGHTS origin (provenance) + where
+							     it's PROCESSED (residency). Show residency only when it differs
+							     from provenance — else an EU model on an EU host reads as a
+							     redundant "EU EU"; the meaningful case is divergence (GLM: China
+							     weights on a US host → "China" + "US"). Full detail in the expand. -->
+							{#if tier.provenance}
+								<span class="text-[10px] uppercase tracking-wide px-1.5 py-px rounded border border-border text-text-muted">
+									{t(`llm.preset.provenance.${tier.provenance}`)}
+								</span>
+							{/if}
+							{#if tier.residency && tier.residency !== tier.provenance}
+								<span class="text-[10px] px-1.5 py-px rounded bg-bg-muted text-text-subtle">{tier.residency}</span>
+							{/if}
+							<!-- Cost feel (rafael): input/output $/M, right-aligned. Same
+							     "$X/M in · $Y/M out" format as the standard main-model picker
+							     (in/out is universal token-pricing notation — hardcoded there too). -->
+							{#if tier.pricing}
+								<span class="text-[11px] text-text-subtle ml-auto tabular-nums whitespace-nowrap">
+									${tier.pricing.input}/M in · ${tier.pricing.output}/M out
+								</span>
+							{/if}
+						</div>
+						{#if expandedDetails[strategy]}
+							<dl class="ml-24 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px] text-text-muted">
+								{#if tier.residency}
+									<dt>{t('llm.preset.disclosure.residency')}</dt><dd>{tier.residency}</dd>
+								{/if}
+								{#if tier.transferBasis}
+									<dt>{t('llm.preset.disclosure.transfer')}</dt><dd>{tier.transferBasis}</dd>
+								{/if}
+								{#if tier.provenance}
+									<dt>{t('llm.preset.disclosure.provenance')}</dt><dd>{t(`llm.preset.provenance.${tier.provenance}`)}</dd>
+								{/if}
+								{#if tier.posture}
+									<dt>{t('llm.preset.disclosure.posture')}</dt><dd>{tier.posture}</dd>
+								{/if}
+							</dl>
+						{/if}
+					{/each}
+					<div class="flex items-center justify-between pt-1">
+						<button type="button" onclick={() => toggleDetails(strategy)}
+							class="text-xs text-accent hover:underline flex items-center gap-1">
+							<Icon name={expandedDetails[strategy] ? 'chevron_up' : 'chevron_down'} size="xs" />
+							{expandedDetails[strategy] ? t('llm.preset.hide_details') : t('llm.preset.details')}
+						</button>
+						<span class="text-[11px] text-text-subtle">{t('llm.preset.applies_hint')}</span>
+					</div>
+				</div>
+			{/if}
 		</section>
 	{/if}
 
@@ -836,16 +1195,27 @@
 	     before the sub-route nav. Vertex is wired in the engine for legacy
 	     `provider: 'vertex'` config.json setups (see core CLAUDE.md) but no
 	     longer offered in-product per project_eu_providers_strategy — filter
-	     it out of the tile list. Hidden in self-host Hybrid: there each tier
-	     picks its OWN provider, so a single top-level picker doesn't apply. -->
-	{#if !hybridActive}
+	     it out of the tile list. Shown ONLY for the Standard strategy: a preset
+	     fixes its own per-tier providers, and Eigene picks a provider per tier. -->
+	{#if strategy === 'standard'}
 	<section aria-labelledby="llm-provider-heading">
 		<h2 id="llm-provider-heading" class="text-lg font-medium mb-3">{t('llm.provider_heading')}</h2>
 		<div class="grid gap-2 sm:grid-cols-2">
-			{#each providers.filter((p) => p.provider !== 'vertex' || activeProvider === 'vertex') as p (catalogEntryKey(p))}
+			{#each providersForDisplay as p (catalogEntryKey(p))}
 				<button type="button" onclick={() => selectCatalogEntry(p)} disabled={isTileLocked(p)}
 					class="text-left p-3 rounded border-2 transition-colors {catalogEntryKey(p) === activeCatalogKey ? 'border-accent bg-accent/5' : 'border-border hover:border-accent/50'} disabled:opacity-50 disabled:cursor-not-allowed">
-					<div class="font-medium text-sm">{p.display_name}</div>
+					<div class="font-medium text-sm flex items-center gap-1.5">
+						<span>{p.display_name}</span>
+						<!-- The caveat used to live inside display_name ("… (experimental)").
+						     It is a structured field now, so render it explicitly — lynox is an
+						     agent, and "tool-calling not verified here" is a real warning, not a
+						     footnote. -->
+						{#if p.verification === 'experimental'}
+							<span class="text-[10px] font-normal uppercase tracking-wide px-1 py-px rounded border border-border text-text-muted">
+								{t('llm.experimental')}
+							</span>
+						{/if}
+					</div>
 					<div class="text-xs text-text-muted mt-0.5">{p.default_residency}</div>
 				</button>
 			{/each}
@@ -871,23 +1241,27 @@
 	</nav>
 
 	{#if activeProviderEntry}
-		<!-- Per-provider config form -->
+		<!-- Per-provider config form — Standard (single provider: key/base/model/test)
+		     or Eigene (per-tier editor). Hidden for a fixed preset: its tiers show in
+		     the inline detail panel above and nothing here is editable; the Save row +
+		     Advanced below stay visible so a preset choice can still be committed. -->
+		{#if !presetSelected}
 		<section aria-labelledby="llm-config-heading" class="border-t border-border pt-6 space-y-4">
 			<h2 id="llm-config-heading" class="text-lg font-medium">{hybridActive ? t('llm.routing.per_tier_heading') : activeProviderEntry.display_name}</h2>
 			{#if !hybridActive && activeProviderEntry.notes}
 				<p class="text-xs text-text-muted">{activeProviderEntry.notes}</p>
 			{/if}
 
-			{#if slotFor(activeProviderEntry.provider) && !cpSuppliesLLMKey() && !hybridActive}
+			{#if slotForEntry(activeProviderEntry) && !cpSuppliesLLMKeyForInstance() && !hybridActive}
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.api_key')}</span>
 					<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
 						placeholder={t('llm.api_key_placeholder')}
-						bind:value={keys[slotFor(activeProviderEntry.provider)]}
+						bind:value={keys[slotForEntry(activeProviderEntry)]} oninput={markDirty}
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 					<span class="text-xs text-text-muted">{t('llm.api_key_hint')}</span>
 				</label>
-			{:else if cpSuppliesLLMKey() && !hybridActive}
+			{:else if cpSuppliesLLMKeyForInstance() && !hybridActive}
 				<!-- v1.5.2: on managed tiers, the CP supplies the LLM key — the
 				     input would be misleading-disabled. Replace with a short
 				     note so the user knows why the field is missing. (Hidden in
@@ -902,7 +1276,7 @@
 					<span class="block text-sm font-medium mb-1">{t('llm.base_url')}</span>
 					<input type="url" disabled={!loaded || providerLocked}
 						placeholder="https://api.mistral.ai/v1"
-						bind:value={config.api_base_url}
+						bind:value={config.api_base_url} oninput={markDirty}
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 				</label>
 
@@ -967,7 +1341,9 @@
 				<!-- Hybrid (PR-4): each tier picks its OWN provider + model. The
 				     Standard/Hybrid decision lives at the TOP of the page (it drives
 				     this section). Provider choices = the catalogued, key-via-vault
-				     ones (Anthropic + Mistral). NO capability gating (D8 2026-06-17):
+				     ones (Anthropic + Mistral) plus tier_models-pinned tiles
+				     (Fireworks; managed-gated via available_tier_presets — see
+				     hybridProviderOptions). NO capability gating (D8 2026-06-17):
 				     every model is selectable (incl. Opus) — the included budget +
 				     per-model cost (⚡ = expensive) control spend. -->
 				<div class="space-y-3">
@@ -991,7 +1367,7 @@
 									onchange={(e) => setTierModel(tier, e.currentTarget.value)}
 									aria-label={t('llm.model')}
 									class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
-									{#each entry?.models ?? [] as m (m.id)}
+									{#each entry ? tierPickerModels(entry) : [] as m (m.id)}
 										<option value={m.id}>{m.label} — ${m.pricing?.input ?? '?'}/M in · ${m.pricing?.output ?? '?'}/M out{isExpensive(m) ? ' ⚡' : ''}</option>
 									{/each}
 								</select>
@@ -1007,17 +1383,17 @@
 				     into the tier_set in config.json; the engine injects each slot's
 				     key at config-load. On managed the CP supplies the keys, so a
 				     short note replaces the fields. -->
-				{#if !cpSuppliesLLMKey()}
+				{#if !cpSuppliesLLMKeyForInstance()}
 					{#if usedHybridProviders.length > 0}
 						<div class="space-y-2 border-t border-border/50 pt-4">
 							<span class="block text-sm font-medium">{t('llm.hybrid_keys_heading')}</span>
 							{#each usedHybridProviders as p (catalogEntryKey(p))}
-								{#if slotFor(p.provider)}
+								{#if slotForEntry(p)}
 									<label class="block">
 										<span class="block text-xs text-text-muted mb-1">{p.display_name}</span>
 										<input type="password" autocomplete="off" disabled={!loaded || providerLocked}
 											placeholder={t('llm.api_key_placeholder')}
-											bind:value={keys[slotFor(p.provider)]}
+											bind:value={keys[slotForEntry(p)]} oninput={markDirty}
 											class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 									</label>
 								{/if}
@@ -1030,28 +1406,51 @@
 						{t('llm.api_key_managed_note')}
 					</p>
 				{/if}
-			{:else if activeProviderEntry.models.length > 0}
-				<!-- Standard mode shows NO tier control: lynox auto-routes per turn
-				     from a balanced baseline (the engine's own default), so a
-				     starting-tier knob would be noise — the auto-routing promise is
-				     the point. Explicit per-tier control is the Hybrid path above. -->
-			{:else if activeProvider === 'custom' || activeCatalogKey === 'openai-compat'}
+			{:else if mainModelOptions.length > 0}
+				<!-- Standard-mode "Main chat model" picker (arch-v2 Simple view). Sets
+				     `default_tier` (+ the Anthropic `balanced_model` variant) so the
+				     user can move the main chat from e.g. Ministral to Mistral Large.
+				     Options are server-computed (`main_chat_models`) — one per reachable
+				     band — so the picker can never offer a model a tier-pick wouldn't
+				     actually reach. Background tasks + subagents keep auto-routing. -->
+				<div class="space-y-2">
+					<label class="block">
+						<span class="block text-sm font-medium mb-1">{t('llm.main_model.heading')}</span>
+						<select value={mainModelSelection}
+							disabled={!loaded || providerLocked}
+							onchange={(e) => setMainModel(e.currentTarget.value)}
+							aria-label={t('llm.main_model.heading')}
+							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
+							{#each mainModelOptions as opt (mainModelOptionKey(opt))}
+								<option value={mainModelOptionKey(opt)} disabled={opt.overCeiling}>
+									{opt.label}{#if opt.pricing} — ${opt.pricing.input}/M in · ${opt.pricing.output}/M out{/if}{#if opt.expensive} ⚡{/if}{#if opt.notRecommended} · {t('llm.main_model.fast_suffix')}{/if}{#if opt.overCeiling} · {t('llm.main_model.locked_suffix')}{/if}
+								</option>
+							{/each}
+						</select>
+					</label>
+					<p class="text-xs text-text-muted">{t('llm.main_model.applies_hint')}</p>
+					<p class="text-xs text-text-muted">{t('llm.main_model.autoroute_hint')}</p>
+				</div>
+			{:else if (activeProviderEntry?.models.length ?? 0) === 0}
 				<!--
-					Free-text endpoints with no enumerated model catalog need an
-					explicit model id. Two tiles qualify: the Anthropic-compatible
-					"custom" provider, AND the generic OpenAI-compatible endpoint
-					(preset_id 'openai-compat', models: []) — both route the model
-					id straight to the proxy (see core/src/core/llm/catalog.ts).
-					The backend rejects provider:'openai' without openai_model_id
-					(http-api.ts), so without this field the openai-compat tile
-					could never save (HTTP 400). Mistral / Anthropic / Vertex have
-					catalogs and use the tier picker above instead.
+					Any entry with an EMPTY model catalog needs an explicit model id —
+					there is nothing to pick from, and the id is routed straight to the
+					endpoint (see core/src/core/llm/catalog.ts). The backend rejects
+					provider:'openai' without openai_model_id (http-api.ts), so without
+					this field such a tile could never save (HTTP 400).
+
+					Derived from `models.length`, NOT from a hardcoded key list. The old
+					list named only 'custom' and 'openai-compat', so every gateway/local
+					preset added later (Ollama, LM Studio, Groq, …) silently rendered no
+					model field at all — selectable, unsaveable, and no way for the user
+					to tell why. Anthropic / Mistral / Vertex ship catalogs and use the
+					tier picker above instead.
 				-->
 				<label class="block">
 					<span class="block text-sm font-medium mb-1">{t('llm.custom_model_id')}</span>
 					<input type="text" disabled={!loaded || providerLocked}
-						placeholder="claude-3-5-sonnet-20241022"
-						bind:value={config.openai_model_id}
+						placeholder={activeProviderEntry?.model_placeholder ?? 'claude-3-5-sonnet-20241022'}
+						bind:value={config.openai_model_id} oninput={markDirty}
 						class="w-full font-mono px-2 py-1 border border-border rounded bg-bg disabled:opacity-50" />
 					<span class="text-xs text-text-muted">{t('llm.custom_model_id_hint')}</span>
 				</label>
@@ -1068,7 +1467,7 @@
 			<!-- Connection-test row — hidden on managed (CP-supplied key, can't
 			     be re-tested by the customer; the engine probe still runs on
 			     server start) and in Hybrid (no single provider to probe). -->
-			{#if !cpSuppliesLLMKey() && !hybridActive}
+			{#if !cpSuppliesLLMKeyForInstance() && !hybridActive}
 			<div class="flex items-center gap-3">
 				<button type="button" onclick={testConnection} disabled={testing || providerLocked || !loaded}
 					class="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent/5 disabled:opacity-50">
@@ -1082,17 +1481,32 @@
 			</div>
 			{/if}
 		</section>
+		{/if}
+	{/if}
 
-		<!-- Save row — provider / model / custom-endpoint changes only. Memory
-		     still saves from its own sub-page (Foundation-Rework may re-home).
-		     Advanced (PR 4.6, 2026-05-19) collapses inline below. -->
-		<div class="flex justify-end">
-			<button type="button" onclick={saveConfig} disabled={saving || !loaded}
-				class="px-4 py-2 bg-accent text-accent-fg rounded hover:opacity-90 disabled:opacity-50">
-				{saving ? t('llm.saving') : t('llm.save')}
-			</button>
-		</div>
+	<!-- Unsaved-changes bar (rafael W4 explicit-save model): the ONE save
+	     affordance. No auto-save anywhere — every change stages `dirty` and this bar
+	     appears with Discard + Save. Reserved for real intent; the per-field toast is
+	     gone. Gated on `dirty` alone — NOT on activeProviderEntry — so the save path
+	     never disappears if the catalog fails to resolve a provider tile, and a
+	     preset choice (whose card has no inline form) still commits here. -->
+	{#if loaded && dirty}
+			<div class="sticky bottom-2 z-10 flex items-center justify-between gap-3 rounded-[var(--radius-md)] border border-accent/40 bg-accent/5 px-3 py-2 shadow-sm backdrop-blur-sm">
+				<span class="text-sm font-medium text-text">{t('llm.unsaved.title')}</span>
+				<div class="flex items-center gap-2">
+					<button type="button" onclick={discardChanges} disabled={saving}
+						class="px-3 py-1.5 text-sm border border-border rounded-[var(--radius-md)] hover:bg-bg-muted disabled:opacity-50">
+						{t('llm.unsaved.discard')}
+					</button>
+					<button type="button" onclick={saveConfig} disabled={saving || !loaded}
+						class="px-4 py-1.5 text-sm bg-accent text-accent-fg rounded-[var(--radius-md)] hover:opacity-90 disabled:opacity-50">
+						{saving ? t('llm.saving') : t('llm.save')}
+					</button>
+				</div>
+			</div>
+		{/if}
 
+	{#if activeProviderEntry}
 		<!-- Settings v3 PR 4.6 (Items 3 + 5): Advanced sub-page collapsed inline
 		     as expandable section. The standalone /llm/advanced route stays for
 		     back-compat with deep links; mounting LLMAdvancedView with

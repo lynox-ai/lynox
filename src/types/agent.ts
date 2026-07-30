@@ -28,7 +28,35 @@ export interface PromptMeta {
   multiSelect?: boolean | undefined;
 }
 
-export type PromptUserFn = (question: string, options?: string[], meta?: PromptMeta) => Promise<string>;
+/**
+ * One span of a confirmation prompt, tagged with who authored it.
+ *
+ * `frame` is system text and may carry markdown — the prompts use bold field
+ * labels and blockquotes on purpose. `value` is whatever the caller
+ * interpolated and is rendered as a TEXT NODE, so it cannot open a markdown
+ * construct however many lines it has.
+ */
+export type PromptSegment =
+  | { readonly kind: 'frame'; readonly text: string }
+  | { readonly kind: 'value'; readonly text: string };
+
+/**
+ * Registered globally so the type here and the `pv` implementation in
+ * `core/prompt-value.ts` agree on one brand without importing each other.
+ */
+export const PROMPT_TEXT_BRAND: unique symbol = Symbol.for('lynox.promptText');
+
+/** A prompt whose frame and values are separated. Built only via `pv`. */
+export interface PromptText {
+  readonly [PROMPT_TEXT_BRAND]: true;
+  readonly segments: readonly PromptSegment[];
+}
+
+/**
+ * A plain string still means "all frame" — that is every un-migrated caller and
+ * every prompt restored from before the split, and it behaves exactly as it did.
+ */
+export type PromptUserFn = (question: string | PromptText, options?: string[], meta?: PromptMeta) => Promise<string>;
 export type PromptTabsFn = (questions: TabQuestion[], meta?: PromptMeta) => Promise<string[]>;
 
 /** Four distinct outcomes for an ask_secret prompt:
@@ -183,6 +211,25 @@ export interface IAgent {
   promptMailConnect?: PromptMailConnectFn | undefined;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
+  /** Wave 1.2: has this run seen wrapped untrusted content? Read by the memory tools
+   *  (`sourceUntrusted` evidence) and by spawn to propagate a child's taint to a parent
+   *  that shares its Memory. */
+  readonly sawUntrustedData?: boolean | undefined;
+  /** DK.1 (H4): has any EXTERNAL-content tool (bash/http/read_file/media/api_setup/mail/…)
+   *  run this turn? Read by `remember` — ORed with {@link sawUntrustedData} to derive
+   *  `sourceUntrusted`, since the content marker is allowlist-by-omission. */
+  readonly sawExternalContentTool?: boolean | undefined;
+  /** DK.1 F5: has THIS CONVERSATION (sticky across turns, not just this run) ingested untrusted
+   *  content? Read by `remember`/`memory_block_edit`/`memory_retire` — ORed with the per-run
+   *  signals so a deferred injected write ("remember … on your next reply") on a later clean turn
+   *  still routes to pending_review instead of active+pinned. */
+  readonly conversationSawUntrusted?: boolean | undefined;
+  /** DK.1: whether the durable knowledge substrate is on for this agent — read by spawn so a
+   *  child inherits the flag (else a sub-agent on an ON tenant would still run legacy extraction). */
+  readonly durableMemoryEnabled?: boolean | undefined;
+  /** Wave 1.2: mark this run as having seen untrusted content — used by spawn to
+   *  propagate a shared-Memory child's taint onto the parent. */
+  noteUntrustedData?(): void;
   readonly spawnDepth?: number | undefined;
   readonly secretStore?: SecretStoreLike | undefined;
   readonly userId?: string | undefined;

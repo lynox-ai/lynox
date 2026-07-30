@@ -6,6 +6,8 @@ import { storePipeline, getPipeline } from './pipeline.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
 import type { RunHistory } from '../../core/run-history.js';
+import type { PromptText } from '../../types/index.js';
+import { pv, joinPrompts } from '../../core/prompt-value.js';
 
 // Config accessed via agent.toolContext.userConfig
 
@@ -108,44 +110,81 @@ export function phasesToPipelineSteps(phases: PlanPhase[]): InlinePipelineStep[]
 
 // --- Business-friendly presentation ---
 
-function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | undefined): string {
-  const lines: string[] = [];
+/**
+ * Build the confirmation the user approves.
+ *
+ * This prompt mixes two kinds of text: what the model wrote (summary, findings,
+ * step names) and what the system computed (the cost estimate from
+ * `estimatePipelineCost` over the run history, and who has to act). The cost
+ * line is the only number here the model did not choose, which is what made it
+ * worth forging.
+ *
+ * `pv` is what makes that impossible rather than merely awkward: every
+ * interpolation below is a VALUE, and the renderer puts values in text nodes,
+ * so model text cannot produce a heading, a quote, a code fence or a line that
+ * reads like a system statement — however many newlines it contains.
+ *
+ * The `> ` prefixes stay, and they are NOT merely decorative — this prompt has
+ * two audiences. The web UI gets the segments and is safe on its own. The CLI
+ * gets the FLATTENED string and renders no markdown, so there the quote marks
+ * are the only thing telling the two kinds of text apart. `quoteLines` puts the
+ * prefix in the FRAME and each line in its own value, which satisfies both: the
+ * flat form is quoted line by line, and every line is still a text node in the
+ * renderer. Neither mechanism covers both surfaces alone.
+ */
+/**
+ * Quote a model-written value line by line — prefix in the frame, each line its
+ * own value. A value spanning lines would otherwise be quoted only on its first
+ * one in the flattened form, which is exactly what the CLI shows.
+ */
+function quoteLines(value: string, indent = ''): PromptText[] {
+  return value
+    .split(/\r\n|[\r\n\u2028\u2029]/)
+    .map((line) => (line === '' ? pv`>` : pv`> ${indent}${line}`));
+}
+function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | undefined): PromptText {
+  const quoted: PromptText[] = [];
 
-  // Context — brief, conversational
   if (input.context) {
-    lines.push(input.context.summary);
-    if (input.context.findings && input.context.findings.length > 0) {
-      for (const f of input.context.findings) {
-        lines.push(`  - ${f}`);
-      }
+    quoted.push(...quoteLines(input.context.summary));
+    for (const f of input.context.findings ?? []) {
+      quoted.push(...quoteLines(f, '  - '));
     }
-    lines.push('');
+    quoted.push(pv`>`);
   }
 
-  lines.push(input.summary);
-  lines.push('');
+  quoted.push(...quoteLines(input.summary));
+  quoted.push(pv`>`);
 
-  // Phased plan or flat steps
+  const userStepNumbers: number[] = [];
   if (input.phases && input.phases.length > 0) {
     for (let p = 0; p < input.phases.length; p++) {
       const phase = input.phases[p]!;
-      const marker = phase.assignee === 'user' ? ' [your input needed]' : '';
-      lines.push(`${p + 1}. ${phase.name}${marker}`);
+      const isUser = phase.assignee === 'user';
+      if (isUser) userStepNumbers.push(p + 1);
+      const marker = isUser ? ' [your input needed]' : '';
+      quoted.push(...quoteLines(`${String(p + 1)}. ${phase.name}${marker}`));
     }
   } else if (input.steps && input.steps.length > 0) {
     for (let i = 0; i < input.steps.length; i++) {
-      lines.push(`${i + 1}. ${input.steps[i]}`);
+      quoted.push(...quoteLines(`${String(i + 1)}. ${input.steps[i] ?? ''}`));
     }
   }
 
-  if (estimatedCostUsd !== undefined && estimatedCostUsd > 0.01) {
-    lines.push('');
-    lines.push(`Estimated cost: ~$${estimatedCostUsd.toFixed(2)}`);
-  }
+  // System text, kept out of the quote so a reader can see the difference. The
+  // blank line before it also keeps CommonMark's lazy continuation from folding
+  // these lines INTO the blockquote — measured, not assumed.
+  const parts = [joinPrompts(quoted, '\n'), pv``];
 
-  lines.push('');
-  lines.push('Shall I proceed?');
-  return lines.join('\n');
+  if (userStepNumbers.length > 0) {
+    parts.push(pv`Your input is needed at step ${userStepNumbers.join(', ')}.`);
+  }
+  if (estimatedCostUsd !== undefined && estimatedCostUsd > 0.01) {
+    parts.push(pv`Estimated cost: ~$${estimatedCostUsd.toFixed(2)}`);
+  }
+  parts.push(pv``, pv`Shall I proceed?`);
+
+  return joinPrompts(parts, '\n');
 }
 
 // --- Pipeline bridge ---
@@ -154,9 +193,7 @@ function formatPresentation(input: PlanTaskInput, estimatedCostUsd?: number | un
  * Convert approved phases to a stored pipeline, return workflow_id.
  *
  * Every workflow runs through the orchestrator (`runManifest`) — there is one
- * execution path (D9). `executionMode` is therefore written to the constant
- * `'orchestrated'`; the field is retained on the type only for backward
- * compatibility with legacy stored rows and is otherwise unread.
+ * execution path (D9).
  */
 function convertToPipeline(summary: string, phases: PlanPhase[], runHistory: RunHistory | null | undefined, historicalAvg?: Record<string, number>): string {
   const pipelineSteps = phasesToPipelineSteps(phases);
@@ -174,7 +211,6 @@ function convertToPipeline(summary: string, phases: PlanPhase[], runHistory: Run
     estimatedCost: costEstimate.totalCostUsd,
     createdAt: new Date().toISOString(),
     executed: false,
-    executionMode: 'orchestrated',
     template: false,
     mode: inferPipelineMode(pipelineSteps),
     // plan_task plans carry no capture parameters; the field exists so a saved

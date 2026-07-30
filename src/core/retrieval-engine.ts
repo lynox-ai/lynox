@@ -11,7 +11,7 @@ import { NAMESPACE_HALF_LIFE } from '../types/index.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { calculateCost } from './pricing.js';
 import { reportMeteredCost, type HookHost } from './metered-request.js';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { resolveTierModel } from './tier-resolver.js';
 import { scopeWeight } from './scope-resolver.js';
 import type { AgentMemoryDb, MemoryRow, ScoredMemoryRow } from './agent-memory-db.js';
@@ -27,6 +27,7 @@ import type { DataStoreBridge } from './datastore-bridge.js';
 import type { RunHistory } from './run-history.js';
 import { escapeXml, renderProvenanceFact, detectInjectionAttempt } from './data-boundary.js';
 import { channels } from './observability.js';
+import { appendRetrievalShadowLog } from './retrieval-shadow-log.js';
 
 /** Default retrieval options. */
 const DEFAULT_TOP_K = 10;
@@ -40,6 +41,38 @@ const DEFAULT_MAX_KNOWLEDGE_CONTEXT_CHARS = 12_000;
 const VECTOR_WEIGHT = 0.55;
 const GRAPH_BOOST = 0.15;
 const THREAD_BOOST = 0.10;
+
+/**
+ * Memory Foundation Wave 2 (P2) — the read-side raw-cosine floor. A purely-vector-surfaced
+ * candidate (no graph reachability, no FTS/run signal) must clear this RAW cosine to be
+ * recalled, cutting the low-relevance "context poison" the nominal `threshold*0.3` gate lets
+ * through. Gated on `memory_write_trust_gate` and applied ONLY to pure-vector candidates
+ * (graph/FTS/run-surfaced facts are EXEMPT — a bare cosine floor would drop graph-reachable
+ * `user_asserted` truths; refute RF-ARCH1).
+ *
+ * ⚠️ Stays 0 (measure-only, byte-identical: `rawCosine >= 0` is always true) until the ≥2-week
+ * shadow window closes (~2026-07-26, DEF-0010) and the constant is DERIVED from the
+ * `retrieval-shadow.jsonl` cosine distribution. Setting it is a SEPARATE reviewed change +
+ * operator GO — never a hot env knob (a fat-fingered high floor silences recall).
+ */
+const MEMORY_READ_COSINE_FLOOR = 0;
+
+/**
+ * Memory Foundation Wave 2 (P2) — does a candidate clear the raw-cosine floor? A candidate
+ * with ANY non-vector signal (graph reachability, FTS, run boost) or no cosine at all
+ * (`vectorScore === 0`) is EXEMPT — the floor never drops a graph-surfaced `user_asserted`
+ * truth (refute RF-ARCH1). A purely-vector candidate must clear `floor` on its RAW cosine
+ * (`vectorScore / VECTOR_WEIGHT`, undoing the `VECTOR_WEIGHT` scaling). Exported so the LOGIC
+ * is tested at multiple floor values while the production constant stays 0 until the shadow
+ * window closes (a reviewed constant, not a hot knob).
+ */
+export function passesReadCosineFloor(
+  c: { vectorScore: number; graphBoost: number; ftsScore: number; runBoost: number },
+  floor: number,
+): boolean {
+  if (c.graphBoost > 0 || c.ftsScore > 0 || c.runBoost > 0 || c.vectorScore === 0) return true;
+  return (c.vectorScore / VECTOR_WEIGHT) >= floor;
+}
 
 /**
  * Context-Hierarchy Scoping (Slice C) — the SOFT walk-up weights that replace the
@@ -95,6 +128,12 @@ export interface RetrievalOptions {
    * or a candidate with no subject → the flat `scopeWeight(scope_type)` (back-compat).
    */
   threadAnchorSubjectId?: string | null | undefined;
+  /**
+   * The active thread id — recorded (plaintext) in the Wave-0 retrieval shadow log
+   * so an operator can correlate the admission distribution by conversation. Only
+   * read when `retrieval_shadow_log` is on; absent otherwise.
+   */
+  threadId?: string | undefined;
 }
 
 interface ScoredCandidate {
@@ -171,6 +210,29 @@ export class RetrievalEngine {
     private readonly entityResolver: EntityResolver,
     private anthropicClient?: Anthropic | undefined,
     private readonly runHistory?: RunHistory | undefined,
+    /**
+     * Memory Foundation Wave 0. When true, `retrieve` scores WITHOUT the
+     * `confMult`/`confirmDecay` terms (the laundered retrieval-tally that gated
+     * admission) and `formatContext` omits the `confidence=` attribute from the
+     * `<fact>` the model reads. Default false — the legacy scoring path, retained
+     * until the flag soaks fleet-wide.
+     */
+    private readonly scoringV2: boolean = false,
+    /**
+     * Memory Foundation Wave 0 — shadow mode. When true, each `retrieve` appends
+     * one record per call to `~/.lynox/retrieval-shadow.jsonl` (raw cosine + tier +
+     * subject + would-pass per scored candidate) for the Wave-2 floor measurement.
+     * Filters nothing. Default false.
+     */
+    private readonly shadowLog: boolean = false,
+    /**
+     * Memory Foundation Wave 2 (P2). When true, a raw-cosine FLOOR
+     * ({@link MEMORY_READ_COSINE_FLOOR}) is applied to purely-vector-surfaced candidates
+     * (graph/FTS/run-surfaced facts exempt). Default false → the legacy `threshold*0.3`
+     * gate alone (byte-identical). The floor constant is 0 until the shadow window closes,
+     * so even ON this is byte-identical until the constant is set (a separate reviewed GO).
+     */
+    private readonly memoryWriteTrustGate: boolean = false,
   ) {}
 
   setDataStoreBridge(bridge: DataStoreBridge): void {
@@ -350,16 +412,42 @@ export class RetrievalEngine {
         }
       }
 
-      // Confidence multiplier: confirmed memories score higher, unconfirmed decay over time
-      const ageDays = (Date.now() - new Date(c.createdAt).getTime()) / (1000 * 60 * 60 * 24);
-      const confirmDecay = c.confirmationCount > 0 ? 1.0 : Math.max(0.5, 1.0 - ageDays / 365);
-      const confMult = (0.5 + 0.5 * Math.min(c.confidence * (1 + c.confirmationCount * 0.1), 1.0)) * confirmDecay;
-
-      c.finalScore = (c.vectorScore + c.ftsScore + c.graphBoost + c.runBoost)
-        * sw * decay * confMult;
+      // Confidence multiplier (legacy path): confirmed memories score higher, and
+      // `confirmDecay` goes STICKY at 1.0 after the first retrieval — permanently
+      // disabling age decay for that row, which turns ranking into an admission
+      // gate (PRD §2.2/§2.5: one retrieval drops the effective cosine bar from ~0.86
+      // to 0.44). Wave 0 (memory_scoring_v2) drops `confMult`/`confirmDecay`
+      // entirely; the legitimate `decay` term survives in BOTH branches.
+      if (this.scoringV2) {
+        c.finalScore = (c.vectorScore + c.ftsScore + c.graphBoost + c.runBoost) * sw * decay;
+      } else {
+        const ageDays = (Date.now() - new Date(c.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+        const confirmDecay = c.confirmationCount > 0 ? 1.0 : Math.max(0.5, 1.0 - ageDays / 365);
+        const confMult = (0.5 + 0.5 * Math.min(c.confidence * (1 + c.confirmationCount * 0.1), 1.0)) * confirmDecay;
+        c.finalScore = (c.vectorScore + c.ftsScore + c.graphBoost + c.runBoost) * sw * decay * confMult;
+      }
     }
 
-    const aboveThreshold = candidates.filter(c => c.finalScore > threshold * 0.3);
+    // Base gate (legacy): the nominal relevance threshold. Memory Foundation Wave 2 (P2):
+    // under the trust gate, ALSO require a purely-vector-surfaced candidate to clear the raw
+    // cosine floor — `rawCosine = vectorScore / VECTOR_WEIGHT`. A candidate with ANY non-vector
+    // signal (graph reachability, FTS, run boost) or no cosine at all is EXEMPT, so the floor
+    // never drops a graph-surfaced `user_asserted` truth (refute RF-ARCH1). Strictly tightening
+    // (`A && B ⊆ A`): the extra clause can only remove low-cosine pure-vector rows, never add.
+    // With the floor at 0 (`rawCosine >= 0` always true) this is byte-identical.
+    const aboveThreshold = candidates.filter(c => {
+      if (!(c.finalScore > threshold * 0.3)) return false;
+      if (!this.memoryWriteTrustGate) return true;
+      return passesReadCosineFloor(c, MEMORY_READ_COSINE_FLOOR);
+    });
+
+    // Memory Foundation Wave 0 — shadow mode: record the full scored candidate
+    // distribution (raw cosine + tier + subject + would-pass) so the Wave-2 FLOOR
+    // is measured on the real corpus, never guessed. Filters nothing; captured over
+    // the pre-gate candidate set so sub-gate rows are visible to the operator.
+    if (this.shadowLog) {
+      this._emitRetrievalShadow(query, candidates, threshold, options?.threadId);
+    }
 
     // === Step 7: MMR Re-Ranking ===
     const selected = this._mmrRerank(aboveThreshold, queryEmbedding, topK);
@@ -464,7 +552,10 @@ export class RetrievalEngine {
         text: m.text,
         kind: m.sourceType,
         tool: m.sourceToolName,
-        confidence: m.confidence,
+        // Wave 0 (memory_scoring_v2): stop asserting a laundered confidence to the
+        // model. 127 active rows sit pinned at 1.00 from the retrieval-tally loop;
+        // omit the attribute entirely rather than teach the model to trust them.
+        confidence: this.scoringV2 ? undefined : m.confidence,
         attrs: {
           ns: m.namespace,
           relevance: `${(m.finalScore * 100).toFixed(0)}%`,
@@ -481,6 +572,46 @@ export class RetrievalEngine {
   }
 
   // === Private Methods ===
+
+  /**
+   * Memory Foundation Wave 0 — emit one shadow-log record for a retrieval (§5.1).
+   * Records the raw cosine, tier, subject and current-gate verdict of every scored
+   * candidate so an operator can pick the Wave-2 per-tier FLOOR from the real
+   * distribution. Writes the JSONL sink AND publishes `channels.retrievalGate` for
+   * live subscribers. Fire-and-forget; the query is stored only as a hashed prefix,
+   * and any error is swallowed so telemetry never affects the retrieval.
+   */
+  private _emitRetrievalShadow(
+    query: string,
+    candidates: ScoredCandidate[],
+    threshold: number,
+    threadId: string | undefined,
+  ): void {
+    try {
+      const gate = threshold * 0.3;
+      const queryHash = createHash('sha256').update(query).digest('hex').slice(0, 16);
+      const entry = {
+        ts: Date.now(),
+        threadId,
+        queryHash,
+        embeddingModel: this.embeddingProvider.model ?? this.embeddingProvider.name,
+        embeddingProvider: this.embeddingProvider.name,
+        candidates: candidates.map(c => ({
+          id: c.id,
+          // Raw cosine — unscale VECTOR_WEIGHT so the operator reads the true
+          // similarity the FLOOR will be expressed in (0 for a graph-only candidate).
+          rawCosine: c.vectorScore / VECTOR_WEIGHT,
+          sourceType: c.sourceType,
+          subjectId: c.subjectId,
+          wouldPass: c.finalScore > gate,
+        })),
+      };
+      void appendRetrievalShadowLog(entry);
+      if (channels.retrievalGate.hasSubscribers) channels.retrievalGate.publish(entry);
+    } catch {
+      // Best-effort telemetry — never affect the retrieval.
+    }
+  }
 
   private async _generateHyDE(query: string): Promise<string | null> {
     if (!this.anthropicClient) return null;

@@ -84,6 +84,24 @@ export function matchesSecretPattern(text: string): string | null {
 }
 
 /**
+ * Like {@link matchesSecretPattern} but ALWAYS applies the generic 40+ char token
+ * catcher, even for short text. `matchesSecretPattern` skips that catcher under 100
+ * chars to avoid false positives in ordinary prose — a fine trade-off when scanning
+ * free text, but wrong when the field should hold NO credential at all (an onboarding
+ * business-fact answer). There a bare 40-99 char token is far more likely a pasted
+ * credential than a company/role/goal, so bias toward rejection. Does NOT close the
+ * sub-40-char class (short app-passwords, TOTP seeds): treat this as a filter that
+ * raises the cost of a mistake, never as a guarantee that a field holds no credential.
+ */
+export function matchesSecretPatternStrict(text: string): string | null {
+  for (const pattern of SECRET_PATTERNS) {
+    const match = pattern.exec(text);
+    if (match) return match[0];
+  }
+  return null;
+}
+
+/**
  * Mask text that matches common secret patterns.
  * Replaces detected secrets with `***<last4>`.
  */
@@ -238,6 +256,38 @@ export class SecretStore implements SecretStoreLike {
     return [...this.secrets.keys()].filter(n => !isInfraSecret(n));
   }
 
+  /**
+   * Agent-visible stored names that reconcile against `requested` — the two near-miss
+   * classes that otherwise loop the agent through "not in vault":
+   *  1. NORMALIZED collision (uppercased, non-alphanumerics stripped) — a spelling
+   *     variant (`Z_AI_API_KEY` vs a stored `ZAI_API_KEY`, both → `ZAIAPIKEY`).
+   *  2. VENDOR namespace — the same leading UPPER_SNAKE token (`DATAFORSEO_API_LOGIN`
+   *     vs a stored `DATAFORSEO_B64`), guarded by a generic-token stoplist so a
+   *     generic first token (API/KEY/TOKEN/…) never groups every `API_*` secret.
+   * Exact matches are excluded (not a mismatch); infra names are never surfaced
+   * (listAgentVisibleNames already filters them); values never surface. Exact-first.
+   */
+  findNameMatches(requested: string): string[] {
+    const norm = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const firstToken = (s: string): string => s.toUpperCase().split('_')[0] ?? '';
+    // Generic leading tokens carry no vendor identity — matching on them would group
+    // every unrelated API_*/KEY_* secret. A vendor match needs a distinctive first token.
+    const GENERIC_TOKENS = new Set([
+      'API', 'KEY', 'TOKEN', 'SECRET', 'AUTH', 'LOGIN', 'PASSWORD', 'PASS',
+      'URL', 'ID', 'CLIENT', 'ACCESS', 'APP', 'USER', 'ACCOUNT', 'PUBLIC', 'PRIVATE',
+    ]);
+    const target = norm(requested);
+    if (!target) return [];
+    const reqVendor = firstToken(requested);
+    const vendorMatchable = reqVendor.length >= 3 && !GENERIC_TOKENS.has(reqVendor);
+    const visible = this.listAgentVisibleNames().filter(n => n !== requested);
+    const exact = visible.filter(n => norm(n) === target);
+    const vendor = vendorMatchable
+      ? visible.filter(n => norm(n) !== target && firstToken(n) === reqVendor)
+      : [];
+    return [...exact, ...vendor];
+  }
+
   containsSecret(text: string): boolean {
     for (const secret of this.secrets.values()) {
       if (secret.value.length < 2) continue; // skip single-char values to avoid false positives
@@ -281,6 +331,16 @@ export class SecretStore implements SecretStoreLike {
     if (!secret) return true;
     if (secret.ttlMs === 0) return false;
     return Date.now() - secret.loadedAt > secret.ttlMs;
+  }
+
+  /**
+   * True when `set()` will persist rather than throw. Callers that want to write
+   * a secret only opportunistically — a boot-time migration that has nothing to
+   * migrate on a vault-less install — check this instead of catching the throw,
+   * so a legitimately vault-less boot is not mistaken for a failure.
+   */
+  canPersist(): boolean {
+    return this.vault !== null;
   }
 
   /**

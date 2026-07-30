@@ -78,7 +78,7 @@ Memories have a configurable half-life (`memory_half_life_days` in config). Olde
 
 ## Multilingual
 
-The memory system works across languages. You can discuss topics in German, English, or any of the 100+ languages Claude supports — entities and relationships are tracked regardless of language.
+The memory system works across languages. You can discuss topics in German, English, or any of the 100+ languages the model supports — entities and relationships are tracked regardless of language.
 
 ## Local Storage
 

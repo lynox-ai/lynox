@@ -1,5 +1,297 @@
 # Changelog
 
+## 2.11.0 — 2026-07-29
+
+An onboarding and trust release. First run now grounds the agent in the business it is pointed at instead of starting from an empty context: it reads the site, asks the three to five questions that reading made possible, and keeps the answers as durable knowledge rather than chat scrollback. The second theme is confirmation prompts — everything the model writes into one is now rendered as text instead of parsed as markup, so a tool result cannot dress itself up as part of the question you are approving. Claude Opus 5 joins the catalog, and operators get a model blocklist. Engine schema moves to v51 (additive); one control-plane migration ships.
+
+### Added
+- **Guided first-run onboarding.** A short flow that scans the site you name, asks questions grounded in what it actually read, and records each answer as durable knowledge. Progress is tracked per flag rather than as one boolean, so a partly-finished run resumes where it stopped. (#1070, #1071, #1072, #1074)
+- **Claude Opus 5 in the model catalog**, selectable in the per-tier picker. (#1067)
+- **Operator model blocklist.** `LYNOX_BLOCKED_MODEL_IDS` takes comma-separated model-id prefixes the engine refuses to run, so a whole family can be locked out with one entry. It is enforced at config load, on config write, and at tier resolution, and is orthogonal to the cost band `max_tier` sets. (#1063)
+- **Fireworks models in the per-tier picker**, via the catalog's tier list rather than a hard-coded branch. (#1061)
+- **A waiting prompt announces itself out-of-tab.** When the agent parks a question, the title carries a badge and a notification fires, so a run does not sit idle because the tab was in the background. (#1073)
+- **Same-site links from `web_research` and `http_request`.** A page read now carries the links it points at, so a follow-up read does not need a second guess at the URL. (#1083)
+
+### Fixed
+- **Confirmation prompts no longer parse model-written text as markup.** The prompt is split into the frame the system wrote and the values interpolated into it; values render as text nodes. A tool result can no longer inject markup into the sentence you are being asked to approve. (#1078, #1084, #1082, #1080)
+- **Mail confirmations show the real body size** instead of a figure that ignored part of the message. (#1077)
+- **Large HTML responses are extracted to text**, and onboarding no longer fetches the same page twice. (#1075)
+- **`web_research` reads the whole page instead of picking part of it.** The article-selection step routinely scored a code sample or the nav bar highest on documentation and JS-rendered sites and returned that alone — and because a short wrong answer is still non-empty, the fallback never fired. Stripping the document can carry boilerplate, but it cannot silently lose the content the task needed. (#1081)
+- **Identical tool-call loops are broken deterministically** instead of running until the iteration cap. (#1065)
+- **Streaming usage survives a trailing usage chunk.** Providers that send usage after the final content chunk no longer produce a run with no recorded cost. (#1062)
+- **Voxtral TTS is pinned to a dated snapshot** rather than a moving alias, which was silently changing voice behaviour. (#1066)
+- **An existing user no longer sees the first-run stepper.** The backfill marks accounts that were already using the product before onboarding existed. (#1090)
+- **Recall handles name the call they stand for**, so a memory reference in a transcript can be traced back. (#1079)
+
+### Changed
+- **The cross-repo wire contract is complete.** Auth and OAuth shapes, the guarded-capable boot marker, and the conventions the hosting side depends on now all have one source of truth in `src/contract/`, verified byte-for-byte in every consumer. (#1087, and the convention pins)
+- **Internal cross-references are out of the public source** and a guard keeps them out. (#1092)
+- **Recall measurement got a readable baseline.** The evaluation now replays the same corpus with archival memory off, so the bars mean something relative to the pipeline they are being compared against. (#1085)
+- Durable writes record which signal put them on the untrusted side (#1089); the gold-set proposal model is pinned to a dated snapshot (#1076); brace-expansion and postcss bumped to clear advisories (#1068).
+
+### Upgrade and rollback notes
+- **Forward upgrade needs nothing on the engine.** Schema v51 adds a nullable `segments_json` column to `pending_prompts`, and the subject-graph store gains an `onboarding_flags` table plus an idempotent backfill. All three apply on boot and are additive.
+- **One control-plane migration ships** with this release: an additive column on the customer table plus an idempotent backfill. It applies automatically when the release publishes.
+- **Rolling back to 2.10.0:** nothing to undo by hand. The new engine columns and table are nullable or unread by 2.10.0, and the control-plane column is likewise ignored by the previous build. A prompt written by 2.11.0 renders in 2.10.0 as its flattened text, which is the same string 2.11.0 shows — the segment detail is simply not used.
+
+## 2.10.0 — 2026-07-22
+
+A model-strategy release. The measured finding behind it: a 14B-class main model answers deep-worthy tasks inline instead of delegating them, so the every-turn main on the managed Efficient and Balanced presets — and the BYOK-Mistral balanced tier — moves up to Mistral Medium 3.5. Claude Fable 5 becomes the max-quality preset's deep slot. The release also introduces a shared wire-contract module (one source of truth for tier vocabulary, env-ABI and wire shapes across engine, web UI and the managed control plane), opt-in extended debug capture, and feature-gated proactive deep escalation (default off). Engine schema moves to v50 (additive).
+
+### Added
+- **Floor-clearing main model for tier presets.** The Efficient and Balanced managed presets run Mistral Medium 3.5 as the every-turn main; Ministral 14B measured below the orchestration floor (it answered deep-worthy tasks inline, 2/22 escalations over the replay set). (#1045)
+- **Extended debug capture, opt-in and default off.** Wire-level snapshot capture with triple redaction, encrypted at rest, bundled into debug exports with a typed wire-diff view; Settings toggle with consent copy. Deleting a thread removes its captured snapshots. (#1044, #1046, #1058)
+- **Proactive deep escalation, feature-gated and default off.** (#1041, #1042)
+- **Claude Fable 5 as the max-quality preset's deep slot.** (#1039)
+- **Wire-contract module `src/contract/`.** Canonical tier vocabulary, env-ABI registry and money/health wire shapes with golden fixtures — the single source of truth for core, the web UI and the managed control plane, guarded by byte-equality checks on every consumer. (#1049, #1050, #1051, #1052)
+
+### Fixed
+- **Mistral deep tier moves to Mistral Medium 3.5**; Mistral Large 3 becomes a legacy catalog option. The BYOK-Mistral balanced tier is lifted to Medium 3.5 as well. (#1040, #1053)
+- **Image input works on the Mistral balanced and deep tiers.** Medium 3.5's vision capability is verified live; without the flip every image message on a Mistral main failed with a pre-flight error. (#1056)
+- **Main-model picker handles providers whose balanced and deep bands share one model.** Options are keyed and selected per band, so the settings page renders correctly and a deep selection stays deep. (#1057)
+- **Debug-capture toggle reflects operator environment overrides** instead of silently writing a dead value; the CLI installer recommends the current Mistral default. (#1058)
+- **Long streaming responses retry on dropped provider connections.** Adapter HTTP errors are classified by status code, never by response body text. (#1045)
+- **Managed provider tile no longer lists internal providers; mobile status footer unclipped.** (#1037)
+
+### Changed
+- README/ROADMAP claim refresh with drift-guard fact checks (#1043); Fireworks AI added to the sub-processor list for the managed Efficient preset's deep tier (#1038); sharp overridden to >=0.35.0 (#1047); behavior-critical control-plane env vars pinned to their engine consumers (#830).
+
+### Upgrade and rollback notes
+- **Forward upgrade needs nothing.** Engine schema v50 (`wire_snapshots`) is additive and applies on boot; no control-plane migrations ship in this release.
+- **Rolling back to 2.9.1:** (1) first reset any custom `tier_set` slot pinned to `claude-fable-5` — 2.9.1 either prices it at generic fallback rates or, for preset-plus-override configs, refuses to boot; (2) delete `wire_snapshots` rows — 2.9.1's data-wipe and key-rotation paths don't know the table; (3) a config saved by 2.10.0 that contains the new `debug_wire_capture` key is ignored as a whole by 2.9.1 until re-saved (self-healing, matches the 2.9.0 caveat).
+
+## 2.9.1 — 2026-07-21
+
+A targeted patch on 2.9.0. It stops an end-of-turn loop where a reply that ended with follow-up suggestions could re-run the model several times before finishing — a slow, token-burning turn that affected instances with plugins active (the default). It also drops the unused bundled npm/corepack from the runtime image, shrinking it and clearing a base-image dependency scan. **No migration** — clean image swap in both directions.
+
+### Fixed
+- **Follow-up suggestions end the turn instead of looping.** On plugin-enabled instances (the default), the terminal `suggest_follow_ups` step had lost its "ends the turn" marker inside a tool wrapper, so a reply that closed with suggestions re-ran the model several times before stopping. The wrapper now preserves every tool property, so the turn ends cleanly after one set of suggestions. (#1034)
+
+### Changed
+- **Smaller, hardened runtime image.** The bundled npm and corepack package managers — never used at runtime — are removed from the production image, reducing its size and attack surface and clearing a base-image dependency scan. (#1035)
+
+## 2.9.0 — 2026-07-21
+
+This release makes model choice a **named strategy** you pick, not a per-tier fiddle. A model preset (a "Modell-Strategie") maps each routing tier to a specific provider's model in one step — chosen from cards in settings or a compact picker in the chat header — with the backing host disclosed so you always know where a turn runs; Fireworks joins as a new provider option, gated off until its key is provisioned. Under that, the durable-knowledge capture path is hardened at the source so a poisoned or low-value fact is stopped and metered before it can enter memory, and the agent's tool prefix shrinks by loading heavy tool guidance only on first use (cache-safe, behaviour-identical). The rest is chat- and rendering-correctness: a resumed multi-step turn renders as one bubble, the first-turn briefing is clean and current, and vision works on gen-3 Mistral models. **No engine.db migration** — the engine store stays at schema v7. **Rollback caveat:** an instance that has adopted a model preset must switch its strategy back to Standard (clear `tier_preset`) *before* rolling back to 2.8.0 — the 2.8.0 engine rejects the unknown `tier_preset` key under a strict config parse and would discard the whole config file. Instances that never picked a preset roll back as a clean image swap.
+
+New env vars (both optional, managed-only, default off): `FIREWORKS_API_KEY`, `LYNOX_MANAGED_FIREWORKS_ENABLED`.
+
+### Added
+- **Pick a named model strategy (Modell-Strategie).** A model preset maps each routing tier to a specific provider's model in one step — selected from cards in settings or a compact picker in the chat header — and the backing host is disclosed so you can see where each tier runs. An unknown or unregistered preset fails closed: it won't silently fall back to a mis-billed default. (#1022, #1023, #1024, #1028)
+- **Fireworks as a provider option.** Fireworks-hosted models can back a tier, gated off until the key is provisioned — a preset that needs Fireworks is rejected rather than run against a missing key. (#1024, #1026)
+
+### Changed
+- **Smaller tool prefix — heavy guidance loads on first use.** The verbose narrative for four tools (recovery rules, anti-patterns) moved out of the always-cached prefix into a model-only block injected once per thread on first use, trimming the static prefix without changing which tools the model picks (confirmed by a real-API A/B). (#1006)
+- **Workflow inline steps can browse and fetch.** Inline workflow steps now have `http_request` and `web_research` available. (#1009)
+
+### Fixed
+- **A resumed multi-step turn renders as one bubble.** Reopening a thread mid-run no longer explodes a single multi-step turn into N separate bubbles; a settled thread adopts the merged, shorter server transcript instead of the longer local one; and reopening a thread while a turn is in flight no longer drops the just-sent message. (#1018, #1019, #1032)
+- **Clean, current first-turn briefing.** The opening briefing drops the internal scope/data-transport leaks and keeps the loaded-context preamble out of your message bubble; the overdue/due-today task overview it surfaces is recomputed per thread (not a stale boot snapshot), and the agent no longer auto-acts on a task it merely surfaced. (#1011, #1014, #1016, #1032)
+- **Notification tap opens the right thread.** Tapping a task notification opens that task's thread. (#1017)
+- **Vision on gen-3 Mistral models.** Image input is enabled on gen-3 Mistral models. (#1015)
+- **Chat + artifact UI polish.** Opaque toasts, the composer's model picker reflects a settings change immediately, user bubbles pre-wrap long content, the hybrid-routing footer and keys row no longer overflow, the artifact card gained export feedback and a gallery link, and the Mermaid PNG export surfaces an error instead of a silent dead click. (#1012, #1013, #1027, #1032)
+
+### Notes
+- **Durable-knowledge capture hardened at the source.** The durable-knowledge path now stops a poisoned or low-value fact before it enters memory, with telemetry on what was caught. On **managed** plans, an `update_memory` re-extraction is now credit-gated and debited like any other model call (self-hosted is unaffected — no metering). This strengthens the substrate that remains **opt-in per instance** (default off; enabled on selected instances only). (#1029, #1030)
+- **Memory write-trust hardening.** The explicit memory tools (store/update/promote) now treat a write made on a turn that read external content (a web page, a mail, a file) with the same caution as the automatic capture path — such a write is routed to the review queue rather than recorded as a trusted fact, on both the fallback and the exact-edit path. The parent↔child taint signal for spawned sub-agents was made symmetric, and the first-turn briefing is fenced against injected instructions in task titles. (#1031, #1032)
+- **Supply-chain + CI.** A daily dependency scan now gates the release build, and two vulnerable transitive dependencies (adm-zip, brace-expansion) were pinned to patched versions. (#1007, #1010, #1031)
+
+## 2.8.0 — 2026-07-17
+
+This release lands the **Durable Knowledge** substrate: a second, archival memory tier that keeps durable facts without the byte-cap and oldest-first eviction of the working store, with a review queue and curation tools for what lynox learns, and an in-chat surface to see and correct it as it happens. The whole substrate ships **dormant** behind a per-tenant flag — default off, byte-identical engine behaviour — and is turned on per instance by an operator, not by this release. Separately, the follow-up "what next" suggestions now arrive through a structured tool instead of parsed text, so they can no longer leak as raw JSON and they survive a thread reload; the managed control plane gains a per-run cost ceiling and a live balance mirror; and the secret vault reconciles near-identical key names instead of stashing a duplicate. **No active engine.db migration** on the default fleet — the durable-knowledge table only materializes once the flag is on. Rollback to 2.7.1 is a clean image swap.
+
+### Added
+- **Durable Knowledge — an archival memory tier (dormant).** Alongside the working memory store, lynox can keep durable facts in a separate archival store with no byte-cap and no oldest-first eviction, so a long-lived fact isn't pushed out by recent chatter. Anything learned from untrusted content — a web page, an inbound mail — lands in a review queue instead of active memory, and curation tools let a fact be retired, pinned, or archived. Ships behind a per-tenant flag, default off: no behaviour change until an operator enables it. (#996, #997, #998, #1000)
+- **See and correct what lynox remembers, in the chat.** When durable knowledge is on, a Knowledge view shows the active facts plus the profile and playbook blocks (secret-masked), and the moment lynox records something you see it inline: a confirmation you can undo for something you told it directly, and a review chip — keep, discard, or edit — for anything learned from external content, so an injected line can't become a durable fact without your click. (#1002)
+- **A per-run cost ceiling and a live balance mirror on managed.** A managed workflow run is now bounded by a per-run cost ceiling, and the tenant's balance is mirrored into the engine so spend is visible and capped per run instead of only reconciled after the fact. (#989)
+
+### Fixed
+- **Follow-up suggestions come through a structured tool, not parsed text.** The end-of-turn "what next" pills are emitted as a tool call instead of a trailing text block, so they can no longer leak as raw JSON when a model omits the wrapper, they render live, and they survive a thread reload. Suggestions you didn't take earlier in the turn stay available in a tray. (#1003)
+- **The secret vault reconciles near-identical key names.** A key stored under a slightly different name — a guessed vendor namespace, a near-duplicate vault entry — is reconciled against the existing one instead of creating a second, divergent copy, and the vault gained a list action to see what's stored. (#990, #992)
+- **The agent's tier-to-model map is grounded, not guessed.** The prompt that tells the agent which model backs each tier is derived from the real routing configuration instead of a hard-coded guess that could drift from it. (#991)
+- **The OpenAI-compatible stream has an idle timeout.** A stalled response from an OpenAI-compatible endpoint no longer hangs indefinitely — an idle timeout closes it. (#999)
+- **Message timestamps show on Safari and Firefox.** A restored message's timestamp no longer comes up blank on Safari or Firefox (a date-parsing difference from Chrome), and the durable-knowledge review surfaces gained accessible names for screen readers. (#1005)
+
+### Notes
+- **Memory write-trust gate ships dormant.** A second-wave memory control — a write-trust gate plus a read-cosine floor — is present but default off, with no behaviour change until enabled. (#995)
+- **Durable knowledge is opt-in per instance.** On hosted plans the substrate is enabled per instance by the operator; self-hosted enables it with an environment flag. Default off means no behaviour change until you turn it on.
+
+## 2.7.1 — 2026-07-15
+
+A small polish release for the chat surface. The composer's model picker now reflects hybrid routing honestly — a tier pointed at a different provider shows that provider's model, not the base default — and the follow-up "what next" pills no longer leak raw JSON when the agent omits their wrapper. The message footer is one coherent, mobile-swipeable line, per-message timestamps are back on your own turns, and the status bar drops the context meter that duplicated the per-message chip. No engine.db migration — rollback to 2.7.0 is a clean image swap.
+
+### Fixed
+- **Model picker follows hybrid routing.** In hybrid mode a tier assigned to another provider (e.g. balanced → Mistral Large) now shows that model in the picker and footer, instead of the base provider's default label. (#987)
+- **Follow-up pills no longer leak raw JSON.** When the agent emits its "what next" suggestions as a bare trailing array without the wrapper, they render as pills instead of leaking the JSON into the message. (#987)
+- **Coherent, swipeable message footer with timestamps.** The per-message stats read as one consistently-separated line that scrolls horizontally on mobile instead of truncating, and per-message timestamps are restored on your own turns. (#987)
+- **Status bar drops the duplicate context meter.** The persistent context-window bar is removed; the per-message occupancy chip is now the single source. (#987)
+- **Model-switch hint clears after the turn.** The "switching re-processes context" hint disappears once the reprocessed reply finishes, instead of lingering. (#987)
+
+### Internal
+- CI now runs security-scan, hex-guard, and web-ui-typecheck as jobs, and enforces the no-AI-attribution rule via a commit-msg hook plus a required check. (#986, #983)
+
+## 2.7.0 — 2026-07-14
+
+This release makes model choice a first-class control and workflows portable, and hardens the paths that carry credentials and money. You can pick the model for a new chat from the composer and set a per-thread execution policy, while the engine enforces your plan's tier ceiling on every path. Workflows gained a versioned export/import format with a re-consent boundary, so a recipe from one instance can be carried to another without silently carrying its secrets or trusted hosts across the trust line. Under that: the workflow run record is durable and honest, in-session workflow spend is now billed, a cluster of LLM-key-isolation fixes closes every path by which a stored key could reach the wrong endpoint, and a saved workflow now needs first-run confirmation before it runs unattended. A guarded outbound-egress policy for agent HTTP tools ships **dormant** (default `allow-all`, no behaviour change). **No engine.db migration** — rollback to 2.6.1 is a clean image swap.
+
+### Added
+- **Pick the model for a new chat, right from the composer.** New chats get a model picker that shows real model names and hides providers that only offer a single model, and a per-thread execution policy lets a thread run on the tier you choose. (#958, #960, #964, #975)
+- **One-click presets for local runtimes and gateways.** Ollama, LM Studio, vLLM, LocalAI, Groq, Together AI and Fireworks each get their own tile in LLM settings, with the base URL filled in for you. Ollama's and Fireworks' are verified end-to-end: a real agent run drives a full tool call and reads the result back. The others connect, but their tool-calling is not yet proven, and the tile says so — lynox is an agent, and a model that cannot call tools cannot run it. (#941, #965)
+- **Portable workflow export and import.** A saved workflow can be exported to a versioned, self-contained format and imported on another instance. Import crosses a re-consent boundary: the secret references and reachable hosts a workflow needs are re-approved on the importing instance, never trusted implicitly from the file. (#955, #959, #974)
+
+### Fixed
+- **An API key can no longer be sent to the wrong vendor.** Every OpenAI-compatible endpoint — Mistral, Groq, a local Ollama — looks the same to the engine (`provider: "openai"`), and the key was picked from the provider alone. Selecting one vendor while another's key was stored therefore sent that key, as a bearer token, to the endpoint you selected; a local runtime received it in plaintext over http. Keys are now bound to the endpoint they are sent to.
+- **The connection test no longer sends a stored key to an unknown host.** Testing a connection to a free-text endpoint without re-typing a key no longer falls back to a stored key unless the endpoint is a known, vetted host — so a probe can't be used to send a saved credential somewhere it doesn't belong. (#984)
+- **The OpenAI adapter no longer drops your images and text.** A message combining text and images sent through an OpenAI-compatible endpoint keeps all of its content instead of silently losing parts of it. (#961)
+- **Workflow run history is durable and complete.** Real workflow spend is recorded instead of dropped, nested sub-pipeline runs are tracked (and filtered out of top-level views), step results are written as each step completes, and a run left "running" by a restart is reconciled to "interrupted" on boot. (#974, #977, #978, #979, #980)
+- **In-session workflow runs count toward your budget.** A workflow run started from chat now reports its cost the same way other work does, so its spend is billed and counts against the usage cap instead of slipping past it. (#984)
+- **Your plan's model-tier ceiling is enforced on every path.** A per-session model override and an agent-selected spawn profile are both clamped to your plan's maximum tier, the agent no longer has a lever to raise its own session tier, and the managed default stays `balanced`. (#954, #957, #982)
+- **Saving a workflow preserves its secret references and rejects overly broad hosts.** (#963)
+- **Session identity survives an agent rebuild.** (#949)
+
+### Changed
+- **If you reached Groq, Together AI or Fireworks through the generic "OpenAI-compatible endpoint" tile, re-enter your API key once.** Those endpoints now have their own tiles and their own key slots, so lynox no longer looks for their key in the slot it shared with Mistral. The engine reports the endpoint as unconfigured until you do, and the settings page shows the field to fix it — nothing is sent with the wrong key in the meantime. Anthropic, Mistral, and any other custom endpoint are unaffected.
+- **The dark-theme text ramp is brighter, matching lynox.ai.** A design-token and shape contract now guards these values against drift. (#948, #962, #966-#976)
+
+### Security
+- **A saved workflow needs first-run confirmation before it runs unattended.** The library Run button, a scheduled run, and an autonomous run all require a workflow to be confirmed first. A workflow you build yourself is confirmed when you save it; an imported workflow stays inert until you review it, so an imported recipe can't run its steps headless before you've seen them. (#984)
+
+### Notes
+- **Guarded agent-egress policy ships dormant.** A per-tenant outbound-egress control for the agent's HTTP tools is present but defaults to `allow-all` — no behaviour change. (#947)
+- **Tools are suppressed in the watch-analysis turn.** (#950)
+
+## 2.6.1 — 2026-07-12
+
+A small hardening release. Saving an API integration that sends data to a host outside lynox's vetted list now asks you to confirm out-of-band before it is saved, so a custom endpoint is only ever trusted after a real person approves it — never automatically, and the save fails closed in autonomous/background mode. Separately, the opt-in diagnostic log sinks now have a bounded retention, so enabling them can no longer let a log file grow without limit. Engine-only release; no migration — rollback to 2.6.0 is a clean image swap.
+
+### Fixed
+- **Custom API endpoints require your explicit confirmation.** Saving an `api_setup` profile that egresses to a host outside lynox's vetted sub-processor list now prompts you out-of-band to accept controller-responsibility before the profile is saved, and fails closed when no interactive prompt is available. (#945)
+- **Opt-in diagnostic logs have bounded retention.** The optional telemetry log sinks now cap their on-disk size, so an enabled sink can no longer grow without limit. (#944)
+
+## 2.6.0 — 2026-07-12
+
+This release lands the first half of a memory-quality rework and hardens the memory foundation 2.5.0 shipped. Memories now record where each fact came from — the channel it arrived on, whether it originated in untrusted content, the embedding model used — and derive a provenance tier from that evidence: the groundwork for trust-aware recall, default-off with no behaviour change. On top of that, several correctness and privacy gaps in the erasure, masking, and compaction paths are closed: a stored memory whose text contains a wildcard character can no longer over-match and remove unrelated memories on delete; a recall-mirror reap that fails now surfaces loudly instead of silently leaving "deleted" content recallable; secrets are masked in the knowledge-graph recall mirror, not just the flat store; and compaction's internal summarizer turns no longer surface as visible thread history. **Additive engine.db migration** (three new nullable/defaulted columns on `memories`) — rollback to 2.5.0 is a clean image swap; the older build simply ignores the added columns.
+
+### Added
+- **Memory provenance evidence.** Every stored memory now carries its source channel, an untrusted-origin flag, and the embedding model used, and a provenance tier is derived from that evidence. Default-off groundwork for trust-aware recall — no behaviour change until enabled. (#942)
+
+### Fixed
+- **Erasure no longer over-matches or half-completes silently.** A stored memory whose text contains a `%` or `_` can no longer cause a delete/erase to remove unrelated memories, and a knowledge-graph reap that fails during a delete/erase/purge now surfaces instead of leaving "deleted" content recallable. (#943)
+- **Secrets are masked in the recall mirror.** The knowledge-graph store — which ambient context injection reads from — now masks secrets the same way the flat store does, so a secret can't be re-injected into context or survive a delete, and the memory HTTP routes refuse content containing secret values. (#943)
+- **Compaction internals stay out of thread history.** The summarizer's internal turns no longer persist as visible thread messages, and a resume summary can no longer be overwritten by an internal budget-guard message. (#943)
+- **`memory_promote` removes only the promoted line.** Promotion now deletes exactly the matched line and refuses an empty pattern, mirroring `memory_delete`'s protections. (#943)
+
+### Notes
+- **Defense-in-depth on tool output.** Output from the workflow runner now passes through the same untrusted-data guard as other tool results, and the pattern scan is bounded so pathological input can't degrade it. (#943)
+
+## 2.5.0 — 2026-07-11
+
+This release makes the agent's long-term memory trustworthy. You can now permanently delete what it remembers; its recall on hosted instances no longer silently loses a new memory or fails to erase a deleted one; and an instance migrated from self-hosting keeps the memories it recalls from. Compaction is hardened — a summary can no longer smuggle a tool result in as a verified fact, and secrets are masked before a summary is stored — and the debug export now carries a privacy-safe snapshot of memory state so recall issues can actually be diagnosed. Groundwork for a larger memory-quality rework ships behind a default-off flag with no behaviour change. **No engine.db migration** — rollback to 2.4.0 is a clean image swap.
+
+### Added
+- **Permanent memory deletion (GDPR Art. 17).** Deleting a memory from the UI now physically erases its text and embedding from every store behind a confirmation — not just a soft hide — and reaches document-ingested entries that previously had no delete path at all. The agent's own `memory_delete` stays a recoverable soft-delete for curation, so a stray tool call can never hard-wipe a namespace. (#938)
+- **A memory snapshot in the debug export.** The thread debug export now carries knowledge-graph stats and a capped set of active memories with their provenance, plus a sharing notice. Secrets are masked; it is your own data, exported by you. (#940)
+
+### Fixed
+- **Hosted recall no longer drifts silently.** On hosted instances that read from the mirrored graph store, a write that failed to mirror (leaving a memory that could never be recalled) and a delete that failed to mirror (leaving one that could never be erased) were both swallowed and reported as success. They now surface loudly, and an erase fails closed rather than half-completing. (#938)
+- **Migrated instances keep their recall memory.** The migration export now includes the flat-file memory tree, so a self-hosted → managed transfer no longer arrives with `memory_recall` / `memory_list` empty. (#936)
+- **Compaction can't launder a tool result into a verified fact.** The summarizer no longer tags recalled facts as tool-verified, its forgery guard is always on, and secrets are masked before the summary is written. (#940)
+
+### Notes
+- **Memory self-reinforcement emergency-stop ships dormant.** The groundwork that stops the retrieval loop from endlessly re-confirming its own recalls is present behind `memory_scoring_v2` (default off) — no behaviour change until a tenant is opted in. (#937)
+
+## 2.4.0 — 2026-07-09
+
+This release cuts what long conversations cost and makes compaction something you can rely on rather than something that happens to you. The summarizer that condenses a long thread now runs on a cheaper model tier by default, which is roughly a four-fold cut in what each compaction costs. The summary it produces is now written down durably, so resuming a compacted thread rebuilds context from that summary plus every message since it, instead of a fixed window of the last 40. The "prepare & compact" offer no longer gets skipped when a single large turn vaults straight past the threshold. And the agent now checks that an integration actually exists before it asks you for that integration's credential. **No engine.db migration** — rollback to 2.3.1 is a clean image swap.
+
+### Changed
+- **The compaction summarizer runs on the `fast` tier by default.** Compacting a thread is one internal, tools-suppressed turn; running it on a cheap model cuts that cost about four-fold. The summary becomes a thread's long-term memory once older messages are evicted, so this trades some summary fidelity for cost. Set `compaction_model` (or `LYNOX_COMPACTION_MODEL`) to pin the summarizer to a different tier. (#72)
+- **Resuming a compacted thread loads more history.** When a durable summary exists, resume now loads every message recorded since that summary's coverage point, capped at 120, instead of always taking the last 40. Threads without a summary behave exactly as before. (#86, #80a)
+- **The context occupancy chip is coloured by cost budget.** Both the chat footer and the persistent status bar keep showing the same honest occupancy percentage; only the colour now reflects how much of the cost budget the thread has consumed, so a large-window model no longer looks green when it is expensive. (#78)
+
+### Added
+- **The compaction summary is persisted.** A live mid-session compaction now stores its summary on the thread rather than discarding it, so a later resume builds on that summary instead of re-summarizing from scratch. (#86)
+- **The compact offer fires on a leap past the threshold.** A single turn that jumps straight from below the offer point to past the auto-compaction point now still surfaces the "prepare & compact" offer once, rather than silently auto-compacting. (#78a)
+- **Credential requests check for the integration first.** Before opening an `ask_secret` prompt for a third-party API credential, the agent verifies the corresponding integration profile exists, so you are no longer asked for a key that nothing is yet wired to consume. Standalone LLM provider keys are unaffected. (#85)
+- **An online reachability matrix for lazy tool loading.** `tests/online/lazy-tool-reachability.test.ts` drives a real model against every deferred tool and asserts it is rediscovered and invoked. It runs only with an API key present.
+
+### Notes
+- **Lazy tool loading stays opt-in and dormant.** The defer-set was re-curated (#933), but the feature remains off unless `lazy_tools_enabled` is explicitly set to `true`. The new reachability matrix shows a model rediscovers only 9 of 17 deferred tools on the `balanced` tier and none on `fast`, and a tool that is never searched for is invisible with no error — so the default stays off until reachability is green on every tier. No behaviour change for any tenant.
+
+## 2.3.1 — 2026-07-08
+
+A small reliability patch for the chat's live view. If the live connection drops mid-run — a mobile tab going to the background, a proxy idling the stream, a frozen tab — answering an `ask_user` prompt no longer strands you: the client detects the drop, re-attaches to the still-running turn, and streams the continuation live, instead of showing your answer as "not sent" and only recovering after a manual reload-from-history. Plus a "Compact context" entry in the thread menu so you can summarize the conversation on demand to keep context cost down. **No engine.db migration** — rollback to 2.3.0 is a clean image swap.
+
+### Fixed
+- **ask_user live-resume** — when the live stream drops while a run is parked on an `ask_user` prompt, the client re-attaches to the run's resumable stream and the answer + continuation appear live, with no reload-from-history needed. (#931)
+
+### Added
+- **Manual context compaction** — a "Compact context" entry in the thread menu compacts the loaded conversation on demand, instead of waiting for the automatic prepare-offer. (#931)
+
+## 2.3.0 — 2026-07-08
+
+This release makes hybrid mode reliable end to end and hardens the agent's honesty. Pipeline and workflow steps now follow the hybrid tier-set — a cross-provider slot steers each step's provider, model, and key (fixing a hybrid-mode workflow that could 404). Workflow sub-agents now receive the parent's secret store, so a step's tools resolve vault secrets, and a referenced secret that can't be found is reported plainly instead of sent as a literal or papered over with invented data. The agent grounds recommendations in verified data and never fills an empty tool result with made-up figures. Plus: a run parked on an ask_user prompt no longer aborts at the 30-minute mark, warm browser tabs hard-reload onto the fresh build after a deploy, and the chat footer reads clearer. **No engine.db migration** — rollback to 2.2.0 is a clean image swap.
+
+### Added
+- **Ground-first behavior** — before recommending a strategy or plan, the agent gathers and verifies the real data it depends on and shows it as the basis; an empty or failed tool result is reported honestly rather than backfilled with estimates. (#75)
+
+### Fixed
+- **Hybrid pipeline/workflow routing** — pipeline and workflow steps follow the hybrid tier-set instead of silently running on the base provider (or 404-ing on a model/endpoint mismatch). (#65/#66)
+- **Workflow sub-agent secrets** — a workflow sub-agent's tools resolve `secret:NAME` vault references, and an unresolved secret fails loudly instead of being sent as a literal. (#79)
+- **Legacy key scope** — the legacy `config.api_key` fallback is scoped to an Anthropic base, so a non-Anthropic tenant's key is never used for an Anthropic slot. (#81)
+- **ask_user wall-clock** — the run wall-clock pauses while a run is parked on a prompt, so answering after the 30-minute mark continues the run instead of aborting it. (#77)
+- **Stale bundle recovery** — warm browser tabs hard-reload onto the freshly deployed build; Mermaid diagram chunk-load failures recover instead of rendering a syntax error. (#73)
+- **Clearer chat footer** — per-turn token totals and context occupancy are co-located and labeled. (#74)
+- **Private-mode toggle** — the header private-mode control uses a ghost icon and an explicit on/off label. (#76)
+- **Context-cost** — repeated large tool-result payloads are de-duplicated in the resident context. (#72)
+
+## 2.2.0 — 2026-07-07
+
+Pick the model your main chat runs on. A new **main-chat model picker** in LLM settings lets you choose the band (fast / balanced / deep) — and its concrete model — for the primary conversation, clamped to your plan's ceiling. Under the hood, **hybrid sub-agents** can now run on a different provider than the main agent (a Mistral main can delegate to an Anthropic sub-agent, and vice-versa), each tier resolving to its own provider, model, and key. An opt-in **lazy tool-loading** mode (`lazy_tools_enabled`, default off, Anthropic-direct only) defers heavy tool schemas behind the native tool-search tool to shrink the cached prompt prefix. The rest is correctness: agent-opened escalation threads resume instead of erroring, failed and cross-provider sub-agents surface real errors instead of completing silently, and the chat's context/compaction UI got an honesty pass. **No engine.db migration** — rollback to 2.1.1 is a clean image swap.
+
+### Added
+- **Main-chat model picker (standard mode)** — choose the band and model your main conversation runs on, from LLM settings. Options come from the provider catalog (so every provider's models appear) and are clamped to your plan's ceiling; the Anthropic balanced band splits into its served-Sonnet variants (4.6 / 5). (#924)
+- **Hybrid cross-provider sub-agents** — sub-agents may run on a different provider than the main agent, each tier resolving to its own provider, model, and key. (#924)
+- **Lazy tool-loading (opt-in)** — `lazy_tools_enabled` (default off, Anthropic-direct only) defers heavy/long-tail tool schemas behind the native tool-search tool to shrink the cached prompt prefix; every tool stays reachable on demand. (#923)
+
+### Fixed
+- **Escalation threads resume** — an agent-opened escalation thread (`escalation-*`) can be reopened instead of erroring. (#922)
+- **Hybrid sub-agent routing & error surfacing** — a hybrid base-fallback sub-agent now routes to its own tier (previously it could pair a tier's model with the wrong provider's endpoint and 404 silently); failed and hybrid sub-agents record a structured error and are marked failed instead of completing silently. (#925)
+- **API-shape fails loud** — when a `response_shape.include` matches no fields, the tool reports the real top-level shape instead of returning an empty result that looked like success. (#925)
+- **Honest context UI** — the compaction banner drops the misleading percentage, and a completed message keeps its usage line visible while a later reply streams. (#926)
+- **Grounding** — the agent reasons from a verified fact that contradicts an assumption instead of quietly proceeding on the assumption. (#925)
+
+## 2.1.1 — 2026-07-07
+
+Fixes the knowledge-graph view on instances with the subject-graph enabled: the graph now renders the connected relationship subgraph (it previously showed a disconnected ring of the most-recently-touched entities), and entity mention counts reflect the real number of linked memories instead of always showing zero. No migration; rollback to 2.1.0 is a clean image swap.
+
+### Fixed
+- **Knowledge-graph view:** serve the connected subgraph (`GET /api/kg/graph` — the recent relationships plus exactly the subjects they touch) so relationships render as edges, and populate the real memory-link mention count. (#920)
+
+## 2.1.0 — 2026-07-07
+
+Claude **Sonnet 5** joins as an opt-in model for the balanced tier — pick it from a new in-settings variant picker, with the extended (1M-token) context window surfaced where the tier allows. Alongside it, the flag-gated subject-graph memory gains a **person-dedup** capability: when two entries turn out to be the same real person ("Ada" and "Dr. Ada Lovelace"), a new `subjects_merge` chat tool folds one into the other — confirmed, reversible, and never run unattended — and a background garbage-sweep archives extraction junk. The bulk of this release is a **correctness + data-safety hardening wave** on the memory subsystem and the boot/migration path. The subject-graph write path **stays flag-gated off** (`subject_graph_enabled`), and the read path is additionally gated (`memory_graph_reads`) — the per-tenant data cutover remains a separate step. **No control-plane database migration**; the engine applies two additive `engine.db` migrations (v6, v7 — nullable columns) on boot — rollback to 2.0.0 is a clean single-image swap (the added columns are inert on the older engine). One rollback caveat: if you set a Sonnet-5 balanced model, strip `balanced_model` from `config.json` before downgrading (or set it via the `LYNOX_BALANCED_MODEL` env, which never touches the config file) — the older engine's strict config parser otherwise ignores the whole file.
+
+**⚠️ Self-hosted operational change.** Client-IP resolution no longer trusts `X-Forwarded-For` by default (previously the leftmost, spoofable entry). If you run behind a reverse proxy and rely on per-client rate-limiting or the IP allowlist, set `LYNOX_TRUST_PROXY=true` (and `LYNOX_TRUSTED_PROXY_HOPS=<n>` if you chain proxies) — otherwise all clients now resolve to the proxy's address. Managed instances are unaffected (the platform sets this).
+
+### Added
+- **Claude Sonnet 5 as an opt-in balanced-tier model**, selectable from a new variant picker in LLM settings, with the extended (1M-token) context window surfaced where the tier allows. Existing balanced-tier behaviour is unchanged until you pick it. (#907, #910)
+- **`subjects_merge` chat tool** — fold a duplicate person entry into the canonical one (moving every note, task, and mention onto it) from chat. Always confirmed, reversible from the merge ledger, and refused in unattended/autonomous runs. (#906, #908, #909, #915)
+- **Subject garbage-sweep** — a background archive phase that clears extraction junk (acronym/lowercase non-people) out of the subject graph, with an archived-recall guard so cleaned entries don't resurface. (#903, #905)
+- **Agent-scheduled agent runs require human confirmation** — a trigger whose effect is to start another agent run now asks for explicit confirmation before firing. (#888)
+
+### Fixed
+- **Boot data-safety:** a database migration *error* is no longer mistaken for *corruption* — the engine fails loud and keeps the file instead of wiping it, across the engine, run-history, and agent-memory stores. (#911)
+- **Memory edits stay consistent:** editing a memory in the UI now mirrors to the subject-graph store under the write flag (previously gated on the read flag), and UI memory mutations route through a single doc↔knowledge-graph sync facade. (#904, #912)
+- **Person-dedup correctness:** the merge repoints the live thread anchor and applies the redirect atomically, the resolver treats name *shape* as identity (so "Ada Jr." and "Ada Sr." are never folded together, and a title-only match isn't a false duplicate), and cross-currency values are no longer stitched into one. (#913, #914)
+- **Subject-graph write path (flag-gated):** engagement subjects converge through a single (name, parent) resolver; consolidation and deactivation mirror to `engine.db`; a contradiction supersede can't cross subjects and lose data; currency/qualified value changes are flagged as contradictions. (#891, #892, #893, #894, #895)
+
+### Hardened / Internal
+- CI actions + build dependencies are **pinned to commit SHAs**, and client-IP derivation is hardened against forwarded-header spoofing. (#889)
+- The per-turn memory auto-extraction is metered through the managed billing gate (previously it spent unmetered on managed). (#917)
+- The `subjects_merge` consent prompt strips the full set of invisible format characters before display. (#918)
+- A gold-corpus recall-quality harness (real ONNX embeddings) and expanded migration-path test coverage. (#890, #896)
+
 ## 2.0.0 — 2026-07-06
 
 Foundation Rework v2 goes active for the verb layer. Workflow, trigger, and task **definitions** now live in the consolidated per-tenant `engine.db` with a first-class **source/effect** model (a trigger's *when* and *what* are separate axes) and a **Connection** primitive over API profiles. The legacy `triggers` table and planned/executed workflow rows in `history.db` are retired from the read+write path. **On upgrade, every engine self-heals at boot**: it migrates your existing triggers, saved workflows, and tasks from the legacy stores into `engine.db` exactly once (no operator action, no data loss), leaving the legacy rows dormant as a rollback net. Alongside the verb cut: project/customer **context-scoping** (memories seat on a thread's subject anchor and recall walks the subject hierarchy), the memory-consolidation lifecycle moves onto the subject graph, a read-only **Subjects** surface, and a broad correctness + billing + security hardening wave. The subject-graph **read path stays flag-gated off** (`subject_graph_enabled`) — the per-tenant data cutover remains a separate step.

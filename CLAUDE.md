@@ -15,8 +15,8 @@ pnpm run lint        # eslint src/
 pnpm run build       # tsc → dist/
 pnpm run dev         # watch mode with tsx
 pnpm run security    # security scan + vitest security tests
-npx vitest run       # ~200 test files (src + tests/)
-npx vitest run tests/online/  # 10 test files (real API)
+npx vitest run       # ~330 test files (src + tests/)
+npx vitest run tests/online/  # 17 test files (real API)
 
 # Web UI (@lynox-ai/web-ui)
 cd packages/web-ui && pnpm run dev        # standalone dev server (needs Engine running: `lynox` or `lynox --http-api`)
@@ -33,9 +33,9 @@ pnpm workspace: root = `@lynox-ai/core` (engine), `packages/web-ui/` = `@lynox-a
 
 Engine (singleton) + Session (per-conversation) + ThreadStore (persistent threads) + WorkerLoop (background tasks).
 
-- `src/core/` — ~119 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, engine-db (subject-graph store, flag-gated OFF), subject-store, knowledge-layer, pattern-engine, memory, error-reporting, backup, api-store, crm, migration-crypto, migration-export, migration-import, workspace, etc.
+- `src/core/` — ~130 modules: engine, session, thread-store, prompt-store, agent, worker-loop, agent-memory-db, engine-db (subject-graph store, flag-gated OFF), subject-store, knowledge-layer, memory-facade, subject-merge-runner, pattern-engine, memory, error-reporting, backup, api-store, crm, migration-crypto, migration-export, migration-import, workspace, etc.
 - `src/cli/` — Terminal utilities (ansi, spinner, stream-handler, docker-installer, approval-dialog, changeset-review, dag-visualizer, markdown, interactive)
-- `src/tools/builtin/` — 32 builtin tool functions across 21 modules (incl. api_setup, media_process, artifact_save/list/delete); `src/tools/` holds the registry + permission guard
+- `src/tools/builtin/` — 41 builtin tool functions across 22 modules (incl. api_setup, media_process, artifact_save/list/delete/history/restore, subjects_merge); `src/tools/` holds the registry + permission guard
 - `src/orchestrator/` — DAG pipeline engine
 - `src/integrations/` — Mail (IMAP/SMTP), Unified Inbox, Google Workspace, Web Search (SearXNG default, DuckDuckGo HTML-scrape fallback), Push notifications. (Telegram removed 2026-05-15 — see `src/index.ts` comment + `docs/src/content/docs/setup/remote-access.md`. WhatsApp removed 2026-05-23 pending staging E2E coverage — see `docs/src/content/docs/archive/whatsapp-inbox.md`.)
 - `src/server/` — Engine HTTP API (REST + SSE for PWA). (MCP server removed 2026-05-23 pending re-introduction with full E2E test coverage — see core PR #536.)
@@ -79,9 +79,12 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 
 ## Key Patterns
 
-- Types: single source of truth in src/types/index.ts — never duplicate
+- Types: single source of truth in src/types/index.ts — never duplicate. EXCEPT the cross-repo
+  wire contract: everything in `src/contract/` (tier vocabulary, env-ABI registry, wire shapes)
+  is the SoT for core AND its vendored consumers (web-ui in-repo copy, the private control plane)
+  — changes there are wire-contract changes, see `src/contract/README.md`.
 - Tools: ToolRegistry + ToolContext dependency injection
-- Security: 5 layers actually wired (input-guard, permission-guard, data-boundary, secret-store, security-audit) + tool-result injection scan (`scanToolResult` in `src/core/output-guard.ts`) + malicious-write scan (`checkWriteContent` in `output-guard.ts`, wired into `write_file`/`edit_file`) + configurable outbound network policy (`network_policy`: allow-all default / deny-all / allow-list, gates `http_request`/`api_setup`/`web_research`). `ToolCallTracker` (H-024 shadow-mode anomaly detector) is wired via `Session._toolCallTracker`. Env vars always override vault (priority: env > vault > config).
+- Security: 5 layers actually wired (input-guard, permission-guard, data-boundary, secret-store, security-audit) + tool-result injection scan (`scanToolResult` in `src/core/output-guard.ts`) + malicious-write scan (`checkWriteContent` in `output-guard.ts`, wired into `write_file`/`edit_file`) + configurable outbound network policy (`network_policy`: allow-all default / deny-all / allow-list / guarded, gates `http_request`/`api_setup`/`web_research`). `ToolCallTracker` (tool-call anomaly detector) is wired via `Session._toolCallTracker`. Env vars always override vault (priority: env > vault > config).
 - Cost & rate limits: Session $50, daily $100, monthly $500 (all configurable via config.json). HTTP tool: 200 req/hr, 2000 req/day default. Per-session: 100 HTTP requests, 500 max agent iterations. Spawn depth: 5 levels, $5 default budget per spawn.
 - Resumable Prompts: PromptStore (SQLite, shared DB with RunHistory) — ask_user/ask_secret survive SSE disconnects, page refreshes, thread switches. Agent polls SQLite every 2s. 24h expiry.
 - Roles: 4 built-in (researcher, creator, operator, collector) as const map
@@ -96,15 +99,37 @@ Docs source (Astro Starlight) in `docs/src/content/docs/` — organized by categ
 
 ## Testing
 
-~180 co-located *.test.ts in src/, ~20 in tests/ (integration + security + smoke).
+~310 co-located *.test.ts in src/, ~20 in tests/ (integration + security + smoke).
 Online tests in tests/online/ (real Haiku API).
 Coverage enforced on src/core/, src/tools/, src/orchestrator/, src/cli/, src/integrations/ (lines >=65%, functions >=60%, branches >=50%, statements >=65%).
 
 ## Git
 
-- Pre-commit: typecheck + hex-guard
-- Pre-push: gitleaks + pattern-scan + security-scan + public-repo-guard (internal-infra leaks) + drift-guard (doc/code drift) + positioning-guard (copy vs POSITIONING.md). All three guards re-run as required CI checks so `--no-verify` can't bypass them.
-- Commits: English, imperative, first line <70 chars
+Hooks (`lefthook.yml` is the source of truth — this list had drifted from it, naming
+pre-push for what actually runs at pre-commit):
+
+- **commit-msg**: no-ai-attribution — strips `Co-Authored-By: Claude` / `Claude-Session:` /
+  "Generated with Claude Code". It strips silently rather than failing (the harness inserts
+  those trailers, so failing would only teach `--no-verify`); the `no-ai-attribution` CI job
+  is the gate for the bypassed case. A human `Co-Authored-By` is left alone.
+- **pre-commit**: gitleaks, pattern-scan, typecheck, hex-guard, token-contract, shape-contract.
+  gitleaks/pattern-scan belong here, not pre-push: they read the *index*, which is empty at
+  push time — at pre-push they were no-ops.
+- **pre-push**: security-scan, public-repo-guard (internal-infra leaks), drift-guard (doc/code
+  drift), positioning-guard (copy vs POSITIONING.md).
+
+Every hook above re-runs as a **required CI check**, so `git commit/push --no-verify` cannot
+bypass any of them — that is what makes them gates rather than suggestions. (`security-scan` and
+`hex-guard` got theirs on 2026-07-14, in `hook-guards.yml`; before that they were hook-only, so
+`--no-verify` removed them entirely. The same workflow adds `web-ui-typecheck`, because the root
+`pnpm typecheck` is `tsc --noEmit` over `src` and never touched the SvelteKit package — 1038 files
+that nothing checked.)
+
+Commits/PRs merge only through the required CI checks.
+
+- Commits: English, imperative, first line ≤72 chars
+- **No AI attribution** — enforced by the commit-msg hook above. It is self-promotion and does
+  not belong in this history.
 
 ## Docker
 

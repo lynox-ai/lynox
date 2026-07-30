@@ -5,6 +5,10 @@ export interface ThreadRecord {
   id: string;
   title: string;
   model_tier: string;
+  /** Provenance of `model_tier` (arc:model-selector P1, DEF-0095) — a
+   *  {@link import('../types/index.js').ThreadModelSource} value ('user' |
+   *  'default' | 'unknown'). ADVISORY-ONLY: never gates a tier/cost decision. */
+  model_tier_source: string;
   context_id: string;
   message_count: number;
   total_tokens: number;
@@ -67,15 +71,22 @@ export class ThreadStore {
   createThread(id: string, opts?: {
     title?: string | undefined;
     model_tier?: string | undefined;
+    /** Provenance of `model_tier` (P1, DEF-0095). Absent → the schema DEFAULT
+     *  `'unknown'` (a programmatic creator that did not observe the origin). */
+    model_tier_source?: string | undefined;
     context_id?: string | undefined;
   }): void {
+    // OR IGNORE: on a resume the thread already exists, so this INSERT is a
+    // no-op — the provenance stamped here only takes effect for a genuinely NEW
+    // thread; a resumed thread keeps its original `model_tier_source`.
     this.db.prepare(`
-      INSERT OR IGNORE INTO threads (id, title, model_tier, context_id)
-      VALUES (?, ?, ?, ?)
+      INSERT OR IGNORE INTO threads (id, title, model_tier, model_tier_source, context_id)
+      VALUES (?, ?, ?, ?, ?)
     `).run(
       id,
       opts?.title ?? '',
       opts?.model_tier ?? 'balanced',
+      opts?.model_tier_source ?? 'unknown',
       opts?.context_id ?? '',
     );
   }
@@ -123,6 +134,14 @@ export class ThreadStore {
     is_favorite?: boolean | undefined;
     skip_extraction?: boolean | undefined;
     is_unread?: boolean | undefined;
+    /** Mid-thread re-pick (P1, DEF-0095/§5.1b). The ONLY sanctioned writer of
+     *  these two is the re-pick endpoint (`PATCH /api/sessions/:id/model`) via
+     *  `Session.repickModel`. They are whitelisted so the *shape* carries them —
+     *  a test (`thread-store-write-restriction.test.ts`) asserts NO agent-reachable
+     *  caller forwards a caller-shaped `updates` map, so widening the shape cannot
+     *  open source-forgery through an existing agent tool (S4 / RI2, structural). */
+    model_tier?: string | undefined;
+    model_tier_source?: string | undefined;
     /** Slice A: set (string) or clear (null) the thread's anchor subject.
      *  `undefined` leaves it unchanged (whitelist semantics — null is a real clear). */
     primary_subject_id?: string | null | undefined;
@@ -140,6 +159,8 @@ export class ThreadStore {
     if (updates.is_favorite !== undefined) { sets.push('is_favorite = ?'); params.push(updates.is_favorite ? 1 : 0); }
     if (updates.skip_extraction !== undefined) { sets.push('skip_extraction = ?'); params.push(updates.skip_extraction ? 1 : 0); }
     if (updates.is_unread !== undefined) { sets.push('is_unread = ?'); params.push(updates.is_unread ? 1 : 0); }
+    if (updates.model_tier !== undefined) { sets.push('model_tier = ?'); params.push(updates.model_tier); }
+    if (updates.model_tier_source !== undefined) { sets.push('model_tier_source = ?'); params.push(updates.model_tier_source); }
     // null is a real value here (clear the anchor); only `undefined` means "skip".
     if (updates.primary_subject_id !== undefined) { sets.push('primary_subject_id = ?'); params.push(updates.primary_subject_id); }
 
@@ -154,6 +175,32 @@ export class ThreadStore {
    *  Does NOT bump updated_at — reading shouldn't re-sort the list. */
   markThreadRead(id: string): void {
     this.db.prepare('UPDATE threads SET is_unread = 0 WHERE id = ?').run(id);
+  }
+
+  /**
+   * Retroactive-merge support: repoint every thread anchored to `fromSubjectId`
+   * onto `toSubjectId`. history.db carries the LIVE thread anchor (engine.db's
+   * `threads` is an empty mirror), so a subject merge must repoint it HERE — else
+   * the thread stays anchored to the now-archived duplicate and keeps attaching new
+   * memories to it. Returns the ids of the threads it repointed (for the merge
+   * ledger's rollback); empty when nothing was anchored to the dup. Does NOT bump
+   * updated_at — a structural repoint shouldn't re-sort the user's thread list.
+   */
+  repointPrimarySubject(fromSubjectId: string, toSubjectId: string): string[] {
+    const affected = this.db
+      .prepare('SELECT id FROM threads WHERE primary_subject_id = ?')
+      .all(fromSubjectId) as Array<{ id: string }>;
+    if (affected.length === 0) return [];
+    this.db
+      .prepare('UPDATE threads SET primary_subject_id = ? WHERE primary_subject_id = ?')
+      .run(toSubjectId, fromSubjectId);
+    return affected.map(r => r.id);
+  }
+
+  /** Reverse {@link repointPrimarySubject}: set the named threads back to `toSubjectId`. */
+  restorePrimarySubject(threadIds: readonly string[], toSubjectId: string): void {
+    const stmt = this.db.prepare('UPDATE threads SET primary_subject_id = ? WHERE id = ?');
+    for (const id of threadIds) stmt.run(toSubjectId, id);
   }
 
   deleteThread(id: string): void {

@@ -12,8 +12,8 @@ import type {
   ModelTier,
   ContextSource,
 } from '../types/index.js';
-import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver } from '../types/index.js';
-import { setTierSetResolver } from './tier-resolver.js';
+import { MODEL_MAP, getOpenAIModelMap, setOpenAIModelResolver, resolveBalancedModel, setBalancedModelResolver, clampTier, normalizeTier } from '../types/index.js';
+import { setTierSetResolver, resolveDefaultChatTier } from './tier-resolver.js';
 import type { Memory } from './memory.js';
 import { BatchIndex } from './batch-index.js';
 import { ToolRegistry } from '../tools/registry.js';
@@ -21,6 +21,7 @@ import { loadConfig, getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
 import { RunHistory } from './run-history.js';
 import { EngineDb } from './engine-db.js';
+import { OnboardingFlagStore } from './onboarding-flag-store.js';
 import { initDebugSubscriber, shutdownDebugSubscriber } from './debug-subscriber.js';
 import { saveManifest } from './project.js';
 import { resolveContext } from './context.js';
@@ -44,6 +45,12 @@ import {
   memoryUpdateTool,
   memoryListTool,
   memoryPromoteTool,
+  rememberTool,
+  memoryRetireTool,
+  memoryFocusTool,
+  archiveSearchTool,
+  recallTool,
+  memoryBlockEditTool,
   spawnAgentTool,
   askUserTool,
   askSecretTool,
@@ -51,11 +58,14 @@ import {
   httpRequestTool,
   runWorkflowTool,
   updateWorkflowTool,
+  exportWorkflowTool,
+  importWorkflowTool,
   diagnoseWorkflowTool,
   taskCreateTool,
   taskUpdateTool,
   taskListTool,
   planTaskTool,
+  suggestFollowUpsTool,
   dataStoreCreateTool,
   dataStoreInsertTool,
   dataStoreQueryTool,
@@ -73,6 +83,7 @@ import {
   artifactRestoreTool,
   recallToolResultTool,
   setThreadContextTool,
+  subjectsMergeTool,
   mediaProcessTool,
 } from '../tools/builtin/index.js';
 import type { ToolContext } from './tool-context.js';
@@ -219,6 +230,9 @@ export class Engine {
    *  so the agent doesn't silently fabricate search results when search
    *  is unavailable. */
   private _webSearchStatus: 'configured' | 'fallback' | 'none' = 'none';
+  /** The web-search provider that landed in the registry (SearXNG or the DDG
+   *  fallback), kept for direct non-agent callers (e.g. onboarding domain derive). */
+  private _searchProvider: import('../integrations/search/index.js').SearchProvider | null = null;
   private _dataStore: DataStore | null = null;
   private _taskManager: import('./task-manager.js').TaskManager | null = null;
   private _hooks: LynoxHooks[] = [];
@@ -252,6 +266,13 @@ export class Engine {
   private _artifactStore: import('./artifact-store.js').ArtifactStore | null = null;
   private _crm: import('./crm.js').CRM | null = null;
   private _subjectStore: import('./subject-store.js').SubjectStore | null = null;
+  /** Durable Knowledge Substrate (DK.1) — the user-owned Know store. Null unless
+   *  `durable_memory_enabled` is on (+ engine.db present). */
+  private _knowledgeStore: import('./knowledge-store.js').KnowledgeStore | null = null;
+  /** Onboarding Wave 1 — the server-side onboarding-flag store. Present whenever
+   *  engine.db is (unconditional, NOT DK-gated); null only when engine.db failed to
+   *  open (→ HTTP/flow layer fails open: onboarding counts as done, AC-1.7). */
+  private _onboardingFlagStore: OnboardingFlagStore | null = null;
   private _subjectFootprintReader: import('./subject-footprint-reader.js').SubjectFootprintReader | null = null;
   private _threadStore: import('./thread-store.js').ThreadStore | null = null;
   private _promptStore: import('./prompt-store.js').PromptStore | null = null;
@@ -259,12 +280,28 @@ export class Engine {
   private _runRegistry: import('./run-registry.js').RunRegistry | null = null;
   private _runBufferManager: import('./run-buffer.js').RunBufferManager | null = null;
   private _runExecutor: import('./run-executor.js').RunExecutor | null = null;
+  /**
+   * True when the ctor derived `config.model` from `default_tier` (vs. an
+   * explicit caller-supplied value) — init() may then re-derive it once the
+   * hybrid tier-set resolver is configured (model-blocklist correctness).
+   */
+  private _modelDerivedFromDefaultTier = false;
 
   constructor(config: LynoxConfig) {
     this.userConfig = loadConfig();
-    // Apply user config defaults if not already set in LynoxConfig
+    // Apply user config defaults if not already set in LynoxConfig. The
+    // main-chat tier comes from `default_tier` (the "Main chat model" picker),
+    // clamped to `max_tier` (G3) so a user pick can never exceed the CP cost
+    // ceiling. normalizeTier accepts legacy brand names in an old config.json.
     if (!config.model) {
-      config.model = this.userConfig.default_tier ?? 'balanced';
+      // `resolveDefaultChatTier` = the historical clampTier(normalizeTier(...))
+      // + the model-blocklist check (`blocked_model_ids`): a default tier whose
+      // model is blocked falls back to `fast`. NOTE: the hybrid tier-set
+      // resolver is not configured yet at ctor time, so this judges the base
+      // provider mapping; init() re-derives after _configureOpenAIResolver so
+      // an allowed hybrid slot is not left falsely downgraded.
+      config.model = resolveDefaultChatTier(this.userConfig);
+      this._modelDerivedFromDefaultTier = true;
     }
     if (!config.effort && this.userConfig.effort_level) {
       config.effort = this.userConfig.effort_level;
@@ -347,6 +384,13 @@ export class Engine {
     // delta but must still take effect. Idempotent; safe to call always; runs
     // before the client swap below.
     this._configureOpenAIResolver();
+    // G1: `config.model` (the main-chat tier) is assigned from `default_tier`
+    // in the ctor ONLY — re-sync it here so a runtime "Main chat model" change
+    // (PUT /api/config { default_tier }) takes effect WITHOUT a process restart.
+    // Clamped to `max_tier` (G3) so a user pick can't exceed the CP cost ceiling.
+    // New sessions pick this up via `session._model`; open sessions keep their
+    // persisted per-thread tier (no cache-prefix churn).
+    this.config.model = resolveDefaultChatTier(this.userConfig);
     // Recreate API client if credentials or provider changed
     if (this.userConfig.api_key !== oldKey || this.userConfig.api_base_url !== oldBase || newProvider !== oldProvider) {
       // Provider switch: load new SDK if needed
@@ -450,6 +494,10 @@ export class Engine {
     // (rafael-prod incident 2026-05-18).
     const apiKey = resolveProviderApiKey({
       provider: this.userConfig.provider,
+      // The endpoint decides the slot. Without it, every `provider:'openai'`
+      // endpoint (Mistral, Groq, Together, a local Ollama) would draw from the
+      // same vault slot — i.e. a Mistral key would be bearer-tokened to Groq.
+      apiBaseURL: this.userConfig.api_base_url,
       secretStore: this.secretStore,
       userConfig: this.userConfig,
     });
@@ -681,6 +729,16 @@ export class Engine {
     // resolve a `ModelTier` via `getModelId(tier, 'openai')` emit Anthropic
     // IDs that downstream endpoints (Mistral, OpenAI, …) reject.
     this._configureOpenAIResolver();
+    // Re-derive the default main-chat tier now that the hybrid tier-set
+    // resolver is configured: the ctor derivation ran before setTierSetResolver,
+    // so under a model blocklist it judged the BASE provider mapping and could
+    // conservatively downgrade a tier whose hybrid slot model is actually
+    // permitted. Only when the ctor derived the tier itself — an explicit
+    // caller-supplied `config.model` is never clobbered. No blocklist → same
+    // value as the ctor (byte-identical default path).
+    if (this._modelDerivedFromDefaultTier) {
+      this.config.model = resolveDefaultChatTier(this.userConfig);
+    }
 
     // Initialize Bugsink error reporting. Gated by:
     //   - bugsink_enabled config flag (UI toggle; default unset = legacy
@@ -790,6 +848,11 @@ export class Engine {
       ? this.userConfig.openai_model_id ?? null
       : null;
     setOpenAIModelResolver({ map, fallbackModelId: fallback });
+    // Sync the config-aware `balanced` Sonnet override (default Sonnet 4.6 →
+    // opt-in Sonnet 5). resolveBalancedModel returns a validated served Sonnet
+    // id (or the 4.6 default), so an unset/invalid config is a no-op. Same
+    // bootstrap+reload seam so a UI/CP flip takes effect without a restart.
+    setBalancedModelResolver(resolveBalancedModel(this.userConfig));
     // Sync the hybrid Tier-Set resolver too, so a routing_mode/tier_set change
     // takes effect at bootstrap + reload without a restart (same hook). For
     // hybrid we enrich each slot with its provider's vault key at this seam so
@@ -818,8 +881,8 @@ export class Engine {
     tierSet: import('../types/index.js').TierSet,
   ): import('../types/index.js').TierSet {
     const base = this.userConfig.provider ?? 'anthropic';
-    return enrichTierSetCreds(tierSet, base, (provider) =>
-      resolveProviderApiKey({ provider, secretStore: this.secretStore, userConfig: this.userConfig }),
+    return enrichTierSetCreds(tierSet, base, (provider, apiBaseURL) =>
+      resolveProviderApiKey({ provider, apiBaseURL, secretStore: this.secretStore, userConfig: this.userConfig }),
     );
   }
 
@@ -854,6 +917,11 @@ export class Engine {
       process.stderr.write(`[lynox] EngineDb init failed: ${err instanceof Error ? err.message : String(err)} — subject-graph store unavailable\n`);
       this.engineDb = null;
     }
+
+    // Onboarding Wave 1: the flag store rides engine.db unconditionally (it does NOT
+    // gate on `durable_memory_enabled` — onboarding runs regardless of DK). Null only
+    // when engine.db is unavailable, in which case the HTTP/flow layer fails open.
+    this._onboardingFlagStore = this.engineDb ? new OnboardingFlagStore(this.engineDb) : null;
 
     // Foundation Rework v2 (S3f): wire the engine.db verb-layer stores onto
     // RunHistory (built above, before engine.db — hence a setter, not a ctor arg).
@@ -901,6 +969,22 @@ export class Engine {
           process.stderr.write(`[lynox] verb-graph backfill failed: ${err instanceof Error ? err.message : String(err)} — legacy verb defs NOT migrated; retry next boot\n`);
         }
       }
+
+      // Move 1 (PRD §4.1): forward-migrate every stored workflow-definition blob
+      // to the current content-schema version. Runs AFTER the verb backfill so
+      // legacy defs just copied from history.db are migrated too. Unlike the
+      // backfill this needs NO exactly-once marker — it is per-blob version-gated
+      // (the version stamp lives inside each blob), so a re-run is a cheap no-op
+      // scan and it self-heals after an engine.db recreate. A failure must NOT
+      // break boot; the next boot retries (idempotent).
+      try {
+        const migrated = this.runHistory.migrateWorkflowContentSchema();
+        if (migrated.migrated > 0) {
+          process.stderr.write(`[lynox] workflow content-schema: migrated ${migrated.migrated}/${migrated.scanned} definition(s)\n`);
+        }
+      } catch (err) {
+        process.stderr.write(`[lynox] workflow content-schema migration failed: ${err instanceof Error ? err.message : String(err)} — retry next boot\n`);
+      }
     }
 
     // Initialize thread store (shares DB connection with RunHistory)
@@ -911,6 +995,28 @@ export class Engine {
       } catch (err) {
         process.stderr.write(`[lynox] ThreadStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
         this._threadStore = null;
+      }
+    }
+
+    // Provenance recovery backfill (arc:model-selector P1, DEF-0095). The v47
+    // `model_tier_source` column starts every pre-column thread at 'unknown'; this
+    // one-shot pass labels a thread whose tier differs from the instance default as
+    // a likely deliberate pick ('user'), recovering the real historical picks the
+    // composer made before the column existed. It CANNOT be migration SQL — it needs
+    // the per-instance `default_tier` (clamped like config.model at :362) + legacy
+    // brand-name normalisation. Gated exactly-once by a history.db marker
+    // (flag-independent — unlike the verb backfill it never touches engine.db). A
+    // failure must NOT break boot: the marker stays 0 and the next boot retries.
+    if (this.runHistory && !this.runHistory.isModelProvenanceBackfillDone()) {
+      try {
+        const defaultTier = clampTier(normalizeTier(this.userConfig.default_tier) ?? 'balanced', this.userConfig.max_tier);
+        const labelled = this.runHistory.backfillModelTierSourceFromDefault(defaultTier);
+        this.runHistory.markModelProvenanceBackfillDone();
+        if (labelled > 0) {
+          process.stderr.write(`[lynox] model-provenance backfill: labelled ${labelled} pre-column thread(s) as 'user'\n`);
+        }
+      } catch (err) {
+        process.stderr.write(`[lynox] model-provenance backfill failed: ${err instanceof Error ? err.message : String(err)} — retry next boot\n`);
       }
     }
 
@@ -954,6 +1060,15 @@ export class Engine {
         if (sweptRuns > 0) process.stderr.write(`[lynox] run-history: swept ${sweptRuns} orphaned running run(s) to failed\n`);
       } catch (err) {
         process.stderr.write(`[lynox] run-history sweep failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+      // 2a/B4: the pipeline_runs counterpart — flip any workflow run still
+      // 'running' at boot to the terminal 'interrupted' (its finalize never ran).
+      // Separate try so a failure here can't blank the runs sweep above.
+      try {
+        const sweptPipelines = this.runHistory.sweepStuckPipelineRuns();
+        if (sweptPipelines > 0) process.stderr.write(`[lynox] run-history: swept ${sweptPipelines} orphaned running workflow run(s) to interrupted\n`);
+      } catch (err) {
+        process.stderr.write(`[lynox] pipeline-run sweep failed: ${err instanceof Error ? err.message : String(err)}\n`);
       }
     }
 
@@ -1035,9 +1150,14 @@ export class Engine {
     const scopeResult = initScopes(this.userConfig, this.context, this.runHistory, this.memory);
     this.userId = scopeResult.userId;
     this.activeScopes = scopeResult.scopes;
-    if (scopeResult.briefingPart) {
-      this.briefing = this.briefing ? `${this.briefing}\n\n${scopeResult.briefingPart}` : scopeResult.briefingPart;
-    }
+
+    // First-turn task overview (overdue / due tasks) is NOT frozen into the static
+    // briefing here — it is recomputed per-Session via `getTaskBriefing()` (called
+    // from the Session constructor). Freezing it at init served the boot-time snapshot
+    // to every new thread for the container's lifetime: completed tasks stayed flagged
+    // overdue and later-overdue tasks never appeared, and the agent (told to trust the
+    // briefing) acted on stale data. The compute is pure SQL (<10ms, no LLM), so a
+    // per-Session recompute is cheap and always current.
   }
 
   /** Memory, embedding provider, knowledge graph, DataStore↔KG bridge, KPI briefing injection, memory:store subscriber. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
@@ -1048,6 +1168,10 @@ export class Engine {
       this.config, this.userConfig, this.activeScopes,
       this.context?.id, this.secretStore,
     );
+    // Route the per-turn auto-extraction pool-key spend through the managed gate
+    // + debit (same onBeforeRun/onAfterRun lifecycle as the KG extractor and
+    // chat/voice). No-op on self-host.
+    this.memory?.setMeteredHost(this);
 
     // Initialize embedding provider + knowledge graph
     this.embeddingProvider = initEmbeddingProvider(this.userConfig, this.runHistory);
@@ -1084,7 +1208,7 @@ export class Engine {
     // Subscribe to memory:store for automatic knowledge graph storage
     setupMemoryStoreSubscription(
       this.knowledgeLayer, this.embeddingProvider, this.runHistory,
-      this.context?.id ?? '', () => null,
+      this.context?.id ?? '',
     );
   }
 
@@ -1144,12 +1268,6 @@ export class Engine {
       .register(readFileTool)
       .register(writeFileTool)
       .register(editFileTool)
-      .register(memoryStoreTool)
-      .register(memoryRecallTool)
-      .register(memoryDeleteTool)
-      .register(memoryUpdateTool)
-      .register(memoryListTool)
-      .register(memoryPromoteTool)
       .register(spawnAgentTool)
       .register(askUserTool)
       .register(askSecretTool)
@@ -1161,7 +1279,30 @@ export class Engine {
       .register(taskListTool)
       .register(planTaskTool)
       .register(recallToolResultTool)
+      .register(suggestFollowUpsTool)
       .register(mediaProcessTool);
+
+    // Memory tools — the Durable Knowledge Substrate (DK.1) REPLACES the six legacy `memory_*`
+    // tools with `remember`/`recall`/`memory_block_edit` when `durable_memory_enabled` is on
+    // (H9 — no partial swap: the six legacy tools are NOT registered when durable is on, and
+    // the new three are NOT registered when it is off, so flag-OFF is byte-identical).
+    if (this.userConfig.durable_memory_enabled === true) {
+      this.registry
+        .register(rememberTool)
+        .register(recallTool)
+        .register(memoryBlockEditTool)
+        .register(memoryRetireTool)
+        .register(memoryFocusTool)
+        .register(archiveSearchTool);
+    } else {
+      this.registry
+        .register(memoryStoreTool)
+        .register(memoryRecallTool)
+        .register(memoryDeleteTool)
+        .register(memoryUpdateTool)
+        .register(memoryListTool)
+        .register(memoryPromoteTool);
+    }
 
     // Wire task manager if run history is available
     if (this.runHistory) {
@@ -1201,11 +1342,13 @@ export class Engine {
       const collections = this._dataStore.listCollections();
       if (collections.length > 0) {
         this.registerDataStoreTools();
-        const lines = collections.map(c =>
-          `${c.name} (${c.scopeType}${c.scopeId ? ':' + c.scopeId : ''}) — ${c.recordCount} records, updated ${c.updatedAt.slice(0, 10)}`
-        );
-        const dataBlock = `<data_collections>\n${lines.join('\n')}\n</data_collections>`;
-        this.briefing = this.briefing ? `${this.briefing}\n\n${dataBlock}` : dataBlock;
+        // The always-injected `<data_collections>` briefing block was removed
+        // 2026-07-18: `listCollections()` is UNSCOPED, so it dumped EVERY project's
+        // tables (a single tenant's laser-clinic, weather, SEO collections, …) into
+        // every thread's first turn — cross-project bleed, and the specific fake-
+        // "project" contents the model confabulated under the "http-api" label. The
+        // agent enumerates tables on demand via `data_store_list` instead (DK's
+        // default-injection-dies / retrieve-on-demand principle).
       }
     } catch (err) {
       process.stderr.write(`[lynox] DataStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -1259,6 +1402,7 @@ export class Engine {
         }
         if (healthy) {
           this.registry.register(createWebSearchTool(searxng));
+          this._searchProvider = searxng;
           this._webSearchStatus = 'configured';
         } else {
           process.stderr.write(`[lynox] SearXNG not reachable at ${searxngUrl} — falling back to DuckDuckGo HTML scrape. Check if SearXNG is running.\n`);
@@ -1277,7 +1421,9 @@ export class Engine {
     if (this._webSearchStatus === 'none') {
       try {
         const { DuckDuckGoProvider, createWebSearchTool } = await import('../integrations/search/index.js');
-        this.registry.register(createWebSearchTool(new DuckDuckGoProvider()));
+        const ddg = new DuckDuckGoProvider();
+        this.registry.register(createWebSearchTool(ddg));
+        this._searchProvider = ddg;
         this._webSearchStatus = 'fallback';
         process.stderr.write('[lynox] No SearXNG configured — using DuckDuckGo HTML-scrape fallback (best-effort). Set SEARXNG_URL or run via `docker compose up` for higher-quality results.\n');
       } catch (err) {
@@ -1555,6 +1701,7 @@ export class Engine {
         this._toolContext.subjectStore = subjectStore;
         this._toolContext.threadStore = this._threadStore;
         this.registry.register(setThreadContextTool);
+        this.registry.register(subjectsMergeTool);
         // Record-on-spine (R1 write + R1.5 query): wire the subject-column bridge
         // so `subject`-typed DataStore columns resolve a row's name → a real
         // subject_id on insert (the SAME findOrCreate dedup that feeds the graph),
@@ -1585,6 +1732,30 @@ export class Engine {
         }
       } catch (err) {
         process.stderr.write(`[lynox] context-scoping tool wiring failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+
+    // Durable Knowledge Substrate (DK.1): construct the KnowledgeStore + expose it to the
+    // remember/recall/memory_block_edit tools (registered above under the same flag). Gated on
+    // `durable_memory_enabled` + engine.db → zero standing surface when off. Independent of
+    // `subject_graph_enabled`: the substrate anchors on subjects, but SubjectStore is a thin
+    // per-call wrapper over engine.db, so it works whether or not the legacy subject-graph
+    // mirror is on (a fresh subjects table just grows deliberate findOrCreate anchors — H1).
+    if (this.userConfig.durable_memory_enabled === true && this.engineDb) {
+      try {
+        const { SubjectStore } = await import('./subject-store.js');
+        const { KnowledgeStore } = await import('./knowledge-store.js');
+        const subjectStore = this._subjectStore ?? new SubjectStore(this.engineDb);
+        const knowledgeStore = new KnowledgeStore(this.engineDb, subjectStore, this.secretStore ?? null);
+        this._knowledgeStore = knowledgeStore;
+        this._toolContext.knowledgeStore = knowledgeStore;
+        // memory_focus's manual override resolves subjects via toolContext.subjectStore. The
+        // subject_graph block wires it, but the durable substrate is independent of that flag —
+        // so wire it here too (idempotent), or a durable-only tenant's memory_focus set-path is
+        // dead ("subject lookup is not available"). Exactly the planned canary flip's config.
+        this._toolContext.subjectStore = this._toolContext.subjectStore ?? subjectStore;
+      } catch (err) {
+        process.stderr.write(`[lynox] durable-memory wiring failed: ${err instanceof Error ? err.message : String(err)}\n`);
       }
     }
 
@@ -1674,7 +1845,39 @@ export class Engine {
 
   /** Create a new per-conversation session. */
   createSession(opts?: SessionOptions): Session {
+    // Managed interactive (main-chat) sessions get a CP-owned per-run cost ceiling
+    // (T-within / DEF-0083(b)): the main path otherwise sets no `costGuard`, so one
+    // looping run could drain far past the entitlement balance. Defaulted ONLY when
+    // the caller set none (the WorkerLoop's executeStandard passes its own $15) and
+    // ONLY on managed instances where the CP emits the ceiling env (self-host / BYOK
+    // → undefined → unchanged). Ships atomically with the balance mirror
+    // (managed-hook.ts) — FB-BOUND-3.
+    if (!opts?.costGuard) {
+      const ceilingUSD = this._resolveManagedRunCostCeilingUSD();
+      if (ceilingUSD !== undefined) {
+        opts = { ...opts, costGuard: { maxBudgetUSD: ceilingUSD } };
+      }
+    }
     return new Session(this, opts);
+  }
+
+  /**
+   * The CP-owned per-run USD ceiling for managed interactive sessions, from the
+   * `LYNOX_MANAGED_RUN_COST_CEILING_USD` env the control plane emits (pro
+   * instance-env). Clamped like the flush interval so a managed tenant editing
+   * their own .env cannot disable the guard (floor) or set it uselessly high
+   * (ceiling). Absent (self-host / BYOK, no CP entitlement) → undefined → no
+   * default guard is applied.
+   */
+  private _resolveManagedRunCostCeilingUSD(): number | undefined {
+    const raw = process.env['LYNOX_MANAGED_RUN_COST_CEILING_USD'];
+    if (raw === undefined) return undefined;
+    const DEFAULT_USD = 10;
+    const MIN_USD = 1;
+    const MAX_USD = 50;
+    const n = Number.parseFloat(raw);
+    if (!Number.isFinite(n) || n <= 0) return DEFAULT_USD;
+    return Math.min(Math.max(n, MIN_USD), MAX_USD);
   }
 
   /** Register pipeline tools on demand (saves ~350 tokens when not used) */
@@ -1684,6 +1887,8 @@ export class Engine {
     this.registry
       .register(runWorkflowTool)
       .register(updateWorkflowTool)
+      .register(exportWorkflowTool)
+      .register(importWorkflowTool)
       .register(diagnoseWorkflowTool)
       .register(saveWorkflowTool);
     // Update tool context with pipeline dependencies
@@ -1719,12 +1924,28 @@ export class Engine {
   getMemory(): Memory | null { return this.memory; }
   getRunHistory(): RunHistory | null { return this.runHistory; }
   getEngineDb(): EngineDb | null { return this.engineDb; }
+  /** Onboarding Wave 1 flag store, or null when engine.db is unavailable (→ fail-open). */
+  getOnboardingFlagStore(): OnboardingFlagStore | null { return this._onboardingFlagStore; }
   getContext(): LynoxContext | null { return this.context; }
   getBriefing(): string | undefined { return this.briefing; }
+  /** Freshly compute the first-turn task overview (overdue / due tasks) — pure SQL,
+   *  no LLM. Called per-Session so the overview is current, not frozen at engine boot.
+   *  Defaults to the engine's resolved scopes. Best-effort: never throws into bring-up. */
+  getTaskBriefing(scopes?: MemoryScopeRef[]): string | undefined {
+    const tm = this._taskManager;
+    if (!tm) return undefined;
+    try {
+      return tm.getBriefingSummary(scopes ?? this.activeScopes) || undefined;
+    } catch {
+      return undefined;
+    }
+  }
   getActiveScopes(): MemoryScopeRef[] { return this.activeScopes; }
   getUserId(): string | null { return this.userId; }
   getEmbeddingProvider(): EmbeddingProvider | null { return this.embeddingProvider; }
   getKnowledgeLayer(): KnowledgeLayer | null { return this.knowledgeLayer; }
+  /** Durable Knowledge Substrate (DK.1) store, or null when `durable_memory_enabled` is off. */
+  getKnowledgeStore(): import('./knowledge-store.js').KnowledgeStore | null { return this._knowledgeStore; }
   getToolContext(): ToolContext { return this._toolContext; }
   getSecretStore(): SecretStore | null { return this.secretStore; }
   getThreadStore(): import('./thread-store.js').ThreadStore | null { return this._threadStore; }
@@ -1822,6 +2043,9 @@ export class Engine {
    *                   told to refuse search and ask for SEARXNG_URL.
    *  Drives the honesty-fallback / fallback-quality prompt suffixes. */
   getWebSearchStatus(): 'configured' | 'fallback' | 'none' { return this._webSearchStatus; }
+  /** The web-search provider (SearXNG or DDG fallback), or null if none landed.
+   *  For direct non-agent search (onboarding domain derive). */
+  getSearchProvider(): import('../integrations/search/index.js').SearchProvider | null { return this._searchProvider; }
   getNotificationRouter(): NotificationRouter { return this._notificationRouter; }
   getWorkerLoop(): WorkerLoop | null { return this._workerLoop; }
   getBackupManager(): import('./backup.js').BackupManager | null { return this._backupManager; }

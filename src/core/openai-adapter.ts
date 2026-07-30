@@ -15,6 +15,7 @@ import * as os from 'node:os';
 import { randomUUID, randomBytes } from 'node:crypto';
 
 import { readEnvAlias } from './env.js';
+import { modelCapability } from '../types/models.js';
 
 import type {
   BetaRawMessageStreamEvent,
@@ -113,9 +114,16 @@ interface OpenAITool {
   };
 }
 
+/** A multimodal user-content part on the OpenAI chat wire. Text stays a bare
+ *  string when a message has no images (byte-parity); an image turns the whole
+ *  message `content` into an array of these parts. */
+type OpenAIContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content?: string | null | undefined;
+  content?: string | OpenAIContentPart[] | null | undefined;
   tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> | undefined;
   tool_call_id?: string | undefined;
 }
@@ -194,9 +202,25 @@ function translateTools(tools: Anthropic.Tool[]): OpenAITool[] {
     }));
 }
 
-function translateMessages(
+/**
+ * Translate an Anthropic-format message history to the OpenAI chat-completions
+ * shape. Exported for tests.
+ *
+ * `visionSupport` gates how a user IMAGE block is handled (it never was before —
+ * images were silently `.filter`ed out, so a tenant on the openai/Mistral wire
+ * got a confident answer to an image the model never saw, DEF-0073):
+ *  - `true` / `undefined` (unknown or custom model) → translate the image to an
+ *    OpenAI `image_url` data-URI part (works for a vision-capable endpoint).
+ *  - `false` (a known non-vision model, e.g. codestral / open-mistral-nemo, and
+ *    the legacy Mistral ids the product doesn't tier-route) → throw a clear,
+ *    actionable error instead of a silent drop or a cryptic provider 400.
+ *    (Gen-3 Mistral — ministral-*-2512, mistral-large-2512 — ARE vision-capable
+ *    and carry vision:true, so they take the translate path above.)
+ */
+export function translateMessages(
   system: unknown,
   messages: unknown[],
+  opts?: { visionSupport?: boolean | undefined; modelLabel?: string | undefined },
 ): OpenAIMessage[] {
   const result: OpenAIMessage[] = [];
 
@@ -222,12 +246,52 @@ function translateMessages(
       if (typeof m.content === 'string') {
         result.push({ role: 'user', content: m.content });
       } else if (Array.isArray(m.content)) {
-        // Extract text from content blocks
-        const text = (m.content as Array<{ type: string; text?: string }>)
-          .filter(b => b.type === 'text')
-          .map(b => b.text ?? '')
-          .join('\n');
-        result.push({ role: 'user', content: text });
+        const blocks = m.content as Array<{ type: string; text?: string; tool_use_id?: string; content?: unknown; source?: { media_type?: string; data?: string } }>;
+
+        // 1. Tool results → role:'tool' messages (they answer the prior
+        //    assistant's tool_calls, so they come first).
+        for (const tr of blocks.filter(b => b.type === 'tool_result')) {
+          let content = '';
+          if (typeof tr.content === 'string') {
+            content = tr.content;
+          } else if (Array.isArray(tr.content)) {
+            content = (tr.content as Array<{ type: string; text?: string }>)
+              .filter(b => b.type === 'text')
+              .map(b => b.text ?? '')
+              .join('\n');
+          }
+          result.push({ role: 'tool', tool_call_id: tr.tool_use_id ?? '', content });
+        }
+
+        // 2. The user's OWN text + images → a user message. Preserved even when
+        //    tool_results share the turn (DEF-0074: the old code `pop()`ed and
+        //    discarded this text). Images become `image_url` parts (DEF-0073:
+        //    the old code silently dropped them).
+        const parts: OpenAIContentPart[] = [];
+        for (const b of blocks) {
+          if (b.type === 'text') {
+            parts.push({ type: 'text', text: b.text ?? '' });
+          } else if (b.type === 'image') {
+            if (opts?.visionSupport === false) {
+              throw new Error(
+                `The active model${opts.modelLabel ? ` (${opts.modelLabel})` : ''} cannot process images. `
+                + `Remove the image, or switch to a vision-capable provider (e.g. Anthropic).`,
+              );
+            }
+            const url = `data:${b.source?.media_type ?? 'image/png'};base64,${b.source?.data ?? ''}`;
+            parts.push({ type: 'image_url', image_url: { url } });
+          }
+        }
+        if (parts.length > 0) {
+          const onlyText = parts.every((p) => p.type === 'text');
+          const content: string | OpenAIContentPart[] = onlyText
+            ? parts.map((p) => (p as { text: string }).text).join('\n')
+            : parts;
+          // Skip an empty-string user message — e.g. a tool_result turn whose only
+          // text block is '' would otherwise emit a `content:''` user message that
+          // some OpenAI-compat endpoints reject (the old code `pop()`ed it).
+          if (content !== '') result.push({ role: 'user', content });
+        }
       }
     } else if (m.role === 'assistant') {
       if (typeof m.content === 'string') {
@@ -249,38 +313,10 @@ function translateMessages(
           ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
         });
       }
-    } else if (m.role === 'tool') {
-      // Anthropic sends tool results as user messages with tool_result content blocks
-      // But in multi-turn, they come as role: 'user' with tool_result blocks
     }
-
-    // Handle user messages that contain tool_result blocks (Anthropic's format for tool responses)
-    if (m.role === 'user' && Array.isArray(m.content)) {
-      const blocks = m.content as Array<{ type: string; tool_use_id?: string; content?: unknown }>;
-      const toolResults = blocks.filter(b => b.type === 'tool_result');
-      if (toolResults.length > 0) {
-        // Remove the user message we just added (it was a tool result, not a real user message)
-        const lastAdded = result[result.length - 1];
-        if (lastAdded?.role === 'user') result.pop();
-
-        for (const tr of toolResults) {
-          let content = '';
-          if (typeof tr.content === 'string') {
-            content = tr.content;
-          } else if (Array.isArray(tr.content)) {
-            content = (tr.content as Array<{ type: string; text?: string }>)
-              .filter(b => b.type === 'text')
-              .map(b => b.text ?? '')
-              .join('\n');
-          }
-          result.push({
-            role: 'tool',
-            tool_call_id: tr.tool_use_id ?? '',
-            content,
-          });
-        }
-      }
-    }
+    // (Anthropic sends tool results as `role:'user'` messages with tool_result
+    // blocks — handled in the user branch above, alongside the user's own text
+    // and images, so nothing is dropped.)
   }
 
   return result;
@@ -372,6 +408,14 @@ async function* translateStream(
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   let totalCachedTokens = 0;
+  // Translated stop_reason, remembered when the finish_reason chunk arrives.
+  // The final message_delta is emitted only AFTER the chunk iteration ends:
+  // OpenAI `stream_options.include_usage` semantics (e.g. Fireworks) put the
+  // terminal usage in a SEPARATE trailing chunk (`choices: []`, `usage` set)
+  // AFTER the finish_reason chunk — emitting at finish_reason time reported
+  // 0/0 tokens for those providers. Mistral attaches usage to the finish
+  // chunk itself; both shapes are covered by deferring the emission.
+  let finishStopReason: string | null = null;
 
   try {
     while (true) {
@@ -491,27 +535,52 @@ async function* translateStream(
           // the downstream StreamProcessor treats 'length' as an unknown
           // stop_reason and the calling Agent loop silently drops the
           // truncated turn (no continuation, no user-visible error). T2-P1.
-          const stopReason = choice.finish_reason === 'tool_calls' ? 'tool_use'
+          finishStopReason = choice.finish_reason === 'tool_calls' ? 'tool_use'
             : choice.finish_reason === 'stop' ? 'end_turn'
             : choice.finish_reason === 'length' ? 'max_tokens'
             : choice.finish_reason;
-
-          yield {
-            type: 'message_delta',
-            delta: { stop_reason: stopReason, stop_sequence: null },
-            usage: {
-              // Anthropic semantics: input_tokens excludes cached.
-              // Mistral SSE returns prompt_tokens including cached → subtract.
-              input_tokens: Math.max(0, totalInputTokens - totalCachedTokens),
-              output_tokens: totalOutputTokens,
-              cache_creation_input_tokens: null,
-              cache_read_input_tokens: totalCachedTokens || null,
-            },
-          } as unknown as BetaRawMessageDeltaEvent as BetaRawMessageStreamEvent;
-
-          yield { type: 'message_stop' } as BetaRawMessageStreamEvent;
         }
       }
+    }
+
+    // A final `data:` frame with no trailing newline stays in `buffer` after
+    // the read loop — for providers that end the stream right after the
+    // trailing usage frame, that IS the usage. Flush it through the same
+    // usage parse (choices/content in a torn final frame are not recoverable).
+    const tail = (buffer + decoder.decode()).trim();
+    if (tail.startsWith('data: ')) {
+      const data = tail.slice(6).trim();
+      if (data !== '[DONE]') {
+        try {
+          const chunk = JSON.parse(data) as OpenAIStreamChunk;
+          if (chunk.usage) {
+            totalInputTokens = chunk.usage.prompt_tokens ?? totalInputTokens;
+            totalOutputTokens = chunk.usage.completion_tokens ?? totalOutputTokens;
+            totalCachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? totalCachedTokens;
+          }
+        } catch { /* torn frame — keep accumulated totals */ }
+      }
+    }
+
+    // Terminal events, deferred until all chunks (incl. a trailing usage-only
+    // chunk) are consumed so the token totals are complete. Ordering stays
+    // content_block_stop (at finish_reason time above) → message_delta →
+    // message_stop.
+    if (finishStopReason !== null) {
+      yield {
+        type: 'message_delta',
+        delta: { stop_reason: finishStopReason, stop_sequence: null },
+        usage: {
+          // Anthropic semantics: input_tokens excludes cached.
+          // Mistral SSE returns prompt_tokens including cached → subtract.
+          input_tokens: Math.max(0, totalInputTokens - totalCachedTokens),
+          output_tokens: totalOutputTokens,
+          cache_creation_input_tokens: null,
+          cache_read_input_tokens: totalCachedTokens || null,
+        },
+      } as unknown as BetaRawMessageDeltaEvent as BetaRawMessageStreamEvent;
+
+      yield { type: 'message_stop' } as BetaRawMessageStreamEvent;
     }
   } finally {
     reader.releaseLock();
@@ -522,6 +591,18 @@ async function* translateStream(
 
 /** Static API key or a function that returns a fresh token (e.g. OAuth refresh). */
 export type ApiKeyProvider = string | (() => Promise<string>);
+
+/** Default idle timeout for an OpenAI-compatible request (ms): abort when no bytes arrive for
+ *  this long — covers both a dead-before-headers connection and a mid-stream stall. A long
+ *  generation is unaffected (the timer re-arms per chunk). Env override:
+ *  `LYNOX_OPENAI_REQUEST_TIMEOUT_MS`. */
+export const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 180_000;
+
+function resolveOpenAIRequestTimeoutMs(): number {
+  const raw = process.env['LYNOX_OPENAI_REQUEST_TIMEOUT_MS'];
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_OPENAI_REQUEST_TIMEOUT_MS;
+}
 
 export class OpenAIAdapter {
   private baseURL: string;
@@ -668,9 +749,6 @@ export class OpenAIAdapter {
     },
     options?: { signal?: AbortSignal | undefined },
   ): AsyncGenerator<BetaRawMessageStreamEvent> {
-    const openaiMessages = translateMessages(params.system, params.messages);
-    const openaiTools = params.tools ? translateTools(params.tools) : undefined;
-
     // Honour caller-provided model id when it's a real downstream id (e.g.
     // 'mistral-large-2512' from the registered tier-map). Reject Anthropic
     // tier aliases that leak through when no tier-map is registered — those
@@ -679,6 +757,14 @@ export class OpenAIAdapter {
     const requestedModel = typeof params.model === 'string' ? params.model : '';
     const looksAnthropic = requestedModel.startsWith('claude-');
     const model = requestedModel && !looksAnthropic ? requestedModel : this.modelId;
+
+    // Gate image handling on the resolved model's vision capability (DEF-0073):
+    // a known non-vision model (codestral / nemo / legacy Mistral) → a clear error
+    // instead of a silent image drop; a vision-capable (gen-3 Mistral) or
+    // unknown/custom model → translate it.
+    const visionSupport = modelCapability(model)?.features?.vision;
+    const openaiMessages = translateMessages(params.system, params.messages, { visionSupport, modelLabel: model });
+    const openaiTools = params.tools ? translateTools(params.tools) : undefined;
 
     const body: Record<string, unknown> = {
       model,
@@ -716,21 +802,59 @@ export class OpenAIAdapter {
     }
 
     const apiKey = await this.resolveApiKey();
-    const response = await fetch(`${this.baseURL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-      signal: options?.signal ?? null,
-    });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`OpenAI-compatible API error ${response.status}: ${errText}`);
+    // Idle-timeout watchdog. The openai-wire `fetch` has NO implicit request timeout (unlike the
+    // Anthropic SDK), and only the caller's optional signal was wired — so a silently-dropped
+    // socket that neither resolves nor rejects hangs the agent loop indefinitely (observed
+    // 2026-07-16: a Mistral request stuck 20+ min with zero open TCP). Abort if NO bytes (response
+    // headers OR a stream chunk) arrive for the idle window; a long generation stays fine because
+    // the timer re-arms on every chunk. The caller's signal is composed in, so an external abort
+    // (stop button) still propagates.
+    const idleMs = resolveOpenAIRequestTimeoutMs();
+    const ac = new AbortController();
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let idleAborted = false;
+    const armIdle = (): void => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => { idleAborted = true; ac.abort(); }, idleMs);
+    };
+    const caller = options?.signal;
+    // Named so it can be removed in the finally. `caller` is the reused per-RUN signal, so an
+    // anonymous {once:true} listener that never fires (the normal-completion path) accumulates
+    // one per _doStream call → MaxListenersExceededWarning past ~10 LLM calls in a turn.
+    const onCallerAbort = (): void => { ac.abort(caller?.reason); };
+    if (caller) {
+      if (caller.aborted) ac.abort(caller.reason);
+      else caller.addEventListener('abort', onCallerAbort, { once: true });
     }
 
-    yield* translateStream(response);
+    try {
+      armIdle();
+      const response = await fetch(`${this.baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: ac.signal,
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`OpenAI-compatible API error ${response.status}: ${errText}`);
+      }
+
+      for await (const event of translateStream(response)) {
+        armIdle(); // a chunk arrived — reset the idle window
+        yield event;
+      }
+    } catch (err) {
+      if (idleAborted) throw new Error(`OpenAI-compatible request timed out (no data for ${idleMs}ms)`);
+      throw err;
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      caller?.removeEventListener('abort', onCallerAbort);
+    }
   }
 }

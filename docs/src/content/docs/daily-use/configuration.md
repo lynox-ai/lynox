@@ -24,7 +24,7 @@ Project configs cannot override security-sensitive fields like API keys or vault
 {
   "provider": "anthropic",
   "api_base_url": "https://api.mistral.ai/v1",
-  "openai_model_id": "mistral-large-2512"
+  "openai_model_id": "mistral-medium-2604"
 }
 ```
 
@@ -32,11 +32,11 @@ Project configs cannot override security-sensitive fields like API keys or vault
 |---------|--------|---------|
 | `provider` | `anthropic` (tested), `openai` (Mistral tested; Ollama / LM Studio / OpenAI / Groq / vLLM / Gemini experimental), `custom` (Anthropic-compat proxy — experimental), `vertex` (legacy — experimental) | `anthropic` |
 | `api_base_url` | Endpoint for `provider: openai` or `custom` | — |
-| `openai_model_id` | Model ID for `provider: openai` (e.g. `mistral-large-2512`, `llama3.2`) | — |
+| `openai_model_id` | Model ID for `provider: openai` (e.g. `mistral-medium-2604`, `llama3.2`) | — |
 
 Only **anthropic** and **openai with the Mistral endpoint** are exercised on every release. The other paths work in principle but are not regularly tested — see [LLM Providers](/setup/llm-providers/) for full details.
 
-> Prefer pinned model IDs (`mistral-large-2512`) over floating tags like `mistral-large-latest` — pins keep behavior reproducible across silent provider snapshot rolls. See [LLM Providers — Mistral](/setup/llm-providers/#mistral-france-eu) for the rationale.
+> Prefer pinned model IDs (`mistral-medium-2604`) over floating tags like `mistral-medium-latest` — pins keep behavior reproducible across silent provider snapshot rolls. See [LLM Providers — Mistral](/setup/llm-providers/#mistral-france-eu) for the rationale.
 
 ### Model & Intelligence
 
@@ -50,9 +50,10 @@ Only **anthropic** and **openai with the Mistral endpoint** are exercised on eve
 
 | Setting | Values | Default |
 |---------|--------|---------|
-| `default_tier` | `fast`, `balanced`, `deep` | `balanced` |
+| `default_tier` | `fast`, `balanced`, `deep` — the band the **main chat** runs on (also picked visually via **Settings → LLM → Main chat model**). Background tasks and subagents auto-route across bands regardless | `balanced` |
 | `thinking_mode` | `adaptive`, `disabled` | `adaptive` |
 | `effort_level` | `low`, `medium`, `high`, `max` | `high` |
+| `balanced_model` | Which Claude Sonnet build serves the **balanced** tier (Anthropic provider). Set `claude-sonnet-5` to opt into the 1M-token context window; leave unset for the default | default Sonnet |
 | `compaction_token_budget` | Token budget that triggers automatic thread summarization (min 32000) | `150000` |
 | `context_cost_log` | Opt-in: write a content-free per-turn context-composition log to the data dir (diagnostics) | `false` |
 
@@ -168,6 +169,7 @@ Controls the agent's outbound network access for the `http_request`, `api_setup`
 - `allow-all` (default) — no restriction; existing behavior.
 - `deny-all` — block all outbound requests from these tools.
 - `allow-list` — allow only the hosts listed in `network_allowed_hosts`.
+- `guarded` — surface-aware lockdown: discovery surfaces stay open, while full-control requests reach only the vetted baseline hosts, the operator floor, and hosts you have explicitly accepted for a connected API.
 
 Override with the `LYNOX_NETWORK_POLICY` and `LYNOX_NETWORK_ALLOWED_HOSTS` (comma-separated) environment variables.
 
@@ -212,6 +214,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 | `ANTHROPIC_API_KEY` | Claude API key (Anthropic provider). Anthropic-only — does NOT serve `provider: openai`. |
 | `ANTHROPIC_BASE_URL` | Base URL for `provider: openai` or `custom` (e.g. `https://api.mistral.ai/v1`) |
 | `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` (default), `openai`, `custom` (Anthropic-compat proxy — experimental), `vertex` (legacy — experimental) |
+| `LYNOX_BALANCED_MODEL` | Which Claude Sonnet build serves the **balanced** tier. Set `claude-sonnet-5` to opt into the 1M-token context window; unset keeps the default. |
 
 ### OpenAI-Compatible
 
@@ -219,7 +222,7 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 |----------|---------|
 | `MISTRAL_API_KEY` | Mistral API key — primary slot for `provider: openai` with the Mistral endpoint (natively supported). |
 | `OPENAI_API_KEY` | Bearer for generic OpenAI-compatible endpoints (experimental). Secondary slot — `MISTRAL_API_KEY` is also accepted. Leave blank for local Ollama / LM Studio without auth. |
-| `OPENAI_MODEL_ID` | Model ID, e.g. `mistral-large-2512` (prefer pinned over `-latest`), `llama3.2`, `gpt-4o`, `llama-3.3-70b-versatile` |
+| `OPENAI_MODEL_ID` | Model ID, e.g. `mistral-medium-2604` (prefer pinned over `-latest`), `llama3.2`, `gpt-4o`, `llama-3.3-70b-versatile` |
 | `ANTHROPIC_BASE_URL` | Provider base URL — see [LLM Providers](/setup/llm-providers/) for the value per backend |
 
 ### Legacy: Google Vertex AI (experimental)
@@ -245,6 +248,8 @@ Credentials can also be stored interactively via lynox's secure `ask_secret` dia
 | `LYNOX_HTTP_PORT` | HTTP API port (default: `3000` in Docker, `3100` locally) |
 | `LYNOX_HTTP_SECRET` | Bearer token for HTTP API authentication |
 | `LYNOX_WEBUI_URL` | Web UI URL (default: `http://localhost:5173`) |
+| `LYNOX_TRUST_PROXY` | Trust `X-Forwarded-For` for client-IP resolution (default `false`). Set `true` **only** when lynox runs behind a reverse proxy you control — otherwise rate-limiting and the IP allowlist key on the proxy's address instead of the real client. |
+| `LYNOX_TRUSTED_PROXY_HOPS` | With `LYNOX_TRUST_PROXY=true`, how many trailing `X-Forwarded-For` entries your proxy chain appends (default `1`). The client IP is read from that many hops in from the right, never the spoofable leftmost entry. |
 
 ### Security & Storage
 

@@ -13,7 +13,7 @@ sidebar:
 
   Other endpoints — OpenAI itself, Ollama, LM Studio, Groq, vLLM, Gemini, the Anthropic-compatible "custom" proxy path (e.g. a LiteLLM proxy exposing the Anthropic Messages route), and Google Vertex AI — are **wired but not regularly tested**. They work in principle and you can configure them via `~/.lynox/config.json` or environment variables, but expect rough edges around tool-calling reliability. See [LLM Providers](/setup/llm-providers/).
 
-The installer walks you through provider selection and credential entry. Most users start with Anthropic — you can switch anytime in **Settings → Provider**.
+The installer walks you through provider selection and credential entry. Most users start with Anthropic — you can switch anytime in **Settings → Config**.
 
 ## Install
 

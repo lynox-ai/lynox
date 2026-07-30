@@ -58,6 +58,14 @@ export interface StoredWorkflow {
   createdAt: string;
 }
 
+/** Result of a content-schema migration pass (Move 1, PRD §4.1). */
+export interface ContentMigrationCounts {
+  /** Rows examined. */
+  scanned: number;
+  /** Rows whose blob was forward-migrated and rewritten. */
+  migrated: number;
+}
+
 export class WorkflowStore {
   private readonly db: Database.Database;
 
@@ -153,6 +161,36 @@ export class WorkflowStore {
   dropExecuted(id: string): boolean {
     const res = this.db.prepare('DELETE FROM workflows WHERE id = ?').run(id);
     return res.changes > 0;
+  }
+
+  /**
+   * Content-schema migration (Move 1, PRD §4.1). Walks EVERY stored definition
+   * and forward-migrates its `definition_json` blob to the current content
+   * version via the injected pure `transform`. Per-row + version-gated (the gate
+   * lives inside `transform`), which makes it:
+   *   - idempotent — a re-run migrates 0 (transform returns null for a current blob);
+   *   - crash-safe + resumable — each UPDATE auto-commits on its own and stamps
+   *     the new version INSIDE the blob, so the write and its idempotency marker
+   *     are the SAME atomic write (no separate marker to desync); a crash after
+   *     row K leaves 1..K migrated and the next boot resumes at K+1;
+   *   - forward-only — `transform` never downgrades.
+   *
+   * Preserves `updated_at` (like {@link rename}/{@link setConfirmedAt}): a
+   * migration is NOT a user re-save and must not reorder the library list.
+   * `transform` returns the re-serialized blob when it changed, or `null` to skip
+   * (already-current OR malformed — a row we can't parse is left untouched).
+   */
+  migrateContentSchema(transform: (raw: string) => string | null): ContentMigrationCounts {
+    const rows = this.db.prepare('SELECT id, definition_json FROM workflows').all() as Array<{ id: string; definition_json: string }>;
+    const update = this.db.prepare('UPDATE workflows SET definition_json = ? WHERE id = ?');
+    let migrated = 0;
+    for (const row of rows) {
+      const next = transform(row.definition_json);
+      if (next === null) continue;
+      update.run(next, row.id);
+      migrated++;
+    }
+    return { scanned: rows.length, migrated };
   }
 
   /** Read a single workflow definition (prefix-matched). */

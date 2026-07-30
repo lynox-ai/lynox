@@ -6,7 +6,7 @@ name: Public-Repo Guard
 #
 # This is the authoritative gate: the lefthook pre-push hook runs the same
 # scan locally for fast feedback, but `git push --no-verify` bypasses it —
-# this job cannot be bypassed. Make it a required status check on main.
+# this job does not. It is a required status check on main.
 
 on:
   pull_request:

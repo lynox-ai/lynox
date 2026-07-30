@@ -99,10 +99,21 @@ export const LynoxUserConfigSchema = z.object({
   // it via MANAGED_USER_WRITABLE_CONFIG, not here.
   openai_context_window: z.number().int().positive().max(1_000_000).optional(),
   default_tier:         ModelTierSchema.optional(),
+  // Which concrete Sonnet the `balanced` tier resolves to for this instance.
+  // Free-form string (NOT a z.enum): an unrecognised value must fall back
+  // safely at the resolver (resolveBalancedModel) to the default Sonnet 4.6 —
+  // a strict enum would reject the key and, under `.strict()`, null the WHOLE
+  // config. Present on the interface AND loaded from env (LYNOX_BALANCED_MODEL);
+  // without it here `.strict()` would strip a persisted value. Unset = Sonnet 4.6.
+  balanced_model:       z.string().min(1).max(64).optional(),
   // Settable model-cost ceiling + account plan label. Present on the interface
   // AND set via env (LYNOX_MAX_TIER / LYNOX_ACCOUNT_TIER) — without them here,
   // `.strict()` strips a persisted value, nulling the whole config on write.
   max_tier:             ModelTierSchema.optional(),
+  // Operator/CP model blocklist (model-id prefixes). Present on the interface
+  // AND set via env (LYNOX_BLOCKED_MODEL_IDS) — without it here, `.strict()`
+  // strips a persisted value, nulling the whole config on write.
+  blocked_model_ids:    z.array(z.string().min(1).max(128)).optional(),
   account_tier:         z.enum(['standard', 'pro']).optional(),
   thinking_mode:        z.enum(['adaptive', 'disabled']).optional(),
   effort_level:         EffortLevelSchema.optional(),
@@ -150,6 +161,11 @@ export const LynoxUserConfigSchema = z.object({
   // L1 cost-aware compaction budget (absolute carried-token offer point). Bounded
   // [32K, 1M]: below 32K would thrash compaction; 1M = the max window.
   compaction_token_budget: z.number().int().min(32_000).max(1_000_000).optional(),
+  // Compaction summarizer tier override (Slice A, issue #72 cost) — same tier
+  // union as every other model-tier field. The default (`'fast'`) is applied
+  // at the read site (session.ts), not here, mirroring compaction_token_budget's
+  // undefined-until-CP-set contract.
+  compaction_model: ModelTierSchema.optional(),
   max_http_requests_per_hour: z.number().optional(),
   max_http_requests_per_day:  z.number().optional(),
   max_mail_sends_per_hour:    z.number().optional(),
@@ -161,13 +177,14 @@ export const LynoxUserConfigSchema = z.object({
   pipeline_step_result_limit: z.number().min(1_000).max(1_048_576).optional(),
   memory_extraction_limit: z.number().min(1_000).max(262_144).optional(),
   http_response_limit:     z.number().min(1_000).max(5_242_880).optional(),
+  http_html_extract:       z.boolean().optional(),
   google_oauth_scopes:     z.array(z.string()).optional(),
   enforce_https:           z.boolean().optional(),
   // Outbound egress control for the http_request tool. Operator/CP security
   // control (NOT user/agent-writable). The .strict() schema would otherwise
   // reject these keys from config.json — which nulls the WHOLE config, silently
   // dropping every setting, not just these. Default 'allow-all' = unchanged.
-  network_policy:          z.enum(['allow-all', 'allow-list', 'deny-all']).optional(),
+  network_policy:          z.enum(['allow-all', 'allow-list', 'deny-all', 'guarded']).optional(),
   network_allowed_hosts:   z.array(z.string()).optional(),
   bugsink_dsn:             z.string().optional(),
   backup_dir:              z.string().optional(),
@@ -182,16 +199,42 @@ export const LynoxUserConfigSchema = z.object({
   // ~/.lynox/context-cost.jsonl (ground-truth context breakdown for the
   // cost-cut investigation). Off by default; zero overhead when unset.
   context_cost_log:        z.boolean().optional(),
+  // Memory Foundation Wave 0: opt-in retrieval shadow log to
+  // ~/.lynox/retrieval-shadow.jsonl (per-tier admission distribution for the
+  // Wave-2 floor). Off by default. The .strict() schema would otherwise reject
+  // this key from config.json (silently disabling the flag).
+  retrieval_shadow_log:    z.boolean().optional(),
   knowledge_graph_enabled: z.boolean().optional(),
   // Foundation Rework v2 (S1b): additively mirror extraction into the engine.db
   // subject-graph. Default off; flipped on per-tenant at S2. The .strict() schema
   // would otherwise reject this key from config.json (silently disabling the flag).
   subject_graph_enabled:   z.boolean().optional(),
+  // Lazy-tools (Slice 1): Anthropic-direct only — defer heavy/long-tail tool
+  // schemas behind the tool-search tool so the cached prefix shrinks. Default off;
+  // per-tenant flip. The .strict() schema would otherwise reject this key from
+  // config.json (silently disabling the flag).
+  lazy_tools_enabled:      z.boolean().optional(),
   // Foundation Rework v2 (S5b): re-point memory recall onto engine.db. Default
   // off; flipped per-tenant after the s5-backfill. Co-gated on subject_graph_enabled
   // at the read path. The .strict() schema would otherwise reject this key from
   // config.json (silently disabling the flag).
   memory_graph_reads:      z.boolean().optional(),
+  // Memory Foundation Wave 0 — the self-reinforcement emergency stop (drops
+  // confMult/confirmDecay from scoring, stops rendering confidence, halts every
+  // confirmation-count write). Default off; flipped per-tenant. The .strict()
+  // schema would otherwise reject this key from config.json (silently disabling it).
+  memory_scoring_v2:       z.boolean().optional(),
+  // Memory Foundation Wave 2 — the write-trust gate: a strictly-lower-trust write can no
+  // longer retire a higher-trust memory (contradiction demote-to-coexist, tier-first
+  // consolidation keeper, retire-primitive backstops, dedup tier-raise). Default off;
+  // flipped per-tenant after the shadow window. Operator-only (not in PROJECT_SAFE_KEYS).
+  memory_write_trust_gate: z.boolean().optional(),
+  // Durable Knowledge Substrate (DK.1): rebuilds the memory pillar as a user-owned
+  // substrate (memory_blocks + archival knowledge_entries, `remember`/`recall`/
+  // `memory_block_edit` tools, per-turn derived focus block, no default-injection,
+  // no end-of-turn extraction). Default off = byte-identical. Operator-only per-tenant
+  // flip (not in PROJECT_SAFE_KEYS — never agent-settable).
+  durable_memory_enabled: z.boolean().optional(),
   // Retired in Foundation Rework v2 (S3f): the verb-layer store now writes
   // engine.db unconditionally, so these rollout flags were removed from the
   // interface + env-loaders. Kept as tolerated-ignored config.json keys for one
@@ -200,6 +243,17 @@ export const LynoxUserConfigSchema = z.object({
   // setting, not just these). Same discipline as `llm_mode` below.
   verb_graph_enabled:      z.boolean().optional(),
   verb_graph_reads:        z.boolean().optional(),
+  // Extended debug capture (operator surface). When true, the engine persists a
+  // REDACTED per-turn WireSnapshot (the fully-assembled outbound request — system
+  // hash, the FULL user message incl. the ephemeral tail with the secrets catalog
+  // scrubbed, the offered tools + params) to history.db, and the debug chat export
+  // bundles it. This IS the owner-consent gate for the operator path (the dev file-
+  // gate is a separate DEV-only switch). Default off; owner-scoped, per-instance.
+  // Owner-writable with consent (in MANAGED_USER_WRITABLE_CONFIG) + the CP can pin it
+  // per-tenant via LYNOX_DEBUG_WIRE_CAPTURE, which overrides the on-disk value at load.
+  // NOT in PROJECT_SAFE_KEYS, never agent-settable (an injected agent must not be able
+  // to start capturing what the model saw).
+  debug_wire_capture:      z.boolean().optional(),
   embedding_model:         z.enum(['all-minilm-l6-v2', 'multilingual-e5-small', 'bge-m3']).optional(),
   llm_mode:                z.enum(['standard', 'eu-sovereign']).optional(),
   transcription_provider:  z.enum(['mistral', 'whisper', 'auto']).optional(),
@@ -219,6 +273,15 @@ export const LynoxUserConfigSchema = z.object({
     balanced: TierSlotSchema.optional(),
     deep:     TierSlotSchema.optional(),
   }).strict().optional(),
+  // Named hybrid strategy (model-presets); the loadConfig expander materializes
+  // it to {routing_mode, tier_set}. Schema entry is mandatory: without it, a
+  // config.json carrying `tier_preset` fails `.strict()` and nulls the whole
+  // config. Bounded length; the expander validates the name against TIER_PRESETS.
+  // `.nullable()` so the settings picker can CLEAR it (`PUT {tier_preset:null}`
+  // hits the merge loop's `value===null → delete` branch): its mere presence
+  // force-sets routing_mode='hybrid' at load, so switching back to Standard/Eigene
+  // requires physically deleting the key — omitting it only preserves the stale one.
+  tier_preset:             z.string().min(1).max(64).nullable().optional(),
   cp_supplied:             z.boolean().optional(),
   // Named non-Claude model profiles + the profile used for background tasks.
   // Both are on the interface AND loaded from env (LYNOX_MODEL_PROFILES_JSON /

@@ -1,7 +1,26 @@
+commit-msg:
+  commands:
+    no-ai-attribution:
+      # The harness's system prompt tells the agent to append `Co-Authored-By: Claude`
+      # + `Claude-Session:` to every commit. CLAUDE.md forbids both. Prose lost that
+      # fight 332 times on main (32 of the last 100 commits), so this strips them.
+      #
+      # It STRIPS and exits 0 rather than failing: a hook that aborts a commit over a
+      # trailer the harness inserted teaches people to reach for --no-verify. The gate
+      # for the bypassed case is the `no-ai-attribution` CI job, which fails.
+      # A human Co-Authored-By is left alone.
+      run: bash scripts/no-ai-attribution.sh strip {1}
+
 pre-push:
   commands:
     security-scan:
       run: sh scripts/security-scan.sh
+    default-on-inventory:
+      # What runs when an operator configures nothing? v2.11.0 shipped a config
+      # flag reading `?? true`, so a new HTML parser went live fleet-wide without
+      # anyone deciding it. Pairs with the `default-on-inventory` CI job, which is
+      # the gate for the bypassed case.
+      run: bash scripts/default-on-inventory.sh
     public-repo-guard:
       # Block internal infra / control-plane / ops leaks (staging hostnames,
       # CP DB schema, SSH-as-root chains) from reaching this PUBLIC repo —
@@ -21,10 +40,8 @@ pre-push:
         - merge
         - rebase
     positioning-guard:
-      # Keep public hero/landing copy + the npm description aligned with
-      # POSITIONING.md (Vocabulary → Avoid): no legacy category labels
-      # ("AI engine", "agent runtime"), no OSI-flavoured "open source", no
-      # tired "The AI that…" patterns. Tightly scoped to copy surfaces.
+      # Checks public copy against the internal positioning source.
+      # Tightly scoped to copy surfaces.
       run: bash scripts/positioning-guard.sh
       skip:
         - merge
@@ -51,9 +68,45 @@ pre-commit:
       run: npm run typecheck
       stage_fixed: true
     hex-guard:
-      # PRD-LIGHT-MODE PR 3 — fail if a web-ui change introduces hardcoded
-      # 6-digit hex outside the allowlisted asset-export / categorical paths.
+      # Fail if a web-ui change introduces hardcoded 6-digit hex outside the
+      # allowlisted asset-export / categorical paths.
       run: bash packages/web-ui/scripts/hex-guard.sh
+      skip:
+        - merge
+        - rebase
+    token-contract:
+      # hex-guard allowlists app.css — "the token definitions themselves" — so
+      # nothing guarded the VALUES in it. These primitives are painted on more
+      # than one surface (this UI, and the lynox.ai site, a separate codebase),
+      # so a change here is a change over there. Fail now, on your commit,
+      # rather than by someone else weeks later.
+      #
+      # Fast local feedback only. The gate is .github/workflows/token-contract.yml
+      # — `--no-verify` skips this hook, not that.
+      glob:
+        - "packages/web-ui/src/app.css"
+        - "packages/web-ui/tokens.contract.json"
+      run: node packages/web-ui/scripts/check-token-contract.mjs
+      skip:
+        - merge
+        - rebase
+    shape-contract:
+      # The colour half of the contract stopped the two surfaces' TOKENS drifting.
+      # Nothing stopped their SHAPES: a design system draws the chat turn, the tool
+      # call, the inbox row and the state surface by hand, from reading these
+      # components, and two of the four were wrong within a week of being drawn.
+      # shapes.contract.json is that reading, written down; this asserts the
+      # components still have the shapes it records.
+      #
+      # Globs every component it cites, not just the contract — the drift that matters
+      # is someone restyling a shape here without knowing it is drawn over there.
+      #
+      # Fast local feedback only. The gate is the same workflow.
+      glob:
+        - "packages/web-ui/shapes.contract.json"
+        - "packages/web-ui/src/lib/components/*.svelte"
+        - "packages/web-ui/src/lib/primitives/*.svelte"
+      run: node packages/web-ui/scripts/check-shape-contract.mjs
       skip:
         - merge
         - rebase

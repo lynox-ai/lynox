@@ -5,6 +5,8 @@
  */
 
 import type { ModelTier, EffortLevel, AutonomyLevel } from '../types/index.js';
+// Wire contract (CP emits `LYNOX_ACCOUNT_TIER`) — SoT in src/contract/vocab.ts.
+import type { AccountTier } from '../contract/vocab.js';
 
 export interface RoleConfig {
   readonly model: ModelTier;
@@ -47,7 +49,10 @@ export const BUILTIN_ROLES: Record<string, RoleConfig> = {
     model: 'fast',
     effort: 'medium',
     autonomy: 'supervised',
-    allowTools: ['ask_user', 'memory_store', 'memory_recall'],
+    // Superset: the legacy memory_store/recall AND the DK.1 remember/recall — allowTools is a
+    // whitelist, so listing the not-registered pair for the current flag state is a harmless
+    // no-op, and the collector role works under both flag states (H9 — no partial swap).
+    allowTools: ['ask_user', 'memory_store', 'memory_recall', 'remember', 'recall', 'archive_search'],
     description: 'Structured Q&A with user. Minimal tools.',
   },
 };
@@ -62,7 +67,7 @@ export function getRoleNames(): string[] {
   return Object.keys(BUILTIN_ROLES);
 }
 
-export type AccountTier = 'standard' | 'pro';
+export type { AccountTier };
 
 /**
  * Resolve an explicit model override. Historically this GATED the `deep` tier

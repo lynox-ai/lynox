@@ -221,9 +221,10 @@ jobs:
       # Pro's staging-engine-redeploy.yml listens for this event and calls
       # the prod control plane admin API to `docker pull + recreate` the
       # staging managed instance with the freshly pushed :staging image.
-      # Keeps the prod admin token out of this public repo — only the
-      # dispatch PAT lives here, which can only trigger workflows, not
-      # call the admin API directly.
+      # Keeps the prod admin token out of this public repo — the dispatch PAT
+      # here cannot call the admin API. It is still a write credential on the
+      # deployment repository, not a trigger-only one; scope and rotation are
+      # tracked there.
       - name: Dispatch engine redeploy to lynox-pro
         env:
           PRO_DISPATCH_TOKEN: ${{ secrets.PRO_DISPATCH_TOKEN }}

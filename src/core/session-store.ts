@@ -6,11 +6,35 @@ import type { ThreadRecord } from './thread-store.js';
 
 const VERBATIM_THRESHOLD = 80;
 const RECENT_COUNT = 40;
+// Hard cap on how many post-summary messages a resume loads verbatim. The delta
+// slice below normally loads EVERY message after the summary's coverage point (so
+// no turn between the summarized point and now is silently dropped), but a
+// pathological session that ran hundreds of turns since its last compaction
+// without re-compacting would otherwise load an unbounded tail — cap it here.
+// `_truncateHistory` + auto-compaction bound the rest.
+const MAX_RESUME_DELTA = 120;
 
-function buildResumeContext(thread: ThreadRecord, messages: BetaMessageParam[]): BetaMessageParam[] {
-  const recent = messages.slice(-RECENT_COUNT);
-
+export function buildResumeContext(thread: ThreadRecord, messages: BetaMessageParam[]): BetaMessageParam[] {
   if (thread.summary) {
+    // Slice B (#86/#80): load [summary + every message SINCE the summary's
+    // coverage point], not a fixed recent window. `compact()` (durable-summary
+    // write) and the resume-time generateThreadSummary both set `summary_up_to`
+    // to the boundary the summary covers up to; slicing from there loads the
+    // mid-section the fixed last-40 window used to silently drop whenever the
+    // summary lagged the tail (a session that compacted, then ran more turns
+    // before eviction). Guard the value: trust only a positive in-range integer
+    // (a legacy row with summary set but `summary_up_to` unset/0 falls back to
+    // the previous fixed-window behavior). The delta is capped at
+    // MAX_RESUME_DELTA — strictly more coverage than the old 40 window, but NOT
+    // an unconditional "no turn dropped": a tail longer than the cap still falls
+    // back to the recent window (rare — occupancy-triggered auto-compaction
+    // normally re-fires first; a freshness-triggered re-summarize to close that
+    // residual gap is a deferred follow-up).
+    const len = messages.length;
+    const upTo = thread.summary_up_to;
+    const recent = Number.isInteger(upTo) && upTo > 0 && upTo <= len
+      ? messages.slice(Math.max(upTo, len - MAX_RESUME_DELTA))
+      : messages.slice(-RECENT_COUNT);
     return [
       { role: 'user' as const, content: '[This conversation is being resumed. Below is a summary of earlier messages.]' },
       { role: 'assistant' as const, content: thread.summary },
@@ -19,6 +43,7 @@ function buildResumeContext(thread: ThreadRecord, messages: BetaMessageParam[]):
   }
 
   // No summary yet — load recent messages with a placeholder
+  const recent = messages.slice(-RECENT_COUNT);
   const dropped = messages.length - RECENT_COUNT;
   return [
     { role: 'user' as const, content: `[Resuming conversation — ${dropped} earlier messages not loaded]` },
@@ -56,7 +81,20 @@ async function generateThreadSummary(
     const summarySession = engine.createSession({ model: 'fast' });
     const formatted = formatMessagesForSummary(messages.slice(0, -RECENT_COUNT));
     const prompt = `Summarize this conversation concisely in 3-5 paragraphs. Focus on: what was discussed, decisions made, current state of work, and any pending items.\n\n${formatted.slice(0, 30_000)}`;
-    const summary = await summarySession.run(prompt);
+    // Run as an INTERNAL summary (mirror compact()): a budget/credit guard block is
+    // then THROWN (InternalRunBlockedError) instead of RETURNED as a string, so a
+    // guard block ("Daily spending cap reached…") can never be persisted as the
+    // thread's authoritative summary — which would replace the real conversation
+    // summary on every future resume (permanent context loss). A throw lands in the
+    // catch → nothing persisted → retried on the next resume.
+    let summary = await summarySession.run(prompt, { noTools: true, internal: true });
+    if (!summary) return; // empty reply / provider blip — leave prior summary, retry next resume
+
+    // Mask any secret the summarizer echoed from the conversation BEFORE persisting:
+    // threads.summary rides backup / migration-export / debug-export and is read back
+    // on resume, so a raw secret must not live there (mirror compact()'s pre-persist mask).
+    const secretStore = engine.getSecretStore();
+    if (secretStore) summary = secretStore.maskSecrets(summary);
 
     const threadStore = engine.getThreadStore();
     if (threadStore) {

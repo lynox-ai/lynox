@@ -14,7 +14,8 @@ import { fetchPinned } from './network-guard.js';
 import { readBodyCapped, stripUntrustedSeparators } from './sanitize.js';
 import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
-import type { TriggerRecord } from '../types/index.js';
+import type { TriggerRecord, PromptText } from '../types/index.js';
+import { flattenPrompt } from './prompt-value.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
 import { reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling } from './session-budget.js';
 
@@ -481,7 +482,11 @@ export class WorkerLoop {
     session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous', profile: workerProfile });
 
     // Wire promptUser so background tasks can ask questions via notifications
-    session.promptUser = (question: string, options?: string[]): Promise<string> => {
+    session.promptUser = (rawQuestion: string | PromptText, options?: string[]): Promise<string> => {
+      // A background task surfaces through a notification body, which is plain
+      // text with no renderer — so the frame/value split has nothing to protect
+      // here and the flattened form is the honest one.
+      const question = flattenPrompt(rawQuestion);
       return new Promise<string>((resolve) => {
         const active = this.activeTasks.get(task.id);
         if (active) {
@@ -492,6 +497,9 @@ export class WorkerLoop {
           body: question,
           taskId: task.id,
           priority: 'high',
+          // Deep-link to the asking thread so a tap opens the conversation where
+          // the answer is expected (sw.js routes `data.threadId` \u2192 `/app?thread=\u2026`).
+          data: { threadId: session.sessionId },
           inquiry: { question, options },
         });
       });
@@ -501,7 +509,9 @@ export class WorkerLoop {
       ? `Task: ${task.title}\n\n${task.description}`
       : `Task: ${task.title}`;
 
-    const result = await session.run(prompt);
+    // Attribute the run to its trigger source (P1, DEF-0097) so this scheduled
+    // automation turn is distinguishable from a user chat turn in run-history.
+    const result = await session.run(prompt, { triggerOrigin: task.source });
     const truncatedResult = result.length > MAX_TASK_RESULT_CHARS
       ? result.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : result;
@@ -517,6 +527,10 @@ export class WorkerLoop {
         body: truncatedResult,
         taskId: task.id,
         priority: 'normal',
+        // Deep-link the notification to THIS run's chat thread so a tap opens the
+        // result instead of a blank new chat (the service worker routes
+        // `data.threadId` \u2192 `/app?thread=\u2026`). session.sessionId is the thread id.
+        data: { threadId: session.sessionId },
         followUps: [
           { label: 'Details', task: `Show me more details about: ${task.title}` },
           { label: 'Run again', task: task.description ?? task.title },
@@ -723,7 +737,7 @@ export class WorkerLoop {
     // An empty signal (error/blank page) would otherwise collapse distinct
     // responses to the same hash — key it by raw length so a 404 and a 500
     // don't read as "no change" from each other.
-    const hashInput = currentSignal.length > 0 ? currentSignal : ` empty:${fetchResult.length}`;
+    const hashInput = currentSignal.length > 0 ? currentSignal : `\u0000empty:${fetchResult.length}`;
     const currentHash = createHash('sha256').update(hashInput).digest('hex');
     const previousHash = config.last_hash;
 
@@ -765,7 +779,15 @@ export class WorkerLoop {
       ? `You are monitoring ${config.url} for changes. This is the first check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nSummarize what the page currently contains in 2-3 sentences. This will be the baseline for future comparisons.`
       : `You are monitoring ${config.url} for changes. The content changed since the last check. Here is the current page content (already fetched and cleaned for you — do NOT re-fetch the URL):\n\n${contentForPrompt}\n\nPrevious summary was: ${task.last_run_result?.slice(0, 2000) ?? 'unknown'}\n\nSummarize what changed in 2-3 sentences.`;
 
-    const analysis = await analysisSession.run(analysisPrompt);
+    // noTools: this turn embeds up to 8 KB of the WATCHED PAGE — content the
+    // user did not author and an attacker may control (a monitored forum, a
+    // competitor page). A summarize turn needs no tools, so suppress the whole
+    // registry: an injected "run bash …" then has nothing to call, rather than
+    // relying on the consent gate (this session is autonomous + headless, where
+    // a non-critical dangerous tool would AUTO-GRANT — see permission-guard
+    // _detectDanger). Removing the capability beats gating it. Same mechanism the
+    // compaction summarizer uses for the same "pure summarize" shape.
+    const analysis = await analysisSession.run(analysisPrompt, { noTools: true, triggerOrigin: 'watch' });
     const truncatedAnalysis = analysis.length > MAX_TASK_RESULT_CHARS
       ? analysis.slice(0, MAX_TASK_RESULT_CHARS) + '\u2026'
       : analysis;

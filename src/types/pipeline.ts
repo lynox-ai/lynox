@@ -68,8 +68,6 @@ export interface PipelineResult {
   totalCostUsd: number;
 }
 
-export type PipelineExecutionMode = 'tracked' | 'orchestrated';
-
 /**
  * Pipeline interaction mode.
  * - 'interactive' allows human-in-the-loop tools (ask_user, ask_secret) and
@@ -88,14 +86,6 @@ export interface PlannedPipeline {
   estimatedCost: number;
   createdAt: string;
   executed: boolean;
-  /**
-   * Legacy execution-mode marker. Retained on the type (no migration) so old
-   * stored rows still deserialize; new pipelines always run through the
-   * orchestrator and are written `'orchestrated'`. No code branches on this
-   * field anymore — the `'tracked'` path was removed (D9). Legacy rows
-   * carrying `'tracked'` are inert.
-   */
-  executionMode: PipelineExecutionMode;
   /** Template pipelines can be re-executed (for scheduling) */
   template: boolean;
   /**
@@ -154,6 +144,18 @@ export interface PlannedPipeline {
    * (`resolveHeadlessLimits`). Round-trips on the blob.
    */
   limits?: WorkflowLimits | undefined;
+  /**
+   * Content-model schema version of THIS stored definition blob (Move 1, PRD
+   * §4.1). Orthogonal to the engine.db DDL `schema_version` TABLE — this versions
+   * the JSON CONTENT shape, not the table structure. Optional on the in-memory
+   * type because legacy blobs predate it, but AUTHORITATIVE at storage: stamped
+   * `CURRENT_PIPELINE_SCHEMA_VERSION` on every native write
+   * (`insertPlannedPipeline`) and guaranteed present on every stored row by the
+   * boot content-migration (`WorkflowStore.migrateContentSchema`). Backfilled on
+   * read for any blob still somehow unstamped. The version-negotiation import
+   * validator (Slice 3) refuses a blob whose version is newer-than-known.
+   */
+  schema_version?: number | undefined;
 }
 
 // === Process Capture ===

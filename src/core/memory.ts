@@ -8,15 +8,17 @@ import { classifyScope } from './scope-classifier.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { scopeToDir } from './scope-resolver.js';
+import { trimMemoryContent } from './memory-file.js';
 import { getLynoxDir } from './config.js';
 import { getErrorMessage } from './utils.js';
 import { ensureDir } from './atomic-write.js';
 import { detectInjectionAttempt } from './data-boundary.js';
+import { fireBeforeRunGate, reportMeteredCost, type HookHost } from './metered-request.js';
+import { calculateCost } from './pricing.js';
 
 const DEFAULT_DIR = 'memory';
 const CONTEXT_TTL_DAYS = 30;
 const GLOBAL_SCOPE: MemoryScopeRef = { type: 'global', id: 'global' };
-const MAX_MEMORY_FILE_BYTES = 256 * 1024;
 
 /** Max length of agent output passed to extraction (prevents token waste and injection surface). */
 const MAX_EXTRACTION_INPUT = 16_000;
@@ -117,6 +119,7 @@ export class Memory implements IMemory {
   private readonly maskFn: ((text: string) => string) | null;
   private apiKey: string | undefined;
   private apiBaseURL: string | undefined;
+  private meteredHost: HookHost | null = null;
   private readonly _flatFileEnabled: boolean;
   private _activeScopes: MemoryScopeRef[] = [];
   private _autoScope = true;
@@ -147,6 +150,17 @@ export class Memory implements IMemory {
     this.contextId = contextId ?? null;
     this.maskFn = maskFn ?? null;
     this._flatFileEnabled = flatFileEnabled ?? true;
+  }
+
+  /**
+   * Route the per-turn `fast`-tier extraction spend through the managed
+   * onBeforeRun gate + onAfterRun debit (same lifecycle as the KnowledgeLayer
+   * extractor and chat/voice). Without this the auto-extraction pool-key call
+   * is billed to nobody on managed and skips the credit gate. No-op on
+   * self-host (no hooks registered).
+   */
+  setMeteredHost(host: HookHost | null): void {
+    this.meteredHost = host;
   }
 
   /**
@@ -191,16 +205,10 @@ export class Memory implements IMemory {
       : GLOBAL_SCOPE;
   }
 
-  /** Trim content to MAX_MEMORY_FILE_BYTES by removing oldest lines. */
-  private _trimToLimit(content: string): string {
-    let result = content;
-    while (Buffer.byteLength(result, 'utf-8') > MAX_MEMORY_FILE_BYTES) {
-      const lines = result.split('\n');
-      if (lines.length <= 1) break;
-      lines.shift();
-      result = lines.join('\n');
-    }
-    return result;
+  /** The scope a bare (unscoped) mutation lands in — so a caller (e.g. MemoryFacade)
+   *  can mirror the same write to the knowledge layer under the matching scope. */
+  currentScope(): MemoryScopeRef {
+    return this._defaultScope();
   }
 
   // === Core CRUD — delegate to scoped methods ===
@@ -211,7 +219,7 @@ export class Memory implements IMemory {
 
   async save(ns: MemoryNamespace, content: string): Promise<void> {
     const scope = this._defaultScope();
-    const trimmed = this._trimToLimit(content);
+    const trimmed = trimMemoryContent(content);
     if (this._flatFileEnabled) {
       const dir = this._scopeDir(scope);
       await ensureDir(dir);
@@ -230,6 +238,17 @@ export class Memory implements IMemory {
 
   async update(ns: MemoryNamespace, oldText: string, newText: string): Promise<boolean> {
     return this.updateScoped(ns, oldText, newText, this._defaultScope());
+  }
+
+  /**
+   * Apply the configured secret-masking to arbitrary text — the SAME maskFn the
+   * flat-file append path uses (`appendScoped`) — so a caller persisting a parallel
+   * copy (the KG recall mirror in MemoryFacade) masks it identically. Without this,
+   * the flat file stores the masked line while the KG (the recall authority) stores
+   * the raw secret. Identity no-op when no maskFn is wired or the text has no secret.
+   */
+  maskText(text: string): string {
+    return this.maskFn ? this.maskFn(text) : text;
   }
 
   hasContent(): boolean {
@@ -374,7 +393,7 @@ export class Memory implements IMemory {
     if (content?.includes(safeText)) return;
 
     const raw = content ? `${content}\n${entry}` : entry;
-    const updated = this._trimToLimit(raw);
+    const updated = trimMemoryContent(raw);
     if (this._flatFileEnabled) {
       const dir = this._scopeDir(scope);
       await ensureDir(dir);
@@ -439,10 +458,14 @@ export class Memory implements IMemory {
 
   async updateScoped(ns: MemoryNamespace, oldText: string, newText: string, scope: MemoryScopeRef): Promise<boolean> {
     const current = await this.loadScoped(ns, scope);
-    if (!current || !current.includes(oldText)) return false;
+    // Guard the empty-oldText footgun: `''.includes('')` is always true and
+    // `replace('', x)` prepends silently, so a malformed request (missing/renamed
+    // fields) would report success having corrupted or no-op'd the doc. An empty
+    // search text is never a real edit → refuse it.
+    if (!oldText || !current || !current.includes(oldText)) return false;
 
     const raw = current.replace(oldText, newText);
-    const updated = this._trimToLimit(raw);
+    const updated = trimMemoryContent(raw);
     if (this._flatFileEnabled) {
       const dir = this._scopeDir(scope);
       await ensureDir(dir);
@@ -452,7 +475,7 @@ export class Memory implements IMemory {
     return true;
   }
 
-  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined): Promise<void> {
+  async maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined): Promise<void> {
     try {
       if (!finalAnswer || finalAnswer.length < 50) return;
 
@@ -484,6 +507,13 @@ export class Memory implements IMemory {
         ? finalAnswer.slice(0, extractionLimit)
         : finalAnswer;
 
+      // Route the auto-extraction pool-key spend through the managed gate: when
+      // the tenant's balance is exhausted the onBeforeRun hook throws →
+      // blockedReason is set → skip the extraction entirely (fail-closed),
+      // matching the KnowledgeLayer extractor. No-op on self-host (no hooks).
+      const extractGate = this.meteredHost ? await fireBeforeRunGate(this.meteredHost, 'fast') : null;
+      if (extractGate && extractGate.blockedReason !== null) return;
+
       const fast = resolveTierModel('fast', getActiveProvider());
       const fastClient = clientForTierSnapshot(fast, this.client, getActiveProvider());
       const stream = fastClient.beta.messages.stream({
@@ -496,6 +526,22 @@ export class Memory implements IMemory {
         }],
       });
       const response = await stream.finalMessage();
+
+      // Debit the spend BEFORE any early return so an empty extraction still
+      // bills the tenant (mirrors the KG extractor). reportMeteredCost no-ops on
+      // zero/undefined cost, so a usage-less response is a clean skip.
+      if (extractGate && this.meteredHost) {
+        const u = response.usage;
+        const costUsd = u
+          ? calculateCost(fast.modelId, {
+              input_tokens: u.input_tokens,
+              output_tokens: u.output_tokens,
+              cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+              cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+            })
+          : 0;
+        reportMeteredCost(this.meteredHost, extractGate.runId, costUsd, 'fast');
+      }
 
       const textBlock = response.content.find(b => b.type === 'text');
       if (!textBlock || textBlock.type !== 'text') return;
@@ -556,9 +602,11 @@ export class Memory implements IMemory {
               scopeType: classification.scope.type,
               scopeId: classification.scope.id,
               sourceThreadId,
-              // Auto-extraction from the agent's own final answer — no tool call,
-              // so the "agent declares" path can't apply. Hardcode agent_inferred.
-              sourceType: 'agent_inferred',
+              sourceRunId,
+              // Auto-extraction from the agent's own final answer — the `agent` channel
+              // (Wave 1.3 derives agent_inferred from it). The turn is clean by construction:
+              // the extraction call is gated off on an untrusted turn (Wave 1.5 abstinence).
+              sourceChannel: 'agent',
             });
           }),
         );
@@ -566,8 +614,8 @@ export class Memory implements IMemory {
         await Promise.all(
           entries.map(async ([ns, text]) => {
             await this.append(ns as MemoryNamespace, text);
-            // Auto-extraction (no tool call) → conservative agent_inferred tier.
-            channels.memoryStore.publish({ namespace: ns, content: text, sourceThreadId, sourceType: 'agent_inferred' });
+            // Auto-extraction (no tool call) → `agent` channel → agent_inferred (Wave 1.3).
+            channels.memoryStore.publish({ namespace: ns, content: text, sourceThreadId, sourceRunId, sourceChannel: 'agent' });
           }),
         );
       }

@@ -1,21 +1,23 @@
 import { randomUUID } from 'node:crypto';
 
-import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider } from '../../types/index.js';
-import { getDefaultMaxTokens } from '../../types/index.js';
+import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent } from '../../types/index.js';
+import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, RunAbortedError } from '../../core/agent.js';
+import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
 import type { AgentConfig } from '../../types/index.js';
 import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
 import { channels } from '../../core/observability.js';
 import { getRole, getRoleNames } from '../../core/roles.js';
-import { resolveRunModel } from '../../core/tier-resolver.js';
+import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, getActiveRoutingMode } from '../../core/tier-resolver.js';
+import { resolveProviderApiKey } from '../../core/llm/provider-keys.js';
 import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget } from '../../core/session-budget.js';
 import { escapeXml, wrapUntrustedData } from '../../core/data-boundary.js';
-import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../../core/prompts.js';
+import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId } from '../../core/prompts.js';
 import {
   DEFAULT_SPAWN_BUDGET_USD,
   DEFAULT_SPAWN_MAX_TURNS,
@@ -135,6 +137,75 @@ export function resolveChildProviderConfig(
   };
 }
 
+/**
+ * Full wire + creds a spawned child Agent is built with, chosen from the tier the
+ * child resolved to — the SEAM the hybrid-spawn provider bug is pinned to.
+ *
+ * The child Agent is always CONSTRUCTED FRESH (no ambient-client reuse), so it
+ * must carry an explicit, self-consistent provider+model+key. Three cases:
+ *
+ *   1. **Cross-provider hybrid slot** (`crossProviderSlot`) — the slot drives the
+ *      wire + creds (Slice 2). A slot that names a DIFFERENT provider than base
+ *      is key-enriched upstream; but a slot that is the SAME provider as base and
+ *      only carries an `api_base_url` is ALSO reported cross (see
+ *      `hybridSlotClientConfig`) yet `enrichTierSetCreds` deliberately left it
+ *      key-LESS (same-provider slots relied on the ambient client's key, which a
+ *      fresh child doesn't have). So resolve the provider's key when the slot
+ *      didn't supply one — else the child mis-routes / 401s with an empty key.
+ *
+ *   2. **Hybrid BASE-fallback tier** (`routing_mode==='hybrid'`, no cross slot) —
+ *      resolve from the BASE provider, NOT the parent. In hybrid the parent runs
+ *      on ITS OWN tier's slot (e.g. a Sonnet `balanced` main on the anthropic
+ *      wire), so inheriting the parent's provider would pair this child's
+ *      base-tier model (ministral-8b) with the parent's anthropic endpoint → a
+ *      `404 no Route matched` (the v2.1.1 bug: fast collectors died silently).
+ *      Mirror the session's base-tier resolution. An explicit `profile` opts out
+ *      → case 3, which honours it.
+ *
+ *   3. **Standard mode (or an explicit profile)** — inherit the parent. This
+ *      closes the managed-tier staging bug where a live UI provider-switch isn't
+ *      yet in `config.json`; in standard mode the parent IS on the base provider,
+ *      so inheritance is correct.
+ *
+ * Pure + table-testable: the caller passes a `resolveKey` closure (bound to
+ * `resolveProviderApiKey` over the parent's secret store) so no SecretStore is
+ * needed in tests.
+ */
+export function resolveSpawnChildProviderConfig(input: {
+  hybridSlot: ReturnType<typeof hybridSlotClientConfig>;
+  routingMode: 'standard' | 'hybrid';
+  profile: ModelProfile | undefined;
+  parent: ProviderConfigSnapshot | null;
+  baseProvider: LLMProvider;
+  userConfig: LynoxUserConfig;
+  /** Endpoint-aware: 'openai' alone cannot tell Mistral from Groq from a local Ollama. */
+  resolveKey: (provider: LLMProvider, apiBaseURL?: string) => string | undefined;
+}): ChildProviderConfig {
+  const { hybridSlot, routingMode, profile, parent, baseProvider, userConfig, resolveKey } = input;
+
+  if (hybridSlot.crossProviderSlot) {
+    return {
+      provider: hybridSlot.provider,
+      apiKey: hybridSlot.apiKey ?? resolveKey(hybridSlot.provider, hybridSlot.apiBaseURL),
+      apiBaseURL: hybridSlot.apiBaseURL,
+      openaiModelId: hybridSlot.openaiModelId,
+      openaiAuth: undefined,
+    };
+  }
+
+  if (!profile && routingMode === 'hybrid') {
+    return {
+      provider: baseProvider,
+      apiKey: resolveKey(baseProvider, userConfig.api_base_url),
+      apiBaseURL: userConfig.api_base_url,
+      openaiModelId: userConfig.openai_model_id,
+      openaiAuth: undefined,
+    };
+  }
+
+  return resolveChildProviderConfig(profile, parent, userConfig);
+}
+
 // Control characters (incl. CR/LF) that could be used to spoof log lines or
 // break terminal rendering when `name` is echoed in error messages, channel
 // events, or the `## ${name}` markdown header.
@@ -180,46 +251,203 @@ function validateSpawnInput(input: SpawnAgentInput): void {
   }
 }
 
-async function executeThinker(
-  spec: SpawnSpec,
-  parentAgent: IAgent,
-  parentOnStream: StreamHandler | null,
-  childDepth: number,
-): Promise<{ result: string; childRunId: string | undefined; model: string }> {
-  // Load role if specified
-  const resolved = spec.role ? getRole(spec.role) : undefined;
-  if (spec.role && !resolved) {
-    throw new Error(
-      `Unknown role "${spec.role}". Available roles: ${getRoleNames().join(', ')}. ` +
-      `If none of these fit, omit the "role" field and set model/effort/tools directly.`,
-    );
-  }
+/**
+ * Structured error detail for a failed spawn child's `error_text` column. The
+ * compact `stop_reason` gets a 200-char slice of the message; `error_text` gets
+ * the FULL detail — name, an HTTP `status` when the SDK error carries one (so a
+ * provider mis-route surfaces as `[404] …` not a bare message), and the message.
+ * Without this the runs row records status=failed with a null error_text, which
+ * makes a silent sub-agent failure undiagnosable after the fact (the exact gap
+ * that hid the v2.1.1 hybrid 404s until the DB was read by hand).
+ */
+export function formatSpawnError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const status = (err as { status?: unknown }).status;
+  const statusPrefix = typeof status === 'number' ? `[${status}] ` : '';
+  return `${statusPrefix}${err.name}: ${err.message}`;
+}
 
-  // 4-tier resolution: spec fields > role defaults > user config > global default
-  const userConfig = loadConfig();
+/**
+ * Does a spawn `profile` route a child to a model whose cost band exceeds the
+ * tenant's `max_tier` ceiling? A profile pins a concrete `model_id` that bypasses
+ * the tier clamp (it wins over the resolved tier), so this is the guard that keeps
+ * an agent-set (hence prompt-injectable) profile from escaping the cost ceiling.
+ *
+ * REFUSE, not clamp: a profile is a specific endpoint, so you cannot substitute a
+ * cheaper model on it (DEF-0080). Semantics:
+ *  - no ceiling (`max_tier` unset, i.e. self-host default) → never exceeds.
+ *  - `max_tier: 'deep'` → not restrictive (nothing is above deep) → never exceeds,
+ *    including an unregistered model.
+ *  - a restrictive ceiling (`fast`/`balanced`): a REGISTERED model exceeds if its
+ *    tier is above the ceiling; an UNREGISTERED model (no known tier) is refused
+ *    conservatively — its band can't be proven within the ceiling.
+ */
+export function profileExceedsMaxTier(profileModelId: string, maxTier: ModelTier | undefined): boolean {
+  // Delegates to the shared predicate — the same rule now guards the tier
+  // chokepoint (`resolveRunModel`), so a raw pipeline `step.model` id is refused
+  // the same way a profile is (DEF-0080). (`spec.model` here is separately enum-
+  // gated to tiers, so it never reaches the chokepoint's raw-id branch.) Kept as a
+  // domain-named wrapper.
+  return modelIdExceedsMaxTier(profileModelId, maxTier);
+}
 
-  // Model profile override: if spec.profile is set, use OpenAI-compatible provider
-  const profile: ModelProfile | undefined = spec.profile
-    ? userConfig.model_profiles?.[spec.profile]
-    : undefined;
-  if (spec.profile && !profile) {
-    throw new Error(`Unknown model profile "${spec.profile}". Available: ${Object.keys(userConfig.model_profiles ?? {}).join(', ') || 'none configured'}.`);
-  }
-
+/**
+ * Which model a spawned child will actually run on, and the hybrid slot that
+ * decides its wire.
+ *
+ * Shared because three callers must give the SAME answer: the pre-spawn cost
+ * reservation, the `spawn` event the UI renders, and the child's own
+ * construction. Two of them used to compute it separately and disagreed — the
+ * reservation fell back to the tenant's `default_tier` while the run pins
+ * unroled spawns to `balanced`, so an instance configured `default_tier: 'deep'`
+ * reserved deep rates against the session ceiling for a child that then ran
+ * balanced. One function, one answer; a UI that names a third model would be
+ * worse still.
+ *
+ * Validation stays with the caller: this resolves, it does not refuse. The
+ * refusals live in `assertSpawnRoutingPermitted`, which the handler runs BEFORE
+ * it announces the batch — see that function for why the ordering is the whole
+ * point.
+ */
+export function resolveSpawnChildRouting(input: {
+  spec: SpawnSpec;
+  role: ReturnType<typeof getRole>;
+  profile: ModelProfile | undefined;
+  userConfig: LynoxUserConfig;
+  baseProvider: LLMProvider;
+}): { tier: ModelTier; model: string; hybridSlot: ReturnType<typeof hybridSlotClientConfig> } {
+  const { spec, role, profile, userConfig, baseProvider } = input;
   // Single chokepoint: the override gate (now a pass-through, D8) THEN CLAMP to
   // the cost ceiling THEN map to the provider's model id. Routing through
   // resolveRunModel adds the max_tier clamp this path previously skipped — a run
   // under a lower ceiling no longer reaches the deep model past its cap.
   const resolvedRun = resolveRunModel({
     requested: spec.model,
-    defaultTier: (resolved?.model ?? userConfig.default_tier ?? 'balanced') as ModelTier,
+    // Unroled spawns pin to `balanced`, NOT the main chat's `default_tier`
+    // (rafael 2026-07-07): once the "Main chat model" picker can raise the main
+    // chat to `deep` (Opus/Large), letting tier-unspecified spawns inherit that
+    // would silently multiply per-message cost. Roles keep their own tier
+    // (operator/collector=fast); an explicit `spec.model` still wins via
+    // resolveRunModel's `requested`.
+    defaultTier: (role?.model ?? 'balanced') as ModelTier,
     accountTier: userConfig.account_tier,
     maxTier: userConfig.max_tier,
-    provider: getActiveProvider(),
+    blockedModelIds: userConfig.blocked_model_ids,
+    provider: baseProvider,
   });
-  const modelTier = resolvedRun.tier;
-  // Profile overrides model ID + provider; otherwise use the resolved tier id.
-  const model = profile ? profile.model_id : resolvedRun.modelId;
+  // Slice 2: a subagent's tier follows the hybrid tier_set. When the resolved
+  // tier has a CROSS-provider slot (e.g. a Mistral main with a `deep`→Sonnet-5
+  // slot), the child runs on that slot's provider/model/creds with a dedicated
+  // client — no per-spawn `profile:` needed. `spec.profile` still WINS (an
+  // explicit opt-out of inheritance). Standard mode returns no slot
+  // (resolveTierModel gates on hybrid) → this is byte-parity with before.
+  const hybridSlot = profile
+    ? { crossProviderSlot: false as const }
+    : hybridSlotClientConfig(resolveTierModel(resolvedRun.tier, baseProvider), baseProvider);
+  // Profile overrides model ID + provider; a cross-provider hybrid slot supplies
+  // its own model; otherwise use the resolved tier id for the base provider.
+  const model = profile
+    ? profile.model_id
+    : (hybridSlot.crossProviderSlot ? hybridSlot.openaiModelId : resolvedRun.modelId);
+  return { tier: resolvedRun.tier, model, hybridSlot };
+}
+
+/**
+ * Every reason a spawn spec is refused outright, in one place — and it runs
+ * BEFORE the batch is announced.
+ *
+ * WHY THE ORDERING IS THE POINT. These four refusals used to live inside
+ * `executeThinker`, which is reached only after the `spawn` event has already
+ * been streamed to the client. So a `spawn_agent({profile})` naming a model above
+ * the tenant's `max_tier` was ANNOUNCED with that model id — the panel rendered
+ * `child · claude-opus-4-6` as "the model it runs on" — and only then refused.
+ * The UI named a model the run demonstrably would not use, which is precisely
+ * the failure the shared-resolution work was done to remove. Announcing after
+ * validation makes the panel's model id true by construction.
+ *
+ * `executeThinker` calls this too. Not redundancy for its own sake: the
+ * announcement path and the construction path must refuse for the same reasons,
+ * and one function is the only way that stays true when a fifth reason is added.
+ */
+function assertSpawnRoutingPermitted(spec: SpawnSpec, userConfig: LynoxUserConfig): void {
+  if (spec.role && !getRole(spec.role)) {
+    throw new Error(
+      `Unknown role "${spec.role}". Available roles: ${getRoleNames().join(', ')}. ` +
+      `If none of these fit, omit the "role" field and set model/effort/tools directly.`,
+    );
+  }
+
+  const profile: ModelProfile | undefined = spec.profile
+    ? userConfig.model_profiles?.[spec.profile]
+    : undefined;
+  if (spec.profile && !profile) {
+    throw new Error(`Unknown model profile "${spec.profile}". Available: ${Object.keys(userConfig.model_profiles ?? {}).join(', ') || 'none configured'}.`);
+  }
+  if (!profile) return;
+
+  // A profile sets `model = profile.model_id`, bypassing the `max_tier` clamp
+  // that `resolveRunModel` applies to a tier. That is the injection lever
+  // (DEF-0093): a prompt-injected `spawn({profile})` could route a child to a
+  // model above the tenant's cost ceiling. A profile cannot be clamped DOWN (you
+  // cannot substitute a different model on someone's endpoint), so the
+  // enforcement is REFUSE, not clamp (DEF-0080). Cross-provider hybrid spawn is
+  // unaffected — that runs on the tier path.
+  if (profileExceedsMaxTier(profile.model_id, userConfig.max_tier)) {
+    const band = modelCapability(profile.model_id)?.tier;
+    throw new Error(`Model profile "${spec.profile}" (${profile.model_id}) is not permitted on this instance: its cost band ${band ? `"${band}"` : '(unknown)'} exceeds the max tier "${userConfig.max_tier}". A profile pins a specific endpoint and cannot be clamped down, so the spawn is refused. Use the \`model\` tier parameter (fast/balanced/deep) for a ceiling-clamped subagent.`);
+  }
+  // Model blocklist (blocked_model_ids): a profile pinning a blocked model is
+  // refused the same way — a pinned endpoint cannot be substituted, so REFUSE,
+  // not clamp. Same checkpoint as the ceiling guard above (write-accept ⟺
+  // load-keep ⟺ resolve symmetry for the profile raw-id path).
+  if (isBlockedModelId(profile.model_id, userConfig.blocked_model_ids)) {
+    throw new Error(`Model profile "${spec.profile}" (${profile.model_id}) is not permitted on this instance: the model is blocked by the operator model blocklist. A profile pins a specific endpoint and cannot be substituted, so the spawn is refused. Use the \`model\` tier parameter (fast/balanced/deep) for a subagent on a permitted model.`);
+  }
+}
+
+async function executeThinker(
+  spec: SpawnSpec,
+  parentAgent: IAgent,
+  parentOnStream: StreamHandler | null,
+  childDepth: number,
+  /**
+   * The child's actual spend, reported once it stops for ANY reason — done,
+   * failed, or aborted. A child that dies halfway still spent what it spent,
+   * and the caller needs that number even though it never receives a result.
+   */
+  onSettled?: (costUsd: number) => void,
+): Promise<{ result: string; childRunId: string | undefined; model: string }> {
+  // 4-tier resolution: spec fields > role defaults > user config > global default
+  const userConfig = loadConfig();
+
+  // Same refusals the handler already ran before announcing the batch. Kept here
+  // because this is the path that BUILDS the child: the two must never diverge,
+  // and a fifth refusal added to one and not the other is exactly how the UI came
+  // to announce a model the run refused.
+  assertSpawnRoutingPermitted(spec, userConfig);
+
+  const resolved = spec.role ? getRole(spec.role) : undefined;
+  const profile: ModelProfile | undefined = spec.profile
+    ? userConfig.model_profiles?.[spec.profile]
+    : undefined;
+
+  const baseProvider = getActiveProvider();
+  const { tier: modelTier, model, hybridSlot } = resolveSpawnChildRouting({
+    spec, role: resolved, profile, userConfig, baseProvider,
+  });
+  // Resolve the child's wire + creds ONCE, up front, so (a) the runs row records
+  // the ACTUAL provider instead of '' — the recording gap that made the hybrid
+  // 404s show `provider=""` and hid which wire the child hit — and (b) the
+  // AgentConfig below reuses the same result (no double resolution).
+  const childProviderCfg = resolveSpawnChildProviderConfig({
+    hybridSlot,
+    routingMode: getActiveRoutingMode(),
+    profile,
+    parent: readParentProviderConfig(parentAgent),
+    baseProvider,
+    userConfig,
+    resolveKey: (provider, apiBaseURL) => resolveProviderApiKey({ provider, apiBaseURL, secretStore: parentAgent.secretStore, userConfig }),
+  });
   // A2: every sub-agent carries the grounding block. Prepend it to the
   // caller-supplied prompt, OR use it standalone when none was given — otherwise
   // the child falls through to agent.ts's bare default, which has NO grounding.
@@ -300,6 +528,7 @@ async function executeThinker(
         taskText: spec.task,
         modelTier: modelTier as string,
         modelId: model,
+        provider: childProviderCfg.provider,
         runType: 'single',
         spawnParentId: parentAgent.currentRunId,
         spawnDepth: childDepth,
@@ -320,6 +549,10 @@ async function executeThinker(
     effort,
     maxTokens: spec.max_tokens ?? profile?.max_tokens,
     memory,
+    // DK.1: inherit the durable-memory flag so a sub-agent on an ON tenant also stands down
+    // the legacy end-of-turn extraction (the child shares the parent's Memory; without this it
+    // would keep extracting into the minting channel the substrate decouples from).
+    durableMemoryEnabled: parentAgent.durableMemoryEnabled,
     onStream: parentOnStream ?? undefined,
     spawnDepth: childDepth,
     maxIterations,
@@ -337,15 +570,11 @@ async function executeThinker(
     // else inherit the parent's so a sub-agent on the same custom/BYOK/self-host
     // model trims against the real window, not the 200k id-fallback.
     nativeContextWindow: profile?.context_window ?? parentAgent.getNativeContextWindow(),
-    // Profile overrides provider credentials; otherwise INHERIT from parent
-    // agent (runtime config), not from loadConfig() (config.json file).
-    // Closes the staging bug where managed-tier UI provider-switch isn't
-    // reflected in config.json — sub-agent got undefined apiBaseURL and
-    // llm-client threw "OpenAI provider requires apiBaseURL". Profile +
-    // userConfig.* preserved as fallback for self-host paths where the
-    // parent might not have set its provider config explicitly.
-    // Precedence chain documented + unit-tested in `resolveChildProviderConfig`.
-    ...resolveChildProviderConfig(profile, readParentProviderConfig(parentAgent), userConfig),
+    // Child wire + creds, resolved from the child's OWN tier (never the parent's
+    // runtime slot in hybrid — the v2.1.1 silent-fast-spawn 404). Resolved once
+    // above so the runs row records the same provider. Rationale in
+    // `resolveSpawnChildProviderConfig`.
+    ...childProviderCfg,
     gcpProjectId: userConfig.gcp_project_id,
     gcpRegion: userConfig.gcp_region,
     userTimezone: parentAgent.userTimezone,
@@ -406,8 +635,30 @@ async function executeThinker(
     // doesn't leave a half-constructed agent in the active set).
     activeChildAgents.add(childAgent);
 
+    // DK.1 F5/S8: a child spawned from a tainted parent inherits the taint for durable writes.
+    // A prompt-injected parent's `spec.task`/`context` can carry an injected `remember(pin:true)`;
+    // the child shares the parent's KnowledgeStore but starts with a clean per-run latch, so
+    // without this an injected write would launder to active+pinned through the child. Arm the
+    // child's STICKY conversation latch (survives its send() per-run reset, unlike sawUntrustedData)
+    // so any such write routes to pending_review. Over-taints in the safe direction only.
+    if (deriveTurnUntrusted(parentAgent)) {
+      childAgent.noteUntrustedData();
+    }
+
     // Same per-turn time anchor as top-level chat / pipeline steps.
     const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone));
+
+    // Wave 1.2 replay (b): a spawned child shares the parent's Memory by default
+    // (`memory` above resolves to `parentAgent.memory` unless `isolated_memory`). If the
+    // child read untrusted content, the SHARED Memory is now tainted for the parent too —
+    // propagate the flag so the parent's own end-of-run extraction abstains. Without this
+    // the child's untrusted read is a fail-open hole in the parent's memory. Derive from the
+    // FULL union, not the bare marker — a child that read external content via a non-wrapping
+    // tool (web_research/mail/read_file) must taint the parent too, symmetric with the
+    // parent→child seed above. No-op when the child ran with isolated memory (`memory === undefined`).
+    if (memory !== undefined && deriveTurnUntrusted(childAgent)) {
+      parentAgent.noteUntrustedData?.();
+    }
 
     // T2-X1 part 5: record the child's actual LLM spend into the same
     // `runs` table the daily/monthly cost-cap aggregator reads. The
@@ -471,6 +722,10 @@ async function executeThinker(
           durationMs: Date.now() - childStart,
           status: childAborted ? 'aborted' : 'failed',
           stopReason: childAborted ? 'aborted' : (err instanceof Error ? err.message.slice(0, 200) : 'error'),
+          // Record the FULL structured error so a failed sub-agent is diagnosable
+          // (not just status=failed + a null error_text). Skipped for an abort —
+          // an intentional interruption isn't an error to store.
+          errorText: childAborted ? undefined : formatSpawnError(err),
         });
       } catch { /* swallow */ }
     }
@@ -490,6 +745,10 @@ async function executeThinker(
     throw err;
   } finally {
     if (childAgent) activeChildAgents.delete(childAgent);
+    // One place for all three exits. The success and failure branches above
+    // each read the same snapshot for their own bookkeeping; reporting it here
+    // means an abort — which takes neither branch's `return` — is still counted.
+    onSettled?.(childAgent?.getCostSnapshot()?.estimatedCostUSD ?? 0);
   }
 }
 
@@ -554,23 +813,53 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     // estimated at balanced-tier rates, which over-allocates against the
     // session ceiling and blocks cheap batches.
     const cfg = loadConfig();
-    const cfgTier = cfg.default_tier;
     const provider = getActiveProvider();
-    const totalEstimate = input.agents.reduce((sum, spec) => {
-      const roleDefault = spec.role ? getRole(spec.role)?.model : undefined;
-      // Estimate against the SAME model the run will actually use (gate + clamp +
-      // provider), not an Anthropic-only tier map — otherwise a Mistral-tenant or
-      // ceiling-clamped spawn is mis-estimated and over/under-reserves the budget.
-      const { modelId } = resolveRunModel({
-        requested: spec.model,
-        defaultTier: (roleDefault ?? cfgTier ?? 'balanced') as ModelTier,
-        accountTier: cfg.account_tier,
-        maxTier: cfg.max_tier,
-        provider,
+
+    // Identifies THIS batch for the whole run. Two `spawn_agent` calls can be in
+    // flight at once (the agent loop runs up to `MAX_PARALLEL_TOOL_CALLS` tools
+    // concurrently), and every later event — progress, child-done, and each
+    // child's forwarded tool activity — carries it so a consumer can tell the
+    // batches apart instead of collapsing them into one.
+    const spawnId = randomUUID();
+
+    // One pass, two outputs from ONE resolution: the budget reservation and the
+    // batch description the UI renders. Estimating against the model the child
+    // will actually run on (gate + clamp + provider + hybrid slot) is what keeps
+    // a Mistral tenant or a ceiling-clamped spawn from mis-reserving, and it is
+    // the same reason the UI may not name a different model than the one the
+    // ceiling was charged for.
+    const subAgents: SpawnedSubAgent[] = [];
+    let totalEstimate = 0;
+    // Refuse BEFORE announcing, not after. `executeThinker` used to own these
+    // checks, and it runs after the `spawn` event is already on the wire — so a
+    // ceiling-exceeding or blocked profile was announced with its model id and
+    // only then refused. A whole batch is refused if any one spec is: the reserve
+    // + announce step is atomic, and half-announcing is worse than not starting.
+    input.agents.forEach((spec) => { assertSpawnRoutingPermitted(spec, cfg); });
+    input.agents.forEach((spec, i) => {
+      const { model } = resolveSpawnChildRouting({
+        spec,
+        role: spec.role ? getRole(spec.role) : undefined,
+        profile: spec.profile ? cfg.model_profiles?.[spec.profile] : undefined,
+        userConfig: cfg,
+        baseProvider: provider,
       });
       const iters = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
-      return sum + estimateSpawnCost(modelId, iters);
-    }, 0);
+      totalEstimate += estimateSpawnCost(model, iters);
+      // The SAME check the identity block and the result header use. This site
+      // had its own charset — one that stripped `/` and cut at 64 — so a
+      // Fireworks child was announced to the UI as
+      // `accountsfireworksmodelsglm-5p2`. An id it rejects is omitted rather
+      // than sent empty: the field is optional, and absent reads as "unknown"
+      // where `''` renders as a model with no name.
+      const wireModel = safeModelId(model);
+      subAgents.push({
+        id: `${spawnId}:${i}`,
+        name: spec.name,
+        role: spec.role,
+        ...(wireModel ? { model: wireModel } : {}),
+      });
+    });
 
     // Enforce session cost ceiling (shared with pipeline steps) against
     // this Session's counters object so concurrent spawns on different
@@ -580,28 +869,34 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     channels.spawnStart.publish({ agents: names, parent: agent.name, parentRunId, depth: childDepth });
 
     if (agent.onStream) {
-      await agent.onStream({ type: 'spawn', agents: names, estimatedCostUSD: totalEstimate, agent: agent.name });
+      await agent.onStream({ type: 'spawn', spawnId, subAgents, estimatedCostUSD: totalEstimate, agent: agent.name });
     }
 
     // Sub-agent progress state — visible to the UI via forwarded events.
     // Without this, parent's stream only sees spawn start + aggregated result
     // and the UI sits on "Arbeitet…" for minutes with no evidence of progress.
-    const running = new Set(names);
+    // Keyed by SpawnedSubAgent.id, never by name: two children in one batch may
+    // legitimately share a name, and a name-keyed map would silently merge them.
+    const running = new Set(subAgents.map(s => s.id));
     const lastToolBySub: Record<string, string> = {};
+    // Actual spend per child, filled in as each one stops. Reported on
+    // `spawn_child_done` so a delegation's cost is visible where it was
+    // incurred, instead of only inside the turn's single aggregate total.
+    const costBySub: Record<string, number> = {};
     const spawnStart = Date.now();
 
     const parentStream = agent.onStream;
-    const makeChildStream = (subName: string): StreamHandler | null => {
+    const makeChildStream = (sub: SpawnedSubAgent): StreamHandler | null => {
       if (!parentStream) return null;
       return (event) => {
         // Forward only high-signal, low-frequency events. Text and thinking
         // token streams from children would flood the parent UI.
         if (event.type === 'tool_call') {
-          lastToolBySub[subName] = event.name;
-          return parentStream({ ...event, subAgent: subName });
+          lastToolBySub[sub.id] = event.name;
+          return parentStream({ ...event, subAgent: sub.name, subAgentId: sub.id });
         }
         if (event.type === 'tool_result') {
-          return parentStream({ ...event, subAgent: subName });
+          return parentStream({ ...event, subAgent: sub.name, subAgentId: sub.id });
         }
         if (event.type === 'error') {
           return parentStream(event);
@@ -621,6 +916,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         const elapsedS = Math.floor((Date.now() - spawnStart) / 1000);
         void parentStream({
           type: 'spawn_progress',
+          spawnId,
           elapsedS,
           running: [...running],
           lastToolBySub: { ...lastToolBySub },
@@ -630,34 +926,41 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     }
 
     const results = await Promise.allSettled(
-      input.agents.map(spec => {
+      input.agents.map((spec, i) => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), SPAWN_TIMEOUT);
         const childStart = Date.now();
+        const sub = subAgents[i]!;
 
-        return executeThinker(spec, agent, makeChildStream(spec.name), childDepth)
+        return executeThinker(spec, agent, makeChildStream(sub), childDepth, (usd) => { costBySub[sub.id] = usd; })
           .then(
             (value) => {
-              running.delete(spec.name);
+              running.delete(sub.id);
               if (parentStream) {
                 void parentStream({
                   type: 'spawn_child_done',
-                  subAgent: spec.name,
+                  spawnId,
+                  subAgent: sub.name,
+                  subAgentId: sub.id,
                   ok: true,
                   elapsedS: Math.floor((Date.now() - childStart) / 1000),
+                  costUsd: costBySub[sub.id] ?? 0,
                   agent: agent.name,
                 });
               }
               return value;
             },
             (err: unknown) => {
-              running.delete(spec.name);
+              running.delete(sub.id);
               if (parentStream) {
                 void parentStream({
                   type: 'spawn_child_done',
-                  subAgent: spec.name,
+                  spawnId,
+                  subAgent: sub.name,
+                  subAgentId: sub.id,
                   ok: false,
                   elapsedS: Math.floor((Date.now() - childStart) / 1000),
+                  costUsd: costBySub[sub.id] ?? 0,
                   agent: agent.name,
                 });
               }
@@ -693,19 +996,27 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // non-Anthropic provider "fast" is NOT a Claude model. The Model-identity
         // prompt rule tells the agent to report THIS id, not the tier.
         // The id can originate from user config (`profile.model_id`) and lands
-        // in the header OUTSIDE the untrusted-data envelope, so sanitize it to
-        // the conventional model-id charset to prevent markdown / boundary-tag
-        // injection into the parent context (defense-in-depth; same pattern as
-        // `modelIdentityContext`'s safeId).
-        const safeModel = String(outcome.value.model).replace(/[^a-zA-Z0-9._:@-]/g, '').slice(0, 64);
-        sections.push(`## ${spec.name} (ran on \`${safeModel}\`)\n\n${wrapped}`);
+        // in the header OUTSIDE the untrusted-data envelope, hence the SAME
+        // check the identity block uses: a second charset here meant a Fireworks
+        // child was reported as `accountsfireworksmodelsglm-5p2` — mangled, and
+        // stated with authority because the prompt vouches for it.
+        // It rejects rather than repairs, so drop the clause when it rejects:
+        // an empty code span in a heading claims a model with no name.
+        const safeModel = safeModelId(outcome.value.model);
+        const ranOn = safeModel ? ` (ran on \`${safeModel}\`)` : '';
+        sections.push(`## ${spec.name}${ranOn}\n\n${wrapped}`);
         childRunIds.push(outcome.value.childRunId);
       } else {
         const err = outcome.reason instanceof Error
           ? outcome.reason
           : new Error(String(outcome.reason));
         errors.push(err);
-        sections.push(`## ${spec.name}\n\n**Error:** ${err.message}`);
+        // Mark the section as a FAILURE unambiguously so the parent can't mistake
+        // a dead sub-agent for one that returned nothing useful — a silent
+        // sub-agent failure is more dangerous than a loud one. `formatSpawnError`
+        // adds the HTTP status (e.g. `[404] …`) so a provider mis-route reads as
+        // a config failure, not a vague error.
+        sections.push(`## ${spec.name} — FAILED\n\n**Error:** ${formatSpawnError(err)}`);
         childRunIds.push(undefined);
       }
     }

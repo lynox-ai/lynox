@@ -37,6 +37,9 @@ import type { RelationshipRow } from './relationship-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
 import { ThreadStore } from './thread-store.js';
 import { channels } from './observability.js';
+import { deriveProvenanceTier, provenanceRank, canSupersede } from './provenance.js';
+import { appendMemoryWriteLog } from './memory-write-log.js';
+import { appendMemoryWriteDecisionLog, type WriteDecision } from './memory-write-decision-log.js';
 
 /** Dedup threshold: skip store if a memory with cosine > this exists. */
 const DEDUP_THRESHOLD = 0.95;
@@ -80,6 +83,29 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * what RECALL surfaces. False → both stay on legacy. Also gates `setMemoryGraphReads`.
    */
   private readonly memoryReadsActive: boolean;
+  /**
+   * Memory Foundation Wave 0 — the self-reinforcement emergency stop. When true,
+   * every confirmation-count WRITE this layer owns is suppressed: the auto-confirm
+   * feedback loop ({@link feedbackOnRetrieval}), the write-time dedup confirm
+   * ({@link store}), and consolidation's confirmation transfer
+   * ({@link consolidateMemories}). The read-side halves (dropping confMult and the
+   * rendered `confidence=`) live on the RetrievalEngine, which is constructed with
+   * the same flag. Default false (legacy path); flipped per-tenant.
+   */
+  private readonly memoryScoringV2: boolean;
+  /** Wave 1.3b: gate the write-side tier telemetry on the SAME measurement flag as the
+   *  retrieval shadow log (one flag, one retention story). Default off. */
+  private readonly retrievalShadowLog: boolean;
+  /**
+   * Memory Foundation Wave 2 — the write-trust gate ENFORCEMENT flag. When true, a
+   * strictly-lower-trust write can no longer retire a higher-trust fact (P1a: a
+   * contradiction `superseded → coexist` demotion + consolidation keeper is tier-first +
+   * both retire primitives backstop-refuse), and a higher-trust re-assert of a near-dup
+   * RAISES the stored fact via supersede-not-mutate (P1b). Default false → the write path
+   * is byte-identical. The would-be DECISION is measured independently under
+   * {@link retrievalShadowLog} (shadow-first: measure before enforcing).
+   */
+  private readonly memoryWriteTrustGate: boolean;
   private readonly subjectStore: SubjectStore | null;
   private readonly relationshipStore: RelationshipStore | null;
   private readonly memoryGraphStore: MemoryGraphStore | null;
@@ -111,13 +137,20 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     engineDb?: EngineDb | undefined,
     subjectGraphEnabled?: boolean | undefined,
     memoryGraphReads?: boolean | undefined,
+    memoryScoringV2?: boolean | undefined,
+    retrievalShadowLog?: boolean | undefined,
+    memoryWriteTrustGate?: boolean | undefined,
   ) {
     this.db = new AgentMemoryDb(dbPath);
     this.db.setEmbeddingDimensions(embeddingProvider.dimensions);
     this.embeddingProvider = embeddingProvider;
     this.entityResolver = new EntityResolver(this.db, embeddingProvider);
+    this.memoryScoringV2 = memoryScoringV2 ?? false;
+    this.retrievalShadowLog = retrievalShadowLog ?? false;
+    this.memoryWriteTrustGate = memoryWriteTrustGate ?? false;
     this.retrievalEngine = new RetrievalEngine(
       this.db, embeddingProvider, this.entityResolver, anthropicClient, runHistory,
+      this.memoryScoringV2, retrievalShadowLog ?? false, this.memoryWriteTrustGate,
     );
     this.anthropicClient = anthropicClient;
     this.runHistory = runHistory ?? null;
@@ -235,7 +268,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     options?: {
       sourceRunId?: string | undefined;
       sourceThreadId?: string | undefined;
-      sourceType?: ProvenanceKind | undefined;
+      // Wave 1.3: the caller supplies EVIDENCE (the write channel + the untrusted
+      // signal), never a tier. `store()` derives the tier here at the boundary (§3);
+      // the old `sourceType` parameter — a live privilege-escalation surface — is gone.
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
       sourceToolName?: string | undefined;
       skipContradictionCheck?: boolean | undefined;
       reuseEmbedding?: number[] | undefined;
@@ -245,6 +282,25 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     if (trimmedText.length < 5) {
       return { memoryId: '', entities: [], relations: [], contradictions: [], stored: false, deduplicated: false };
     }
+
+    // Provenance is DERIVED from evidence at the store boundary and persisted alongside
+    // its inputs, so the tier stays a re-derivable pure function (§3). `stubEvidence`
+    // threads the derived tier + its evidence into the subject-graph writers below.
+    const derivedTier = deriveProvenanceTier({
+      sourceChannel: options?.sourceChannel,
+      sourceUntrusted: options?.sourceUntrusted,
+    });
+    // §1.7: the model that produced this row's vector — there is no re-embed path, so a
+    // silent embedding-default change would otherwise orphan row↔space identity.
+    const embeddingModel = this.embeddingProvider.model ?? this.embeddingProvider.name;
+    const stubEvidence = {
+      sourceRunId: options?.sourceRunId,
+      sourceType: derivedTier,
+      sourceToolName: options?.sourceToolName,
+      sourceChannel: options?.sourceChannel,
+      sourceUntrusted: options?.sourceUntrusted,
+      embeddingModel,
+    };
 
     // 1. Embed the text
     const embedding = options?.reuseEmbedding ?? await this.embeddingProvider.embed(trimmedText);
@@ -271,12 +327,35 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       // silently absorbed as a confirmation of the wrong project's fact — the same
       // subject-blind data-loss class the supersede veto guards, at the dedup gate.
       if (!hasHeuristicContradiction(trimmedText, candidate.text) && !subjectsDisagree(trimmedText, candidate.text)) {
-        this.db.confirmMemory(candidate.id);
-        // S5b recall parity: mirror the confirmation onto the engine.db stub so its
-        // confirmation_count/confidence don't go stale under the read cutover. Dual-
-        // write gate (subject_graph_enabled), isolated — a mirror failure never
-        // affects the authoritative legacy confirm above.
-        this._mirrorConfidence(candidate.id, 'confirm');
+        // Memory Foundation Wave 2 (P1b — dedup tier-RAISE): a dedup hit whose incoming
+        // write is STRICTLY higher-trust than the stored row should upgrade it to the
+        // protected tier (a `ui` re-assert of an `agent_inferred` fact → `user_asserted`).
+        // Done via SUPERSEDE-NOT-MUTATE (store the fresh higher-trust row + retire the old)
+        // so the Wave-1 write-once-evidence invariant holds and the raise is reversible —
+        // NOT by overwriting the stored row's evidence. Measured under the shadow flag
+        // (would-be decision, blast-radius before the flip); enforced under the trust gate.
+        const existingTier = candidate.source_type as ProvenanceKind;
+        const wouldRaise = provenanceRank(derivedTier) > provenanceRank(existingTier);
+        this._emitWriteDecision(wouldRaise ? 'tier-raise' : 'confirm', derivedTier, existingTier, candidate.id, namespace);
+
+        if (this.memoryWriteTrustGate && wouldRaise) {
+          const raisedId = this._raiseTier(candidate, trimmedText, namespace, scope, derivedTier, embeddingModel, embedding, options);
+          return { memoryId: raisedId, entities: [], relations: [], contradictions: [], stored: true, deduplicated: true };
+        }
+
+        // Wave 0 (memory_scoring_v2): a dedup hit is a PLAIN no-op — no confirm.
+        // The write-time confirm was a second feeder of the self-reinforcement loop
+        // (PRD §2.2). No new row is stored either way; the existing fact stands
+        // unchanged (its tier is untouched here — a same-or-lower re-assert stays a
+        // plain no-op-confirm; only a strictly-higher re-assert raises, above).
+        if (!this.memoryScoringV2) {
+          this.db.confirmMemory(candidate.id);
+          // S5b recall parity: mirror the confirmation onto the engine.db stub so its
+          // confirmation_count/confidence don't go stale under the read cutover. Dual-
+          // write gate (subject_graph_enabled), isolated — a mirror failure never
+          // affects the authoritative legacy confirm above.
+          this._mirrorConfidence(candidate.id, 'confirm');
+        }
         return { memoryId: candidate.id, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true };
       }
       // Fall through to contradiction detection
@@ -292,22 +371,57 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       );
     }
 
+    // 3b. Memory Foundation Wave 2 (P1a — trust-aware conflict, DECIDED AT SOURCE).
+    // Finalize each `superseded` resolution against the write-trust order ONCE, here,
+    // before ANY store consumes the array — so the legacy write AND every engine.db mirror
+    // (which all key on the SAME by-reference `contradictions` array) act on one already-
+    // demoted decision (the RF4 divergence trap: a DB-guard that refuses on one store while
+    // a mirror fires on the pre-guard decision would leave the truth invisible under the
+    // read cutover). A strictly-lower-trust write is demoted `superseded → coexist` so both
+    // facts survive. Measured under the shadow flag; enforced under the trust gate.
+    for (const c of contradictions) {
+      if (c.resolution !== 'superseded' || c.existingSourceType === undefined) continue;
+      const wouldBlock = !canSupersede(derivedTier, c.existingSourceType);
+      this._emitWriteDecision(wouldBlock ? 'demote-coexist' : 'supersede', derivedTier, c.existingSourceType, c.existingMemoryId, namespace);
+      if (this.memoryWriteTrustGate && wouldBlock) c.resolution = 'coexist';
+    }
+
     // 4+5. Create memory + supersede contradicted (atomic transaction)
     const memoryId = this.db.transaction(() => {
       const id = this.db.createMemory({
         text: trimmedText, namespace, scopeType: scope.type, scopeId: scope.id,
         sourceRunId: options?.sourceRunId, sourceThreadId: options?.sourceThreadId,
-        sourceType: options?.sourceType, sourceToolName: options?.sourceToolName,
+        sourceType: derivedTier, sourceToolName: options?.sourceToolName,
+        sourceChannel: options?.sourceChannel, sourceUntrusted: options?.sourceUntrusted,
+        embeddingModel,
         provider: this.embeddingProvider.name, embedding,
       });
       for (const c of contradictions) {
         if (c.resolution === 'superseded') {
-          this.db.supersedMemory(c.existingMemoryId, id);
+          // Backstop (defense-in-depth): the demotion above already prevents a blocked
+          // pair from reaching here; this refuses a direct trust-downgrade too. Gated →
+          // flag off passes trustGate:false → byte-identical.
+          this.db.supersedMemory(c.existingMemoryId, id, { trustGate: this.memoryWriteTrustGate });
           this.db.createSupersedes(id, c.existingMemoryId, 'contradiction');
         }
       }
       return id;
     });
+
+    // Wave 1.3b: write-side tier telemetry — one JSONL line per STORED row (post-dedup),
+    // gated on the measurement flag. Lets the write distribution be tracked over time
+    // (does external_unverified spike? does tool_verified ever fire?) — a retrieval-only
+    // shadow log cannot see a tier that is never written. Fire-and-forget, best-effort.
+    if (this.retrievalShadowLog) {
+      void appendMemoryWriteLog({
+        ts: Date.now(),
+        sourceChannel: options?.sourceChannel ?? null,
+        sourceUntrusted: options?.sourceUntrusted === true,
+        sourceType: derivedTier,
+        namespace,
+        embeddingModel: this.embeddingProvider.model ?? this.embeddingProvider.name,
+      });
+    }
 
     // 6. Extract entities and relations (async LLM call — outside transaction).
     // Managed credit lifecycle for the pool-key extraction call: gate BEFORE the
@@ -348,10 +462,40 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       // DROP. The stub always lands (even when the extractor is gated); createdAt carries
       // the legacy row's creation time so the stub time-decays correctly.
       const createdAt = this.db.getMemoryCreatedAt(memoryId);
-      extracted = await this._extractAndPersistToSubjects(
-        trimmedText, namespace, scope, memoryId, embedding, options, contradictions, createdAt, extractionAllowed,
-        threadAnchorSubjectId,
-      );
+      // §0.1 (mirror P0): under memoryReadsActive the engine.db stub written here is
+      // the recall-AUTHORITATIVE row — recall reads engine.db primary, and the legacy
+      // fallback (`retrieval-engine.ts`) fires only on a `throw`, never on a row that
+      // was simply never mirrored. A silent failure = a store the fleet can never
+      // recall. Preserve the legacy row (already committed above — no data loss; it
+      // rides backup/export) and surface a HARD, monitorable parity-loss signal so the
+      // Adapter-PR reconcile can repair engine.db. This is NOT the routine best-effort
+      // mirror swallow (that is correct only while legacy is the read authority).
+      let stubWritten = true;
+      try {
+        extracted = await this._extractAndPersistToSubjects(
+          trimmedText, namespace, scope, memoryId, embedding, stubEvidence, contradictions, createdAt, extractionAllowed,
+          threadAnchorSubjectId,
+        );
+      } catch (err: unknown) {
+        this._reportMirrorParityLoss('store', memoryId, err);
+        extracted = { resolvedEntities: [], resolvedRelations: [] };
+        stubWritten = false;
+      }
+      // Read-back parity: even without a throw, the stub MUST be present in engine.db
+      // (it always lands on a successful write, even when the extractor is gated). Its
+      // absence is the exact silent-loss the old swallow hid. Only checked when the
+      // write did not already report a loss above (no double signal for one memory),
+      // and the read-back itself is tolerated — a getStub throw must NOT escape store()
+      // and defeat the preserve-and-continue intent.
+      if (stubWritten) {
+        try {
+          if (!this.memoryGraphStore.getStub(memoryId)) {
+            this._reportMirrorParityLoss('store', memoryId, new Error('stub absent in engine.db after write'));
+          }
+        } catch (err: unknown) {
+          this._reportMirrorParityLoss('store', memoryId, err);
+        }
+      }
     } else {
       // Pre-cutover (every current tenant): legacy persist is authoritative (gated), and
       // the engine.db mirror below is an additive dual-write that runs REGARDLESS of the
@@ -378,7 +522,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         try {
           const createdAt = this.db.getMemoryCreatedAt(memoryId);
           this._mirrorToSubjectGraph(
-            memoryId, trimmedText, namespace, scope, options,
+            memoryId, trimmedText, namespace, scope, stubEvidence,
             resolvedEntities, resolvedRelations, contradictions, embedding, createdAt,
             threadAnchorSubjectId,
           );
@@ -557,12 +701,20 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
     if (!this._anchorThreadStore) return null;
     try {
-      const anchorId = this._anchorThreadStore.getThread(threadId)?.primary_subject_id ?? null;
-      // Validate the cross-DB soft ref: the thread's anchor lives in history.db and points
-      // at an engine.db subject with NO enforceable FK, so a hard-deleted subject leaves a
-      // dangling id. Fall back to the heuristic (null) rather than write a dangling
-      // memories.subject_id — which WOULD FK-throw on the authoritative cutover write.
-      if (anchorId && this.subjectStore?.getSubject(anchorId)) return anchorId;
+      const rawAnchorId = this._anchorThreadStore.getThread(threadId)?.primary_subject_id ?? null;
+      if (!rawAnchorId) return null;
+      // Resolve the v7 merge redirect FORWARD: if the anchor's subject was folded into a
+      // canonical (merged_into), use the canonical — so a thread anchored to a since-merged
+      // dup keeps attaching memories to the LIVE subject, not the archived stub. This is the
+      // read-side of the three-store merge repoint (the write side repoints the history.db
+      // anchor directly; this also masks any stale id a pre-fix ledger never repointed).
+      const anchorId = this.subjectStore?.resolveActiveSubject(rawAnchorId) ?? rawAnchorId;
+      // Validate the cross-DB soft ref (no enforceable FK): the resolved subject must still
+      // exist AND be active — a hard-deleted or archived anchor falls back to the heuristic
+      // (null) rather than writing a dangling/archived memories.subject_id, which WOULD
+      // FK-throw (or mis-attribute) on the authoritative cutover write.
+      const subject = this.subjectStore?.getSubject(anchorId);
+      if (subject && !subject.archived_at) return anchorId;
       return null;
     } catch {
       return null;
@@ -602,8 +754,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     scope: MemoryScopeRef,
     options: {
       sourceRunId?: string | undefined;
+      // `sourceType` here is the DERIVED tier (store() computed it); the evidence
+      // columns ride alongside so the stub persists them too (§1/§3).
       sourceType?: ProvenanceKind | undefined;
       sourceToolName?: string | undefined;
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
+      embeddingModel?: string | undefined;
     } | undefined,
     entities: EntityRecord[],
     relations: RelationRecord[],
@@ -625,7 +782,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       //    when the old memory has no stub; superseded_by is a soft column (no
       //    FK), so it may point at this memory even if it gets no stub of its own.
       for (const c of contradictions) {
-        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId);
+        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
       }
 
       // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Build an
@@ -641,9 +798,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         // Engagements route through the single (name, parent) resolver — filed under
         // the thread's client anchor — so extraction converges with set_thread_context
         // instead of minting a duplicate project row on every store.
+        // Persons route through the subset resolver: a new surface form that is an
+        // unambiguous token-subset of exactly one existing person folds in as an alias
+        // ("Ada" → the existing "Dr. Ada Lovelace") instead of minting a duplicate.
         const { id: subjectId } = kind === 'engagement'
           ? subjects.findOrCreateEngagement(e.canonicalName, this._engagementParent(subjects, threadAnchorSubjectId), { aliases: e.aliases })
-          : subjects.findOrCreate({ kind, name: e.canonicalName, aliases: e.aliases });
+          : kind === 'person'
+            ? subjects.resolvePersonSubject(e.canonicalName, { aliases: e.aliases })
+            : subjects.findOrCreate({ kind, name: e.canonicalName, aliases: e.aliases });
         entityToSubject.set(e.id, subjectId);
         subjectIds.push(subjectId);
         // primary = the first person/organization the memory concerns; else the
@@ -673,6 +835,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         sourceRunId: options?.sourceRunId ?? null,
         sourceType: options?.sourceType,
         sourceToolName: options?.sourceToolName ?? null,
+        sourceChannel: options?.sourceChannel ?? null,
+        sourceUntrusted: options?.sourceUntrusted,
+        embeddingModel: options?.embeddingModel,
         provider: this.embeddingProvider.name,
         embedding: embedToBlob(embedding),
         createdAt,
@@ -720,8 +885,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     embedding: number[],
     options: {
       sourceRunId?: string | undefined;
+      // `sourceType` here is the DERIVED tier (store() computed it); the evidence
+      // columns ride alongside so the stub persists them too (§1/§3).
       sourceType?: ProvenanceKind | undefined;
       sourceToolName?: string | undefined;
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
+      embeddingModel?: string | undefined;
     } | undefined,
     contradictions: ContradictionInfo[],
     createdAt: string | undefined,
@@ -777,8 +947,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     scope: MemoryScopeRef,
     options: {
       sourceRunId?: string | undefined;
+      // `sourceType` here is the DERIVED tier (store() computed it); the evidence
+      // columns ride alongside so the stub persists them too (§1/§3).
       sourceType?: ProvenanceKind | undefined;
       sourceToolName?: string | undefined;
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
+      embeddingModel?: string | undefined;
     } | undefined,
     entities: Array<{ name: string; type: EntityType; aliases: string[] }>,
     relations: Array<{ from: string; to: string; kind: string; description: string; confidence: number }>,
@@ -797,7 +972,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     this.engineDb!.getDb().transaction(() => {
       // 1. Supersession mirror FIRST (flips OLD stubs; independent of this memory's subjects).
       for (const c of contradictions) {
-        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId);
+        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
       }
 
       // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Name-keyed so
@@ -812,9 +987,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         if (!kind) continue;
         // Engagements route through the single (name, parent) resolver (see the twin
         // above) so extraction converges with set_thread_context, not a fresh row.
+        // Person subset-resolver (see the twin above) so "Ada" folds into an existing
+        // "Dr. Ada Lovelace" as an alias rather than a duplicate person row.
         const { id: subjectId } = kind === 'engagement'
           ? subjects.findOrCreateEngagement(e.name, this._engagementParent(subjects, threadAnchorSubjectId), { aliases: e.aliases })
-          : subjects.findOrCreate({ kind, name: e.name, aliases: e.aliases });
+          : kind === 'person'
+            ? subjects.resolvePersonSubject(e.name, { aliases: e.aliases })
+            : subjects.findOrCreate({ kind, name: e.name, aliases: e.aliases });
         nameToSubject.set(e.name.toLowerCase(), subjectId);
         subjectIds.push(subjectId);
         resolvedEntities.push({
@@ -839,6 +1018,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         sourceRunId: options?.sourceRunId ?? null,
         sourceType: options?.sourceType,
         sourceToolName: options?.sourceToolName ?? null,
+        sourceChannel: options?.sourceChannel ?? null,
+        sourceUntrusted: options?.sourceUntrusted,
+        embeddingModel: options?.embeddingModel,
         provider: this.embeddingProvider.name,
         embedding: embedToBlob(embedding),
         createdAt,
@@ -876,28 +1058,32 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * Deletes memories and orphaned entities (reference-counted).
    */
   purgeThread(threadId: string): number {
-    // S5b'-c: under the MIRROR flag, ALSO reap the thread's engine.db stubs — the
-    // authoritative recall store — else the purged (privacy) statement text lingers
-    // there. id-parity bridge: read the thread's ids from legacy (which owns
-    // source_thread_id) BEFORE the legacy purge deletes them, then delete the same
-    // stub ids from engine.db (cascades reap the junction; durable subjects survive).
-    // Gated on `subjectGraphEnabled`, NOT reads — the mirror WRITES stubs whenever it's
-    // on, so a purge must reap them whenever it's on (matching _mirrorConfidence).
-    // Isolated: an engine.db failure is logged + swallowed so the legacy purge below
-    // still runs. Residual gap (tracked for the reads-flip reconcile, NOT this slice):
-    // once `memoryGraphReads` is on, a swallowed reap leaves the stub recallable AND
-    // unrecoverable (the legacy ids vanish once the legacy purge runs). Surfacing that
-    // end-to-end is a route change — the caller (http-api private-mode purge) already
-    // treats purge as best-effort-logged — so hardening it here alone wouldn't reach
-    // the user. No live tenant has reads on yet.
-    if (this.subjectGraphEnabled && this.memoryGraphStore) {
+    // S5b'-c: ALSO reap the thread's engine.db stubs — the authoritative recall
+    // store — else the purged (privacy) statement text lingers there. id-parity
+    // bridge: read the thread's ids from legacy (which owns source_thread_id)
+    // BEFORE the legacy purge deletes them, then delete the same stub ids from
+    // engine.db (cascades reap the junction; durable subjects survive).
+    //
+    // Gated on the STORE existing, NOT the reversible `subjectGraphEnabled` write
+    // flag: stubs are durable rows, so a stub written during a flag-ON window must
+    // be reaped on purge even if the flag was since toggled OFF — else it resurrects
+    // on re-flip. A no-op reap (no matching stubs) is cheap.
+    //
+    // §0.1 (mirror P0): the reap is NOT swallowed. The whole fleet runs
+    // memory_graph_reads=true, so a swallowed reap would leave the purged content
+    // still recallable from engine.db — a silent privacy FAILURE. engine.db is reaped
+    // FIRST, legacy LAST: on a reap failure RE-THROW before the legacy purge, so the
+    // legacy ids survive and a retry re-derives them + self-heals (mirror
+    // eraseByPattern), instead of the old swallow-then-purge-legacy-anyway that left
+    // an orphaned, unrecoverable, still-recallable engine.db stub. Emits the
+    // monitorable [lynox:mirror-parity] CRITICAL marker.
+    if (this.memoryGraphStore) {
       try {
         const ids = this.db.getMemoryIdsByThread(threadId);
         this.memoryGraphStore.purgeMemories(ids);
       } catch (err: unknown) {
-        process.stderr.write(
-          `[lynox:subject-graph] purge mirror failed for thread ${threadId}: ${err instanceof Error ? err.message : String(err)}\n`,
-        );
+        this._reportMirrorParityLoss('purge', `thread ${threadId}`, err);
+        throw err;
       }
     }
     return this.db.purgeByThread(threadId);
@@ -975,6 +1161,53 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * The connected subgraph for the graph visualization: the most-recent N
+   * relationships (edges) plus exactly the subjects they touch (nodes) — so the
+   * client always gets edges whose BOTH endpoints are present. This is what the
+   * `/api/kg/graph` view needs; the recency-ordered `listEntities` returned mostly
+   * orphan nodes whose partners fell outside the page, so no edges could draw.
+   */
+  async getGraph(limit: number): Promise<{ nodes: EntityRecord[]; edges: RelationRecord[] }> {
+    if (this.subjectGraphEnabled && this.subjectStore && this.relationshipStore) {
+      try {
+        const relRows = this.relationshipStore.listRecent(limit);
+        const edges = relRows.map(r => this._relRowToRelationRecord(r));
+        const ids = new Set<string>();
+        for (const e of edges) { ids.add(e.fromEntityId); ids.add(e.toEntityId); }
+        const store = this.subjectStore;
+        const counts = store.getMentionCounts([...ids]);
+        const nodes: EntityRecord[] = [];
+        for (const id of ids) {
+          const row = store.getSubject(id);
+          if (!row || row.archived_at) continue;
+          const rec = this._subjectRowToEntityRecord(row, counts.get(id) ?? 0);
+          if (rec) nodes.push(rec);
+        }
+        // Drop edges whose endpoint was archived/missing (node filtered out), then
+        // prune any node left with no surviving edge — keep "exactly the nodes the
+        // surviving edges touch" so an archived partner can't leave an orphan node.
+        const present = new Set(nodes.map(n => n.id));
+        const survivingEdges = edges.filter(e => present.has(e.fromEntityId) && present.has(e.toEntityId));
+        const referenced = new Set<string>();
+        for (const e of survivingEdges) { referenced.add(e.fromEntityId); referenced.add(e.toEntityId); }
+        return { nodes: nodes.filter(n => referenced.has(n.id)), edges: survivingEdges };
+      } catch (err: unknown) { this._logReadFallback('getGraph', err); }
+    }
+    // Legacy fallback (flag-off): top entities by mention + their relations.
+    const ents = this.db.listEntities({ limit }).map(toEntityRecord);
+    const ids = new Set(ents.map(e => e.id));
+    const edges: RelationRecord[] = [];
+    for (const e of ents) {
+      for (const r of this.db.getEntityRelations(e.id, 50)) {
+        if (ids.has(r.from_entity_id) && ids.has(r.to_entity_id)) {
+          edges.push({ fromEntityId: r.from_entity_id, toEntityId: r.to_entity_id, relationType: r.relation_type, description: r.description, confidence: r.confidence, sourceMemoryId: r.source_memory_id ?? '', createdAt: r.created_at });
+        }
+      }
+    }
+    return { nodes: ents, edges };
+  }
+
+  /**
    * Entity browse-search (the `/api/kg/entities?q=` path). When the subject-graph
    * read path is active this is a case-insensitive name/alias substring match over
    * subjects (no semantic search over subjects yet — substring is predictable for a
@@ -995,7 +1228,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     if (this.subjectGraphEnabled && this.subjectStore) {
       try {
         const row = this.subjectStore.getSubject(id);
-        return row ? this._subjectRowToEntityRecord(row) : null;
+        if (!row) return null;
+        const count = this.subjectStore.getMentionCounts([id]).get(id) ?? 0;
+        return this._subjectRowToEntityRecord(row, count);
       } catch (err: unknown) { this._logReadFallback('getEntity', err); }
     }
     const row = this.db.getEntity(id);
@@ -1044,12 +1279,30 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * §0.1 — surface an engine.db recall-parity LOSS as a HARD, monitorable signal,
+   * deliberately distinct from the routine `[lynox:subject-graph] … failed` best-effort
+   * logs (which are correct to swallow only while legacy is the read authority). Under
+   * `memoryReadsActive` recall reads engine.db PRIMARY, so a stub that was never written
+   * (store) or never reaped (deactivate) diverges silently from legacy: silent memory
+   * loss one way, silent erasure failure the other, neither self-healing. The distinct
+   * `mirror-parity` marker is greppable for alerting; the caller decides the recovery
+   * posture — store PRESERVES the legacy row and continues; deactivate and erase
+   * RE-THROW so a half-completed erasure is never reported as done.
+   */
+  private _reportMirrorParityLoss(op: 'store' | 'deactivate' | 'erase' | 'purge', ref: string, err: unknown): void {
+    process.stderr.write(
+      `[lynox:mirror-parity] CRITICAL ${op} ${ref}: engine.db diverged from legacy under memory_graph_reads — ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+
+  /**
    * The subject-graph read of the entity list: maps Subjects back to the stable
    * `EntityRecord` DTO, dropping kinds with no KG equivalent (service/other).
-   * Filter order: kind (`type`) → name/alias substring (`q`) → offset/limit slice.
-   * Rows come `updated_at DESC` (via `listSubjects`); the legacy path orders by
-   * `mention_count DESC`, but subjects carry no mention count, so browse order +
-   * `mentionCount` (0) differ from legacy — tracked with the memory sprint.
+   * Filter order: kind (`type`) → name/alias substring (`q`) → mention-count
+   * backfill → offset/limit slice. Rows come `updated_at DESC` (via `listSubjects`);
+   * the legacy path orders by `mention_count DESC`, so browse ORDER still differs from
+   * legacy, but `mentionCount` is now the real memory_subjects link count (batched via
+   * {@link SubjectStore.getMentionCounts}), not a hardcoded 0.
    */
   private _listSubjectEntities(
     opts?: { type?: string | undefined; q?: string | undefined; limit?: number | undefined; offset?: number | undefined },
@@ -1073,11 +1326,18 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
     const offset = Math.max(opts?.offset ?? 0, 0);
     const limit = opts?.limit ?? mapped.length;
-    return mapped.slice(offset, offset + limit);
+    const page = mapped.slice(offset, offset + limit);
+    // Populate the real mention count (memory_subjects links) — the subject path
+    // otherwise reports 0 for every entity (the "0× Erwähnungen" bug). Counted for
+    // the returned page ONLY: bounded against the SQLite variable cap on a large
+    // graph, and no wasted counting of rows we slice away.
+    const counts = store.getMentionCounts(page.map(e => e.id));
+    for (const e of page) e.mentionCount = counts.get(e.id) ?? 0;
+    return page;
   }
 
   /** Map a Subject row to the stable `EntityRecord` DTO, or null when the kind has no KG equivalent. */
-  private _subjectRowToEntityRecord(row: SubjectRow): EntityRecord | null {
+  private _subjectRowToEntityRecord(row: SubjectRow, mentionCount = 0): EntityRecord | null {
     const entityType = subjectKindToEntityType(row.kind);
     if (!entityType) return null;
     let aliases: string[];
@@ -1095,7 +1355,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       description: '',
       scopeType: 'global',
       scopeId: 'global',
-      mentionCount: 0,
+      mentionCount,
       firstSeenAt: row.created_at,
       lastSeenAt: row.updated_at,
     };
@@ -1161,24 +1421,92 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // there too — else `memory_delete` leaves the statement recallable via
     // engine.db, breaking the "deleted means gone" privacy promise. id-parity
     // bridge: the pattern is matched on legacy (plaintext), then the SAME ids are
-    // reaped in engine.db (encrypted text can't be LIKE-matched). Gated on
-    // subjectGraphEnabled (NOT reads) — the mirror WRITES stubs whenever it's on,
-    // so a delete must reap them whenever it's on (matching purgeThread /
-    // _mirrorConfidence). Isolated: an engine.db failure is logged + swallowed so
-    // the legacy deactivation above still stands. Residual (tracked for the
-    // reads-flip reconcile, like purgeThread): once memoryGraphReads is on, a
-    // swallowed reap leaves the deleted content recallable in engine.db — and a
-    // re-run finds ids=[] (the legacy rows are already inactive), so it is not
-    // self-healing. No live tenant has reads on yet.
-    if (this.subjectGraphEnabled && this.memoryGraphStore) {
+    // reaped in engine.db (encrypted text can't be LIKE-matched). Gated on the
+    // STORE existing (NOT the reversible subjectGraphEnabled write flag) — stubs are
+    // durable, so a soft-delete must reap them whenever the store exists, else a stub
+    // written during a flag-ON window resurrects on re-flip (matching purgeThread /
+    // eraseByPattern).
+    //
+    // §0.1 (mirror P0): the reap is NOT swallowed. The whole fleet runs
+    // memory_graph_reads=true (rafael/cat/war since 2026-07-08), so a swallowed reap
+    // leaves the "deleted" content still recallable from engine.db — a silent erasure
+    // FAILURE, and not self-healing (a re-run finds the legacy rows already inactive
+    // → ids=[] → the stub is never revisited). So a failed reap: (1) emits a hard,
+    // monitorable [lynox:mirror-parity] CRITICAL marker (ops can alert on a silent
+    // reap NOW), and (2) RE-THROWS so a caller that awaits can surface it.
+    //
+    // NOTE — this is loud only for a caller that AWAITS + propagates. As of the erasure
+    // PR: `memory_delete` (the agent's SOFT curation path) awaits this and surfaces a
+    // partial failure; the hard GDPR erase (MemoryFacade.delete) uses eraseByPattern, not
+    // this method. The one remaining swallower is `memory_promote` (`void …catch(()=>{})`)
+    // — deliberate: promotion is a MOVE (the fact survives at the target scope), so a
+    // lingering old-scope stub is a duplicate, never a privacy leak, and no half-erasure
+    // is falsely reported as done.
+    if (this.memoryGraphStore) {
       try {
         this.memoryGraphStore.deactivateByIds(ids);
       } catch (err: unknown) {
-        process.stderr.write(
-          `[lynox:subject-graph] deactivate mirror failed: ${err instanceof Error ? err.message : String(err)}\n`,
-        );
+        this._reportMirrorParityLoss('deactivate', `${ids.length} id(s) for pattern`, err);
+        throw err;
       }
     }
+    return ids.length;
+  }
+
+  /**
+   * Erasure PR — PHYSICALLY delete every memory whose text matches `pattern`, in
+   * BOTH stores (GDPR Art. 17 hard-delete). This is the terminal end of the Validity
+   * axis: {@link deactivateByPattern} is the SOFT state (`is_active = 0` — the row,
+   * its text and embedding persist and ride backup/migration-export); erase is the
+   * TERMINAL state (the row is gone). `memory_delete` and the UI delete route here;
+   * a supersede/re-scope (memory_update, memory_promote, a bulk-doc reconcile) stays
+   * soft.
+   *
+   * Matching is by pattern + namespace ONLY — deliberately NOT scope-filtered. On the
+   * live corpus 863/893 rows sit under the degenerate `context:http-api` transport
+   * scope, so a scope-filtered erase would match zero rows and silently fail to forget
+   * exactly the content it must (scope-aware erase waits on the Wave-3 namespace fix).
+   * {@link AgentMemoryDb.findMemoryIdsByPattern} also matches `is_active = 0` rows, so a
+   * previously soft-deleted fact's residue is caught too.
+   *
+   * The engine.db recall mirror is reaped FIRST, legacy (the plaintext id source) LAST —
+   * the order is load-bearing for recoverability. The ids can only be re-derived from
+   * the legacy PLAINTEXT (`findMemoryIdsByPattern` LIKE-matches text; engine.db text is
+   * encrypted). If legacy were purged first and the engine.db reap then threw, a retry's
+   * pattern match would find the legacy rows already gone (ids=[]) and NEVER revisit the
+   * surviving — still recallable, on the read-flipped fleet — engine.db stub: a permanent,
+   * silent GDPR failure. Reaping engine.db first means a failure leaves legacy intact, so
+   * a retry re-derives the same ids and self-heals; it also clears the recall-authoritative
+   * store (what `memory_graph_reads=true` reads) before the backup-only legacy store. On a
+   * failed engine.db reap it reuses §0.1's loud contract — a monitorable
+   * `[lynox:mirror-parity] CRITICAL` marker (with the ids, for reconciliation) + a
+   * RE-THROW, so an awaiting caller fails the delete instead of reporting a false success.
+   * The legacy purge cascade reaps mentions, relations, supersedes and orphan entities.
+   *
+   * KNOWN residue (engine.db): `purgeMemories` deletes `memories` only; the schema's
+   * ON DELETE CASCADE reaps memory_subjects/supersedes/conflicts, but an orphaned SUBJECT
+   * (plaintext `name`) and a relationship whose source was the erased memory
+   * (`source_memory_id` ON DELETE SET NULL, keeps its `description`) are NOT reaped — the
+   * orphan-subject sweep is deferred to the subject-lifecycle design (memory-graph-store.ts).
+   * The memory TEXT is erased from both stores; that derived residue is a tracked follow-up.
+   *
+   * Returns the number of memories matched + erased.
+   */
+  async eraseByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number> {
+    const ids = this.db.findMemoryIdsByPattern(pattern, namespace);
+    if (ids.length === 0) return 0;
+
+    if (this.memoryGraphStore) {
+      try {
+        this.memoryGraphStore.purgeMemories(ids);
+      } catch (err: unknown) {
+        // Legacy is still intact here (not yet purged), so this is fully retryable.
+        const sample = ids.slice(0, 20).join(',');
+        this._reportMirrorParityLoss('erase', `${ids.length} id(s): ${sample}${ids.length > 20 ? ',…' : ''}`, err);
+        throw err;
+      }
+    }
+    this.db.purgeMemoriesByIds(ids);
     return ids.length;
   }
 
@@ -1192,21 +1520,50 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const id = this.db.updateMemoryText(oldText, newText, namespace, embedding);
     if (!id) return false;
 
-    // Re-extract for the corrected text. Under the read cutover (S5b'-b) the
-    // re-extraction persists onto the subject graph — and refreshes the engine.db
-    // stub's text + embedding via upsertStub, so recall (which reads engine.db) sees
-    // the corrected text instead of the stale original. Pre-cutover: the legacy
-    // mention path, unchanged.
+    // Privacy/recall parity: refresh the engine.db stub's text + embedding under the
+    // WRITE flag (subject_graph_enabled) — NOT the read flag — so a correction/redaction
+    // made during the dual-write window (write-on, read-off, e.g. cat's soak) is present
+    // in engine.db when reads flip on, instead of recall serving the stale pre-edit text
+    // (the same divergence the deactivate/consolidate mirrors close). No-op when the memory
+    // has no stub; isolated so a mirror failure never fails the legacy edit.
+    if (this.subjectGraphEnabled && this.memoryGraphStore) {
+      try {
+        this.memoryGraphStore.updateStubText(id, newText, embedToBlob(embedding));
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:subject-graph] text-edit mirror failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+
+    // Re-extract for the corrected text. Under the read cutover (S5b'-b) the re-extraction
+    // re-resolves the subject linkage and re-upserts the stub; pre-cutover: the legacy
+    // mention path, unchanged. The stub's TEXT is already refreshed above under the write
+    // flag, independent of this read-gated (cost-bearing) re-extraction.
+    // The re-extraction is a metered LLM call on the (managed pool) key — gate it and
+    // debit its cost exactly like store(). Previously it ran unconditionally: an undebited
+    // managed spend that survived credit exhaustion and was injection-loopable via the
+    // `update_memory` tool. The text update itself (above) is local + always applies; only
+    // the LLM re-extraction is credit-gated, so an exhausted tenant's edit still lands.
+    const extractGate = this.meteredHost && this.anthropicClient
+      ? await fireBeforeRunGate(this.meteredHost, 'fast')
+      : null;
+    const extractionAllowed = !extractGate || extractGate.blockedReason === null;
     if (this.memoryReadsActive && this.subjectStore && this.relationshipStore && this.memoryGraphStore) {
-      // A text correction is not credit-gated (the legacy path re-extracts unconditionally).
       const createdAt = this.db.getMemoryCreatedAt(id);
       // Slice B: keep the memory's project/client anchor across a text edit — resolve
       // its SOURCE thread's anchor (not the current thread; this is an edit, not a new
       // write) so re-extraction doesn't silently revert the primary subject to the heuristic.
       const threadAnchorSubjectId = this._readThreadAnchor(this.db.getMemorySourceThread(id));
-      await this._extractAndPersistToSubjects(newText, namespace, scope, id, embedding, undefined, [], createdAt, true, threadAnchorSubjectId);
-    } else {
+      const extracted = await this._extractAndPersistToSubjects(newText, namespace, scope, id, embedding, undefined, [], createdAt, extractionAllowed, threadAnchorSubjectId);
+      if (extractGate && this.meteredHost && extracted.costUsd) {
+        reportMeteredCost(this.meteredHost, extractGate.runId, extracted.costUsd, 'fast');
+      }
+    } else if (extractionAllowed) {
       const extraction = await extractEntities(newText, namespace, this.anthropicClient);
+      if (extractGate && this.meteredHost && extraction.costUsd) {
+        reportMeteredCost(this.meteredHost, extractGate.runId, extraction.costUsd, 'fast');
+      }
       for (const ext of extraction.entities) {
         const entity = await this.entityResolver.resolve(ext.name, ext.type, [scope], { createIfMissing: true });
         if (entity) this.db.createMention(id, entity.id);
@@ -1287,6 +1644,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   /** Provide feedback on retrieved memories. */
   feedbackOnRetrieval(memoryIds: string[], signal: 'useful' | 'wrong'): void {
+    // Wave 0 (memory_scoring_v2): the auto-confirm loop is the self-reinforcement
+    // engine — session.ts fires this with a hard-coded 'useful' on every run
+    // success, relevance-blind (PRD §2.2). Suppress the confirm side entirely; the
+    // 'wrong'/penalize side (a genuine correction, which only lowers) stays live.
+    if (this.memoryScoringV2 && signal === 'useful') return;
     for (const id of memoryIds) {
       if (signal === 'useful') this.db.confirmMemory(id);
       else this.db.penalizeMemory(id);
@@ -1315,15 +1677,140 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
   }
 
+  /**
+   * Memory Foundation Wave 2 — emit one write-trust DECISION to the shadow sink, gated on
+   * the measurement flag (`retrievalShadowLog`) INDEPENDENTLY of enforcement, so the gate's
+   * blast-radius is measurable before the enforcement flag flips (shadow-first). Fire-and-
+   * forget, text-free (opaque row id + tiers only — the emit sites sit next to PII-bearing
+   * memory text; see `memory-write-decision-log.ts`).
+   */
+  private _emitWriteDecision(
+    decision: WriteDecision,
+    newTier: ProvenanceKind,
+    existingTier: ProvenanceKind,
+    existingId: string,
+    namespace: MemoryNamespace,
+  ): void {
+    if (!this.retrievalShadowLog) return;
+    void appendMemoryWriteDecisionLog({
+      ts: Date.now(), decision, newTier, existingTier,
+      enforced: this.memoryWriteTrustGate, existingId, namespace,
+    });
+  }
+
+  /**
+   * P1b — raise a deduped row's trust tier via SUPERSEDE-NOT-MUTATE. Stores the fresh
+   * higher-trust row (write-once evidence intact), retires the old lower-trust one
+   * (`canSupersede(new, old)` holds → the backstop passes), and carries forward the old
+   * row's confirmation_count so the raise doesn't drop accumulated confirmations vs today's
+   * no-op-confirm (`createMemory` hardcodes 0). Skips contradiction detection (a near-dup of
+   * the retired row). Reversible pre-GC (un-retire the tombstone until `gc()` reaps it — the
+   * same soft-delete semantics as every supersede here); NO evidence overwrite → the
+   * Wave-1 re-derivable-tier invariant holds. Done inline (not via `store()` recursion, which
+   * would re-enter dedup and re-find the same ≥0.95 row). Returns the fresh row's id.
+   */
+  private _raiseTier(
+    candidate: ScoredMemoryRow,
+    text: string,
+    namespace: MemoryNamespace,
+    scope: MemoryScopeRef,
+    derivedTier: ProvenanceKind,
+    embeddingModel: string,
+    embedding: number[],
+    options: {
+      sourceRunId?: string | undefined;
+      sourceThreadId?: string | undefined;
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
+      sourceToolName?: string | undefined;
+    } | undefined,
+  ): string {
+    const newId = this.db.transaction(() => {
+      const id = this.db.createMemory({
+        text, namespace, scopeType: scope.type, scopeId: scope.id,
+        sourceRunId: options?.sourceRunId, sourceThreadId: options?.sourceThreadId,
+        sourceType: derivedTier, sourceToolName: options?.sourceToolName,
+        sourceChannel: options?.sourceChannel, sourceUntrusted: options?.sourceUntrusted,
+        embeddingModel, provider: this.embeddingProvider.name, embedding,
+      });
+      this.db.supersedMemory(candidate.id, id, { trustGate: true });
+      this.db.createSupersedes(id, candidate.id, 'tier-raise');
+      this.db.addConfirmations(id, candidate.confirmation_count);
+      return id;
+    });
+    this._mirrorTierRaise(candidate, newId, text, namespace, scope, derivedTier, embeddingModel, embedding, options);
+    return newId;
+  }
+
+  /**
+   * Mirror a P1b tier-raise onto engine.db (dual-write gate): retire the old stub + insert
+   * the fresh stub carrying the old row's subject linkage + confirmation count, so recall
+   * under the S5b cutover sees the RAISED row and not the retired one. Isolated — a mirror
+   * failure never affects the authoritative legacy raise (already committed).
+   */
+  private _mirrorTierRaise(
+    candidate: ScoredMemoryRow,
+    newId: string,
+    text: string,
+    namespace: MemoryNamespace,
+    scope: MemoryScopeRef,
+    derivedTier: ProvenanceKind,
+    embeddingModel: string,
+    embedding: number[],
+    options: {
+      sourceRunId?: string | undefined;
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
+      sourceToolName?: string | undefined;
+    } | undefined,
+  ): void {
+    if (!this.subjectGraphEnabled || !this.memoryGraphStore) return;
+    const memoryGraph = this.memoryGraphStore;
+    try {
+      const oldSubject = memoryGraph.getStub(candidate.id)?.subject_id ?? null;
+      const oldMentions = memoryGraph.getLinkedSubjectIds(candidate.id);
+      this.engineDb!.getDb().transaction(() => {
+        memoryGraph.markSuperseded(candidate.id, newId, { newTier: derivedTier });
+        memoryGraph.upsertStub({
+          id: newId, text, namespace, scopeType: scope.type, scopeId: scope.id,
+          subjectId: oldSubject,
+          sourceRunId: options?.sourceRunId ?? null,
+          sourceType: derivedTier,
+          sourceToolName: options?.sourceToolName ?? null,
+          sourceChannel: options?.sourceChannel ?? null,
+          sourceUntrusted: options?.sourceUntrusted,
+          embeddingModel,
+          provider: this.embeddingProvider.name,
+          embedding: embedToBlob(embedding),
+          confirmationCount: candidate.confirmation_count,
+        });
+        if (oldMentions.length > 0) memoryGraph.linkSubjects(newId, oldMentions);
+      })();
+    } catch (err: unknown) {
+      process.stderr.write(
+        `[lynox:subject-graph] tier-raise mirror failed for ${newId}: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
   /** Consolidate similar memories within a scope. Returns count merged. */
   consolidateMemories(namespace: MemoryNamespace, scopeType: string, scopeId: string): number {
     // Inject the subject-agreement veto so the clusterer never merges two projects'
     // facts (cross-subject data loss — the same guard M1 added to supersede/dedup).
     // Pass the set-level primitives so each row is tokenized once, not per pair;
     // `undefined` keeps the DB method's default threshold.
+    // Wave 0 (memory_scoring_v2): consolidation still MERGES duplicates (supersede),
+    // but stops TRANSFERRING the victims' confirmation counts to the keeper — the
+    // third confirmation-count feeder (PRD §2.2). `transferConfirmations=false`
+    // skips the inline UPDATE and zeroes `victimConfirmations`, so the engine.db
+    // `addConfirmations` mirror below is a natural no-op.
     const pairs = this.db.consolidateMemories(
       namespace, scopeType, scopeId, undefined,
       { tokenize: properNounTokens, disagree: subjectTokensDisagree },
+      !this.memoryScoringV2,
+      // Wave 2: tier-first keeper-sort so a low-trust duplicate can't win the merge and
+      // retire a user truth. Flag off → legacy confirmation-count-then-length sort.
+      this.memoryWriteTrustGate,
     );
     // S5b'-c: mirror every consolidation supersede + confirmation transfer onto the
     // engine.db stubs (the authoritative recall store under the cutover), else the

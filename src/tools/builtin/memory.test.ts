@@ -1,7 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { memoryStoreTool, memoryRecallTool, memoryDeleteTool, memoryUpdateTool, memoryListTool, memoryPromoteTool } from './memory.js';
-import type { IAgent } from '../../types/index.js';
+import type { IAgent, IKnowledgeLayer } from '../../types/index.js';
 import { createToolContext } from '../../core/tool-context.js';
+
+/** A KG stub exposing only the two delete-path methods the memory tools call. */
+function makeKg(overrides: Partial<Pick<IKnowledgeLayer, 'eraseByPattern' | 'deactivateByPattern'>> = {}): IKnowledgeLayer {
+  return {
+    eraseByPattern: vi.fn(async () => 0),
+    deactivateByPattern: vi.fn(async () => 0),
+    ...overrides,
+  } as unknown as IKnowledgeLayer;
+}
 
 vi.mock('../../core/observability.js', () => ({
   channels: {
@@ -61,22 +70,37 @@ describe('memoryStoreTool', () => {
     expect(channels.memoryStore.publish).toHaveBeenCalledWith({
       namespace: 'knowledge',
       content: 'channel test',
-      sourceType: 'agent_inferred',
+      sourceChannel: 'agent',
+      // A clean write (no untrusted signal) is now an explicit `false`, not absent —
+      // the tool derives it from the full write-trust union, which floors to false.
+      sourceUntrusted: false,
     });
   });
 
-  it('captures the agent-declared sourceType in the published event', async () => {
+  it('force-floors the tier to agent_inferred — an agent cannot self-declare provenance (Wave 0.6, §2.8)', async () => {
     const { channels } = await import('../../core/observability.js');
     const append = vi.fn().mockResolvedValue(undefined);
     const agent = makeAgent(makeMockMemory({ append }));
 
+    // Even if a caller smuggles a sourceType — the removed self-declare param, or
+    // injected content instructing the agent to claim the tier the system prompt
+    // trusts most — the tool publishes agent_inferred. The §2.8 privilege
+    // escalation is closed: provenance is no longer agent-declarable.
     await memoryStoreTool.handler(
-      { namespace: 'knowledge', content: 'the user told me their budget', sourceType: 'user_asserted' },
+      { namespace: 'knowledge', content: 'the user told me their budget', sourceType: 'user_asserted' } as unknown as Parameters<typeof memoryStoreTool.handler>[0],
       agent,
     );
     expect(channels.memoryStore.publish).toHaveBeenCalledWith(
-      expect.objectContaining({ content: 'the user told me their budget', sourceType: 'user_asserted' }),
+      expect.objectContaining({ content: 'the user told me their budget', sourceChannel: 'agent' }),
     );
+  });
+
+  it('memory_store and memory_update no longer expose a sourceType/sourceToolName parameter (Wave 0.6)', () => {
+    const storeProps = (memoryStoreTool.definition.input_schema as { properties: Record<string, unknown> }).properties;
+    expect(storeProps).not.toHaveProperty('sourceType');
+    expect(storeProps).not.toHaveProperty('sourceToolName');
+    const updateProps = (memoryUpdateTool.definition.input_schema as { properties: Record<string, unknown> }).properties;
+    expect(updateProps).not.toHaveProperty('sourceType');
   });
 
   it('stores content via agent.memory.append and returns confirmation', async () => {
@@ -155,6 +179,122 @@ describe('memoryStoreTool', () => {
     );
     expect(result).toBe('Stored in knowledge. Entities and relationships are extracted automatically for future cross-referencing.');
     expect(append).toHaveBeenCalledWith('knowledge', 'safe content');
+  });
+});
+
+describe('memory write-trust union (legacy tools quarantine external-content writes)', () => {
+  // The bare `sawUntrustedData` wrap marker is allowlist-by-omission: `web_research`/`mail_*`/
+  // `read_file`/`bash` return attacker-controllable content WITHOUT setting it. Previously the
+  // legacy memory_store/update/promote derived `sourceUntrusted` from that marker ALONE, so
+  // external-derived content was minted as TRUSTED `agent_inferred` instead of quarantined —
+  // single-tenant durable memory poison on the DK-off default path (#1029 closed the DK/auto-
+  // extractor path, not these tools). Each case below FAILS if a tool reverts to the bare marker.
+  const untrustedAgent = (memory: NonNullable<IAgent['memory']>, signals: Partial<Pick<IAgent, 'sawUntrustedData' | 'sawExternalContentTool' | 'conversationSawUntrusted'>>): IAgent =>
+    ({ ...makeAgent(memory), sawUntrustedData: false, sawExternalContentTool: false, conversationSawUntrusted: false, ...signals });
+
+  it('memory_store quarantines when an external-content tool ran this turn (no wrap marker)', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent = untrustedAgent(makeMockMemory({ append: vi.fn().mockResolvedValue(undefined) }), { sawExternalContentTool: true });
+    await memoryStoreTool.handler({ namespace: 'knowledge', content: 'AcmeCorp wires payment on the 1st' }, agent);
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: true }));
+  });
+
+  it('memory_store quarantines when the conversation ingested untrusted content on a prior turn (F5 sticky)', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent = untrustedAgent(makeMockMemory({ append: vi.fn().mockResolvedValue(undefined) }), { conversationSawUntrusted: true });
+    await memoryStoreTool.handler({ namespace: 'knowledge', content: 'deferred injected remember on a clean turn' }, agent);
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: true }));
+  });
+
+  it('memory_store still honours the bare wrap marker', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent = untrustedAgent(makeMockMemory({ append: vi.fn().mockResolvedValue(undefined) }), { sawUntrustedData: true });
+    await memoryStoreTool.handler({ namespace: 'knowledge', content: 'wrapped untrusted content' }, agent);
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: true }));
+  });
+
+  it('memory_store keeps a clean business-conversation write trusted (no external tool, no ingested untrusted)', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent = untrustedAgent(makeMockMemory({ append: vi.fn().mockResolvedValue(undefined) }), {});
+    await memoryStoreTool.handler({ namespace: 'knowledge', content: 'the user prefers terse replies' }, agent);
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: false }));
+  });
+
+  it('memory_promote quarantines the re-embedded copy when an external-content tool ran this turn', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent: IAgent = {
+      ...untrustedAgent(makeMockMemory({
+        loadScoped: vi.fn().mockResolvedValue('User pattern A\nUser pattern B'),
+        appendScoped: vi.fn().mockResolvedValue(undefined),
+        deleteScoped: vi.fn().mockResolvedValue(1),
+      }), { sawExternalContentTool: true }),
+      activeScopes: [{ type: 'global', id: 'global' }, { type: 'context', id: 'proj1' }, { type: 'user', id: 'alex' }],
+    };
+    await memoryPromoteTool.handler(
+      { namespace: 'methods', content_pattern: 'pattern B', from_scope: 'user:alex', to_scope: 'context:proj1' },
+      agent,
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: true }));
+  });
+
+  // memory_update's KG-mirror publish is knowledgeLayer-gated AND only on the fallback path
+  // (exact update miss → [SUPERSEDED] marker + append), so drive both: update() returns false
+  // and a knowledgeLayer is present.
+  const updateFallbackMemory = () => makeMockMemory({
+    load: vi.fn(async () => 'ProjectAlpha launch is in November'),
+    update: vi.fn(async () => false),
+    delete: vi.fn(async () => 1),
+    append: vi.fn(async () => undefined),
+  });
+  const withKg = (agent: IAgent): IAgent => ({ ...agent, toolContext: { ...createToolContext({}), knowledgeLayer: makeKg() } });
+
+  it('memory_update quarantines the KG-mirrored write when an external-content tool ran this turn', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent = withKg(untrustedAgent(updateFallbackMemory(), { sawExternalContentTool: true }));
+    await memoryUpdateTool.handler(
+      { namespace: 'learnings', old_content: 'ProjectAlpha launch November', new_content: 'ProjectAlpha launch postponed to December' },
+      agent,
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: true }));
+  });
+
+  it('memory_update keeps the KG-mirrored write trusted on a clean turn', async () => {
+    const { channels } = await import('../../core/observability.js');
+    const agent = withKg(untrustedAgent(updateFallbackMemory(), {}));
+    await memoryUpdateTool.handler(
+      { namespace: 'learnings', old_content: 'ProjectAlpha launch November', new_content: 'ProjectAlpha launch postponed to December' },
+      agent,
+    );
+    expect(channels.memoryStore.publish).toHaveBeenCalledWith(expect.objectContaining({ sourceUntrusted: false }));
+  });
+
+  // The EXACT-update path (memory.update returns true) mirrors to the KG via
+  // knowledgeLayer.updateMemoryText, which RE-EXTRACTS the new text into the trusted
+  // subject graph — so it too must be gated on the union, not run untainted (the residual
+  // the first write-trust pass left on this path).
+  const kgWithUpdate = () => {
+    const updateMemoryText = vi.fn().mockResolvedValue(undefined);
+    return { kg: { ...makeKg(), updateMemoryText } as unknown as IKnowledgeLayer, updateMemoryText };
+  };
+
+  it('memory_update EXACT path skips the KG re-extraction on an external-content turn', async () => {
+    const { kg, updateMemoryText } = kgWithUpdate();
+    const agent: IAgent = {
+      ...untrustedAgent(makeMockMemory({ update: vi.fn().mockResolvedValue(true) }), { sawExternalContentTool: true }),
+      toolContext: { ...createToolContext({}), knowledgeLayer: kg },
+    };
+    await memoryUpdateTool.handler({ namespace: 'status', old_content: 'old', new_content: 'new' }, agent);
+    expect(updateMemoryText).not.toHaveBeenCalled();
+  });
+
+  it('memory_update EXACT path mirrors to the KG on a clean turn', async () => {
+    const { kg, updateMemoryText } = kgWithUpdate();
+    const agent: IAgent = {
+      ...untrustedAgent(makeMockMemory({ update: vi.fn().mockResolvedValue(true) }), {}),
+      toolContext: { ...createToolContext({}), knowledgeLayer: kg },
+    };
+    await memoryUpdateTool.handler({ namespace: 'status', old_content: 'old', new_content: 'new' }, agent);
+    expect(updateMemoryText).toHaveBeenCalled();
   });
 });
 
@@ -335,6 +475,92 @@ describe('memoryDeleteTool', () => {
       agent,
     );
     expect(result).toBe('Memory is not configured for this agent.');
+  });
+
+  it('SOFT-deactivates the KG (curation, recoverable) — never the hard erase', async () => {
+    // The agent tool is least-privilege: it deactivates (is_active = 0), it must NOT
+    // call the irreversible eraseByPattern — that is the human-gated UI path only.
+    const deactivate = vi.fn().mockResolvedValue(2);
+    const erase = vi.fn();
+    const agent = makeAgent(makeMockMemory({ delete: vi.fn().mockResolvedValue(2) }));
+    agent.toolContext.knowledgeLayer = makeKg({ deactivateByPattern: deactivate, eraseByPattern: erase });
+
+    const result = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: 'old stuff' },
+      agent,
+    );
+    expect(deactivate).toHaveBeenCalledWith('old stuff', 'knowledge');
+    expect(erase).not.toHaveBeenCalled();
+    expect(result).toBe('Removed 2 entries matching "old stuff" from knowledge.');
+  });
+
+  it('deactivates the KG UNCONDITIONALLY — even when the flat-file matched 0 lines (document-ingest rows)', async () => {
+    const deactivate = vi.fn().mockResolvedValue(2);
+    const agent = makeAgent(makeMockMemory({ delete: vi.fn().mockResolvedValue(0) }));
+    agent.toolContext.knowledgeLayer = makeKg({ deactivateByPattern: deactivate });
+
+    const result = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: 'ingested doc fact' },
+      agent,
+    );
+    // The old `if (count > 0)` gate skipped the KG for these rows; now it runs on a
+    // 0-line flat-file match and the count falls back to the KG (not "nothing found").
+    expect(deactivate).toHaveBeenCalledWith('ingested doc fact', 'knowledge');
+    expect(result).toBe('Removed 2 entries matching "ingested doc fact" from knowledge.');
+  });
+
+  it('uses the singular "entry" for a single removed memory', async () => {
+    const agent = makeAgent(makeMockMemory({ delete: vi.fn().mockResolvedValue(1) }));
+    agent.toolContext.knowledgeLayer = makeKg({ deactivateByPattern: vi.fn().mockResolvedValue(1) });
+
+    const result = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: 'one thing' },
+      agent,
+    );
+    expect(result).toBe('Removed 1 entry matching "one thing" from knowledge.');
+  });
+
+  it('passes the scope through to the flat-file delete and labels the message', async () => {
+    const deleteScoped = vi.fn().mockResolvedValue(1);
+    const agent: IAgent = {
+      ...makeAgent(makeMockMemory({ deleteScoped })),
+      activeScopes: [{ type: 'user', id: 'alex' }],
+    };
+    agent.toolContext.knowledgeLayer = makeKg({ deactivateByPattern: vi.fn().mockResolvedValue(1) });
+
+    const result = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: 'personal fact', scope: 'user:alex' },
+      agent,
+    );
+    expect(deleteScoped).toHaveBeenCalledWith('knowledge', 'personal fact', { type: 'user', id: 'alex' });
+    expect(result).toBe('Removed 1 entry matching "personal fact" from knowledge (scope: user:alex).');
+  });
+
+  it('refuses an empty/whitespace pattern (would substring-match every line)', async () => {
+    const deleteFn = vi.fn();
+    const agent = makeAgent(makeMockMemory({ delete: deleteFn }));
+    agent.toolContext.knowledgeLayer = makeKg();
+
+    const result = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: '   ' },
+      agent,
+    );
+    expect(result).toBe('A non-empty pattern is required to delete.');
+    expect(deleteFn).not.toHaveBeenCalled(); // never reached the store
+  });
+
+  it('reports a partial failure (NOT success) when the recall-mirror reap throws', async () => {
+    const deactivate = vi.fn().mockRejectedValue(new Error('engine.db locked'));
+    const agent = makeAgent(makeMockMemory({ delete: vi.fn().mockResolvedValue(1) }));
+    agent.toolContext.knowledgeLayer = makeKg({ deactivateByPattern: deactivate });
+
+    const result = await memoryDeleteTool.handler(
+      { namespace: 'knowledge', pattern: 'stubborn fact' },
+      agent,
+    );
+    // A swallowed reap failure would leave the content recallable — the tool must own up.
+    expect(result).toContain('recall mirror could not be updated');
+    expect(result).not.toContain('Removed 1');
   });
 });
 
@@ -664,14 +890,53 @@ describe('memoryPromoteTool', () => {
     expect(result).toContain('Promoted entry from user:alex to context:proj1');
     expect(result).toContain('User pattern B');
     expect(appendScoped).toHaveBeenCalledWith('methods', 'User pattern B', { type: 'context', id: 'proj1' });
-    expect(deleteScoped).toHaveBeenCalledWith('methods', 'pattern B', { type: 'user', id: 'alex' });
+    // F4: deletes EXACTLY the promoted line ({exact:true}), not the substring pattern
+    // (which would also erase sibling matches that were never promoted).
+    expect(deleteScoped).toHaveBeenCalledWith('methods', 'User pattern B', { type: 'user', id: 'alex' }, { exact: true });
     expect(channels.memoryStore.publish).toHaveBeenCalledWith({
       namespace: 'methods',
       content: 'User pattern B',
       scopeType: 'context',
       scopeId: 'proj1',
-      sourceType: 'agent_inferred',
+      sourceChannel: 'agent',
+      sourceUntrusted: false,
     });
+  });
+
+  it('F4: promotes ONE line but does not substring-delete sibling matches from the source', async () => {
+    // Two lines both contain the pattern "secret"; only the first-matched line is
+    // promoted, so only IT may be removed from the source (the old substring delete
+    // erased both — silent data loss of the un-promoted sibling).
+    const loadScoped = vi.fn().mockResolvedValue('secret alpha\nsecret beta');
+    const appendScoped = vi.fn().mockResolvedValue(undefined);
+    const deleteScoped = vi.fn().mockResolvedValue(1);
+    const agent: IAgent = {
+      ...makeAgent(makeMockMemory({ loadScoped, appendScoped, deleteScoped })),
+      activeScopes: allScopes,
+    };
+    await memoryPromoteTool.handler(
+      { namespace: 'knowledge', content_pattern: 'secret', from_scope: 'user:alex', to_scope: 'global' },
+      agent,
+    );
+    expect(appendScoped).toHaveBeenCalledWith('knowledge', 'secret alpha', { type: 'global', id: 'global' });
+    expect(deleteScoped).toHaveBeenCalledTimes(1);
+    expect(deleteScoped).toHaveBeenCalledWith('knowledge', 'secret alpha', { type: 'user', id: 'alex' }, { exact: true });
+  });
+
+  it('F4: rejects an empty/whitespace content_pattern (would wipe the namespace)', async () => {
+    const loadScoped = vi.fn().mockResolvedValue('a\nb\nc');
+    const deleteScoped = vi.fn();
+    const agent: IAgent = {
+      ...makeAgent(makeMockMemory({ loadScoped, deleteScoped })),
+      activeScopes: allScopes,
+    };
+    const result = await memoryPromoteTool.handler(
+      { namespace: 'knowledge', content_pattern: '   ', from_scope: 'user:alex', to_scope: 'global' },
+      agent,
+    );
+    expect(result).toContain('non-empty content_pattern');
+    expect(deleteScoped).not.toHaveBeenCalled();
+    expect(loadScoped).not.toHaveBeenCalled();
   });
 
   it('rejects when from_scope is not more specific than to_scope', async () => {

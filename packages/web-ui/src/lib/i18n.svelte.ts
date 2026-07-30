@@ -24,6 +24,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'artifacts.save_pdf': { de: 'Als PDF', en: 'Save as PDF' },
 	'artifacts.print': { de: 'Drucken', en: 'Print' },
 	'artifacts.download_file': { de: 'Datei', en: 'Download' },
+	'artifacts.share': { de: 'Teilen', en: 'Share' },
 	'artifacts.popup_blocked': { de: 'Popup blockiert — erlaube Popups, um zu drucken', en: 'Popup blocked — allow popups to print' },
 	'artifacts.toggle_preview': { de: 'Vorschau ein-/ausklappen', en: 'Toggle preview' },
 	'artifacts.back_to_chat': { de: 'Zurück zum Chat', en: 'Back to chat' },
@@ -47,13 +48,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'threads.run_running': { de: 'Agent arbeitet', en: 'Agent working' },
 	'threads.run_awaiting': { de: 'Wartet auf deine Eingabe', en: 'Awaiting your input' },
 	'threads.run_interrupted': { de: 'Lauf unterbrochen — erneut starten', en: 'Run interrupted — retry' },
-	'threads.private_on': { de: 'Privater Chat — kein Wissen wird gespeichert', en: 'Private chat — no knowledge stored' },
-	'threads.private_off': { de: 'Wissen wird gespeichert', en: 'Knowledge is being stored' },
+	'threads.private_on': { de: 'Privat-Modus an — dieser Chat wird nicht ins Gedächtnis aufgenommen', en: 'Private mode on — this chat is kept out of memory' },
+	'threads.private_off': { de: 'Privat-Modus aus — klicken, um diesen Chat vom Gedächtnis auszunehmen', en: 'Private mode off — click to keep this chat out of memory' },
 	'threads.rename': { de: 'Umbenennen', en: 'Rename' },
 	'threads.delete': { de: 'Löschen', en: 'Delete' },
 	'threads.confirm_delete': { de: 'Thread endgültig löschen?', en: 'Permanently delete this thread?' },
 	'threads.actions_menu': { de: 'Thread-Aktionen', en: 'Thread actions' },
 	'threads.menu_close': { de: 'Menü schließen', en: 'Close menu' },
+	'threads.compact': { de: 'Kontext verdichten', en: 'Compact context' },
 	'threads.export': { de: 'Als Markdown exportieren', en: 'Export as Markdown' },
 	'threads.export_json': { de: 'Als JSON exportieren (mit Debug-Daten)', en: 'Export as JSON (with debug data)' },
 	'threads.error_export': { de: 'Thread konnte nicht exportiert werden', en: 'Failed to export thread' },
@@ -71,13 +73,21 @@ const translations: Record<string, Record<Locale, string>> = {
 	'panel.pin': { de: 'Fixieren', en: 'Pin' },
 	'panel.pinned': { de: 'Fixiert', en: 'Pinned' },
 
-	// Spawn (sub-agent delegation — sidebar progress view)
+	// Spawn (sub-agent delegation — sidebar progress view + inline transcript panel)
 	'spawn.active': { de: 'aktiv', en: 'active' },
 	'spawn.done': { de: 'fertig', en: 'done' },
 	'spawn.running': { de: 'Laufend', en: 'Running' },
 	'spawn.completed': { de: 'Abgeschlossen', en: 'Completed' },
 	'spawn.status_ok': { de: 'erfolgreich', en: 'succeeded' },
 	'spawn.status_fail': { de: 'fehlgeschlagen', en: 'failed' },
+	'spawn.subagents': { de: 'Subagenten', en: 'Sub-agents' },
+	'spawn.slow': { de: 'ungewöhnlich lang', en: 'taking unusually long' },
+	'spawn.est_max_hint': {
+		de: 'Obergrenze, die die Engine für diese Delegation reserviert hat — die tatsächlichen Kosten liegen meist deutlich darunter und ersetzen diese Zahl, sobald ein Subagent fertig ist.',
+		en: 'Ceiling the engine reserved for this delegation — the actual cost is usually well below it, and replaces this figure as soon as a sub-agent finishes.',
+	},
+	'spawn.waiting': { de: 'wartet', en: 'waiting' },
+	'spawn.region_label': { de: 'Aktivität der Subagenten', en: 'Sub-agent activity' },
 
 	// Nav (flat post-consolidation: 5 top-level entries, all sub-features as hub tabs)
 	'nav.automation': { de: 'Automation', en: 'Automation' },
@@ -92,6 +102,28 @@ const translations: Record<string, Record<Locale, string>> = {
 	'hub.intelligence.contacts': { de: 'Kontakte', en: 'Contacts' },
 	'hub.intelligence.data': { de: 'Daten', en: 'Data' },
 	'hub.intelligence.subjects': { de: 'Subjekte', en: 'Subjects' },
+	// DK.2 review queue (durable memory) — tab + panel strings.
+	'hub.intelligence.queue': { de: 'Prüfen', en: 'Review' },
+	'knowledge.queue.title': { de: 'Merk-Warteschlange', en: 'Memory review queue' },
+	'knowledge.queue.subtitle': { de: 'Fakten aus Durchläufen mit externen Inhalten warten hier auf deine Freigabe.', en: 'Facts captured on turns that read external content wait here for your approval.' },
+	'knowledge.queue.reload_aria': { de: 'Prüf-Liste neu laden', en: 'Reload review list' },
+	'knowledge.queue.edit_aria': { de: 'Eintrag bearbeiten', en: 'Edit entry' },
+	'chat.knowledge.review_edit_aria': { de: 'Zur Prüfung bearbeiten', en: 'Edit for review' },
+	'knowledge.queue.empty': { de: 'Nichts zu prüfen — die Warteschlange ist leer.', en: 'Nothing to review — the queue is empty.' },
+	'knowledge.queue.pending_tag': { de: 'ungeprüft', en: 'pending' },
+	'knowledge.queue.approve': { de: 'Freigeben', en: 'Approve' },
+	'knowledge.queue.edit': { de: 'Bearbeiten…', en: 'Edit…' },
+	'knowledge.queue.save_approve': { de: 'Speichern + freigeben', en: 'Save + approve' },
+	'knowledge.queue.reject': { de: 'Ablehnen', en: 'Reject' },
+	'knowledge.queue.reject_confirm': { de: 'Eintrag ablehnen? Er bleibt als abgelehnt protokolliert und wird dem Agenten nie gezeigt.', en: 'Reject this entry? It stays on record as rejected and is never shown to the agent.' },
+	// DK-UX read-surface ("Wissen"-Tab, active durable knowledge — browse only).
+	'knowledge.active.count_label': { de: 'aktive Einträge', en: 'active entries' },
+	'knowledge.active.subtitle': { de: 'Was sich lynox über dich und deine Arbeit gemerkt hat. Änderungen besprichst du direkt im Chat.', en: 'What lynox has remembered about you and your work. Discuss any changes directly in chat.' },
+	'knowledge.active.profile': { de: 'Profil', en: 'Profile' },
+	'knowledge.active.playbook': { de: 'Playbook', en: 'Playbook' },
+	'knowledge.active.empty': { de: 'Noch nichts gemerkt. Sobald lynox etwas über dich lernt, erscheint es hier.', en: 'Nothing remembered yet. As lynox learns about you, it shows up here.' },
+	'knowledge.active.pinned': { de: 'angeheftet', en: 'pinned' },
+	'knowledge.active.edit_hint': { de: 'Etwas ändern oder löschen? Sag es lynox einfach im Chat.', en: 'Want to change or remove something? Just tell lynox in chat.' },
 	// PRD-IA-V2 P3-PR-H: `insights` folded as sub-tab under `graph`. Key kept
 	// (powers the sub-tab label). `graph_overview` labels the default graph
 	// view inside the `graph` top-tab.
@@ -151,6 +183,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'privacy.bugsink_label':        { de: 'Fehler-Reporting aktivieren',                                                         en: 'Enable error reporting' },
 	'privacy.bugsink_managed_fixed':{ de: 'Auf Managed-Plänen immer aktiv (per DPIA, Hetzner Frankfurt).',                       en: 'Always on for managed plans (per DPIA, Hetzner Frankfurt).' },
 	'privacy.bugsink_self_host_env':{ de: 'Selbst-Hosting: Aktivieren durch Setzen der Env-Variable LYNOX_BUGSINK_DSN. UI-Toggle folgt.', en: 'Self-host: enable by setting env LYNOX_BUGSINK_DSN. UI toggle in a follow-up release.' },
+	'privacy.wire_capture_heading': { de: 'Erweiterte Debug-Aufzeichnung',                                                        en: 'Extended debug capture' },
+	'privacy.wire_capture_subtitle':{ de: 'Speichert pro Turn eine geschwärzte Momentaufnahme der vollständig zusammengesetzten Anfrage — genau das, was das Modell erhalten hat (Geheimnisse entfernt) — in der Datenbank dieser Instanz und legt sie deinem Debug-Export bei. Nützlich für Fehlerberichte. Standardmäßig aus.', en: 'Stores a redacted per-turn snapshot of the fully assembled request — exactly what the model received, secrets removed — in this instance\'s database and bundles it into your debug export. Useful for bug reports. Off by default.' },
+	'privacy.wire_capture_label':   { de: 'Debug-Aufzeichnung aktivieren',                                                          en: 'Enable debug capture' },
+	'privacy.wire_capture_env_pinned': { de: 'Über die Betreiber-Umgebung gesetzt — hier gesperrt.',                              en: 'Set by the operator environment — locked here.' },
 	'privacy.delete_heading':       { de: 'Konto löschen',                                                                       en: 'Delete account' },
 	'privacy.delete_subtitle':      { de: 'Schickt eine E-Mail an unser Privacy-Team. Bearbeitung innerhalb 30 Tagen (GDPR Art. 17).', en: 'Opens an email to our privacy team. Processed within 30 days (GDPR Art. 17).' },
 	'privacy.delete_button':        { de: 'Löschung anfordern',                                                                  en: 'Request deletion' },
@@ -258,6 +294,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.subtitle':           { de: 'Anbieter, Schlüssel und Modell auswählen.',                                 en: 'Pick provider, key, and model.' },
 	'llm.back_to_settings':   { de: 'Zurück zu Einstellungen',                                                   en: 'Back to Settings' },
 	'llm.provider_heading':   { de: 'Anbieter',                                                                  en: 'Provider' },
+	'llm.experimental':       { de: 'ungeprüft',                                                                 en: 'unverified' },
 	'llm.api_key':            { de: 'API-Schlüssel',                                                             en: 'API key' },
 	'llm.api_key_placeholder':{ de: 'Leer lassen, um den gespeicherten Schlüssel zu behalten.',                  en: 'Leave blank to keep the stored key.' },
 	'llm.api_key_hint':       { de: 'Wird verschlüsselt im Vault gespeichert. Wird nie im Browser angezeigt.',   en: 'Stored encrypted in the vault. Never shown back in the browser.' },
@@ -282,6 +319,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.routing.hybrid_desc':   { de: 'Weise jeder Stufe ein eigenes Modell zu.',                               en: 'Assign a specific model to each tier.' },
 	'llm.routing.budget_hint':   { de: 'Teurere Modelle verbrauchen dein Guthaben schneller — die Kosten pro Modell stehen rechts (⚡ = teuer).', en: 'Pricier models use up your balance faster — per-model cost is shown on the right (⚡ = expensive).' },
 	'llm.routing.per_tier_heading': { de: 'Modell pro Stufe',                                                       en: 'Model per tier' },
+	'llm.main_model.heading':      { de: 'Haupt-Chat-Modell',                                                        en: 'Main chat model' },
+	'llm.main_model.applies_hint': { de: 'Gilt für neue Unterhaltungen. Laufende Unterhaltungen behalten ihr Modell.', en: 'Applies to new conversations. Ongoing conversations keep their model.' },
+	'llm.main_model.autoroute_hint': { de: 'Hintergrund-Aufgaben und Subagenten routen weiterhin automatisch über schnell/ausgewogen/tief.', en: 'Background tasks & subagents keep auto-routing across fast/balanced/deep.' },
+	'llm.main_model.fast_suffix':  { de: 'für den Haupt-Chat nicht empfohlen',                                       en: 'not recommended for main chat' },
+	'llm.main_model.locked_suffix': { de: 'im aktuellen Tarif nicht verfügbar',                                       en: 'unavailable on your current plan' },
 	'llm.hybrid_keys_heading': { de: 'API-Schlüssel pro Anbieter',                                                 en: 'API keys per provider' },
 	'llm.tier.fast':          { de: 'Schnell',                                                                   en: 'Fast' },
 	'llm.tier.balanced':      { de: 'Ausgewogen',                                                                en: 'Balanced' },
@@ -309,6 +351,40 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.confirm_body_2':     { de: 'Nur fortfahren, wenn du dieser Domain vollständig vertraust. SSRF-Schutz blockiert interne Adressen, aber ein bösartiger öffentlicher Endpoint könnte deinen Key abgreifen.', en: 'Only proceed if you fully trust this domain. SSRF guard blocks internal addresses, but a malicious public endpoint could still capture your key.' },
 	'llm.confirm_cancel':     { de: 'Abbrechen',                                                                 en: 'Cancel' },
 	'llm.confirm_proceed':    { de: 'Verstanden, fortfahren',                                                    en: 'Understood, proceed' },
+
+	// model-presets W4 — the "Modell-Strategie" cards + per-tier disclosure. Model
+	// choice is framed by COST + SOVEREIGNTY + CONTEXT, never a quality claim about
+	// any single model (positioning-guard). DE + EN written natively.
+	'llm.preset.heading':        { de: 'Modell-Strategie',                                                        en: 'Model strategy' },
+	'llm.preset.subheading':     { de: 'Wähle eine fertige Strategie oder stelle jede Stufe selbst ein.',         en: 'Pick a ready-made strategy, or tune each tier yourself.' },
+	'llm.preset.recommended':    { de: 'empfohlen',                                                               en: 'recommended' },
+	'llm.preset.standard':       { de: 'Standard',                                                                en: 'Standard' },
+	'llm.preset.standard_desc':  { de: 'Ein Anbieter bedient jede Stufe — lynox wählt das Modell pro Aufgabe.',   en: 'One provider serves every tier — lynox picks the model per task.' },
+	'llm.preset.efficient':      { de: 'Effizient',                                                               en: 'Efficient' },
+	'llm.preset.efficient_desc': { de: 'Günstigste kohärente Kombi: EU-Mistral für den Alltag, ein großes Kontextfenster für tiefe Aufgaben.', en: 'Cheapest coherent mix: EU Mistral for everyday work, a large context window for deep tasks.' },
+	'llm.preset.balanced':       { de: 'Ausgewogen',                                                              en: 'Balanced' },
+	'llm.preset.balanced_desc':  { de: 'Der ausgewogene Mix — schnelles Tool-Routing im Haupt-Chat, starke Modelle für die Tiefe.', en: 'The balanced mix — fast tool-routing in the main chat, strong models for depth.' },
+	'llm.preset.max_quality':    { de: 'Max-Qualität',                                                            en: 'Max quality' },
+	'llm.preset.max_quality_desc': { de: 'Durchgehend die stärksten Modelle — der höchste Kostenrahmen.',         en: 'The strongest models across every tier — the highest cost.' },
+	'llm.preset.custom':         { de: 'Eigene',                                                                  en: 'Custom' },
+	'llm.preset.custom_desc':    { de: 'Weise jeder Stufe manuell ein Modell zu.',                                en: 'Assign a model to each tier yourself.' },
+	'llm.preset.details':        { de: 'Details',                                                                 en: 'Details' },
+	'llm.preset.hide_details':   { de: 'Details ausblenden',                                                      en: 'Hide details' },
+	'llm.preset.applies_hint':   { de: 'Gilt für neue Unterhaltungen. Laufende behalten ihr Modell.',             en: 'Applies to new conversations. Ongoing ones keep their model.' },
+	'llm.preset.unavailable':    { de: 'Im aktuellen Plan nicht verfügbar.',                                      en: 'Not available on your current plan.' },
+	'llm.preset.unavailable_cta':{ de: 'Support kontaktieren',                                                    en: 'Contact support' },
+	// Per-tier disclosure (three axes — where data is processed, transfer basis,
+	// where the model weights originate). R2-gated posture comes from the server.
+	'llm.preset.disclosure.residency':  { de: 'Verarbeitung',                                                     en: 'Processing' },
+	'llm.preset.disclosure.transfer':   { de: 'Übermittlung',                                                     en: 'Transfer basis' },
+	'llm.preset.disclosure.provenance': { de: 'Modell-Herkunft',                                                  en: 'Model origin' },
+	'llm.preset.disclosure.posture':    { de: 'Daten-Umgang',                                                     en: 'Data handling' },
+	'llm.preset.provenance.US':  { de: 'USA',                                                                     en: 'USA' },
+	'llm.preset.provenance.EU':  { de: 'EU',                                                                      en: 'EU' },
+	'llm.preset.provenance.CN':  { de: 'China',                                                                   en: 'China' },
+	// Explicit-save model (rafael): no auto-save; a bar appears on change.
+	'llm.unsaved.title':         { de: 'Ungespeicherte Änderungen',                                               en: 'Unsaved changes' },
+	'llm.unsaved.discard':       { de: 'Verwerfen',                                                               en: 'Discard' },
 
 	// Wave 5d — BYOK custom-endpoint disclosure modal (i18n keys per the
 	// PRD-HN-LAUNCH-HARDENING spec; surface text per `feedback_native_language`
@@ -351,6 +427,16 @@ const translations: Record<string, Record<Locale, string>> = {
 	'llm.context_window.option.500k_hint':     { de: 'Mehr Historie pro Antwort. ~2.5× teurer.',                                 en: 'More history per response. ~2.5× cost.' },
 	'llm.context_window.option.1m':            { de: 'Maximum — 1M Tokens',                                                      en: 'Maximum — 1M tokens' },
 	'llm.context_window.option.1m_hint':       { de: 'Volle Modell-Kapazität. ~5× teurer, +30 % Latenz. Nur für sehr lange Threads.', en: 'Full model capacity. ~5× cost, +30% latency. Only for very long threads.' },
+
+	// Sonnet-variant picker (LLM Advanced) — opt the `balanced` tier into Sonnet 5.
+	// Anthropic-only surface; hidden on Mistral/OpenAI-compat/custom providers.
+	'llm.variant.heading':                { de: 'Modellvariante',                                                              en: 'Model variant' },
+	'llm.variant.description':            { de: 'Welches Sonnet-Modell die Standardstufe (balanced) verwendet.',                en: 'Which Sonnet model the balanced tier uses.' },
+	'llm.variant.sonnet46_label':         { de: 'Claude Sonnet 4.6 · Standard',                                                 en: 'Claude Sonnet 4.6 · Standard' },
+	'llm.variant.sonnet46_hint':          { de: 'Bewährtes Standardmodell mit 200k-Kontext.',                                   en: 'Proven default model with 200k context.' },
+	'llm.variant.sonnet5_label':          { de: 'Claude Sonnet 5 · neu',                                                        en: 'Claude Sonnet 5 · new' },
+	'llm.variant.sonnet5_hint':           { de: '1M-Kontext, stärker bei agentischen Aufgaben, ~gleicher Preis.',  en: '1M context, stronger on agentic tasks, ~same price.' },
+	'llm.variant.note':                   { de: 'Nach dem Speichern schaltet Sonnet 5 unten das größere Kontextfenster frei. Sein neuer Tokenizer zählt allerdings ~30 % mehr Tokens pro Text — bei gleichem Preis pro Token liegen die Kosten pro Aufgabe daher etwas höher.', en: 'After you save, Sonnet 5 unlocks the larger context window below. Its newer tokenizer counts ~30% more tokens per text, though — so at the same per-token price, the cost per equivalent task is a touch higher.' },
 
 	// LLM sub-route nav (PRD-IA-V2 P3-PR-C). Data-driven on LLMSettings.svelte —
 	// adding a 4th entry (e.g. OpenAI-native, PRD-OPENAI-NATIVE.md Phase 4) is
@@ -544,9 +630,15 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.context_auto_compact_imminent': { de: 'Auto-Komprimierung steht an', en: 'auto-compaction imminent' },
 	'chat.compact_now': { de: 'Zusammenfassen & komprimieren', en: 'Summarize & compact' },
 	'chat.compact_in_progress': { de: 'Komprimiere…', en: 'Compacting…' },
-	'chat.context_offer': { de: 'Der Kontext füllt sich — ich kann den Verlauf zusammenfassen, damit wir Platz schaffen.', en: 'Context is filling up — I can summarize the history to free up room.' },
+	'chat.context_offer': { de: 'Der Verlauf wird lang — Zusammenfassen hält die nächsten Antworten schnell und günstig.', en: 'This conversation is getting long — summarizing keeps the next replies fast and low-cost.' },
 	'chat.compact_failed': { de: 'Komprimierung fehlgeschlagen', en: 'Compaction failed' },
 	'chat.compact_done': { de: 'Kontext komprimiert', en: 'Context compacted' },
+	// Footer clarity: the token count is a per-turn SUM over every internal
+	// tool-loop step, so it can exceed the context window. The tooltip + the
+	// adjacent occupancy chip make that distinction self-evident.
+	'chat.footer_tokens_tooltip': { de: 'Summe aller Tokens über sämtliche Schritte dieser Antwort — kann das Kontextfenster übersteigen. Wie voll das Fenster gerade wirklich ist, zeigt der Balken daneben.', en: 'Total tokens across every step of this answer — this can exceed the context window. The bar next to it shows how full the window actually is right now.' },
+	'chat.ctx_occupancy_label': { de: 'Kontext', en: 'Context' },
+	'chat.ctx_occupancy_tooltip': { de: 'Aktuelle Auslastung des Kontextfensters', en: 'How full the context window is right now' },
 	'status.panel_title': { de: 'Systemstatus', en: 'System Status' },
 	'status.connected': { de: 'Verbunden', en: 'Connected' },
 	'status.disconnected': { de: 'Nicht verbunden', en: 'Disconnected' },
@@ -568,6 +660,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'status.communities': { de: 'Communities', en: 'Communities' },
 
 	'common.ok': { de: 'OK', en: 'OK' },
+	'common.dismiss': { de: 'Schließen', en: 'Dismiss' },
 
 	// Setup Banner & Wizard
 	'banner.api_key_missing': { de: 'Kein LLM-Provider konfiguriert — KI-Antworten sind deaktiviert.', en: 'No LLM provider configured — AI responses are disabled.' },
@@ -602,7 +695,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'setup.provider_select': { de: 'LLM-Provider wählen', en: 'Choose LLM provider' },
 	'setup.provider_anthropic_desc': { de: 'Empfohlen — direkte API, getestet', en: 'Recommended — direct API, tested' },
 	'setup.provider_mistral_desc': { de: 'Paris, EU — getestet', en: 'Paris, EU — tested' },
-	'setup.provider_openai_desc': { de: 'Ollama, LM Studio, LiteLLM, Groq, vLLM — experimentell', en: 'Ollama, LM Studio, LiteLLM, Groq, vLLM — experimental' },
+	'setup.provider_openai_desc': { de: 'Jeder OpenAI-kompatible Endpunkt', en: 'Any OpenAI-compatible endpoint' },
 	'setup.step_provider': { de: 'Provider', en: 'Provider' },
 	'setup.step_credentials': { de: 'Zugangsdaten', en: 'Credentials' },
 	'setup.back': { de: 'Zurück', en: 'Back' },
@@ -656,6 +749,18 @@ const translations: Record<string, Record<Locale, string>> = {
 	// disappears on focus in some AT, so it can't be the only label).
 	'chat.input_label': { de: 'Nachricht an lynox', en: 'Message lynox' },
 	'chat.send': { de: 'Senden', en: 'Send' },
+	'chat.model_picker.label': { de: 'Modell:', en: 'Model:' },
+	'chat.model_picker.recommended': { de: 'empfohlen', en: 'recommended' },
+	'chat.model_picker.pricier': { de: 'teurer', en: 'pricier' },
+	// Per-thread model control (P1 §5.1b) — the running-thread indicator + re-pick.
+	'chat.thread_model.label': { de: 'Läuft auf', en: 'Running on' },
+	'chat.thread_model.change': { de: 'Modell für diesen Chat wechseln', en: 'Change the model for this chat' },
+	'chat.thread_model.busy': { de: 'Während eine Antwort läuft, lässt sich das Modell nicht wechseln.', en: 'You can’t change the model while a response is streaming.' },
+	'chat.thread_model.error': { de: 'Modellwechsel fehlgeschlagen. Versuch es nochmal.', en: 'Couldn’t change the model. Please try again.' },
+	// Downgrade-overflow refusal (U1). {tier} is interpolated with the target tier label.
+	'chat.thread_model.overflow': { de: 'Dieser Chat ist zu lang für {tier} — er passt nicht mehr in dessen Kontextfenster. Kürze zuerst den Verlauf oder bleib beim aktuellen Modell.', en: 'This chat is too long for {tier} — it no longer fits that model’s context window. Shorten the history first, or stay on the current model.' },
+	// One-time cache-rewrite hint after a mid-thread switch (P2 §5.1b, Fork-3). Cost-framed, so suppressed on demo/CP-paid tenants at the call site.
+	'chat.thread_model.cache_hint': { de: 'Modellwechsel: die nächste Antwort verarbeitet den bisherigen Verlauf einmalig neu — der Cache ist modellspezifisch, das kostet einmalig etwas mehr.', en: 'Model switched: the next reply re-processes the conversation once — the cache is model-specific, so that one turn costs a little more.' },
 	'chat.batch_custom_answer': { de: 'Oder eigene Antwort tippen …', en: 'Or type your own answer …' },
 	'chat.thinking': { de: 'lynox denkt...', en: 'lynox is thinking...' },
 	'chat.activity.thinking': { de: 'Denkt nach...', en: 'Thinking...' },
@@ -708,6 +813,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.send_failed': { de: 'Nicht gesendet — tippen zum Wiederholen', en: 'Not sent — tap to retry' },
 	'chat.cancel_queue': { de: 'Queue leeren', en: 'Clear queue' },
 	'chat.remove_queued': { de: 'Aus Queue entfernen', en: 'Remove from queue' },
+	'chat.deferred_title': { de: 'Noch offen', en: 'Still open' },
+	'chat.deferred_dismiss': { de: 'Vorschlag entfernen', en: 'Dismiss suggestion' },
+	'chat.deferred_clear': { de: 'Alle entfernen', en: 'Clear all' },
 	'chat.placeholder_streaming': { de: 'Nächste Nachricht vorbereiten...', en: 'Prepare next message...' },
 	'chat.placeholder_answer': { de: 'Antwort eingeben...', en: 'Type your answer...' },
 	'chat.placeholder_secret': { de: 'Schlüssel oben eingeben — dann geht es weiter', en: 'Enter the key above to continue' },
@@ -731,6 +839,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'prompt_anchor.duration_seconds': { de: '{n}s', en: '{n}s' },
 	'prompt_anchor.duration_minutes': { de: '{n}min', en: '{n}min' },
 	'prompt_anchor.aria_label': { de: 'Offene Frage von Lynox', en: 'Open question from Lynox' },
+	'attention.badge': { de: 'Antwort nötig · lynox', en: 'Answer needed · lynox' },
+	'attention.notify_title': { de: 'lynox wartet auf deine Antwort', en: 'lynox is waiting for your answer' },
+	'attention.notify_body': { de: 'Öffne den Chat, um zu antworten.', en: 'Open the chat to answer.' },
 	'chat.secret_consent': { de: 'Wird lokal verschlüsselt gespeichert und niemals an die KI gesendet.', en: 'Stored encrypted locally and never sent to AI.' },
 	'chat.secret_save': { de: 'Speichern', en: 'Save' },
 	'chat.secret_cancel': { de: 'Abbrechen', en: 'Cancel' },
@@ -804,6 +915,22 @@ const translations: Record<string, Record<Locale, string>> = {
 	// EU AI Act Art. 50 §1 — persistent transparency disclosure on every assistant message
 	'chat.ai_generated_badge': { de: 'KI', en: 'AI' },
 	'chat.ai_generated_aria': { de: 'Von KI generiert', en: 'AI-generated' },
+	// DK-UX inline durable-knowledge chips (trusted write → confirmation + undo).
+	'chat.knowledge.saved_to': { de: 'gemerkt bei {subject}', en: 'saved to {subject}' },
+	'chat.knowledge.saved': { de: 'gemerkt', en: 'saved' },
+	'chat.knowledge.undo': { de: 'rückgängig', en: 'undo' },
+	'chat.knowledge.undone': { de: 'rückgängig gemacht', en: 'undone' },
+	'chat.knowledge.undo_failed': { de: 'Konnte nicht rückgängig gemacht werden.', en: 'Couldn’t undo that.' },
+	// DK-UX untrusted-capture review chip (turn read external content → keep/edit/discard).
+	'chat.knowledge.review_tag': { de: 'prüfen', en: 'review' },
+	'chat.knowledge.review_hint': { de: 'aus externem Inhalt', en: 'from external content' },
+	'chat.knowledge.review_keep': { de: 'behalten', en: 'keep' },
+	'chat.knowledge.review_edit': { de: 'bearbeiten', en: 'edit' },
+	'chat.knowledge.review_discard': { de: 'verwerfen', en: 'discard' },
+	'chat.knowledge.review_save_keep': { de: 'speichern + behalten', en: 'save + keep' },
+	'chat.knowledge.review_kept': { de: 'übernommen', en: 'kept' },
+	'chat.knowledge.review_discarded': { de: 'verworfen', en: 'discarded' },
+	'chat.knowledge.review_failed': { de: 'Prüfung fehlgeschlagen.', en: 'Review failed.' },
 	// EU AI Act Art. 50 §1 — composer-level disclosure (interacting with AI) + §8 output caveat
 	'chat.ai_disclaimer': {
 		de: 'Antworten werden von KI generiert und können Fehler enthalten — wichtige Angaben bitte überprüfen.',
@@ -843,7 +970,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.key_saved': { de: 'Bereit zum Chatten!', en: 'Ready to chat!' },
 	'onboard.save_key': { de: 'Speichern & Starten', en: 'Save & Start' },
 	'onboard.ready_title': { de: 'Alles eingerichtet!', en: 'All set!' },
-	'onboard.ready_hint': { de: 'In 3 Schritten lernt lynox dein Business kennen.', en: 'In 3 steps, lynox learns about your business.' },
+	'onboard.ready_hint': { de: 'Schritt für Schritt lernt lynox dein Business kennen.', en: 'Step by step, lynox gets to know your business.' },
 	'onboard.chip_1': { de: 'Analysiere meine Website', en: 'Analyze my website' },
 	'onboard.chip_1_desc': { de: 'Positionierung, Zielgruppe und Tone of Voice erkennen', en: 'Detect positioning, audience, and tone of voice' },
 	'onboard.chip_2': { de: 'Erzähl mir mehr über dein Business', en: 'Tell me more about your business' },
@@ -875,20 +1002,35 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.vault_confirm_btn': { de: 'Kopiert, weiter', en: 'Copied, continue' },
 	'onboard.vault_skip_btn': { de: 'Später', en: 'Later' },
 	'onboard.vault_confirmed': { de: 'Vault Key gesichert. Du findest ihn jederzeit unter Settings → Config.', en: 'Vault key noted. You can find it anytime in Settings → Config.' },
-	'onboard.continue_step': { de: 'Weiter: Schritt {n}/3', en: 'Continue: Step {n}/3' },
-	'onboard.whats_next_title': { de: 'Bereit!', en: 'Ready to go!' },
-	'onboard.whats_next_subtitle': { de: 'lynox kennt jetzt dein Business. Was möchtest du als Nächstes?', en: 'lynox knows your business now. What would you like to do next?' },
-	'onboard.whats_next_google': { de: 'Gmail & Kalender verbinden', en: 'Connect Gmail & Calendar' },
-	'onboard.whats_next_google_desc': { de: 'E-Mails, Termine und Drive anbinden', en: 'Connect emails, calendar and Drive' },
-	'onboard.whats_next_mobile': { de: 'Mobile App installieren', en: 'Install mobile app' },
-	'onboard.whats_next_mobile_desc': { de: 'QR-Code scannen und als PWA nutzen', en: 'Scan QR code and use as PWA' },
-	'onboard.whats_next_notifications': { de: 'Benachrichtigungen aktivieren', en: 'Enable notifications' },
-	'onboard.whats_next_notifications_desc': { de: 'Erhalte Alerts wenn Workflows abgeschlossen sind', en: 'Get alerts when workflows complete' },
-	'onboard.whats_next_knowledge': { de: 'Wissen ansehen', en: 'Explore Knowledge' },
-	'onboard.whats_next_knowledge_desc': { de: 'Was lynox über dich gelernt hat', en: 'What lynox learned about you' },
+	// Post-onboarding closing: the generic capability tiles were removed (Activation
+	// Principle — the close proposes grounded jobs via follow-up pills, not a feature
+	// menu). Only the honest limits note + the "just chat" dismiss remain.
 	'onboard.whats_next_chat': { de: 'Einfach loschatten', en: 'Just start chatting' },
 	'onboard.url_placeholder': { de: 'https://deine-website.de', en: 'https://your-website.com' },
 	'onboard.url_go': { de: 'Analysieren', en: 'Analyze' },
+	'onboard.url_deriving': { de: 'Ich suche kurz deine Website…', en: 'Looking up your website…' },
+	'onboard.url_derived': { de: 'Aus deinem Firmennamen vorgeschlagen — passt das?', en: 'Suggested from your company name — is this right?' },
+	// Onboarding Wave 1 (D9v2) — intro card, engine Step-0 basics, closing, per-layer reactivation
+	'onboard.intro_title': { de: 'Willkommen. Lass uns lynox auf dein Geschäft einstellen.', en: "Welcome. Let's tune lynox to your business." },
+	'onboard.intro_lead': { de: 'Zwei kurze Fragen, dann schaue ich mir deine Website an. Dauert ~2 Minuten — du kannst jederzeit überspringen.', en: "Two quick questions, then I'll look at your website. About 2 minutes — you can skip anytime." },
+	'onboard.intro_start': { de: "Los geht's", en: "Let's go" },
+	'onboard.basics_step': { de: 'Die Basics', en: 'The basics' },
+	'onboard.basics_save': { de: 'Speichern & weiter', en: 'Save & continue' },
+	'onboard.basics_save_failed': { de: 'Konnte nicht gespeichert werden — deine Antworten stehen noch hier. Nochmal versuchen?', en: 'Could not be saved — your answers are still here. Try again?' },
+	'onboard.basics_saving': { de: 'Speichern…', en: 'Saving…' },
+	'onboard.limits_note': { de: 'Ich merke mir Geschäftskontext dauerhaft und schlage vor, bevor ich etwas Wichtiges tue. E-Mails versende ich nie ohne deine Freigabe.', en: 'I keep your business context and propose before doing anything important. I never send email without your OK.' },
+	'onboard.relayer_title': { de: 'Onboarding', en: 'Onboarding' },
+	'onboard.relayer_desc': { de: 'Die Schichten einzeln neu durchlaufen', en: 'Re-run the onboarding layers individually' },
+	'onboard.relayer_knowledge': { de: 'Knowledge — dein Geschäft', en: 'Knowledge — your business' },
+	'onboard.relayer_knowledge_desc': { de: 'Basics + Website-Analyse erneut durchlaufen', en: 'Run basics + website analysis again' },
+	'onboard.relayer_restart': { de: 'Neu starten', en: 'Restart' },
+	'onboard.relayer_status_done': { de: 'Abgeschlossen', en: 'Completed' },
+	'onboard.relayer_status_skipped': { de: 'Übersprungen', en: 'Skipped' },
+	'onboard.relayer_status_pending': { de: 'Offen', en: 'Not started' },
+	'onboard.relayer_restarted': { de: 'Zurückgesetzt — das Onboarding startet beim nächsten Öffnen des Chats neu.', en: 'Reset — onboarding restarts the next time you open the chat.' },
+	'onboard.relayer_open_chat': { de: 'Jetzt starten', en: 'Start now' },
+	'onboard.relayer_error': { de: 'Zurücksetzen fehlgeschlagen. Bitte erneut versuchen.', en: 'Reset failed. Please try again.' },
+	'onboard.relayer_degraded': { de: 'Onboarding-Status vorübergehend nicht verfügbar.', en: 'Onboarding state is temporarily unavailable.' },
 	'setup.title_byok': { de: 'Dein API Key', en: 'Your API Key' },
 	'setup.subtitle_byok': { de: 'Gib deinen API Key ein, um loszulegen.', en: 'Enter your API key to get started.' },
 
@@ -912,6 +1054,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	// PRD-LIGHT-MODE (2026-05-19) — Appearance: theme preference
 	'settings.account.appearance': { de: 'Darstellung', en: 'Appearance' },
 	'settings.account.appearance_desc': { de: 'Theme wählen — System, Hell oder Dunkel.', en: 'Choose theme — System, Light or Dark.' },
+	'settings.account.onboarding': { de: 'Onboarding', en: 'Onboarding' },
+	'settings.account.onboarding_desc': { de: 'Die Ersteinrichtung Schritt für Schritt neu durchlaufen.', en: 'Re-run the initial setup, step by step.' },
 	'appearance.heading': { de: 'Darstellung', en: 'Appearance' },
 	'appearance.system_hint': { de: 'Im System-Modus folgt das Theme deinen OS-Einstellungen und wechselt automatisch.', en: 'In System mode the theme follows your OS setting and switches automatically.' },
 	'theme.heading': { de: 'Theme', en: 'Theme' },
@@ -1461,6 +1605,7 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Memory
 	'memory.title': { de: 'Knowledge', en: 'Knowledge' },
+	'memory.entry_count_label': { de: 'Einträge in diesem Notizbuch (neueste zuerst)', en: 'entries in this notebook (newest first)' },
 	'memory.no_entries': { de: 'Keine Einträge in', en: 'No entries in' },
 	'memory.no_entries_hint': { de: 'Füge oben einen Eintrag hinzu, oder chatte mit lynox — Wissen wird automatisch gespeichert.', en: 'Add an entry above, or chat with lynox — knowledge is stored automatically.' },
 	'memory.edit': { de: 'Bearbeiten', en: 'Edit' },
@@ -1469,6 +1614,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	'memory.add_placeholder': { de: 'Neuer Eintrag...', en: 'New entry...' },
 	'memory.add_button': { de: 'Hinzufügen', en: 'Add' },
 	'memory.delete_button': { de: 'Löschen', en: 'Delete' },
+	'memory.delete_confirm': { de: 'Diesen Eintrag endgültig löschen? Er wird dauerhaft aus dem Speicher entfernt und kann nicht wiederhergestellt werden.', en: 'Permanently delete this entry? It is removed from memory for good and cannot be recovered.' },
+	'memory.erase_pattern_label': { de: 'Nach Muster löschen', en: 'Erase by pattern' },
+	'memory.erase_pattern_hint': { de: 'Löscht dauerhaft alle Einträge, die den Text enthalten — auch importierte Inhalte, die oben nicht als Zeile erscheinen.', en: 'Permanently erases every entry containing the text — including imported content not shown above as a line.' },
+	'memory.erase_pattern_placeholder': { de: 'Text, der dauerhaft gelöscht werden soll...', en: 'Text to erase permanently...' },
+	'memory.erase_pattern_button': { de: 'Endgültig löschen', en: 'Erase permanently' },
+	'memory.erase_pattern_confirm': { de: 'Alle Einträge, die „{pattern}" enthalten, dauerhaft und unwiderruflich löschen? Das entfernt auch importierte Inhalte, die hier nicht als Zeile erscheinen.', en: 'Permanently and irreversibly erase every entry containing "{pattern}"? This also removes imported content not shown here as a line.' },
 
 	// History
 	'history.title': { de: 'Run History', en: 'Run History' },
@@ -1540,6 +1691,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'tool.data_queried': { de: 'Daten abgefragt', en: 'Data queried' },
 	'tool.artifact_creating': { de: 'Artifact wird erstellt...', en: 'Creating artifact...' },
 	'markdown.mermaid_error': { de: 'Mermaid-Diagramm konnte nicht gerendert werden', en: 'Mermaid diagram could not be rendered' },
+	'markdown.mermaid_reloading': { de: 'Neue Version verfügbar — Seite wird neu geladen, um dieses Diagramm anzuzeigen…', en: 'A newer version is available — reloading to render this diagram…' },
 	'tool.command': { de: 'Befehl', en: 'Command' },
 	'tool.api_request': { de: 'API-Anfrage', en: 'API request' },
 	'tool.web_search': { de: 'Web-Recherche', en: 'Web search' },
@@ -1562,6 +1714,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'migration.secrets': { de: 'Secrets', en: 'Secrets' },
 	'migration.databases': { de: 'Datenbanken', en: 'Databases' },
 	'migration.artifacts': { de: 'Artefakte', en: 'Artifacts' },
+	'migration.memory': { de: 'Erinnerung', en: 'Memory' },
 	'migration.config': { de: 'Konfiguration', en: 'Configuration' },
 	'migration.no_data': { de: 'Keine Daten zum Migrieren gefunden.', en: 'No data found to migrate.' },
 	'migration.plan_title': { de: 'Plan wählen', en: 'Choose a Plan' },

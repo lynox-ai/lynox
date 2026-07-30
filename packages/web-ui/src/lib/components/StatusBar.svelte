@@ -5,7 +5,7 @@
 	import { scrollFade } from '../utils/scroll-fade.js';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { onDestroy } from 'svelte';
-	import { getContextBudget, getSessionModel, getAuthError } from '../stores/chat.svelte.js';
+	import { getAuthError } from '../stores/chat.svelte.js';
 	import { ensureVoiceInfoProbed, isTtsAvailable, getSttProvider } from '../stores/voice-info.svelte.js';
 	import { isAutoSpeakEnabled, toggleAutoSpeak } from '../stores/autospeak.svelte.js';
 	import { isVoiceAutoSendEnabled, toggleVoiceAutoSend } from '../stores/voice-autosend.svelte.js';
@@ -118,7 +118,15 @@
 				const data = (await providersRes.json()) as { providers: ProviderEntry[] };
 				providers = Array.isArray(data.providers) ? data.providers : [];
 				const primary = providers[0];
-				if (primary?.provider) providerName = primary.provider;
+				// Name ALL configured providers, not just the primary — in a hybrid
+				// tier setup (e.g. balanced=Mistral, deep=Anthropic) the footer must
+				// show both. Shorten "Mistral AI" → "Mistral" to keep the no-wrap
+				// mobile line compact.
+				const names = providers
+					.map((p) => p.provider)
+					.filter((n): n is string => Boolean(n))
+					.map((n) => n.replace(/\bMistral AI\b/, 'Mistral'));
+				if (names.length > 0) providerName = names.join(' · ');
 
 				// Aggregate worst-state across ALL configured providers — when one
 				// provider (e.g. Mistral with an expired key) is failing, the bar
@@ -345,18 +353,26 @@
 	produced wasted black space below the status text. The iOS Home Indicator
 	bar visually overlaps the bottom edge now, but the status text sits above
 	the indicator and stays legible. -->
-<div class="flex md:hidden items-center justify-center gap-1 border-t border-border bg-bg-subtle min-h-7 px-2">
-	<button onclick={togglePanel} class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors" title={apiStatusTooltip || providerName}>
-		<span class="inline-block h-1.5 w-1.5 rounded-full {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
-		{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'}
-		<span class="text-border mx-1">|</span>
-		<!-- Aggregated worst-state across all configured providers (mobile mirror
-		     of the desktop pill). Pre-fix this used providers[0] only, so a
-		     failing Mistral was invisible on mobile too. -->
-		<span class="inline-block h-1.5 w-1.5 rounded-full {apiStatusClass()}"></span>
-		{providerName} · {apiStatusLabel()}
-		<span class="text-border mx-1">|</span>
-		{formatCost(todayCost)}
+<div class="flex md:hidden items-center justify-center gap-1 border-t border-border bg-bg-subtle min-h-7 px-2 whitespace-nowrap overflow-x-hidden scrollbar-none">
+	<!-- Status is conveyed VISUALLY by the two colored dots (engine + aggregated
+	     API worst-state), NOT spelled out as text. The old "OK · Anthropic ·
+	     Mistral · API beeinträchtigt" line overflowed and clipped on both edges
+	     on narrow phones (justify-center + overflow). Dropping the text status
+	     labels — and truncating a long hybrid provider list — keeps the line
+	     inside the viewport; the full wording lives in the tooltip/aria-label and
+	     the tap-through panel. Mirrors the desktop bar, which is already dot-only. -->
+	<button
+		onclick={togglePanel}
+		class="flex items-center gap-1.5 text-[11px] font-mono text-text-subtle hover:text-text transition-colors min-w-0"
+		aria-label="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()} · {formatCost(todayCost)}"
+		title="{engineOk === true ? t('status.engine_ok') : engineOk === false ? t('status.engine_error') : '...'} · {providerName} · {apiStatusLabel()}{apiStatusTooltip ? ` — ${apiStatusTooltip}` : ''}"
+	>
+		<span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 {engineOk === true ? 'bg-success' : engineOk === false ? 'bg-danger' : 'bg-text-subtle animate-pulse'}"></span>
+		<span class="text-border">|</span>
+		<span class="inline-block h-1.5 w-1.5 rounded-full shrink-0 {apiStatusClass()}"></span>
+		<span class="truncate">{providerName}</span>
+		<span class="text-border shrink-0">|</span>
+		<span class="shrink-0">{formatCost(todayCost)}</span>
 	</button>
 	{@render voiceAutoSendBtn()}
 	{@render autoSpeakBtn()}
@@ -434,20 +450,6 @@
 	<a href="/app/settings/account/mobile" class="flex items-center gap-1 px-2 py-1 hover:text-text transition-colors shrink-0" title={t('mobile.title')}>
 		<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path d="M7 2a2 2 0 00-2 2v12a2 2 0 002 2h6a2 2 0 002-2V4a2 2 0 00-2-2H7zm3 14a1 1 0 100-2 1 1 0 000 2z"/></svg>
 	</a>
-
-	<!-- Context Window -->
-	{#if getContextBudget()}
-		{@const pct = getContextBudget()?.usagePercent ?? 0}
-		{@const color = pct >= 75 ? 'bg-danger' : pct >= 60 ? 'bg-warning' : 'bg-accent'}
-		{@const textColor = pct >= 75 ? 'text-danger' : pct >= 60 ? 'text-warning' : 'text-text-subtle'}
-		<span class="text-border">|</span>
-		<div class="flex items-center gap-1.5 px-3 py-1 shrink-0" title="{getContextBudget()?.totalTokens ?? 0} / {getContextBudget()?.maxTokens ?? 0} tokens{getSessionModel() ? ` · ${getSessionModel()}` : ''}">
-			<div class="w-16 h-1 rounded-full bg-border overflow-hidden">
-				<div class="{color} h-full rounded-full transition-all duration-500" style="width: {Math.min(pct, 100)}%"></div>
-			</div>
-			<span class="text-[10px] font-mono {textColor}">{Math.min(pct, 100)}%</span>
-		</div>
-	{/if}
 
 	<!-- Legal + version (right-aligned) -->
 	<div class="flex items-center gap-2 ml-auto px-3 shrink-0">

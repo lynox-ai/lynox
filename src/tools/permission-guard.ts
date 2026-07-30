@@ -291,7 +291,7 @@ export function isDangerous(toolName: string, input: unknown, autonomy?: Autonom
     // host, path) tuple — and only that tuple. The grant requires host AND path
     // AND method to all match, so a re-target param that resolved into a
     // different host/path/method is NOT granted → the warning stands → denied
-    // (the S1 fix the host-only applyHostPolicy misses). Never reached for a
+    // (the S1 fix the host-only assertHostPolicy misses). Never reached for a
     // [BLOCKED] critical (guarded above), so a contract can't lift CRITICAL_BASH
     // / sensitive-path / http DELETE — the post-substitution bash scan in
     // _detectDanger therefore still governs every bash call regardless of the

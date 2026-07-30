@@ -442,7 +442,7 @@
 							     CP-pre-configured (managed) and shown a Skip button only,
 							     trapping them on the provider the picker landed on if
 							     they wanted Mistral after seeing the Anthropic-default
-							     credential form (rafael F7 HN-launch QA 2026-05-27). -->
+							     credential form (demo-walk hardening). -->
 							<button
 								onclick={goBack}
 								class="text-sm text-text-subtle hover:text-text transition-colors"

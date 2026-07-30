@@ -32,6 +32,14 @@ export const channels = {
 
   memoryStore:          channel('lynox:memory:store'),
   memoryExtraction:     channel('lynox:memory:extraction'),
+  /**
+   * Memory Foundation Wave 0 — retrieval shadow mode. Emitted once per `retrieve()`
+   * when `retrieval_shadow_log` is on, carrying the scored candidate distribution
+   * (raw cosine + tier + subject + would-pass) used to measure the Wave-2 FLOOR.
+   * Same JSONL sink family as the context-cost log. Privacy: the query is a hashed
+   * prefix, but threadId/subjectId are plaintext — bound retention before fleet use.
+   */
+  retrievalGate:        channel('lynox:retrieval:gate'),
   contentTruncation:    channel('lynox:content:truncation'),
   fileWatcherFallback:  channel('lynox:filewatcher:fallback'),
   secretAccess:         channel('lynox:secret:access'),

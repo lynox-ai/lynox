@@ -225,9 +225,9 @@
 				<div class="space-y-2">
 					{#each genericNames as name (name)}
 						<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle px-4 py-3">
-							<div class="flex items-center justify-between">
-								<span class="font-mono text-sm">{name}</span>
-								<div class="flex items-center gap-2">
+							<div class="flex items-center justify-between gap-3">
+								<span class="font-mono text-sm truncate min-w-0">{name}</span>
+								<div class="flex items-center gap-2 shrink-0">
 									{#if editingName !== name}
 										<button
 											type="button"

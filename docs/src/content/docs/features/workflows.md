@@ -16,7 +16,7 @@ lynox has four built-in roles, each optimized for a different type of work:
 | **Operator** | `fast` | Fast status checks, concise reporting | Tool-restricted (bash + read tools allowed; no write tools) |
 | **Collector** | `fast` | Structured Q&A, data gathering | Minimal tools — memory and user interaction only |
 
-Tiers are provider-agnostic (`deep` / `balanced` / `fast`) and resolve to the active provider's models — e.g. on Mistral `balanced` → `ministral-14b-2512`. They are **not** tied to Anthropic model names.
+Tiers are provider-agnostic (`deep` / `balanced` / `fast`) and resolve to the active provider's models — e.g. on Mistral `balanced` → `mistral-medium-2604`. They are **not** tied to Anthropic model names.
 
 ### Switching roles
 
@@ -51,6 +51,8 @@ Or create tasks in the Web UI under Settings → Tasks.
 | **Watch** | Monitors a URL for changes — only processes when content differs |
 | **Backup** | Automated database backup (no LLM cost) |
 | **Workflow** | Multi-step workflow with dependent tasks |
+
+When the **agent itself** schedules a Standard (autonomous agent) run, that trigger requires your explicit confirmation before it first fires — so a task set up on your behalf can't start running unattended without you approving it. Tasks you create yourself in the UI are already explicit and run as scheduled.
 
 ### Scheduling
 

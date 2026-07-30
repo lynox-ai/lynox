@@ -27,6 +27,12 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # The suite spawns subprocesses (the cross-repo convention pins run workflow
+    # shell against a stubbed curl). Their own timeout signals the shell it
+    # started, not that shell's own children — an orphaned grandchild outlives
+    # it. Without a job ceiling such a process would burn the runner's 6h
+    # default instead of failing. Matches `smoke` below.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

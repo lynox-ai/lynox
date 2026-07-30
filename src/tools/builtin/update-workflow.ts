@@ -140,13 +140,13 @@ export const updateWorkflowTool: ToolEntry<UpdateWorkflowInput> = {
     const contractErr = validateContractAgainstSteps(updated);
     if (contractErr) return contractErr;
 
-    // Any step edit invalidates the human's first-run consent (given against
-    // the OLD steps), so clear `confirmedAt` whenever it was set. The interactive
-    // run_workflow path already refuses to run a workflow whose `confirmedAt` is
-    // unset; the autonomous/scheduled worker-loop enforcement is the deferred
-    // scheduling-consent slice (see `types/pipeline.ts` — not yet load-bearing).
-    // This reset is the defense-in-depth that makes an edited workflow re-require
-    // consent once that gate lands. A no-op for an unconfirmed workflow.
+    // Any step edit invalidates the human's first-run consent (given against the
+    // OLD steps), so clear `confirmedAt` whenever it was set. The load-bearing
+    // enforcement is the AUTONOMOUS/scheduled worker-loop gate (`worker-loop.ts`
+    // refuses to fire a workflow whose `confirmedAt` is unset); the interactive
+    // `run_workflow` path is NOT confirmedAt-gated — it runs with a live approver
+    // and prompts per dangerous action. Clearing here forces re-confirmation before
+    // the next scheduled run. A no-op for an unconfirmed workflow.
     const wasConfirmed = planned.confirmedAt !== undefined;
     if (wasConfirmed) {
       updated.confirmedAt = undefined;

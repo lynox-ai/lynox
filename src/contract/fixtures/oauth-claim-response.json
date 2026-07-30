@@ -1,0 +1,9 @@
+{
+  "access_token": "TEST-ACCESS-TOKEN",
+  "refresh_token": "TEST-REFRESH-TOK",
+  "expires_at": 4102444800000,
+  "scopes": [
+    "https://scopes.example.invalid/auth/test-read",
+    "https://scopes.example.invalid/auth/test-write"
+  ]
+}

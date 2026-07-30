@@ -71,12 +71,33 @@ jobs:
             echo "Verdict: docs-only PR — stub will emit pass for required checks."
           fi
 
+  # gitleaks is NOT stubbed. `test` and `docker-scan` genuinely do not apply to a
+  # docs-only PR — no code changed, no image built. A SECRET, however, applies
+  # perfectly well to a .md file: an API key pasted into a doc example is one of the
+  # likelier ways this PUBLIC repo would leak one.
+  #
+  # This job used to be `run: echo "...marking pass"`, which left the required
+  # `gitleaks` check structurally incapable of failing on exactly the paths it was
+  # covering. The pre-commit hook still scans locally — but this CI check exists
+  # precisely as the backstop for when that hook is bypassed or absent.
+  #
+  # So: run the real thing. Kept identical to ci.yml's gitleaks job — if that one
+  # changes, change this one in the same PR.
   gitleaks:
     needs: detect
     if: needs.detect.outputs.docs-only == 'true'
     runs-on: ubuntu-latest
     steps:
-      - run: echo "docs-only PR; gitleaks not applicable, marking pass"
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { fetch-depth: 0 }
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: '8.21.2'
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz
+          sudo mv gitleaks /usr/local/bin/
+      - name: Run gitleaks
+        run: gitleaks detect --source . --verbose --redact
 
   test:
     needs: detect

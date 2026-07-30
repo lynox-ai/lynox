@@ -83,6 +83,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   httpRequestTool: { name: 'http_request' },
   runWorkflowTool: { name: 'run_workflow' },
   updateWorkflowTool: { name: 'update_workflow_steps' },
+  exportWorkflowTool: { name: 'export_workflow' },
+  importWorkflowTool: { name: 'import_workflow' },
   diagnoseWorkflowTool: { name: 'diagnose_workflow_run' },
   taskCreateTool: { name: 'task_create' },
   taskUpdateTool: { name: 'task_update' },
@@ -102,6 +104,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactHistoryTool: { name: 'artifact_history' },
   artifactRestoreTool: { name: 'artifact_restore' },
   recallToolResultTool: { name: 'recall_tool_result' },
+  suggestFollowUpsTool: { name: 'suggest_follow_ups' },
 }));
 
 vi.mock('./tool-context.js', () => ({
@@ -385,5 +388,76 @@ describe('Allowlist gate symmetry — init + reload paths share one decision fun
       typeof c[0] === 'string' && (c[0] as string).includes('WARNING'),
     );
     expect(warningCalls).toHaveLength(0);
+  });
+});
+
+// ── Main-chat tier (default_tier → config.model) — the "Main chat model" picker ──
+// Wire-proof for the picker: the picked tier must reach `config.model` (which
+// session._model reads), clamped to the CP max_tier ceiling, at BOTH the ctor
+// and reload seams. The reload test pins G1 (default_tier was restart-only).
+describe('Engine — main-chat tier (default_tier → config.model)', () => {
+  const modelOf = (e: Engine): string | undefined =>
+    (e as unknown as { config: { model?: string } }).config.model;
+
+  // D25 drift-lock: `balanced` is the UNIVERSAL default main-chat tier. With no
+  // `default_tier` picked (a fresh self-host config) and no ceiling, the CTOR seam
+  // (engine.ts:273) must resolve to `balanced` — never `fast` (a silent quality
+  // drop) or `deep` (a silent cost blowout). Pins that `?? 'balanced'` fallback
+  // against a quiet flip; the reload seam (engine.ts:362, a separate `?? 'balanced'`
+  // expression) is pinned by the sibling reload test below. See model-execution-
+  // policy D25 ("balanced universal default"); managed enforces it via TIER_POLICY.
+  it('ctor: unset default_tier resolves to the balanced universal default (D25)', () => {
+    mockLoadConfig.mockReturnValue({ ...BASELINE_ANTHROPIC }); // no default_tier, no max_tier
+    const engine = new Engine({}); // no explicit model → the universal default applies
+    expect(modelOf(engine)).toBe('balanced');
+  });
+
+  // D25 drift-lock — the RELOAD seam (engine.ts:362). Separate `?? 'balanced'`
+  // expression from the ctor, so it needs its own pin: a regression flipping only
+  // the reload fallback would slip past the ctor test above.
+  it('reloadUserConfig: unset default_tier re-resolves to the balanced universal default (D25)', async () => {
+    const engine = makeEngine(); // starts at balanced
+    // Move it OFF balanced first, so the final assertion proves the fallback
+    // actively fires at reload rather than mere inertia.
+    mockLoadConfig.mockReturnValueOnce({ ...BASELINE_ANTHROPIC, default_tier: 'deep' });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-baseline');
+    await engine.reloadUserConfig();
+    expect(modelOf(engine)).toBe('deep');
+    // User clears the pick (default_tier unset) → reload must fall back to balanced,
+    // never strand the session on the previously-picked deep tier.
+    mockLoadConfig.mockReturnValueOnce({ ...BASELINE_ANTHROPIC });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-baseline');
+    await engine.reloadUserConfig();
+    expect(modelOf(engine)).toBe('balanced');
+  });
+
+  it('ctor: config.model comes from default_tier, clamped to max_tier (G3)', () => {
+    mockLoadConfig.mockReturnValue({ ...BASELINE_ANTHROPIC, default_tier: 'deep', max_tier: 'balanced' });
+    const engine = new Engine({}); // no explicit model → applies default_tier
+    expect(modelOf(engine)).toBe('balanced'); // clamped down to the ceiling
+  });
+
+  it('ctor: default_tier passes through when under the max_tier ceiling', () => {
+    mockLoadConfig.mockReturnValue({ ...BASELINE_ANTHROPIC, default_tier: 'deep', max_tier: 'deep' });
+    const engine = new Engine({});
+    expect(modelOf(engine)).toBe('deep');
+  });
+
+  it('reloadUserConfig re-syncs config.model from a changed default_tier WITHOUT restart (G1)', async () => {
+    const engine = makeEngine(); // ctor with explicit model:'balanced'
+    expect(modelOf(engine)).toBe('balanced');
+    // User picks a new main-chat model → PUT persists default_tier → reload.
+    mockLoadConfig.mockReturnValueOnce({ ...BASELINE_ANTHROPIC, default_tier: 'deep' });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-baseline');
+    await engine.reloadUserConfig();
+    expect(modelOf(engine)).toBe('deep'); // took effect without a process restart
+  });
+
+  it('reloadUserConfig clamps the re-synced tier to max_tier (G1+G3)', async () => {
+    const engine = makeEngine();
+    mockLoadConfig.mockReturnValueOnce({ ...BASELINE_ANTHROPIC, default_tier: 'deep', max_tier: 'balanced' });
+    mockResolveProviderApiKey.mockReturnValueOnce('sk-ant-baseline');
+    await engine.reloadUserConfig();
+    expect(modelOf(engine)).toBe('balanced'); // ceiling still enforced on reload
   });
 });

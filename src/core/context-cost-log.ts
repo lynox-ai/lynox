@@ -1,6 +1,4 @@
-import { appendFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import path from 'node:path';
+import { appendBoundedJsonl } from './bounded-jsonl-log.js';
 import type { CompositionSnapshot } from './context-composition-probe.js';
 
 /**
@@ -17,17 +15,14 @@ import type { CompositionSnapshot } from './context-composition-probe.js';
  *    every error is swallowed. Cost telemetry that crashes a chat is worse than
  *    no telemetry.
  *  - Deploy-safe path: written next to `agent-memory.db` in the persistent data
- *    dir (env `LYNOX_DATA_DIR`, else `~/.lynox`). That volume is writable in the
- *    managed read-only container (the DB lives there), so no extra wiring.
+ *    dir (env `LYNOX_DATA_DIR`/`LYNOX_DIR`, else `~/.lynox`). That volume is writable
+ *    in the managed read-only container (the DB lives there), so no extra wiring.
+ *  - Bounded: retention is capped by the shared size-rotation in
+ *    `bounded-jsonl-log.ts` (≤ 2× cap on disk), so an opt-in capture can't grow
+ *    an unbounded file.
  */
 
 export const CONTEXT_COST_LOG_FILE = 'context-cost.jsonl';
-
-/** Resolve the data dir the same way the rest of the engine does. */
-function dataDir(): string {
-  const fromEnv = process.env['LYNOX_DATA_DIR'] ?? process.env['LYNOX_DIR'];
-  return fromEnv && fromEnv.length > 0 ? fromEnv : path.join(homedir(), '.lynox');
-}
 
 /** One persisted line: a snapshot plus the turn metadata that frames it. */
 export interface ContextCostLogEntry extends CompositionSnapshot {
@@ -42,15 +37,10 @@ export interface ContextCostLogEntry extends CompositionSnapshot {
 }
 
 /**
- * Append one composition entry as a JSON line. Fire-and-forget: the caller does
- * `void appendContextCostLog(...)` and never awaits. Any error (read-only FS,
- * permission, disk full) is swallowed so the run is untouched.
+ * Append one composition entry as a JSON line to the size-bounded sink. Fire-and-forget:
+ * the caller does `void appendContextCostLog(...)` and never awaits. Best-effort — any
+ * FS error is swallowed so the run is untouched.
  */
-export async function appendContextCostLog(entry: ContextCostLogEntry): Promise<void> {
-  try {
-    const file = path.join(dataDir(), CONTEXT_COST_LOG_FILE);
-    await appendFile(file, JSON.stringify(entry) + '\n', 'utf8');
-  } catch {
-    // Best-effort telemetry — never propagate.
-  }
+export function appendContextCostLog(entry: ContextCostLogEntry): Promise<void> {
+  return appendBoundedJsonl(CONTEXT_COST_LOG_FILE, entry);
 }
