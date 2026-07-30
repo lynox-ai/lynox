@@ -874,6 +874,24 @@ describe('LynoxHTTPApi', () => {
       expect(body.sessionId).toMatch(/^[0-9a-f-]{36}$/);
     });
 
+    // The Web-UI suffix ASKS every turn to end with `suggest_follow_ups`; models
+    // ignore that instruction at wildly different rates (mistral-medium-2604:
+    // 0/21 measured), so `followUpFallback` is what recovers the chips. The two
+    // belong together: the suffix without the recovery means no chips on a
+    // non-compliant model, the recovery without the suffix means paying for a
+    // call nothing asked for. Pinned here because this is the one place that
+    // sets them — and the recovery's own tests all passed while this line was
+    // absent.
+    it('opts the Web-UI surface into BOTH the follow-up suffix and its recovery', async () => {
+      mockGetOrCreate.mockClear();
+      const res = await jsonFetch('/api/sessions', { method: 'POST', body: '{}' });
+      expect(res.status).toBe(201);
+      const opts = mockGetOrCreate.mock.calls.at(-1)?.[2] as
+        { systemPromptSuffix?: string; followUpFallback?: boolean } | undefined;
+      expect(opts?.systemPromptSuffix).toContain('suggest_follow_ups');
+      expect(opts?.followUpFallback).toBe(true);
+    });
+
     // S-M1 regression-pin from /pr-review #456: threadId must be a UUID.
     // Without the gate an attacker could pollute the sessionStore Map and
     // SQLite primary-key namespace with multi-MB strings (availability,

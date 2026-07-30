@@ -1924,6 +1924,10 @@ export class LynoxHTTPApi {
         source: normalizeThreadModelSource(opts['source']),
         effort: typeof opts['effort'] === 'string' ? opts['effort'] as 'low' | 'medium' | 'high' : undefined,
         systemPromptSuffix: WEB_UI_SYSTEM_PROMPT_SUFFIX,
+        // The suffix ASKS for the follow-up chips; this catches the models that
+        // do not deliver them. Set together so a surface can never request the
+        // chips without the recovery, or pay for recovery where nothing asked.
+        followUpFallback: true,
       });
       const tier = session.getModelTier();
       const threadStore = engine.getThreadStore();

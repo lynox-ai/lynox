@@ -178,6 +178,11 @@ export interface SessionOptions {
   tenantId?: string | undefined;
   messages?: BetaMessageParam[] | undefined;
   systemPromptSuffix?: string | undefined;
+  /** Web UI: recover the end-of-turn follow-up chips when the model ignores the
+   *  `suggest_follow_ups` instruction. Set alongside the Web-UI prompt suffix —
+   *  the suffix asks for the chips, this catches the models that do not deliver.
+   *  See `Agent.followUpFallback`. */
+  followUpFallback?: boolean | undefined;
   costGuard?: import('../types/index.js').CostGuardConfig | undefined;
 }
 
@@ -237,6 +242,7 @@ export class Session {
     continuationPrompt?: string | undefined;
     excludeTools?: string[] | undefined;
     systemPromptSuffix?: string | undefined;
+    followUpFallback?: boolean | undefined;
     autonomy?: import('../types/index.js').AutonomyLevel | undefined;
     costGuard?: import('../types/index.js').CostGuardConfig | undefined;
   } = {};
@@ -389,6 +395,9 @@ export class Session {
     this._tenantId = opts?.tenantId ?? null;
     if (opts?.systemPromptSuffix) {
       this.agentOverrides.systemPromptSuffix = opts.systemPromptSuffix;
+    }
+    if (opts?.followUpFallback) {
+      this.agentOverrides.followUpFallback = true;
     }
     if (opts?.autonomy) {
       this.agentOverrides.autonomy = opts.autonomy;
@@ -1933,6 +1942,9 @@ export class Session {
       // session-lifetime — carried unless this call supplies a new value
       maxIterations: supplied.maxIterations ?? this.agentOverrides.maxIterations,
       systemPromptSuffix: supplied.systemPromptSuffix ?? this.agentOverrides.systemPromptSuffix,
+      // Travels WITH the suffix: the suffix asks for the chips, this recovers
+      // them. A rebuild that dropped it would silently stop recovering mid-thread.
+      followUpFallback: this.agentOverrides.followUpFallback,
       autonomy: supplied.autonomy ?? this.agentOverrides.autonomy,
       costGuard: this.agentOverrides.costGuard, // never a caller's to set here
       // per-rebuild — reset unless this call supplies one
@@ -2242,6 +2254,10 @@ export class Session {
     // Per-thread override takes precedence over global config
     if (this._skipMemoryExtractionOverride !== null) {
       this.agent.skipMemoryExtraction = this._skipMemoryExtractionOverride;
+    }
+    // Web-UI surfaces only: catch a turn that ended without the chips.
+    if (this.agentOverrides.followUpFallback === true) {
+      this.agent.followUpFallback = true;
     }
   }
 
