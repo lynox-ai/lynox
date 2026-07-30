@@ -2186,9 +2186,12 @@
 					<span
 						class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
 						title={t('chat.footer_tokens_tooltip')}
-					>{formatTurnTokens(usage)}</span>
+					>{formatTurnTokens(usage)}</span><span class="sr-only">{t('chat.footer_tokens_tooltip')}</span>
 					{#each formatUsageMetaParts(usage, !getDemoMode()) as part}
-						<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span><span class="shrink-0">{part}</span>
+						<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{#if part.title}<span
+								class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
+								title={part.title}
+							>{part.text}</span><span class="sr-only">{part.title}</span>{:else}<span class="shrink-0">{part.text}</span>{/if}
 					{/each}
 				{/if}
 		{#if isLast && ctxBudget}
@@ -3426,17 +3429,22 @@
 		{/if}
 
 		<!-- Model picker: only on an empty chat (before turn 1). Once the chat has a
-		     session, the per-thread control below takes over — D18 makes a pick sticky
+		     session, the per-thread control takes over — D18 makes a pick sticky
 		     and re-pickable mid-conversation, reversing D1 ("model fixed").
 		     model-presets W4: on desktop the new-chat picker moved to the nav header
 		     (frees composer space); it stays here on mobile (sm:hidden) where the
-		     header is too cramped for it. The mid-thread control is unchanged. -->
+		     header is too cramped for it. 2026-07-30: the mid-thread control follows
+		     the same split — its full "Läuft auf: […]" row cost a composer line on
+		     every running thread, so on desktop it now renders compact in the header
+		     (AppShell) and only mobile keeps the row here. -->
 		{#if currentSessionId === null}
 			<div class="sm:hidden">
 				<ComposerModelPicker />
 			</div>
 		{:else}
-			<ThreadModelControl />
+			<div class="sm:hidden">
+				<ThreadModelControl />
+			</div>
 		{/if}
 
 		<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-center gap-1.5 md:gap-2">

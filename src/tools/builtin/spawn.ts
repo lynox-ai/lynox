@@ -17,7 +17,7 @@ import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget } from '../../core/session-budget.js';
 import { escapeXml, wrapUntrustedData } from '../../core/data-boundary.js';
-import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../../core/prompts.js';
+import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId } from '../../core/prompts.js';
 import {
   DEFAULT_SPAWN_BUDGET_USD,
   DEFAULT_SPAWN_MAX_TURNS,
@@ -31,19 +31,6 @@ import {
 
 const SPAWN_TIMEOUT = 10 * 60 * 1000;
 const SPAWN_EXCLUDED = new Set(['spawn_agent']);
-
-/**
- * Clamp a model id to the conventional model-id charset.
- *
- * The id can originate from user config (`profile.model_id`), and it travels to
- * two places that both need it tame: the parent's context, where it sits
- * OUTSIDE the untrusted-data envelope and could otherwise smuggle markdown or a
- * boundary tag; and the `spawn` stream event, where the UI renders it. Same
- * pattern as `modelIdentityContext`'s `safeId`.
- */
-function safeModelId(model: unknown): string {
-  return String(model).replace(/[^a-zA-Z0-9._:@-]/g, '').slice(0, 64);
-}
 
 /** Empirical p90 fill of a model's maxOutput per turn; overshoots are caught by the per-spawn cost guard. */
 const SPAWN_OUTPUT_FILL_RATIO = 0.3;
@@ -859,11 +846,18 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       });
       const iters = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
       totalEstimate += estimateSpawnCost(model, iters);
+      // The SAME check the identity block and the result header use. This site
+      // had its own charset — one that stripped `/` and cut at 64 — so a
+      // Fireworks child was announced to the UI as
+      // `accountsfireworksmodelsglm-5p2`. An id it rejects is omitted rather
+      // than sent empty: the field is optional, and absent reads as "unknown"
+      // where `''` renders as a model with no name.
+      const wireModel = safeModelId(model);
       subAgents.push({
         id: `${spawnId}:${i}`,
         name: spec.name,
         role: spec.role,
-        model: safeModelId(model),
+        ...(wireModel ? { model: wireModel } : {}),
       });
     });
 
@@ -1001,7 +995,16 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // would mislabel the sub-agent's model when reporting back — on a
         // non-Anthropic provider "fast" is NOT a Claude model. The Model-identity
         // prompt rule tells the agent to report THIS id, not the tier.
-        sections.push(`## ${spec.name} (ran on \`${safeModelId(outcome.value.model)}\`)\n\n${wrapped}`);
+        // The id can originate from user config (`profile.model_id`) and lands
+        // in the header OUTSIDE the untrusted-data envelope, hence the SAME
+        // check the identity block uses: a second charset here meant a Fireworks
+        // child was reported as `accountsfireworksmodelsglm-5p2` — mangled, and
+        // stated with authority because the prompt vouches for it.
+        // It rejects rather than repairs, so drop the clause when it rejects:
+        // an empty code span in a heading claims a model with no name.
+        const safeModel = safeModelId(outcome.value.model);
+        const ranOn = safeModel ? ` (ran on \`${safeModel}\`)` : '';
+        sections.push(`## ${spec.name}${ranOn}\n\n${wrapped}`);
         childRunIds.push(outcome.value.childRunId);
       } else {
         const err = outcome.reason instanceof Error

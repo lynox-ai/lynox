@@ -226,20 +226,63 @@ export interface TierModelInfo {
  *  When present it replaces the old generic per-provider example, so the agent
  *  plans against the map it actually runs, not a hallucinated one (the fast/
  *  balanced inversion bug). Both live call sites pass it in lockstep. */
+/**
+ * Clamp a model id to the conventional model-id charset, for any prompt that
+ * states one.
+ *
+ * Exported because THREE writers put a model id into model context — this
+ * function's identity block, the tier→model map beside it, and the
+ * `## <name> (ran on \`<model>\`)` header `spawn_agent` builds for the parent —
+ * and two of them disagreed on the charset. That mattered: the identity block
+ * tells the agent to state the id it is given, so a writer that mangles it
+ * differently makes the agent report a wrong id with authority. One list.
+ *
+ * `/` is in it. Hosted-inference providers use path-shaped ids
+ * (`accounts/fireworks/models/glm-5p2`), and stripping the slashes produced
+ * `accountsfireworksmodelsglm-5p2`. `@` is in it for the same reason (Together,
+ * some Vertex publisher ids). Neither is a markdown or prompt-boundary
+ * character, so neither weakens the boundary — but note that a tenant-set id
+ * containing `//` can now render as something a reader takes for a URL. It
+ * cannot become a live link: the brackets and parens of link syntax are off the
+ * list, so an id carrying them is rejected outright.
+ *
+ * It REJECTS rather than repairs. An id carrying anything off the list is
+ * dropped whole, and so is one past the bound — because repairing either way
+ * produces the failure this exists to prevent: `[link](http://x)` strips to
+ * `linkhttp://x` and a mid-path truncation cuts a real id short, and the prompt
+ * then orders the agent to state that mangled string as its identity. A wrong
+ * id asserted with authority is worse than no id, and every caller here has an
+ * honest empty path. The bound also stops an adversarial id from padding the
+ * prompt; 128 clears real ids by 3x (registered catalog ids run to ~41 chars,
+ * e.g. `accounts/fireworks/models/deepseek-v4-pro`). Surrounding whitespace is
+ * trimmed first — a stray space in hand-edited config is a typo, not a lie.
+ */
+export function safeModelId(id: string | undefined | null): string {
+  const trimmed = String(id ?? '').trim();
+  return /^[a-zA-Z0-9._:@/-]{1,128}$/.test(trimmed) ? trimmed : '';
+}
+
 export function modelIdentityContext(
   provider: string | undefined | null,
   modelId: string | undefined | null,
   tierMap?: readonly TierModelInfo[] | undefined,
 ): string {
-  if (!provider || !modelId) return '';
-  // Sanitize: strip backticks + control chars + any markdown/prompt boundary
-  // chars, then cap length. Model IDs are conventionally `[a-z0-9._-]+` —
-  // anything else is treated as adversarial.
-  const safeId = (id: string | undefined | null): string =>
-    String(id ?? '').replace(/[^a-zA-Z0-9._:-]/g, '').slice(0, 64);
-  const selfId = safeId(modelId);
+  const selfId = safeModelId(modelId);
   const prettyProvider = providerFamilyLabel(provider);
-  if (!selfId || !prettyProvider) return '';
+  if (!prettyProvider) return '';
+
+  // An id we cannot state — off-charset, past the bound, or simply absent —
+  // must not take the whole block with it. Everything below the first sentence
+  // (the tier vocabulary and "never claim a different brand") is what stops a
+  // Mistral run from answering "I am Claude" out of its pretrained identity,
+  // and none of it depends on the id.
+  // The absent case is NOT hypothetical: `engine.ts` forwards
+  // `openai_model_id ?? null` and the web UI stages a blank there, so `''`
+  // reaches here on a half-configured custom provider — the very setup most
+  // likely to produce a wrong self-identification.
+  const identitySentence = selfId
+    ? `You are running on ${prettyProvider} as model \`${selfId}\`. When asked which model you are — or which model you used for a turn — state THIS exact model id.`
+    : `You are running on ${prettyProvider}. The exact model id is not available to you — name the provider and say you do not have the precise id, never a guessed one.`;
 
   // THIS instance's resolved tier→model map, rendered model-id-FIRST so the
   // agent anchors on the concrete id when it plans which tier runs which model.
@@ -249,7 +292,7 @@ export function modelIdentityContext(
   // light backtick/control strip is enough to keep the code-span intact.
   const tierLines = (tierMap ?? [])
     .map((e) => ({
-      id: safeId(e.modelId),
+      id: safeModelId(e.modelId),
       tier: String(e.tier).replace(/[^a-zA-Z]/g, '').slice(0, 16),
       family: String(e.providerLabel).replace(/`/g, '').slice(0, 48),
     }))
@@ -259,7 +302,7 @@ export function modelIdentityContext(
     ? `\n\nOn THIS instance the tiers resolve as follows — use THIS map when you plan which tier runs which model, never a generic mapping:\n${tierLines.join('\n')}\n\n`
     : ' Each resolves to a different concrete model per provider (e.g. on Mistral `balanced`→`mistral-medium-2604`, `fast`→`ministral-8b-2512`, `deep`→`mistral-medium-2604`; on Anthropic to the Claude models).';
 
-  return `\n\n**Model identity**: You are running on ${prettyProvider} as model \`${selfId}\`. When asked which model you are — or which model you used for a turn — state THIS exact model id. \`fast\`, \`balanced\`, and \`deep\` are INTERNAL capability tiers (used in tool inputs like \`spawn(role, model: "fast")\`), NOT model identities.${tierGuidance}Do NOT present a tier name as if it were a model brand — not for yourself, and not when describing sub-agents you spawned. When reporting what a sub-agent ran on, use the resolved model id surfaced in its result, never the tier you requested. Never claim a different brand: do not say "Claude" if the model is Mistral, do not say "GPT" if the model is Claude.`;
+  return `\n\n**Model identity**: ${identitySentence} \`fast\`, \`balanced\`, and \`deep\` are INTERNAL capability tiers (used in tool inputs like \`spawn(role, model: "fast")\`), NOT model identities.${tierGuidance}Do NOT present a tier name as if it were a model brand — not for yourself, and not when describing sub-agents you spawned. When reporting what a sub-agent ran on, use the resolved model id surfaced in its result, never the tier you requested — and if its result surfaces no id, say the id is not available rather than naming the tier. Never claim a different brand: do not say "Claude" if the model is Mistral, do not say "GPT" if the model is Claude.`;
 }
 
 /**
