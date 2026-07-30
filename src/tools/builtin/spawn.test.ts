@@ -263,8 +263,12 @@ describe('spawn_agent tool', () => {
         ),
       ).rejects.toThrow(/model blocklist/);
 
-      expect(streamEvents(onStream).filter((e) => e['type'] === 'spawn')).toHaveLength(0);
-      expect(JSON.stringify(streamEvents(onStream))).not.toContain('claude-fable-5');
+      // Not "no spawn event" alone — that also holds if the batch never streamed
+      // one at all. Pin that the stream DID carry the batch's other traffic and
+      // simply never announced this model.
+      const evs = streamEvents(onStream);
+      expect(evs.filter((e) => e['type'] === 'spawn')).toHaveLength(0);
+      expect(JSON.stringify(evs)).not.toContain('claude-fable-5');
     } finally {
       vi.unstubAllEnvs();
       reloadConfig();

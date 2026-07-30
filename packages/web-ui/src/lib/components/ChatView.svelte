@@ -2056,10 +2056,14 @@
 
 			{#each children as child (child.id)}
 				{@const isRunning = child.status === 'running'}
-				<!-- Folded with the SAME reducer the parent transcript uses
+				<!-- Folded with the same reducer the parent transcript uses
 				     (`foldToolRows`): consecutive same-action calls collapse into one
-				     row with merged subjects. Before that, a child that read forty
-				     files rendered forty rows here, where the identical forty calls
+				     row with merged subjects. Not byte-identical to the transcript —
+				     `groupedToolCalls` pulls `plan_task` and `artifact_save` out
+				     before grouping, so those break a fold there and not here; a
+				     child rendering either is not a case this panel has. Before the
+				     fold, a child that read forty files rendered forty rows here,
+				     where the identical forty calls
 				     used to fold into one in the parent's list. -->
 				{@const childRows = foldToolRows(child.toolCalls, toolCallLabel)}
 				<div class="mt-1">

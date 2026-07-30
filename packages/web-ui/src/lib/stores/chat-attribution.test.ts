@@ -500,7 +500,7 @@ describe('foldToolRows', () => {
 	it('folds a long run of one action into a single row with merged subjects', () => {
 		// The regression this exists for: forty reads rendered as forty rows in the
 		// sub-agent panel while the identical calls folded into one in the parent.
-		const calls = Array.from({ length: 40 }, (_, n) => call('read_file'));
+		const calls = Array.from({ length: 40 }, () => call('read_file'));
 		const subjects = Array.from({ length: 40 }, (_, n) => `f${n}.ts`);
 
 		const rows = foldToolRows(calls, labelBy(subjects));
