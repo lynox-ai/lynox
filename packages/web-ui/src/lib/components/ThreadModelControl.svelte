@@ -28,7 +28,12 @@
   import { addToast } from '../stores/toast.svelte.js';
   import { t } from '../i18n.svelte.js';
 
-  const { compact = false }: { compact?: boolean } = $props();
+  interface Props {
+    /** Header form: select only, notice/hint via toast (the nav header has no
+     *  room for a second line). Default is the labelled composer form. */
+    compact?: boolean;
+  }
+  const { compact = false }: Props = $props();
 
   let tiers = $state<ModelTier[]>([]);
   let defaultTier = $state<ModelTier>('balanced');
@@ -136,40 +141,37 @@
   }
 </script>
 
+<!-- ONE select, two frames. The compact (header) form drops the visible label
+     and carries its meaning in the accessible name instead; the composer form
+     keeps the label and an inline notice/hint line. Written as a snippet rather
+     than two copies of the markup — the copies had already drifted apart on
+     border and radius within a single review round. -->
+{#snippet control(compactForm: boolean)}
+  <select
+    id={compactForm ? 'thread-model-control-compact' : 'thread-model-control'}
+    value={currentTier}
+    onchange={onChange}
+    disabled={pending || getIsStreaming()}
+    class="bg-transparent outline-none focus:border-accent cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed {compactForm
+      ? 'max-w-[16rem] truncate border border-border rounded-[var(--radius-md)] px-2 py-1.5 text-xs text-text-subtle hover:text-text transition-colors'
+      : 'border border-border/60 rounded-md px-2 py-1 text-text'}"
+    aria-label={compactForm ? `${t('chat.thread_model.label')} — ${t('chat.thread_model.change')}` : t('chat.thread_model.change')}
+    title={t('chat.thread_model.change')}
+  >
+    {#each tiers as tier (tier)}
+      <option value={tier}>{tierLabel(tier)}</option>
+    {/each}
+  </select>
+{/snippet}
+
 {#if show}
   {#if compact}
-    <!-- Header form: select only. The accessible name carries the "Läuft auf"
-         meaning the visible label carries in the composer form. -->
-    <select
-      id="thread-model-control-compact"
-      value={currentTier}
-      onchange={onChange}
-      disabled={pending || getIsStreaming()}
-      class="max-w-[16rem] truncate bg-transparent border border-border rounded-[var(--radius-md)] px-2 py-1.5 text-xs text-text-subtle hover:text-text outline-none focus:border-accent cursor-pointer transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-      aria-label="{t('chat.thread_model.label')} — {t('chat.thread_model.change')}"
-      title={t('chat.thread_model.change')}
-    >
-      {#each tiers as tier (tier)}
-        <option value={tier}>{tierLabel(tier)}</option>
-      {/each}
-    </select>
+    {@render control(true)}
   {:else}
     <div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-1.5 px-1 text-xs text-text-subtle">
       <div class="flex items-center gap-2">
         <label for="thread-model-control" class="shrink-0">{t('chat.thread_model.label')}</label>
-        <select
-          id="thread-model-control"
-          value={currentTier}
-          onchange={onChange}
-          disabled={pending || getIsStreaming()}
-          class="bg-transparent border border-border/60 rounded-md px-2 py-1 text-text outline-none focus:border-accent cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-          aria-label={t('chat.thread_model.change')}
-          title={t('chat.thread_model.change')}
-        >
-          {#each tiers as tier (tier)}
-            <option value={tier}>{tierLabel(tier)}</option>
-          {/each}
-        </select>
+        {@render control(false)}
       </div>
       {#if notice}
         <p class="mt-1 text-warning" role="status">{notice}</p>

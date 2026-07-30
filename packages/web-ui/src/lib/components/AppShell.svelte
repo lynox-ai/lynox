@@ -863,16 +863,14 @@
 							<HeaderModelPicker />
 						</div>
 					{/if}
-					<!-- Per-thread model control, same slot, once a session exists (2026-07-30).
-					     Desktop only — mobile keeps the labelled row above the composer, where
-					     there is room for it. -->
 					{#if isActive('/app', true) && getSessionId()}
+						<!-- Per-thread model control, same slot, once a session exists
+						     (2026-07-30). Desktop only — mobile keeps the labelled row above
+						     the composer, where there is room for it. -->
 						<div class="hidden sm:block mr-1">
 							<ThreadModelControl compact />
 						</div>
-					{/if}
-					<!-- Private mode toggle (chat page only) -->
-					{#if isActive('/app', true) && getSessionId()}
+						<!-- Private mode toggle -->
 						<button
 							onclick={() => void toggleSkipExtraction()}
 							class="flex items-center gap-1.5 text-xs transition-colors min-h-[2.5rem] px-2 py-2 rounded hover:bg-bg-muted {getSkipExtraction() ? 'text-warning' : 'text-text-subtle hover:text-text'}"
