@@ -77,9 +77,8 @@ describe('hybridSlotClientConfig — hybrid hot-path routing', () => {
  * Mistral), and wrong in the exact artifact used to diagnose provider behaviour —
  * found in a real prod snapshot (rafael, 2026-07-30).
  *
- * These drive the shared resolver through the REAL tier-set flow. The last case is
- * the one that matters: it asserts the two writers AGREE, which is the property
- * that broke — a per-writer assertion would have passed on the broken code.
+ * These drive the shared resolver through the REAL tier-set flow. What they do
+ * NOT do is prove the two writers agree — see the scope note on the last case.
  */
 describe('effectiveProviderForRun — which provider the identity prompt names', () => {
   beforeEach(() => setTierSetResolver({ routingMode: 'standard', tierSet: {} }));

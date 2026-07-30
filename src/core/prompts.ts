@@ -245,18 +245,20 @@ export interface TierModelInfo {
  * containing `//` can now render as something a reader takes for a URL; link
  * syntax is still stripped, so it cannot become a live link.
  *
- * Over-long ids are DROPPED, not truncated. Truncation is the same failure as
- * stripping a character — a mid-path cut yields a confidently-stated wrong id —
- * so a cap that truncates only moves the lie to a longer input. Returning empty
- * is the honest outcome and the one the callers already handle: `if (!selfId)
- * return ''` omits the identity sentence, and the tier map filters the line.
- * Saying nothing beats saying something false. The bound still exists so an
- * adversarial id cannot pad the prompt; 128 clears real ids by 3x (registered
- * catalog ids run to ~41 chars, e.g. `accounts/fireworks/models/deepseek-v4-pro`).
+ * It REJECTS rather than repairs. An id carrying anything off the list is
+ * dropped whole, and so is one past the bound — because repairing either way
+ * produces the failure this exists to prevent: `[link](http://x)` strips to
+ * `linkhttp://x` and a mid-path truncation cuts a real id short, and the prompt
+ * then orders the agent to state that mangled string as its identity. A wrong
+ * id asserted with authority is worse than no id, and every caller here has an
+ * honest empty path. The bound also stops an adversarial id from padding the
+ * prompt; 128 clears real ids by 3x (registered catalog ids run to ~41 chars,
+ * e.g. `accounts/fireworks/models/deepseek-v4-pro`). Surrounding whitespace is
+ * trimmed first — a stray space in hand-edited config is a typo, not a lie.
  */
 export function safeModelId(id: string | undefined | null): string {
-  const stripped = String(id ?? '').replace(/[^a-zA-Z0-9._:@/-]/g, '');
-  return stripped.length > 128 ? '' : stripped;
+  const trimmed = String(id ?? '').trim();
+  return /^[a-zA-Z0-9._:@/-]{1,128}$/.test(trimmed) ? trimmed : '';
 }
 
 export function modelIdentityContext(
@@ -267,7 +269,18 @@ export function modelIdentityContext(
   if (!provider || !modelId) return '';
   const selfId = safeModelId(modelId);
   const prettyProvider = providerFamilyLabel(provider);
-  if (!selfId || !prettyProvider) return '';
+  if (!prettyProvider) return '';
+
+  // An id we cannot state (off-charset or past the bound) must not take the
+  // whole block with it. Everything below the first sentence — the tier
+  // vocabulary and "never claim a different brand" — is what stops a Mistral
+  // run from answering "I am Claude" out of its pretrained identity, and that
+  // guidance does not depend on the id. So the sentence degrades, the block
+  // stays. (An ABSENT id still returns nothing, as before: no caller passes one
+  // meaning "unknown", so that path is untouched here.)
+  const identitySentence = selfId
+    ? `You are running on ${prettyProvider} as model \`${selfId}\`. When asked which model you are — or which model you used for a turn — state THIS exact model id.`
+    : `You are running on ${prettyProvider}. The exact model id is not available to you — name the provider and say you do not have the precise id, never a guessed one.`;
 
   // THIS instance's resolved tier→model map, rendered model-id-FIRST so the
   // agent anchors on the concrete id when it plans which tier runs which model.
@@ -287,7 +300,7 @@ export function modelIdentityContext(
     ? `\n\nOn THIS instance the tiers resolve as follows — use THIS map when you plan which tier runs which model, never a generic mapping:\n${tierLines.join('\n')}\n\n`
     : ' Each resolves to a different concrete model per provider (e.g. on Mistral `balanced`→`mistral-medium-2604`, `fast`→`ministral-8b-2512`, `deep`→`mistral-medium-2604`; on Anthropic to the Claude models).';
 
-  return `\n\n**Model identity**: You are running on ${prettyProvider} as model \`${selfId}\`. When asked which model you are — or which model you used for a turn — state THIS exact model id. \`fast\`, \`balanced\`, and \`deep\` are INTERNAL capability tiers (used in tool inputs like \`spawn(role, model: "fast")\`), NOT model identities.${tierGuidance}Do NOT present a tier name as if it were a model brand — not for yourself, and not when describing sub-agents you spawned. When reporting what a sub-agent ran on, use the resolved model id surfaced in its result, never the tier you requested. Never claim a different brand: do not say "Claude" if the model is Mistral, do not say "GPT" if the model is Claude.`;
+  return `\n\n**Model identity**: ${identitySentence} \`fast\`, \`balanced\`, and \`deep\` are INTERNAL capability tiers (used in tool inputs like \`spawn(role, model: "fast")\`), NOT model identities.${tierGuidance}Do NOT present a tier name as if it were a model brand — not for yourself, and not when describing sub-agents you spawned. When reporting what a sub-agent ran on, use the resolved model id surfaced in its result, never the tier you requested. Never claim a different brand: do not say "Claude" if the model is Mistral, do not say "GPT" if the model is Claude.`;
 }
 
 /**

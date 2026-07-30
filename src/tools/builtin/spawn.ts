@@ -887,17 +887,15 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // non-Anthropic provider "fast" is NOT a Claude model. The Model-identity
         // prompt rule tells the agent to report THIS id, not the tier.
         // The id can originate from user config (`profile.model_id`) and lands
-        // in the header OUTSIDE the untrusted-data envelope, so sanitize it to
-        // the conventional model-id charset to prevent markdown / boundary-tag
-        // injection into the parent context (defense-in-depth; same pattern as
-        // `modelIdentityContext`'s safeId).
-        // The SAME sanitiser the identity block uses. This header lands OUTSIDE
-        // the untrusted-data envelope and the identity prompt orders the agent to
-        // report the id surfaced here, so a second charset meant a Fireworks child
-        // was reported as `accountsfireworksmodelsglm-5p2` — mangled, and stated
-        // with authority because the prompt vouches for it.
+        // in the header OUTSIDE the untrusted-data envelope, hence the SAME
+        // check the identity block uses: a second charset here meant a Fireworks
+        // child was reported as `accountsfireworksmodelsglm-5p2` — mangled, and
+        // stated with authority because the prompt vouches for it.
+        // It rejects rather than repairs, so drop the clause when it rejects:
+        // an empty code span in a heading claims a model with no name.
         const safeModel = safeModelId(outcome.value.model);
-        sections.push(`## ${spec.name} (ran on \`${safeModel}\`)\n\n${wrapped}`);
+        const ranOn = safeModel ? ` (ran on \`${safeModel}\`)` : '';
+        sections.push(`## ${spec.name}${ranOn}\n\n${wrapped}`);
         childRunIds.push(outcome.value.childRunId);
       } else {
         const err = outcome.reason instanceof Error

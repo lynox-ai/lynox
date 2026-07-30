@@ -2062,7 +2062,7 @@
 					<span
 						class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
 						title={t('chat.footer_tokens_tooltip')}
-					>{formatTurnTokens(usage)}</span>
+					>{formatTurnTokens(usage)}</span><span class="sr-only">{t('chat.footer_tokens_tooltip')}</span>
 					{#each formatUsageMetaParts(usage, !getDemoMode()) as part}
 						<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{#if part.title}<span
 								class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
