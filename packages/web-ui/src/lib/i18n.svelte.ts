@@ -806,9 +806,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.cancel_queue': { de: 'Queue leeren', en: 'Clear queue' },
 	'chat.remove_queued': { de: 'Aus Queue entfernen', en: 'Remove from queue' },
 	'chat.deferred_title': { de: 'Noch offen', en: 'Still open' },
-	// Prefix for the screen-reader copy of what a follow-up chip will actually
-	// send — the visible second line is clamped, this one is not.
-	'chat.followup_sends': { de: 'Sendet:', en: 'Sends:' },
 	'chat.deferred_dismiss': { de: 'Vorschlag entfernen', en: 'Dismiss suggestion' },
 	'chat.deferred_clear': { de: 'Alle entfernen', en: 'Clear all' },
 	'chat.placeholder_streaming': { de: 'Nächste Nachricht vorbereiten...', en: 'Prepare next message...' },

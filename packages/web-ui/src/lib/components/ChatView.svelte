@@ -2729,11 +2729,21 @@
 					     Clicking runs `task` as a full agent turn with the whole tool
 					     set and no second confirmation, so the click is the only
 					     consent gate — and it was being given against text the user
-					     had never seen. The second line is clamped for layout; the
-					     full instruction is in the tooltip and read out in full to a
-					     screen reader. When the task only restates the label there is
-					     no second line: a line that always repeats itself is a line
-					     people stop reading. -->
+					     had never seen.
+
+					     HONEST LIMIT, because the clamp moves the problem rather than
+					     removing it: `line-clamp-2` at this size shows roughly the
+					     first 130 characters, and a long task can carry its payload
+					     past that. What a sighted mouse user gets without hovering is
+					     the OPENING of the instruction, not the whole of it. That is
+					     strictly better than a label alone and strictly less than
+					     informed consent — tracked as DEF-followup-task-invisible.
+					     No `sr-only` copy here: a CSS clamp hides nothing from assistive
+					     tech, so the visible span is already announced in full and a
+					     second one would read the task twice.
+
+					     When the task only restates the label there is no second line:
+					     a line that always repeats itself is one people stop reading. -->
 					<div class="flex flex-wrap gap-2 mt-1">
 						{#each lastAssistant.followUps as fu}
 							{@const preview = taskPreview(fu)}
@@ -2748,7 +2758,6 @@
 										<span aria-hidden="true">↳</span>
 										<span class="line-clamp-2">{preview}</span>
 									</span>
-									<span class="sr-only">{t('chat.followup_sends')} {preview}</span>
 								{/if}
 							</button>
 						{/each}
@@ -3316,14 +3325,17 @@
 					<div class="inline-flex max-w-full items-center rounded-full border border-accent/30 bg-accent/5 text-xs text-accent-text hover:border-accent/50 hover:bg-accent/10 transition-all">
 						<!-- Same consent argument as the chips above: this button also
 						     runs `task` on one click. The tray is a single compact row,
-						     so the instruction rides inline and truncated rather than
-						     on a second line — the tooltip and the screen-reader text
-						     carry it whole. -->
+						     so the instruction rides inline and truncated — about 40
+						     characters at this size, which is an opening and not an
+						     instruction. The tooltip carries it whole for a mouse; a
+						     screen reader gets the full text from the visible span,
+						     since `truncate` is CSS and hides nothing from assistive
+						     tech (an `sr-only` copy here read the task twice). -->
 						<button
 							onclick={() => runDeferredFollowUp(fu)}
 							title={preview ?? fu.label}
 							class="rounded-l-full px-3 py-1.5 min-w-0 text-left"
-						>{fu.label}{#if preview}<span class="text-text-subtle"> · <span class="inline-block max-w-[16rem] truncate align-bottom">{preview}</span></span><span class="sr-only">{t('chat.followup_sends')} {preview}</span>{/if}</button>
+						>{fu.label}{#if preview}<span class="text-text-subtle"> · <span class="inline-block max-w-[16rem] truncate align-bottom">{preview}</span></span>{/if}</button>
 						<button
 							onclick={() => dismissDeferredFollowUp(fu)}
 							aria-label={t('chat.deferred_dismiss')}
