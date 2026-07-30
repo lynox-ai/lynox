@@ -3,6 +3,20 @@ import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 import { estimateCost } from '../format.js';
 import { t } from '../i18n.svelte.js';
 import { mergeDoneUsage, type UsageInfo } from './chat-usage.js';
+import {
+	recordToolCall,
+	recordToolResult,
+	recordSpawn,
+	applySpawnProgress,
+	applyChildDone,
+	SPAWN_EVENT,
+	SPAWN_PROGRESS_EVENT,
+	SPAWN_CHILD_DONE_EVENT,
+	type ToolCallInfo,
+	type SpawnProgress,
+	type SubAgentActivity,
+	type ContentBlock,
+} from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, computeDeferredTray, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
@@ -45,10 +59,7 @@ export interface ApiCallCost {
 	costUsd: number;
 }
 
-export type ContentBlock =
-	| { type: 'text'; text: string }
-	| { type: 'thinking'; text: string }
-	| { type: 'tool_call'; index: number };
+export type { ContentBlock } from './chat-attribution.js';
 
 /** DK-UX inline chip for a durable-knowledge write (from the `knowledge_write` SSE event). */
 export interface KnowledgeWriteChip {
@@ -69,8 +80,14 @@ export interface ChatMessage {
 	/** Ordered blocks for interleaved rendering (text ↔ tool calls) */
 	blocks?: ContentBlock[];
 	pipeline?: PipelineInfo;
-	/** Sub-agent delegation progress (set when spawn_agent fires). */
-	spawn?: SpawnProgress;
+	/** Sub-agent delegations in this turn, keyed by the engine's `spawnId`.
+	 *  A map, not a single object: the agent loop runs several `spawn_agent`
+	 *  calls concurrently, and the old single field let the second batch
+	 *  overwrite the first. */
+	spawns?: Record<string, SpawnProgress>;
+	/** Flat index of every delegated child in this turn, keyed by child id.
+	 *  Holds each child's OWN tool calls — the main agent's stay in `toolCalls`. */
+	subAgents?: Record<string, SubAgentActivity>;
 	thinking?: string;
 	usage?: UsageInfo;
 	/** Profiled-API calls fired by this message's tool invocations. Each entry
@@ -107,27 +124,7 @@ export interface ChatMessage {
 	_toolSinceText?: boolean;
 }
 
-export interface SpawnProgress {
-	/** All sub-agents spawned in this delegation. */
-	agents: string[];
-	/** Sub-agents currently running. */
-	running: string[];
-	/** Sub-agents that have completed, with outcome. */
-	done: Array<{ name: string; ok: boolean; elapsedS: number }>;
-	/** Last-seen tool name per sub-agent. */
-	lastToolBySub: Record<string, string>;
-	/** Seconds since the delegation started. */
-	elapsedS: number;
-	/** Client timestamp when the spawn started (for fallback elapsed if no heartbeat). */
-	startedAt: number;
-}
-
-export interface ToolCallInfo {
-	name: string;
-	input: unknown;
-	result?: string;
-	status: 'running' | 'done' | 'error';
-}
+export type { ToolCallInfo, SpawnProgress, SubAgentActivity } from './chat-attribution.js';
 
 export interface PipelineStepInfo {
 	id: string;
@@ -1188,6 +1185,41 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	}
 }
 
+/**
+ * Mirror a turn's delegation state into the Context sidebar.
+ *
+ * Aggregated across every batch on the turn. The panel is a single view and
+ * used to be fed from one `msg.spawn` object, so with two concurrent
+ * `spawn_agent` calls it showed only whichever fired last. The inline transcript
+ * is the exact, per-batch view; this stays the roll-up.
+ */
+function syncSpawnContext(msg: ChatMessage): void {
+	const children = Object.values(msg.subAgents ?? {});
+	if (children.length === 0) return;
+	// Keyed by NAME because that is what the panel renders — which means an
+	// ambiguous name gets NO entry rather than one twin's tool shown for both.
+	// The inline transcript is the exact, id-keyed view.
+	const nameCounts = new Map<string, number>();
+	for (const c of children) nameCounts.set(c.name, (nameCounts.get(c.name) ?? 0) + 1);
+	const lastTool: Record<string, string> = {};
+	for (const c of children) {
+		if (nameCounts.get(c.name) !== 1) continue;
+		const last = c.toolCalls[c.toolCalls.length - 1];
+		if (last) lastTool[c.name] = last.name;
+	}
+	setContext({
+		type: 'spawn',
+		title: 'spawn_agent',
+		spawnAgents: children.map((c) => c.name),
+		spawnRunning: children.filter((c) => c.status === 'running').map((c) => c.name),
+		spawnDone: children
+			.filter((c) => c.status !== 'running')
+			.map((c) => ({ name: c.name, ok: c.status === 'done', elapsedS: c.elapsedS ?? 0 })),
+		spawnLastTool: lastTool,
+		spawnElapsedS: Math.max(0, ...Object.values(msg.spawns ?? {}).map((sp) => sp.elapsedS)),
+	});
+}
+
 function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number, userIdx: number): void {
 	// Any event arriving counts as proof the connection is alive. Drives the
 	// "Verbindung scheint langsam" hint in StreamingActivityBar when the gap
@@ -1291,24 +1323,17 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				if (fu.length > 0) msg.followUps = fu;
 				break;
 			}
-			msg.toolCalls = msg.toolCalls ?? [];
-			// Dedup: skip if last tool call has same name and is still running
-			const lastTc = msg.toolCalls[msg.toolCalls.length - 1];
-			if (!(lastTc && lastTc.name === toolName && lastTc.status === 'running'
-				&& JSON.stringify(lastTc.input) === JSON.stringify(toolInput))) {
-				const tcIndex = msg.toolCalls.length;
-				msg.toolCalls.push({ name: toolName, input: toolInput, status: 'running' });
-				// Interleaved blocks: add tool_call block in order. If the previous
-				// block was text, that text just became "complete" — emit it so
-				// auto-speak can start playing it without waiting for turn_end.
-				msg.blocks = msg.blocks ?? [];
-				const prevBlock = msg.blocks[msg.blocks.length - 1];
-				if (prevBlock && prevBlock.type === 'text') {
-					emitCompletedTextBlock(prevBlock.text, `msg-${idx}-block-${msg.blocks.length - 1}`);
-				}
-				msg.blocks.push({ type: 'tool_call', index: tcIndex });
-			}
-			msg._toolSinceText = true;
+			// One function owns the routing so a child's call CANNOT land in the main
+			// agent's list — see recordToolCall. It reports where the event went; the
+			// streaming indicator follows, and a dropped event moves nothing.
+			const where = recordToolCall(msg, data, (text, blockIndex) => {
+				emitCompletedTextBlock(text, `msg-${idx}-block-${blockIndex}`);
+			});
+			if (where === 'dropped') break;
+			// `_toolSinceText` splits the MAIN agent's prose into a new paragraph after
+			// its own tool calls. A child's activity is not a break in the parent's
+			// text flow, so it must not set the flag.
+			if (where === 'parent') msg._toolSinceText = true;
 			streamingActivity = 'tool';
 			streamingToolName = toolName;
 			streamingToolPhase = null;
@@ -1318,7 +1343,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// few ticks later with running/done counts; letting the tool_call
 			// path set tool+spawn_agent first causes a visible flash to the
 			// generic tool card before the spawn view takes over.
-			if (toolName !== 'ask_user' && toolName !== 'ask_secret' && toolName !== 'spawn_agent') {
+			// A child's tool must not steal the sidebar from the delegation panel the
+			// user is following, so the Context switch is parent-only.
+			if (where === 'parent' && toolName !== 'ask_user' && toolName !== 'ask_secret' && toolName !== 'spawn_agent') {
 				setContext({ type: 'tool', toolName, toolInput, title: toolName });
 			}
 			break;
@@ -1355,11 +1382,13 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		}
 		case 'tool_result': {
 			const toolName = String(data['name'] ?? '');
-			const tc = msg.toolCalls?.find((t) => t.name === toolName && t.status === 'running')
-				?? msg.toolCalls?.findLast((t) => t.name === toolName);
+			// Routing again lives in one place: a child's result closes the CHILD's
+			// call. The old code searched a single shared list, so a child's
+			// `read_file` result closed the parent's still-running `read_file` — and a
+			// delegation doing the same thing as its parent is the normal case.
+			const { scope, call: tc } = recordToolResult(msg, data);
+			if (scope !== 'dropped') persistChat();
 			if (tc) {
-				tc.result = String(data['result'] ?? '');
-				tc.status = data['isError'] === true ? 'error' : 'done';
 				setContext({
 					type: tc.name === 'write_file' ? 'file' : 'tool',
 					toolName: tc.name,
@@ -1367,74 +1396,30 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					toolResult: tc.result,
 					filePath: tc.name === 'write_file' ? String((tc.input as Record<string, unknown>)?.['path'] ?? '') : undefined,
 					title: tc.name,
-				});
-				persistChat();
+			});
 			}
 			streamingToolPhase = null;
 			break;
 		}
-		case 'spawn': {
-			// Delegation started. Track progress so the UI can show which
-			// sub-agents are running, elapsed time, and last tool per sub.
-			const agents = (data['agents'] as string[] | undefined) ?? [];
-			msg.spawn = {
-				agents,
-				running: [...agents],
-				done: [],
-				lastToolBySub: {},
-				elapsedS: 0,
-				startedAt: Date.now(),
-			};
+		case SPAWN_EVENT: {
+			// Delegation started. Registers the batch, its children, and the block that
+			// places the panel where the delegation happened — chronologically, not
+			// pinned to whichever tool row came last.
+			if (!recordSpawn(msg, data, Date.now())) break;
 			streamingActivity = 'tool';
 			streamingToolName = 'spawn_agent';
 			currentToolStartedAt = Date.now();
-			// Surface delegation in the Context panel so the sidebar shows
-			// live sub-agent state alongside the inline ChatView block.
-			setContext({
-				type: 'spawn',
-				title: 'spawn_agent',
-				spawnAgents: agents,
-				spawnRunning: [...agents],
-				spawnDone: [],
-				spawnLastTool: {},
-				spawnElapsedS: 0,
-			});
+			syncSpawnContext(msg);
 			break;
 		}
-		case 'spawn_progress': {
-			if (!msg.spawn) break;
-			msg.spawn.elapsedS = Number(data['elapsedS'] ?? 0);
-			msg.spawn.running = (data['running'] as string[] | undefined) ?? msg.spawn.running;
-			msg.spawn.lastToolBySub = (data['lastToolBySub'] as Record<string, string> | undefined) ?? msg.spawn.lastToolBySub;
-			// Keep the Context-panel in sync; done list carries over since
-			// progress events don't re-emit it.
-			setContext({
-				type: 'spawn',
-				title: 'spawn_agent',
-				spawnAgents: msg.spawn.agents,
-				spawnRunning: [...msg.spawn.running],
-				spawnDone: [...msg.spawn.done],
-				spawnLastTool: { ...msg.spawn.lastToolBySub },
-				spawnElapsedS: msg.spawn.elapsedS,
-			});
+		case SPAWN_PROGRESS_EVENT: {
+			applySpawnProgress(msg, data);
+			syncSpawnContext(msg);
 			break;
 		}
-		case 'spawn_child_done': {
-			if (!msg.spawn) break;
-			const sub = String(data['subAgent'] ?? '');
-			const ok = data['ok'] === true;
-			const elapsedS = Number(data['elapsedS'] ?? 0);
-			msg.spawn.running = msg.spawn.running.filter(a => a !== sub);
-			msg.spawn.done = [...msg.spawn.done, { name: sub, ok, elapsedS }];
-			setContext({
-				type: 'spawn',
-				title: 'spawn_agent',
-				spawnAgents: msg.spawn.agents,
-				spawnRunning: [...msg.spawn.running],
-				spawnDone: [...msg.spawn.done],
-				spawnLastTool: { ...msg.spawn.lastToolBySub },
-				spawnElapsedS: msg.spawn.elapsedS,
-			});
+		case SPAWN_CHILD_DONE_EVENT: {
+			applyChildDone(msg, data);
+			syncSpawnContext(msg);
 			break;
 		}
 		case 'prompt':

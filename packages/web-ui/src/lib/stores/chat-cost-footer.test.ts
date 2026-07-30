@@ -5,6 +5,8 @@ import {
 	usageFromDoneEvent,
 	formatTurnTokens,
 	formatUsageMeta,
+	formatUsageMetaParts,
+	shortModelLabel,
 	type UsageInfo,
 } from './chat-usage.js';
 
@@ -200,5 +202,40 @@ describe('formatUsageMeta — footer tail (token count excluded)', () => {
 	it('drops cache when there were no cache reads', () => {
 		const u: UsageInfo = { tokensIn: 100, tokensOut: 10, cacheRead: 0, cacheWrite: 0, costUsd: 0.02 };
 		expect(formatUsageMeta(u, true)).not.toContain('cache');
+	});
+});
+
+/**
+ * Hosted-inference providers namespace their ids as a path
+ * (`accounts/fireworks/models/glm-5p2`), which crowded the footer line without
+ * adding information (rafael, 2026-07-30). The footer shows the last segment and
+ * keeps the full id in the part's `title`, so nothing is lost — the id is the
+ * provider/tier verification BYOK users rely on.
+ */
+describe('shortModelLabel — path-shaped model ids in the footer', () => {
+	it('shows only the model segment of a path-shaped id', () => {
+		expect(shortModelLabel('accounts/fireworks/models/glm-5p2')).toBe('glm-5p2');
+	});
+
+	it('leaves a plain id untouched (every Anthropic / Mistral id)', () => {
+		expect(shortModelLabel('mistral-medium-2604')).toBe('mistral-medium-2604');
+		expect(shortModelLabel('claude-haiku-4-5-20251001')).toBe('claude-haiku-4-5-20251001');
+	});
+
+	it('falls back to the input when the path has no usable last segment', () => {
+		expect(shortModelLabel('weird/')).toBe('weird');
+		expect(shortModelLabel('/')).toBe('/');
+	});
+
+	it('carries the FULL id in the part title so the verification value survives', () => {
+		const u: UsageInfo = { tokensIn: 100, tokensOut: 10, cacheRead: 0, cacheWrite: 0, costUsd: 0.02, model: 'accounts/fireworks/models/glm-5p2' };
+		const modelPart = formatUsageMetaParts(u, true).at(-1);
+		expect(modelPart).toEqual({ text: 'glm-5p2', title: 'accounts/fireworks/models/glm-5p2' });
+	});
+
+	it('adds no title when nothing was shortened (no spurious tooltip)', () => {
+		const u: UsageInfo = { tokensIn: 100, tokensOut: 10, cacheRead: 0, cacheWrite: 0, costUsd: 0.02, model: 'mistral-medium-2604' };
+		const modelPart = formatUsageMetaParts(u, true).at(-1);
+		expect(modelPart).toEqual({ text: 'mistral-medium-2604' });
 	});
 });
