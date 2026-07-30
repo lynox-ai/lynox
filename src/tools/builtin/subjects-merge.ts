@@ -38,7 +38,7 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
       'Merge two person entries that are the SAME real person into one (e.g. a bare first name "Ada" ' +
       'and the fuller "Dr. Ada Lovelace"), moving all their notes, tasks and mentions onto the kept entry. ' +
       'Use ONLY when confident they are one person. Pass the shorter/duplicate name as `duplicate` and the ' +
-      'fuller/correct name as `canonical`. You will be asked to confirm. Undoing a merge needs a command-line rollback from a ledger file — do NOT tell the user it can be undone from chat.',
+      'fuller/correct name as `canonical`. Confirm required. Undoing needs a command-line rollback — never call it reversible.',
     input_schema: {
       type: 'object' as const,
       properties: {
