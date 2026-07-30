@@ -14,6 +14,13 @@ name: gate-record
 # `edited` is in the trigger list because the record lives in the PR body: without
 # it, fixing a stale record would need a dummy commit.
 #
+# EXPECT A RED RUN AFTER EVERY PUSH, then a green one. That is not flakiness: the
+# push fires `synchronize`, and at that instant the record genuinely does describe
+# an older commit. Updating `head:` fires `edited` and the check goes green.
+# Branch protection reads the LATEST run for the name, so the earlier red does not
+# block the merge — it stays in the list as the receipt that the record was
+# re-taken rather than left behind.
+#
 # This job is a required status check on main.
 
 on:
