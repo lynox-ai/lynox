@@ -336,9 +336,9 @@ describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
   // ── An ALREADY-ANCHORED mirror meeting a null balance ────────────────────
   //
   // The case above starts cold. This one does not, and that is the whole
-  // difference: the mirror can only ever go DOWN once anchored (`:370`
-  // decrements, `:313` refuses), and the re-anchor is the only thing that can
-  // raise it. Skipping the write on a null therefore did not neutralise the
+  // difference: the mirror can only ever go DOWN once anchored (`onAfterRun`
+  // decrements, `onBeforeRun` refuses), and the re-anchor is the only thing that
+  // can raise it. Skipping the write on a null therefore did not neutralise the
   // mirror, it froze it at whatever number it last held.
   //
   // This is not hypothetical plumbing. It is the failure the control-plane comp
@@ -355,9 +355,15 @@ describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
     await hook.onInit?.(); // a fresh /status re-anchors — here, clears
 
     // MUTATION THIS KILLS: dropping the `else if (data.balance_cents === null)`
-    // branch. Without it the mirror stays at its stale negative number and this
-    // run is refused forever, with no way back — which is exactly the shipped
-    // behaviour this change exists to remove.
+    // branch — verified by running it, not by reading.
+    //
+    // But NOT at this line, and the difference is worth writing down because the
+    // next person will edit against the reason rather than the assertion. The
+    // refuse above fires a forced flush+resync, which re-anchors the mirror to
+    // +50 BEFORE the null arrives — so under the mutant `run-b` resolves anyway.
+    // What actually fails is the last assertion: r2's spend drives that stale
+    // +50 to -450 and the coalesce window blocks a rescue resync. The mutant
+    // dies at "it stays ungated", not here.
     await expect(hook.onBeforeRun!('run-b', CTX)).resolves.toBeUndefined();
 
     // And it stays ungated: further spend must not re-arm a mirror that is gone.
@@ -388,6 +394,32 @@ describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
     // That reads as a simplification and silently disarms the spend guard.
     await expect(hook.onBeforeRun!('run-x', CTX)).rejects.toThrow(/budget for this period reached/i);
     await hook.onShutdown?.();
+  });
+
+  it('a non-null NON-NUMBER does not clear it either — `typeof x === "object"` is not the test', async () => {
+    // The gap the ABSENT case above leaves open, and it is not academic:
+    // `typeof null === 'object'`, so `else if (typeof data.balance_cents ===
+    // 'object')` looks like a faithful rewrite of the null check, passes every
+    // other test in this file, and additionally clears the mirror on `{}` or
+    // `[]` — a malformed reply disarming the guard, which is the one outcome the
+    // branch comment rules out. Found by mutating the line, not by reading it.
+    // Driven through the harness's own `statusBalance` seam rather than by
+    // replacing the fetch mock: a replacement survives the loop iteration and
+    // silently stops the NEXT case from anchoring at all, so every later
+    // assertion passes for the wrong reason. (It did, on the first draft.)
+    for (const junk of [{}, [], 'none', true]) {
+      const hook = createManagedHook();
+      statusBalance = 50;
+      await hook.onInit?.(); // mirror = 50c
+      hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10c
+
+      statusBalance = junk as unknown as number; // a broken reply, not a signal
+      await hook.onInit?.();
+
+      await expect(hook.onBeforeRun!('run-x', CTX), JSON.stringify(junk))
+        .rejects.toThrow(/budget for this period reached/i);
+      await hook.onShutdown?.();
+    }
   });
 
   it('refuse path resyncs flush→status, /status the last writer, and touches only those endpoints (§7 iii/iv)', async () => {
