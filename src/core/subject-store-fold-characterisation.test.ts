@@ -15,23 +15,41 @@
  *       Also false, inverted: CRM contacts (`crm.ts`) and task assignees
  *       (`task-store.ts` → `resolveAssigneeToSubjectId`) do exactly that.
  *
- * The verified account, checked at each call site:
+ * The verified account, from an exhaustive sweep of the production call sites
+ * (`findOrCreate` · `resolvePersonSubject` · `findOrCreateEngagement` ·
+ * `resolveAssigneeToSubjectId` · `makeSubjectColumnBridge`):
  *
- *   organization / product / service  → `findOrCreate`
- *   person, from EXTRACTION           → `resolvePersonSubject`  (subset fold)
- *   person, from CRM or an ASSIGNEE   → `findOrCreate`          (no subset fold)
- *   engagement                        → `findOrCreateEngagement`
+ *   engagement                → `findOrCreateEngagement`
+ *   person, from EXTRACTION   → `resolvePersonSubject`  (subset fold)
+ *   EVERYTHING ELSE           → `findOrCreate`          (no subset fold)
+ *
+ * The second line has exactly two sites — `knowledge-layer.ts:807` and `:995`,
+ * the two arms of extraction. Every other resolution in the codebase is the
+ * third line, persons included: CRM contacts (`crm.ts:261`), task assignees
+ * (`task-store.ts:241` → `resolveAssigneeToSubjectId`), the graph backfill
+ * (`subject-graph-backfill.ts:265`), the DataStore subject-column bridge
+ * (`engine.ts:1712`), and — the one that matters most for the register entry
+ * this file feeds — the DURABLE-KNOWLEDGE write path itself
+ * (`knowledge-store.ts:143`, whose kind is `params.subjectKind ?? 'organization'`
+ * and so resolves a person through `findOrCreate` too).
  *
  * That split is the finding, and it points the opposite way from the blocker it
  * was filed under: the same human entered as the contact "Ada" and extracted
  * from a mail as "Dr. Ada Lovelace" becomes TWO subjects. Over-merging was the
- * worry; under one of the two person paths, fragmentation is the behaviour.
+ * worry; on every person path except extraction, fragmentation is the behaviour.
  *
  * What holds across all of them: none MERGES two existing rows. Each either
  * attaches the incoming surface form to an existing subject as an alias, or
  * creates a new one — with one exception, engagement's orphan-adopt, which
- * re-parents an existing row. (`mergeSubjects` is the separate, explicit,
- * LEDGERED call that redirects a row via `merged_into`.)
+ * re-parents an existing row.
+ *
+ * The real merge is a different call, and it is the inverse of the worry: `runMerge`
+ * (`subject-merge-runner.ts`) redirects a row via `merged_into`, writes a ledger
+ * file and has `rollbackMergeRun`. It is reachable ONLY from the `subjects_merge`
+ * tool and the `subject-sweep` operator CLI — nothing schedules it. So the merge
+ * that IS reversible has to be asked for, and the fold that is not reversible
+ * happens on its own. Nothing reconciles a fragmented pair afterwards either,
+ * which is why the divergence below persists rather than healing.
  *
  * And a fold does not reliably leave a trace: `_mergeAliases` dedupes
  * case-insensitively, so a case-variant fold writes nothing at all.
@@ -176,8 +194,9 @@ describe('subject folding, per resolver', () => {
   });
 
   describe('⚠️ the two person paths disagree', () => {
-    it('a CRM contact or assignee does NOT subset-fold, where extraction would', () => {
-      // `crm.ts` and `resolveAssigneeToSubjectId` both call
+    it('every person path EXCEPT extraction skips the subset fold', () => {
+      // `crm.ts`, `resolveAssigneeToSubjectId`, the backfill, the DataStore
+      // bridge and the durable-knowledge write path all call
       // `findOrCreate({kind:'person'})`, which has no subset stage. So the same
       // human, entered as the contact "Ada" and extracted from a mail as
       // "Dr. Ada Lovelace", becomes two subjects — fragmentation, the mirror of
