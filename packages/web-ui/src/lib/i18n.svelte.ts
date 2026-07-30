@@ -73,13 +73,17 @@ const translations: Record<string, Record<Locale, string>> = {
 	'panel.pin': { de: 'Fixieren', en: 'Pin' },
 	'panel.pinned': { de: 'Fixiert', en: 'Pinned' },
 
-	// Spawn (sub-agent delegation — sidebar progress view)
+	// Spawn (sub-agent delegation — sidebar progress view + inline transcript panel)
 	'spawn.active': { de: 'aktiv', en: 'active' },
 	'spawn.done': { de: 'fertig', en: 'done' },
 	'spawn.running': { de: 'Laufend', en: 'Running' },
 	'spawn.completed': { de: 'Abgeschlossen', en: 'Completed' },
 	'spawn.status_ok': { de: 'erfolgreich', en: 'succeeded' },
 	'spawn.status_fail': { de: 'fehlgeschlagen', en: 'failed' },
+	'spawn.subagents': { de: 'Subagenten', en: 'Sub-agents' },
+	'spawn.slow': { de: 'ungewöhnlich lang', en: 'taking unusually long' },
+	'spawn.waiting': { de: 'wartet', en: 'waiting' },
+	'spawn.region_label': { de: 'Aktivität der Subagenten', en: 'Sub-agent activity' },
 
 	// Nav (flat post-consolidation: 5 top-level entries, all sub-features as hub tabs)
 	'nav.automation': { de: 'Automation', en: 'Automation' },
