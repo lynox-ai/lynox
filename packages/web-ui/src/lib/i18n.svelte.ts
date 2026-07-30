@@ -82,6 +82,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'spawn.status_fail': { de: 'fehlgeschlagen', en: 'failed' },
 	'spawn.subagents': { de: 'Subagenten', en: 'Sub-agents' },
 	'spawn.slow': { de: 'ungewöhnlich lang', en: 'taking unusually long' },
+	'spawn.est_max_hint': {
+		de: 'Obergrenze, die die Engine für diese Delegation reserviert hat — die tatsächlichen Kosten liegen meist deutlich darunter und ersetzen diese Zahl, sobald ein Subagent fertig ist.',
+		en: 'Ceiling the engine reserved for this delegation — the actual cost is usually well below it, and replaces this figure as soon as a sub-agent finishes.',
+	},
 	'spawn.waiting': { de: 'wartet', en: 'waiting' },
 	'spawn.region_label': { de: 'Aktivität der Subagenten', en: 'Sub-agent activity' },
 

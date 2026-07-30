@@ -10,6 +10,9 @@ import {
 	batchTotals,
 	foldToolRows,
 	worstStatus,
+	SPAWN_EVENT,
+	SPAWN_PROGRESS_EVENT,
+	SPAWN_CHILD_DONE_EVENT,
 	type AttributionState,
 	type ToolCallInfo,
 } from './chat-attribution.js';
@@ -198,6 +201,15 @@ describe('recordToolCall', () => {
 		expect(state.subAgents!['s1:0']!.toolCalls.map((c) => c.input)).toEqual([{ path: 'a' }, { path: 'b' }]);
 	});
 
+	it('does NOT dedup two DIFFERENT tools that happen to share an input', () => {
+		const state = withDelegation();
+		recordToolCall(state, { name: 'read_file', input: {}, subAgentId: 's1:0' });
+		recordToolCall(state, { name: 'list_dir', input: {}, subAgentId: 's1:0' });
+		// `{}` is a common input, so without the name comparison the dedup
+		// swallows the second call and the child under-reports its work.
+		expect(state.subAgents!['s1:0']!.toolCalls.map((c) => c.name)).toEqual(['read_file', 'list_dir']);
+	});
+
 	it('does NOT dedup a repeat of a call that already CLOSED', () => {
 		const state = withDelegation();
 		recordToolCall(state, { name: 'read_file', input: { path: 'a' }, subAgentId: 's1:0' });
@@ -278,12 +290,21 @@ describe('recordToolResult', () => {
 		const state = withDelegation();
 		recordToolCall(state, { name: 'read_file', input: { path: 'a' } });
 		recordToolCall(state, { name: 'read_file', input: { path: 'b' } });
-		// Close the LATER one first — parallel tool calls settle out of order.
+		// Reachable via THREAD RESUME, not via the live stream: the server pairs
+		// results to calls by `tool_use_id` and the client rehydrates the list
+		// verbatim, so a turn can be restored with a later call already closed
+		// while an earlier one is not. (The live path cannot produce this — it
+		// always closes the FIRST running match, so a mid-stream state where a
+		// later call is done and an earlier one is running never arises.)
 		state.toolCalls![1]!.status = 'done';
 		state.toolCalls![1]!.result = 'b done';
 		const { call } = recordToolResult(state, { name: 'read_file', result: 'a done' });
-		// `findLast` alone would re-close 'b' and overwrite its result; the
-		// running-first lookup is what makes the name unambiguous.
+		// `findLast` alone would re-close 'b' and overwrite a result it already
+		// has. Running-first does NOT make the name unambiguous — with BOTH
+		// running, this still closes 'a' for a result that belongs to 'b'. Name
+		// matching stays approximate for one agent's own parallel same-tool
+		// calls; what the per-agent lists fixed was the PARENT/CHILD collision,
+		// which is a different one.
 		expect(call?.input).toEqual({ path: 'a' });
 		expect(state.toolCalls![1]!.result).toBe('b done');
 	});
@@ -419,6 +440,103 @@ describe('batchTotals elapsed', () => {
 	});
 });
 
+/**
+ * The engine reserves a figure for the batch before any child runs and puts it
+ * on the `spawn` event. Nothing read it — a field on the wire with no reader is
+ * the same defect as a reducer with no caller, just pointing the other way.
+ */
+describe('batchTotals — the up-front reservation', () => {
+	const withEstimate = (usd: unknown): AttributionState => {
+		const state: AttributionState = {};
+		recordSpawn(state, { ...batch('s1', [{ id: 's1:0', name: 'researcher' }]), estimatedCostUSD: usd }, 1000);
+		return state;
+	};
+
+	it('is offered as a ceiling while the batch is still running', () => {
+		const t = batchTotals(withEstimate(0.04), 's1');
+		expect(t.estimateMaxUsd).toBe(0.04);
+		// Kept OUT of `costUsd`: that field means spend, and this is not spend.
+		expect(t.costUsd).toBe(0);
+	});
+
+	it('is REPLACED by real spend the moment a child settles', () => {
+		const state = withEstimate(0.04);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 9, costUsd: 0.0021 });
+		const t = batchTotals(state, 's1');
+		expect(t.costUsd).toBe(0.0021);
+		expect(t.estimateMaxUsd).toBeNull();
+	});
+
+	/**
+	 * The state that got the first version of this merged past its own tests.
+	 * `reportableUsd` leaves `costUsd` unset for a model with no pricing entry,
+	 * so a FINISHED batch still had `spent === 0` — and kept rendering the
+	 * ceiling beside "done", forever, as if that were the bill.
+	 */
+	it('retires the ceiling when the batch finishes having spent nothing measurable', () => {
+		const state = withEstimate(0.42);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 9, costUsd: 0 });
+		const t = batchTotals(state, 's1');
+		expect(t.running).toHaveLength(0);
+		expect(t.costUsd).toBe(0);
+		expect(t.estimateMaxUsd).toBeNull();
+	});
+
+	it('drops the ceiling as soon as ANY child has settled, siblings still running', () => {
+		const state: AttributionState = {};
+		recordSpawn(state, {
+			...batch('s1', [{ id: 's1:0', name: 'a' }, { id: 's1:1', name: 'b' }]),
+			estimatedCostUSD: 0.42,
+		}, 1000);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 9, costUsd: 0.0021 });
+		const t = batchTotals(state, 's1');
+		expect(t.running).toHaveLength(1);
+		// Both numbers at once would be two costs on one row, one of them an
+		// order of magnitude larger, with nothing saying which is which.
+		expect(t.costUsd).toBe(0.0021);
+		expect(t.estimateMaxUsd).toBeNull();
+	});
+
+	it('claims nothing when the engine sent no estimate', () => {
+		const t = batchTotals(withDelegation(), 's1');
+		expect(t.costUsd).toBe(0);
+		expect(t.estimateMaxUsd).toBeNull();
+	});
+
+	it('ignores a malformed estimate rather than rendering NaN', () => {
+		// `Infinity` is the one that needs `Number.isFinite` — every other value
+		// here already fails the `> 0` test (`NaN > 0` is false), so a list
+		// without it leaves that check unpinned.
+		for (const bad of ['0.04', Number.NaN, Number.POSITIVE_INFINITY, -1, null, undefined]) {
+			const t = batchTotals(withEstimate(bad), 's1');
+			expect(t.costUsd).toBe(0);
+			expect(t.estimateMaxUsd).toBeNull();
+		}
+	});
+});
+
+/**
+ * The event-type strings.
+ *
+ * What actually fixed the problem is the constants themselves: the `switch` in
+ * `chat.svelte.ts` — which vitest cannot import — now uses the same symbols, so
+ * a `case 'spawn_progres':` typo is no longer expressible. This test cannot
+ * catch that class and does not claim to.
+ *
+ * What it does is pin the VALUES, so changing one is a deliberate edit of a
+ * test. It is an attestation, not a verification: the engine's own literals sit
+ * in `src/types/tools.ts` of this repo, but this package imports nothing from
+ * the engine's `src/` (only the vendored `contract/`), so nothing here can
+ * compare against them. Cross-check by hand against that file.
+ */
+describe('wire event types', () => {
+	it('are the names the engine emits', () => {
+		expect(SPAWN_EVENT).toBe('spawn');
+		expect(SPAWN_PROGRESS_EVENT).toBe('spawn_progress');
+		expect(SPAWN_CHILD_DONE_EVENT).toBe('spawn_child_done');
+	});
+});
+
 describe('two children sharing a name', () => {
 	/**
 	 * `validateSpawnInput` checks a name's length and control characters, never
@@ -482,7 +600,7 @@ describe('foldToolRows', () => {
 	it('folds a long run of one action into a single row with merged subjects', () => {
 		// The regression this exists for: forty reads rendered as forty rows in the
 		// sub-agent panel while the identical calls folded into one in the parent.
-		const calls = Array.from({ length: 40 }, (_, n) => call('read_file'));
+		const calls = Array.from({ length: 40 }, () => call('read_file'));
 		const subjects = Array.from({ length: 40 }, (_, n) => `f${n}.ts`);
 
 		const rows = foldToolRows(calls, labelBy(subjects));

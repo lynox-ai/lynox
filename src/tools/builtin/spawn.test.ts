@@ -263,8 +263,16 @@ describe('spawn_agent tool', () => {
         ),
       ).rejects.toThrow(/model blocklist/);
 
-      expect(streamEvents(onStream).filter((e) => e['type'] === 'spawn')).toHaveLength(0);
-      expect(JSON.stringify(streamEvents(onStream))).not.toContain('claude-fable-5');
+      // The property is that NOTHING reaches the UI before the refusal — so the
+      // stream is empty, and that is asserted as the whole of it. (A previous
+      // version claimed to pin "the stream carried the batch's other traffic";
+      // it did not, and could not: nothing else runs. Against an empty array
+      // the substring check below is vacuous on its own, which is why the
+      // length assertion carries it — the pre-change order streamed a `spawn`
+      // event naming `claude-fable-5` right here.)
+      const evs = streamEvents(onStream);
+      expect(evs).toHaveLength(0);
+      expect(JSON.stringify(evs)).not.toContain('claude-fable-5');
     } finally {
       vi.unstubAllEnvs();
       reloadConfig();
@@ -291,6 +299,10 @@ describe('spawn_agent tool', () => {
       ).rejects.toThrow(/model blocklist/);
 
       expect(streamEvents(onStream).filter((e) => e['type'] === 'spawn')).toHaveLength(0);
+      // And the permitted sibling did not quietly run either. Without this, an
+      // implementation that streams nothing while still executing `ok` — the
+      // half-done batch this ordering exists to prevent — passes.
+      expect(mockSend).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllEnvs();
       reloadConfig();
