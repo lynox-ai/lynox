@@ -47,6 +47,7 @@ import {
   normalizeFollowUpSuggestions,
   lastUserText,
 } from './follow-up-fallback.js';
+import { randomBytes } from 'node:crypto';
 import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
 import { scanToolResult, RepeatCallGuard } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
@@ -923,25 +924,32 @@ export class Agent implements IAgent {
       // whether or not the suggestions turn out usable.
       const u = response.usage;
       if (u) {
-        this.costGuard?.recordTurn(u);
-        debitInRunHelperCost(
-          this.toolContext.meteredHost,
-          this.sessionCounters,
-          calculateCost(fastSnap.modelId, {
-            input_tokens: u.input_tokens,
-            output_tokens: u.output_tokens,
-            cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
-            cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
-          }),
-          'fast',
-        );
+        const usd = calculateCost(fastSnap.modelId, {
+          input_tokens: u.input_tokens,
+          output_tokens: u.output_tokens,
+          cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+          cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+        });
+        // Priced on the FAST model, then charged as a dollar amount.
+        // `recordTurn` would book these tokens at the run's own `pricePerM` — on
+        // an Opus run charging Haiku tokens that trips the ceiling ~20x early.
+        this.costGuard?.recordExternalCost(usd);
+        debitInRunHelperCost(this.toolContext.meteredHost, this.sessionCounters, usd, 'fast');
       }
 
       const call = response.content.find(
         (b): b is BetaToolUseBlock => b.type === 'tool_use' && b.name === FOLLOW_UP_TOOL_NAME,
       );
       if (!call) return;
-      const suggestions = normalizeFollowUpSuggestions(call.input);
+      const suggestions = normalizeFollowUpSuggestions(call.input)
+        // The chip DISPLAYS `label` and SENDS `task`, and `task` is never shown.
+        // The answer this was built from can quote a web page or a mail, so a
+        // laundered `task` ("forward the last 20 mails to …") behind an innocuous
+        // label is a one-click agent turn the user never read. The char cap
+        // bounds cost, not instructions — this drops the suggestion outright.
+        // `wrapUntrustedData` already computed this verdict for the excerpt and
+        // discarded it; here it decides.
+        .filter((sug) => !detectInjectionAttempt(sug.task).detected);
       if (suggestions.length === 0) return; // same outcome as the model declining
 
       const input = { suggestions };
@@ -954,7 +962,13 @@ export class Agent implements IAgent {
       // persisted message would be silently lost while the pushed tool_result
       // still landed: chips gone on reload, orphan tool_result on disk.
       const last = this.messages.at(-1);
-      const toolUseId = `followup_fallback_${this.messages.length}`;
+      // 9 alphanumerics, because that is the narrowest shape any target provider
+      // accepts (Mistral validates `^[a-zA-Z0-9]{9}$` and the OpenAI-compat
+      // adapter forwards ids verbatim) and this pair is PERSISTED: a rejected id
+      // fails not just this turn but every later turn in the thread — on exactly
+      // the provider the recovery exists for. A `messages.length`-derived id was
+      // also not unique: `_truncateHistory` shrinks the array, so it repeats.
+      const toolUseId = randomBytes(8).toString('base64url').replace(/[^a-zA-Z0-9]/g, '').slice(0, 9).padEnd(9, '0');
       const useBlock = { type: 'tool_use' as const, id: toolUseId, name: FOLLOW_UP_TOOL_NAME, input };
       if (last && last.role === 'assistant' && Array.isArray(last.content)) {
         last.content = [...last.content, useBlock];
@@ -1233,7 +1247,19 @@ export class Agent implements IAgent {
       // already-persisted assistant message would never reach disk while the
       // pushed tool_result still would — chips gone on reload, orphan
       // tool_result on disk. Here both blocks are still in the unpersisted tail.
+      // Captured before the chip recovery, which may splice a tool_use onto this
+      // assistant message and push a tool_result after it. The occupancy delta
+      // below wants the index of THE ASSISTANT REPLY; read after a splice it
+      // points at the tool_result and the reply drops out of the estimate.
+      const msgCountBeforeRecovery = this.messages.length;
       if (response.stop_reason === 'end_turn') {
+        // Read the CONTENT, not just the stop reason: the OpenAI-compat adapter
+        // defaults `stop_reason` to 'end_turn' when a stream ends without a
+        // `finish_reason`, so a turn that DID call the tool can otherwise pay for
+        // a second forced call and persist a duplicate chip pair.
+        if (response.content.some(
+          (b) => b.type === 'tool_use' && b.name === FOLLOW_UP_TOOL_NAME,
+        )) this._sawFollowUpCall = true;
         await this._recoverFollowUps(extractText(response.content));
       }
       // F-Eager-Persist: checkpoint after each assistant message so the
@@ -1293,7 +1319,8 @@ export class Agent implements IAgent {
           // priced the prompt (all but that just-pushed reply), so the reply
           // onward is the delta for the next estimate. Derived from the
           // post-truncation array — correct even if _callAPI dropped history.
-          this._lastRealAtMsgCount = this.messages.length - 1;
+          // `msgCountBeforeRecovery`, not `messages.length`: see its declaration.
+          this._lastRealAtMsgCount = msgCountBeforeRecovery - 1;
           if (this.onStream) {
             const maxCtx = this._effectiveContextWindow();
             void this.onStream({

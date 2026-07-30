@@ -106,8 +106,63 @@ function toolUseIds(rows: readonly Msg[]): string[] {
     : []);
 }
 
+/**
+ * A model that calls the tool ITSELF and keeps going, then finishes with prose.
+ *
+ * This drives the primary gate — the flag that keeps a compliant model from
+ * paying for a recovery it does not need — and it needs the co-emitted working
+ * tool to reach it at all: `suggest_follow_ups` alone is `endsTurn`, so the loop
+ * returns right there and the recovery branch is never entered. The reachable
+ * case is the one the loop comment describes: a model that emits it ALONGSIDE a
+ * working tool keeps looping, and the turn after that ends with `end_turn` —
+ * which is the shape the recovery reads.
+ */
+describe('follow-up recovery stays silent for a compliant model', () => {
+  it('never calls the helper when the model already called the tool', async () => {
+    const store = makeStore();
+    const working = {
+      definition: { name: 'noop', description: 'x', input_schema: { type: 'object' as const, properties: {} } },
+      handler: () => Promise.resolve('ok'),
+    };
+    const responses = [
+      {
+        content: [
+          { type: 'tool_use', id: 'abc123def', name: 'suggest_follow_ups', input: { suggestions: CHIPS } },
+          { type: 'tool_use', id: 'ghi456jkl', name: 'noop', input: {} },
+        ],
+        stop_reason: 'tool_use',
+        usage: USAGE,
+      },
+      { content: [{ type: 'text', text: 'Fertig.' }], stop_reason: 'end_turn', usage: USAGE },
+    ];
+    let call = 0;
+    const agent = new Agent({
+      name: 'test',
+      model: 'mistral-medium-2604',
+      systemPrompt: 'SYS',
+      onMessageCheckpoint: () => store.checkpointFrom((agent as unknown as { messages: Msg[] }).messages),
+    });
+    const inner = agent as unknown as { client: unknown; tools: unknown[] };
+    inner.tools = [suggestFollowUpsTool, working];
+    inner.client = {
+      beta: { messages: { stream: () => {
+        // Past the scripted turns the model would be the recovery's forced call.
+        const response = responses[call++] ?? { content: [{ type: 'text', text: 'UNSCRIPTED' }], stop_reason: 'end_turn', usage: USAGE };
+        return { _response: response, finalMessage: () => Promise.resolve(response) };
+      } } },
+    };
+    agent.followUpFallback = true;
+    await agent.send('was steht an?');
+    // Two turns, no third: the recovery is what a third would be. Without the
+    // gate every compliant model pays for a forced call on every single turn —
+    // and persists a duplicate chip pair on top of its own.
+    expect(call).toBe(2);
+    expect(toolUseNames(store.rows).filter((n) => n === 'suggest_follow_ups')).toHaveLength(1);
+  });
+});
+
 /** A turn that answers in prose and stops — the non-compliant model. */
-function buildAgent(recoveryReply: unknown) {
+function buildAgent(recoveryReply: unknown, turnOverride?: unknown) {
   const store = makeStore();
   let call = 0;
   const agent = new Agent({
@@ -120,7 +175,7 @@ function buildAgent(recoveryReply: unknown) {
   });
   const inner = agent as unknown as { client: unknown; tools: unknown[] };
   inner.tools = [suggestFollowUpsTool];
-  const TURN = {
+  const TURN = turnOverride ?? {
     content: [{ type: 'text', text: 'Drei Aufgaben sind überfällig. Soll ich anfangen?' }],
     stop_reason: 'end_turn',
     usage: USAGE,
@@ -139,7 +194,7 @@ function buildAgent(recoveryReply: unknown) {
     },
   };
   agent.followUpFallback = true;
-  return { agent, store };
+  return { agent, store, streamCalls: () => call };
 }
 
 const RECOVERED = {
@@ -179,5 +234,55 @@ describe('follow-up recovery survives persistence', () => {
     await agent.send('was steht an?');
     expect(toolUseNames(store.rows)).not.toContain('suggest_follow_ups');
     expect(toolResultIds(store.rows)).toHaveLength(0);
+  });
+
+  /**
+   * The gate that decides whether to pay for a recovery reads the RESPONSE, and
+   * `stop_reason` alone is not a reliable reading of it: the openai-compat
+   * adapter defaults `stop_reason` to 'end_turn' when a stream ends without a
+   * `finish_reason` — on the very provider class this feature targets. A turn
+   * that DID call the tool then looks identical to one that declined.
+   */
+  it('does not pay for a recovery when the turn already carries the call', async () => {
+    const COMPLIANT_TURN = {
+      content: [
+        { type: 'text', text: 'Drei Aufgaben sind überfällig.' },
+        { type: 'tool_use', id: 'abc123def', name: 'suggest_follow_ups', input: { suggestions: CHIPS } },
+      ],
+      // The adapter's default, not a reading of the wire.
+      stop_reason: 'end_turn',
+      usage: USAGE,
+    };
+    const { agent, store, streamCalls } = buildAgent(RECOVERED, COMPLIANT_TURN);
+    await agent.send('was steht an?');
+    // One call: the turn. A second would be a forced tool call billed to the
+    // user for suggestions the model had already produced.
+    expect(streamCalls()).toBe(1);
+    // And it would persist a SECOND chip pair — a duplicate row on reload.
+    expect(toolUseNames(store.rows).filter((n) => n === 'suggest_follow_ups')).toHaveLength(1);
+  });
+});
+
+/**
+ * The context meter is anchored on the last REAL prompt size the API reported,
+ * plus a char-estimate of everything appended since. That anchor is an index
+ * into `messages[]` — and the recovery moves the array underneath it.
+ */
+describe('follow-up recovery leaves the context meter honest', () => {
+  it('keeps the assistant reply inside the delta the meter estimates', async () => {
+    // Large enough that dropping it is unmistakable at any chars-per-token.
+    const REPLY = 'Der Bericht: ' + 'x'.repeat(20_000);
+    const { agent } = buildAgent(RECOVERED, {
+      content: [{ type: 'text', text: REPLY }],
+      stop_reason: 'end_turn',
+      usage: USAGE,
+    });
+    await agent.send('was steht an?');
+    // Anchor = the API-reported prompt of 700 tokens. The delta must still hold
+    // the 20k-char reply (≥ ~5k tokens). Read AFTER the recovery spliced a
+    // tool_use onto that reply and pushed a tool_result behind it: an anchor
+    // taken from the post-recovery `messages.length` points past the reply, and
+    // the meter under-reports the turn it just made by the whole answer.
+    expect(agent.getEstimatedOccupancyTokens()).toBeGreaterThan(700 + 4000);
   });
 });
