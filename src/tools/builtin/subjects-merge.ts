@@ -11,9 +11,13 @@ import { pv } from '../../core/prompt-value.js';
 //
 // Registered ONLY when `subject_graph_enabled` is on (engine.ts); absent otherwise.
 // `requiresConfirmation: true` → the tool owns its own confirmation (promptUser), so a
-// merge NEVER runs unattended: no interactive channel ⇒ it fails closed. Reversible via
-// the shared merge runner's ledger (the same `~/.lynox/sweeps/` + `subject-sweep --rollback`
-// path the operator sweep uses).
+// merge NEVER runs unattended: no interactive channel ⇒ it fails closed.
+//
+// Undoing one is possible but NOT from chat: `subject-sweep --rollback=<ledger>` against the
+// file under `~/.lynox/sweeps/`. That file is in no backup and in neither migration list, so a
+// restore or a tenant migration ends the possibility silently. Every user-facing string here —
+// the description above, the consent prompt, the result — must say that plainly rather than the
+// bare word "reversible", which is what all three used to say.
 
 interface SubjectsMergeInput {
   duplicate: string;
@@ -34,7 +38,7 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
       'Merge two person entries that are the SAME real person into one (e.g. a bare first name "Ada" ' +
       'and the fuller "Dr. Ada Lovelace"), moving all their notes, tasks and mentions onto the kept entry. ' +
       'Use ONLY when confident they are one person. Pass the shorter/duplicate name as `duplicate` and the ' +
-      'fuller/correct name as `canonical`. You will be asked to confirm; the merge is reversible.',
+      'fuller/correct name as `canonical`. You will be asked to confirm. Undoing a merge needs a command-line rollback from a ledger file — do NOT tell the user it can be undone from chat.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -87,7 +91,7 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
     // their answer — they cannot take this back themselves — and leaves the operator
     // path to the result message, which hands over the actual ledger file.
     const answer = await agent.promptUser(
-      pv`Merge "${dupSafe}" into "${canonSafe}"? Every note, task and mention of "${dupSafe}" moves to "${canonSafe}", and "${dupSafe}" is archived. You cannot undo this yourself.`,
+      pv`Merge "${dupSafe}" into "${canonSafe}"? Every note, task and mention of "${dupSafe}" moves to "${canonSafe}", and "${dupSafe}" is archived. Undoing it needs a command-line rollback — not something you can do from chat.`,
       ['Merge', 'Cancel'],
     );
     if (answer !== 'Merge') return `Cancelled — "${dup.name}" and "${canon.name}" were left as separate entries.`;

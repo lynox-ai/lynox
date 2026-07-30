@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from '../../core/engine-db.js';
@@ -9,7 +9,7 @@ import { createToolContext } from '../../core/tool-context.js';
 import { setDataDir } from '../../core/config.js';
 import { subjectsMergeTool } from './subjects-merge.js';
 import type { IAgent } from '../../types/index.js';
-import { flattenPrompt } from '../../core/prompt-value.js';
+import { flattenPrompt, isPromptText } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
 
 /**
@@ -58,33 +58,70 @@ describe('subjects_merge tool (PR-C3)', () => {
   // `backup.ts`'s three lists and in neither the migration export set nor the
   // import whitelist — so a migration or a restore silently makes every past
   // merge unreversible.
-  it('tells the user they cannot undo it, and does not claim reversibility', async () => {
+  // The tool DESCRIPTION is the third promise, and it is the one the model reads.
+  // `subjects_merge` is in LAZY_DEFERRED_TOOLS, so this text is how the model
+  // discovers the tool and how it frames the action to the user BEFORE the consent
+  // dialog is ever rendered. The first version of this fix changed the prompt and the
+  // result and left this line saying "the merge is reversible" — which would have
+  // shipped the assistant promising an undo one sentence before the system denies it.
+  it('does not promise reversibility in the text the MODEL reads', () => {
+    const desc = subjectsMergeTool.definition.description;
+    // MUTATION THIS KILLS: restoring "the merge is reversible" to the description.
+    // Killed by this assert (`subjects-merge.test.ts`, the `not.toMatch(/is reversible/i)`
+    // below). Nothing else in this file reads `definition.description` at all — the
+    // prompt and result tests above are blind to it, which is exactly how the original
+    // claim survived a change whose whole purpose was to remove it.
+    // NB: no blanket /can be undone/ assert — the correct text CONTAINS that phrase,
+    // inside the instruction "do NOT tell the user it can be undone from chat". A
+    // negative assert broad enough to catch the claim also catches its negation.
+    expect(desc).not.toMatch(/is reversible/i);
+    expect(desc).toMatch(/command-line rollback/i);
+  });
+
+  it('names the real undo route instead of claiming reversibility', async () => {
     const agent = makeAgent('Merge');
     await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);
 
-    // `pv` hands promptUser a PromptText (frame/value segments), not a string —
-    // flatten the segments rather than String()-ing the object, which yields
-    // "[object Object]" and would make any assertion below vacuously false.
-    const arg = (agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as
-      { segments?: Array<{ text: string }> } | string | undefined;
-    const prompt = typeof arg === 'string' ? arg : (arg?.segments ?? []).map((sg) => sg.text).join('');
-    // MUTATION THIS KILLS: restoring "This is reversible." to the prompt.
-    // Killed by THIS assert (`subjects-merge.test.ts`, the `toMatch(/cannot undo/i)`
-    // line below) — the older assert two tests down only checks `toContain('Merged')`
-    // on the RESULT and passes with any prompt wording.
-    expect(prompt).toMatch(/cannot undo this yourself/i);
+    // `pv` hands promptUser a PromptText, not a string. The first version of this
+    // flatten accepted a plain string too — which read as defensive and was the
+    // opposite: it made this test pass with the `pv` tag REMOVED, i.e. with the
+    // frame/value boundary that keeps KG-derived names out of markdown gone.
+    // Assert the shape first, then use the helper this file already imports.
+    const arg = (agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(isPromptText(arg), 'the consent prompt must stay a pv PromptText').toBe(true);
+    const prompt = flattenPrompt(arg as Parameters<typeof flattenPrompt>[0]);
+    // The wording is tier-neutral on purpose. "You cannot undo this yourself" was the
+    // first attempt and is FALSE for a self-hoster: `subject-sweep --rollback` ships in
+    // `dist/` and they own the box, so for the primary distribution tier the user IS the
+    // operator. Naming the ROUTE is true for both tiers.
+    //
+    // MUTATION THIS KILLS: restoring "This is reversible." to the prompt. Killed by the
+    // `toMatch(/command-line rollback/i)` assert below — the happy-path test further
+    // down only checks `toContain('Merged')` on the RESULT and passes with any wording.
+    expect(prompt).toMatch(/command-line rollback/i);
     expect(prompt).not.toMatch(/is reversible/i);
   });
 
-  it('hands over the ledger path instead of an abstract reversibility claim', async () => {
+  it('hands over the ledger file that was ACTUALLY written, not a plausible path', async () => {
     const agent = makeAgent('Merge');
     const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);
 
-    // MUTATION THIS KILLS: dropping `r.ledgerPath` from the result string (it was
-    // discarded for the tool's whole life while the message claimed reversibility).
-    // Killed by the `/sweeps/` assert on the NEXT line — `toContain('Merged')`
-    // elsewhere does not constrain the tail of this message at all.
-    expect(res).toMatch(/sweeps[/\\]merge-/);
+    // The first version of this test asserted `/sweeps[/\\]merge-/` — the SHAPE of a
+    // path. An adversarial pass replaced the interpolation with the hardcoded, never-
+    // written `~/.lynox/sweeps/merge-latest.json` and all 14 tests stayed green. The
+    // whole point of the change is handing over the REAL address, and shape-matching
+    // does not pin it: the obvious "tidy-up" refactor (reconstructing the path from
+    // `getLynoxDir()`) would ship a nonexistent file to the user with CI green.
+    //
+    // So: find what `runMerge` actually wrote, and require the message to name it.
+    const written = readdirSync(join(dir, 'sweeps')).filter((f) => f.startsWith('merge-'));
+    expect(written, 'runMerge must have written exactly one ledger').toHaveLength(1);
+
+    // MUTATION THIS KILLS: replacing `${r.ledgerPath}` with ANY constant, including a
+    // plausible one. Killed by this assert (`subjects-merge.test.ts`, the
+    // `toContain(written[0])` below) — the older shape regex could not tell the two apart.
+    expect(res).toContain(written[0]!);
+    expect(existsSync(join(dir, 'sweeps', written[0]!))).toBe(true);
     expect(res).toMatch(/not included in backups/i);
     expect(res).not.toMatch(/Reversible from the merge ledger/i);
   });
