@@ -64,12 +64,15 @@
 		type UsageInfo,
 		type ContextBudget,
 		type ToolCallInfo,
+		type ChatMessage,
 	} from '../stores/chat.svelte.js';
 	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase, getDemoMode } from '../config.svelte.js';
 	import { isDiagnosticsEnabled } from '../stores/diagnostics.svelte.js';
 	import { formatTurnTokens, formatUsageMetaParts } from '../stores/chat-usage.js';
 	import { taskPreview } from '../stores/follow-ups.js';
+	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
+	import { formatCost } from '../format.js';
 	import { scrollFade } from '../utils/scroll-fade.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
@@ -494,7 +497,8 @@
 		| { type: 'text'; text: string }
 		| { type: 'thinking'; text: string }
 		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status'] }
-		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> };
+		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
+		| { type: 'spawn'; spawnId: string };
 
 	/** Wrap artifact content in a fenced code block whose delimiter is long
 	 *  enough to survive any backtick run inside the content. CommonMark closes
@@ -534,14 +538,10 @@
 		return `${parsed.toLocaleDateString(locale, { day: 'numeric', month: 'short' })} ${time}`;
 	}
 
-	// Precedence for the grouped tool-row status: error wins, running over
-	// done. Encoding it as a numeric rank keeps the rule explicit and makes
-	// the reducer below symmetric ("which member is worst?") rather than a
-	// chain of escalation-only branches.
-	const TOOL_STATUS_RANK: Record<ToolCallInfo['status'], number> = { done: 0, running: 1, error: 2 };
-	function worstStatus(a: ToolCallInfo['status'], b: ToolCallInfo['status']): ToolCallInfo['status'] {
-		return TOOL_STATUS_RANK[a] >= TOOL_STATUS_RANK[b] ? a : b;
-	}
+	// `worstStatus` and the rank table it reads now live in `chat-attribution.ts`,
+	// beside `foldToolRows`. It is the ONLY thing the transcript's fold below and
+	// the sub-agent panel's share — the two loops are separate implementations.
+	// Two copies of "which status wins" was one copy too many.
 
 	/** Group consecutive tool calls with same action, extract plan + step blocks */
 	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): GroupedBlock[] {
@@ -561,6 +561,10 @@
 				if (block.text) result.push({ type: 'thinking', text: block.text });
 			} else if (block.type === 'text' && block.text) {
 				result.push({ type: 'text', text: block.text });
+			} else if (block.type === 'spawn') {
+				// Never folded into a neighbouring group: a delegation is its own
+				// panel, and two batches in a row must stay two panels.
+				result.push({ type: 'spawn', spawnId: block.spawnId });
 			} else if (block.type === 'tool_call') {
 				const tc = toolCalls[block.index];
 				if (!tc) continue;
@@ -2000,6 +2004,135 @@
 	}
 </script>
 
+<!--
+	One delegation batch, rendered where it happened in the transcript.
+
+	Indented behind a coloured rail because that is the whole point: work a
+	sub-agent did must not read as the main agent's. Each child gets its name,
+	its role and the concrete model it runs on, and — indented once more — its
+	OWN tool calls. Those calls used to land in the main agent's tool list, which
+	made the transcript not merely thin but wrong.
+-->
+{#snippet subAgentPanel(msg: ChatMessage, spawnId: string)}
+	{@const batch = msg.spawns?.[spawnId]}
+	{#if batch}
+		{@const totals = batchTotals(msg, spawnId)}
+		{@const children = totals.children}
+		{@const running = totals.running}
+		<!-- Once every child has stopped, the batch's own elapsed is the longest
+		     child's. The 5s heartbeat stops at its last tick, so a wall-clock
+		     figure here would read "12s" right next to a child row saying "17s". -->
+		{@const elapsed = totals.settledElapsedS
+			?? Math.max(batch.elapsedS, Math.floor((Date.now() - batch.startedAt) / 1000))}
+		<div
+			class="ml-3 mt-1 mb-1 border-l-2 border-accent/40 pl-3 py-1 text-[11px] font-mono text-text-subtle/80"
+			role="group"
+			aria-label={t('spawn.region_label')}
+		>
+			<!-- Wraps rather than clips: at 390px this row ran out of width and the
+			     trailing items — the cost among them — silently fell off the end. -->
+			<div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-text-subtle">
+				<!-- Deliberately NOT repeating "Delegiert" — the tool row directly
+				     above already says it. This names what the panel adds. -->
+				<span class="uppercase tracking-widest text-[10px] text-accent-text">{t('spawn.subagents')}</span>
+				<span>{elapsed}s</span>
+				{#if running.length > 0}
+					<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse" aria-hidden="true"></span>
+					<span>{running.length} {t('spawn.active')}</span>
+				{:else}
+					<span>{t('spawn.done')}</span>
+				{/if}
+				<span class="text-text-subtle/50">{children.length - running.length}/{children.length}</span>
+				<!-- Spend when it is known, otherwise the engine's CEILING while the
+				     batch is still running — `≤`, never `~`, because that figure is
+				     maxIterations × a full output fill and the real bill is usually a
+				     fraction of it. `batchTotals` decides which of the two exists;
+				     asking `> 0` here is a rendering question, not a second guard. -->
+				{#if totals.costUsd > 0}
+					<span class="text-text-subtle/50" aria-hidden="true">·</span>
+					<span class="text-text-subtle/70">{formatCost(totals.costUsd)}</span>
+				{:else if totals.estimateMaxUsd !== null}
+					<span class="text-text-subtle/50" aria-hidden="true">·</span>
+					<span class="text-text-subtle/70" title={t('spawn.est_max_hint')}
+						>≤ {formatCost(totals.estimateMaxUsd)}</span><span class="sr-only">{t('spawn.est_max_hint')}</span>
+				{/if}
+				{#if elapsed >= 120 && running.length > 0}
+					<span class="text-warning">{t('spawn.slow')}</span>
+				{/if}
+			</div>
+
+			{#each children as child (child.id)}
+				{@const isRunning = child.status === 'running'}
+				<!-- `foldToolRows`: consecutive same-action calls collapse into one row
+				     with merged subjects. A SECOND implementation of the transcript's
+				     inline fold, not a shared one — `groupedToolCalls` above keeps its
+				     own loop (it interleaves `plan_task` / `artifact_save` and emits a
+				     richer row), and the two share only `worstStatus`. They can drift.
+				     Before the fold, a child that read forty files rendered forty rows
+				     here, where the identical forty fold into one in the parent's
+				     list. -->
+				{@const childRows = foldToolRows(child.toolCalls, toolCallLabel)}
+				<div class="mt-1">
+					<div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+						{#if isRunning}
+							<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse shrink-0" aria-hidden="true"></span>
+						{:else}
+							<span
+								class="shrink-0 {child.status === 'error' ? 'text-danger' : 'text-success'}"
+								aria-label={child.status === 'error' ? t('spawn.status_fail') : t('spawn.status_ok')}
+							>{child.status === 'error' ? '✗' : '✓'}</span>
+						{/if}
+						<span class="text-text truncate min-w-0">{child.name}</span>
+						<!-- The model usually names its child after the role it picked, so
+						     showing both gives "researcher · researcher". Only add the role
+						     when it says something the name does not. -->
+						{#if child.role && child.role !== child.name}
+							<span class="text-text-subtle/50" aria-hidden="true">·</span>
+							<span class="text-text-subtle/70">{child.role}</span>
+						{/if}
+						{#if child.model}
+							<span class="text-text-subtle/50" aria-hidden="true">·</span>
+							<span class="text-text-subtle/60 truncate min-w-0 max-w-[12rem]" title={child.model}>{child.model}</span>
+						{/if}
+						<!-- Kept together and unshrinkable: elapsed and cost are the two
+						     numbers the row exists for, so the model id yields space first. -->
+						{#if child.elapsedS !== undefined || child.costUsd !== undefined}
+							<span class="ml-auto shrink-0 flex items-center gap-2">
+								{#if child.elapsedS !== undefined}
+									<span class="text-text-subtle/50">{child.elapsedS}s</span>
+								{/if}
+								{#if child.costUsd !== undefined}
+									<span class="text-text-subtle/60">{formatCost(child.costUsd)}</span>
+								{/if}
+							</span>
+						{/if}
+					</div>
+
+					<!-- The child's own work. Only tool names reach the client today —
+					     `makeChildStream` forwards tool_call/tool_result and swallows the
+					     child's text and thinking, so this is deliberately a list of
+					     actions, not a transcript. -->
+					{#if childRows.length > 0}
+						<ul class="ml-3 mt-0.5 border-l border-border pl-2 space-y-0.5">
+							{#each childRows as row, rowIdx (rowIdx)}
+								<li class="flex items-center gap-1.5 text-text-subtle/70">
+									<span
+										class="shrink-0 {row.status === 'error' ? 'text-danger' : row.status === 'running' ? 'text-warning' : 'text-text-subtle/40'}"
+										aria-hidden="true"
+									>{row.status === 'running' ? '…' : row.status === 'error' ? '✗' : '·'}</span>
+									<span class="truncate">{row.action}{row.subjects.length > 0 ? ': ' + row.subjects.join(', ') : ''}</span>
+								</li>
+							{/each}
+						</ul>
+					{:else if isRunning}
+						<div class="ml-3 mt-0.5 pl-2 text-text-subtle/50">{t('spawn.waiting')}…</div>
+					{/if}
+				</div>
+			{/each}
+		</div>
+	{/if}
+{/snippet}
+
 {#snippet micButton()}
 	<!-- Tap-to-toggle on every device. Hold-to-record was racy on touch
 	     (async getUserMedia vs pointerup, plus the synthesised click that
@@ -2063,9 +2196,12 @@
 					<span
 						class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
 						title={t('chat.footer_tokens_tooltip')}
-					>{formatTurnTokens(usage)}</span>
+					>{formatTurnTokens(usage)}</span><span class="sr-only">{t('chat.footer_tokens_tooltip')}</span>
 					{#each formatUsageMetaParts(usage, !getDemoMode()) as part}
-						<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span><span class="shrink-0">{part}</span>
+						<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{#if part.title}<span
+								class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
+								title={part.title}
+							>{part.text}</span><span class="sr-only">{part.title}</span>{:else}<span class="shrink-0">{part.text}</span>{/if}
 					{/each}
 				{/if}
 		{#if isLast && ctxBudget}
@@ -2540,41 +2676,8 @@
 										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] {isError ? 'text-danger' : 'text-success'}">{isError ? '✗' : '✓'}</span>
 									{/if}
 								</div>
-								{#if gBlock.toolName === 'spawn_agent' && msg.spawn}
-									{@const sp = msg.spawn}
-									{@const elapsed = Math.max(sp.elapsedS, Math.floor((Date.now() - sp.startedAt) / 1000))}
-									<div class="ml-3 mt-1 mb-1 text-[11px] font-mono text-text-subtle/80 border-l-2 border-warning/30 pl-3 py-1">
-										<div class="flex items-center gap-2 text-text-subtle">
-											<span>{elapsed}s</span>
-											{#if sp.running.length > 0}
-												<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse" aria-hidden="true"></span>
-												<span>{sp.running.length} aktiv</span>
-											{:else}
-												<span>fertig</span>
-											{/if}
-											{#if elapsed >= 120 && sp.running.length > 0}
-												<span class="text-warning">ungewöhnlich lang</span>
-											{/if}
-										</div>
-										{#each sp.running as subName}
-											<div class="flex items-center gap-2 mt-0.5">
-												<span class="text-text-subtle/60">-&gt;</span>
-												<span class="text-text">{subName}</span>
-												{#if sp.lastToolBySub[subName]}
-													<span class="text-text-subtle/60">·</span>
-													<span class="text-text-subtle/70">{sp.lastToolBySub[subName]}</span>
-												{/if}
-											</div>
-										{/each}
-										{#each sp.done as d}
-											<div class="flex items-center gap-2 mt-0.5">
-												<span class={d.ok ? 'text-success' : 'text-danger'}>{d.ok ? '✓' : '✗'}</span>
-												<span class="text-text-subtle/80">{d.name}</span>
-												<span class="text-text-subtle/50">{d.elapsedS}s</span>
-											</div>
-										{/each}
-									</div>
-								{/if}
+							{:else if gBlock.type === 'spawn'}
+								{@render subAgentPanel(msg, gBlock.spawnId)}
 							{:else if gBlock.type === 'thinking' && gBlock.text}
 								<!-- Mask once: the preview must be redacted too, not just
 								     the body — a secret in the first chars would otherwise
@@ -3375,17 +3478,22 @@
 		{/if}
 
 		<!-- Model picker: only on an empty chat (before turn 1). Once the chat has a
-		     session, the per-thread control below takes over — D18 makes a pick sticky
+		     session, the per-thread control takes over — D18 makes a pick sticky
 		     and re-pickable mid-conversation, reversing D1 ("model fixed").
 		     model-presets W4: on desktop the new-chat picker moved to the nav header
 		     (frees composer space); it stays here on mobile (sm:hidden) where the
-		     header is too cramped for it. The mid-thread control is unchanged. -->
+		     header is too cramped for it. 2026-07-30: the mid-thread control follows
+		     the same split — its full "Läuft auf: […]" row cost a composer line on
+		     every running thread, so on desktop it now renders compact in the header
+		     (AppShell) and only mobile keeps the row here. -->
 		{#if currentSessionId === null}
 			<div class="sm:hidden">
 				<ComposerModelPicker />
 			</div>
 		{:else}
-			<ThreadModelControl />
+			<div class="sm:hidden">
+				<ThreadModelControl />
+			</div>
 		{/if}
 
 		<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex items-center gap-1.5 md:gap-2">

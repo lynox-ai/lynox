@@ -1,5 +1,5 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync } from 'node:fs';
+import { describe, it, expect, afterEach, beforeAll, beforeEach } from 'vitest';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Short } from './utils.js';
@@ -8,6 +8,8 @@ import {
   buildWireSnapshot,
   extractWireFields,
   isWireSinkEnabled,
+  isProvisionedInstance,
+  _resetCaptureRefusalNotice,
   wireSinkDir,
   writeWireSnapshot,
   captureWireSnapshot,
@@ -206,9 +208,13 @@ describe('wireSinkDir', () => {
     expect(wireSinkDir({ LYNOX_DEBUG_WIRE_SINK: '/custom/sink' })).toBe('/custom/sink');
   });
 
-  it('falls back to a default dir under tmpdir when unset', () => {
-    const d = wireSinkDir({});
-    expect(d).toContain('lynox-wire-sink');
+  it('defaults under the engine data dir, NOT tmpdir', () => {
+    // The default moved off `/tmp` deliberately: a world-writable sink location
+    // (and, worse, a world-writable arming marker) made "is capture on?" a
+    // question any process on the box could answer yes to.
+    expect(wireSinkDir({ LYNOX_DATA_DIR: '/data/lx' })).toBe('/data/lx/wire-sink');
+    expect(wireSinkDir({})).not.toContain(tmpdir());
+    expect(wireSinkDir({})).toContain('.lynox');
   });
 });
 
@@ -278,8 +284,9 @@ describe('raw-body sink (eval / wire-replay path)', () => {
     expect(isRawWireSinkEnabled({ LYNOX_DEBUG_WIRE_RAW_GATE_FILE: rawGate })).toBe(true);
   });
 
-  it('rawWireSinkDir defaults under tmpdir, or uses the override', () => {
-    expect(rawWireSinkDir({})).toContain('lynox-wire-sink-raw');
+  it('rawWireSinkDir defaults under the data dir, or uses the override', () => {
+    expect(rawWireSinkDir({ LYNOX_DATA_DIR: '/data/lx' })).toBe('/data/lx/wire-sink-raw');
+    expect(rawWireSinkDir({})).not.toContain(tmpdir());
     expect(rawWireSinkDir({ LYNOX_DEBUG_WIRE_RAW_SINK: '/x/raw' })).toBe('/x/raw');
   });
 
@@ -308,5 +315,232 @@ describe('raw-body sink (eval / wire-replay path)', () => {
     expect(res).not.toBeNull();
     expect(typeof res?.capturedAt).toBe('number');
     expect(readdirSync(dir).filter(f => f.startsWith('raw-') && f.endsWith('.json')).length).toBe(1);
+  });
+});
+
+// ── The structural half of the gate ─────────────────────────────────────────
+//
+// A file marker cannot express "not on a customer's box": any process that can
+// create a file can arm it, and on the old `/tmp` default that included a tool
+// call steered by injected content. Process env can express it — it is fixed at
+// exec, so an in-container actor cannot rewrite it for the running engine.
+//
+// The redacted sink writes scrubbed personal data. The raw sink writes the FULL
+// secrets catalog and the whole KG, so it matters more; both refuse.
+describe('capture sinks refuse on a control-plane-provisioned instance', () => {
+  const armed = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
+    LYNOX_DEBUG_WIRE_GATE_FILE: GATE,
+    LYNOX_DEBUG_WIRE_RAW_GATE_FILE: GATE,
+    ...extra,
+  });
+
+  // A real armed marker, so "refused" cannot be confused with "never armed".
+  let GATE = '';
+  beforeAll(() => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-gate-'));
+    GATE = join(dir, 'on');
+    writeFileSync(GATE, '');
+  });
+
+  it('arms on a self-hosted box — the control that makes the refusals meaningful', () => {
+    expect(isWireSinkEnabled(armed())).toBe(true);
+    expect(isRawWireSinkEnabled(armed())).toBe(true);
+  });
+
+  it.each([
+    ['LYNOX_MANAGED_INSTANCE_ID', 'abc123def456ghi789jkl'],
+    ['LYNOX_BILLING_TIER', 'managed'],
+    ['LYNOX_BILLING_TIER', 'hosted'],   // BYOK is a customer's box too
+    ['LYNOX_MANAGED_MODE', 'managed'],  // the legacy alias the registry keeps forever
+  ])('refuses both sinks when %s is set, even with the marker present', (key, value) => {
+    const env = armed({ [key]: value });
+    // MUTATION THIS KILLS: dropping either `isProvisionedInstance` early-out.
+    expect(isWireSinkEnabled(env)).toBe(false);
+    expect(isRawWireSinkEnabled(env)).toBe(false);
+    // captureWireSnapshot is the one-shot convenience — it must refuse too.
+    expect(captureWireSnapshot({
+      runId: 'r1', turnIndex: 0, model: 'm', provider: 'p', systemText: 's',
+      userMessage: 'u', toolNames: [], maxTokens: 1, ephemeralTailChars: 0,
+    }, env)).toBeNull();
+  });
+
+  it('an operator acknowledgement re-arms it — the recorded qa-managed workflow', () => {
+    // A blanket refusal would break the managed-tenant capture the acceptance
+    // test and the wire-replay eval both use; DEF-wire-capture-prod-gate says so
+    // and is why that row was downgraded rather than closed this way before.
+    // The acknowledgement is an ENV edit through the control plane — an operator
+    // action the in-container threat cannot perform on a running process.
+    const env = armed({ LYNOX_BILLING_TIER: 'managed', LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED: '1' });
+    expect(isWireSinkEnabled(env)).toBe(true);
+    expect(isRawWireSinkEnabled(env)).toBe(true);
+  });
+
+  it('accepts ONLY the exact acknowledgement value', () => {
+    // MUTATION THIS KILLS: loosening the check to truthiness. 'false', '0' and
+    // 'no' are all truthy strings, and an env var spelled by hand is exactly
+    // where that bites — a tenant carrying LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED=0
+    // would silently be capturing.
+    for (const v of ['0', 'false', 'no', 'true', 'yes', '', ' 1']) {
+      expect(isWireSinkEnabled(armed({ LYNOX_BILLING_TIER: 'managed', LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED: v })))
+        .toBe(false);
+    }
+  });
+
+  it('the acknowledgement alone arms NOTHING without the marker', () => {
+    // It is a permission to consider the marker, not a second arming path.
+    expect(isWireSinkEnabled({ LYNOX_BILLING_TIER: 'managed', LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED: '1',
+      LYNOX_DEBUG_WIRE_GATE_FILE: '/nonexistent/gate' })).toBe(false);
+  });
+
+  it('treats an EMPTY marker as absent, not as provisioned', () => {
+    // An empty env var is how a compose file spells "unset" by accident; it must
+    // not silently disable an operator's own capture.
+    expect(isProvisionedInstance({ LYNOX_BILLING_TIER: '' })).toBe(false);
+    expect(isWireSinkEnabled(armed({ LYNOX_BILLING_TIER: '' }))).toBe(true);
+  });
+
+  it('fails closed on a PARTIAL provisioning env', () => {
+    // Only one of the three present — a provisioning bug, not a licence.
+    expect(isProvisionedInstance({ LYNOX_MANAGED_INSTANCE_ID: 'x' })).toBe(true);
+  });
+});
+
+// ── The two surviving mutants an adversarial pass found ─────────────────────
+const SNAP = buildWireSnapshot({
+  runId: 'r1', turnIndex: 0, model: 'm', provider: 'p', systemText: 's',
+  userMessage: 'u', toolNames: [], maxTokens: 1, ephemeralTailChars: 0,
+});
+
+describe('sink defaults that no test was pinning', () => {
+  it('gives the RAW sink its own marker path, not the redacted sink\'s', () => {
+    // MUTATION THIS KILLS: collapsing the raw default onto `wire-sink-on`.
+    // Every other test supplies explicit gate overrides, so the default raw
+    // path was unexercised — and one `touch ~/.lynox/wire-sink-on` would then
+    // have armed the FULL secrets-catalog + KG dump alongside the redacted one,
+    // destroying the "separate, more deliberate opt-in" this file promises.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-defaults-'));
+    writeFileSync(join(dir, 'wire-sink-on'), '');   // arm ONLY the redacted marker
+    const env = { LYNOX_DATA_DIR: dir };
+    expect(isWireSinkEnabled(env)).toBe(true);
+    expect(isRawWireSinkEnabled(env)).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('honours the legacy LYNOX_DIR alias when resolving the data dir', () => {
+    // MUTATION THIS KILLS: dropping `?? env['LYNOX_DIR']`. A self-hoster on the
+    // legacy alias would silently resolve to `~/.lynox` instead of their real
+    // data dir — capture armed in one place, looked for in another.
+    expect(wireSinkDir({ LYNOX_DIR: '/legacy/lx' })).toBe('/legacy/lx/wire-sink');
+    expect(rawWireSinkDir({ LYNOX_DIR: '/legacy/lx' })).toBe('/legacy/lx/wire-sink-raw');
+    // Canonical wins when both are present.
+    expect(wireSinkDir({ LYNOX_DIR: '/legacy/lx', LYNOX_DATA_DIR: '/new/lx' })).toBe('/new/lx/wire-sink');
+  });
+});
+
+describe('a sink dir that already exists is not trusted as found', () => {
+  beforeEach(() => { _resetCaptureRefusalNotice(); });
+
+  function captureStderr(): { lines: string[]; restore: () => void } {
+    const lines: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as { write: unknown }).write = (chunk: unknown): boolean => { lines.push(String(chunk)); return true; };
+    return { lines, restore: () => { (process.stderr as { write: unknown }).write = orig; } };
+  }
+
+  it('refuses a symlinked sink dir rather than following it, and says so', () => {
+    // `mkdirSync(dir, {mode})` sets the mode only when it CREATES the dir, so a
+    // pre-planted symlink survived the move off /tmp untouched and redirected
+    // the capture wherever it pointed. DEF-wire-capture-prod-gate asks for this
+    // explicitly ("incl. tightening a pre-existing loose/symlinked dir").
+    const base = mkdtempSync(join(tmpdir(), 'lynox-link-'));
+    const elsewhere = join(base, 'elsewhere');
+    mkdirSync(elsewhere);
+    const sink = join(base, 'sink');
+    symlinkSync(elsewhere, sink);
+
+    const cap = captureStderr();
+    try { writeWireSnapshot(SNAP, { LYNOX_DEBUG_WIRE_SINK: sink }); } finally { cap.restore(); }
+
+    // MUTATION THIS KILLS: reverting to a bare mkdirSync — the file lands in
+    // the symlink target and this directory is no longer empty.
+    expect(readdirSync(elsewhere)).toHaveLength(0);
+    // And the refusal is not silent: a capture that produces nothing while the
+    // marker is armed is the exact confusion this file's other notice exists for.
+    // Assert the REASON, not a word that also occurs in the temp path — the
+    // first version of this line matched `/symlink/` against a tmpdir named
+    // `lynox-symlink-…`, so removing the symlink branch (which then falls
+    // through to the not-a-directory branch) left it green.
+    expect(cap.lines.join('')).toMatch(/refusing to follow it/);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it('REFUSES a pre-existing loose dir instead of re-permissioning it', () => {
+    // A first version chmod'ed it to 0700. The path is entirely env-supplied,
+    // is not validated to be a sink, and the engine runs as root in the image —
+    // so a stale `LYNOX_DEBUG_WIRE_SINK` had a debug feature silently
+    // re-permissioning someone else's directory. Refusing costs an operator one
+    // chmod; tightening costs whoever else was using that path.
+    const base = mkdtempSync(join(tmpdir(), 'lynox-loose-'));
+    const sink = join(base, 'sink');
+    mkdirSync(sink, { mode: 0o755 });
+
+    const cap = captureStderr();
+    try { writeWireSnapshot(SNAP, { LYNOX_DEBUG_WIRE_SINK: sink }); } finally { cap.restore(); }
+
+    // MUTATION THIS KILLS: chmod'ing instead of refusing, and equally a bare
+    // mkdirSync (which would write into the 0755 dir).
+    expect(statSync(sink).mode & 0o777).toBe(0o755);   // untouched
+    expect(readdirSync(sink)).toHaveLength(0);          // and nothing written
+    expect(cap.lines.join('')).toMatch(/mode 755/);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it('refuses when the sink path is a regular file', () => {
+    const base = mkdtempSync(join(tmpdir(), 'lynox-file-'));
+    const sink = join(base, 'sink');
+    writeFileSync(sink, '');
+    const cap = captureStderr();
+    try { writeWireSnapshot(SNAP, { LYNOX_DEBUG_WIRE_SINK: sink }); } finally { cap.restore(); }
+    // MUTATION THIS KILLS: dropping the `!existing.isDirectory()` branch.
+    expect(cap.lines.join('')).toMatch(/not a directory/);
+    expect(readFileSync(sink, 'utf8')).toBe('');
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it('creates a fresh sink dir at 0700 and writes into it', () => {
+    // The control: refusing everything would also pass the three tests above.
+    const base = mkdtempSync(join(tmpdir(), 'lynox-fresh-'));
+    const sink = join(base, 'sink');
+    writeWireSnapshot(SNAP, { LYNOX_DEBUG_WIRE_SINK: sink });
+    expect(statSync(sink).mode & 0o777).toBe(0o700);
+    expect(readdirSync(sink)).toHaveLength(1);
+    rmSync(base, { recursive: true, force: true });
+  });
+});
+
+describe('the provisioned-instance refusal announces itself', () => {
+  beforeEach(() => { _resetCaptureRefusalNotice(); });
+
+  it('writes one line to stderr, and only once per process', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-notice-'));
+    const gate = join(dir, 'on');
+    writeFileSync(gate, '');
+    const env = { LYNOX_DEBUG_WIRE_GATE_FILE: gate, LYNOX_BILLING_TIER: 'managed' };
+
+    const lines: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as { write: unknown }).write = (chunk: unknown): boolean => { lines.push(String(chunk)); return true; };
+    try {
+      isWireSinkEnabled(env);
+      isWireSinkEnabled(env);
+      isRawWireSinkEnabled(env);
+    } finally { (process.stderr as { write: unknown }).write = orig; }
+
+    // MUTATION THIS KILLS: deleting the announcement — it was presented as a
+    // deliverable and had zero tests, while its reset seam was exported and
+    // called by nothing, which reads as coverage without being any.
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED/);
+    rmSync(dir, { recursive: true, force: true });
   });
 });

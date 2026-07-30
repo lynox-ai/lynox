@@ -82,19 +82,48 @@ export interface ToolEntry<TInput = unknown> {
 import type { BetaUsage } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 export type { BetaUsage as Usage };
 
+/**
+ * One delegated child in a `spawn_agent` batch, as announced to the UI.
+ *
+ * `id` is what every later event keys on, and it exists because `name` cannot
+ * carry that load: the name is model-chosen and the engine enforces only length
+ * and control-character limits (`validateSpawnInput`), so one batch may well
+ * hold two children called "researcher". Keying on the name merges their
+ * activity into one row; keying on `id` keeps them apart. `name` stays purely
+ * a display label.
+ */
+export interface SpawnedSubAgent {
+  /** Stable within the run: `<spawnId>:<index>`. Unique by construction. */
+  id: string;
+  /** Model-chosen label. Display only — NOT unique within a batch. */
+  name: string;
+  /** Built-in role id, when the spawn requested one. */
+  role?: string | undefined;
+  /** Concrete model this child runs on (sanitized id, not the tier). */
+  model?: string | undefined;
+}
+
 export type StreamEvent =
   | { type: 'text';        text: string;                           agent: string; subAgent?: string | undefined }
   | { type: 'thinking';    thinking: string;                       agent: string; subAgent?: string | undefined }
   | { type: 'thinking_done';                                       agent: string; subAgent?: string | undefined }
-  | { type: 'tool_call';   name: string; input: unknown;           agent: string; subAgent?: string | undefined }
+  | { type: 'tool_call';   name: string; input: unknown;           agent: string; subAgent?: string | undefined; subAgentId?: string | undefined }
   | { type: 'tool_progress'; tool: string; phase: string;          agent: string; subAgent?: string | undefined }
   | { type: 'api_cost'; tool: string; profileId: string; profileName: string;
       endpoint: string; costUsd: number;                           agent: string; subAgent?: string | undefined }
-  | { type: 'tool_result'; name: string; result: string;           agent: string; isError?: boolean; subAgent?: string | undefined }
-  | { type: 'spawn';       agents: string[]; estimatedCostUSD?: number | undefined; agent: string }
-  | { type: 'spawn_progress'; elapsedS: number; running: string[];
+  | { type: 'tool_result'; name: string; result: string;           agent: string; isError?: boolean; subAgent?: string | undefined; subAgentId?: string | undefined }
+  | { type: 'spawn';       spawnId: string; subAgents: SpawnedSubAgent[];
+      estimatedCostUSD?: number | undefined;                       agent: string }
+  // 5s heartbeat for a running batch. `running` and the keys of `lastToolBySub`
+  // are `SpawnedSubAgent.id`s, not names — see the note on that interface.
+  | { type: 'spawn_progress'; spawnId: string; elapsedS: number; running: string[];
       lastToolBySub: Record<string, string>; agent: string }
-  | { type: 'spawn_child_done'; subAgent: string; ok: boolean; elapsedS: number; agent: string }
+  // `costUsd` is the child's OWN actual spend (its cost snapshot), reported
+  // whether it finished, failed, or was aborted — a child that died halfway
+  // still spent what it spent. It is already counted in the turn's aggregate;
+  // this breaks that aggregate down to where the money went.
+  | { type: 'spawn_child_done'; spawnId: string; subAgent: string; subAgentId: string;
+      ok: boolean; elapsedS: number; costUsd: number;              agent: string }
   | { type: 'turn_end';    stop_reason: string; usage: BetaUsage;  model?: string | undefined; contextWindow?: number | undefined; agent: string }
   | { type: 'error';       message: string;                        agent: string }
   | { type: 'warning';     code: string; detail?: string | undefined; agent: string }

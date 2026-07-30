@@ -15,8 +15,8 @@
  * SDK-type-free by design: callers extract plain strings/arrays, so this module has
  * no Anthropic-SDK dependency and is reusable by the eval's wire-replay consumer.
  */
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, writeFileSync, lstatSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Short } from './utils.js';
 import { maskSecretPatterns } from './secret-store.js';
@@ -145,12 +145,119 @@ export function buildWireSnapshot(input: WireSnapshotInput): WireSnapshot {
 
 // --- Dev file-sink (Surface B) ------------------------------------------------
 
-const DEFAULT_GATE_FILE = '/tmp/wire-sink-on';
-const DEFAULT_SINK_DIR = join(tmpdir(), 'lynox-wire-sink');
+/**
+ * Both the arming marker and the sink now default under the engine's OWN data dir, not `/tmp`.
+ *
+ * `/tmp` is world-writable, so the previous default made "is the sink armed?" a question any
+ * process on the box — including a tool call steered by injected content — could answer yes to
+ * by creating one empty file. The data dir is the same directory that already holds the vault
+ * and the databases: a writer who can reach it has the secrets anyway, so the marker stops being
+ * the weakest link. (DEF-wire-sink-tmp-arming, DEF-wire-capture-prod-gate leg 2.)
+ *
+ * ⚠️ This MOVES the arming path. An operator who armed the old `/tmp/wire-sink-on` will find the
+ * sink silently off after upgrading — deliberate: for a capture surface, failing closed on an
+ * ambiguity is the right direction. `LYNOX_DEBUG_WIRE_GATE_FILE` still overrides it explicitly.
+ */
+function defaultGateFile(env: NodeJS.ProcessEnv): string {
+  return join(dataDir(env), 'wire-sink-on');
+}
+function defaultSinkDir(env: NodeJS.ProcessEnv): string {
+  return join(dataDir(env), 'wire-sink');
+}
+
+/** Resolve the data dir the way the rest of the engine does (`config.ts:112-113`). */
+function dataDir(env: NodeJS.ProcessEnv): string {
+  const fromEnv = env['LYNOX_DATA_DIR'] ?? env['LYNOX_DIR'];
+  return fromEnv && fromEnv.length > 0 ? fromEnv : join(homedir(), '.lynox');
+}
+
+/**
+ * Env markers that say "the control plane provisioned this container for a customer".
+ *
+ * All three are emitted on EVERY tier including BYOK/hosted (`contract/env-registry.ts:121`,
+ * `:126` — `emitPolicy: 'always'`, `requiredForTier: ALL_TIERS`), which is exactly the scope
+ * wanted: a BYOK tenant's box is no more a debugging surface than a managed one.
+ * `LYNOX_MANAGED_MODE` is the legacy alias the registry says the engine honours forever.
+ */
+const PROVISIONED_INSTANCE_MARKERS = [
+  'LYNOX_MANAGED_INSTANCE_ID',
+  'LYNOX_BILLING_TIER',
+  'LYNOX_MANAGED_MODE',
+] as const;
+
+/**
+ * A capture sink must not arm on a container the control plane provisioned for someone.
+ *
+ * This is the structural half of the gate, and it is what a file marker cannot be: process env
+ * is fixed at exec. An in-container actor — including a tool call steered by injected content —
+ * can create a file; it cannot rewrite the environment of the already-running engine. So on a
+ * customer instance the answer is no regardless of what exists on disk.
+ *
+ * Fail-CLOSED on a partial env: ANY marker present is enough. A container carrying only some of
+ * them is a provisioning bug, not a licence to capture.
+ */
+export function isProvisionedInstance(env: NodeJS.ProcessEnv = process.env): boolean {
+  return PROVISIONED_INSTANCE_MARKERS.some((k) => (env[k] ?? '').length > 0);
+}
+
+/**
+ * The operator escape hatch, and it exists for a recorded reason rather than to soften the gate.
+ *
+ * A blanket refusal on every provisioned instance would break a workflow that is in use: the
+ * capture acceptance test — and Workstream 2's wire-replay input — arms the sink on the managed
+ * QA tenant `qa-managed` via `staging-tenant-exec`. `DEF-wire-capture-prod-gate` says so in its
+ * own source note ("a blanket prod-refuse would break the managed staging capture WS2 needs"),
+ * which is why that row was downgraded rather than fixed this way the first time.
+ *
+ * So the refusal is conditional on something the threat cannot supply. The threat is an
+ * in-container actor — a tool call steered by injected content — which can create a file
+ * anywhere it can write, but **cannot alter the environment of the already-running engine**.
+ * Setting this variable means editing the tenant's env through the control plane and recreating
+ * the container: an operator action, deliberate, attributable, and visible in the env preview.
+ *
+ * That is the whole difference between this and the marker file it guards. Not "env is safer than
+ * files" in general — env is a poor secret channel — but here, for THIS threat, env is the one
+ * channel the attacker is outside of.
+ *
+ * ⚠️ OPERATIONAL LIMIT, and it is real: the control plane has no emit path for this variable. It
+ * matches the `LYNOX_DEBUG_WIRE_*` glob in `contract/env-registry.ts` SELF_HOST_ONLY, whose text
+ * says the CP never emits them — yet the workflow this hatch exists for runs on managed tenants.
+ * So today it must be hand-added to the tenant `.env`, and the next `sync-env` REWRITES that file
+ * wholesale and drops it (`pro services/instance-env.ts` says so in its own header). Re-arm after
+ * every sync-env, or give it a CP column. Tracked as DEF-wire-capture-hatch-not-cp-emitted.
+ */
+export function provisionedCaptureAcknowledged(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env['LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED'] ?? '') === '1';
+}
+
+/** Refuse when this is a provisioned instance AND no operator acknowledgement is present. */
+let refusalAnnounced = false;
+function captureRefused(env: NodeJS.ProcessEnv): boolean {
+  const refused = isProvisionedInstance(env) && !provisionedCaptureAcknowledged(env);
+  // Say it once. An operator who armed the marker and sees nothing appear needs to be able to
+  // tell "refused" from "wrong path" from "never armed" — and the default path moved in the
+  // same change, so both silent failures are newly plausible at once. Once per process, because
+  // this sits on the per-turn hot path.
+  if (refused && !refusalAnnounced) {
+    refusalAnnounced = true;
+    process.stderr.write(
+      '[lynox] wire capture refused: this instance was provisioned by the control plane. '
+      + 'Set LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED=1 in the tenant env to allow it.\n',
+    );
+  }
+  return refused;
+}
+
+/** Test seam — both notices are once-per-reason by design, so a test that asserts one must
+ *  be able to clear the memo rather than depend on suite ORDER. */
+export function _resetCaptureRefusalNotice(): void {
+  refusalAnnounced = false;
+  sinkWarnings.clear();
+}
 
 /**
  * The dev/eval sink is armed by a runtime FILE-GATE: a file must exist at the gate path
- * (default `/tmp/wire-sink-on`), matching the original spike. Arming is a deliberate `touch`,
+ * (default `<dataDir>/wire-sink-on`), matching the original spike. Arming is a deliberate `touch`,
  * not a value flip — but the invariant is the FILE's existence, not "env can't reach it":
  * both the gate path (`LYNOX_DEBUG_WIRE_GATE_FILE`) and the destination dir
  * (`LYNOX_DEBUG_WIRE_SINK`, see `wireSinkDir`) are env-configurable, so the environment
@@ -158,19 +265,72 @@ const DEFAULT_SINK_DIR = join(tmpdir(), 'lynox-wire-sink');
  * OPERATOR controls for debugging (local or a staging container).
  *
  * This is an operator DEBUGGING tool, NOT an auth boundary: the gate file is a convenience, not
- * a permission (`/tmp` is world-writable), so it must NOT be enabled on a customer/production
- * instance — that would write their (secret-scrubbed but still personal) data to disk. Real
- * per-instance consent + non-`/tmp` at-rest belong to the operator surface that would make this
- * safe to expose; until that exists, the boundary here is operator discipline.
+ * a permission, so it must NOT be enabled on a customer/production instance — that would write
+ * their (secret-scrubbed but still personal) data to disk.
+ *
+ * That last sentence used to end "until that exists, the boundary here is operator discipline".
+ * It no longer is: `isProvisionedInstance` refuses on any control-plane-provisioned container,
+ * and process env is not writable by an in-container actor. Discipline is now the fallback for
+ * the operator's own boxes, not the only layer on a customer's.
  */
 export function isWireSinkEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const gate = env['LYNOX_DEBUG_WIRE_GATE_FILE'] ?? DEFAULT_GATE_FILE;
+  if (captureRefused(env)) return false;
+  const gate = env['LYNOX_DEBUG_WIRE_GATE_FILE'] ?? defaultGateFile(env);
   return existsSync(gate);
 }
 
-/** The sink destination dir — `LYNOX_DEBUG_WIRE_SINK` when set, else a default under tmpdir. */
+/** The sink destination dir — `LYNOX_DEBUG_WIRE_SINK` when set, else under the data dir. */
 export function wireSinkDir(env: NodeJS.ProcessEnv = process.env): string {
-  return env['LYNOX_DEBUG_WIRE_SINK'] ?? DEFAULT_SINK_DIR;
+  return env['LYNOX_DEBUG_WIRE_SINK'] ?? defaultSinkDir(env);
+}
+
+/**
+ * Prepare a sink directory, and REFUSE rather than write into a suspicious one.
+ *
+ * `mkdirSync(dir, { mode })` applies the mode only when it CREATES the directory. An existing
+ * `~/.lynox/wire-sink` at 0755 keeps 0755, and an existing symlink is followed to wherever it
+ * points — so a pre-planted path defeats the move off `/tmp` entirely. `DEF-wire-capture-prod-gate`
+ * asks for exactly this ("incl. tightening a pre-existing loose/symlinked dir").
+ *
+ * It REFUSES a loose directory rather than tightening it, and that is the correction of a first
+ * version which called `chmodSync`. The path comes from `LYNOX_DEBUG_WIRE_SINK`, i.e. entirely
+ * from the environment, is not validated to be a sink, and the engine runs as root in the image —
+ * so a stale or mistyped value (`/tmp`, a shared log dir, a bind mount) had the engine
+ * re-permissioning someone else's directory as a side effect of a debug feature. Refusing costs
+ * an operator one `chmod`; tightening costs whoever else was using that path.
+ *
+ * Returns null when the path must not be used. Every rejection says why: the callers swallow
+ * failures by design, and a capture that silently produces nothing is the exact confusion the
+ * provisioned-instance refusal above exists to avoid.
+ */
+function prepareSinkDir(dir: string): string | null {
+  const existing = lstatSync(dir, { throwIfNoEntry: false });
+  if (existing) {
+    if (existing.isSymbolicLink()) {
+      warnSinkRefused(`sink path is a symlink (${dir}) — refusing to follow it`);
+      return null;
+    }
+    if (!existing.isDirectory()) {
+      warnSinkRefused(`sink path exists and is not a directory (${dir})`);
+      return null;
+    }
+    const mode = existing.mode & 0o777;
+    if (mode !== 0o700) {
+      warnSinkRefused(`sink dir ${dir} is mode ${mode.toString(8)}, expected 700 — refusing rather than re-permissioning a path this process does not own`);
+      return null;
+    }
+    return dir;
+  }
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
+}
+
+/** One line per distinct reason, so a hot path cannot spam the log. */
+const sinkWarnings = new Set<string>();
+function warnSinkRefused(reason: string): void {
+  if (sinkWarnings.has(reason)) return;
+  sinkWarnings.add(reason);
+  process.stderr.write(`[lynox] wire capture sink refused: ${reason}\n`);
 }
 
 /**
@@ -179,8 +339,8 @@ export function wireSinkDir(env: NodeJS.ProcessEnv = process.env): string {
  */
 export function writeWireSnapshot(snapshot: WireSnapshot, env: NodeJS.ProcessEnv = process.env): void {
   try {
-    const dir = wireSinkDir(env);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const dir = prepareSinkDir(wireSinkDir(env));
+    if (dir === null) return;
     const safeRun = (snapshot.runId ?? 'norun').replace(/[^A-Za-z0-9_-]/g, '_');
     const file = join(dir, `wire-${safeRun}-t${snapshot.turnIndex}-${snapshot.capturedAt}.json`);
     writeFileSync(file, JSON.stringify(snapshot, null, 2), { mode: 0o600 });
@@ -208,8 +368,12 @@ export function captureWireSnapshot(
 
 // --- Raw body sink (eval / wire-replay path) ----------------------------------
 
-const DEFAULT_RAW_GATE_FILE = '/tmp/wire-sink-raw-on';
-const DEFAULT_RAW_SINK_DIR = join(tmpdir(), 'lynox-wire-sink-raw');
+function defaultRawGateFile(env: NodeJS.ProcessEnv): string {
+  return join(dataDir(env), 'wire-sink-raw-on');
+}
+function defaultRawSinkDir(env: NodeJS.ProcessEnv): string {
+  return join(dataDir(env), 'wire-sink-raw');
+}
 
 /**
  * The FULL, UNREDACTED agent-level assembled request — the faithful, replayable representation
@@ -220,7 +384,7 @@ const DEFAULT_RAW_SINK_DIR = join(tmpdir(), 'lynox-wire-sink-raw');
  *
  * ⚠️ Contains the FULL secrets catalog (names + last-4), memory blocks, and KG — it is NOT
  * redacted (redacting would defeat replay fidelity). Therefore it is DEV/STAGING-EVAL ONLY, on
- * the owner's OWN instance, behind a SEPARATE, more deliberate gate (`/tmp/wire-sink-raw-on`) —
+ * the owner's OWN instance, behind a SEPARATE, more deliberate gate (`<dataDir>/wire-sink-raw-on`) —
  * never the operator export, never a customer/production instance.
  */
 export interface RawWireBody {
@@ -237,22 +401,25 @@ export interface RawWireBody {
 }
 
 /** Raw-body capture is enabled ONLY by its OWN file-gate (distinct from the redacted sink), so
- *  the more-sensitive unredacted dump is a separate, deliberate opt-in. */
+ *  the more-sensitive unredacted dump is a separate, deliberate opt-in — and, like the redacted
+ *  sink, it refuses outright on a provisioned instance. This one matters more: the redacted sink
+ *  writes scrubbed personal data, this one writes the full secrets catalog and the whole KG. */
 export function isRawWireSinkEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const gate = env['LYNOX_DEBUG_WIRE_RAW_GATE_FILE'] ?? DEFAULT_RAW_GATE_FILE;
+  if (captureRefused(env)) return false;
+  const gate = env['LYNOX_DEBUG_WIRE_RAW_GATE_FILE'] ?? defaultRawGateFile(env);
   return existsSync(gate);
 }
 
-/** The raw-body sink dir — `LYNOX_DEBUG_WIRE_RAW_SINK` when set, else a default under tmpdir. */
+/** The raw-body sink dir — `LYNOX_DEBUG_WIRE_RAW_SINK` when set, else under the data dir. */
 export function rawWireSinkDir(env: NodeJS.ProcessEnv = process.env): string {
-  return env['LYNOX_DEBUG_WIRE_RAW_SINK'] ?? DEFAULT_RAW_SINK_DIR;
+  return env['LYNOX_DEBUG_WIRE_RAW_SINK'] ?? defaultRawSinkDir(env);
 }
 
 /** Best-effort 0600 write of the raw body. NEVER throws into the hot path. */
 export function writeRawWireBody(body: RawWireBody, env: NodeJS.ProcessEnv = process.env): void {
   try {
-    const dir = rawWireSinkDir(env);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const dir = prepareSinkDir(rawWireSinkDir(env));
+    if (dir === null) return;
     const safeRun = (body.runId ?? 'norun').replace(/[^A-Za-z0-9_-]/g, '_');
     const file = join(dir, `raw-${safeRun}-t${body.turnIndex}-${body.capturedAt}.json`);
     writeFileSync(file, JSON.stringify(body, null, 2), { mode: 0o600 });
