@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.11.0 — 2026-07-29
+
+An onboarding and trust release. First run now grounds the agent in the business it is pointed at instead of starting from an empty context: it reads the site, asks the three to five questions that reading made possible, and keeps the answers as durable knowledge rather than chat scrollback. The second theme is confirmation prompts — everything the model writes into one is now rendered as text instead of parsed as markup, so a tool result cannot dress itself up as part of the question you are approving. Claude Opus 5 joins the catalog, and operators get a model blocklist. Engine schema moves to v51 (additive); one control-plane migration ships.
+
+### Added
+- **Guided first-run onboarding.** A short flow that scans the site you name, asks questions grounded in what it actually read, and records each answer as durable knowledge. Progress is tracked per flag rather than as one boolean, so a partly-finished run resumes where it stopped. (#1070, #1071, #1072, #1074)
+- **Claude Opus 5 in the model catalog**, selectable in the per-tier picker. (#1067)
+- **Operator model blocklist.** `LYNOX_BLOCKED_MODEL_IDS` takes comma-separated model-id prefixes the engine refuses to run, so a whole family can be locked out with one entry. It is enforced at config load, on config write, and at tier resolution, and is orthogonal to the cost band `max_tier` sets. (#1063)
+- **Fireworks models in the per-tier picker**, via the catalog's tier list rather than a hard-coded branch. (#1061)
+- **A waiting prompt announces itself out-of-tab.** When the agent parks a question, the title carries a badge and a notification fires, so a run does not sit idle because the tab was in the background. (#1073)
+- **Same-site links from `web_research` and `http_request`.** A page read now carries the links it points at, so a follow-up read does not need a second guess at the URL. (#1083)
+
+### Fixed
+- **Confirmation prompts no longer parse model-written text as markup.** The prompt is split into the frame the system wrote and the values interpolated into it; values render as text nodes. A tool result can no longer inject markup into the sentence you are being asked to approve. (#1078, #1084, #1082, #1080)
+- **Mail confirmations show the real body size** instead of a figure that ignored part of the message. (#1077)
+- **Large HTML responses are extracted to text**, and onboarding no longer fetches the same page twice. (#1075)
+- **`web_research` reads the whole page instead of picking part of it.** The article-selection step routinely scored a code sample or the nav bar highest on documentation and JS-rendered sites and returned that alone — and because a short wrong answer is still non-empty, the fallback never fired. Stripping the document can carry boilerplate, but it cannot silently lose the content the task needed. (#1081)
+- **Identical tool-call loops are broken deterministically** instead of running until the iteration cap. (#1065)
+- **Streaming usage survives a trailing usage chunk.** Providers that send usage after the final content chunk no longer produce a run with no recorded cost. (#1062)
+- **Voxtral TTS is pinned to a dated snapshot** rather than a moving alias, which was silently changing voice behaviour. (#1066)
+- **An existing user no longer sees the first-run stepper.** The backfill marks accounts that were already using the product before onboarding existed. (#1090)
+- **Recall handles name the call they stand for**, so a memory reference in a transcript can be traced back. (#1079)
+
+### Changed
+- **The cross-repo wire contract is complete.** Auth and OAuth shapes, the guarded-capable boot marker, and the conventions the hosting side depends on now all have one source of truth in `src/contract/`, verified byte-for-byte in every consumer. (#1087, and the convention pins)
+- **Internal cross-references are out of the public source** and a guard keeps them out. (#1092)
+- **Recall measurement got a readable baseline.** The evaluation now replays the same corpus with archival memory off, so the bars mean something relative to the pipeline they are being compared against. (#1085)
+- Durable writes record which signal put them on the untrusted side (#1089); the gold-set proposal model is pinned to a dated snapshot (#1076); brace-expansion and postcss bumped to clear advisories (#1068).
+
+### Upgrade and rollback notes
+- **Forward upgrade needs nothing on the engine.** Schema v51 adds a nullable `segments_json` column to `pending_prompts`, and the subject-graph store gains an `onboarding_flags` table plus an idempotent backfill. All three apply on boot and are additive.
+- **One control-plane migration ships** with this release: an additive column on the customer table plus an idempotent backfill. It applies automatically when the release publishes.
+- **Rolling back to 2.10.0:** nothing to undo by hand. The new engine columns and table are nullable or unread by 2.10.0, and the control-plane column is likewise ignored by the previous build. A prompt written by 2.11.0 renders in 2.10.0 as its flattened text, which is the same string 2.11.0 shows — the segment detail is simply not used.
+
 ## 2.10.0 — 2026-07-22
 
 A model-strategy release. The measured finding behind it: a 14B-class main model answers deep-worthy tasks inline instead of delegating them, so the every-turn main on the managed Efficient and Balanced presets — and the BYOK-Mistral balanced tier — moves up to Mistral Medium 3.5. Claude Fable 5 becomes the max-quality preset's deep slot. The release also introduces a shared wire-contract module (one source of truth for tier vocabulary, env-ABI and wire shapes across engine, web UI and the managed control plane), opt-in extended debug capture, and feature-gated proactive deep escalation (default off). Engine schema moves to v50 (additive).

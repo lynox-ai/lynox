@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 #
-# public-repo-guard.sh — block internal infra / control-plane / ops leaks
-# from landing in this PUBLIC, source-available repo.
+# public-repo-guard.sh — block internal infra / control-plane / ops leaks, and
+# doubled-bracket cross-references, from landing in this PUBLIC repo.
 #
 # gitleaks + the pattern-scan catch classic *secrets* (API keys, private
 # keys). They do NOT catch internal infrastructure topology, control-plane
-# DB schema, SSH-as-root ops chains or staging hostnames — none of which
-# are "secrets" in the regex sense, yet all of which belong only in the
-# private pro repo. This guard fills that gap.
+# DB schema, SSH-as-root ops chains or staging hostnames — none of which are
+# "secrets" in the regex sense, yet all of which belong only in the private
+# repo. This guard fills that gap.
+#
+# Scope note, so the header is not read as a promise it does not keep: the
+# cross-reference class below matches ONE form — the doubled-bracket link. Plain
+# prose citing a path inside the private repo still passes, deliberately, because
+# some of those citations are load-bearing (the release script coordinates both
+# repos and would be worse without them). Triaging the rest is tracked separately.
 #
 # Two enforcement points (see lefthook.yml pre-push + the CI workflow):
 #   - pre-push hook   — scans the whole tracked tree, fast local feedback
@@ -27,9 +33,10 @@
 #   1. Whole-file allow: add the path to ALLOW_FILES below (only for docs
 #      that describe the public managed service by design).
 #   2. Inline allow: put the pragma `public-repo-guard:allow` anywhere on
-#      the offending line, ideally with a short reason. Use sparingly and
-#      only for the SOFT (dual-use hostname) patterns — HARD markers are
-#      never exempt.
+#      the offending line, ideally with a short reason. Use sparingly.
+#      Accepted for the SOFT (dual-use hostname) class and for the
+#      cross-reference class, whose shape legal code can also produce —
+#      HARD markers are never exempt.
 
 set -euo pipefail
 
@@ -75,6 +82,45 @@ HARD='control-staging\.lynox\.cloud|root@control|managed_tenant_hosts|ssh_privat
 _org='router'"-for-"'me'
 _port='83'"17"
 HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0\.1:${_port}|localhost:${_port}"
+
+# Third class — internal cross-reference slugs in the doubled-bracket link form.
+# The private repo and the maintainer's own notes address items by slug that way.
+# Such an id resolves to nothing a reader of THIS repo can open, and the slug names
+# themselves expose how private material is filed — so they are noise here at best.
+# 17 instances across 12 files predated this pattern; all were removed in the same
+# commit, which is why it can start at zero rather than permanently red.
+#
+# Spaces ARE allowed in the body, because one of the 17 was free text rather than a
+# slug — a slug-only class let that exact form back in, which is what review caught.
+# What the body class excludes is punctuation like a comma or a quote, which is why
+# `new Map([[k, v]])` does not match. It does NOT separate refs from every nested
+# array: a bare `[[42]]` or `[[key]]` matches, and cannot be told from a ref by shape.
+# That is what limit 2 below is about, and why the pragma exists.
+#
+# Two honest limits, both asserted in tests/public-repo-guard.test.ts, where every
+# marker lives and is assembled at runtime. SELF_EXCLUDE stays load-bearing for the
+# HARD classes above, which this file necessarily spells out; for the reference
+# class it covers only the worked examples in the prose below — the pattern
+# definitions themselves do not match, since the backslashes break the brackets.
+#
+#  1. A line-based grep cannot see a link SPLIT ACROSS LINES, and one of the 17 was.
+#     REF_OPENER catches the opening line of that form; it has zero hits on the tree
+#     today, so it costs nothing. A link whose opener sits at a line end with no
+#     slug-ish text after it is still invisible — accepted, not solved.
+#  2. Legal TypeScript wears the same brackets — a nested-array destructure or a
+#     nested numeric literal — and no pattern that catches free-text bodies can tell
+#     them apart. So BOTH reference patterns, unlike the two HARD classes above,
+#     honour the inline pragma. Without that escape a legitimate line would hard-block
+#     a commit and the only way past would be a hook bypass, which is worse than what
+#     is guarded. There are zero such lines today; the pragma is for the one that
+#     comes — and one round of this review proved how easily it gets removed.
+REF_SLUG_BODY='[A-Za-z0-9_][A-Za-z0-9_. /#|-]*'
+INTERNAL_REF="\\[\\[${REF_SLUG_BODY}\\]\\]"
+# The trailing anchor is `\$` — ONE backslash. In double quotes that yields a bare
+# `$`, which grep -E reads as end-of-line. Writing `\\$` yields a literal `\$`,
+# i.e. a dollar CHARACTER, and the pattern silently stops anchoring. Tried it while
+# tidying the quoting; the split-line test caught it, which is the point of having it.
+REF_OPENER="\\[\\[${REF_SLUG_BODY}\$"
 
 # SOFT — dual-use service hostnames. Legitimate in a few documented spots
 # (allow-file or inline pragma), but flagged everywhere else to catch the
@@ -153,8 +199,48 @@ while IFS= read -r f; do
     violations=$((violations + 1))
   done < <(grep -nIEi "$HARD_LOCAL_TOOLING" "$f" 2>/dev/null || true)
 
-  # SOFT — exempt if whole-file allowed or line carries the pragma.
+  # Whole-file allow applies from here down. It sits ABOVE the reference loops on
+  # purpose: those match a bracket shape that legal content can produce, and an
+  # allow-listed file may have no comment syntax to hang a pragma on — a JSON
+  # document with a nested array had no way past at all while this check came
+  # after. The HARD classes above stay outside it, as their comment says.
   is_allow_file "$f" && continue
+
+  # Internal cross-reference slug — case-SENSITIVE and a separate grep: the pattern
+  # is anchored on bracket shape, so the -i of the run above would buy nothing and
+  # only widen it. Honours the inline pragma (see the class comment for why).
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *"$PRAGMA"*) continue ;;
+    esac
+    echo "❌ internal cross-reference in $f (state the reason inline instead):"
+    echo "     ${line}"
+    violations=$((violations + 1))
+  done < <(grep -nIE "$INTERNAL_REF" "$f" 2>/dev/null || true)
+
+  # The opening line of a link split across lines. Reported separately so the
+  # message can say why it looks incomplete.
+  #
+  # The pragma check is load-bearing here, and a round of this review removed it on
+  # the theory that it was unreachable — the pragma carries a colon, the body class
+  # excludes one, so an annotated line cannot match. That holds only when the pragma
+  # sits AFTER the opener. Put it BEFORE, which the header explicitly permits, and
+  # the opener still ends the line and still matches. Removing the branch turned a
+  # working escape into a hard block, and the error text below tells the reader to
+  # use exactly the escape that had stopped working.
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *"$PRAGMA"*) continue ;;
+    esac
+    echo "❌ internal cross-reference opened in $f and continued on the next line:"
+    echo "     ${line}"
+    violations=$((violations + 1))
+  done < <(grep -nIE "$REF_OPENER" "$f" 2>/dev/null || true)
+
+  # SOFT — exempt if the line carries the pragma. Whole-file allow already
+  # returned above, so it needs no second check here.
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
@@ -168,9 +254,11 @@ done < <(list_files)
 
 if [ "$violations" -gt 0 ]; then
   echo ""
-  echo "public-repo-guard: ${violations} leak marker(s) found — this is the PUBLIC repo."
-  echo "Move the offending content to the private pro repo, or (SOFT only) annotate"
-  echo "the line with '${PRAGMA}: <reason>' if the mention is genuinely public-safe."
+  echo "public-repo-guard: ${violations} marker(s) found — this is the PUBLIC repo."
+  echo "Move the offending content to the private pro repo; for a cross-reference,"
+  echo "state the reason inline instead of citing an id. If the mention is genuinely"
+  echo "public-safe, annotate the line with '${PRAGMA}: <reason>' — accepted for the"
+  echo "hostname and cross-reference classes, never for a HARD leak marker."
   exit 1
 fi
 

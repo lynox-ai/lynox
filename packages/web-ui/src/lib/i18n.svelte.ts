@@ -73,13 +73,21 @@ const translations: Record<string, Record<Locale, string>> = {
 	'panel.pin': { de: 'Fixieren', en: 'Pin' },
 	'panel.pinned': { de: 'Fixiert', en: 'Pinned' },
 
-	// Spawn (sub-agent delegation — sidebar progress view)
+	// Spawn (sub-agent delegation — sidebar progress view + inline transcript panel)
 	'spawn.active': { de: 'aktiv', en: 'active' },
 	'spawn.done': { de: 'fertig', en: 'done' },
 	'spawn.running': { de: 'Laufend', en: 'Running' },
 	'spawn.completed': { de: 'Abgeschlossen', en: 'Completed' },
 	'spawn.status_ok': { de: 'erfolgreich', en: 'succeeded' },
 	'spawn.status_fail': { de: 'fehlgeschlagen', en: 'failed' },
+	'spawn.subagents': { de: 'Subagenten', en: 'Sub-agents' },
+	'spawn.slow': { de: 'ungewöhnlich lang', en: 'taking unusually long' },
+	'spawn.est_max_hint': {
+		de: 'Obergrenze, die die Engine für diese Delegation reserviert hat — die tatsächlichen Kosten liegen meist deutlich darunter und ersetzen diese Zahl, sobald ein Subagent fertig ist.',
+		en: 'Ceiling the engine reserved for this delegation — the actual cost is usually well below it, and replaces this figure as soon as a sub-agent finishes.',
+	},
+	'spawn.waiting': { de: 'wartet', en: 'waiting' },
+	'spawn.region_label': { de: 'Aktivität der Subagenten', en: 'Sub-agent activity' },
 
 	// Nav (flat post-consolidation: 5 top-level entries, all sub-features as hub tabs)
 	'nav.automation': { de: 'Automation', en: 'Automation' },
@@ -1008,6 +1016,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'onboard.intro_start': { de: "Los geht's", en: "Let's go" },
 	'onboard.basics_step': { de: 'Die Basics', en: 'The basics' },
 	'onboard.basics_save': { de: 'Speichern & weiter', en: 'Save & continue' },
+	'onboard.basics_save_failed': { de: 'Konnte nicht gespeichert werden — deine Antworten stehen noch hier. Nochmal versuchen?', en: 'Could not be saved — your answers are still here. Try again?' },
 	'onboard.basics_saving': { de: 'Speichern…', en: 'Saving…' },
 	'onboard.limits_note': { de: 'Ich merke mir Geschäftskontext dauerhaft und schlage vor, bevor ich etwas Wichtiges tue. E-Mails versende ich nie ohne deine Freigabe.', en: 'I keep your business context and propose before doing anything important. I never send email without your OK.' },
 	'onboard.relayer_title': { de: 'Onboarding', en: 'Onboarding' },

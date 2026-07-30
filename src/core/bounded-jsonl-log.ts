@@ -83,8 +83,19 @@ async function rotateIfNeeded(file: string, cap: number): Promise<void> {
  * even when the write fails. Callers do `void appendBoundedJsonl(...)` and never await.
  */
 export function appendBoundedJsonl(fileName: string, entry: unknown): Promise<void> {
-  const file = path.join(dataDir(), fileName);
-  const cap = maxBytes();
+  // Resolve INSIDE the guard. `dataDir()`/`path.join`/`maxBytes` are synchronous and a
+  // throw here (a NUL byte in an env-supplied path, a hostile LYNOX_DATA_DIR) escaped the
+  // promise entirely — so a `void`-ed telemetry call could abort its caller. Every emit
+  // site sits next to a durable write; one of them runs BEFORE the write. Telemetry must
+  // never be able to fail the thing it measures.
+  let file: string;
+  let cap: number;
+  try {
+    file = path.join(dataDir(), fileName);
+    cap = maxBytes();
+  } catch {
+    return Promise.resolve();
+  }
   const prev = chains.get(file) ?? Promise.resolve();
   const next = prev.then(async () => {
     try {
