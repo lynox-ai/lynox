@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,7 @@ import {
   buildWireSnapshot,
   extractWireFields,
   isWireSinkEnabled,
+  isProvisionedInstance,
   wireSinkDir,
   writeWireSnapshot,
   captureWireSnapshot,
@@ -206,9 +207,13 @@ describe('wireSinkDir', () => {
     expect(wireSinkDir({ LYNOX_DEBUG_WIRE_SINK: '/custom/sink' })).toBe('/custom/sink');
   });
 
-  it('falls back to a default dir under tmpdir when unset', () => {
-    const d = wireSinkDir({});
-    expect(d).toContain('lynox-wire-sink');
+  it('defaults under the engine data dir, NOT tmpdir', () => {
+    // The default moved off `/tmp` deliberately: a world-writable sink location
+    // (and, worse, a world-writable arming marker) made "is capture on?" a
+    // question any process on the box could answer yes to.
+    expect(wireSinkDir({ LYNOX_DATA_DIR: '/data/lx' })).toBe('/data/lx/wire-sink');
+    expect(wireSinkDir({})).not.toContain(tmpdir());
+    expect(wireSinkDir({})).toContain('.lynox');
   });
 });
 
@@ -278,8 +283,9 @@ describe('raw-body sink (eval / wire-replay path)', () => {
     expect(isRawWireSinkEnabled({ LYNOX_DEBUG_WIRE_RAW_GATE_FILE: rawGate })).toBe(true);
   });
 
-  it('rawWireSinkDir defaults under tmpdir, or uses the override', () => {
-    expect(rawWireSinkDir({})).toContain('lynox-wire-sink-raw');
+  it('rawWireSinkDir defaults under the data dir, or uses the override', () => {
+    expect(rawWireSinkDir({ LYNOX_DATA_DIR: '/data/lx' })).toBe('/data/lx/wire-sink-raw');
+    expect(rawWireSinkDir({})).not.toContain(tmpdir());
     expect(rawWireSinkDir({ LYNOX_DEBUG_WIRE_RAW_SINK: '/x/raw' })).toBe('/x/raw');
   });
 
@@ -308,5 +314,92 @@ describe('raw-body sink (eval / wire-replay path)', () => {
     expect(res).not.toBeNull();
     expect(typeof res?.capturedAt).toBe('number');
     expect(readdirSync(dir).filter(f => f.startsWith('raw-') && f.endsWith('.json')).length).toBe(1);
+  });
+});
+
+// ── The structural half of the gate ─────────────────────────────────────────
+//
+// A file marker cannot express "not on a customer's box": any process that can
+// create a file can arm it, and on the old `/tmp` default that included a tool
+// call steered by injected content. Process env can express it — it is fixed at
+// exec, so an in-container actor cannot rewrite it for the running engine.
+//
+// The redacted sink writes scrubbed personal data. The raw sink writes the FULL
+// secrets catalog and the whole KG, so it matters more; both refuse.
+describe('capture sinks refuse on a control-plane-provisioned instance', () => {
+  const armed = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
+    LYNOX_DEBUG_WIRE_GATE_FILE: GATE,
+    LYNOX_DEBUG_WIRE_RAW_GATE_FILE: GATE,
+    ...extra,
+  });
+
+  // A real armed marker, so "refused" cannot be confused with "never armed".
+  let GATE = '';
+  beforeAll(() => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-gate-'));
+    GATE = join(dir, 'on');
+    writeFileSync(GATE, '');
+  });
+
+  it('arms on a self-hosted box — the control that makes the refusals meaningful', () => {
+    expect(isWireSinkEnabled(armed())).toBe(true);
+    expect(isRawWireSinkEnabled(armed())).toBe(true);
+  });
+
+  it.each([
+    ['LYNOX_MANAGED_INSTANCE_ID', 'abc123def456ghi789jkl'],
+    ['LYNOX_BILLING_TIER', 'managed'],
+    ['LYNOX_BILLING_TIER', 'hosted'],   // BYOK is a customer's box too
+    ['LYNOX_MANAGED_MODE', 'managed'],  // the legacy alias the registry keeps forever
+  ])('refuses both sinks when %s is set, even with the marker present', (key, value) => {
+    const env = armed({ [key]: value });
+    // MUTATION THIS KILLS: dropping either `isProvisionedInstance` early-out.
+    expect(isWireSinkEnabled(env)).toBe(false);
+    expect(isRawWireSinkEnabled(env)).toBe(false);
+    // captureWireSnapshot is the one-shot convenience — it must refuse too.
+    expect(captureWireSnapshot({
+      runId: 'r1', turnIndex: 0, model: 'm', provider: 'p', systemText: 's',
+      userMessage: 'u', toolNames: [], maxTokens: 1, ephemeralTailChars: 0,
+    }, env)).toBeNull();
+  });
+
+  it('an operator acknowledgement re-arms it — the recorded qa-managed workflow', () => {
+    // A blanket refusal would break the managed-tenant capture the acceptance
+    // test and the wire-replay eval both use; DEF-wire-capture-prod-gate says so
+    // and is why that row was downgraded rather than closed this way before.
+    // The acknowledgement is an ENV edit through the control plane — an operator
+    // action the in-container threat cannot perform on a running process.
+    const env = armed({ LYNOX_BILLING_TIER: 'managed', LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED: '1' });
+    expect(isWireSinkEnabled(env)).toBe(true);
+    expect(isRawWireSinkEnabled(env)).toBe(true);
+  });
+
+  it('accepts ONLY the exact acknowledgement value', () => {
+    // MUTATION THIS KILLS: loosening the check to truthiness. 'false', '0' and
+    // 'no' are all truthy strings, and an env var spelled by hand is exactly
+    // where that bites — a tenant carrying LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED=0
+    // would silently be capturing.
+    for (const v of ['0', 'false', 'no', 'true', 'yes', '', ' 1']) {
+      expect(isWireSinkEnabled(armed({ LYNOX_BILLING_TIER: 'managed', LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED: v })))
+        .toBe(false);
+    }
+  });
+
+  it('the acknowledgement alone arms NOTHING without the marker', () => {
+    // It is a permission to consider the marker, not a second arming path.
+    expect(isWireSinkEnabled({ LYNOX_BILLING_TIER: 'managed', LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED: '1',
+      LYNOX_DEBUG_WIRE_GATE_FILE: '/nonexistent/gate' })).toBe(false);
+  });
+
+  it('treats an EMPTY marker as absent, not as provisioned', () => {
+    // An empty env var is how a compose file spells "unset" by accident; it must
+    // not silently disable an operator's own capture.
+    expect(isProvisionedInstance({ LYNOX_BILLING_TIER: '' })).toBe(false);
+    expect(isWireSinkEnabled(armed({ LYNOX_BILLING_TIER: '' }))).toBe(true);
+  });
+
+  it('fails closed on a PARTIAL provisioning env', () => {
+    // Only one of the three present — a provisioning bug, not a licence.
+    expect(isProvisionedInstance({ LYNOX_MANAGED_INSTANCE_ID: 'x' })).toBe(true);
   });
 });

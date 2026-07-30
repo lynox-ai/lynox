@@ -9,6 +9,7 @@ import type { LynoxHooks } from '../core/engine.js';
 // Mocked below (vi.mock '../core/config.js') — imported so the model-blocklist
 // gate tests can override its return value per-test.
 import { loadConfig } from '../core/config.js';
+import { SecretStore, maskSecretPatterns } from '../core/secret-store.js';
 
 // === Mock dependencies ===
 
@@ -156,6 +157,11 @@ vi.mock('../core/engine.js', () => ({
       deleteSecret: mockSecretDelete,
       resolve: mockSecretResolve,
       containsSecret: mockSecretContains,
+      // Identity, which is what a real SecretStore with an empty vault returns.
+      // It was absent, and the debug-export route now masks by value as well as
+      // by pattern — so its absence made the route 500 rather than under-mask,
+      // which is the fixture failing to mirror `SecretStoreLike`, not the route.
+      maskSecrets: (text: string) => text,
     });
     this.getRunHistory = vi.fn().mockReturnValue({
       getRecentRuns: mockHistoryGetRecentRuns,
@@ -3751,6 +3757,82 @@ describe('LynoxHTTPApi', () => {
         expect(body.runs[0]!.prompt_snapshot).toContain('system');
         // Secret scrub: the leaked key must NOT survive anywhere in the bundle.
         expect(JSON.stringify(body)).not.toContain(KEY);
+      });
+    });
+
+    // ── The class the pattern scrub structurally cannot reach ──────────────
+    //
+    // `maskSecretPatterns` matches known key SHAPES. The export's sharing notice
+    // promises "secrets masked", and for an app password, a bare bearer token or
+    // a credential inside a URL that promise was false — no prefix, no match,
+    // and the generic high-entropy pattern is deliberately off to avoid masking
+    // legitimate debug data. `SecretStore.maskSecrets` masks by VALUE from this
+    // tenant's own vault, so it covers exactly that class (DEF-export-masker-gaps).
+    //
+    // A real SecretStore, not a stub: a stub with a `maskSecrets` method would
+    // prove the route calls something, which is not the claim.
+    it('masks a prefix-less vault value that the pattern scrub cannot recognise', async () => {
+      const OPAQUE = 'qmzTPLvRWdJHxkeUYSAFNBCG';   // no prefix — no SECRET_PATTERN matches it
+      // Loaded via `LYNOX_SECRET_*`, the vault-free injection path — `set()`
+      // needs a real vault, and a stub would test the stub.
+      vi.stubEnv('LYNOX_SECRET_APP_PASSWORD', OPAQUE);
+      const store = new SecretStore();
+
+      // Control: the pattern scrub alone genuinely does not catch it. Without
+      // this the test could pass because the value never reached the bundle.
+      expect(maskSecretPatterns(OPAQUE)).toContain(OPAQUE);
+
+      await swapEngine({
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: `T ${OPAQUE}` }), getMessages: () => [] }),
+        getRunHistory: () => ({
+          getRunsBySession: () => [],
+          getCompactionEventsBySession: () => [],
+          getWireSnapshotsForRun: () => [],
+        }),
+        getSecretStore: () => store,
+      }, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const raw = JSON.stringify(await res.json());
+        // MUTATION THIS KILLS: dropping the `secretStore.maskSecrets(...)` call
+        // from the scrub chain — the export then ships the vault value verbatim.
+        expect(raw).not.toContain(OPAQUE);
+        expect(raw).toContain('***');   // masked, not merely dropped
+      });
+    });
+
+    it('survives a vault value whose characters would break the JSON round-trip', async () => {
+      // The scrub is a string replacement over `JSON.stringify(bundle)`, so a
+      // careless mask could inject a quote or a backslash and make JSON.parse
+      // throw — turning a hardening step into a 500 on the export route. The
+      // argument that it cannot is real but subtle (a value containing `"` or
+      // `\` appears ESCAPED in the JSON, so the literal never matches and no
+      // replacement happens), and an argument is not a test.
+      vi.stubEnv('LYNOX_SECRET_QUOTED', 'abc"def\\ghi');
+      vi.stubEnv('LYNOX_SECRET_NEWLINE', 'tok\nen\tvalue');
+      vi.stubEnv('LYNOX_SECRET_UNICODE', 'schlüssel-Ω-value');
+      vi.stubEnv('LYNOX_SECRET_SHORT', 'ab');   // <= 4 chars → mask is a bare '***'
+      const store = new SecretStore();
+
+      await swapEngine({
+        getThreadStore: () => ({
+          getThread: () => ({ id: 't1', title: 'abc"def\\ghi / tok\nen\tvalue / schlüssel-Ω-value / ab' }),
+          getMessages: () => [],
+        }),
+        getRunHistory: () => ({
+          getRunsBySession: () => [],
+          getCompactionEventsBySession: () => [],
+          getWireSnapshotsForRun: () => [],
+        }),
+        getSecretStore: () => store,
+      }, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        // The whole point: still 200 and still parseable JSON.
+        expect(res.status).toBe(200);
+        const body = await res.json() as { thread: { id: string } };
+        expect(body.thread.id).toBe('t1');
+        // And the values that DO appear literally in the JSON are masked.
+        expect(JSON.stringify(body)).not.toContain('schlüssel-Ω-value');
       });
     });
 
