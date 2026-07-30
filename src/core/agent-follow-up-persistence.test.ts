@@ -283,6 +283,59 @@ describe('follow-up recovery leaves the context meter honest', () => {
     // tool_use onto that reply and pushed a tool_result behind it: an anchor
     // taken from the post-recovery `messages.length` points past the reply, and
     // the meter under-reports the turn it just made by the whole answer.
-    expect(agent.getEstimatedOccupancyTokens()).toBeGreaterThan(700 + 4000);
+    const occupancy = agent.getEstimatedOccupancyTokens();
+    expect(occupancy).toBeGreaterThan(700 + 4000);
+    // Bounded above as well: the char-estimate FALLBACK (used when no real usage
+    // has been recorded) also clears the lower bound, so a one-sided assertion
+    // passes when the anchor is lost entirely rather than merely misplaced.
+    // The real path counts the reply once, on top of a 700-token anchor.
+    expect(occupancy).toBeLessThan(700 + 20_000);
+  });
+});
+
+/**
+ * The gate added for the adapter's `end_turn` default skips the recovery when
+ * the turn's CONTENT already holds the call. A review round read that as "the
+ * user then gets no chips at all", on the grounds that the dispatch branch never
+ * runs for that shape. The dispatch branch indeed does not run — but the chips
+ * do not come from dispatch: the StreamProcessor emits `tool_call` when the
+ * BLOCK closes, independently of the stop reason. That half is pinned where the
+ * real processor runs (`stream.test.ts`, "even when the stream never reports a
+ * stop reason") — this file mocks `./stream.js`, so it cannot assert it.
+ *
+ * What THIS pins is the other half: no second paid call, and one chip-bearing
+ * block on disk rather than two.
+ */
+describe('the compliant-shape gate does not pay twice', () => {
+  it('makes no recovery call when the turn ends with the call in content', async () => {
+    const store = makeStore();
+    const agent = new Agent({
+      name: 'test',
+      model: 'mistral-medium-2604',
+      systemPrompt: 'SYS',
+      onMessageCheckpoint: () => store.checkpointFrom((agent as unknown as { messages: Msg[] }).messages),
+    });
+    const inner = agent as unknown as { client: unknown; tools: unknown[] };
+    inner.tools = [suggestFollowUpsTool];
+    let calls = 0;
+    // The adapter's default when a stream ends with no finish_reason, carrying a
+    // completed tool_use block.
+    inner.client = {
+      beta: { messages: { stream: () => {
+        calls++;
+        const response = {
+          content: [{ type: 'tool_use', id: 'abc123def', name: 'suggest_follow_ups', input: { suggestions: CHIPS } }],
+          stop_reason: 'end_turn',
+          usage: USAGE,
+        };
+        return { _response: response, finalMessage: () => Promise.resolve(response) };
+      } } },
+    };
+    agent.followUpFallback = true;
+    await agent.send('was steht an?');
+    // No paid second call…
+    expect(calls).toBe(1);
+    // …and exactly one chip-bearing block on disk, not two.
+    expect(toolUseNames(store.rows).filter((n) => n === 'suggest_follow_ups')).toHaveLength(1);
   });
 });

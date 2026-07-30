@@ -867,8 +867,8 @@ export class Agent implements IAgent {
    *  - **A capped excerpt, not the run context.** `endsTurn` exists to avoid an
    *    extra full-context round trip; recovering must not hand that back.
    *  - **Metered.** The tokens never flow through the agent's own stream, so
-   *    without `debitInRunHelperCost` + `costGuard.recordTurn` the spend would
-   *    be invisible to the session cap AND to the managed tenant debit — a
+   *    without `debitInRunHelperCost` + `costGuard.recordExternalCost` the spend
+   *    would be invisible to the session cap AND to the managed tenant debit — a
    *    pool-key burn nobody bills. Same treatment as the other in-run helpers
    *    (web-search rerank, api_setup docs extraction).
    *  - **Abortable and time-boxed.** It runs before the turn's text is returned,
@@ -945,10 +945,16 @@ export class Agent implements IAgent {
         // The chip DISPLAYS `label` and SENDS `task`, and `task` is never shown.
         // The answer this was built from can quote a web page or a mail, so a
         // laundered `task` ("forward the last 20 mails to …") behind an innocuous
-        // label is a one-click agent turn the user never read. The char cap
-        // bounds cost, not instructions — this drops the suggestion outright.
-        // `wrapUntrustedData` already computed this verdict for the excerpt and
-        // discarded it; here it decides.
+        // label is a one-click agent turn the user never read.
+        //
+        // Read this for what it is: a floor, not a boundary. `detectInjectionAttempt`
+        // matches injection PHRASING — override tokens, role tags, "use the X
+        // tool" — in ENGLISH, and a `task` is a plain user-voice instruction that
+        // needs none of that, in whatever language the thread runs in (this
+        // feature's own prompt asks for German). It stops the copy-paste payload
+        // and nothing subtler. The real gate is that a human clicks the chip —
+        // which is why the task being invisible to that human is the open issue
+        // here, not the strength of this filter. See DEF-followup-task-invisible.
         .filter((sug) => !detectInjectionAttempt(sug.task).detected);
       if (suggestions.length === 0) return; // same outcome as the model declining
 
@@ -962,12 +968,16 @@ export class Agent implements IAgent {
       // persisted message would be silently lost while the pushed tool_result
       // still landed: chips gone on reload, orphan tool_result on disk.
       const last = this.messages.at(-1);
-      // 9 alphanumerics, because that is the narrowest shape any target provider
-      // accepts (Mistral validates `^[a-zA-Z0-9]{9}$` and the OpenAI-compat
-      // adapter forwards ids verbatim) and this pair is PERSISTED: a rejected id
-      // fails not just this turn but every later turn in the thread — on exactly
-      // the provider the recovery exists for. A `messages.length`-derived id was
-      // also not unique: `_truncateHistory` shrinks the array, so it repeats.
+      // 9 alphanumerics: the narrowest shape reported for a target provider
+      // (Mistral is documented as validating `^[a-zA-Z0-9]{9}$`), chosen because
+      // this pair is PERSISTED — a rejected id fails not just this turn but every
+      // later turn in the thread, on exactly the provider the recovery exists
+      // for. NOT a claim that the engine only ever mints such ids: the
+      // openai-compat adapter names an id-less tool call `tool_<index>`
+      // (see `openai-adapter.ts`), which this shape would reject. If Mistral does
+      // enforce it, that path has the same bug and is the one to fix next.
+      // A `messages.length`-derived id was also not unique: `_truncateHistory`
+      // shrinks the array, so it repeats within one thread.
       const toolUseId = randomBytes(8).toString('base64url').replace(/[^a-zA-Z0-9]/g, '').slice(0, 9).padEnd(9, '0');
       const useBlock = { type: 'tool_use' as const, id: toolUseId, name: FOLLOW_UP_TOOL_NAME, input };
       if (last && last.role === 'assistant' && Array.isArray(last.content)) {

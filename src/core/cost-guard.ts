@@ -84,6 +84,12 @@ export class CostGuard {
    * so an Opus run charging Haiku tokens at Opus rates trips its own ceiling
    * roughly twenty times too early (and inflates the iteration count with a turn
    * the model never took).
+   *
+   * Fails OPEN on a malformed amount — deliberately, and opposite to
+   * `isExceeded`. Storing a NaN makes `estimateCost` non-finite, which
+   * `isExceeded` reads as "over budget" and would end EVERY later turn of the
+   * run. Dropping one unpriceable helper call understates the ceiling by cents;
+   * the alternative kills the run.
    */
   recordExternalCost(usd: number): boolean {
     if (Number.isFinite(usd) && usd > 0) this.externalCostUSD += usd;
