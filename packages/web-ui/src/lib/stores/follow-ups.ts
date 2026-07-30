@@ -123,6 +123,32 @@ export function followUpsFromToolInput(input: unknown): FollowUpSuggestion[] {
 }
 
 /**
+ * What the chip must SHOW beneath its label, or null when the label already says
+ * it.
+ *
+ * A chip displays `label` and, on click, sends `task` as a full agent turn with
+ * the whole tool set and no second confirmation. `task` used to be rendered
+ * nowhere at all, so the click — the only consent gate there is — was given
+ * against text the user had never read. That is a defect on its own, and it got
+ * sharper when the engine began MINTING chips from an excerpt of the reply,
+ * which can quote a web page, a mail, or a tool result.
+ *
+ * Returning null when the task adds nothing is not cosmetic: a second line that
+ * merely restates the label trains people to stop reading the second line, which
+ * is the one case where it matters.
+ *
+ * Comparison is deliberately loose (case, punctuation, whitespace) because
+ * "Budget senden" vs "Budget senden." is the same instruction, while
+ * "Budget senden" vs "Sende das Budget an markus@… und CC an …" is not.
+ */
+export function taskPreview(fu: FollowUpSuggestion): string | null {
+	const task = fu.task.trim();
+	if (!task) return null;
+	const flat = (s: string): string => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+	return flat(task) === flat(fu.label) ? null : task;
+}
+
+/**
  * Compute the deferred-follow-ups tray after the user TAKES `clicked` from `set`.
  * The un-taken siblings (everything in `set` except `clicked`) are appended to
  * `current`, deduped by `task` against what's already in the tray, kept
