@@ -186,6 +186,33 @@ describe('recordToolCall', () => {
 		expect(state.subAgents!['s1:0']!.toolCalls.every((c) => c.status === 'done')).toBe(true);
 	});
 
+	it('does NOT dedup a same-named call with different input', () => {
+		const state = withDelegation();
+		recordToolCall(state, { name: 'read_file', input: { path: 'a' }, subAgentId: 's1:0' });
+		recordToolCall(state, { name: 'read_file', input: { path: 'b' }, subAgentId: 's1:0' });
+		// Reading two files is two calls. Without the input comparison the dedup
+		// would swallow the second and the child's work would under-report.
+		expect(state.subAgents!['s1:0']!.toolCalls.map((c) => c.input)).toEqual([{ path: 'a' }, { path: 'b' }]);
+	});
+
+	it('does NOT dedup a repeat of a call that already CLOSED', () => {
+		const state = withDelegation();
+		recordToolCall(state, { name: 'read_file', input: { path: 'a' }, subAgentId: 's1:0' });
+		recordToolResult(state, { name: 'read_file', result: 'first', subAgentId: 's1:0' });
+		recordToolCall(state, { name: 'read_file', input: { path: 'a' }, subAgentId: 's1:0' });
+		// An agent legitimately re-reads the same file later in the turn. Only a
+		// STILL-RUNNING duplicate is a replayed frame; dropping the `status` check
+		// would hide the second read.
+		expect(state.subAgents!['s1:0']!.toolCalls).toHaveLength(2);
+	});
+
+	it('does NOT dedup the main agent\'s same-named call with different input', () => {
+		const state: AttributionState = {};
+		recordToolCall(state, { name: 'read_file', input: { path: 'a' } });
+		recordToolCall(state, { name: 'read_file', input: { path: 'b' } });
+		expect(state.toolCalls).toHaveLength(2);
+	});
+
 	it('treats a `subAgent` without `subAgentId` as a child, not the main agent', () => {
 		const state = withDelegation();
 		// An older engine — or a frame that lost the id — still says the event came
@@ -231,6 +258,31 @@ describe('recordToolResult', () => {
 		recordToolCall(state, { name: 'bash', input: {}, subAgentId: 's1:1' });
 		recordToolResult(state, { name: 'bash', result: 'boom', isError: true, subAgentId: 's1:1' });
 		expect(state.subAgents!['s1:1']!.toolCalls[0]).toMatchObject({ status: 'error' });
+	});
+
+	it('closes the STILL-RUNNING call, not merely the last same-named one', () => {
+		const state = withDelegation();
+		recordToolCall(state, { name: 'read_file', input: { path: 'a' } });
+		recordToolResult(state, { name: 'read_file', result: 'first' });
+		recordToolCall(state, { name: 'read_file', input: { path: 'b' } });
+		// Two same-named calls, the SECOND still open. `findLast` alone happens to
+		// pick it here — so the discriminating case is the reverse order below.
+		const { call } = recordToolResult(state, { name: 'read_file', result: 'second' });
+		expect(call?.input).toEqual({ path: 'b' });
+	});
+
+	it('prefers a running EARLIER call over a closed later one', () => {
+		const state = withDelegation();
+		recordToolCall(state, { name: 'read_file', input: { path: 'a' } });
+		recordToolCall(state, { name: 'read_file', input: { path: 'b' } });
+		// Close the LATER one first — parallel tool calls settle out of order.
+		state.toolCalls![1]!.status = 'done';
+		state.toolCalls![1]!.result = 'b done';
+		const { call } = recordToolResult(state, { name: 'read_file', result: 'a done' });
+		// `findLast` alone would re-close 'b' and overwrite its result; the
+		// running-first lookup is what makes the name unambiguous.
+		expect(call?.input).toEqual({ path: 'a' });
+		expect(state.toolCalls![1]!.result).toBe('b done');
 	});
 
 	it('falls back to the last matching call when none is still running', () => {

@@ -318,8 +318,9 @@ export function profileExceedsMaxTier(profileModelId: string, maxTier: ModelTier
  * worse still.
  *
  * Validation stays with the caller: this resolves, it does not refuse. The
- * profile ceiling/blocklist refusals live in `executeThinker`, which runs them
- * before the child is built.
+ * refusals live in `assertSpawnRoutingPermitted`, which the handler runs BEFORE
+ * it announces the batch — see that function for why the ordering is the whole
+ * point.
  */
 export function resolveSpawnChildRouting(input: {
   spec: SpawnSpec;
@@ -364,6 +365,59 @@ export function resolveSpawnChildRouting(input: {
   return { tier: resolvedRun.tier, model, hybridSlot };
 }
 
+/**
+ * Every reason a spawn spec is refused outright, in one place — and it runs
+ * BEFORE the batch is announced.
+ *
+ * WHY THE ORDERING IS THE POINT. These four refusals used to live inside
+ * `executeThinker`, which is reached only after the `spawn` event has already
+ * been streamed to the client. So a `spawn_agent({profile})` naming a model above
+ * the tenant's `max_tier` was ANNOUNCED with that model id — the panel rendered
+ * `child · claude-opus-4-6` as "the model it runs on" — and only then refused.
+ * The UI named a model the run demonstrably would not use, which is precisely
+ * the failure the shared-resolution work was done to remove. Announcing after
+ * validation makes the panel's model id true by construction.
+ *
+ * `executeThinker` calls this too. Not redundancy for its own sake: the
+ * announcement path and the construction path must refuse for the same reasons,
+ * and one function is the only way that stays true when a fifth reason is added.
+ */
+function assertSpawnRoutingPermitted(spec: SpawnSpec, userConfig: LynoxUserConfig): void {
+  if (spec.role && !getRole(spec.role)) {
+    throw new Error(
+      `Unknown role "${spec.role}". Available roles: ${getRoleNames().join(', ')}. ` +
+      `If none of these fit, omit the "role" field and set model/effort/tools directly.`,
+    );
+  }
+
+  const profile: ModelProfile | undefined = spec.profile
+    ? userConfig.model_profiles?.[spec.profile]
+    : undefined;
+  if (spec.profile && !profile) {
+    throw new Error(`Unknown model profile "${spec.profile}". Available: ${Object.keys(userConfig.model_profiles ?? {}).join(', ') || 'none configured'}.`);
+  }
+  if (!profile) return;
+
+  // A profile sets `model = profile.model_id`, bypassing the `max_tier` clamp
+  // that `resolveRunModel` applies to a tier. That is the injection lever
+  // (DEF-0093): a prompt-injected `spawn({profile})` could route a child to a
+  // model above the tenant's cost ceiling. A profile cannot be clamped DOWN (you
+  // cannot substitute a different model on someone's endpoint), so the
+  // enforcement is REFUSE, not clamp (DEF-0080). Cross-provider hybrid spawn is
+  // unaffected — that runs on the tier path.
+  if (profileExceedsMaxTier(profile.model_id, userConfig.max_tier)) {
+    const band = modelCapability(profile.model_id)?.tier;
+    throw new Error(`Model profile "${spec.profile}" (${profile.model_id}) is not permitted on this instance: its cost band ${band ? `"${band}"` : '(unknown)'} exceeds the max tier "${userConfig.max_tier}". A profile pins a specific endpoint and cannot be clamped down, so the spawn is refused. Use the \`model\` tier parameter (fast/balanced/deep) for a ceiling-clamped subagent.`);
+  }
+  // Model blocklist (blocked_model_ids): a profile pinning a blocked model is
+  // refused the same way — a pinned endpoint cannot be substituted, so REFUSE,
+  // not clamp. Same checkpoint as the ceiling guard above (write-accept ⟺
+  // load-keep ⟺ resolve symmetry for the profile raw-id path).
+  if (isBlockedModelId(profile.model_id, userConfig.blocked_model_ids)) {
+    throw new Error(`Model profile "${spec.profile}" (${profile.model_id}) is not permitted on this instance: the model is blocked by the operator model blocklist. A profile pins a specific endpoint and cannot be substituted, so the spawn is refused. Use the \`model\` tier parameter (fast/balanced/deep) for a subagent on a permitted model.`);
+  }
+}
+
 async function executeThinker(
   spec: SpawnSpec,
   parentAgent: IAgent,
@@ -376,43 +430,19 @@ async function executeThinker(
    */
   onSettled?: (costUsd: number) => void,
 ): Promise<{ result: string; childRunId: string | undefined; model: string }> {
-  // Load role if specified
-  const resolved = spec.role ? getRole(spec.role) : undefined;
-  if (spec.role && !resolved) {
-    throw new Error(
-      `Unknown role "${spec.role}". Available roles: ${getRoleNames().join(', ')}. ` +
-      `If none of these fit, omit the "role" field and set model/effort/tools directly.`,
-    );
-  }
-
   // 4-tier resolution: spec fields > role defaults > user config > global default
   const userConfig = loadConfig();
 
-  // Model profile override: if spec.profile is set, use OpenAI-compatible provider
+  // Same refusals the handler already ran before announcing the batch. Kept here
+  // because this is the path that BUILDS the child: the two must never diverge,
+  // and a fifth refusal added to one and not the other is exactly how the UI came
+  // to announce a model the run refused.
+  assertSpawnRoutingPermitted(spec, userConfig);
+
+  const resolved = spec.role ? getRole(spec.role) : undefined;
   const profile: ModelProfile | undefined = spec.profile
     ? userConfig.model_profiles?.[spec.profile]
     : undefined;
-  if (spec.profile && !profile) {
-    throw new Error(`Unknown model profile "${spec.profile}". Available: ${Object.keys(userConfig.model_profiles ?? {}).join(', ') || 'none configured'}.`);
-  }
-  // A profile sets `model = profile.model_id` below, bypassing the `max_tier`
-  // clamp that `resolveRunModel` applies to a tier. That is the injection lever
-  // (DEF-0093): a prompt-injected `spawn({profile})` could route a child to a
-  // model above the tenant's cost ceiling. Enforce the ceiling HERE — but a
-  // profile cannot be clamped DOWN (you cannot substitute a different model on
-  // someone's endpoint), so the enforcement is REFUSE, not clamp (DEF-0080).
-  // Cross-provider hybrid spawn is unaffected — that runs on the tier path.
-  if (profile && profileExceedsMaxTier(profile.model_id, userConfig.max_tier)) {
-    const band = modelCapability(profile.model_id)?.tier;
-    throw new Error(`Model profile "${spec.profile}" (${profile.model_id}) is not permitted on this instance: its cost band ${band ? `"${band}"` : '(unknown)'} exceeds the max tier "${userConfig.max_tier}". A profile pins a specific endpoint and cannot be clamped down, so the spawn is refused. Use the \`model\` tier parameter (fast/balanced/deep) for a ceiling-clamped subagent.`);
-  }
-  // Model blocklist (blocked_model_ids): a profile pinning a blocked model is
-  // refused the same way — a pinned endpoint cannot be substituted, so REFUSE,
-  // not clamp. Same checkpoint as the ceiling guard above (write-accept ⟺
-  // load-keep ⟺ resolve symmetry for the profile raw-id path).
-  if (profile && isBlockedModelId(profile.model_id, userConfig.blocked_model_ids)) {
-    throw new Error(`Model profile "${spec.profile}" (${profile.model_id}) is not permitted on this instance: the model is blocked by the operator model blocklist. A profile pins a specific endpoint and cannot be substituted, so the spawn is refused. Use the \`model\` tier parameter (fast/balanced/deep) for a subagent on a permitted model.`);
-  }
 
   const baseProvider = getActiveProvider();
   const { tier: modelTier, model, hybridSlot } = resolveSpawnChildRouting({
