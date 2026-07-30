@@ -102,6 +102,13 @@ export function formatTurnTokens(u: UsageInfo): string {
 	return `Σ ${(u.tokensIn + u.tokensOut).toLocaleString()} tokens`;
 }
 
+/** One footer segment. `title` carries the untruncated value when the rendered
+ *  `text` is a shortened form (currently only the model id). */
+export interface UsageMetaPart {
+	text: string;
+	title?: string;
+}
+
 /**
  * Everything AFTER the token count in the footer: LLM $ (+ third-party API $
  * when meaningful), cache-hit %, and the dispatched model id. Split out from
@@ -115,25 +122,42 @@ export function formatTurnTokens(u: UsageInfo): string {
  * box) without surfacing prices. Real tenants (self-host, BYOK, Managed) always
  * see cost — keeping AI spend transparent rather than hidden. (rafael 2026-05-29)
  */
-export function formatUsageMetaParts(u: UsageInfo, includeCost: boolean): string[] {
-	const parts: string[] = [];
+export function formatUsageMetaParts(u: UsageInfo, includeCost: boolean): UsageMetaPart[] {
+	const parts: UsageMetaPart[] = [];
 	if (includeCost) {
-		parts.push(formatCost(u.costUsd));
+		parts.push({ text: formatCost(u.costUsd) });
 		// Phase E: surface third-party API cost (DataForSEO etc.) next to the LLM
 		// cost when the message hit any profiled API. Threshold of >$0.001 keeps
 		// the row clean when nothing meaningful happened.
 		if (u.apiCostUsd !== undefined && u.apiCostUsd > 0.001) {
-			parts.push(`API: ${formatCost(u.apiCostUsd)}`);
+			parts.push({ text: `API: ${formatCost(u.apiCostUsd)}` });
 		}
 	}
 	const cachePct = u.tokensIn > 0 ? Math.round((u.cacheRead / u.tokensIn) * 100) : 0;
-	if (cachePct > 0) parts.push(`${cachePct}% cache`);
+	if (cachePct > 0) parts.push({ text: `${cachePct}% cache` });
 	// rafael QA 2026-05-18: surface the actual dispatched model id so the user
 	// can verify their provider choice actually applies (and so auto-downgrade is
 	// observable rather than hidden behind an Anthropic-flavoured tier alias in
 	// the model's text response).
-	if (u.model) parts.push(u.model);
+	if (u.model) {
+		const short = shortModelLabel(u.model);
+		parts.push(short === u.model ? { text: short } : { text: short, title: u.model });
+	}
 	return parts;
+}
+
+/**
+ * Display form of a dispatched model id. Hosted-inference providers namespace
+ * their ids as a path (`accounts/fireworks/models/glm-5p2`), which crowds the
+ * footer line without adding information — the last segment is the model. Ids
+ * without a slash (every Anthropic and Mistral id) are returned untouched, so
+ * this only ever shortens the case that needs it. The full id stays reachable:
+ * callers put it in the `title` of the shortened part.
+ */
+export function shortModelLabel(model: string): string {
+	if (!model.includes('/')) return model;
+	const last = model.split('/').filter(Boolean).pop();
+	return last && last.length > 0 ? last : model;
 }
 
 /**
@@ -142,5 +166,5 @@ export function formatUsageMetaParts(u: UsageInfo, includeCost: boolean): string
  * `formatUsageMetaParts`) so every separator is one consistent styled element.
  */
 export function formatUsageMeta(u: UsageInfo, includeCost: boolean): string {
-	return formatUsageMetaParts(u, includeCost).join(' · ');
+	return formatUsageMetaParts(u, includeCost).map((p) => p.text).join(' · ');
 }

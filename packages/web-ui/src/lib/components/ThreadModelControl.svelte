@@ -12,6 +12,12 @@
   while a run streams (a swap mid-turn is refused server-side with 409 anyway). The
   server clamps + guards (resolveRunModel + the downgrade-overflow pre-check), so this
   is UX, not the boundary; a refused downgrade surfaces the overflow copy inline.
+
+  `compact` renders the header form: the select alone, no label row, and notice/hint
+  go to a toast instead of an inline paragraph (the nav header has no room for a
+  second line). It follows the HeaderModelPicker split — header on desktop, composer
+  on mobile — so the running thread stops spending a full composer row on a control
+  the new-chat picker already moved upstairs. (rafael 2026-07-30)
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -19,7 +25,10 @@
   import { loadTierConfig, type MainChatTiers } from '../utils/tier-config.js';
   import { getSessionId, getSessionTier, getIsStreaming, repickSessionModel } from '../stores/chat.svelte.js';
   import { getDemoMode } from '../config.svelte.js';
+  import { addToast } from '../stores/toast.svelte.js';
   import { t } from '../i18n.svelte.js';
+
+  const { compact = false }: { compact?: boolean } = $props();
 
   let tiers = $state<ModelTier[]>([]);
   let defaultTier = $state<ModelTier>('balanced');
@@ -86,13 +95,25 @@
     el.value = currentTier ?? defaultTier;
   }
 
+  // Same message, two surfaces: the composer form has room for an inline line,
+  // the header form does not — there it becomes a toast. Routed through one
+  // helper so a new message can never reach only one of the two.
+  function say(message: string, kind: 'notice' | 'hint'): void {
+    if (compact) {
+      addToast(message, kind === 'notice' ? 'error' : 'info', kind === 'notice' ? 5000 : 4000);
+      return;
+    }
+    if (kind === 'notice') notice = message;
+    else hint = message;
+  }
+
   async function onChange(e: Event): Promise<void> {
     const el = e.currentTarget as HTMLSelectElement;
     const val = el.value as ModelTier;
     notice = null;
     hint = null;
     if (val === currentTier) return;
-    if (getIsStreaming()) { notice = t('chat.thread_model.busy'); revert(el); return; }
+    if (getIsStreaming()) { say(t('chat.thread_model.busy'), 'notice'); revert(el); return; }
     pending = true;
     const result = await repickSessionModel(val);
     pending = false;
@@ -101,42 +122,60 @@
       // the next reply re-processes the whole conversation once (a one-time cost
       // bump). Surface that honestly — but only where the user bears the cost
       // (suppressed on demo / CP-paid tenants, mirroring the usage-footer gate).
-      if (!getDemoMode()) hint = t('chat.thread_model.cache_hint');
+      if (!getDemoMode()) say(t('chat.thread_model.cache_hint'), 'hint');
       return; // sessionTier updated → the bound value reflects the new tier
     }
     if (result.reason === 'overflow') {
-      notice = t('chat.thread_model.overflow').replace('{tier}', t(`llm.tier.${result.targetTier}`));
+      say(t('chat.thread_model.overflow').replace('{tier}', t(`llm.tier.${result.targetTier}`)), 'notice');
     } else if (result.reason === 'busy') {
-      notice = t('chat.thread_model.busy');
+      say(t('chat.thread_model.busy'), 'notice');
     } else {
-      notice = t('chat.thread_model.error');
+      say(t('chat.thread_model.error'), 'notice');
     }
     revert(el);
   }
 </script>
 
 {#if show}
-  <div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-1.5 px-1 text-xs text-text-subtle">
-    <div class="flex items-center gap-2">
-      <label for="thread-model-control" class="shrink-0">{t('chat.thread_model.label')}</label>
-      <select
-        id="thread-model-control"
-        value={currentTier}
-        onchange={onChange}
-        disabled={pending || getIsStreaming()}
-        class="bg-transparent border border-border/60 rounded-md px-2 py-1 text-text outline-none focus:border-accent cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-        aria-label={t('chat.thread_model.change')}
-        title={t('chat.thread_model.change')}
-      >
-        {#each tiers as tier (tier)}
-          <option value={tier}>{tierLabel(tier)}</option>
-        {/each}
-      </select>
+  {#if compact}
+    <!-- Header form: select only. The accessible name carries the "Läuft auf"
+         meaning the visible label carries in the composer form. -->
+    <select
+      id="thread-model-control-compact"
+      value={currentTier}
+      onchange={onChange}
+      disabled={pending || getIsStreaming()}
+      class="max-w-[13rem] truncate bg-transparent border border-border rounded-[var(--radius-md)] px-2 py-1.5 text-xs text-text-subtle hover:text-text outline-none focus:border-accent cursor-pointer transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      aria-label="{t('chat.thread_model.label')} — {t('chat.thread_model.change')}"
+      title={t('chat.thread_model.change')}
+    >
+      {#each tiers as tier (tier)}
+        <option value={tier}>{tierLabel(tier)}</option>
+      {/each}
+    </select>
+  {:else}
+    <div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto mb-1.5 px-1 text-xs text-text-subtle">
+      <div class="flex items-center gap-2">
+        <label for="thread-model-control" class="shrink-0">{t('chat.thread_model.label')}</label>
+        <select
+          id="thread-model-control"
+          value={currentTier}
+          onchange={onChange}
+          disabled={pending || getIsStreaming()}
+          class="bg-transparent border border-border/60 rounded-md px-2 py-1 text-text outline-none focus:border-accent cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+          aria-label={t('chat.thread_model.change')}
+          title={t('chat.thread_model.change')}
+        >
+          {#each tiers as tier (tier)}
+            <option value={tier}>{tierLabel(tier)}</option>
+          {/each}
+        </select>
+      </div>
+      {#if notice}
+        <p class="mt-1 text-warning" role="status">{notice}</p>
+      {:else if hint}
+        <p class="mt-1 text-text-subtle" role="status">{hint}</p>
+      {/if}
     </div>
-    {#if notice}
-      <p class="mt-1 text-warning" role="status">{notice}</p>
-    {:else if hint}
-      <p class="mt-1 text-text-subtle" role="status">{hint}</p>
-    {/if}
-  </div>
+  {/if}
 {/if}

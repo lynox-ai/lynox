@@ -12,6 +12,7 @@
 	import { getApiBase, getContextPanelEnabled } from '../config.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
 	import HeaderModelPicker from './HeaderModelPicker.svelte';
+	import ThreadModelControl from './ThreadModelControl.svelte';
 	import StatusBar from './StatusBar.svelte';
 	import SetupBanner from './SetupBanner.svelte';
 	import PublicDemoBanner from './PublicDemoBanner.svelte';
@@ -855,11 +856,19 @@
 				<div class="flex items-center gap-1">
 					<!-- Model picker (model-presets W4) — new-chat only, relocated here
 					     from above the composer to free composer space. Picks the tier
-					     (balanced/deep) for turn 1; once the chat starts it disappears and
-					     the per-thread control in the composer takes over. -->
+					     (balanced/deep) for turn 1; once the chat starts it hands over to
+					     the per-thread control in the slot right below. -->
 					{#if isActive('/app', true) && !getSessionId()}
 						<div class="hidden sm:block mr-1">
 							<HeaderModelPicker />
+						</div>
+					{/if}
+					<!-- Per-thread model control, same slot, once a session exists (2026-07-30).
+					     Desktop only — mobile keeps the labelled row above the composer, where
+					     there is room for it. -->
+					{#if isActive('/app', true) && getSessionId()}
+						<div class="hidden sm:block mr-1">
+							<ThreadModelControl compact />
 						</div>
 					{/if}
 					<!-- Private mode toggle (chat page only) -->
