@@ -44,6 +44,19 @@ jobs:
       # Pure bash + grep over the web-ui sources. No install needed.
       - run: bash packages/web-ui/scripts/hex-guard.sh
 
+  # A gated path is only as gated as its DEFAULT. v2.11.0 shipped a config flag
+  # reading `?? true`, so a brand-new HTML parser went live on every instance that
+  # set nothing — reviewed, tested, released, and nobody decided it. This job asks
+  # the one question none of the other gates ask: what runs when an operator
+  # configures nothing? A new default-ON flag has to be written into the inventory,
+  # which is the deliberate act that was missing.
+  default-on-inventory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # Pure bash + grep over the config schema and src. No install needed.
+      - run: bash scripts/default-on-inventory.sh
+
   web-ui-typecheck:
     runs-on: ubuntu-latest
     steps:

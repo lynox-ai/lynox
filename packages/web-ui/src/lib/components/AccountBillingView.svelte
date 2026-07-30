@@ -18,9 +18,9 @@
 	If the env is unset (older / unconfigured instance), the CTA disappears
 	entirely and only the support@ fallback shows. No more broken JSON 401.
 
-	Full engine→CP→Stripe SSO (1-click instead of 2-click) deferred to
-	[[project_pr3_stripe_portal_sso_deferred]] — PRD-v3 at
-	`pro/docs/internal/PRD-STRIPE-PORTAL-SSO.md` is the spec for that sprint.
+	Full engine→CP→Stripe SSO (1-click instead of 2-click) is deferred. Its spec
+	lives with the hosting control plane, not in this repo; this component
+	deliberately stops at the 2-click flow.
 
 	Tier-awareness audit (`managed` value from /api/config, canonical post-v1.8.0):
 	| Surface                  | null (self-host) | hosted (BYOK) | managed / managed_pro |
@@ -171,9 +171,8 @@
 				     CHF 79/149 Managed plans. Gated on `managed === 'hosted'`, NOT
 				     `isHostedInstance(managed)` (which is true for EVERY CP tier
 				     incl. managed/managed_pro and used to wrongly show this box to
-				     paying Managed customers). Mailto stopgap until
-				     [[project_pr3_stripe_portal_sso_deferred]] lands a proper
-				     in-portal plan-switch flow. -->
+				     paying Managed customers). Mailto stopgap until a proper
+				     in-portal plan-switch flow lands. -->
 				<div class="rounded border border-border bg-bg-subtle p-4 text-sm space-y-2">
 					<p class="font-medium text-text">{t('account.billing.upgrade_heading')}</p>
 					<p class="text-text-muted">{t('account.billing.upgrade_body')}</p>

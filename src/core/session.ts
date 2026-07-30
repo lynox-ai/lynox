@@ -26,7 +26,7 @@ import type {
   PromptText,
 } from '../types/index.js';
 import { effectiveContextWindow } from '../types/index.js';
-import { resolveRunModel, resolveTierModel, hybridSlotClientConfig } from './tier-resolver.js';
+import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent, RunAbortedError } from './agent.js';
@@ -755,16 +755,12 @@ export class Session {
     }
     // Mirror the prompt-assembly that _createAgent uses so the hash and the
     // recorded snapshot reflect what the Agent actually sees (Fix C, v1.5.2).
-    // The resolved tier map is built from the SAME base provider `_createAgent`
-    // uses (`getActiveProvider()`), so the snapshot's identity context matches
-    // the agent's. This mirror APPROXIMATES _createAgent — it reproduces the
+    // Both the tier map and the identity provider come from the SAME helpers
+    // `_createAgent` calls, so the hybrid-slot case can no longer diverge here.
+    // This mirror still APPROXIMATES _createAgent — it reproduces the
     // durable-substrate suffix and identity context, but not yet every other
-    // suffix / hybrid-slot identity delta (tracked in the deferred register).
-    const runIdentityContext = modelIdentityContext(
-      this._profileOverride?.provider ?? this.engine.getUserConfig().provider,
-      model,
-      this._identityTierMap(runBaseProvider),
-    );
+    // suffix delta (tracked in the deferred register).
+    const runIdentityContext = this._identityContext(runSnap, runBaseProvider, model);
     // DK.1: _createAgent appends this suffix to basePrompt when the substrate is on; mirror it
     // so a durable-on run's snapshot/hash isn't silently divergent from the real agent prompt.
     const snapshotBase = this.engine.getUserConfig().durable_memory_enabled === true
@@ -1320,6 +1316,24 @@ export class Session {
     // summary run below only *appends* (the summary prompt + reply), so the
     // snapshot still captures every result that is about to be reset away.
     const preCompactionMessages = this.saveMessages();
+    // DK.1 F5: capture the sticky conversation taint at the TOP, and re-arm it on
+    // every exit below.
+    //
+    // Two separate things clear it, which is why this sits here and not next to
+    // the reset. The obvious one is `reset()` further down — the
+    // fresh-conversation path, whose post-compaction seed carries no untrusted
+    // marker for `loadMessages` to re-derive from. The one that actually fires
+    // first is the SUMMARISER RUN itself (`this.run(..., { internal: true })`
+    // below): it is a nested run over a rewritten message set, and it lands the
+    // latch on false before compaction has decided anything. So even the
+    // early-return path at `if (!summary)` — which deliberately leaves the thread
+    // intact — came back with the durable-write gate disarmed.
+    //
+    // Strictly one-way: a compaction may keep the gate armed, never disarm it.
+    const taintedBeforeCompaction = this.agent?.conversationSawUntrusted ?? false;
+    const rearmTaint = (): void => {
+      if (taintedBeforeCompaction) this.agent?.restoreConversationTaint();
+    };
     // Debug-export Tier 2: capture the triggering occupancy AND the active run id
     // BEFORE the summary run below mutates the agent's last-usage anchor and (via
     // its own run() finally) nulls currentRunId. For auto-compaction this is the
@@ -1393,6 +1407,7 @@ export class Session {
     // context on a transient blip — and a returned block string was even injected
     // as the authoritative summary, corrupting the thread.)
     if (!summary) {
+      rearmTaint();
       return { success: false, summary: '' };
     }
 
@@ -1427,6 +1442,17 @@ export class Session {
     // byte cap; empty for the common no-image thread (zero behaviour change).
     const carriedImages = evictImagesFrom(preCompactionMessages);
 
+    // DK.1 F5: carry the sticky conversation taint ACROSS the rewrite.
+    //
+    // Compaction goes through `reset()` — the fresh-conversation path, which
+    // clears the latch by design — and then `loadMessages()`, which re-derives
+    // it from the new context. But the post-compaction seed is a summary: no
+    // wrapped-untrusted marker, no `tool_use` block naming an external-content
+    // tool. So the re-derivation lands on false and the durable-write gate
+    // disarms on a conversation that HAS ingested untrusted data. Auto-compaction
+    // fires on context pressure, so this hit exactly the long research threads
+    // most likely to be tainted.
+    //
     this.reset();
     if (summary) {
       this.loadMessages(
@@ -1477,8 +1503,10 @@ export class Session {
           });
         } catch { /* fire-and-forget */ }
       }
+      rearmTaint();
       return { success: true, summary };
     }
+    rearmTaint();
     return { success: false, summary: '' };
   }
 
@@ -1939,6 +1967,47 @@ export class Session {
   }
 
   /**
+   * The whole identity block for a run — provider line AND tier map.
+   *
+   * ONE expression, called by both `_createAgent` and the run-snapshot mirror,
+   * because "both call the same helpers" was not enough: the mirror had drifted
+   * to the wrong provider.
+   *
+   * ⚠ This is a smaller guarantee than it looks. Sharing the expression removes
+   * the drift that comes from editing one site's ARGUMENTS; it does not stop
+   * someone replacing the call. A review verified that: re-introducing the exact
+   * pre-fix bug at the mirror still passes every test that touches the identity
+   * prompt. A Session-level test that records a snapshot under a hybrid tier set
+   * and compares it to the live prompt is owed — see the deferred register.
+   */
+  private _identityContext(
+    tierSnap: ReturnType<typeof resolveTierModel>,
+    baseProvider: LLMProvider,
+    modelId: string,
+  ): string {
+    return modelIdentityContext(
+      this._identityProvider(tierSnap, baseProvider),
+      modelId,
+      this._identityTierMap(baseProvider),
+    );
+  }
+
+  /**
+   * The provider this run effectively uses — which is therefore also the one its
+   * prompt must name. Thin binding over {@link effectiveProviderForRun}.
+   *
+   * ⚠ `_createAgent` also passes this value as the AgentConfig `provider` and
+   * resolves the API key on it, so it selects the WIRE. Not prompt cosmetics.
+   */
+  private _identityProvider(tierSnap: ReturnType<typeof resolveTierModel>, baseProvider: LLMProvider): LLMProvider | undefined {
+    return effectiveProviderForRun(tierSnap, baseProvider, {
+      profileOverrideProvider: this._profileOverride?.provider,
+      hasProfileOverride: this._profileOverride !== undefined && this._profileOverride !== null,
+      configProvider: this.engine.getUserConfig().provider,
+    });
+  }
+
+  /**
    * Feature-gated proactive-deep escalation suffix. Resolves the deep-slot
    * provider so the Anthropic (premium) cost-gate applies. Empty unless the
    * `proactive-deep` flag is on AND the deep slot is cheap (or the Anthropic
@@ -1983,9 +2052,8 @@ export class Session {
     const slotCfg = this._profileOverride
       ? { crossProviderSlot: false as const }
       : hybridSlotClientConfig(tierSnap, baseProvider);
-    const effectiveProvider: LLMProvider | undefined = slotCfg.crossProviderSlot
-      ? slotCfg.provider
-      : (this._profileOverride?.provider ?? userConfig.provider);
+    // Same resolution the run-snapshot mirror uses — see `_identityProvider`.
+    const effectiveProvider: LLMProvider | undefined = this._identityProvider(tierSnap, baseProvider);
     const entries = registry.getEntries();
     // Wrap handlers with the plugin gate while PRESERVING every ToolEntry field
     // (endsTurn, detailedGuidance, …) — see applyPluginToolGate for why the spread
@@ -2072,11 +2140,7 @@ export class Session {
     // resolved tier map (built from the same `baseProvider`) tells the agent
     // which concrete model each fast/balanced/deep tier maps to, so it plans
     // against the real routing instead of a hallucinated per-provider table.
-    const identityContext = modelIdentityContext(
-      effectiveProvider,
-      model,
-      this._identityTierMap(baseProvider),
-    );
+    const identityContext = this._identityContext(tierSnap, baseProvider, model);
     const systemPrompt = (this.agentOverrides.systemPromptSuffix
       ? basePrompt + this.agentOverrides.systemPromptSuffix
       : basePrompt) + identityContext + this._proactiveDeepSuffix(baseProvider) + currentDateContext();
@@ -2154,7 +2218,7 @@ export class Session {
       // self-host `openai_context_window`. Undefined for managed/Anthropic
       // (registry knows the size). Lets the agent trim against the real window.
       nativeContextWindow: this._profileOverride?.context_window ?? userConfig.openai_context_window,
-      // Provider-aware key resolution via [[provider-keys]] — pre-1.5.2 this
+      // Provider-aware key resolution via `llm/provider-keys.ts` — pre-1.5.2 this
       // read `userConfig.api_key` directly, which is empty for Mistral/Custom.
       // Cross-provider hybrid slot → use the slot's enriched creds (the vault/CP
       // key + Mistral host injected by enrichTierSetCreds / applyManagedTierSet-

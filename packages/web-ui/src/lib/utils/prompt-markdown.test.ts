@@ -9,6 +9,7 @@ import {
 	PROMPT_EMITTED_TAGS,
 	PROMPT_STRIPPED_TAGS,
 	PROMPT_ALLOWED_ATTR,
+	VALUE_SLOT,
 } from './prompt-markdown.js';
 
 /**
@@ -347,6 +348,12 @@ describe('renderPromptMarkdown — the prompt still reads as intended', () => {
 describe('renderPromptSegments', () => {
 	const LF = String.fromCharCode(0x0a);
 	const NUL = String.fromCharCode(0);
+	/**
+	 * The REAL slot, imported — not a mirrored copy. A local copy made the
+	 * "not a character an HTML parser deletes" assertion below compare two
+	 * test-side constants, so putting the module back to NUL left it green.
+	 */
+	const SLOT = VALUE_SLOT;
 	const frame = (text: string) => ({ kind: 'frame' as const, text });
 	const value = (text: string) => ({ kind: 'value' as const, text });
 
@@ -396,10 +403,33 @@ describe('renderPromptSegments', () => {
 	it('a value containing the placeholder cannot shift the others', () => {
 		// The placeholder is removed from every value first, so this is a
 		// property we enforce rather than a collision we hope against.
-		const out = renderPromptSegments([frame('A: '), value(`x${NUL}y`), frame(' B: '), value('second')]);
+		const out = renderPromptSegments([frame('A: '), value(`x${SLOT}y`), frame(' B: '), value('second')]);
 		expect(out).toContain('xy');
 		expect(out).toContain('second');
-		expect(out).not.toContain(NUL);
+		expect(out).not.toContain(SLOT);
+	});
+
+	it('the placeholder is not a character an HTML parser deletes', () => {
+		// The regression this pins: the slot used to be NUL, and a browser's HTML
+		// parser DROPS U+0000 — `innerHTML`, `DOMParser` and `<template>` all
+		// delete it outright (measured in Chrome 150). Every slot vanished inside
+		// DOMPurify, `split` then found one part, and every value was silently
+		// dropped: "Delete event ? This cannot be undone." with the id gone.
+		//
+		// It could not be caught here: DOMPurify is a no-op without a DOM, and
+		// `linkedom` — the DOM this package has — PRESERVES NUL, so even a
+		// DOM-mode test would have gone green. Hence the character-level assert.
+		// Assert the actual property, not just "≠ NUL": a slot of 'X' passed the
+		// first version of this assertion — and 'X' would split on every frame
+		// that happens to contain one.
+		expect(SLOT).toHaveLength(1);
+		const cp = SLOT.codePointAt(0) ?? 0;
+		expect(cp).toBeGreaterThanOrEqual(0xe000); // Private Use Area — unassigned,
+		expect(cp).toBeLessThanOrEqual(0xf8ff);    // so it cannot occur in real text.
+		// Also has to survive layer 1 untouched, in every construct it can land in.
+		for (const frameText of ['x ', '**b** ', '> ', '- ', '# ']) {
+			expect(renderPromptMarkdown(`${frameText}${SLOT}`)).toContain(SLOT);
+		}
 	});
 
 	it('renders an all-frame prompt exactly like the unsegmented path', () => {

@@ -28,9 +28,12 @@ import { EngineDb } from '../../src/core/engine-db.js';
 import { SubjectStore } from '../../src/core/subject-store.js';
 import { KnowledgeStore } from '../../src/core/knowledge-store.js';
 import { createToolContext } from '../../src/core/tool-context.js';
-import { rememberTool, recallTool } from '../../src/tools/builtin/knowledge.js';
+import {
+  rememberTool, recallTool, memoryBlockEditTool,
+  memoryRetireTool, memoryFocusTool,
+} from '../../src/tools/builtin/knowledge.js';
 import { DURABLE_MEMORY_PROMPT_SUFFIX } from '../../src/core/prompts.js';
-import type { ToolEntry } from '../../src/types/index.js';
+import type { ToolEntry, PromptUserFn } from '../../src/types/index.js';
 import type { CapturedEntry, GoldThread, MatchJudge } from './knowledge-substrate-runner.js';
 
 /**
@@ -41,14 +44,45 @@ import type { CapturedEntry, GoldThread, MatchJudge } from './knowledge-substrat
  * lands in the product. Only the `mail_read` line is replay-specific (the stub
  * stands in for the real inbox tools).
  */
-export const REPLAY_SYSTEM_PROMPT = [
-  'You are lynox, a business assistant working for an operator. Keep replies to one or two sentences.',
+/** Turn-level send failures, shared by BOTH replays. The runner deliberately swallows
+ *  a failed turn (a transient provider error must not tank the corpus), which means a
+ *  run where EVERY turn 400'd is indistinguishable from a run with genuinely poor
+ *  recall — both print a number and exit 0. That happened twice on 2026-07-27. The
+ *  count belongs in the report, not only on stderr. */
+export const replayFailures = { sends: 0, turns: 0 };
+
+/** Zero the counters. MUST run before each run of a multi-run invocation: the object is
+ *  module-level, so without this run 2 reports run 1's failures on top of its own and the
+ *  persisted `turnFailures` is cumulative — a rate that only ever climbs. */
+export function resetReplayFailures(): void {
+  replayFailures.sends = 0;
+  replayFailures.turns = 0;
+}
+
+/** The role preamble both replays share. Exported so the DK-OFF baseline derives it
+ *  instead of duplicating the lines — a silent drift between the two preambles would
+ *  move the comparison without anyone noticing.
+ *
+ *  NB the reply-length cap lives here and applies to BOTH sides. It matters more than it
+ *  looks: the legacy extractor's input is the assistant reply and it bails under 50/300
+ *  chars (`memory.ts:480,484`), so a tighter cap would starve the baseline's capture path
+ *  while leaving DK's tool-call path untouched. Change it on one side only and the
+ *  comparison silently favours DK. */
+export const REPLAY_PREAMBLE = [
+  'You are lynox, a business assistant working for an operator. Answer in a few sentences.',
   'When a message says an email or document has arrived, call `mail_read` to read it BEFORE acting on it.',
+].join('\n');
+
+export const REPLAY_SYSTEM_PROMPT = [
+  REPLAY_PREAMBLE,
   DURABLE_MEMORY_PROMPT_SUFFIX,
 ].join('\n');
 
-/** A per-thread stub `mail_read` — returns the payload staged for the current turn. */
-function makeMailReadStub(): { tool: ToolEntry; stage: (payload: string | undefined) => void } {
+/** A per-thread stub `mail_read` — returns the payload staged for the current turn.
+ *  Exported so the DK-OFF baseline replay drives the SAME stub: if the two runs
+ *  differed in how untrusted payloads reach the agent, their numbers would not be
+ *  comparable, which is the only thing the baseline exists to be. */
+export function makeMailReadStub(): { tool: ToolEntry; stage: (payload: string | undefined) => void } {
   let staged: string | undefined;
   const tool: ToolEntry = {
     definition: {
@@ -81,8 +115,9 @@ export interface ReplayProviderConfig {
   openaiModelId?: string | undefined;
 }
 
-/** The Agent config fragment that selects the provider (empty for direct Anthropic). */
-function providerAgentFields(cfg: ReplayProviderConfig): { provider: 'openai'; apiBaseURL: string; openaiModelId: string } | Record<string, never> {
+/** The Agent config fragment that selects the provider (empty for direct Anthropic).
+ *  Exported for the DK-OFF baseline — same provider wiring on both sides. */
+export function providerAgentFields(cfg: ReplayProviderConfig): { provider: 'openai'; apiBaseURL: string; openaiModelId: string } | Record<string, never> {
   if (cfg.provider === 'openai') {
     return {
       provider: 'openai',
@@ -128,8 +163,10 @@ const TURN_WATCHDOG_MS = 300_000;
  * A WatchdogError is NOT retried (post-abort agent state is mid-turn — the
  * caller decides: the replay abandons the thread, the judge scores no-match).
  * Other non-rate errors propagate to the caller's existing handling.
+ * Exported so the DK-OFF baseline retries identically — a harsher retry policy on
+ * one side of the comparison would move the number it is meant to establish.
  */
-async function sendWithRetry(agent: Agent, text: string, label: string): Promise<string> {
+export async function sendWithRetry(agent: Agent, text: string, label: string): Promise<string> {
   const maxAttempts = 5;
   for (let attempt = 1; ; attempt += 1) {
     let timer: NodeJS.Timeout | undefined;
@@ -171,7 +208,21 @@ export function makeRealReplayThread(opts: RealReplayOpts): (thread: GoldThread)
       const ks = new KnowledgeStore(engine, subjects);
       const ctx = createToolContext({} as never);
       ctx.knowledgeStore = ks;
+      // `memory_focus` returns "not available" without this (`tools/builtin/knowledge.ts`
+      // reads `toolContext.subjectStore`, which `createToolContext` defaults to null). The
+      // store was already built one line up and simply never reached the context, so the
+      // tool was registered and dead.
+      ctx.subjectStore = subjects;
       const mail = makeMailReadStub();
+
+      // `memory_block_edit` and `memory_retire` refuse outright when the agent has no
+      // interactive channel (`!agent.promptUser`). Auto-CONFIRM rather than auto-deny,
+      // because the comparison decides it: the six legacy `memory_*` tools call
+      // `promptUser` ZERO times — they execute unconfirmed. Denying here would leave DK
+      // two tools that always refuse while the baseline mutates freely, which is the same
+      // asymmetry in a new coat. It approximates a cooperative operator, which is the
+      // closest a replay can get to "the tool is available".
+      const confirmStub: PromptUserFn = (_q, options) => Promise.resolve(options?.[0] ?? 'yes');
 
       const agent = new Agent({
         name: `replay-${thread.id}`,
@@ -181,10 +232,31 @@ export function makeRealReplayThread(opts: RealReplayOpts): (thread: GoldThread)
         durableMemoryEnabled: true,
         systemPrompt: REPLAY_SYSTEM_PROMPT,
         toolContext: ctx,
+        promptUser: confirmStub,
         // Erase the per-tool input generics into the registry's ToolEntry[] shape
         // (the engine does this via `registry.register<T>`; a literal array needs
         // the cast because ToolHandler's input param is contravariant).
-        tools: [rememberTool, recallTool, mail.tool] as ToolEntry[],
+        //
+        // FIVE of the six DK tools `engine.ts:1290-1296` registers, all of them
+        // FUNCTIONAL. Two rounds were needed to get here and the second is the
+        // instructive one:
+        //   · until 2026-07-28 only remember/recall were wired, against a baseline
+        //     holding its full production set — an asymmetry that ran AGAINST DK and
+        //     therefore survived a review pass hunting bias in the other direction.
+        //   · the first repair added the other four to this array and changed nothing:
+        //     block_edit/retire refuse without `promptUser`, focus/archive_search return
+        //     "not available" without their tool-context deps. DK still ran 2-of-6
+        //     FUNCTIONAL while a comment here claimed the gap was closed — and each dead
+        //     call still burned one of the six `maxIterations`, which is the concrete
+        //     mechanism behind DK scoring WORSE after the "fix".
+        // Registering a tool is not wiring it. `archive_search` is deliberately absent:
+        // it reads the legacy archive via `toolContext.knowledgeLayer`, and a throwaway
+        // per-thread db has no archive, so it could only ever return empty — registering
+        // it would buy nothing and cost an iteration per call.
+        tools: [
+          rememberTool, recallTool, memoryBlockEditTool,
+          memoryRetireTool, memoryFocusTool, mail.tool,
+        ] as ToolEntry[],
         ...providerAgentFields(opts),
       });
 
@@ -198,6 +270,7 @@ export function makeRealReplayThread(opts: RealReplayOpts): (thread: GoldThread)
         agent.currentRunId = `${thread.id}-t${i}`;
         mail.stage(turn.untrusted === true ? (turn.externalPayload ?? '') : undefined);
         opts.onTurn?.(thread.id, i);
+        replayFailures.turns += 1;
         let abandoned = false;
         try {
           // eslint-disable-next-line no-await-in-loop
@@ -205,6 +278,7 @@ export function makeRealReplayThread(opts: RealReplayOpts): (thread: GoldThread)
         } catch (err) {
           // A transient provider error must not tank the whole corpus — the turn
           // simply captures nothing (surfaces as lower recall, visibly).
+          replayFailures.sends += 1;
           process.stderr.write(`  [replay] ${thread.id} t${i} send failed: ${(err instanceof Error ? err.message : String(err)).slice(0, 160)}\n`);
           // A watchdog abort leaves the agent mid-turn (dangling tool_use in its
           // message state) — further sends on this thread would cascade-fail.

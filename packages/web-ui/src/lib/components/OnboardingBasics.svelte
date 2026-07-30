@@ -42,6 +42,8 @@
 	let promptId = $state('');
 	let loading = $state(true);
 	let saving = $state(false);
+	/** The settle call came back non-OK — say so instead of losing the answers quietly. */
+	let saveError = $state(false);
 
 	onMount(() => {
 		void start();
@@ -77,11 +79,23 @@
 		try {
 			// Settle the tabs prompt with the typed answers, then promote. A blank answer
 			// rides the canonical skip marker — the engine promotion writes nothing for it.
-			await fetch(`${getApiBase()}/sessions/${sessionId}/reply-tabs`, {
+			//
+			// The response is CHECKED. It used to be discarded, which mattered once
+			// the engine started letting an agent prompt supersede an abandoned
+			// card: a card superseded while someone was still typing settles with
+			// an error, and swallowing it meant the typed answers vanished with no
+			// sign. Losing them is still possible; losing them SILENTLY is not.
+			const settleRes = await fetch(`${getApiBase()}/sessions/${sessionId}/reply-tabs`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ promptId, answers: answers.map((a) => a.trim() || '__dismissed__') }),
 			});
+			if (!settleRes.ok) {
+				// Do NOT fall through to `finally`'s onDone(): that closes the card,
+				// which is precisely how the answers would be lost.
+				saveError = true;
+				return;
+			}
 			const promoteRes = await fetch(`${getApiBase()}/onboarding/knowledge/promote`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -95,7 +109,9 @@
 			/* best-effort — onboarding continues regardless of a promote hiccup */
 		} finally {
 			saving = false;
-			onDone(companyAnswer(), knowledgeThreadId);
+			// A failed settle keeps the card open with the answers in it; every
+			// other outcome, including a promote hiccup, moves onboarding along.
+			if (!saveError) onDone(companyAnswer(), knowledgeThreadId);
 		}
 	}
 
@@ -153,5 +169,8 @@
 				{t('onboard.skip_onboarding')}
 			</button>
 		</div>
+		{#if saveError}
+			<p class="pt-1.5 text-sm text-danger">{t('onboard.basics_save_failed')}</p>
+		{/if}
 	{/if}
 </div>
