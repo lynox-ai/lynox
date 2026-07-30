@@ -11,6 +11,8 @@ const mockSend = vi.fn().mockResolvedValue('sub-agent result');
  * this to assert the cost flows into RunHistory.updateRun.
  */
 let mockCostSnapshot: import('../../types/index.js').CostSnapshot | null;
+/** Set to give each constructed child its OWN snapshot, in construction order. */
+let mockCostSnapshotQueue: Array<import('../../types/index.js').CostSnapshot> | null;
 
 interface MockedAgentShape {
   send: typeof mockSend;
@@ -51,7 +53,11 @@ vi.mock('../../core/agent.js', () => ({
     this.promptSecret = config.promptSecret;
     this.promptTabs = config.promptTabs;
     this.noteUntrustedData = vi.fn();
-    this.getCostSnapshot = () => mockCostSnapshot;
+    // Per-instance when a queue is set. The single shared `mockCostSnapshot`
+    // cannot express "these two children spent different amounts", so a test
+    // that needs per-child cost would be asserting the fixture, not the code.
+    const queued = mockCostSnapshotQueue?.shift();
+    this.getCostSnapshot = queued !== undefined ? () => queued : () => mockCostSnapshot;
   }),
   // spawn.ts does `err instanceof RunAbortedError` in the failure catch; the
   // factory mock replaces the whole module, so this export must exist or the
@@ -138,6 +144,11 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
 // === Tests ===
 
 describe('spawn_agent tool', () => {
+  /** Every event the handler streamed, in order. */
+  function streamEvents(onStream: ReturnType<typeof vi.fn>): Array<Record<string, unknown>> {
+    return onStream.mock.calls.map((c) => c[0] as Record<string, unknown>);
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockSend.mockResolvedValue('sub-agent result');
@@ -145,6 +156,7 @@ describe('spawn_agent tool', () => {
     // Default: no cost snapshot — the T2-X1 cost-recording test overrides
     // this to a concrete value to assert it flows into RunHistory.updateRun.
     mockCostSnapshot = null;
+    mockCostSnapshotQueue = null;
     testCounters = {
       httpRequests: 0,
       writeBytes: 0,
@@ -226,6 +238,62 @@ describe('spawn_agent tool', () => {
     } finally {
       vi.unstubAllEnvs();
       reloadConfig(); // drop the blocklist-bearing cache for sibling tests
+    }
+  });
+
+  it('announces NOTHING when the profile is refused — no model id reaches the UI', async () => {
+    // The refusal above proves the child does not run. It does NOT prove the UI
+    // was never told it would: the `spawn` event used to be streamed BEFORE the
+    // ceiling/blocklist checks ran, so the panel rendered `worker ·
+    // claude-fable-5` as "the model it runs on" and only then errored. A UI that
+    // names a model the run refuses is the third wrong answer the shared
+    // resolution exists to prevent, so assert on the wire, not on the throw.
+    const { reloadConfig } = await import('../../core/config.js');
+    vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+      pinned: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'claude-fable-5' },
+    }));
+    vi.stubEnv('LYNOX_BLOCKED_MODEL_IDS', 'claude-fable-');
+    reloadConfig();
+    try {
+      const onStream = vi.fn();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'worker', task: 'Analyze', profile: 'pinned' }] },
+          makeAgent({ onStream: onStream as StreamHandler }),
+        ),
+      ).rejects.toThrow(/model blocklist/);
+
+      expect(streamEvents(onStream).filter((e) => e['type'] === 'spawn')).toHaveLength(0);
+      expect(JSON.stringify(streamEvents(onStream))).not.toContain('claude-fable-5');
+    } finally {
+      vi.unstubAllEnvs();
+      reloadConfig();
+    }
+  });
+
+  it('refuses the WHOLE batch when only the second spec is impermissible', async () => {
+    // Reserve-and-announce is one step for the batch, so a per-spec refusal after
+    // the announcement would leave a half-announced batch on screen with one
+    // child that never starts. Nothing may be announced.
+    const { reloadConfig } = await import('../../core/config.js');
+    vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+      pinned: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'claude-fable-5' },
+    }));
+    vi.stubEnv('LYNOX_BLOCKED_MODEL_IDS', 'claude-fable-');
+    reloadConfig();
+    try {
+      const onStream = vi.fn();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'ok', task: 'A' }, { name: 'bad', task: 'B', profile: 'pinned' }] },
+          makeAgent({ onStream: onStream as StreamHandler }),
+        ),
+      ).rejects.toThrow(/model blocklist/);
+
+      expect(streamEvents(onStream).filter((e) => e['type'] === 'spawn')).toHaveLength(0);
+    } finally {
+      vi.unstubAllEnvs();
+      reloadConfig();
     }
   });
 
@@ -427,6 +495,44 @@ describe('spawn_agent tool', () => {
     }
   }
 
+  /**
+   * The `spawn` event's `model` is the THIRD place an id reaches a reader, and
+   * it had its own charset until this test: one that stripped `/` and cut at 64,
+   * so a Fireworks child was announced to the panel as
+   * `accountsfireworksmodelsglm-5p2`. Neither PR could see it alone — the
+   * sanitiser and the event were added on separate branches, each green.
+   */
+  it('announces the same id to the UI that it reports to the parent', async () => {
+    const { setTierSetResolver } = await import('../../core/tier-resolver.js');
+    const onStream = vi.fn();
+    try {
+      setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: {
+          balanced: {
+            provider: 'openai',
+            model_id: 'accounts/fireworks/models/glm-5p2',
+            api_key: 'sk-test',
+            api_base_url: 'https://api.fireworks.ai/inference/v1',
+          },
+        },
+      });
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'hosted', task: 'think' }] },
+        makeAgent({ onStream: onStream as StreamHandler }),
+      );
+      const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
+      const announced = (spawn['subAgents'] as Array<{ model?: string }>)[0]!.model;
+      expect(announced).toBe('accounts/fireworks/models/glm-5p2');
+      // The same string in both places — the identity prompt tells the agent to
+      // report what the result surfaces, and the panel shows what the event
+      // announced. Two answers to "which model ran?" is the whole defect.
+      expect(result).toContain(`(ran on \`${announced}\`)`);
+    } finally {
+      setTierSetResolver({ routingMode: 'standard', tierSet: null });
+    }
+  });
+
   it('reports a path-shaped model id to the parent WITHOUT mangling it', async () => {
     // The result header lands OUTSIDE the untrusted-data envelope and the identity
     // prompt orders the agent to report the id surfaced here. This site used to
@@ -490,7 +596,10 @@ describe('spawn_agent tool', () => {
     );
 
     expect(onStream).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'spawn', agents: ['notifier'] }),
+      expect.objectContaining({
+        type: 'spawn',
+        subAgents: [expect.objectContaining({ name: 'notifier' })],
+      }),
     );
   });
 
@@ -512,6 +621,242 @@ describe('spawn_agent tool', () => {
     expect(onStream).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'spawn_child_done', subAgent: 'silent' }),
     );
+  });
+
+  /**
+   * Batch + child identity, the contract the chat UI attributes activity with.
+   *
+   * The UI used to key sub-agent state on the model-chosen NAME and keep a
+   * single spawn object per message. Both break under load the engine allows
+   * without complaint: `validateSpawnInput` checks a name's length and control
+   * characters but never its uniqueness, and the agent loop runs several
+   * `spawn_agent` calls concurrently. Two children called "researcher" merged
+   * into one row; a second batch overwrote the first. These pin the identifiers
+   * that make the attribution exact.
+   */
+  describe('batch + child identity', () => {
+    it('gives two children sharing a name distinct ids', async () => {
+      const onStream = vi.fn();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'researcher', task: 'A' }, { name: 'researcher', task: 'B' }] },
+        makeAgent({ onStream: onStream as StreamHandler }),
+      );
+
+      const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
+      const subs = spawn['subAgents'] as Array<{ id: string; name: string }>;
+      expect(subs.map((s) => s.name)).toEqual(['researcher', 'researcher']);
+      // The whole point: same name, different identity.
+      expect(new Set(subs.map((s) => s.id)).size).toBe(2);
+
+      // And each child's completion is attributable to exactly one of them.
+      const doneIds = streamEvents(onStream)
+        .filter((e) => e['type'] === 'spawn_child_done')
+        .map((e) => e['subAgentId']);
+      expect(new Set(doneIds)).toEqual(new Set(subs.map((s) => s.id)));
+    });
+
+    it('stamps ONE spawnId across the batch and derives child ids from it', async () => {
+      const onStream = vi.fn();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }] },
+        makeAgent({ onStream: onStream as StreamHandler }),
+      );
+
+      const events = streamEvents(onStream).filter((e) =>
+        e['type'] === 'spawn' || e['type'] === 'spawn_child_done' || e['type'] === 'spawn_progress');
+      expect(events.length).toBeGreaterThanOrEqual(3);
+      const ids = new Set(events.map((e) => e['spawnId']));
+      expect(ids.size).toBe(1);
+
+      const spawnId = [...ids][0] as string;
+      expect(spawnId).toBeTruthy();
+      const subs = (events.find((e) => e['type'] === 'spawn')!['subAgents']) as Array<{ id: string }>;
+      // Derived, not independent: a consumer can recover the batch from a child.
+      for (const s of subs) expect(s.id.startsWith(`${spawnId}:`)).toBe(true);
+    });
+
+    it('gives two concurrent batches different spawnIds', async () => {
+      const onStream = vi.fn();
+      const agent = makeAgent({ onStream: onStream as StreamHandler });
+      await Promise.all([
+        spawnAgentTool.handler({ agents: [{ name: 'x', task: 'A' }] }, agent),
+        spawnAgentTool.handler({ agents: [{ name: 'y', task: 'B' }] }, agent),
+      ]);
+
+      const spawnIds = streamEvents(onStream)
+        .filter((e) => e['type'] === 'spawn')
+        .map((e) => e['spawnId']);
+      expect(spawnIds).toHaveLength(2);
+      expect(new Set(spawnIds).size).toBe(2);
+    });
+
+    it('tags a child tool_call with both its display name and its id', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const onStream = vi.fn();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'digger', task: 'dig' }] },
+        makeAgent({ onStream: onStream as StreamHandler }),
+      );
+
+      const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
+      const sub = (spawn['subAgents'] as Array<{ id: string; name: string }>)[0]!;
+
+      // Replay a child event through the wrapper the child agent was handed.
+      const childCfg = vi.mocked(MockAgent).mock.calls[0]![0] as { onStream: StreamHandler };
+      onStream.mockClear();
+      await childCfg.onStream({ type: 'tool_call', name: 'read_file', input: { path: 'x' }, agent: 'digger' });
+      await childCfg.onStream({ type: 'tool_result', name: 'read_file', result: 'ok', agent: 'digger' });
+
+      const [call, result] = streamEvents(onStream);
+      expect(call).toMatchObject({ type: 'tool_call', name: 'read_file', subAgent: 'digger', subAgentId: sub.id });
+      expect(result).toMatchObject({ type: 'tool_result', name: 'read_file', subAgent: 'digger', subAgentId: sub.id });
+    });
+
+    it('names the model the child is actually built with, not the requested tier', async () => {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const onStream = vi.fn();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'thinker', task: 'think', model: 'fast' }] },
+        makeAgent({ onStream: onStream as StreamHandler }),
+      );
+
+      const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
+      const announced = (spawn['subAgents'] as Array<{ model?: string }>)[0]!.model;
+      const built = (vi.mocked(MockAgent).mock.calls[0]![0] as { model: string }).model;
+
+      // Cross-check between two paths that resolve independently of this test:
+      // the announcement (pre-spawn) and the child's construction. Announcing the
+      // tier word, the wrong spec, or a stale id all fail here.
+      expect(announced).toBe(built);
+      expect(announced).not.toBe('fast');
+    });
+
+    it('carries the role through so the UI can label the child', async () => {
+      mockGetRole.mockReturnValue({
+        model: 'fast', effort: 'low', autonomy: 'guided', denyTools: [], description: 'x',
+      } as RoleConfig);
+      const onStream = vi.fn();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'scout', task: 'look', role: 'researcher' }] },
+        makeAgent({ onStream: onStream as StreamHandler }),
+      );
+
+      const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
+      expect((spawn['subAgents'] as Array<{ role?: string }>)[0]!.role).toBe('researcher');
+    });
+
+    /**
+     * Cost per delegation (rafael 2026-07-30).
+     *
+     * The child's spend already reached the `runs` table and the tenant's
+     * balance; what was missing was the user seeing it. Reported on
+     * `spawn_child_done` because that is where it becomes known — and from the
+     * `finally`, so the abort path (which returns through neither branch) is
+     * counted too.
+     */
+    it('reports what a child actually spent when it finishes', async () => {
+      mockCostSnapshot = {
+        inputTokens: 9_000, outputTokens: 1_200, estimatedCostUSD: 0.0143,
+        iterationsUsed: 2, budgetPercent: 3,
+      };
+      const onStream = vi.fn();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'spender', task: 'work' }] },
+        makeAgent({ onStream: onStream as StreamHandler }),
+      );
+
+      const done = streamEvents(onStream).find((e) => e['type'] === 'spawn_child_done')!;
+      expect(done['costUsd']).toBe(0.0143);
+    });
+
+    it('reports the spend of a child that FAILED', async () => {
+      mockCostSnapshot = {
+        inputTokens: 3_000, outputTokens: 200, estimatedCostUSD: 0.0021,
+        iterationsUsed: 1, budgetPercent: 1,
+      };
+      mockSend.mockRejectedValue(new Error('provider exploded'));
+      const onStream = vi.fn();
+      // A batch whose only child dies rethrows; the event still has to have
+      // carried the cost before that.
+      await expect(spawnAgentTool.handler(
+        { agents: [{ name: 'doomed', task: 'work' }] },
+        makeAgent({ onStream: onStream as StreamHandler }),
+      )).rejects.toThrow();
+
+      const done = streamEvents(onStream).find((e) => e['type'] === 'spawn_child_done')!;
+      // A child that died halfway still burned tokens. Dropping its cost here
+      // makes the delegation look cheaper than the bill.
+      expect(done['ok']).toBe(false);
+      expect(done['costUsd']).toBe(0.0021);
+    });
+
+    it('reports zero rather than nothing when the model has no pricing', async () => {
+      mockCostSnapshot = null;
+      const onStream = vi.fn();
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'unpriced', task: 'work' }] },
+        makeAgent({ onStream: onStream as StreamHandler }),
+      );
+
+      const done = streamEvents(onStream).find((e) => e['type'] === 'spawn_child_done')!;
+      // The field is always present; the CLIENT decides that 0 means "unknown"
+      // and shows nothing, rather than the engine omitting it inconsistently.
+      expect(done['costUsd']).toBe(0);
+    });
+
+    it('attributes cost to the right child in a batch', async () => {
+      const costs = [0.05, 0.01];
+      mockCostSnapshotQueue = costs.map((usd) => ({
+        inputTokens: 0, outputTokens: 0, estimatedCostUSD: usd, iterationsUsed: 1, budgetPercent: 0,
+      }));
+
+      const onStream = vi.fn();
+      // Both children share a NAME on purpose. With distinct names this test
+      // passed even when `costBySub` was keyed by name — the fixture could not
+      // express the very collapse it exists to catch.
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'twin', task: 'A' }, { name: 'twin', task: 'B' }] },
+        makeAgent({ onStream: onStream as StreamHandler }),
+      );
+
+      const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
+      const subs = spawn['subAgents'] as Array<{ id: string }>;
+      const done = streamEvents(onStream).filter((e) => e['type'] === 'spawn_child_done');
+      expect(done).toHaveLength(2);
+      // Per child id, and the ids are the only thing telling the two apart.
+      const byId = new Map(done.map((e) => [e['subAgentId'], e['costUsd']]));
+      expect(byId.get(subs[0]!.id)).toBe(costs[0]);
+      expect(byId.get(subs[1]!.id)).toBe(costs[1]);
+    });
+
+    it('keys the heartbeat by child id, so same-named children stay separable', async () => {
+      vi.useFakeTimers();
+      try {
+        let release!: (v: string) => void;
+        mockSend.mockReturnValue(new Promise<string>((res) => { release = res; }));
+
+        const onStream = vi.fn();
+        const pending = spawnAgentTool.handler(
+          { agents: [{ name: 'twin', task: 'A' }, { name: 'twin', task: 'B' }] },
+          makeAgent({ onStream: onStream as StreamHandler }),
+        );
+        // Let the handler reach the heartbeat setup, then fire one tick.
+        await vi.advanceTimersByTimeAsync(5_100);
+
+        const progress = streamEvents(onStream).find((e) => e['type'] === 'spawn_progress');
+        expect(progress).toBeDefined();
+        const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
+        const subIds = (spawn['subAgents'] as Array<{ id: string }>).map((s) => s.id);
+        // Names would collapse to one entry here; ids keep both children visible.
+        expect(progress!['running']).toEqual(subIds);
+
+        release('done');
+        await vi.advanceTimersByTimeAsync(0);
+        await pending;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it('uses undefined parentRunId when agent has no currentRunId', async () => {

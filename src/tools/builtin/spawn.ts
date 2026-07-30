@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider } from '../../types/index.js';
+import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent } from '../../types/index.js';
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
@@ -291,55 +291,36 @@ export function profileExceedsMaxTier(profileModelId: string, maxTier: ModelTier
   return modelIdExceedsMaxTier(profileModelId, maxTier);
 }
 
-async function executeThinker(
-  spec: SpawnSpec,
-  parentAgent: IAgent,
-  parentOnStream: StreamHandler | null,
-  childDepth: number,
-): Promise<{ result: string; childRunId: string | undefined; model: string }> {
-  // Load role if specified
-  const resolved = spec.role ? getRole(spec.role) : undefined;
-  if (spec.role && !resolved) {
-    throw new Error(
-      `Unknown role "${spec.role}". Available roles: ${getRoleNames().join(', ')}. ` +
-      `If none of these fit, omit the "role" field and set model/effort/tools directly.`,
-    );
-  }
-
-  // 4-tier resolution: spec fields > role defaults > user config > global default
-  const userConfig = loadConfig();
-
-  // Model profile override: if spec.profile is set, use OpenAI-compatible provider
-  const profile: ModelProfile | undefined = spec.profile
-    ? userConfig.model_profiles?.[spec.profile]
-    : undefined;
-  if (spec.profile && !profile) {
-    throw new Error(`Unknown model profile "${spec.profile}". Available: ${Object.keys(userConfig.model_profiles ?? {}).join(', ') || 'none configured'}.`);
-  }
-  // A profile sets `model = profile.model_id` below, bypassing the `max_tier`
-  // clamp that `resolveRunModel` applies to a tier. That is the injection lever
-  // (DEF-0093): a prompt-injected `spawn({profile})` could route a child to a
-  // model above the tenant's cost ceiling. Enforce the ceiling HERE — but a
-  // profile cannot be clamped DOWN (you cannot substitute a different model on
-  // someone's endpoint), so the enforcement is REFUSE, not clamp (DEF-0080).
-  // Cross-provider hybrid spawn is unaffected — that runs on the tier path.
-  if (profile && profileExceedsMaxTier(profile.model_id, userConfig.max_tier)) {
-    const band = modelCapability(profile.model_id)?.tier;
-    throw new Error(`Model profile "${spec.profile}" (${profile.model_id}) is not permitted on this instance: its cost band ${band ? `"${band}"` : '(unknown)'} exceeds the max tier "${userConfig.max_tier}". A profile pins a specific endpoint and cannot be clamped down, so the spawn is refused. Use the \`model\` tier parameter (fast/balanced/deep) for a ceiling-clamped subagent.`);
-  }
-  // Model blocklist (blocked_model_ids): a profile pinning a blocked model is
-  // refused the same way — a pinned endpoint cannot be substituted, so REFUSE,
-  // not clamp. Same checkpoint as the ceiling guard above (write-accept ⟺
-  // load-keep ⟺ resolve symmetry for the profile raw-id path).
-  if (profile && isBlockedModelId(profile.model_id, userConfig.blocked_model_ids)) {
-    throw new Error(`Model profile "${spec.profile}" (${profile.model_id}) is not permitted on this instance: the model is blocked by the operator model blocklist. A profile pins a specific endpoint and cannot be substituted, so the spawn is refused. Use the \`model\` tier parameter (fast/balanced/deep) for a subagent on a permitted model.`);
-  }
-
+/**
+ * Which model a spawned child will actually run on, and the hybrid slot that
+ * decides its wire.
+ *
+ * Shared because three callers must give the SAME answer: the pre-spawn cost
+ * reservation, the `spawn` event the UI renders, and the child's own
+ * construction. Two of them used to compute it separately and disagreed — the
+ * reservation fell back to the tenant's `default_tier` while the run pins
+ * unroled spawns to `balanced`, so an instance configured `default_tier: 'deep'`
+ * reserved deep rates against the session ceiling for a child that then ran
+ * balanced. One function, one answer; a UI that names a third model would be
+ * worse still.
+ *
+ * Validation stays with the caller: this resolves, it does not refuse. The
+ * refusals live in `assertSpawnRoutingPermitted`, which the handler runs BEFORE
+ * it announces the batch — see that function for why the ordering is the whole
+ * point.
+ */
+export function resolveSpawnChildRouting(input: {
+  spec: SpawnSpec;
+  role: ReturnType<typeof getRole>;
+  profile: ModelProfile | undefined;
+  userConfig: LynoxUserConfig;
+  baseProvider: LLMProvider;
+}): { tier: ModelTier; model: string; hybridSlot: ReturnType<typeof hybridSlotClientConfig> } {
+  const { spec, role, profile, userConfig, baseProvider } = input;
   // Single chokepoint: the override gate (now a pass-through, D8) THEN CLAMP to
   // the cost ceiling THEN map to the provider's model id. Routing through
   // resolveRunModel adds the max_tier clamp this path previously skipped — a run
   // under a lower ceiling no longer reaches the deep model past its cap.
-  const baseProvider = getActiveProvider();
   const resolvedRun = resolveRunModel({
     requested: spec.model,
     // Unroled spawns pin to `balanced`, NOT the main chat's `default_tier`
@@ -348,13 +329,12 @@ async function executeThinker(
     // would silently multiply per-message cost. Roles keep their own tier
     // (operator/collector=fast); an explicit `spec.model` still wins via
     // resolveRunModel's `requested`.
-    defaultTier: (resolved?.model ?? 'balanced') as ModelTier,
+    defaultTier: (role?.model ?? 'balanced') as ModelTier,
     accountTier: userConfig.account_tier,
     maxTier: userConfig.max_tier,
     blockedModelIds: userConfig.blocked_model_ids,
     provider: baseProvider,
   });
-  const modelTier = resolvedRun.tier;
   // Slice 2: a subagent's tier follows the hybrid tier_set. When the resolved
   // tier has a CROSS-provider slot (e.g. a Mistral main with a `deep`→Sonnet-5
   // slot), the child runs on that slot's provider/model/creds with a dedicated
@@ -363,12 +343,98 @@ async function executeThinker(
   // (resolveTierModel gates on hybrid) → this is byte-parity with before.
   const hybridSlot = profile
     ? { crossProviderSlot: false as const }
-    : hybridSlotClientConfig(resolveTierModel(modelTier, baseProvider), baseProvider);
+    : hybridSlotClientConfig(resolveTierModel(resolvedRun.tier, baseProvider), baseProvider);
   // Profile overrides model ID + provider; a cross-provider hybrid slot supplies
   // its own model; otherwise use the resolved tier id for the base provider.
   const model = profile
     ? profile.model_id
     : (hybridSlot.crossProviderSlot ? hybridSlot.openaiModelId : resolvedRun.modelId);
+  return { tier: resolvedRun.tier, model, hybridSlot };
+}
+
+/**
+ * Every reason a spawn spec is refused outright, in one place — and it runs
+ * BEFORE the batch is announced.
+ *
+ * WHY THE ORDERING IS THE POINT. These four refusals used to live inside
+ * `executeThinker`, which is reached only after the `spawn` event has already
+ * been streamed to the client. So a `spawn_agent({profile})` naming a model above
+ * the tenant's `max_tier` was ANNOUNCED with that model id — the panel rendered
+ * `child · claude-opus-4-6` as "the model it runs on" — and only then refused.
+ * The UI named a model the run demonstrably would not use, which is precisely
+ * the failure the shared-resolution work was done to remove. Announcing after
+ * validation makes the panel's model id true by construction.
+ *
+ * `executeThinker` calls this too. Not redundancy for its own sake: the
+ * announcement path and the construction path must refuse for the same reasons,
+ * and one function is the only way that stays true when a fifth reason is added.
+ */
+function assertSpawnRoutingPermitted(spec: SpawnSpec, userConfig: LynoxUserConfig): void {
+  if (spec.role && !getRole(spec.role)) {
+    throw new Error(
+      `Unknown role "${spec.role}". Available roles: ${getRoleNames().join(', ')}. ` +
+      `If none of these fit, omit the "role" field and set model/effort/tools directly.`,
+    );
+  }
+
+  const profile: ModelProfile | undefined = spec.profile
+    ? userConfig.model_profiles?.[spec.profile]
+    : undefined;
+  if (spec.profile && !profile) {
+    throw new Error(`Unknown model profile "${spec.profile}". Available: ${Object.keys(userConfig.model_profiles ?? {}).join(', ') || 'none configured'}.`);
+  }
+  if (!profile) return;
+
+  // A profile sets `model = profile.model_id`, bypassing the `max_tier` clamp
+  // that `resolveRunModel` applies to a tier. That is the injection lever
+  // (DEF-0093): a prompt-injected `spawn({profile})` could route a child to a
+  // model above the tenant's cost ceiling. A profile cannot be clamped DOWN (you
+  // cannot substitute a different model on someone's endpoint), so the
+  // enforcement is REFUSE, not clamp (DEF-0080). Cross-provider hybrid spawn is
+  // unaffected — that runs on the tier path.
+  if (profileExceedsMaxTier(profile.model_id, userConfig.max_tier)) {
+    const band = modelCapability(profile.model_id)?.tier;
+    throw new Error(`Model profile "${spec.profile}" (${profile.model_id}) is not permitted on this instance: its cost band ${band ? `"${band}"` : '(unknown)'} exceeds the max tier "${userConfig.max_tier}". A profile pins a specific endpoint and cannot be clamped down, so the spawn is refused. Use the \`model\` tier parameter (fast/balanced/deep) for a ceiling-clamped subagent.`);
+  }
+  // Model blocklist (blocked_model_ids): a profile pinning a blocked model is
+  // refused the same way — a pinned endpoint cannot be substituted, so REFUSE,
+  // not clamp. Same checkpoint as the ceiling guard above (write-accept ⟺
+  // load-keep ⟺ resolve symmetry for the profile raw-id path).
+  if (isBlockedModelId(profile.model_id, userConfig.blocked_model_ids)) {
+    throw new Error(`Model profile "${spec.profile}" (${profile.model_id}) is not permitted on this instance: the model is blocked by the operator model blocklist. A profile pins a specific endpoint and cannot be substituted, so the spawn is refused. Use the \`model\` tier parameter (fast/balanced/deep) for a subagent on a permitted model.`);
+  }
+}
+
+async function executeThinker(
+  spec: SpawnSpec,
+  parentAgent: IAgent,
+  parentOnStream: StreamHandler | null,
+  childDepth: number,
+  /**
+   * The child's actual spend, reported once it stops for ANY reason — done,
+   * failed, or aborted. A child that dies halfway still spent what it spent,
+   * and the caller needs that number even though it never receives a result.
+   */
+  onSettled?: (costUsd: number) => void,
+): Promise<{ result: string; childRunId: string | undefined; model: string }> {
+  // 4-tier resolution: spec fields > role defaults > user config > global default
+  const userConfig = loadConfig();
+
+  // Same refusals the handler already ran before announcing the batch. Kept here
+  // because this is the path that BUILDS the child: the two must never diverge,
+  // and a fifth refusal added to one and not the other is exactly how the UI came
+  // to announce a model the run refused.
+  assertSpawnRoutingPermitted(spec, userConfig);
+
+  const resolved = spec.role ? getRole(spec.role) : undefined;
+  const profile: ModelProfile | undefined = spec.profile
+    ? userConfig.model_profiles?.[spec.profile]
+    : undefined;
+
+  const baseProvider = getActiveProvider();
+  const { tier: modelTier, model, hybridSlot } = resolveSpawnChildRouting({
+    spec, role: resolved, profile, userConfig, baseProvider,
+  });
   // Resolve the child's wire + creds ONCE, up front, so (a) the runs row records
   // the ACTUAL provider instead of '' — the recording gap that made the hybrid
   // 404s show `provider=""` and hid which wire the child hit — and (b) the
@@ -679,6 +745,10 @@ async function executeThinker(
     throw err;
   } finally {
     if (childAgent) activeChildAgents.delete(childAgent);
+    // One place for all three exits. The success and failure branches above
+    // each read the same snapshot for their own bookkeeping; reporting it here
+    // means an abort — which takes neither branch's `return` — is still counted.
+    onSettled?.(childAgent?.getCostSnapshot()?.estimatedCostUSD ?? 0);
   }
 }
 
@@ -743,28 +813,53 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     // estimated at balanced-tier rates, which over-allocates against the
     // session ceiling and blocks cheap batches.
     const cfg = loadConfig();
-    const cfgTier = cfg.default_tier;
     const provider = getActiveProvider();
-    const totalEstimate = input.agents.reduce((sum, spec) => {
-      const roleDefault = spec.role ? getRole(spec.role)?.model : undefined;
-      // Estimate against the SAME model the run will actually use (gate + clamp +
-      // provider), not an Anthropic-only tier map — otherwise a Mistral-tenant or
-      // ceiling-clamped spawn is mis-estimated and over/under-reserves the budget.
-      // A profile spawn runs on `profile.model_id` (which WINS over the tier), so
-      // reserve against that — else a profile pointing at a pricier model than the
-      // tier default under-reserves the session budget.
-      const profileModelId = spec.profile ? cfg.model_profiles?.[spec.profile]?.model_id : undefined;
-      const modelId = profileModelId ?? resolveRunModel({
-        requested: spec.model,
-        defaultTier: (roleDefault ?? cfgTier ?? 'balanced') as ModelTier,
-        accountTier: cfg.account_tier,
-        maxTier: cfg.max_tier,
-        blockedModelIds: cfg.blocked_model_ids,
-        provider,
-      }).modelId;
+
+    // Identifies THIS batch for the whole run. Two `spawn_agent` calls can be in
+    // flight at once (the agent loop runs up to `MAX_PARALLEL_TOOL_CALLS` tools
+    // concurrently), and every later event — progress, child-done, and each
+    // child's forwarded tool activity — carries it so a consumer can tell the
+    // batches apart instead of collapsing them into one.
+    const spawnId = randomUUID();
+
+    // One pass, two outputs from ONE resolution: the budget reservation and the
+    // batch description the UI renders. Estimating against the model the child
+    // will actually run on (gate + clamp + provider + hybrid slot) is what keeps
+    // a Mistral tenant or a ceiling-clamped spawn from mis-reserving, and it is
+    // the same reason the UI may not name a different model than the one the
+    // ceiling was charged for.
+    const subAgents: SpawnedSubAgent[] = [];
+    let totalEstimate = 0;
+    // Refuse BEFORE announcing, not after. `executeThinker` used to own these
+    // checks, and it runs after the `spawn` event is already on the wire — so a
+    // ceiling-exceeding or blocked profile was announced with its model id and
+    // only then refused. A whole batch is refused if any one spec is: the reserve
+    // + announce step is atomic, and half-announcing is worse than not starting.
+    input.agents.forEach((spec) => { assertSpawnRoutingPermitted(spec, cfg); });
+    input.agents.forEach((spec, i) => {
+      const { model } = resolveSpawnChildRouting({
+        spec,
+        role: spec.role ? getRole(spec.role) : undefined,
+        profile: spec.profile ? cfg.model_profiles?.[spec.profile] : undefined,
+        userConfig: cfg,
+        baseProvider: provider,
+      });
       const iters = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
-      return sum + estimateSpawnCost(modelId, iters);
-    }, 0);
+      totalEstimate += estimateSpawnCost(model, iters);
+      // The SAME check the identity block and the result header use. This site
+      // had its own charset — one that stripped `/` and cut at 64 — so a
+      // Fireworks child was announced to the UI as
+      // `accountsfireworksmodelsglm-5p2`. An id it rejects is omitted rather
+      // than sent empty: the field is optional, and absent reads as "unknown"
+      // where `''` renders as a model with no name.
+      const wireModel = safeModelId(model);
+      subAgents.push({
+        id: `${spawnId}:${i}`,
+        name: spec.name,
+        role: spec.role,
+        ...(wireModel ? { model: wireModel } : {}),
+      });
+    });
 
     // Enforce session cost ceiling (shared with pipeline steps) against
     // this Session's counters object so concurrent spawns on different
@@ -774,28 +869,34 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     channels.spawnStart.publish({ agents: names, parent: agent.name, parentRunId, depth: childDepth });
 
     if (agent.onStream) {
-      await agent.onStream({ type: 'spawn', agents: names, estimatedCostUSD: totalEstimate, agent: agent.name });
+      await agent.onStream({ type: 'spawn', spawnId, subAgents, estimatedCostUSD: totalEstimate, agent: agent.name });
     }
 
     // Sub-agent progress state — visible to the UI via forwarded events.
     // Without this, parent's stream only sees spawn start + aggregated result
     // and the UI sits on "Arbeitet…" for minutes with no evidence of progress.
-    const running = new Set(names);
+    // Keyed by SpawnedSubAgent.id, never by name: two children in one batch may
+    // legitimately share a name, and a name-keyed map would silently merge them.
+    const running = new Set(subAgents.map(s => s.id));
     const lastToolBySub: Record<string, string> = {};
+    // Actual spend per child, filled in as each one stops. Reported on
+    // `spawn_child_done` so a delegation's cost is visible where it was
+    // incurred, instead of only inside the turn's single aggregate total.
+    const costBySub: Record<string, number> = {};
     const spawnStart = Date.now();
 
     const parentStream = agent.onStream;
-    const makeChildStream = (subName: string): StreamHandler | null => {
+    const makeChildStream = (sub: SpawnedSubAgent): StreamHandler | null => {
       if (!parentStream) return null;
       return (event) => {
         // Forward only high-signal, low-frequency events. Text and thinking
         // token streams from children would flood the parent UI.
         if (event.type === 'tool_call') {
-          lastToolBySub[subName] = event.name;
-          return parentStream({ ...event, subAgent: subName });
+          lastToolBySub[sub.id] = event.name;
+          return parentStream({ ...event, subAgent: sub.name, subAgentId: sub.id });
         }
         if (event.type === 'tool_result') {
-          return parentStream({ ...event, subAgent: subName });
+          return parentStream({ ...event, subAgent: sub.name, subAgentId: sub.id });
         }
         if (event.type === 'error') {
           return parentStream(event);
@@ -815,6 +916,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         const elapsedS = Math.floor((Date.now() - spawnStart) / 1000);
         void parentStream({
           type: 'spawn_progress',
+          spawnId,
           elapsedS,
           running: [...running],
           lastToolBySub: { ...lastToolBySub },
@@ -824,34 +926,41 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     }
 
     const results = await Promise.allSettled(
-      input.agents.map(spec => {
+      input.agents.map((spec, i) => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), SPAWN_TIMEOUT);
         const childStart = Date.now();
+        const sub = subAgents[i]!;
 
-        return executeThinker(spec, agent, makeChildStream(spec.name), childDepth)
+        return executeThinker(spec, agent, makeChildStream(sub), childDepth, (usd) => { costBySub[sub.id] = usd; })
           .then(
             (value) => {
-              running.delete(spec.name);
+              running.delete(sub.id);
               if (parentStream) {
                 void parentStream({
                   type: 'spawn_child_done',
-                  subAgent: spec.name,
+                  spawnId,
+                  subAgent: sub.name,
+                  subAgentId: sub.id,
                   ok: true,
                   elapsedS: Math.floor((Date.now() - childStart) / 1000),
+                  costUsd: costBySub[sub.id] ?? 0,
                   agent: agent.name,
                 });
               }
               return value;
             },
             (err: unknown) => {
-              running.delete(spec.name);
+              running.delete(sub.id);
               if (parentStream) {
                 void parentStream({
                   type: 'spawn_child_done',
-                  subAgent: spec.name,
+                  spawnId,
+                  subAgent: sub.name,
+                  subAgentId: sub.id,
                   ok: false,
                   elapsedS: Math.floor((Date.now() - childStart) / 1000),
+                  costUsd: costBySub[sub.id] ?? 0,
                   agent: agent.name,
                 });
               }
