@@ -1,0 +1,53 @@
+name: Design Contracts
+
+# lynox paints two surfaces: this product UI, and the lynox.ai marketing site — a
+# separate codebase that cannot depend on this package. Two things cross that gap, and
+# both are duplicated by hand on the other side:
+#
+#   COLOUR — tokens.contract.json. The brand primitives in packages/web-ui/src/app.css.
+#     Nothing in this repo knew those values were shared: hex-guard allowlists app.css
+#     as "the token definitions themselves", so the values IN it were unguarded, and a
+#     rebrand could land here and be discovered elsewhere, later, by someone else.
+#
+#   FORM — shapes.contract.json. The chat turn, the tool call, the inbox row, the state
+#     surface, the one primitive. A design system draws these by hand from reading these
+#     components. It was done once, carefully, with a paragraph promising the shapes had
+#     been read off the real source — and two of the four were wrong within a week (the
+#     inbox row was drawn flat with hairline separators, which is the marketing site's
+#     idiom and appears nowhere in this package; the state surface was generalised from
+#     two callouts into a rule the other hundred-odd state surfaces do not follow). Both
+#     were plausible. Nothing could tell. Now the reading is written down and checked.
+#
+# The lefthook pre-commit hook runs both locally; this job is the gate (`--no-verify`
+# skips the hook, not this). It is a required status check on main — without that it
+# would be a suggestion.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  token-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: '22' }
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with: { version: '10' }
+      # The shape contract PARSES the components — a grep could be fooled by evidence
+      # hidden in a comment, a string or a <template>, and was, three times. Parsing needs
+      # the Svelte compiler, so this job needs the workspace installed. It failed loudly
+      # without it rather than passing quietly, which is the only acceptable way for a
+      # guard to be broken.
+      - run: pnpm install --frozen-lockfile
+      - name: app.css still matches tokens.contract.json
+        run: node packages/web-ui/scripts/check-token-contract.mjs
+      - name: the components still have the shapes shapes.contract.json records
+        run: node packages/web-ui/scripts/check-shape-contract.mjs

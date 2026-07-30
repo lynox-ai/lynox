@@ -133,11 +133,19 @@ COPY --from=whisper-build /usr/local/lib/libggml* /usr/local/lib/
 COPY --from=whisper-build /usr/share/whisper/ggml-base.bin /usr/share/whisper/ggml-base.bin
 RUN ldconfig
 
-# Harden: remove package managers, shells, SUID binaries
+# Harden: remove package managers, shells, SUID binaries.
+# npm + corepack are the base image's bundled Node package managers; the runtime
+# runs `node /app/dist/index.js` with pre-installed /app/node_modules and never
+# invokes either, so they are dead weight — and their bundled node-tar carries
+# fixed-but-unreachable CVEs (e.g. CVE-2026-59873) that fail the image scan. This
+# hardening block already strips apt/dpkg/perl/bash for the same reason; npm was
+# the gap.
 RUN \
     rm -rf /usr/bin/apt-get /usr/bin/apt /usr/bin/dpkg /usr/bin/dpkg-* \
            /usr/lib/apt /var/lib/dpkg /var/lib/apt /etc/apt \
     && rm -rf /usr/bin/perl* /usr/share/perl* /usr/lib/*/perl* \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+              /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
     && rm -f /usr/bin/bash /bin/bash /usr/bin/rbash /bin/rbash \
     && find / -perm -4000 -type f -exec chmod u-s {} + 2>/dev/null || true \
     && sed -i 's|root:/bin/bash|root:/usr/sbin/nologin|' /etc/passwd

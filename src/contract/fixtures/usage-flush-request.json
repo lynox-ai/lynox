@@ -1,0 +1,6 @@
+{
+  "runs": [
+    { "run_id": "TEST-RUN-0001", "model": "balanced", "cost_cents": 3 },
+    { "run_id": "TEST-RUN-0002", "model": "deep", "cost_cents": 12 }
+  ]
+}

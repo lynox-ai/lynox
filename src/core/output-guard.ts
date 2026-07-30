@@ -263,3 +263,87 @@ export class ToolCallTracker {
     return null;
   }
 }
+
+// === Repeat-call loop guard ===
+
+export interface RepeatCallSkip {
+  readonly escalatedResult: string;
+}
+
+/**
+ * Deterministic breaker for a stuck tool-call loop: an agent that issues the
+ * EXACT same `(tool, input)` call and gets the EXACT same result over and over,
+ * making no progress. Distinct from `ToolCallTracker` above — that is a
+ * shadow-mode security heuristic with false-positive risk (H-024), deliberately
+ * non-blocking. This is a certain waste signal, not a probabilistic one, so it
+ * is allowed to intervene.
+ *
+ * It keys on the RESULT being identical, NOT on an `is_error` flag, on purpose:
+ * many tools report a soft failure as an ordinary (non-error) result string
+ * ("API profile X not found. Use action \"list\".") — which is exactly the shape
+ * of the loop this guard exists to break (a real 20× `api_setup view` loop with
+ * a hallucinated id on prod, 2026-07-26; the result carried no `is_error`, so an
+ * `is_error`-keyed guard would have missed it entirely). Keying on an identical
+ * result also means a call that makes PROGRESS (a different result — e.g. a poll
+ * that finally returns "done") never trips, however many times it is issued.
+ *
+ * Run-scoped: one instance per agent run, reset alongside the loop tool counter.
+ */
+export class RepeatCallGuard {
+  private key: string | null = null;
+  private lastResult = '';
+  private identicalCount = 0;
+
+  /**
+   * After this many consecutive identical (call → result) pairs, the next
+   * identical call is skipped. Conservative: a normal retry after a transient
+   * hiccup yields a DIFFERENT result and thus resets the streak, so it is never
+   * caught — only a genuinely stuck, output-unchanging loop is.
+   */
+  static readonly REPEAT_LIMIT = 3;
+
+  private static readonly EXCERPT_MAX = 300;
+
+  /**
+   * Call BEFORE executing a tool. Returns a skip directive when this exact call
+   * has already produced this exact result REPEAT_LIMIT times in a row;
+   * otherwise null (execute normally). State is left UNTOUCHED on skip, so the
+   * guard stays latched until a different call resets it — every further
+   * identical repeat is skipped too.
+   */
+  check(key: string): RepeatCallSkip | null {
+    if (key !== this.key || this.identicalCount < RepeatCallGuard.REPEAT_LIMIT) return null;
+    const excerpt = this.lastResult.length > RepeatCallGuard.EXCERPT_MAX
+      ? this.lastResult.slice(0, RepeatCallGuard.EXCERPT_MAX) + '…'
+      : this.lastResult;
+    return {
+      escalatedResult:
+        `This exact call was already made ${String(this.identicalCount)} times in a row and returned the same result each time:\n\n` +
+        `${excerpt}\n\n` +
+        `Repeating it will not change the outcome. Do NOT call it again with the same input — take a different ` +
+        `approach (a different action such as "list", different arguments, or ask the user).`,
+    };
+  }
+
+  /**
+   * Call AFTER executing a tool, with the result content the agent actually saw.
+   * Grows the streak when the same key yields the same result; otherwise starts
+   * a fresh streak of 1.
+   */
+  record(key: string, result: string): void {
+    if (key === this.key && result === this.lastResult) {
+      this.identicalCount++;
+    } else {
+      this.key = key;
+      this.lastResult = result;
+      this.identicalCount = 1;
+    }
+  }
+
+  /** Clear all state — call at the start of each agent run. */
+  reset(): void {
+    this.key = null;
+    this.lastResult = '';
+    this.identicalCount = 0;
+  }
+}

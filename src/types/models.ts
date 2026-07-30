@@ -4,84 +4,49 @@ import type { ProviderDescriptor, ProviderKey, CacheProfile } from './provider-r
 // === 4.1 Model Tiers & Providers ===
 
 /**
- * Provider-agnostic capability tiers. Renamed 2026-05-29 from the legacy
- * Anthropic-brand names (`opus`/`sonnet`/`haiku`) because lynox is now
- * provider-agnostic — the brand names leaked into tool schemas + config and
- * caused models on non-Anthropic providers to mislabel themselves (a Mistral
- * tenant reporting its `balanced` tier as "Sonnet"). The tier names describe
- * the cost/capability band; each provider resolves them to a concrete model
- * via the `*_MODEL_MAP`s below.
- *   fast     — cheapest/lowest-latency (status checks, formatting)
- *   balanced — default workhorse (data queries, content, tool use)
- *   deep     — reasoning-heavy (strategy, multi-source analysis)
- * Legacy names are still accepted at input boundaries via {@link normalizeTier}.
+ * Provider-agnostic capability tiers (`fast`/`balanced`/`deep`; renamed
+ * 2026-05-29 from the legacy Anthropic-brand names). The tier vocabulary +
+ * `normalizeTier` are WIRE CONTRACT — the control plane emits tier values into
+ * tenant envs — so their single source of truth lives in `src/contract/vocab.ts`
+ * (K-W1, PRD-CORE-PRO-CONTRACT / DEF-0030). Re-exported here as a pure shim to
+ * keep the public `@lynox-ai/core/types` surface unchanged. `ModelTierSchema`
+ * in types/schemas.ts reuses `LEGACY_TIER_ALIASES`.
  */
-export type ModelTier = 'deep' | 'balanced' | 'fast';
+import { LEGACY_TIER_ALIASES, normalizeTier } from '../contract/vocab.js';
+import type { ModelTier, LLMProvider } from '../contract/vocab.js';
+import { isModelProfile } from '../contract/shapes.js';
+import type { ModelProfile } from '../contract/shapes.js';
 
-/** Legacy Anthropic-brand tier aliases → provider-agnostic names. Single
- *  source of truth; also reused by `ModelTierSchema` in types/schemas.ts. */
-export const LEGACY_TIER_ALIASES: Record<string, ModelTier> = {
-  opus: 'deep',
-  sonnet: 'balanced',
-  haiku: 'fast',
-};
+export { LEGACY_TIER_ALIASES, normalizeTier, isModelProfile };
+export type { ModelTier, LLMProvider, ModelProfile };
 
 /**
- * Normalize a tier string to the canonical provider-agnostic name, accepting
- * both the current names (`fast`/`balanced`/`deep`) and the legacy
- * Anthropic-brand names (`haiku`/`sonnet`/`opus`). Returns `undefined` for
- * anything unrecognized so callers can fall back to their own default.
- * Applied at every input boundary (config load, env vars, tool inputs) so
- * persisted `config.json` files and `LYNOX_DEFAULT_TIER` env vars written
- * before the rename keep working.
+ * Provenance of a thread's persisted `model_tier` (arc:model-selector Wave P1,
+ * DEF-0095). Records WHO chose the tier so a sticky per-thread pick (D18) is
+ * distinguishable from a machine default:
+ *  - `'user'`    — a deliberate pick (the composer picker was touched, or the
+ *                  mid-thread re-pick endpoint ran). STICKY: resume honours it.
+ *  - `'default'` — a new thread whose creator did NOT touch the picker.
+ *  - `'unknown'` — origin not observed (the schema DEFAULT + the conservative
+ *                  backfill value for pre-column rows).
+ *
+ * ADVISORY-ONLY: it is client-supplied (only the picker UI knows explicit-vs-
+ * untouched), so a client CAN send `'user'` for a machine default. That is
+ * harmless ONLY as long as `source` stays observational — it MUST NOT gate any
+ * tier/cost/capability decision. The instant a policy keys off it, a client
+ * could pin an expensive tier by lying. Kept a 3-value enum on purpose; because
+ * the column is `TEXT`, a future value (e.g. `'inferred'`) is a zero-migration
+ * string add (DEF-0127), so no speculative writers are named now.
  */
-export function normalizeTier(value: string | undefined): ModelTier | undefined {
-  if (value === undefined) return undefined;
-  if (value === 'fast' || value === 'balanced' || value === 'deep') return value;
-  return LEGACY_TIER_ALIASES[value];
-}
-
-export type LLMProvider = 'anthropic' | 'vertex' | 'custom' | 'openai';
-
-/** Named model profile for non-Claude providers (Mistral, Gemini, Grok, etc.). */
-export interface ModelProfile {
-  /** Provider type — always 'openai' (OpenAI-compatible API). */
-  provider: 'openai';
-  /** API base URL (e.g. 'https://api.mistral.ai/v1'). */
-  api_base_url: string;
-  /** API key for this provider. Ignored if `auth: 'google-vertex'` (OAuth token generated from service account). */
-  api_key: string;
-  /** Authentication mode. 'static' (default) uses api_key as-is. 'google-vertex' generates OAuth tokens from GOOGLE_APPLICATION_CREDENTIALS. */
-  auth?: 'static' | 'google-vertex' | undefined;
-  /** Model ID to send in requests (e.g. 'mistral-large-2512'). */
-  model_id: string;
-  /** Context window size in tokens. Default: 200000. */
-  context_window?: number | undefined;
-  /** Max output tokens. Default: 16000. */
-  max_tokens?: number | undefined;
-  /** Max continuation attempts. Default: 5. */
-  max_continuations?: number | undefined;
-  /** Pricing per million tokens (for cost guards). */
-  pricing?: { input: number; output: number } | undefined;
-}
+export type ThreadModelSource = 'user' | 'default' | 'unknown';
 
 /**
- * Runtime guard for a {@link ModelProfile}. Checks only the REQUIRED fields the
- * downstream LLM client dereferences (`provider`, `api_base_url`, `api_key`,
- * `model_id`) — optional fields are left to their defaults. Used at every
- * untrusted boundary that ingests a profile (the `LYNOX_MODEL_PROFILES_JSON`
- * env blob, spawn `profile` inputs) so a malformed entry is dropped rather than
- * reaching the openai-adapter as `Bearer undefined` and crashing the run.
+ * Validate a client-supplied `source` at an input boundary. Returns `undefined`
+ * for anything unrecognised so callers fall back to the schema default
+ * (`'unknown'`). Mirrors {@link normalizeTier}'s boundary-validation shape.
  */
-export function isModelProfile(value: unknown): value is ModelProfile {
-  if (value === null || typeof value !== 'object') return false;
-  const v = value as Record<string, unknown>;
-  return (
-    v['provider'] === 'openai' &&
-    typeof v['api_base_url'] === 'string' &&
-    typeof v['api_key'] === 'string' &&
-    typeof v['model_id'] === 'string'
-  );
+export function normalizeThreadModelSource(value: unknown): ThreadModelSource | undefined {
+  return value === 'user' || value === 'default' || value === 'unknown' ? value : undefined;
 }
 
 export const MODEL_MAP: Record<ModelTier, string> = {
@@ -106,23 +71,35 @@ export const MISTRAL_API_BASE = 'https://api.mistral.ai/v1';
  * refreshes. `mistral-large-latest` would auto-roll silently — bad for cost
  * and behaviour-drift in managed-EU tenants.
  *   fast     → ministral-8b-2512      (gen 3 edge model, replaces retired mistral-small-2603)
- *   balanced → ministral-14b-2512     (near-large quality at ~6× lower cost)
- *   deep     → mistral-large-2512     (Mistral quality leader, tool-use)
+ *   balanced → mistral-medium-2604    (WS2: the 14B main fell below the R1/R3 floor)
+ *   deep     → mistral-medium-2604    (Medium 3.5 — the stronger Mistral deep; Large 3 → legacy)
  * (Keep this block in sync with MISTRAL_MODEL_MAP below — the values are
  *  pinned by tests/doc-drift.test.ts.)
  *
  * Updated 2026-05-24: ministral-3b/8b-2410 retired 2025-12-31, mistral-small-2603 deprecated.
  * fast-tier moves to ministral-8b-2512 (gen 3 edge, ~$0.15/M, multimodal, 256k ctx).
  */
-// Refreshed 2026-05-29 (Set-Bench v4, fair judge panel): Mistral deprecated
-// the Magistral reasoning family (magistral-medium-2509 retires 2026-07-31),
-// so `deep` moves to mistral-large-2512 — the Mistral quality leader, which
-// medium-2604 (the nominal Magistral successor) never beats at 6× the cost.
-// `balanced` adopts ministral-14b-2512 (100% pass, near-large quality at ~6×
-// lower cost), giving a clean fast→balanced→deep capability ladder.
+// Refreshed 2026-07-21: `deep` moves to mistral-medium-2604 (Mistral Medium
+// 3.5). Mistral Large 3 (2512) is being deprecated to a legacy option and is
+// the weaker deep; Medium 3.5 is a newer, stronger generation for deep
+// reasoning — pricier ($1.50/$7.50 vs Large's $0.50/$1.50) and text-only (no
+// vision), the quality tradeoff. Mistral still has no 1M-context deep (262k
+// ceiling).
 export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
-  'deep':     'mistral-large-2512',
-  'balanced': 'ministral-14b-2512',
+  // deep → mistral-medium-2604 (Mistral Medium 3.5): the stronger Mistral for
+  // deep reasoning. Mistral Large 3 (2512) is being deprecated to legacy and is
+  // the weaker deep; Medium 3.5 is a newer generation that beats it on analysis
+  // (pricier at $1.50/$7.50 vs Large's $0.50/$1.50 — the quality tradeoff). Note
+  // Mistral has no 1M-context deep — 262k is the ceiling here.
+  'deep':     'mistral-medium-2604',
+  // balanced → mistral-medium-2604 too: the WS2 wire-replay measured Ministral
+  // 14B BELOW the R1/R3 orchestration floor (answers deep-worthy tasks inline,
+  // 2/22 escalate over 3 tasks) — the same finding that moved the managed
+  // presets (#1045). Mistral has nothing between 14B and Medium 3.5 (Large 3 is
+  // the WEAKER deep, going legacy), so balanced==deep here — honest for a
+  // provider whose best model is the ladder's ceiling; deep escalation on
+  // BYOK-Mistral changes budget/framing, not the model.
+  'balanced': 'mistral-medium-2604',
   'fast':     'ministral-8b-2512',
 };
 
@@ -183,6 +160,75 @@ export function getActiveOpenAIModelMap(): Record<ModelTier, string> | null {
   return _openaiModelMap;
 }
 
+// === Config-aware balanced-model resolver (Sonnet variant selection) ===
+// The `balanced` tier resolves to `claude-sonnet-4-6` by default (MODEL_MAP),
+// but a per-instance config field (`balanced_model`) can opt-in to a different
+// served Sonnet — currently `claude-sonnet-5`. This mirrors the openai resolver
+// pattern above: a pure `resolveBalancedModel(config)` computes the value, the
+// engine pushes it to the process-global at bootstrap + reload, and the
+// Anthropic/custom descriptors consult the global at CALL time. The raw
+// MODEL_MAP stays the ultimate fallback, so an absent/invalid selection is a
+// zero-behaviour no-op (default = Sonnet 4.6).
+
+/** The only Sonnet ids `balanced_model` may select. Anything else falls back
+ *  to `MODEL_MAP.balanced` — an invalid value can never route balanced to a
+ *  non-Sonnet (or unknown) model. */
+export const SERVED_BALANCED_SONNET_IDS: ReadonlySet<string> = new Set([
+  'claude-sonnet-4-6',
+  'claude-sonnet-5',
+]);
+
+/**
+ * Resolve which concrete Sonnet the `balanced` tier should use for this
+ * instance. Returns the configured `balanced_model` iff it is a served Sonnet
+ * id; otherwise the raw `MODEL_MAP.balanced` default (Sonnet 4.6). Pure — the
+ * default (4.6) is the fallback, so nothing changes unless a valid override is
+ * set. Accepts a minimal config shape to avoid a types↔config import cycle.
+ */
+export function resolveBalancedModel(config: { balanced_model?: string | undefined }): string {
+  const requested = config.balanced_model;
+  if (requested !== undefined && SERVED_BALANCED_SONNET_IDS.has(requested)) return requested;
+  return MODEL_MAP.balanced;
+}
+
+/**
+ * Process-global override for the `balanced` tier on the Claude-wire providers
+ * (anthropic + custom). `null` = no override (use MODEL_MAP.balanced). Set at
+ * engine bootstrap + reload via {@link setBalancedModelResolver}. Read at call
+ * time by {@link anthropicTierModel} so a config reload takes effect without a
+ * restart — same lifecycle seam as `_openaiModelMap`.
+ */
+let _balancedModelOverride: string | null = null;
+
+/**
+ * Configure the active `balanced`-tier Sonnet override. Defensively refuses any
+ * id that is not a served Sonnet (falls back to no-override) so a malformed
+ * value can never leak onto the wire. Pass `null` to reset (tests / defaults).
+ */
+export function setBalancedModelResolver(modelId: string | null): void {
+  if (modelId === null) {
+    _balancedModelOverride = null;
+    return;
+  }
+  _balancedModelOverride = SERVED_BALANCED_SONNET_IDS.has(modelId) ? modelId : null;
+}
+
+/** The `balanced` model the Claude-wire providers currently resolve to
+ *  (override if set + valid, else MODEL_MAP.balanced). Tests + debug. */
+export function getActiveBalancedModel(): string {
+  return _balancedModelOverride ?? MODEL_MAP.balanced;
+}
+
+/**
+ * Tier→model resolution for the Claude-wire providers (anthropic + custom).
+ * Identical to `MODEL_MAP[tier]` EXCEPT `balanced`, which honours the active
+ * per-instance Sonnet override. `deep`/`fast` are untouched. Read at call time.
+ */
+function anthropicTierModel(tier: ModelTier): string {
+  if (tier === 'balanced' && _balancedModelOverride !== null) return _balancedModelOverride;
+  return MODEL_MAP[tier];
+}
+
 // === Provider Registry (resolution) ===
 // PR-1a: route tier→model resolution through a per-provider descriptor registry
 // instead of the hardcoded `if (provider === …)` branches. Byte-parity — each
@@ -234,7 +280,9 @@ export function resolveModelIdViaRegistry(tier: ModelTier, provider: ProviderKey
 // caches automatic-prefix.
 registerProvider({
   id: 'anthropic', wireClient: 'anthropic', defaultTierModels: MODEL_MAP,
-  resolveModelId: (tier) => MODEL_MAP[tier],
+  // `balanced` honours the per-instance Sonnet override (anthropicTierModel);
+  // deep/fast are the raw MODEL_MAP. Default (no override) = byte-identical.
+  resolveModelId: (tier) => anthropicTierModel(tier),
   cache: { mechanism: 'explicit-breakpoint' },
 });
 registerProvider({
@@ -247,8 +295,10 @@ registerProvider({
   // maps them) — hence wireClient:'anthropic'. But the engine treats it as a
   // custom proxy and STRIPS cache_control (agent.ts:1140), so cache-wise it is
   // automatic-prefix like openai, NOT explicit-breakpoint.
+  // A custom (Anthropic-compatible) proxy resolves `balanced` through the same
+  // per-instance Sonnet override — the proxy maps whichever Claude id it gets.
   id: 'custom', wireClient: 'anthropic', defaultTierModels: MODEL_MAP,
-  resolveModelId: (tier) => MODEL_MAP[tier],
+  resolveModelId: (tier) => anthropicTierModel(tier),
   cache: { mechanism: 'automatic-prefix' },
 });
 registerProvider({
@@ -320,6 +370,13 @@ export interface ModelFeatures {
   pdfInput: boolean;
 }
 
+/** Where a model's WEIGHTS originate (supply-chain provenance) — axis (c) of the
+ *  model-presets three-axis disclosure. Distinct from where the DATA is processed
+ *  (the HOST — see `host-disclosure.ts`): a CN-weights model served from a Western
+ *  host (e.g. GLM via Fireworks/US) is still CN by weights. `US`/`EU`/`CN` cover
+ *  the current roster; extend as the fleet grows. */
+export type WeightsOrigin = 'US' | 'EU' | 'CN';
+
 /**
  * Single source of truth for per-model facts. Keyed by canonical provider
  * model id (no tier aliases). Replaces the pre-2026-05-18 scattered
@@ -348,6 +405,22 @@ export interface ModelCapability {
   pricing: ModelPricing;
   /** Human-readable label for UI dropdowns / pills. */
   uiLabel: string;
+  /**
+   * Per-model chars-per-token override for context estimation. When absent,
+   * consumers fall back to the global {@link CHARS_PER_TOKEN} (3.5). Set only
+   * for models whose tokenizer diverges materially from the 3.5 baseline —
+   * e.g. Sonnet 5's new tokenizer emits ~30% more tokens for the same text, so
+   * a LOWER chars-per-token (more tokens per char) keeps the occupancy meter +
+   * truncation math conservative. Leaving existing Claude 4.6 entries unset
+   * preserves byte-identical estimation for today's default fleet.
+   */
+  charsPerToken?: number | undefined;
+  /** Model weights-origin for the presets supply-chain disclosure (axis c).
+   *  Set on the models a preset SURFACES, so the disclosure carries a per-model
+   *  weights-origin for each (incl. US/EU, not only CN — the picker renders all
+   *  three axes per model). Absent on models the presets don't surface, where the
+   *  host implies it. */
+  provenance?: WeightsOrigin | undefined;
 }
 
 const CLAUDE_FEATURES: ModelFeatures = {
@@ -367,6 +440,37 @@ const MISTRAL_FEATURES_LARGE: ModelFeatures = {
 };
 
 const MISTRAL_FEATURES_SMALL: ModelFeatures = {
+  vision: false,
+  extendedThinking: false,
+  toolUse: true,
+  promptCaching: true,
+  pdfInput: false,
+};
+
+// Gen-3 Mistral (ministral-{3,8,14}b-2512, mistral-large-2512) are multimodal:
+// they accept an OpenAI `image_url` part and describe it. VERIFIED against the
+// live Mistral API 2026-07-18 (red/blue split PNG → correctly named both halves
+// on all four). This is the ONLY axis that separates them from MISTRAL_FEATURES_*
+// today, so it earns its own object rather than flipping the shared ones — the
+// legacy/opt-in roster (codestral, magistral, nemo, *-2410/2508/2603) stays
+// vision:false: codestral + nemo genuinely reject images ("Image input is not
+// enabled for this model"), and the reasoning/deprecated ids the product doesn't
+// tier-route are left unsupported by decision (rafael 2026-07-18) — a false-NO
+// only yields the clear pre-flight throw, never a silent answer to an unseen image.
+const MISTRAL_FEATURES_GEN3: ModelFeatures = {
+  vision: true,
+  extendedThinking: false,
+  toolUse: true,
+  promptCaching: true,
+  pdfInput: false,
+};
+
+// Fireworks-hosted openai-compat text models (GLM 5.2, DeepSeek v4 Pro). Text +
+// tool-use + prompt-cache; NO vision (Fireworks model pages state "image input:
+// not supported" for both — so vision:false yields a clean pre-flight throw on an
+// image-attach, never a silent drop). extendedThinking is the Anthropic-specific
+// mechanism → false on the openai wire.
+const FIREWORKS_TEXT_FEATURES: ModelFeatures = {
   vision: false,
   extendedThinking: false,
   toolUse: true,
@@ -399,6 +503,51 @@ export const CACHE_READ_MULTIPLIER = 0.1;
 
 export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // === Anthropic Claude (direct + custom proxy) ===
+  // Claude Opus 5 — the new flagship deep model (GA 2026-07; Opus 4.8 is now
+  // Legacy). Additive OPT-IN only: MODEL_MAP.deep stays opus-4-6, and the
+  // max-quality deep preset stays fable-5 — re-pointing either is a deliberate
+  // behavior change gated on a bench/canary pass, NOT this catalog wave. Pricing
+  // $5/$25 (= Opus 4.8), 1M native ctx, vision (CLAUDE_FEATURES). TTL contract:
+  // cacheWrite=input×2=10, cacheRead=input×0.1=0.50 (models.test.ts pins it).
+  // Thinking is adaptive DEFAULT-ON on Opus 5 (4.8: default-off). Opus 5 adds a
+  // new per-request 400 for `thinking:disabled` + effort xhigh/max — unreachable
+  // here: when thinking is disabled the agent OMITS the field entirely rather
+  // than sending `{type:'disabled'}` (agent.ts `thinkingEnabled` gate, ~1349/1573),
+  // so a disabled deep turn just runs adaptive-ON, valid with any effort. No
+  // charsPerToken override until a live count_tokens baseline (measure-first);
+  // the tokenizer is assumed 4.7-family but not yet measured. Blocked for trials
+  // automatically via the `claude-opus-` prefix in LYNOX_BLOCKED_MODEL_IDS.
+  'claude-opus-5': {
+    id: 'claude-opus-5',
+    provider: 'anthropic',
+    tier: 'deep',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 32_000,
+    maxContinuations: 20,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
+    uiLabel: 'Claude Opus 5',
+    provenance: 'US',
+  },
+  // Claude Opus 4.8 — the max-quality preset's deep model (model-presets P1).
+  // Additive: MODEL_MAP.deep stays opus-4-6 (re-pointing it is a deliberate
+  // behavior change, not this wave). Pricing verified against Anthropic's catalog
+  // (2026-06-24): $5/$25, 1M native ctx, vision. Shares the 4.7 tokenizer (no
+  // charsPerToken override). TTL contract: cacheWrite=input×2, cacheRead=input×0.1.
+  'claude-opus-4-8': {
+    id: 'claude-opus-4-8',
+    provider: 'anthropic',
+    tier: 'deep',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 32_000,
+    maxContinuations: 20,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
+    uiLabel: 'Claude Opus 4.8',
+    provenance: 'US',
+  },
   'claude-opus-4-7': {
     id: 'claude-opus-4-7',
     provider: 'anthropic',
@@ -423,6 +572,19 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 5, output: 25, cacheWrite: 10, cacheRead: 0.50 },
     uiLabel: 'Claude Opus 4.6',
   },
+  'claude-fable-5': {
+    id: 'claude-fable-5',
+    provider: 'anthropic',
+    tier: 'deep',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 32_000,
+    maxContinuations: 20,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 10, output: 50, cacheWrite: 20, cacheRead: 1.00 },
+    uiLabel: 'Claude Fable 5',
+    provenance: 'US',
+  },
   'claude-sonnet-4-6': {
     id: 'claude-sonnet-4-6',
     provider: 'anthropic',
@@ -435,6 +597,32 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 3, output: 15, cacheWrite: 6, cacheRead: 0.30 },
     uiLabel: 'Claude Sonnet 4.6',
   },
+  // Claude Sonnet 5 — additive opt-in (4.6 stays the balanced default). 1M
+  // context NATIVELY (no `context-1m` beta header, unlike the 4.6[1m] variant),
+  // mirroring the Opus base entries' shape. Pricing is $3/$15 STICKER: Anthropic
+  // lists an intro $2/$10 through 2026-08-31, then reverts to $3/$15 on Sep 1 —
+  // we bill sticker so the customer-facing rate is stable across that cutover
+  // (no 2026-09 re-deploy; the intro window is temporary extra margin). The
+  // pricing-vs-TTL contract (models.test.ts) requires cacheWrite = input×2 (1h
+  // TTL) and cacheRead = input×0.1, so 6 and 0.30 are the only valid values.
+  // charsPerToken 2.7 (≈ 3.5 / 1.3): Sonnet 5's new tokenizer emits ~30% more
+  // tokens/text (documented Anthropic fact) — a conservative baseline pending
+  // live count_tokens measurement (measure-first). Same per-token RATE as 4.6;
+  // the real cost delta is the tokenizer, which the metered debit counts directly.
+  'claude-sonnet-5': {
+    id: 'claude-sonnet-5',
+    provider: 'anthropic',
+    tier: 'balanced',
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: CLAUDE_FEATURES,
+    pricing: { input: 3, output: 15, cacheWrite: 6, cacheRead: 0.30 },
+    uiLabel: 'Claude Sonnet 5',
+    charsPerToken: 2.7,
+    provenance: 'US',
+  },
   'claude-haiku-4-5-20251001': {
     id: 'claude-haiku-4-5-20251001',
     provider: 'anthropic',
@@ -446,6 +634,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: CLAUDE_FEATURES,
     pricing: { input: 1, output: 5, cacheWrite: 2, cacheRead: 0.10 },
     uiLabel: 'Claude Haiku 4.5',
+    provenance: 'US',
   },
   // Vertex AI variant — same model, different id surface (no date suffix).
   'claude-haiku-4-5': {
@@ -516,7 +705,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
     betaHeaders: [],
-    features: MISTRAL_FEATURES_SMALL,
+    features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 0.10, output: 0.10, cacheWrite: 0.10, cacheRead: 0.010 },
     uiLabel: 'Ministral 3B',
   },
@@ -528,9 +717,10 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
     betaHeaders: [],
-    features: MISTRAL_FEATURES_SMALL,
+    features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 0.15, output: 0.15, cacheWrite: 0.15, cacheRead: 0.015 },
     uiLabel: 'Ministral 8B',
+    provenance: 'EU',
   },
   // Ministral 3 14B (Dec 2025): gen-3 mid model, text+vision, 262k context.
   // The `balanced` tier as of 2026-05-29 — Set-Bench v4 showed 100% pass and
@@ -543,9 +733,10 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 8_192,
     maxContinuations: 5,
     betaHeaders: [],
-    features: MISTRAL_FEATURES_SMALL,
+    features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 0.20, output: 0.20, cacheWrite: 0.20, cacheRead: 0.02 },
     uiLabel: 'Ministral 14B',
+    provenance: 'EU',
   },
   // Mistral Large 3 (Dec 2025): 256k context, $0.50/$1.50 (75% price cut vs Large 2),
   // multimodal input (text+image), structured-outputs, function-calling, prefix-cache.
@@ -559,7 +750,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
-    features: MISTRAL_FEATURES_LARGE,
+    features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.05 },
     uiLabel: 'Mistral Large 3',
   },
@@ -646,6 +837,30 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 0.40, output: 2, cacheWrite: 0.40, cacheRead: 0.40 },
     uiLabel: 'Mistral Medium 3.1',
   },
+  // Mistral Medium 3.5 (2604) — model-presets candidate (Mistral standard-deep /
+  // balanced). 262k ctx (clears the 200k fitness floor, unlike 2508's 128k).
+  // Pricing VERIFIED against the Mistral model card: $1.50/$7.50 (the 2508 entry's
+  // $0.40/$2 was ~3.75× too low for this newer model). cacheRead is NOT published
+  // for Medium 3.5 → apply the gen-3 convention (cacheWrite=input, cacheRead=input
+  // ×0.1, as mistral-large-2512 does); verify against La Plateforme when available.
+  // vision VERIFIED live vs the Mistral API 2026-07-22 (two probes: red/blue split
+  // PNG and green/yellow quadrant PNG — colors and positions named correctly on
+  // both), completing the check the verify-live-or-false convention owed here →
+  // GEN3. Medium 3.5 carries both the balanced and deep Mistral tiers, so a
+  // false-NO would hard-block every image message on the BYOK-Mistral main.
+  'mistral-medium-2604': {
+    id: 'mistral-medium-2604',
+    provider: 'openai',
+    tier: 'deep',
+    contextWindow: 262_144,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: MISTRAL_FEATURES_GEN3,
+    pricing: { input: 1.50, output: 7.50, cacheWrite: 1.50, cacheRead: 0.15 },
+    uiLabel: 'Mistral Medium 3.5',
+    provenance: 'EU',
+  },
   'mistral-medium-latest': {
     id: 'mistral-medium-latest',
     provider: 'openai',
@@ -705,6 +920,43 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: MISTRAL_FEATURES_SMALL,
     pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.50 },
     uiLabel: 'Magistral Small (latest)',
+  },
+  // === Fireworks-hosted (openai-compat) — model-presets hybrid deep/big-context ===
+  // CN-provenance weights served from a WESTERN fixed host (Fireworks/US), never a
+  // direct CN API — the affirmative sourcing rule (host residency US, weights CN).
+  // Pricing VERIFIED against the Fireworks model pages (2026-07-19): the harness
+  // estimates were ~2.5-4× low. cacheRead = $0.14 is the PUBLISHED Fireworks
+  // cached-input rate for BOTH models (a flat rate, NOT input×0.1) — so DeepSeek's
+  // 0.14 (≠ 1.74×0.1 = 0.174) is correct as read from its page, not a copy of GLM's.
+  // Both are text-only (Fireworks: "image input: not supported"). Reached via
+  // provider:'openai' + api_base_url=api.fireworks.ai + the full
+  // `accounts/fireworks/models/*` id; no Fireworks tier map yet (they are preset
+  // -slot models, tier:null — a preset's tier_set pins them explicitly).
+  'accounts/fireworks/models/glm-5p2': {
+    id: 'accounts/fireworks/models/glm-5p2',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 1.40, output: 4.40, cacheWrite: 1.40, cacheRead: 0.14 },
+    uiLabel: 'GLM 5.2',
+    provenance: 'CN',
+  },
+  'accounts/fireworks/models/deepseek-v4-pro': {
+    id: 'accounts/fireworks/models/deepseek-v4-pro',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 1.74, output: 3.48, cacheWrite: 1.74, cacheRead: 0.14 },
+    uiLabel: 'DeepSeek v4 Pro',
+    provenance: 'CN',
   },
 };
 
@@ -817,6 +1069,17 @@ export function getMaxContinuations(model: string): number {
   return modelCapabilityOrFallback(model).maxContinuations;
 }
 
+/**
+ * Model-aware chars-per-token for context estimation. Returns the model's
+ * per-entry `charsPerToken` when set, else the global {@link CHARS_PER_TOKEN}
+ * (3.5). Unknown ids + every model without an override → 3.5, so existing
+ * default-fleet estimation is byte-identical; only models with a materially
+ * different tokenizer (e.g. Sonnet 5 at 2.7) shift. Normalizes @-suffixed ids.
+ */
+export function getCharsPerToken(model: string): number {
+  return modelCapability(model)?.charsPerToken ?? CHARS_PER_TOKEN;
+}
+
 // === Thinking & Effort ===
 
 export type ThinkingMode =
@@ -825,6 +1088,37 @@ export type ThinkingMode =
   | { type: 'disabled' };
 
 export type ThinkingHint = ThinkingMode['type'];
+
+/**
+ * Claude model families that still accept the LEGACY manual extended-thinking
+ * shape `{ type: 'enabled', budget_tokens }`. Anthropic REMOVED manual thinking
+ * in the 4.7/5 generation (Sonnet 5, Opus 4.7+): those hard-400 on an `enabled`
+ * block and require `adaptive` instead. This is a POSITIVE allowlist of the
+ * legacy-accepting ids so any NEW/unknown Claude id defaults to the SAFE path
+ * (treated as rejecting → coerced to adaptive, which every Claude model
+ * accepts). Over-coercing is harmless (adaptive works on 4.6 too); UNDER-
+ * coercing 400s — so the safe bias is "unknown Claude ⇒ reject".
+ */
+const CLAUDE_MODELS_ACCEPTING_MANUAL_THINKING: ReadonlySet<string> = new Set([
+  'claude-sonnet-4-6', 'claude-sonnet-4-6[1m]',
+  'claude-opus-4-6', 'claude-opus-4-6[1m]',
+  // Haiku 4.5 has no extended thinking at all (force-disabled upstream), so it
+  // never carries an `enabled` block to coerce — omitting it is inconsequential.
+]);
+
+/**
+ * True when a model is a Claude model that REJECTS the legacy manual
+ * `{ type: 'enabled', budget_tokens }` thinking shape (i.e. the 4.7/5 family and
+ * anything newer). Non-Claude models return false — their thinking support is
+ * governed by their own provider guard. Used as a defense-in-depth normalizer
+ * so a free-form `thinking` object handed in via the spawn tool schema can never
+ * 400 a Sonnet-5/Opus-4.7+ run. Normalizes @-suffixed ids.
+ */
+export function claudeModelRejectsManualThinking(model: string): boolean {
+  const id = normalizeModelId(model);
+  if (!id.startsWith('claude-')) return false;
+  return !CLAUDE_MODELS_ACCEPTING_MANUAL_THINKING.has(id);
+}
 
 /**
  * Structured warning produced by the engine that the HTTP-API surfaces as a
@@ -847,9 +1141,13 @@ export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 // === Step Hints (LLM-driven per-step configuration) ===
 
-/** Hints the LLM attaches to options or plan phases to configure the next step. */
+/**
+ * Hints the LLM attaches to `ask_user` options to tune the NEXT step's
+ * thinking/effort. It deliberately carries NO model tier: the agent never
+ * drives the main-session tier — only the user (composer picker / thread
+ * re-pick) does. See model-execution-policy D23.
+ */
 export interface StepHint {
-  model?: ModelTier | undefined;
   thinking?: ThinkingHint | undefined;
   effort?: EffortLevel | undefined;
 }
@@ -861,4 +1159,49 @@ const TIER_ORDER: Record<ModelTier, number> = { fast: 0, balanced: 1, deep: 2 };
 export function clampTier(requested: ModelTier, maxTier: ModelTier | undefined): ModelTier {
   if (!maxTier) return requested;
   return TIER_ORDER[requested] > TIER_ORDER[maxTier] ? maxTier : requested;
+}
+
+/**
+ * Does an explicit model id resolve to a cost band ABOVE the ceiling? A raw model
+ * id carries no tier to clamp — it names a specific model/endpoint that cannot be
+ * substituted — so an over-ceiling id must be REFUSED, not clamped (DEF-0080). An
+ * id unknown to the registry has no tier and is treated as `deep` (fail closed),
+ * matching FALLBACK_PRICING's conservative Opus default. Shared by the tier
+ * chokepoint (`resolveRunModel`) and the spawn profile guard (`profileExceedsMaxTier`).
+ */
+export function modelIdExceedsMaxTier(modelId: string, maxTier: ModelTier | undefined): boolean {
+  if (!maxTier) return false;
+  const tier = modelCapability(modelId)?.tier ?? null;
+  if (tier === null) return maxTier !== 'deep';
+  return clampTier(tier, maxTier) !== tier;
+}
+
+/**
+ * Parse the `LYNOX_BLOCKED_MODEL_IDS` wire value (or a config field) into a
+ * clean prefix list: comma-separated, trimmed, empties dropped. Pure; an
+ * unset/blank input yields `[]` (nothing blocked).
+ */
+export function parseBlockedModelIds(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * Is this model id blocked by the operator/CP model blocklist? The list holds
+ * model-id PREFIXES (e.g. `claude-opus-`), matched case-insensitively so an id
+ * cannot dodge the lock by casing. An empty/absent list blocks nothing — the
+ * default path stays byte-identical. Orthogonal to {@link modelIdExceedsMaxTier}
+ * (cost band): this is a per-model lock, enforced at config load (tier_set slot
+ * drop), config write (403), and tier resolution (`resolveRunModel`).
+ */
+export function isBlockedModelId(modelId: string, blockedPrefixes: readonly string[] | undefined): boolean {
+  if (!blockedPrefixes || blockedPrefixes.length === 0) return false;
+  const id = modelId.toLowerCase();
+  return blockedPrefixes.some((p) => {
+    const prefix = p.trim().toLowerCase();
+    return prefix.length > 0 && id.startsWith(prefix);
+  });
 }

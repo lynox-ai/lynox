@@ -68,6 +68,15 @@ export interface AgentConfig {
   capabilityContract?: CapabilityContract | undefined;
   /** Knowledge context for system prompt. Truthy string = inject as Block 2. Falsy/undefined = no memory block. */
   knowledgeContext?:   string | undefined;
+  /** Durable Knowledge Substrate (DK.1): the pre-rendered always-loaded blocks
+   *  (profile + playbook + derived focus) for this turn. Truthy = render fenced on the
+   *  ephemeral uncached tail; falsy/undefined = no block. Set by Session when
+   *  `durable_memory_enabled` is on (mirrors {@link knowledgeContext}). */
+  memoryBlocks?:       string | undefined;
+  /** DK.1: when true, the legacy end-of-turn memory extraction is stood down (the
+   *  substrate captures via the `remember` tool instead). Default/undefined = off =
+   *  byte-identical legacy extraction. */
+  durableMemoryEnabled?: boolean | undefined;
   secretStore?:        SecretStoreLike | undefined;
   userId?:             string | undefined;
   activeScopes?:       MemoryScopeRef[] | undefined;
@@ -114,6 +123,17 @@ export interface AgentConfig {
    * is responsible for its own error handling.
    */
   onMessageCheckpoint?: (() => void | Promise<void>) | undefined;
+  /**
+   * Extended debug capture (operator surface). When set, the Agent builds a REDACTED
+   * per-turn {@link import('../core/wire-capture.js').WireSnapshot} at the outbound
+   * seam and emits it here so the Session can persist it to `history.db`
+   * (RunHistory.insertWireSnapshot) for the debug export. The callback's PRESENCE is
+   * the gate — the Session passes it only when the owner-consent `debug_wire_capture`
+   * setting is on, so on a normal turn this is undefined and the whole capture block
+   * is skipped. Fire-and-forget: the hook must never throw or block the loop (the
+   * Agent wraps the call, and a persist failure must not affect a real turn).
+   */
+  onWireSnapshot?: ((snapshot: import('../core/wire-capture.js').WireSnapshot) => void) | undefined;
   /**
    * H-024 shadow mode: per-conversation `ToolCallTracker` for anomaly
    * observability. The Session owns one instance so the rolling 20-call
@@ -258,8 +278,17 @@ export interface LynoxUserConfig {
   /** GCP region for Vertex AI (e.g. 'europe-west4', 'us-east5'). */
   gcp_region?: string | undefined;
   default_tier?: ModelTier | undefined;
-  /** Maximum allowed model tier — the cost ceiling. Requests for a higher tier (StepHints, pipeline steps, run-options) are clamped via `clampTier`. Post-D8 this is the sole tier cap (the budget caps spend); managed + managed_pro set `'deep'`. */
+  /** Maximum allowed model tier — the cost ceiling. Requests for a higher tier (pipeline steps, run-options) are clamped via `clampTier`. Post-D8 this is the sole tier cap (the budget caps spend); managed + managed_pro set `'deep'`. */
   max_tier?: ModelTier | undefined;
+  /**
+   * Operator/CP model blocklist: model-id PREFIXES (e.g. `claude-opus-`) the
+   * engine refuses to run, matched case-insensitively (`isBlockedModelId`).
+   * Orthogonal to `max_tier` (a cost band): this locks specific models. Like
+   * `max_tier`, the env form (`LYNOX_BLOCKED_MODEL_IDS`, comma-separated) WINS
+   * over config.json — it is a lock, not a seed. Empty/unset = nothing blocked
+   * (byte-identical default path).
+   */
+  blocked_model_ids?: string[] | undefined;
   /**
    * Account-level plan tier, independent of LLM model tier. Post-D8
    * (2026-06) it NO LONGER gates model/tier selection — `applyTierGate`
@@ -283,6 +312,15 @@ export interface LynoxUserConfig {
    */
   tier_set?: TierSet | undefined;
   /**
+   * Named hybrid strategy (`model-presets.md`). Config-sugar: materializes to
+   * `{routing_mode:'hybrid', tier_set}` from the shared `TIER_PRESETS` SoT at
+   * config-load (the `loadConfig` expander), before the env `tier_set` block (so
+   * an env slot still wins per-slot) and before managed hardening. NOT in
+   * PROJECT_SAFE_KEYS — a project/agents_dir-settable preset would be a
+   * standard→hybrid + reroute escalation.
+   */
+  tier_preset?: string | undefined;
+  /**
    * Whether the control plane supplies the LLM key (config mirror of
    * `cpSuppliesLLMKey` / billing-tier). Set from `LYNOX_BILLING_TIER`; the
    * managed tier_set allowlist (PR-3b) is gated on this.
@@ -290,6 +328,14 @@ export interface LynoxUserConfig {
   cp_supplied?: boolean | undefined;
   thinking_mode?: 'adaptive' | 'disabled' | undefined;
   effort_level?: EffortLevel | undefined;
+  /**
+   * Which concrete Sonnet the `balanced` tier resolves to (opt-in Sonnet
+   * variant selection). One of the served Sonnet ids — `'claude-sonnet-4-6'`
+   * (default when unset) or `'claude-sonnet-5'`. An unrecognised value falls
+   * back safely to Sonnet 4.6 at `resolveBalancedModel`. Loaded from config,
+   * project config, or the `LYNOX_BALANCED_MODEL` env var.
+   */
+  balanced_model?: string | undefined;
   max_session_cost_usd?: number | undefined;
   /** Max chat runs executing concurrently across all threads (Tier-2 run
    *  executor). Bounds LLM-cost blast + run-buffer memory from many parallel
@@ -347,6 +393,17 @@ export interface LynoxUserConfig {
    * (not in the managed-user allowlist). Default: 150_000 (`DEFAULT_COMPACTION_TOKEN_BUDGET`).
    */
   compaction_token_budget?: number | undefined;
+  /**
+   * Model tier the compaction SUMMARIZER run resolves against — independent of
+   * the live session's own tier (`resolveTierModel`, provider-agnostic: Haiku
+   * on Anthropic, the small Mistral model under BYOK/hybrid). The summary is
+   * one internal, tools-suppressed turn per compaction; running it on a cheap
+   * tier instead of the session's real (often `deep`/`balanced`) tier cuts its
+   * cost roughly 4x with no accuracy requirement beyond faithfully condensing
+   * the transcript. CP-tunable (not in the managed-user allowlist, mirrors
+   * `compaction_token_budget`). Default: `'fast'`.
+   */
+  compaction_model?: ModelTier | undefined;
   /** Max HTTP requests per hour (across sessions). */
   max_http_requests_per_hour?: number | undefined;
   /** Max HTTP requests per day (across sessions). */
@@ -371,6 +428,12 @@ export interface LynoxUserConfig {
   memory_extraction_limit?: number | undefined;
   /** HTTP response body size limit in bytes. Default: 100000 */
   http_response_limit?: number | undefined;
+  /**
+   * Extract large `text/html` responses to text (title, meta/OG tags, headings,
+   * visible text) instead of returning raw markup. Default: true. Set false when
+   * you need the markup itself — scraping attributes, inspecting a page's HTML.
+   */
+  http_html_extract?: boolean | undefined;
   /** Max chars for a single tool result before truncation. Default: 80000 */
   max_tool_result_chars?: number | undefined;
   /**
@@ -388,6 +451,19 @@ export interface LynoxUserConfig {
    * Default: false — zero overhead when unset.
    */
   context_cost_log?: boolean | undefined;
+  /**
+   * Memory Foundation Wave 0 — retrieval shadow mode. When true, each retrieve()
+   * appends one JSONL record per call to `~/.lynox/retrieval-shadow.jsonl` (the raw
+   * cosine, tier, subject and would-pass verdict of every scored candidate) so an
+   * operator can measure the per-tier admission distribution on the real corpus and
+   * pick the Wave-2 FLOOR from data, never a guess. Filters NOTHING — pure
+   * telemetry. Ships WITH Wave 0 because Wave 0 widens admission, so the floor must
+   * be measured on the corpus customers actually generate. The sink records
+   * threadId/subjectId in plaintext (per-container, outside backups/export): bound
+   * its retention before enabling fleet-wide on customer data. Default: false — zero
+   * overhead when unset.
+   */
+  retrieval_shadow_log?: boolean | undefined;
   /** Enable Knowledge Graph for entity-aware memory. Default: true */
   knowledge_graph_enabled?: boolean | undefined;
   /**
@@ -402,6 +478,12 @@ export interface LynoxUserConfig {
    */
   subject_graph_enabled?: boolean | undefined;
   /**
+   * Anthropic-direct only: defer heavy/long-tail tool schemas via the tool-search
+   * tool so the cached prefix shrinks. Default off; per-tenant flip like
+   * subject_graph_enabled.
+   */
+  lazy_tools_enabled?: boolean | undefined;
+  /**
    * Foundation Rework v2 (S5b): re-point the memory RECALL reads (vector search +
    * graph-expand + the no-query recency list) from the legacy agent-memory.db onto
    * the engine.db subject-graph `memories`. Default: false — recall stays on the
@@ -414,6 +496,61 @@ export interface LynoxUserConfig {
    * recall. Requires the s5-backfill to have run on the tenant first.
    */
   memory_graph_reads?: boolean | undefined;
+  /**
+   * Memory Foundation Wave 0 — the self-reinforcement "emergency stop". When true,
+   * retrieval scoring drops the `confMult`/`confirmDecay` terms (the laundered
+   * retrieval-tally that gated admission), stops rendering `confidence=` into the
+   * `<fact>` the model reads, and stops every confirmation-count WRITE (the
+   * auto-confirm-on-success loop, the write-time dedup confirm, and consolidation's
+   * confirmation transfer). Zero rows are mutated — the columns go inert, not
+   * corrected. Default: false — a tenant stays on the legacy scoring/write path
+   * until a per-tenant flip. Both scoring branches are retained until the flag is
+   * soaked fleet-wide (dual-scorer sunset: rafael, 2026-08-31).
+   */
+  memory_scoring_v2?: boolean | undefined;
+  /**
+   * Memory Foundation Wave 2 — the write-trust gate. When true, a strictly-lower-trust
+   * write can no longer retire a higher-trust memory: a contradiction demotes
+   * `superseded → coexist`, consolidation's keeper-sort is tier-first, both retire
+   * primitives backstop-refuse a downgrade, and a higher-trust re-assert of a near-dup
+   * RAISES the stored fact (supersede-not-mutate). Default false → the write path is
+   * byte-identical. The would-be decision is measured independently under
+   * `retrieval_shadow_log` (shadow-first). Per-tenant flip (rafael canary first);
+   * intentionally NOT in PROJECT_SAFE_KEYS (operator-only, never agent-settable).
+   */
+  memory_write_trust_gate?: boolean | undefined;
+  /**
+   * Durable Knowledge Substrate (DK.1). When true, the memory pillar is rebuilt as
+   * a user-owned substrate: agent-authored `memory_blocks` (profile/playbook) + an
+   * archival `knowledge_entries` store, captured via the `remember` tool (direct
+   * insert, decoupled from the extraction minting channel) and surfaced through a
+   * per-turn derived `focus` block on the ephemeral uncached tail. Replaces the six
+   * legacy `memory_*` tools with `remember`/`recall`/`memory_block_edit`, kills the
+   * per-turn `knowledgeLayer.retrieve` default-injection, and stands down the
+   * end-of-turn extraction. Default false → BYTE-IDENTICAL (legacy extraction +
+   * injection + `memory_*` tools; the v9 tables exist but are never read/written on
+   * the hot path). Operator-only per-tenant flip (rafael canary first); intentionally
+   * NOT in PROJECT_SAFE_KEYS — never agent-settable.
+   */
+  durable_memory_enabled?: boolean | undefined;
+  /**
+   * Extended debug capture (operator surface). When true, the engine persists a
+   * REDACTED per-turn {@link import('../core/wire-capture.js').WireSnapshot} — the
+   * fully-assembled outbound request (system-prompt hash, the FULL last user message
+   * incl. the ephemeral tail with the `<secrets>` catalog scrubbed, the offered tool
+   * names/count, tool_choice/temperature/max_tokens) — to `history.db`, and the debug
+   * chat export bundles it per run. Surfaces "what the model actually SAW" so a
+   * behaves-differently-than-expected report becomes a read, not an instrumentation
+   * dig (see pro `docs/internal/prd/extended-debug-capture.md`). Default false =
+   * capture off, byte-identical hot path. THIS is the owner-consent gate for the
+   * operator path (the DEV file-sink of Step 1 is a separate, DEV-only switch).
+   * Owner-scoped, per-instance: the instance owner can write it with consent (it is
+   * in MANAGED_USER_WRITABLE_CONFIG, same class as `bugsink_enabled`), and the CP can
+   * pin it per-tenant via `LYNOX_DEBUG_WIRE_CAPTURE`, which OVERRIDES the on-disk value
+   * at load. Intentionally NOT in PROJECT_SAFE_KEYS — never agent-settable (an injected
+   * agent must not be able to turn on content capture).
+   */
+  debug_wire_capture?: boolean | undefined;
   /** Embedding model for ONNX provider. Default: 'multilingual-e5-small' */
   embedding_model?: 'all-minilm-l6-v2' | 'multilingual-e5-small' | 'bge-m3' | undefined;
   /** Google OAuth scopes to request. Defaults to read-only. Add write scopes as needed. */
@@ -426,6 +563,14 @@ export interface LynoxUserConfig {
    * query AND the page/content fetch). Default 'allow-all' = today's behaviour,
    * unchanged. 'deny-all' = those tools cannot reach the network. 'allow-list' =
    * they may reach ONLY the hosts in `network_allowed_hosts`.
+   *
+   * 'guarded' = surface-aware lockdown: the full-control surfaces (`http_request`
+   * any method, `api_setup fetch_token`) may reach ONLY baseline vetted hosts ∪
+   * the `network_allowed_hosts` operator floor ∪ the hosts a connected api_profile
+   * was human-accepted for (`custom_endpoint_ack`), while the discovery surfaces
+   * (`web_research` read/search, `api_setup` bootstrap) stay open (still SSRF- and
+   * enforce_https-gated). Blocks credential-free active egress to off-baseline
+   * hosts a prompt-injected agent could steer, without breaking "connect any API".
    *
    * SCOPE — this is NOT a full process air-gap. It gates the agent-driven HTTP
    * tool surface only. It does NOT gate: the LLM provider call (separate client),
@@ -630,4 +775,4 @@ export interface CapabilityLock {
  * `custom_provider_endpoints`: free-text base_url tiles disabled (Managed).
  *   Mirror in code: catalog entries with `requires_base_url === true`.
  */
-export type CapabilityLocks = Partial<Record<'provider' | 'custom_provider_endpoints' | 'limits' | 'custom_endpoints' | 'context_window' | 'thinking_effort', CapabilityLock>>;
+export type CapabilityLocks = Partial<Record<'provider' | 'custom_provider_endpoints' | 'limits' | 'custom_endpoints' | 'context_window' | 'thinking_effort' | 'tier_preset', CapabilityLock>>;

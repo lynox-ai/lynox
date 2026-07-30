@@ -1,0 +1,93 @@
+/**
+ * Symbols whose SINGLE SOURCE OF TRUTH moved into `src/contract/`.
+ *
+ * VENDORED DOWNSTREAM — edit ONLY here (`core/src/contract/`); a vendored
+ * copy of this file is read-only for its consumer.
+ *
+ * The orphan-twin drift test (`tests/contract-drift.test.ts`) fails CI when any of
+ * these is REDEFINED locally anywhere in `src/` or `packages/web-ui/src/`
+ * outside the contract dirs — pure re-export shims (export-from statements
+ * only, no local declaration) are the one permitted form.
+ *
+ * Add a row when a symbol migrates into the contract; never remove one without
+ * migrating the symbol back out deliberately.
+ *
+ * Pattern rules (each `twinPattern` is a regex source, applied per line):
+ * - Anchored on a DECLARATION keyword (`type`/`interface`, `function`/`const`/
+ *   `let`/`var`) so re-export shims (`export { X } from …`) and call sites
+ *   never match.
+ * - Anchored past the name (`=`, `(`, `:`, or a word boundary) so a
+ *   deliberately-differently-named delegating helper (e.g. web-ui's
+ *   `cpSuppliesLLMKeyForInstance`) is not a prefix false-positive.
+ * - Known limitation: an object/class METHOD named like a migrated function
+ *   (`normalizeTier(v) { … }`) is not hunted — any pattern for it would also
+ *   match ordinary call sites. The sweep is a drift tripwire, not a parser.
+ */
+export interface MigratedSymbol {
+  /** Exported symbol name. */
+  name: string;
+  /** Contract file that owns it now. */
+  contractFile:
+    | 'vocab.ts'
+    | 'shapes.ts'
+    | 'env-registry.ts'
+    | 'http.ts'
+    | 'marker.ts'
+    | 'fixtures/mirrors.ts';
+  /** The declaration pattern the orphan-twin test hunts (regex source, applied per line). */
+  twinPattern: string;
+}
+
+// Anchored past the name on a declaration continuation (`=`, `{`, `<`,
+// `extends`) so inline type-imports (`import { type BillingTier } from …`)
+// never match.
+const typeTwin = (name: string): string => `\\b(?:type|interface)\\s+${name}\\s*(?:=|\\{|<|extends\\b)`;
+const valueTwin = (name: string): string => `\\b(?:function|const|let|var)\\s+${name}\\s*[=(:]`;
+
+export const MIGRATED: readonly MigratedSymbol[] = [
+  { name: 'BillingTier', contractFile: 'vocab.ts', twinPattern: typeTwin('BillingTier') },
+  { name: 'LEGACY_BILLING_TIER_ALIASES', contractFile: 'vocab.ts', twinPattern: valueTwin('LEGACY_BILLING_TIER_ALIASES') },
+  { name: 'CANONICAL_BILLING_TIERS', contractFile: 'vocab.ts', twinPattern: valueTwin('CANONICAL_BILLING_TIERS') },
+  { name: 'normalizeBillingTier', contractFile: 'vocab.ts', twinPattern: valueTwin('normalizeBillingTier') },
+  { name: 'isHostedInstance', contractFile: 'vocab.ts', twinPattern: valueTwin('isHostedInstance') },
+  { name: 'cpSuppliesLLMKey', contractFile: 'vocab.ts', twinPattern: valueTwin('cpSuppliesLLMKey') },
+  { name: 'ModelTier', contractFile: 'vocab.ts', twinPattern: typeTwin('ModelTier') },
+  { name: 'LEGACY_TIER_ALIASES', contractFile: 'vocab.ts', twinPattern: valueTwin('LEGACY_TIER_ALIASES') },
+  { name: 'normalizeTier', contractFile: 'vocab.ts', twinPattern: valueTwin('normalizeTier') },
+  { name: 'AccountTier', contractFile: 'vocab.ts', twinPattern: typeTwin('AccountTier') },
+  { name: 'LLMProvider', contractFile: 'vocab.ts', twinPattern: typeTwin('LLMProvider') },
+  { name: 'NetworkPolicy', contractFile: 'vocab.ts', twinPattern: typeTwin('NetworkPolicy') },
+  { name: 'ModelProfile', contractFile: 'shapes.ts', twinPattern: typeTwin('ModelProfile') },
+  { name: 'isModelProfile', contractFile: 'shapes.ts', twinPattern: valueTwin('isModelProfile') },
+  // Not migrated FROM anywhere (born in the contract), but vendored downstream —
+  // a local re-declaration would be the same silent-divergence failure mode.
+  { name: 'ENV_REGISTRY', contractFile: 'env-registry.ts', twinPattern: valueTwin('ENV_REGISTRY') },
+  { name: 'ENV_REGISTRY_BY_NAME', contractFile: 'env-registry.ts', twinPattern: valueTwin('ENV_REGISTRY_BY_NAME') },
+  { name: 'SELF_HOST_ONLY', contractFile: 'env-registry.ts', twinPattern: valueTwin('SELF_HOST_ONLY') },
+  { name: 'PREFIX_FAMILIES', contractFile: 'env-registry.ts', twinPattern: valueTwin('PREFIX_FAMILIES') },
+  // K-W2 — money-HTTP + health wire shapes (born in the contract; a local
+  // re-declaration downstream is the same silent-divergence failure mode).
+  { name: 'UsageReportRun', contractFile: 'http.ts', twinPattern: typeTwin('UsageReportRun') },
+  { name: 'UsageFlushRequest', contractFile: 'http.ts', twinPattern: typeTwin('UsageFlushRequest') },
+  { name: 'UsageFlushResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageFlushResponse') },
+  { name: 'UsageStatusResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageStatusResponse') },
+  { name: 'UsageSummaryPeriod', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryPeriod') },
+  { name: 'UsageSummaryResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryResponse') },
+  { name: 'HealthBody', contractFile: 'http.ts', twinPattern: typeTwin('HealthBody') },
+  { name: 'TYPED_MIRRORS', contractFile: 'fixtures/mirrors.ts', twinPattern: valueTwin('TYPED_MIRRORS') },
+  // K-W3 — auth + OAuth wire shapes.
+  { name: 'MagicLinkVerifyRequest', contractFile: 'http.ts', twinPattern: typeTwin('MagicLinkVerifyRequest') },
+  { name: 'MAGIC_LINK_ERROR_CODES', contractFile: 'http.ts', twinPattern: valueTwin('MAGIC_LINK_ERROR_CODES') },
+  { name: 'MagicLinkErrorCode', contractFile: 'http.ts', twinPattern: typeTwin('MagicLinkErrorCode') },
+  { name: 'isMagicLinkErrorCode', contractFile: 'http.ts', twinPattern: valueTwin('isMagicLinkErrorCode') },
+  { name: 'AuthErrorBody', contractFile: 'http.ts', twinPattern: typeTwin('AuthErrorBody') },
+  { name: 'OAuthClaimRequest', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimRequest') },
+  { name: 'OAuthClaimResponse', contractFile: 'http.ts', twinPattern: typeTwin('OAuthClaimResponse') },
+  // K-W3 — the guarded-capable boot marker. The literal existed twice by hand
+  // across the repo boundary; a local re-declaration is that failure returning.
+  { name: 'GUARDED_CAPABLE_MARKER', contractFile: 'marker.ts', twinPattern: valueTwin('GUARDED_CAPABLE_MARKER') },
+  { name: 'EGRESS_POLICY_LOG_PREFIX', contractFile: 'marker.ts', twinPattern: valueTwin('EGRESS_POLICY_LOG_PREFIX') },
+  { name: 'guardedCapableBootLine', contractFile: 'marker.ts', twinPattern: valueTwin('guardedCapableBootLine') },
+  { name: 'GUARDED_CAPABLE_LINE_ERE', contractFile: 'marker.ts', twinPattern: valueTwin('GUARDED_CAPABLE_LINE_ERE') },
+  { name: 'guardedCapableLineRegex', contractFile: 'marker.ts', twinPattern: valueTwin('guardedCapableLineRegex') },
+];

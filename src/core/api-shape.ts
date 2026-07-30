@@ -41,6 +41,20 @@ export function applyShape(raw: unknown, shape: ResponseShape): ShapeResult {
     // 1. Projection (include whitelist).
     if (shape.include && shape.include.length > 0) {
       value = project(raw, shape.include);
+      // Fail LOUDLY when the whitelist matched NOTHING against a non-empty raw
+      // response: that's almost always wrong paths (e.g. a shallow `result.keyword`
+      // against DataForSEO's `tasks[].result[].items[].keyword_data.keyword`).
+      // Returning `{}` silently makes the agent thrash refine→refine→refine; an
+      // error routes the caller to the safety-net raw (which shows the real
+      // structure) + surfaces WHICH keys exist so the paths get fixed in one pass.
+      if (isEmptyResult(value) && !isEmptyResult(raw)) {
+        return {
+          shaped: rawString,
+          beforeChars,
+          afterChars: beforeChars,
+          error: `response_shape.include matched no fields (response ${describeTopLevel(raw)}) — verify the paths against the actual response structure`,
+        };
+      }
     }
 
     // 2. Reducers.
@@ -72,6 +86,24 @@ export function applyShape(raw: unknown, shape: ResponseShape): ShapeResult {
     const message = err instanceof Error ? err.message : String(err);
     return { shaped: rawString, beforeChars, afterChars: beforeChars, error: message };
   }
+}
+
+/** A projection/response is "empty" if it carries no data the agent could use. */
+function isEmptyResult(v: unknown): boolean {
+  if (v === undefined || v === null) return true;
+  if (Array.isArray(v)) return v.length === 0;
+  if (typeof v === 'object') return Object.keys(v as Record<string, unknown>).length === 0;
+  return false; // a primitive (0, '', false) is still a real value
+}
+
+/** Human-readable top-level shape of a raw response, for the "wrong paths" hint. */
+function describeTopLevel(raw: unknown): string {
+  if (Array.isArray(raw)) return `is an array of ${raw.length} item(s)`;
+  if (raw && typeof raw === 'object') {
+    const keys = Object.keys(raw as Record<string, unknown>);
+    return `top-level keys: ${keys.slice(0, 12).join(', ')}${keys.length > 12 ? ', …' : ''}`;
+  }
+  return 'is a primitive';
 }
 
 // ── Path parsing ──────────────────────────────────────────────────────────────

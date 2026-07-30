@@ -9,11 +9,11 @@ The `lynox` CLI is the **installer + server entrypoint**. All interactive featur
 live in the Web UI. All scripted/agent workflows go through the HTTP API
 (`lynox --http-api`).
 
-Pre-HN-launch we trimmed the power-user CLI modes (single-task invocation,
+In a recent release we trimmed the power-user CLI modes (single-task invocation,
 file-watch, manifest runner, background-task creator, output redirect). They
 were undocumented in the user-facing surface, had no external callers, and were
-not exercised by CI. We will revisit them once OSS-launch traffic shape tells
-us which (if any) are missed.
+not exercised by CI. We will revisit them if usage shows which (if any) are
+missed.
 
 ## Entry Modes
 
@@ -55,8 +55,8 @@ REST/SSE endpoints exposed by this server.
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | Anthropic API key (required for the anthropic provider) |
 | `ANTHROPIC_BASE_URL` | Custom API endpoint (for proxies) |
-| `MISTRAL_API_KEY` | Mistral API key (required for the mistral provider — EU data residency) |
-| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` \| `mistral` \| `custom` \| `openai` \| `vertex` (legacy — wired for existing config.json setups, no longer offered by the installer/wizard) |
+| `MISTRAL_API_KEY` | Mistral API key (used with `provider: openai` pinned to the Mistral endpoint — EU data residency) |
+| `LYNOX_LLM_PROVIDER` | LLM provider: `anthropic` \| `custom` \| `openai` \| `vertex` (legacy — wired for existing config.json setups, no longer offered by the installer/wizard) |
 | `LYNOX_VAULT_KEY` | AES-256 key for the secrets vault (critical — cannot be recovered if lost) |
 | `LYNOX_DATA_DIR` | Override data directory (same as `--data-dir`) |
 | `LYNOX_HTTP_PORT` | HTTP API port (default: `3100`) |

@@ -1046,6 +1046,85 @@ describe('httpRequestTool', () => {
     });
   });
 
+  describe('network policy: guarded', () => {
+    // guarded = full-control (http_request) reaches only baseline ∪ operator
+    // floor ∪ hosts a connected api_profile was human-accepted for.
+
+    it('blocks an off-baseline host with no accepting profile', async () => {
+      applyNetworkPolicy(testCtx, 'guarded', undefined);
+      mockDnsPublic();
+      // Early-gate hard-block → agent-visible actionable string (not a throw).
+      const result = await handler({ url: 'https://attacker.example.org/v1' }, makeAgent());
+      expect(result).toContain('not reachable under the current egress policy');
+    });
+
+    it('allows an operator-floor host under guarded', async () => {
+      applyNetworkPolicy(testCtx, 'guarded', ['ops.example.com']);
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      const result = await handler({ url: 'https://ops.example.com/x' }, makeAgent());
+      expect(result).toContain('HTTP 200');
+    });
+
+    it('allows a human-accepted profile host incl. an OAuth token_url ≠ base_url (P7)', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'provider',
+        name: 'Provider',
+        base_url: 'https://api.provider.net/v1',
+        description: 'oauth2 profile; token endpoint on a different host',
+        auth: { type: 'oauth2', oauth: { token_url: 'https://token.provider.net/oauth/token' } },
+        // Both egress hosts accepted out-of-band at save (base_url + token_url).
+        custom_endpoint_ack: { accepted: true, hosts: ['api.provider.net', 'token.provider.net'], accepted_at: new Date().toISOString() },
+      } as never);
+      testCtx.apiStore = store;
+      applyNetworkPolicy(testCtx, 'guarded', undefined);
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      // The token_url host (≠ base_url) is admitted via the accepted-host union.
+      // No secretStore on the stub agent → the OAuth attach block is skipped.
+      expect(await handler({ url: 'https://token.provider.net/oauth/token' }, makeAgent())).toContain('HTTP 200');
+      // A host NOT in any profile's acceptance stays blocked.
+      const blocked = await handler({ url: 'https://unaccepted.example.com' }, makeAgent());
+      expect(blocked).toContain('not reachable under the current egress policy');
+    });
+
+    it('allows a credential-less (no-auth) profile host under guarded (P7)', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'credsfree',
+        name: 'Creds-free',
+        base_url: 'https://api.creds-free.net/v1',
+        description: 'no engine-managed credential; still human-accepted at save',
+        custom_endpoint_ack: { accepted: true, hosts: ['api.creds-free.net'], accepted_at: new Date().toISOString() },
+      } as never);
+      testCtx.apiStore = store;
+      applyNetworkPolicy(testCtx, 'guarded', undefined);
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ body: 'ok' })));
+      expect(await handler({ url: 'https://api.creds-free.net/v1/data' }, makeAgent())).toContain('HTTP 200');
+    });
+
+    it('blocks a redirect from an allowed host to an off-baseline host (per-hop)', async () => {
+      applyNetworkPolicy(testCtx, 'guarded', ['ok.example.com']);
+      mockDnsPublic();
+      // ok.example.com is floor-allowed and 302s to an off-baseline attacker host;
+      // the per-hop re-check inside fetchWithValidatedRedirects must block hop 2.
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({
+        status: 302,
+        headers: { location: 'https://evil.com/steal' },
+      }));
+      vi.stubGlobal('fetch', fetchMock);
+      await expect(handler({ url: 'https://ok.example.com/start' }, makeAgent()))
+        .rejects.toThrow('not reachable under the current egress policy');
+      // Proves the SECOND hop (evil.com) was blocked BEFORE its fetch: hop 1
+      // (ok.example.com, floor-allowed) fetched once, the redirect target never did.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('Response shaping via API profile', () => {
     it('applies response_shape when the hostname has a profile', async () => {
       const { ApiStore } = await import('../../core/api-store.js');
@@ -1868,6 +1947,203 @@ describe('httpRequestTool', () => {
 
       const callArgs = fetchMock.mock.calls[0][1];
       expect(callArgs.headers.Authorization).toBe('Bearer agent-set-token');
+    });
+  });
+
+  describe('HTML text extraction', () => {
+    // Motivated by the onboarding website scan (amazona.de, 2026-07-27): a
+    // 204KB page went into the context as raw markup — 91% of the thread's
+    // context bytes, re-billed on every following turn.
+    // Body copy must clear MIN_USEFUL_EXTRACT_CHARS — an extraction yielding
+    // near-nothing deliberately falls back to raw markup (SPA case, tested below).
+    const bigHtml = (visible: string): string =>
+      `<html><head><title>Musiker-Magazin</title>` +
+      `<meta name="description" content="Tests zu Synthesizern"/>` +
+      `<script>${'var pad=1;'.repeat(4_000)}</script>` +
+      `<style>${'.a{b:c}'.repeat(2_000)}</style>` +
+      `</head><body><h1>${visible}</h1>` +
+      `<p>${'Wir testen Synthesizer, Keyboards und Gitarren seit 1999. '.repeat(10)}</p>` +
+      `</body></html>`;
+
+    function htmlAgent(userConfig?: Record<string, unknown>): never {
+      return {
+        name: 'main',
+        toolContext: userConfig ? { userConfig } : {},
+        sessionCounters: testCounters,
+      } as never;
+    }
+
+    it('extracts a large text/html body instead of returning raw markup', async () => {
+      mockDnsPublic();
+      const html = bigHtml('Aktuelle Tests');
+      expect(html.length).toBeGreaterThan(30_000);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+        body: html,
+      })));
+
+      const result = await handler({ url: 'https://example.com/' }, htmlAgent());
+
+      expect(result).toContain('title: Musiker-Magazin');
+      expect(result).toContain('description: Tests zu Synthesizern');
+      expect(result).toContain('## Aktuelle Tests');
+      expect(result).not.toContain('var pad=1;');
+      expect(result).toContain('HTML auto-extracted to text');
+      // The whole point: the result must be a fraction of the raw page.
+      expect(result.length).toBeLessThan(html.length / 10);
+    });
+
+    it('leaves a SMALL html body untouched — fetching a markup snippet still works', async () => {
+      mockDnsPublic();
+      // Prose well over MIN_USEFUL_EXTRACT_CHARS, so the ONLY reason this stays
+      // raw is the 30k threshold. With a tiny page the min-useful fallback would
+      // return raw anyway and the test would pass even with the threshold deleted.
+      const small = `<html><body><h1>Klein</h1><p>${'Sichtbarer Fliesstext. '.repeat(30)}</p></body></html>`;
+      expect(small.length).toBeGreaterThan(500);
+      expect(small.length).toBeLessThan(30_000);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: small,
+      })));
+
+      const result = await handler({ url: 'https://example.com/' }, htmlAgent());
+
+      expect(result).toContain('<h1>Klein</h1>');
+      expect(result).not.toContain('HTML auto-extracted');
+    });
+
+    it('pins the threshold as strictly-greater: exactly 30_000 chars stays raw', async () => {
+      mockDnsPublic();
+      const filler = 'Fliesstext. ';
+      const head = '<html><body><p>';
+      const tail = '</p></body></html>';
+      const body = head + filler.repeat(Math.ceil(30_000 / filler.length)) + tail;
+      const exact = `${body.slice(0, 30_000 - tail.length)}${tail}`.slice(0, 30_000);
+      expect(exact.length).toBe(30_000);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: exact,
+      })));
+
+      const result = await handler({ url: 'https://example.com/' }, htmlAgent());
+
+      expect(result).not.toContain('HTML auto-extracted');
+    });
+
+    it('reports BOTH notes when a >100KB page is read-truncated and then extracted', async () => {
+      mockDnsPublic();
+      // Over DEFAULT_RESPONSE_BYTES, so readBodyLimited truncates first. The
+      // combined branch must swap the collector hint for the read-limit note —
+      // after extraction the context-bloat advice would be wrong.
+      const huge = bigHtml('Aktuelle Tests') +
+        `<p>${'Weiterer sichtbarer Fliesstext. '.repeat(4_000)}</p>`;
+      expect(huge.length).toBeGreaterThan(100_000);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: huge,
+      })));
+
+      const result = await handler({ url: 'https://example.com/' }, htmlAgent());
+
+      expect(result).toContain('HTML auto-extracted to text');
+      expect(result).toContain('exceeded the 98KB read limit');
+      expect(result).not.toContain("role='collector'");
+    });
+
+    it('flags the 24k cap when the extracted TEXT itself overflows', async () => {
+      mockDnsPublic();
+      const wordy = `<html><body><p>${'Sichtbarer Fliesstext ohne Markup. '.repeat(1_200)}</p></body></html>`;
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: wordy,
+      })));
+
+      const result = await handler({ url: 'https://example.com/' }, htmlAgent());
+
+      expect(result).toContain('hit the 24000-char cap');
+    });
+
+    it('passes the FETCHED url through, so the page\'s links are listed', async () => {
+      // The wiring is the point: passing `undefined` as the base leaves this
+      // suite green, so nothing else would notice the links disappearing.
+      // MUTATION: `extractHtmlText(text, {})` at the call site.
+      mockDnsPublic();
+      const nav = Array.from({ length: 6 }, (_, i) => `<a href="/teil-${i}">Teil ${i}</a>`).join('');
+      const html = `<html><head><title>T</title></head><body>${nav}`
+        + `<p>${'Sichtbarer Fliesstext. '.repeat(1_600)}</p></body></html>`;
+      expect(html.length).toBeGreaterThan(30_000);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: html,
+      })));
+
+      const result = await handler({ url: 'https://example.com/start' }, htmlAgent());
+
+      expect(result).toContain('links (same-site');
+      expect(result).toContain('/teil-0 — Teil 0');
+    });
+
+    it('honours http_html_extract: false for the scraping case', async () => {
+      mockDnsPublic();
+      const html = bigHtml('Aktuelle Tests');
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: html,
+      })));
+
+      const result = await handler(
+        { url: 'https://example.com/' },
+        htmlAgent({ http_html_extract: false }),
+      );
+
+      expect(result).toContain('var pad=1;');
+      expect(result).not.toContain('HTML auto-extracted');
+    });
+
+    it('does not touch a large JSON body — that path keeps its own shaping', async () => {
+      mockDnsPublic();
+      // Must clear the 30k HTML threshold too, otherwise the size gate — not the
+      // content-type branch — is what keeps the HTML path out, and the test would
+      // stay green even if the branches were ordered wrongly.
+      const items = Array.from({ length: 900 }, (_, i) => ({ id: i, name: `name-${i}`, note: 'x'.repeat(30) }));
+      expect(JSON.stringify({ items }).length).toBeGreaterThan(30_000);
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'application/json' },
+        json: { items },
+      })));
+
+      const result = await handler({ url: 'https://api.example.com/x' }, htmlAgent());
+
+      expect(result).not.toContain('HTML auto-extracted');
+      expect(result).toContain('items');
+    });
+
+    it('does not extract a text/plain body', async () => {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/plain' },
+        body: `<h1>not markup</h1>${'x'.repeat(40_000)}`,
+      })));
+
+      const result = await handler({ url: 'https://example.com/f.txt' }, htmlAgent());
+
+      expect(result).toContain('<h1>not markup</h1>');
+      expect(result).not.toContain('HTML auto-extracted');
+    });
+
+    it('keeps raw markup when extraction yields almost nothing (JS-rendered shell)', async () => {
+      mockDnsPublic();
+      const spa = `<html><head><script>window.__D__={${'"k":1,'.repeat(6_000)}"z":0}</script>` +
+        `</head><body><div id="root"></div></body></html>`;
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({
+        headers: { 'content-type': 'text/html' },
+        body: spa,
+      })));
+
+      const result = await handler({ url: 'https://spa.example.com/' }, htmlAgent());
+
+      expect(result).toContain('window.__D__');
+      expect(result).not.toContain('HTML auto-extracted');
     });
   });
 });

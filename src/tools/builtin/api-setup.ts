@@ -19,10 +19,12 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ResponseShape, ApiAuth, ApiEndpoint } from '../../core/api-store.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
+import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
+import { pv } from '../../core/prompt-value.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -77,14 +79,6 @@ interface ApiSetupInput {
   docs_url?: string | undefined;
   /** Additive patch (required for refine). */
   refine?: RefinePatch | undefined;
-  /**
-   * Wave 5d BYOK liability gate: when `profile.base_url` is not on lynox's
-   * vetted sub-processor allowlist (see `core/llm/endpoint-allowlist.ts`),
-   * create/update returns a REQUIRES_USER_CONFIRMATION sentinel. The agent
-   * must surface the disclosure via `ask_user`, then re-call api_setup with
-   * `confirm_custom_endpoint: true` to capture user acceptance and proceed.
-   */
-  confirm_custom_endpoint?: boolean | undefined;
 }
 
 const REQUIRED_FIELDS: Array<keyof ApiProfile> = ['id', 'name', 'base_url', 'description'];
@@ -588,7 +582,7 @@ async function fetchLinkedSection(url: string, agent: IAgent, remainingBudget: n
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const resp = await fetchWithValidatedRedirects(url, { signal: ac.signal }, agent.toolContext);
+      const { response: resp } = await fetchWithValidatedRedirects(url, { signal: ac.signal }, 'discovery', agent.toolContext);
       // Bootstrap fetches go around the http_request tool, so the session
       // limit didn't see them pre-1.5.0. Charge each successful fetch so a
       // pathological docs_url can't laundromat its way past the budget.
@@ -744,7 +738,7 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     const ac = new AbortController();
     const timer = setTimeout(() => { ac.abort(); }, DOCS_FETCH_TIMEOUT_MS);
     try {
-      const resp = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, agent.toolContext);
+      const { response: resp } = await fetchWithValidatedRedirects(docsUrl, { signal: ac.signal }, 'discovery', agent.toolContext);
       // Charge the primary docs fetch against the session HTTP budget so
       // bootstrap is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
       agent.sessionCounters.httpRequests++;
@@ -805,6 +799,12 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
       // leak path in `createLLMClient()` — see PR #568 for the analogous
       // spawn.ts fix).
       agent,
+      // Honour the operator model blocklist: without this a managed trial that
+      // blocks premium Anthropic ids would still run the Sonnet default here on
+      // the CP pool key (the resolved model falls back to the fast tier).
+      ...(agent.toolContext.userConfig?.blocked_model_ids !== undefined
+        ? { blockedModelIds: agent.toolContext.userConfig.blocked_model_ids }
+        : {}),
     });
     extracted = result.data;
     costUsd = result.costUsd;
@@ -908,7 +908,7 @@ function applyRefine(existing: ApiProfile, patch: RefinePatch): ApiProfile {
 export const apiSetupTool: ToolEntry<ApiSetupInput> = {
   definition: {
     name: 'api_setup',
-    description: 'Create, update, delete, list, view, bootstrap, refine, or fetch_token API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). Returns a draft profile; enrich it with extra guidelines/avoid/response_shape (from reading the docs) and then call `create`.\n- create: pass a complete `profile` object.\n- refine: pass `id` + `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit). Use when a call teaches you something new.\n- delete: pass `id`.\n- fetch_token: pass `id`. Drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata. Resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. Use INSTEAD of constructing the /oauth/access_token POST by hand via http_request. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled.',
+    description: 'Create, update, delete, list, view, bootstrap, refine, or fetch_token API profiles. Profiles teach you how to correctly use external APIs — endpoints, auth, rate limits, common mistakes, and response shaping.\n\nActions:\n- list / view: read profiles.\n- bootstrap: draft a profile from an OpenAPI spec (`openapi_url`) or a docs page (`docs_url`), then enrich it and call `create`.\n- create: pass a complete `profile` object.\n- refine: pass `id` + a `refine` patch (addGuidelines / addAvoid / addNotes / addEndpoints / response_shape / rate_limit) when a call teaches you something new.\n- delete: pass `id`.\n- fetch_token: pass `id` to run the profile\'s OAuth grant and store the access_token — use INSTEAD of building the token POST by hand.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -941,14 +941,13 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
           type: 'string',
           description: 'For fetch_token action: vault key name to store the resulting access_token under. UPPER_SNAKE_CASE. Default: `${id.toUpperCase()}_ACCESS_TOKEN`.',
         },
-        confirm_custom_endpoint: {
-          type: 'boolean',
-          description: 'Required when `profile.base_url` points at a host outside lynox\'s vetted sub-processor allowlist. First call returns `REQUIRES_USER_CONFIRMATION` with a disclosure text; surface that to the user via `ask_user`, then re-call this tool with `confirm_custom_endpoint: true` to record acceptance and proceed.',
-        },
       },
       required: ['action'],
     },
   },
+  detailedGuidance:
+    'bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). It returns a DRAFT profile — enrich it with extra guidelines/avoid/response_shape from reading the docs, then call `create`.\n' +
+    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled.',
   handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> => {
     const apisDir = getApisDir();
 
@@ -997,7 +996,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         const timer = setTimeout(() => { ac.abort(); }, OPENAPI_FETCH_TIMEOUT_MS);
         let resp: Response;
         try {
-          resp = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, agent.toolContext);
+          ({ response: resp } = await fetchWithValidatedRedirects(input.openapi_url, { signal: ac.signal }, 'discovery', agent.toolContext));
           // Charge OpenAPI bootstrap fetches against the session budget too.
           agent.sessionCounters.httpRequests++;
         } finally {
@@ -1115,27 +1114,39 @@ Next steps before calling create:
         egressUrls.push(profile.auth.oauth.token_url);
       }
       const nonAllowlisted = egressUrls.filter((u) => !isAllowlistedEndpoint(u));
-      if (nonAllowlisted.length > 0 && input.confirm_custom_endpoint !== true) {
-        // Disclose EVERY non-allowlisted egress host — a single confirm accepts
-        // all of them, so the user must see all (not just the first).
+      if (nonAllowlisted.length > 0) {
+        // Controller-responsibility acceptance MUST be a real OUT-OF-BAND human
+        // confirmation — NEVER an agent-supplied tool argument. A prompt-injected
+        // agent (malicious mail/page/doc) that could self-approve would repoint an
+        // existing oauth2 profile's base_url at an attacker host, accept, and then
+        // exfiltrate the managed access_token via a later http_request (the token
+        // auto-attaches by hostname). So we ask the human out-of-band via
+        // `promptUser` (PromptStore ask_user) — the agent cannot supply this
+        // answer — and fail CLOSED when no interactive prompt exists. Disclose
+        // EVERY non-allowlisted egress host so the single accept is informed.
         const disclosure = nonAllowlisted.map((u) => describeDisclosure(u)).join('\n\n');
-        return JSON.stringify({
-          status: 'REQUIRES_USER_CONFIRMATION',
-          disclosure,
-          hint: 'Surface the `disclosure` text to the user via `ask_user`. Once they accept, re-call `api_setup` with the same `profile` plus `confirm_custom_endpoint: true` to record acceptance and persist the profile.',
-        }, null, 2);
+        if (!agent.promptUser) {
+          return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance of controller-responsibility — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
+        }
+        const answer = await agent.promptUser(
+          pv`⚠ api_setup: "${profile.name}" will send data${profile.auth?.type === 'oauth2' ? ' — and, for its OAuth token, the managed access_token —' : ''} to non-vetted host(s):\n\n${disclosure}\n\nAccept controller-responsibility and save this profile?`,
+          ['Allow', 'Deny', '\x00'],
+        );
+        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+          return `Blocked: profile "${profile.id}" not saved — user declined controller-responsibility for the non-vetted host(s).`;
+        }
       }
 
       // Persist the acceptance onto the profile so the RUNTIME egress paths
       // (fetch_token, http_request OAuth2 attach) can re-verify it fail-closed
-      // after a reload/migration — where the transient `confirm_custom_endpoint`
-      // tool signal is long gone. Set server-side ONLY; an ack carried in the
-      // incoming `profile` object is never trusted (that would forge the gate),
-      // so we overwrite it unconditionally here. Bound to the specific hosts so
-      // a later `token_url`/`base_url` swap to a different non-vetted host does
+      // after a reload/migration — where the transient in-run confirmation is
+      // long gone. Set server-side ONLY; an ack carried in the incoming
+      // `profile` object is never trusted (that would forge the gate), so we
+      // overwrite it unconditionally here. Bound to the specific hosts so a
+      // later `token_url`/`base_url` swap to a different non-vetted host does
       // not inherit this ack — it re-gates.
       if (nonAllowlisted.length > 0) {
-        // Reachable only with confirm_custom_endpoint === true (else returned above).
+        // Reachable only after the human accepted above (else returned).
         const ackHosts = Array.from(new Set(
           nonAllowlisted
             .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
@@ -1247,7 +1258,7 @@ Next steps before calling create:
       if (!isAllowlistedEndpoint(oauth.token_url) && !isEndpointAcked(profile.custom_endpoint_ack, oauth.token_url)) {
         let host = oauth.token_url;
         try { host = new URL(oauth.token_url).hostname; } catch { /* keep raw value */ }
-        return `Error: profile "${input.id}" token_url points at a non-vetted sub-processor (${host}) with no recorded acceptance — fetch_token is refused because it would POST the client_secret to an unaccepted host. Re-save the profile via api_setup({ action: 'update', ... }); you'll be prompted to accept controller-responsibility (re-call with confirm_custom_endpoint: true), which records the acceptance and unblocks fetch_token.`;
+        return `Error: profile "${input.id}" token_url points at a non-vetted sub-processor (${host}) with no recorded acceptance — fetch_token is refused because it would POST the client_secret to an unaccepted host. Re-save the profile via api_setup({ action: 'update', ... }); you'll be prompted to accept controller-responsibility, which records the acceptance and unblocks fetch_token.`;
       }
       const grantType = oauth.grant_type ?? 'client_credentials';
       const bodyFormat = oauth.body_format ?? 'form';
@@ -1343,15 +1354,20 @@ Next steps before calling create:
         // enforcement. Without it the client_secret in `body` would POST to an
         // arbitrary attacker-supplied token_url regardless of the tenant's
         // network policy — a credential-exfil channel.
-        response = await Promise.race([
+        ({ response } = await Promise.race([
+          // fetch_token is a full-control credentialed egress (posts the
+          // client_secret to token_url) — gated under `guarded`. The token_url
+          // host is in this profile's own custom_endpoint_ack (base_url +
+          // token_url were both accepted at save), so the accepted-host union
+          // admits it; a token_url no profile accepted stays blocked.
           fetchWithValidatedRedirects(oauth.token_url, {
             method: 'POST',
             headers,
             body,
             signal: ac.signal,
-          }, agent.toolContext),
+          }, 'full-control', agent.toolContext, undefined, resolveGuardedAckHosts(agent.toolContext)),
           wallTimeout,
-        ]);
+        ]));
         // Charge the token exchange against the session HTTP budget so
         // fetch_token is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
         agent.sessionCounters.httpRequests++;

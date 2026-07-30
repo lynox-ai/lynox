@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { generateKeyPairSync } from 'node:crypto';
 import { GoogleAuth, SCOPES, READ_ONLY_SCOPES, WRITE_SCOPES } from './google-auth.js';
+// The fixture VALUE, not the fixture FILE: `node:fs` is mocked in this file, so
+// reading the JSON here would quietly yield the stub's `{}`. The mirror is
+// `satisfies`-welded to the contract type and proven byte-equal to the JSON in
+// `tests/contract-http.test.ts`, so driving the mirror drives the golden bytes.
+import { TYPED_MIRRORS } from '../../contract/fixtures/mirrors.js';
 
 // Mock fetch globally
 const mockFetch = vi.fn();
@@ -714,5 +719,63 @@ describe('GoogleAuth', () => {
       expect(t).toBe('sa-token-after-recovery');
       expect(mockFetch).toHaveBeenCalledTimes(2);
     });
+  });
+});
+
+// ── OAuth claim: the control plane's handoff body ─────────────────────────
+//
+// `setTokens` is the engine's REAL parser for `/internal/oauth/google/claim`
+// (PRD-CORE-PRO-CONTRACT §2.3 #5). The pair partner drives the same golden
+// bytes against the control plane's route in the private repo, so a field
+// rename fails on whichever side moves first.
+//
+// The claim is the seam where a rename is most expensive and least visible:
+// the HTTP call still returns 200, the tokens land as `undefined`, and the
+// failure only surfaces later as an unrelated Google auth error. Hence the
+// drop-a-field probes below — the guard must reject, not shrug.
+describe('setTokens — OAuth claim fixture (contract §2.3 #5)', () => {
+  const fixture = TYPED_MIRRORS['oauth-claim-response.json'] as Record<string, unknown>;
+
+  function makeVaultAuth(): { auth: GoogleAuth; vault: { set: ReturnType<typeof vi.fn> } } {
+    const vault = { set: vi.fn(), get: vi.fn(), delete: vi.fn() };
+    const vaultAuth = new GoogleAuth({
+      clientId: 'test-client-id',
+      clientSecret: 'test-client-secret',
+      vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+    });
+    return { auth: vaultAuth, vault };
+  }
+
+  it('accepts the golden claim body and stores every field', async () => {
+    const { auth: vaultAuth, vault } = makeVaultAuth();
+    await vaultAuth.setTokens(fixture as unknown as Parameters<GoogleAuth['setTokens']>[0]);
+    expect(vaultAuth.isAuthenticated()).toBe(true);
+    expect(vaultAuth.getScopes()).toEqual(fixture['scopes']);
+    // Round-trips through the vault unchanged — the stored blob IS the claim.
+    const stored = JSON.parse(vault.set.mock.calls[0]![1] as string) as Record<string, unknown>;
+    expect(stored).toEqual(fixture);
+  });
+
+  for (const field of ['access_token', 'refresh_token', 'expires_at', 'scopes'] as const) {
+    it(`rejects the body when \`${field}\` is renamed away (the silent-drift probe)`, async () => {
+      const { auth: vaultAuth } = makeVaultAuth();
+      const mutated = { ...fixture };
+      delete mutated[field];
+      // Named field, not just /Invalid token data/: all four guards share that
+      // prefix, so the loose form passes even when a DIFFERENT guard fired —
+      // which would mean the field under test is unguarded and the probe is
+      // reporting someone else's rejection.
+      await expect(
+        vaultAuth.setTokens(mutated as unknown as Parameters<GoogleAuth['setTokens']>[0]),
+      ).rejects.toThrow(new RegExp(`Invalid token data: ${field}`));
+    });
+  }
+
+  it('rejects a SECONDS-valued expires_at — the field is epoch milliseconds', async () => {
+    const { auth: vaultAuth } = makeVaultAuth();
+    const seconds = { ...fixture, expires_at: Math.floor((fixture['expires_at'] as number) / 1000) };
+    await expect(
+      vaultAuth.setTokens(seconds as unknown as Parameters<GoogleAuth['setTokens']>[0]),
+    ).rejects.toThrow(/expires_at/);
   });
 });

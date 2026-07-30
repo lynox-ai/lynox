@@ -28,6 +28,10 @@ export const ENV_ALIASES = {
   LYNOX_DEFAULT_MODEL_TIER: ['LYNOX_DEFAULT_TIER'],
   LYNOX_API_BASE_URL: ['ANTHROPIC_BASE_URL'],
   LYNOX_DATA_DIR: ['LYNOX_DIR'],
+  // No legacy name (new var) — routed through this registry anyway so it reads
+  // via the single vetted `envTier` helper, keeping legacy Anthropic-brand
+  // values (haiku/sonnet/opus) accepted consistently with every other tier var.
+  LYNOX_COMPACTION_MODEL: [],
 } as const satisfies Record<string, readonly string[]>;
 
 export type CanonicalEnvName = keyof typeof ENV_ALIASES;

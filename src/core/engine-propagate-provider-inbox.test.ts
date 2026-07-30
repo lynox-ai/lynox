@@ -64,6 +64,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   httpRequestTool: { name: 'http_request' },
   runWorkflowTool: { name: 'run_workflow' },
   updateWorkflowTool: { name: 'update_workflow_steps' },
+  exportWorkflowTool: { name: 'export_workflow' },
+  importWorkflowTool: { name: 'import_workflow' },
   diagnoseWorkflowTool: { name: 'diagnose_workflow_run' },
   taskCreateTool: { name: 'task_create' },
   taskUpdateTool: { name: 'task_update' },
@@ -83,6 +85,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactHistoryTool: { name: 'artifact_history' },
   artifactRestoreTool: { name: 'artifact_restore' },
   recallToolResultTool: { name: 'recall_tool_result' },
+  suggestFollowUpsTool: { name: 'suggest_follow_ups' },
 }));
 
 vi.mock('./tool-context.js', () => ({

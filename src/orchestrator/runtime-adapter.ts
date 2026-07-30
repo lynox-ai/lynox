@@ -1,13 +1,14 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
 import { getModelId, clampTier, normalizeTier } from '../types/index.js';
-import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract } from '../types/index.js';
+import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
 import { getRole, getRoleNames } from '../core/roles.js';
-import { resolveRunModel } from '../core/tier-resolver.js';
+import { resolveRunModel, resolveCrossProviderSlotCreds } from '../core/tier-resolver.js';
+import { resolveProviderApiKey } from '../core/llm/provider-keys.js';
 import { resolveTools } from '../tools/resolve-tools.js';
 import { isHumanInTheLoopTool } from './human-in-the-loop.js';
 import type { PromptBudget } from './prompt-budget.js';
@@ -24,10 +25,23 @@ const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 // + memory_update + memory_list are read-or-tenant-scoped and safe in the
 // inline sandbox. memory_delete + memory_promote stay opt-in via per-step
 // allowTools because they're destructive / confidence-changing.
+// `http_request` + `web_research` are the external-fetch tools a workflow step
+// needs to call an API or research the web. `http_request` was listed as `'http'`
+// here since v1.2.2 (2026-04-20) — but the registered tool is `http_request`, so
+// the name never matched and the filter SILENTLY stripped it out of every inline
+// step (a workflow that called an external API got "tool not available", not a
+// security block). `web_research` was never added at all. Both are read-only /
+// SSRF- and network-policy-gated, so they are safe in the inline sandbox.
 export const INLINE_CORE_TOOLS = new Set([
-  'bash', 'read_file', 'write_file', 'http', 'ask_user',
+  'bash', 'read_file', 'write_file', 'http_request', 'web_research', 'ask_user',
   'data_store_query', 'data_store_insert',
   'memory_recall', 'memory_store', 'memory_update', 'memory_list',
+  // Durable Knowledge Substrate (DK.1): only the READ side (recall) is inline-safe. `remember`
+  // is deliberately NOT inline — a pipeline step builds a FRESH Agent with the untrusted-taint
+  // latches cleared, so an inline `remember` of an upstream step's external content would write
+  // it as ACTIVE (an H4 pending_review bypass) instead of queuing it. Durable writes stay
+  // opt-in per-step, like memory_block_edit.
+  'recall',
 ]);
 
 /**
@@ -260,6 +274,56 @@ export function resolveModel(stepModel: string | undefined, defaultTier: ModelTi
 }
 
 /**
+ * Resolve the per-step Agent wire + creds for an already-resolved tier under the
+ * active routing mode. In STANDARD mode (no hybrid tier_set) the result is
+ * `crossProviderSlot:false` and the caller keeps its base `config.*` values, so
+ * the built Agent is BYTE-IDENTICAL to pre-hybrid behavior. Under a hybrid
+ * tier_set with a cross-provider slot for `tier`, the slot drives provider +
+ * model + creds so the step lands on the right wire instead of silently running
+ * on base (or 404-ing on a model/endpoint mismatch — the #66 pipeline gap).
+ *
+ * `resolveKey` reads the provider key from env + config (the orchestrator has no
+ * SecretStore in scope — unlike spawn.ts, which binds it to the parent agent's
+ * vault). It is consulted ONLY on the cross-provider path (`crossProviderSlot`),
+ * never in standard mode, so it can never perturb byte-parity. It matters only
+ * for a SAME-provider keyless cross slot (one that carries just an api_base_url):
+ * `enrichTierSetCreds` injects the key for cross-DIFFERENT-provider slots at
+ * config-load, so `hybrid.apiKey` is already populated there and the fallback
+ * short-circuits. In the same-provider case `config.api_key` IS the base key, so
+ * the fallback lends it only to the base provider — never to a different one.
+ */
+/**
+ * Exported ONLY so a test can pin that the slot's endpoint reaches the key
+ * resolver. It cannot be guaranteed by types: TypeScript happily assigns a
+ * one-parameter closure where a two-parameter one is expected, so a `(provider)`
+ * signature silently drops `apiBaseURL` and resolves against the base endpoint —
+ * which is exactly how a Groq slot came to be handed a Mistral key. The compiler
+ * will never catch that. A test has to.
+ */
+export function resolveStepSlotCreds(config: LynoxUserConfig, tier: ModelTier): ReturnType<typeof resolveCrossProviderSlotCreds> {
+  const baseProvider = config.provider ?? getActiveProvider();
+  // `apiBaseURL` is the SLOT's endpoint, which is not necessarily the base one —
+  // a hybrid slot may point at a different vendor entirely. Declaring the closure
+  // with only `(provider)` silently drops it (TS allows lower arity), which would
+  // resolve the key against the BASE endpoint and hand, say, a Mistral key to a
+  // Groq slot. Take it explicitly.
+  const resolveKey = (provider: LLMProvider, apiBaseURL?: string): string | undefined => {
+    const endpoint = apiBaseURL ?? config.api_base_url;
+    const resolved = resolveProviderApiKey({ provider, apiBaseURL: endpoint, secretStore: undefined, userConfig: config });
+    if (resolved) return resolved;
+
+    // Legacy `config.api_key` fallback. It used to be safe to lend it whenever
+    // the slot named the BASE provider — "same provider" then implied "same
+    // endpoint". Presets break that: a Groq slot and a Mistral base are both
+    // `provider: 'openai'`. So require the endpoint to match too, or the legacy
+    // key walks straight into the leak this whole change closes.
+    const sameEndpoint = endpoint === config.api_base_url;
+    return (provider === baseProvider && sameEndpoint) ? config.api_key : undefined;
+  };
+  return resolveCrossProviderSlotCreds(tier, baseProvider, resolveKey);
+}
+
+/**
  * Spawn a real agent for a manifest step and capture token usage.
  */
 export async function spawnViaAgent(
@@ -276,6 +340,7 @@ export async function spawnViaAgent(
   capabilityContract?: CapabilityContract | undefined,
   stepRunId?: string | undefined,
   recordToolCall?: StepToolRecorder | undefined,
+  secretStore?: SecretStoreLike | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -288,9 +353,16 @@ export async function spawnViaAgent(
     defaultTier: agentDef.defaultTier,
     accountTier: config.account_tier,
     maxTier: config.max_tier,
+    blockedModelIds: config.blocked_model_ids,
     provider: getActiveProvider(),
   });
   const model = runModel.modelId;
+  // #66: steer this step by the hybrid tier_set. Standard mode (no tier_set) →
+  // crossProviderSlot=false → the base config.* values below are byte-identical
+  // to before; a cross-provider slot drives the wire + creds so the step lands
+  // on the right provider/model instead of running on base (or 404-ing).
+  const creds = resolveStepSlotCreds(config, runModel.tier);
+  const agentModel = creds.crossProviderSlot ? creds.model : model;
 
   let tools = convertAgentTools(agentDef.tools ?? []);
 
@@ -323,18 +395,19 @@ export async function spawnViaAgent(
     tools = tools.filter(t => !disabled.has(t.definition.name));
   }
 
-  // Resolve thinking from step hint, fallback to adaptive
-  const thinking: ThinkingMode = step.thinking === 'enabled'
-    ? { type: 'enabled', budget_tokens: 10_000 }
-    : step.thinking === 'disabled'
-      ? { type: 'disabled' }
-      : { type: 'adaptive' };
+  // Resolve thinking from step hint, fallback to adaptive. The legacy
+  // `'enabled'` hint maps to adaptive: the manual `{type:'enabled',
+  // budget_tokens}` shape 400s on Sonnet 5 / Opus 4.7+ (manual extended
+  // thinking removed in the 4.7/5 generation); adaptive is safe on 4.6 too.
+  const thinking: ThinkingMode = step.thinking === 'disabled'
+    ? { type: 'disabled' }
+    : { type: 'adaptive' };
 
   const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
 
   const agent = new Agent({
     name: step.agent,
-    model,
+    model: agentModel,
     // A2: ground the named-agent pipeline path too. Prepend the block to the
     // agent definition's prompt (or use it standalone when none is defined).
     systemPrompt: agentDef.systemPrompt
@@ -351,15 +424,24 @@ export async function spawnViaAgent(
     excludeTools: disabledTools,
     maxContextWindowTokens: config.max_context_window_tokens,
     costGuard: { maxBudgetUSD: runModel.tier === 'deep' ? 10 : 2, maxIterations: 10 },
-    apiKey: config.api_key,
-    apiBaseURL: config.api_base_url,
-    provider: config.provider,
+    // #66: a cross-provider hybrid slot drives creds from the slot; standard mode
+    // (crossProviderSlot=false) keeps the base config.* values → byte-parity.
+    apiKey: creds.crossProviderSlot ? creds.apiKey : config.api_key,
+    apiBaseURL: creds.crossProviderSlot ? creds.apiBaseURL : config.api_base_url,
+    provider: creds.crossProviderSlot ? creds.provider : config.provider,
     gcpProjectId: config.gcp_project_id,
     gcpRegion: config.gcp_region,
-    openaiModelId: config.openai_model_id,
+    openaiModelId: creds.crossProviderSlot ? creds.openaiModelId : config.openai_model_id,
     preApproval,
     autonomy,
     capabilityContract,
+    // Share the parent agent's SecretStore so this step's tools resolve
+    // `secret:NAME` refs against the vault AND the fail-loud unresolved-secret
+    // guard (agent.ts) fires. Without it the whole secret block is skipped: the
+    // literal `secret:NAME` is sent to the external service and the model then
+    // papers over the empty/4xx result. Mirrors spawn.ts threading it for
+    // `spawn_agent`. Undefined for callers that supply none → unchanged.
+    secretStore,
     // A2: the step's own run id (reuses the Agent's `currentRunId` attribution
     // tag), so an isDangerous guard decision during this step is stamped onto
     // the append-only audit with the run it occurred in.
@@ -448,6 +530,7 @@ export async function spawnInline(
   capabilityContract?: CapabilityContract | undefined,
   stepRunId?: string | undefined,
   recordToolCall?: StepToolRecorder | undefined,
+  secretStore?: SecretStoreLike | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -469,9 +552,14 @@ export async function spawnInline(
     defaultTier: (resolved?.model ?? configTier ?? 'balanced') as ModelTier,
     accountTier: config.account_tier,
     maxTier: config.max_tier,
+    blockedModelIds: config.blocked_model_ids,
     provider: getActiveProvider(),
   });
   const model = runModel.modelId;
+  // #66: steer this inline step by the hybrid tier_set (see spawnViaAgent).
+  // Standard mode → crossProviderSlot=false → byte-parity with the base config.*.
+  const creds = resolveStepSlotCreds(config, runModel.tier);
+  const agentModel = creds.crossProviderSlot ? creds.model : model;
   // A2: pipeline steps carry the grounding block too (they previously ran on a
   // bare task prompt with no provenance discipline).
   const systemPrompt = `${GROUNDING_PROMPT_BLOCK}\n\nYou are a focused task agent. Complete the task precisely. Return structured data (JSON, Markdown tables) over verbose prose. When creating artifacts, keep HTML/SVG minimal — use plain data + CSS, avoid large JS chart libraries inline. Optimize for clarity, not visual complexity.`;
@@ -495,16 +583,19 @@ export async function spawnInline(
   }
   // Resolve thinking: step hint > adaptive default. Haiku 4.5 has no
   // extended-thinking support — force disabled regardless of step hint to
-  // avoid Anthropic 400 "model does not support" errors.
-  const isHaikuStep = model.includes('haiku');
+  // avoid Anthropic 400 "model does not support" errors. Keyed on the EFFECTIVE
+  // model (agentModel): byte-identical to `model` in standard mode, and detects
+  // Haiku on the actual slot model under a cross-provider hybrid tier_set.
+  const isHaikuStep = agentModel.includes('haiku');
   let thinking: ThinkingMode;
   if (isHaikuStep) {
     thinking = { type: 'disabled' };
-  } else if (step.thinking === 'enabled') {
-    thinking = { type: 'enabled', budget_tokens: 10_000 };
   } else if (step.thinking === 'disabled') {
     thinking = { type: 'disabled' };
   } else {
+    // Legacy `'enabled'` hint → adaptive: the manual `{type:'enabled',
+    // budget_tokens}` shape 400s on Sonnet 5 / Opus 4.7+ (manual extended
+    // thinking removed in the 4.7/5 generation); adaptive is safe on 4.6 too.
     thinking = { type: 'adaptive' };
   }
   // Parity with agent.ts:271 main-agent default (non-Haiku, non-custom-proxy).
@@ -515,25 +606,33 @@ export async function spawnInline(
 
   const agent = new Agent({
     name: step.id,
-    model,
+    model: agentModel,
     systemPrompt,
     tools,
     thinking,
     effort,
     excludeTools: disabledToolsInline,
     maxContextWindowTokens: config.max_context_window_tokens,
-    apiKey: config.api_key,
-    apiBaseURL: config.api_base_url,
-    provider: config.provider,
+    // #66: cross-provider hybrid slot drives creds; standard mode keeps the base
+    // config.* values → byte-parity.
+    apiKey: creds.crossProviderSlot ? creds.apiKey : config.api_key,
+    apiBaseURL: creds.crossProviderSlot ? creds.apiBaseURL : config.api_base_url,
+    provider: creds.crossProviderSlot ? creds.provider : config.provider,
     gcpProjectId: config.gcp_project_id,
     gcpRegion: config.gcp_region,
-    openaiModelId: config.openai_model_id,
+    openaiModelId: creds.crossProviderSlot ? creds.openaiModelId : config.openai_model_id,
     preApproval,
     autonomy,
     capabilityContract,
     // A2: stamp guard decisions during this inline step onto the audit (see spawnViaAgent).
     currentRunId: stepRunId,
     toolContext: parentToolContext,
+    // Share the parent agent's SecretStore so this inline step's tools resolve
+    // `secret:NAME` refs AND the fail-loud unresolved-secret guard (agent.ts)
+    // fires — instead of silently sending the literal `secret:NAME` to the
+    // external service. Mirrors spawn.ts for `spawn_agent`; undefined for
+    // callers that supply none → unchanged.
+    secretStore,
     maxIterations: maxIter,
     costGuard: { maxBudgetUSD: runModel.tier === 'deep' ? 10 : 2, maxIterations: maxIter },
     promptUser: promptCallbacks.promptUser,
@@ -627,6 +726,8 @@ export async function spawnPipeline(
   autonomy?: import('../types/index.js').AutonomyLevel | undefined,
   capabilityContract?: CapabilityContract | undefined,
   runHistory?: import('../core/run-history.js').RunHistory | null | undefined,
+  secretStore?: SecretStoreLike | undefined,
+  parentRunId?: string | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -683,6 +784,13 @@ export async function spawnPipeline(
     // `pipeline_step` rows (under the sub-pipeline's run id) — observability at
     // every nesting depth, not just the top level.
     runHistory: runHistory ?? undefined,
+    // Carry the parent SecretStore into the nested pipeline so a
+    // `runtime:'pipeline'` step's inner inline/named steps also resolve secrets
+    // + fire the fail-loud guard, instead of dropping it one level down.
+    secretStore,
+    // 2a/B5: stamp the caller's run id so the nested pipeline_runs row links to
+    // its parent and is filtered out of the top-level run list + cost stats.
+    parentRunId,
   });
 
   // Aggregate results

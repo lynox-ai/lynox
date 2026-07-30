@@ -12,8 +12,9 @@
  *   This module is the single source of truth for "is this endpoint already
  *   on lynox's vetted sub-processor list?". Three call sites enforce it:
  *     1. Settings UI    — modal with disclosure + accept checkbox before save
- *     2. `api_setup`    — returns REQUIRES_USER_CONFIRMATION until the agent
- *                         re-calls with confirm_custom_endpoint=true
+ *     2. `api_setup`    — prompts the user out-of-band (`ask_user`) for
+ *                         controller-responsibility acceptance before save;
+ *                         fails closed (no self-approval by the agent)
  *     3. Engine boot    — refuses to start when env-driven custom endpoint
  *                         is not accompanied by LYNOX_CUSTOM_ENDPOINT_ACCEPTED
  *
@@ -97,12 +98,36 @@ export function isAllowlistedEndpoint(url: string): boolean {
 }
 
 /**
+ * Stricter variant for the `guarded` network policy's full-control baseline:
+ * matches ONLY the EXACT vetted provider hosts (`ALLOWLISTED_HOSTS`), NOT the
+ * pattern set. `isAllowlistedEndpoint` additionally vouches for
+ * `*.openai.azure.com` — an **attacker-registerable** Azure namespace (any
+ * account can create `<label>.openai.azure.com`) — plus `.local`/`.lan`/
+ * `.intranet` (arbitrary LAN names). That breadth is right for the BYOK/DPA
+ * sub-processor gate it was built for, but WRONG for `guarded`, whose goal is
+ * "no arbitrary off-baseline host on a full-control egress": an off-list host
+ * must instead be reached via the operator floor (`network_allowed_hosts`) or a
+ * human-accepted api_profile (`custom_endpoint_ack`), never a wildcard the
+ * agent can register a match for. The RFC1918 IP patterns are moot here — the
+ * caller's `isPrivateIP` early-out blocks them regardless.
+ */
+export function isGuardedBaselineHost(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    return ALLOWLISTED_HOSTS.has(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Persisted record that a user accepted controller-responsibility for the
  * non-allowlisted egress hosts a profile can drive a credentialed request to.
  *
- * The save-time gate (`api_setup` create/update) captures acceptance via the
- * transient `confirm_custom_endpoint` tool input, but that signal is consumed
- * at save and is NOT otherwise durable. A profile can re-enter the store WITHOUT
+ * The save-time gate (`api_setup` create/update) captures acceptance via an
+ * out-of-band user confirmation (`promptUser`/`ask_user`) at save time, but that
+ * acceptance is otherwise transient. A profile can re-enter the store WITHOUT
  * passing that gate — `ApiStore.loadFromDirectory` at boot, or a JSON written
  * into the apis dir — at which point nothing distinguishes "user accepted this
  * endpoint" from "this endpoint was never accepted". Persisting acceptance onto

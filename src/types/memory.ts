@@ -47,7 +47,7 @@ export interface IMemory {
   render():                                                     string;
   hasContent():                                                 boolean;
   loadAll():                                                    Promise<void>;
-  maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined): Promise<void>;
+  maybeUpdate(finalAnswer: string, toolsUsed?: number | undefined, sourceThreadId?: string | undefined, sourceRunId?: string | undefined): Promise<void>;
   // Scope-aware methods (Phase 1)
   appendScoped(ns: MemoryNamespace, text: string, scope: MemoryScopeRef):            Promise<void>;
   loadScoped(ns: MemoryNamespace, scope: MemoryScopeRef):                            Promise<string | null>;
@@ -119,6 +119,58 @@ export const ALL_PROVENANCE_KINDS: readonly ProvenanceKind[] = [
 /** Conservative default when the capture site can't determine the tier. */
 export const DEFAULT_PROVENANCE_KIND: ProvenanceKind = 'agent_inferred';
 
+// === Durable Knowledge Substrate (DK.1) ===
+
+/** The shape of a durable knowledge entry. `block_edit` records a memory-block edit as an
+ *  auditable archival row (DK.2 apply-on-approval); the rest are the substantive kinds. */
+export type KnowledgeKind = 'fact' | 'preference' | 'rule' | 'event' | 'block_edit';
+export const ALL_KNOWLEDGE_KINDS: readonly KnowledgeKind[] = ['fact', 'preference', 'rule', 'event', 'block_edit'];
+
+/** Lifecycle status of a knowledge entry. Only `active` is agent-readable; `pending_review`
+ *  is queued (not yet knowledge); `rejected`/`superseded` are kept (auditable), not deleted. */
+export type KnowledgeStatus = 'active' | 'pending_review' | 'rejected' | 'superseded';
+
+/** The two STORED memory blocks (the `focus` block is derived per turn, never persisted). */
+export type MemoryBlockId = 'profile' | 'playbook';
+export const ALL_MEMORY_BLOCK_IDS: readonly MemoryBlockId[] = ['profile', 'playbook'];
+
+/** Default char bounds — the loud-error boundary for each block (no silent trim). */
+export const MEMORY_BLOCK_CHAR_LIMITS: Readonly<Record<MemoryBlockId, number>> = {
+  profile: 2000,
+  playbook: 3000,
+};
+
+/** The derived `focus` block cap (≤2 subject cards). Derived per turn, never stored. */
+export const FOCUS_BLOCK_CHAR_LIMIT = 2500;
+
+/** A durable knowledge entry (decrypted view). Mirrors the v9 `knowledge_entries` table. */
+export interface KnowledgeEntry {
+  id: string;
+  subjectId: string | null;
+  /** Surface name when the write was not (or not yet) subject-linked. Never minted. */
+  subjectHint: string | null;
+  kind: KnowledgeKind;
+  text: string;
+  pinned: boolean;
+  /** 0 = incidental, 1 = normal, 2 = important. */
+  importance: number;
+  status: KnowledgeStatus;
+  sourceChannel: string | null;
+  sourceUntrusted: boolean;
+  /** Derived trust tier (re-derivable from the evidence columns via provenance.ts). */
+  sourceType: ProvenanceKind;
+  sourceThreadId: string | null;
+  sourceRunId: string | null;
+  supersededBy: string | null;
+  reviewedAt: string | null;
+  reviewAction: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Edit modes for `memory_block_edit`. */
+export type MemoryBlockEditMode = 'replace' | 'append' | 'remove';
+
 export interface MemoryRecord {
   id: string;
   text: string;
@@ -140,6 +192,14 @@ export interface ContradictionInfo {
   existingText: string;
   similarity: number;
   resolution: 'superseded' | 'coexist' | 'flagged';
+  /**
+   * The provenance tier of the EXISTING (contradicted) row — carried forward from the
+   * recall row so the write-trust gate (Memory Foundation Wave 2) can decide, at the
+   * single resolution-finalization site, whether the incoming write is trusted enough
+   * to retire it. Optional: pre-gate callers / rows without a projected `source_type`
+   * leave it undefined (the gate then treats the pair as ungated — legacy behaviour).
+   */
+  existingSourceType?: ProvenanceKind | undefined;
 }
 
 export interface KnowledgeStoreResult {
@@ -219,7 +279,10 @@ export interface IKnowledgeLayer {
       // Interface had drifted: the impl already accepts (and persists)
       // sourceThreadId — declare it so callers are typed against reality.
       sourceThreadId?: string | undefined;
-      sourceType?: ProvenanceKind | undefined;
+      // Wave 1.3: callers supply EVIDENCE (channel + untrusted signal), never a tier.
+      // The tier is derived at the store boundary (§3). `sourceType` is intentionally gone.
+      sourceChannel?: string | undefined;
+      sourceUntrusted?: boolean | undefined;
       sourceToolName?: string | undefined;
       skipContradictionCheck?: boolean | undefined;
       reuseEmbedding?: number[] | undefined;
@@ -264,6 +327,7 @@ export interface IKnowledgeLayer {
   ): Promise<ContradictionInfo[]>;
 
   deactivateByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
+  eraseByPattern(pattern: string, namespace?: MemoryNamespace | undefined): Promise<number>;
   updateMemoryText(
     oldText: string,
     newText: string,

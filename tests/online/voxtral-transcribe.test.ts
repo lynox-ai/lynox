@@ -62,7 +62,7 @@ const FIXTURES: readonly Fixture[] = [
   { id: '05', file: 'spike-05.webm', expected: 'Ich brauch ein Follow-up für den Call mit dem Marketing-Team. Die wollen wissen ob wir den Launch auf nächste Woche shiften oder ob wir beim Original-Timing bleiben.' },
   { id: '06', file: 'spike-06.webm', expected: 'Erstell mir einen neuen Thread zum Thema Onboarding Flow. Der Setup Wizard muss vor dem Go-Live fertig sein, das ist ein Blocker für die Customer Journey.' },
   { id: '07', file: 'spike-07.webm', expected: 'Also ich hab mir das nochmal angeschaut mit dem Pricing. Die Starter Tier ist okay aber ich glaub wir müssen das Messaging nochmal überarbeiten. Vielleicht sollten wir A/B Testing machen auf der Landing Page, was meinst du?' },
-  { id: '08', file: 'spike-08.webm', expected: 'Der Roland hat mir geschrieben, sein Dashboard zeigt seit Freitag falsche Zahlen an. Ich glaub das hängt mit dem letzten Release zusammen, Version eins Punkt null Punkt fünf. Kannst du dir mal die Logs anschauen auf dem Server? Die Instanz heisst war Punkt lynox Punkt cloud.' },
+  { id: '08', file: 'spike-08.webm', expected: 'Der Thomas hat mir geschrieben, sein Dashboard zeigt seit Freitag falsche Zahlen an. Ich glaub das hängt mit dem letzten Release zusammen, Version eins Punkt null Punkt fünf. Kannst du dir mal die Logs anschauen auf dem Server? Die Instanz heisst demo Punkt example Punkt com.' },
   { id: '09', file: 'spike-09.webm', expected: 'Also ich hab mir das nochmal angeschaut mit dem Pricing. Die Starter Tier ist okay aber ich glaub wir müssen das Messaging nochmal überarbeiten. Vielleicht sollten wir A/B Testing machen auf der Landing Page, was meinst du?' },
   { id: '10', file: 'spike-10.webm', expected: null },
 ];

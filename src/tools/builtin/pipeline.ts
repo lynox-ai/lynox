@@ -1,6 +1,9 @@
-import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits } from '../../types/index.js';
+import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier } from '../../types/index.js';
+import { reportMeteredCost } from '../../core/metered-request.js';
+import { randomUUID } from 'node:crypto';
 import { validateManifest, MAX_STEPS } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
+import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
 import type { Manifest, AgentOutput, RunState, RunHooks } from '../../types/orchestration.js';
 import type { RunHistory } from '../../core/run-history.js';
@@ -12,7 +15,6 @@ import type { SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.j
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 
-const DEFAULT_RESULT_BYTES = 20_480; // 20KB per step result
 const MAX_PLANS = 10;
 /** Retry-state buffer cap — larger than the plan cache so a burst of distinct
  *  workflows keeps each other's executed state retriable; bounds the leak. */
@@ -46,7 +48,12 @@ const WARNED_LEGACY_MAX = 1024;
  * Mutates and returns the input.
  */
 function backfillPlannedPipelineDefaults(planned: PlannedPipeline): PlannedPipeline {
-  planned.executionMode ??= 'orchestrated';
+  // NB: `schema_version` is deliberately NOT backfilled here. Its authority is the
+  // write-stamp (`insertPlannedPipeline`) + the boot content-migration, which
+  // together guarantee every STORED blob is versioned; labelling an unstamped
+  // in-memory read as "current" would, once a real transform exists (Slice 1b+),
+  // mask a blob that still carries an old shape. The runtime does not branch on
+  // the version, so leaving it undefined on a read is honest and harmless.
   planned.template ??= false;
   // Legacy rows (saved before the re-target schema landed) have no `parameters`;
   // default to an empty schema so binding/validation treats them as no-param.
@@ -148,12 +155,6 @@ export function forgetPipeline(id: string): void {
 /** Get executed state for retry */
 export function getExecutedResult(pipelineId: string): { manifest: Manifest; state: RunState } | undefined {
   return executedStates.get(pipelineId);
-}
-
-function truncateResult(result: string, limit = DEFAULT_RESULT_BYTES): string {
-  if (result.length <= limit) return result;
-  const limitKB = Math.round(limit / 1024);
-  return result.slice(0, limit) + `\n...[truncated — result was ${result.length} chars, showing first ${limitKB}KB. Set "pipeline_step_result_limit" in config to increase.]`;
 }
 
 export function buildManifest(name: string, steps: InlinePipelineStep[], onFailure: 'stop' | 'continue' | 'notify', context?: Record<string, unknown>): Manifest {
@@ -319,49 +320,42 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
   return JSON.stringify(result, null, 2);
 }
 
-function persistPipelineRun(state: RunState, manifest: Manifest, pipelineRunHistory: RunHistory | null, resultLimit?: number, workflowId?: string | undefined): void {
-  if (!pipelineRunHistory) return;
-  // Build step-id → model-tier lookup from manifest
-  const stepModelMap = new Map<string, string>();
-  for (const step of manifest.agents) {
-    stepModelMap.set(step.id, step.model ?? 'balanced');
-  }
-  try {
-    pipelineRunHistory.insertPipelineRun({
-      id: state.runId,
-      manifestName: manifest.name,
-      status: state.status,
-      manifestJson: JSON.stringify(manifest),
-      totalDurationMs: [...state.outputs.values()].reduce((s, o) => s + o.durationMs, 0),
-      totalCostUsd: [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0),
-      totalTokensIn: [...state.outputs.values()].reduce((s, o) => s + o.tokensIn, 0),
-      totalTokensOut: [...state.outputs.values()].reduce((s, o) => s + o.tokensOut, 0),
-      stepCount: state.outputs.size,
-      error: state.error,
-      // Slice C2: link the run to its saved workflow (undefined for inline/ad-hoc)
-      // so a failed run resolves back to the workflow for diagnose/fix/re-run.
-      ...(workflowId ? { workflowId } : {}),
-    });
-    for (const [, output] of state.outputs) {
-      pipelineRunHistory.insertPipelineStepResult({
-        pipelineRunId: state.runId,
-        stepId: output.stepId,
-        status: output.skipped ? 'skipped' : output.error ? 'failed' : 'completed',
-        result: truncateResult(output.result, resultLimit),
-        error: output.error,
-        durationMs: output.durationMs,
-        tokensIn: output.tokensIn,
-        tokensOut: output.tokensOut,
-        costUsd: output.costUsd,
-        modelTier: stepModelMap.get(output.stepId) ?? '',
-      });
-    }
-  } catch {
-    // Fire-and-forget
-  }
-}
+// 2a/B3: both the pipeline_runs row and its pipeline_step_results rows are now
+// written by the orchestrator (`runManifest`); the tool-layer batch writer was
+// retired here.
 
 // ===== Private execution helpers =====
+
+/**
+ * Debit the aggregated cost of an IN-SESSION `run_workflow` execution.
+ *
+ * Workflow steps run as sub-agents whose token streams are never seen by the
+ * parent agent's onAfterRun, and every step is written as a `pipeline_step` row
+ * that all cost queries EXCLUDE (getCostByDay / getCostByModel — the sources of
+ * the daily/monthly persistent-budget cap AND the managed-billing debit). So
+ * without this, in-session workflow spend on the shared pool key was unbilled and
+ * escaped the persistent cap entirely. `reportMeteredCost` fires the onAfterRun
+ * hook that debits the tenant's managed balance + persistent cap — the axis the
+ * pipeline_step exclusion left uncovered.
+ *
+ * CP-only (`reportMeteredCost`, NOT `debitInRunHelperCost`) — exactly spawn.ts's
+ * choice, for the same reason: the LOCAL per-session $-cap is ALREADY charged for
+ * these steps. Each step runs on the parent's SessionCounters (runner.ts threads
+ * `parentSessionCounters` = `deps.sessionCounters`), and `checkSessionBudget` +
+ * `adjustSessionCost` net the actual step cost onto `counters.costUSD` per step.
+ * A `recordSessionCost` here would count the same spend a SECOND time and trip the
+ * session ceiling at ~half the real spend. The headless path bills separately
+ * (saved-workflow-runner), and the step rows never enter the CP cost queries, so
+ * there is no double-count on the CP axis either.
+ */
+function debitInSessionWorkflowCost(deps: PipelineDeps, state: RunState): void {
+  // No metered host = self-host / BYOK → no CP balance to debit (mirrors spawn.ts).
+  const meteredHost = deps.toolContext?.meteredHost;
+  if (!meteredHost) return;
+  const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
+  const tier: ModelTier = deps.config.default_tier ?? 'balanced';
+  reportMeteredCost(meteredHost, randomUUID(), costUsd, tier);
+}
 
 async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
   const steps = input.steps!;
@@ -420,9 +414,10 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       userTimezone: deps.userTimezone,
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
+      secretStore: deps.secretStore,
     }));
 
-    persistPipelineRun(state, manifest, deps.runHistory, resultLimit);
+    debitInSessionWorkflowCost(deps, state);
     return formatResult(state, input.name ?? 'inline-pipeline', resultLimit);
   } catch (err: unknown) {
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
@@ -475,6 +470,18 @@ export interface PipelineDeps {
    * leniently to schema defaults).
    */
   params?: Record<string, unknown> | undefined;
+  /**
+   * Parent agent's SecretStore, threaded from the `run_workflow` tool
+   * (`agent.secretStore`) down into each step sub-agent so a workflow step's
+   * tools resolve `secret:NAME` refs against the vault AND the fail-loud
+   * unresolved-secret guard (agent.ts) fires — instead of silently sending the
+   * literal `secret:NAME` to an external service (which then 4xx/empties and the
+   * model papers over it). Mirrors how `spawn_agent` threads
+   * `parentAgent.secretStore`. Absent for headless callers (worker-loop
+   * saved-workflow runs, unit tests) → the step agent's `secretStore` stays
+   * undefined, i.e. unchanged pre-fix behaviour.
+   */
+  secretStore?: SecretStoreLike | undefined;
 }
 
 /** Outcome of a Saved-Workflows-library "Run" action. */
@@ -579,7 +586,6 @@ export async function runSavedWorkflow(
     return { ok: false, error: `Workflow exceeds maximum of ${MAX_STEPS} steps.` };
   }
 
-  const resultLimit = config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
   try {
     // Honour the workflow's stored failure strategy instead of hardcoding 'stop'
     // (§4.5 drift fix). Backfilled to 'stop' on read, so legacy rows are
@@ -611,8 +617,8 @@ export async function runSavedWorkflow(
       // runaway from inside the run. Absent contract = the safe deny default.
       capabilityContract: planned.capabilityContract,
       limits: resolveHeadlessLimits(planned.limits),
+      workflowId: planned.id,
     }));
-    persistPipelineRun(state, manifest, runHistory, resultLimit, planned.id);
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
     // A2: surface per-step failures + the terminal run error so the trigger UI
     // shows WHICH step failed (not just status). `ok:true` = the run executed;
@@ -637,6 +643,19 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
   // set" deep in the run.
   if (planned.mode === 'interactive' && !deps.parentPrompt?.parentPromptUser) {
     return `Error: Workflow "${planned.id}" is interactive (uses ask_user / ask_secret) and requires a live chat session. Invoke it from a chat instead of a headless context.`;
+  }
+
+  // Consent gate for UNATTENDED execution — the same first-run-confirm the cron
+  // gate (worker-loop.ts:574) and the library /run route enforce. run_workflow is
+  // reachable from an AUTONOMOUS worker session (the run_agent trigger builds a
+  // session with the full tool registry), so without this an autonomous caller
+  // could run an UNCONFIRMED imported workflow — attacker-authored steps — with no
+  // per-action approver. Scoped to autonomy==='autonomous': an interactive chat
+  // (autonomy undefined) still prompts on each dangerous step, so the in-chat path
+  // stays open, matching how run_workflow was always the safe way to trial an
+  // imported workflow.
+  if (deps.autonomy === 'autonomous' && !planned.confirmedAt) {
+    return `Error: Workflow "${planned.id}" needs first-run confirmation before it can run unattended. Schedule it (the consent step confirms it) or run it from an interactive chat.`;
   }
 
   const resultLimit = deps.config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
@@ -670,10 +689,11 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         userTimezone: deps.userTimezone,
         parentSessionCounters: deps.sessionCounters,
         parentMemory: deps.memory ?? null,
+        workflowId: planned.id,
       }));
 
       recordExecutedState(planned.id, { manifest: prev.manifest, state });
-      persistPipelineRun(state, prev.manifest, deps.runHistory, resultLimit, planned.id);
+      debitInSessionWorkflowCost(deps, state);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
       return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
@@ -746,14 +766,16 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       userTimezone: deps.userTimezone,
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
+      secretStore: deps.secretStore,
+      workflowId: planned.id,
     }));
 
     recordExecutedState(planned.id, { manifest, state });
-    persistPipelineRun(state, manifest, deps.runHistory, resultLimit, planned.id);
     if (!isTemplate) {
       try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
     }
 
+    debitInSessionWorkflowCost(deps, state);
     return formatResult(state, planned.name, resultLimit);
   } catch (err: unknown) {
     if (!isTemplate) planned.executed = false; // Allow retry on validation errors
@@ -891,12 +913,13 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
 
     const pipelineToolContext = agent.toolContext;
 
-    // run_workflow is always called from a chat session; inherit the parent
-    // agent's prompt callbacks so sub-agents can route ask_user/ask_secret
-    // back through the live SSE stream. Stored autonomous pipelines that
-    // somehow get invoked here will still be rejected at executePipelineById
-    // / WorkerLoop boundaries; for inline runs the contract is "always
-    // interactive" by definition.
+    // run_workflow inherits the parent agent's prompt callbacks so sub-agents can
+    // route ask_user/ask_secret back through the live SSE stream when there is one.
+    // It is NOT always a live chat, though: an autonomous worker session can call
+    // run_workflow too — which is exactly why executePipelineById now enforces the
+    // confirmedAt consent gate for `autonomy==='autonomous'` (an unconfirmed
+    // imported workflow can't be run headless via this tool). For inline runs the
+    // contract is "always interactive" by definition.
     const parentPrompt = (agent.promptUser || agent.promptTabs || agent.promptSecret)
       ? {
           parentPromptUser: agent.promptUser,
@@ -905,38 +928,57 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
         }
       : undefined;
 
-    if (input.workflow_id) {
-      return executePipelineById(input, {
-        config: pipelineConfig,
-        tools: pipelineTools,
-        streamHandler: pipelineStreamHandler,
-        runHistory: pipelineRunHistory,
-        toolContext: pipelineToolContext,
-        parentPrompt,
-        userTimezone: agent.userTimezone,
-        sessionCounters: agent.sessionCounters,
-        memory: agent.memory,
-        // Inherit the calling agent's posture: a normal chat (undefined) keeps
-        // interactive prompting; a worker-session run propagates 'autonomous'
-        // so its steps don't silently fail on a benign DANGEROUS_BASH op (C1).
-        autonomy: agent.autonomy,
-        // Re-target values for a parametrised stored workflow (§4.5).
-        params: input.params,
-      });
-    }
+    const workflowResult = input.workflow_id
+      ? await executePipelineById(input, {
+          config: pipelineConfig,
+          tools: pipelineTools,
+          streamHandler: pipelineStreamHandler,
+          runHistory: pipelineRunHistory,
+          toolContext: pipelineToolContext,
+          parentPrompt,
+          userTimezone: agent.userTimezone,
+          sessionCounters: agent.sessionCounters,
+          memory: agent.memory,
+          // Inherit the calling agent's posture: a normal chat (undefined) keeps
+          // interactive prompting; a worker-session run propagates 'autonomous'
+          // so its steps don't silently fail on a benign DANGEROUS_BASH op (C1).
+          autonomy: agent.autonomy,
+          // Re-target values for a parametrised stored workflow (§4.5).
+          params: input.params,
+          // Thread the parent agent's SecretStore so step sub-agents resolve
+          // `secret:NAME` refs + fire the fail-loud guard (mirrors spawn.ts for
+          // spawn_agent). `agent.secretStore` is undefined for a headless/no-vault
+          // parent → unchanged behaviour.
+          secretStore: agent.secretStore,
+        })
+      : await executeInlineSteps(input, {
+          config: pipelineConfig,
+          tools: pipelineTools,
+          streamHandler: pipelineStreamHandler,
+          sessionCounters: agent.sessionCounters,
+          runHistory: pipelineRunHistory,
+          toolContext: pipelineToolContext,
+          parentPrompt,
+          userTimezone: agent.userTimezone,
+          memory: agent.memory,
+          autonomy: agent.autonomy,
+          // Thread the parent agent's SecretStore (see executePipelineById above).
+          secretStore: agent.secretStore,
+        });
 
-    return executeInlineSteps(input, {
-        config: pipelineConfig,
-        tools: pipelineTools,
-        streamHandler: pipelineStreamHandler,
-        sessionCounters: agent.sessionCounters,
-        runHistory: pipelineRunHistory,
-        toolContext: pipelineToolContext,
-        parentPrompt,
-        userTimezone: agent.userTimezone,
-        memory: agent.memory,
-        autonomy: agent.autonomy,
-      });
+    // H-002 parity (CORE-9): a workflow's steps run sub-agents with web/http/
+    // read_file access, so its aggregated output can carry attacker-derived content
+    // back into the PARENT agent's context. Seat the parent's per-run untrusted
+    // latch — the same propagation spawn_agent does (spawn.ts) — so the parent's
+    // end-of-run memory extraction ABSTAINS instead of persisting that content as
+    // trusted (source_untrusted=0). Conservative-by-default like spawn: any
+    // delegated run taints. We seat the latch directly rather than wrapping the
+    // result, because a workflow result is structured JSON a caller reads
+    // field-wise (status/runId/stepErrors) — wrapping it would corrupt that
+    // contract. Paired with run_workflow's removal from INTERNAL_TOOLS so the
+    // output is ALSO injection-scanned by scanToolResult (defence-in-depth).
+    agent.noteUntrustedData?.();
+    return workflowResult;
   },
 };
 

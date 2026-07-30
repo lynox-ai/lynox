@@ -35,6 +35,11 @@
 		clearError,
 		cancelQueue,
 		removeQueuedMessage,
+		takeFollowUp,
+		getDeferredFollowUps,
+		runDeferredFollowUp,
+		dismissDeferredFollowUp,
+		clearDeferredFollowUps,
 		getSessionModel,
 		getContextBudget,
 		getCompactionOffer,
@@ -43,6 +48,7 @@
 		getChangesetLoading,
 		submitChangesetReview,
 		getSessionId,
+		ensureSession,
 		reconcileThread,
 		compactNow,
 		getIsCompacting,
@@ -52,29 +58,40 @@
 		getRunInterrupted,
 		retryInterruptedRun,
 		dismissInterruptedRun,
+		retireKnowledge,
+		reviewKnowledge,
 		type FileAttachment,
 		type UsageInfo,
 		type ContextBudget,
 		type ToolCallInfo,
+		type ChatMessage,
 	} from '../stores/chat.svelte.js';
 	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase, getDemoMode } from '../config.svelte.js';
 	import { isDiagnosticsEnabled } from '../stores/diagnostics.svelte.js';
-	import { formatCost as fmtCost } from '../format.js';
+	import { formatTurnTokens, formatUsageMetaParts } from '../stores/chat-usage.js';
+	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
+	import { formatCost } from '../format.js';
+	import { scrollFade } from '../utils/scroll-fade.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
-	import { stripNowMarker } from '../utils/now-marker.js';
+	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { isIosSafari } from '../utils/ios-safari.js';
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
-	import { isArtifactContentInline } from '../utils/artifact-inline.js';
+	import { isArtifactContentInline, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
 	import { isPipelineRunning } from '../utils/pipeline-status.js';
+	import { renderPromptMarkdown, renderPromptSegments } from '../utils/prompt-markdown.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ChangesetReview from './ChangesetReview.svelte';
 	import PipelineProgress from './PipelineProgress.svelte';
 	import PromptAnchor from './PromptAnchor.svelte';
+	import { setPromptAttention, clearPromptAttention } from '../utils/prompt-attention.js';
 	import StreamingActivityBar from './StreamingActivityBar.svelte';
 	import AgentPresenceIcon from './AgentPresenceIcon.svelte';
+	import ComposerModelPicker from './ComposerModelPicker.svelte';
+	import ThreadModelControl from './ThreadModelControl.svelte';
+	import OnboardingBasics from './OnboardingBasics.svelte';
 	import { t, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
@@ -112,24 +129,96 @@
 	// "[ONBOARDING 2/3] ..." / "[ONBOARDING 3/3] ..." lines in the user-visible
 	// chat output as "Next Steps" — leaking internal orchestration naming.
 	// The agent doesn't need to know its step number; the chip UI tracks that.
+	// D9v2 (Onboarding W1): captures route through the memory tool that is actually
+	// registered — `{memoryTool}` is substituted per instance: DK-on → `remember`
+	// (research-tainted turns land as Faden chips / pending_review the user confirms),
+	// DK-off (the default) → `memory_store` (legacy flat save). Naming `remember`
+	// unconditionally would reference a non-existent tool on the DK-off majority
+	// (engine.ts registers remember XOR memory_store on `durable_memory_enabled`).
+	// Step-1's questions are SHARPENED: grounded in
+	// what the scan found, not a generic questionnaire — this is the high-value moment.
+	// Step-3's CLOSING follows the Activation Principle (POSITIONING.md): it proposes
+	// 2-3 concrete, context-grounded JOBS via suggest_follow_ups (rendered as clickable
+	// pills) instead of enumerating generic capabilities — propose→react, not a feature menu.
+	// ⚠ Prompt-behaviour change (Step-1 questions + Step-3 closing) — validate cross-provider
+	// on real models before ship. The no-sequence-marker
+	// constraint above still holds.
 	const ONBOARDING_CONTEXT = [
-		`The user's website is: {url} — scan it now. Use web_research and http_request to analyze it. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Save ALL findings with memory_store. Present a structured summary. Be fast and direct — no clarifying questions. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
-		`You already analyzed the user's website earlier in this conversation. Now use ask_user to ask 3-5 targeted questions about what the website doesn't reveal. Use the ask_user tool with the "questions" parameter to present all questions at once (each as a separate question with free-text input). Topics: revenue model & pricing, team size & capacity, biggest current challenge, 12-month growth goal, key metrics tracked. Save their answers to memory_store when they respond. IMPORTANT: If the user skips or dismisses questions (answers contain "__dismissed__"), accept that gracefully — save whatever answers you received and move on. Do NOT re-ask dismissed questions. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
-		`You analyzed the website and learned about the business earlier in this conversation. Now use web_research to find 3-5 competitors based on what you learned. Then call the artifact_save tool with type=markdown and a comparison table as the body (columns: name, positioning, target audience, key differentiators, pricing if public). Save competitive insights with memory_store. After the artifact_save tool call returns, write a brief chat message (1-2 sentences) confirming the artifact was saved and ending with 2-3 concrete actionable suggestions the user could take next. Respond in {locale}.`,
+		`The user's website is: {url} — scan it now. Use web_research with action='read', which returns the page already extracted to text: read the homepage, then 1-3 key sub-pages that add substance (about, services, imprint). Never call http_request on a URL you already read with web_research — use http_request only if web_research returns nothing usable for that URL. Extract: company name, industry, positioning, target audience, tone of voice, key services/products, USPs. Ground every finding in content you actually read; do not infer from asset filenames, script URLs or CSS paths. Record each concrete finding as durable knowledge with the {memoryTool} tool. Present a structured summary. Be fast and direct — no clarifying questions. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
+		`You already analyzed the user's website earlier in this conversation. Now ask the 3-5 questions the research made possible — the sharp, specific ones the website does NOT answer, each GROUNDED in a concrete detail you just found. Do NOT ask a generic questionnaire: tie every question to something specific from the scan (e.g. if they sell recurring maintenance contracts, ask how they handle overdue renewals today; if the positioning is premium, ask what justifies the price to a skeptical prospect). Cover what actually moves the needle — how they make money, where the real bottleneck is, the biggest current challenge, and what success looks like in 12 months. Use the ask_user tool with the "questions" parameter to present all questions at once (each free-text). When they answer, record each answer as durable knowledge with the {memoryTool} tool. IMPORTANT: if the user skips or dismisses questions (answers contain "__dismissed__"), accept it gracefully — record whatever you received and move on; do NOT re-ask. Do not propose next steps; the UI handles step progression. Respond in {locale}.`,
+		`You analyzed the website and learned about the business earlier in this conversation. Now use web_research to find 3-5 competitors based on what you learned. Then call the artifact_save tool with type=markdown and a comparison table as the body (columns: name, positioning, target audience, key differentiators, pricing if public). Record the key competitive insights as durable knowledge with the {memoryTool} tool. After artifact_save returns, write a brief 1-2 sentence chat message that confirms the artifact AND proves you understood the business by naming one concrete fact you just learned. Then call the suggest_follow_ups tool with 2-3 CONCRETE JOBS you could do for them right now — each grounded in a specific fact from the scan or their answers (e.g. "draft a re-engagement email to churned customers", "set up a watcher for overdue invoices", "compare your pricing against competitor X"). These must be specific tasks tied to their business, NOT generic capabilities ("connect Gmail", "install the app") and NOT feature enumeration. Finally, close with ONE honest expectation in a single plain sentence — a concrete limit of what lynox does right now (e.g. it acts only when you ask, unless you set up a watcher; it drafts, but you approve before anything is sent) — no hedging, no disclaimer list. Respond in {locale}.`,
 	];
 
-	let onboardingStep = $state(0); // 0-based: which step is current
+	let onboardingStep = $state(0); // 0-based: which of the 3 model-run chips is current
 	let onboardingDismissed = $state(false);
 	let pendingOnboardingAdvance = $state(false);
 	let onboardingJustCompleted = $state(false);
-	let showUrlInput = $state(false); // Step 1: collect URL in UI before LLM call
+	let showUrlInput = $state(false); // scan step: collect URL in UI before LLM call
 	let onboardingUrl = $state('');
+	// Activation Principle: the Step-0 company name lets us pre-fill a candidate domain
+	// so the scan step is a one-tap CONFIRM, not a blank field. Derived via a non-agent
+	// search (no model call); fails to empty (manual) — never a wrong value to delete.
+	let onboardingCompany = $state<string | null>(null);
+	let onboardingUrlDeriving = $state(false);
+	let onboardingUrlDerived = $state(false); // the field was pre-filled from the company name
+	// D9v2 Step-0 (engine basics) pre-phase — runs BEFORE the 3-chip model flow, in the
+	// same thread. `onboardingStarted` gates the intro card; `onboardingBasicsDone` gates
+	// the hand-off to the chip stepper. No step-index server state (RF-GAP3) — a reload
+	// restarts from the basics, which dedup-skip already-known facts (AC-1.6/AC-1.9).
+	let onboardingStarted = $state(false);
+	let onboardingBasicsDone = $state(false);
+	let onboardingSessionId = $state<string | null>(null);
+	// The AUTHORITATIVE onboarding thread-id echoed by /promote (== every promoted fact's
+	// source_thread_id). Stamped into knowledge_done at completion so the AC-1.10 repair
+	// pointer cannot drift from the data (RF-IRR1); null on the DK-off/skip path (no facts).
+	let onboardingKnowledgeThreadId = $state<string | null>(null);
+	// The memory tool the model-run steps must name — `remember` (DK-on) vs
+	// `memory_store` (DK-off default). Set from /status.durableMemory; defaults to
+	// the DK-off majority so an unresolved status never names a DK-on-only tool.
+	let onboardingMemoryTool = $state<'remember' | 'memory_store'>('memory_store');
 
-	function loadOnboardingState() {
-		if (typeof localStorage === 'undefined') return;
-		const saved = localStorage.getItem('lynox-onboarding-step');
-		if (saved === 'done') { onboardingDismissed = true; return; }
-		if (saved) onboardingStep = Math.min(parseInt(saved, 10), ONBOARDING_CHIPS.length);
+	async function loadOnboardingState(): Promise<void> {
+		// Server-side, cross-device state (D12/AC-1.1) — no localStorage READ. The /status
+		// endpoint fails OPEN server-side (a degraded engine.db reports done → never re-nags,
+		// AC-1.7). The CLIENT MIRRORS that: a status we cannot resolve is treated as done
+		// (dismiss), NOT shown with the default memory tool — otherwise a transient failure on a
+		// DK-on instance would run the chips instructing the unregistered `memory_store`,
+		// silently losing every capture (RF-COH1).
+		try {
+			const res = await fetch(`${getApiBase()}/onboarding/status`);
+			if (!res.ok) { onboardingDismissed = true; return; }
+			const data = (await res.json()) as {
+				knowledgeDone?: boolean; skipped?: boolean; durableMemory?: boolean; firstSessionAt?: string | null;
+			};
+			if (data.knowledgeDone || data.skipped) onboardingDismissed = true;
+			onboardingMemoryTool = data.durableMemory === true ? 'remember' : 'memory_store';
+			// first_session_at (DC4): stamp the FIRST time onboarding is seen — the session-1
+			// baseline the Wave-3 literacy rule (AC-3.7) reads. Set-once (null → now); a later
+			// re-onboard keeps the original. Skipped once onboarding is already done/dismissed.
+			if (!onboardingDismissed && !data.firstSessionAt) {
+				postOnboardingFlag('first_session_at', new Date().toISOString());
+			}
+		} catch {
+			onboardingDismissed = true; // status unresolvable → treat as done (mirror server fail-open)
+		}
+	}
+
+	/** Raw fire-and-forget server flag write (owner-auth, set-only). Best-effort — a failed
+	 *  write never blocks the UI. Carries NO localStorage side-effect (unlike completion). */
+	function postOnboardingFlag(flag: 'knowledge_done' | 'skipped' | 'first_session_at', value: string): void {
+		void fetch(`${getApiBase()}/onboarding/flags/${flag}`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ value }),
+		}).catch(() => { /* best-effort */ });
+	}
+
+	/** Mark completion/skip: the server flag PLUS the write-only localStorage 'done' write-back
+	 *  (AC-1.11) — the fleet-rollback guard so a downgrade never re-nags. ONLY these two flags
+	 *  write the legacy key; first_session_at (a mid-flow render-ack stamp) must not. */
+	function setOnboardingFlag(flag: 'knowledge_done' | 'skipped', value: string): void {
+		postOnboardingFlag(flag, value);
+		if (typeof localStorage !== 'undefined') localStorage.setItem('lynox-onboarding-step', 'done');
 	}
 
 	function advanceOnboarding() {
@@ -137,23 +226,68 @@
 		if (next >= ONBOARDING_CHIPS.length) {
 			onboardingDismissed = true;
 			onboardingJustCompleted = true;
-			localStorage.setItem('lynox-onboarding-step', 'done');
+			// knowledge_done carries the onboarding thread-id (AC-1.10 — the mass-repair link).
+			// Prefer the AUTHORITATIVE id echoed by /promote (== the promoted facts' source_thread_id,
+			// RF-IRR1); fall back to the session only on the DK-off/skip path where no facts were
+			// written and the link is moot.
+			setOnboardingFlag('knowledge_done', onboardingKnowledgeThreadId ?? onboardingSessionId ?? getSessionId() ?? '');
 		} else {
 			onboardingStep = next;
-			localStorage.setItem('lynox-onboarding-step', String(next));
 		}
 	}
 
 	function skipOnboarding() {
 		onboardingDismissed = true;
-		localStorage.setItem('lynox-onboarding-step', 'done');
+		setOnboardingFlag('skipped', new Date().toISOString());
+	}
+
+	/** Intro-card "start": establish the thread session up front so Step-0 basics, the
+	 *  scan, and the chip steps all run in ONE thread (consistent source_thread_id). */
+	async function startOnboarding(): Promise<void> {
+		onboardingStarted = true;
+		try {
+			onboardingSessionId = await ensureSession();
+		} catch {
+			// Session couldn't be created — skip Step-0 basics, let the chip flow proceed.
+			onboardingBasicsDone = true;
+		}
+	}
+
+	function onBasicsDone(company: string | null, knowledgeThreadId: string | null): void {
+		onboardingCompany = company;
+		onboardingKnowledgeThreadId = knowledgeThreadId;
+		onboardingBasicsDone = true;
 	}
 
 	function handleChipClick(idx: number) {
 		if (idx !== onboardingStep) return;
-		// Step 1: show URL input instead of sending immediately
-		if (idx === 0) { showUrlInput = true; return; }
+		// Step 1: show URL input instead of sending immediately, and pre-fill a
+		// candidate domain from the Step-0 company name (propose→react).
+		if (idx === 0) { showUrlInput = true; void deriveDomainCandidate(); return; }
 		sendOnboardingStep(idx);
+	}
+
+	// Best-effort domain pre-fill from the company name. Non-blocking: the input
+	// appears immediately empty and fills in if a clean candidate returns AND the
+	// user hasn't started typing. No candidate → field stays empty (manual fallback).
+	async function deriveDomainCandidate(): Promise<void> {
+		const company = onboardingCompany?.trim();
+		if (!company || onboardingUrl.trim()) return;
+		onboardingUrlDeriving = true;
+		try {
+			const res = await fetch(`${getApiBase()}/onboarding/derive-domain`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ company, lang: getLocale() }),
+			});
+			if (!res.ok) return;
+			const data = (await res.json()) as { domain: string | null };
+			if (data.domain && !onboardingUrl.trim()) {
+				onboardingUrl = data.domain;
+				onboardingUrlDerived = true;
+			}
+		} catch { /* leave the field empty — manual entry */ }
+		finally { onboardingUrlDeriving = false; }
 	}
 
 	function handleDemoChipClick(idx: number) {
@@ -171,6 +305,7 @@
 		if (!chip) return;
 		const locale = getLocale() === 'de' ? 'German' : 'English';
 		let context = ONBOARDING_CONTEXT[idx]?.replace('{locale}', locale) ?? '';
+		context = context.replace(/\{memoryTool\}/g, onboardingMemoryTool);
 		if (url) context = context.replace('{url}', url);
 		const prompt = t(`onboard.${chip.key}` as 'onboard.chip_1');
 		pendingOnboardingAdvance = true;
@@ -283,8 +418,8 @@
 
 	onMount(() => {
 		void loadDisplayName();
-		loadOnboardingState();
-		// F13 (rafael HN-launch QA 2026-05-27): if the user navigated away
+		void loadOnboardingState();
+		// F13 (demo-walk hardening): if the user navigated away
 		// mid-stream and came back, the SSE listener got torn down with the
 		// previous ChatView while the engine kept running the turn and
 		// persisted the assistant reply to history. The in-memory chat store
@@ -342,8 +477,10 @@
 	}
 
 	/** Artifact types that carry a `<!-- type: X -->` marker so MarkdownRenderer
-	 *  dispatches them to a non-iframe renderer (markdown prose, data download). */
-	const TYPED_ARTIFACT_FENCE = new Set(['markdown', 'csv', 'tsv', 'json', 'text']);
+	 *  renders + labels them correctly. markdown/csv/tsv/json/text route to a
+	 *  non-iframe renderer; svg still renders in the iframe but needs the marker
+	 *  so the pill reads "SVG" instead of defaulting to "HTML". */
+	const TYPED_ARTIFACT_FENCE = new Set(['markdown', 'svg', 'csv', 'tsv', 'json', 'text']);
 	/** Tool calls that get special rendering (not grouped with regular tools) */
 	const SPECIAL_TOOLS = new Set(['plan_task']);
 
@@ -359,7 +496,8 @@
 		| { type: 'text'; text: string }
 		| { type: 'thinking'; text: string }
 		| { type: 'tools'; action: string; subjects: string[]; toolName: string; status: ToolCallInfo['status'] }
-		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> };
+		| { type: 'plan'; summary: string; phases: Array<{ name: string; steps: string[] }> }
+		| { type: 'spawn'; spawnId: string };
 
 	/** Wrap artifact content in a fenced code block whose delimiter is long
 	 *  enough to survive any backtick run inside the content. CommonMark closes
@@ -380,7 +518,13 @@
 	 *  UTC (the server persists UTC without an offset). Returns '' on a bad/absent
 	 *  value so callers can skip rendering. */
 	function formatMessageTime(createdAt: string): string {
-		const parsed = new Date(createdAt.endsWith('Z') || createdAt.includes('+') ? createdAt : createdAt + 'Z');
+		// A SQLite space-separated 'YYYY-MM-DD HH:MM:SS' must become 'T'-separated before the 'Z'
+		// or Safari/Firefox parse it as Invalid Date (Chrome is lenient) — the same space→'T'
+		// normalization KnowledgeQueueView.fmtDate applies (its regex is stricter; behaviour matches).
+		const iso = createdAt.endsWith('Z') || createdAt.includes('+')
+			? createdAt
+			: (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(createdAt) ? createdAt.replace(' ', 'T') : createdAt) + 'Z';
+		const parsed = new Date(iso);
 		if (Number.isNaN(parsed.getTime())) return '';
 		const now = new Date();
 		const lang = getLocale();
@@ -393,14 +537,10 @@
 		return `${parsed.toLocaleDateString(locale, { day: 'numeric', month: 'short' })} ${time}`;
 	}
 
-	// Precedence for the grouped tool-row status: error wins, running over
-	// done. Encoding it as a numeric rank keeps the rule explicit and makes
-	// the reducer below symmetric ("which member is worst?") rather than a
-	// chain of escalation-only branches.
-	const TOOL_STATUS_RANK: Record<ToolCallInfo['status'], number> = { done: 0, running: 1, error: 2 };
-	function worstStatus(a: ToolCallInfo['status'], b: ToolCallInfo['status']): ToolCallInfo['status'] {
-		return TOOL_STATUS_RANK[a] >= TOOL_STATUS_RANK[b] ? a : b;
-	}
+	// `worstStatus` and the rank table it reads now live in `chat-attribution.ts`,
+	// beside `foldToolRows`. It is the ONLY thing the transcript's fold below and
+	// the sub-agent panel's share — the two loops are separate implementations.
+	// Two copies of "which status wins" was one copy too many.
 
 	/** Group consecutive tool calls with same action, extract plan + step blocks */
 	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): GroupedBlock[] {
@@ -420,6 +560,10 @@
 				if (block.text) result.push({ type: 'thinking', text: block.text });
 			} else if (block.type === 'text' && block.text) {
 				result.push({ type: 'text', text: block.text });
+			} else if (block.type === 'spawn') {
+				// Never folded into a neighbouring group: a delegation is its own
+				// panel, and two batches in a row must stay two panels.
+				result.push({ type: 'spawn', spawnId: block.spawnId });
 			} else if (block.type === 'tool_call') {
 				const tc = toolCalls[block.index];
 				if (!tc) continue;
@@ -441,9 +585,16 @@
 					if (content && !isArtifactContentInline(content, artifactTextBlocks)) {
 						const title = String(inp?.['title'] ?? 'Artifact');
 						const artifactType = typeof inp?.['type'] === 'string' ? inp['type'] as string : 'html';
-						const header = TYPED_ARTIFACT_FENCE.has(artifactType)
-							? `<!-- title: ${title} -->\n<!-- type: ${artifactType} -->\n`
-							: `<!-- title: ${title} -->\n`;
+						// artifact_save persists to the gallery server-side and returns
+						// the id in its result string. Thread it into the fence so the
+						// inline card LINKS to that existing entry instead of re-saving on
+						// pin/open — the re-save added a duplicate gallery row per click.
+						const header = artifactFenceHeader({
+							title,
+							type: artifactType,
+							id: parseArtifactIdFromResult(tc.result),
+							typed: TYPED_ARTIFACT_FENCE.has(artifactType),
+						});
 						result.push({ type: 'text', text: artifactFenceWrap(header, content) });
 					}
 					continue;
@@ -484,6 +635,9 @@
 	let inputText = $state('');
 	let messagesEl: HTMLDivElement;
 	let autoScroll = $state(true);
+	// DK-UX: inline edit state for the untrusted-knowledge review chip (edit_approve).
+	let editingKnowledgeId = $state<string | null>(null);
+	let editingKnowledgeText = $state('');
 	const SCROLL_THRESHOLD_PX = 64;
 	let textareaEl = $state<HTMLTextAreaElement>();
 	let fileInputEl: HTMLInputElement;
@@ -1043,8 +1197,8 @@
 			// OpenAI-compatible vs straight Anthropic) — pre-fix this hardcoded
 			// "sk-ant-..." and console.anthropic.com regardless of active provider,
 			// confusing every Hosted-BYOK tenant who picked Mistral in Settings →
-			// LLM and was then asked to paste an Anthropic key (caught on staging
-			// meridian-demo walk 2026-05-27).
+			// LLM and was then asked to paste an Anthropic key (caught on a
+			// staging meridian-demo walk).
 			try {
 				const cfg = await fetch(`${getApiBase()}/config`).then(r => r.json()) as { api_base_url?: string };
 				activeApiBaseUrl = cfg.api_base_url ?? '';
@@ -1479,6 +1633,7 @@
 		return t('chat.thinking');
 	});
 	const queueLength = $derived(getQueueLength());
+	const deferredFollowUpsList = $derived(getDeferredFollowUps());
 	const pendingPermission = $derived(getPendingPermission());
 	const pendingTabsPrompt = $derived(getPendingTabsPrompt());
 	const pendingSecret = $derived(getPendingSecretPrompt());
@@ -1522,6 +1677,22 @@
 	const waitingOnUser = $derived(pendingPromptHead !== null);
 	const runStartedAt = $derived(getRunStartedAt());
 	const runPromptCount = $derived(getRunPromptCount());
+
+	// Out-of-tab attention: when a run parks on a prompt while this tab is hidden,
+	// signal it (title badge + one browser notification if permission is already
+	// granted) so a parked prompt does not read as a stuck/looping run. The in-tab
+	// PromptAnchor covers the looking-at-the-tab case; this covers away/other-tab.
+	$effect(() => {
+		const head = pendingPromptHead;
+		const key = head ? (head.promptId ?? head.question ?? 'pending') : null;
+		setPromptAttention(key, {
+			badge: t('attention.badge'),
+			notifyTitle: t('attention.notify_title'),
+			notifyBody: head?.question || t('attention.notify_body'),
+		});
+	});
+	// Clear the signal on unmount (navigating away mid-prompt must not strand a badge).
+	$effect(() => () => clearPromptAttention());
 
 	// Pre-compute prompt-gate signals once so the textarea's per-keystroke
 	// re-render doesn't re-walk the whole ternary chain.
@@ -1797,34 +1968,13 @@
 	// `tool-call-details`, but the new interleaved-block rendering doesn't
 	// emit that class anywhere — the toggle never had anything to expand.
 
-	// `includeCost` gates ONLY the dollar figures (LLM + third-party API). The
-	// token/model/cache metrics always render — they're free of pricing and
-	// carry the provider/tier verification self-hosters + BYOK users rely on.
-	// Demo tenants pass includeCost=false so the public playground shows
-	// metrics (not a black box) without surfacing prices. Real tenants
-	// (self-host, BYOK, Managed) always see cost — keeping AI spend
-	// transparent rather than hidden. (rafael 2026-05-29)
-	function formatUsage(u: UsageInfo, includeCost: boolean): string {
-		const totalIn = u.tokensIn;
-		const cachePct = totalIn > 0 ? Math.round((u.cacheRead / totalIn) * 100) : 0;
-		const parts = [`${(totalIn + u.tokensOut).toLocaleString()} tokens`];
-		if (includeCost) {
-			parts.push(fmtCost(u.costUsd));
-			// Phase E: surface third-party API cost (DataForSEO etc.) next to the
-			// LLM cost when the message hit any profiled API. Threshold of >$0.001
-			// keeps the row clean when nothing meaningful happened.
-			if (u.apiCostUsd !== undefined && u.apiCostUsd > 0.001) {
-				parts.push(`API: ${fmtCost(u.apiCostUsd)}`);
-			}
-		}
-		if (cachePct > 0) parts.push(`${cachePct}% cache`);
-		// rafael QA 2026-05-18: surface the actual dispatched model id so the
-		// user can verify their provider choice actually applies (and so
-		// auto-downgrade is observable rather than hidden behind an
-		// Anthropic-flavoured tier alias in the model's text response).
-		if (u.model) parts.push(u.model);
-		return parts.join(' · ');
-	}
+	// The footer usage line is split into two pure helpers in `chat-usage.ts`:
+	// `formatTurnTokens` (the per-turn SUM, with a `Σ` prefix + tooltip so it
+	// no longer reads as a single over-window prompt) and `formatUsageMetaParts`
+	// (the $ / cache / model tail as an array, so the footer can set off every
+	// segment with one consistent `·` separator). The real current window fill is
+	// shown separately as the co-located occupancy chip. `includeCost` gates only
+	// the dollar figures (demo tenants pass false). See chat-usage.ts for rationale.
 
 	// Diagnostics panel helpers (opt-in via Advanced metrics setting).
 	function fmtMs(ms: number): string {
@@ -1852,6 +2002,135 @@
 		el.style.overflowY = el.scrollHeight > maxH ? 'auto' : 'hidden';
 	}
 </script>
+
+<!--
+	One delegation batch, rendered where it happened in the transcript.
+
+	Indented behind a coloured rail because that is the whole point: work a
+	sub-agent did must not read as the main agent's. Each child gets its name,
+	its role and the concrete model it runs on, and — indented once more — its
+	OWN tool calls. Those calls used to land in the main agent's tool list, which
+	made the transcript not merely thin but wrong.
+-->
+{#snippet subAgentPanel(msg: ChatMessage, spawnId: string)}
+	{@const batch = msg.spawns?.[spawnId]}
+	{#if batch}
+		{@const totals = batchTotals(msg, spawnId)}
+		{@const children = totals.children}
+		{@const running = totals.running}
+		<!-- Once every child has stopped, the batch's own elapsed is the longest
+		     child's. The 5s heartbeat stops at its last tick, so a wall-clock
+		     figure here would read "12s" right next to a child row saying "17s". -->
+		{@const elapsed = totals.settledElapsedS
+			?? Math.max(batch.elapsedS, Math.floor((Date.now() - batch.startedAt) / 1000))}
+		<div
+			class="ml-3 mt-1 mb-1 border-l-2 border-accent/40 pl-3 py-1 text-[11px] font-mono text-text-subtle/80"
+			role="group"
+			aria-label={t('spawn.region_label')}
+		>
+			<!-- Wraps rather than clips: at 390px this row ran out of width and the
+			     trailing items — the cost among them — silently fell off the end. -->
+			<div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-text-subtle">
+				<!-- Deliberately NOT repeating "Delegiert" — the tool row directly
+				     above already says it. This names what the panel adds. -->
+				<span class="uppercase tracking-widest text-[10px] text-accent-text">{t('spawn.subagents')}</span>
+				<span>{elapsed}s</span>
+				{#if running.length > 0}
+					<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse" aria-hidden="true"></span>
+					<span>{running.length} {t('spawn.active')}</span>
+				{:else}
+					<span>{t('spawn.done')}</span>
+				{/if}
+				<span class="text-text-subtle/50">{children.length - running.length}/{children.length}</span>
+				<!-- Spend when it is known, otherwise the engine's CEILING while the
+				     batch is still running — `≤`, never `~`, because that figure is
+				     maxIterations × a full output fill and the real bill is usually a
+				     fraction of it. `batchTotals` decides which of the two exists;
+				     asking `> 0` here is a rendering question, not a second guard. -->
+				{#if totals.costUsd > 0}
+					<span class="text-text-subtle/50" aria-hidden="true">·</span>
+					<span class="text-text-subtle/70">{formatCost(totals.costUsd)}</span>
+				{:else if totals.estimateMaxUsd !== null}
+					<span class="text-text-subtle/50" aria-hidden="true">·</span>
+					<span class="text-text-subtle/70" title={t('spawn.est_max_hint')}
+						>≤ {formatCost(totals.estimateMaxUsd)}</span><span class="sr-only">{t('spawn.est_max_hint')}</span>
+				{/if}
+				{#if elapsed >= 120 && running.length > 0}
+					<span class="text-warning">{t('spawn.slow')}</span>
+				{/if}
+			</div>
+
+			{#each children as child (child.id)}
+				{@const isRunning = child.status === 'running'}
+				<!-- `foldToolRows`: consecutive same-action calls collapse into one row
+				     with merged subjects. A SECOND implementation of the transcript's
+				     inline fold, not a shared one — `groupedToolCalls` above keeps its
+				     own loop (it interleaves `plan_task` / `artifact_save` and emits a
+				     richer row), and the two share only `worstStatus`. They can drift.
+				     Before the fold, a child that read forty files rendered forty rows
+				     here, where the identical forty fold into one in the parent's
+				     list. -->
+				{@const childRows = foldToolRows(child.toolCalls, toolCallLabel)}
+				<div class="mt-1">
+					<div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+						{#if isRunning}
+							<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse shrink-0" aria-hidden="true"></span>
+						{:else}
+							<span
+								class="shrink-0 {child.status === 'error' ? 'text-danger' : 'text-success'}"
+								aria-label={child.status === 'error' ? t('spawn.status_fail') : t('spawn.status_ok')}
+							>{child.status === 'error' ? '✗' : '✓'}</span>
+						{/if}
+						<span class="text-text truncate min-w-0">{child.name}</span>
+						<!-- The model usually names its child after the role it picked, so
+						     showing both gives "researcher · researcher". Only add the role
+						     when it says something the name does not. -->
+						{#if child.role && child.role !== child.name}
+							<span class="text-text-subtle/50" aria-hidden="true">·</span>
+							<span class="text-text-subtle/70">{child.role}</span>
+						{/if}
+						{#if child.model}
+							<span class="text-text-subtle/50" aria-hidden="true">·</span>
+							<span class="text-text-subtle/60 truncate min-w-0 max-w-[12rem]" title={child.model}>{child.model}</span>
+						{/if}
+						<!-- Kept together and unshrinkable: elapsed and cost are the two
+						     numbers the row exists for, so the model id yields space first. -->
+						{#if child.elapsedS !== undefined || child.costUsd !== undefined}
+							<span class="ml-auto shrink-0 flex items-center gap-2">
+								{#if child.elapsedS !== undefined}
+									<span class="text-text-subtle/50">{child.elapsedS}s</span>
+								{/if}
+								{#if child.costUsd !== undefined}
+									<span class="text-text-subtle/60">{formatCost(child.costUsd)}</span>
+								{/if}
+							</span>
+						{/if}
+					</div>
+
+					<!-- The child's own work. Only tool names reach the client today —
+					     `makeChildStream` forwards tool_call/tool_result and swallows the
+					     child's text and thinking, so this is deliberately a list of
+					     actions, not a transcript. -->
+					{#if childRows.length > 0}
+						<ul class="ml-3 mt-0.5 border-l border-border pl-2 space-y-0.5">
+							{#each childRows as row, rowIdx (rowIdx)}
+								<li class="flex items-center gap-1.5 text-text-subtle/70">
+									<span
+										class="shrink-0 {row.status === 'error' ? 'text-danger' : row.status === 'running' ? 'text-warning' : 'text-text-subtle/40'}"
+										aria-hidden="true"
+									>{row.status === 'running' ? '…' : row.status === 'error' ? '✗' : '·'}</span>
+									<span class="truncate">{row.action}{row.subjects.length > 0 ? ': ' + row.subjects.join(', ') : ''}</span>
+								</li>
+							{/each}
+						</ul>
+					{:else if isRunning}
+						<div class="ml-3 mt-0.5 pl-2 text-text-subtle/50">{t('spawn.waiting')}…</div>
+					{/if}
+				</div>
+			{/each}
+		</div>
+	{/if}
+{/snippet}
 
 {#snippet micButton()}
 	<!-- Tap-to-toggle on every device. Hold-to-record was racy on touch
@@ -1888,14 +2167,67 @@
 	</button>
 {/snippet}
 
-{#snippet messageActions(msgKey: string, msgContent: string, hasArtifact: boolean, usage: UsageInfo | undefined)}
+{#snippet messageActions(msgKey: string, msgContent: string, hasArtifact: boolean, usage: UsageInfo | undefined, isStreamingMsg: boolean, isLast: boolean)}
 	<!-- Inline footer: usage stats on the left, action icons (speak +
 	     copy) on the right. Right-alignment of the tappable buttons puts
 	     them in the thumb sweep zone for right-handed mobile users — the
-	     stats column is read-only, the icons are the actual touch targets. -->
+	     stats column is read-only, the icons are the actual touch targets.
+	     The usage line is gated on THIS message being the actively-streaming
+	     one (`isStreamingMsg`), NOT the global `isStreaming` — else a new turn
+	     streaming below wrongly blanks the stats of every completed message
+	     above it (they only reappeared once the turn finished). A completed
+	     message's usage is final, so it stays visible while a later reply
+	     streams; only the in-progress reply hides its (still-partial) stats.
+	     The token count is a per-turn SUM over all tool-loop steps (can exceed
+	     the window); the co-located occupancy chip beside it shows the REAL
+	     current window fill, so the two numbers read as distinct — not one
+	     broken over-window figure. The chip only rides the LAST message because
+	     `ctxBudget` is a single live session value, not a per-message stat. -->
 	<div class="flex items-center gap-2 mt-2">
-		{#if usage && !isStreaming}
-			<span class="text-[11px] font-mono text-text-subtle truncate">{formatUsage(usage, !getDemoMode())}</span>
+		{#if !isStreamingMsg && (usage || (isLast && ctxBudget))}
+			<!-- One coherent stats line — Σ tokens · $ · cache · model · context
+			     meter — every segment set off by the SAME `·` separator at the
+			     same gap. Horizontally swipeable on mobile when a long model id
+			     overflows (scroll-fades the clipped edge) instead of truncating;
+			     the action icons stay pinned right, outside this scroll box. -->
+			<div class="flex-1 min-w-0 flex items-center gap-1.5 overflow-x-auto scrollbar-none whitespace-nowrap text-[11px] font-mono text-text-subtle" use:scrollFade>
+				{#if usage}
+					<span
+						class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
+						title={t('chat.footer_tokens_tooltip')}
+					>{formatTurnTokens(usage)}</span><span class="sr-only">{t('chat.footer_tokens_tooltip')}</span>
+					{#each formatUsageMetaParts(usage, !getDemoMode()) as part}
+						<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{#if part.title}<span
+								class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
+								title={part.title}
+							>{part.text}</span><span class="sr-only">{part.title}</span>{:else}<span class="shrink-0">{part.text}</span>{/if}
+					{/each}
+				{/if}
+		{#if isLast && ctxBudget}
+			{@const pct = Math.min(ctxBudget.usagePercent, 100)}
+			<!-- Color intensity rides the cost-aware `budgetPercent` (how close the
+			     thread is to a compaction, cost-wise) when the engine sends it;
+			     falls back to the window-fill `pct` when it's absent (older /
+			     non-lazy engines) so the chip looks EXACTLY as before (#78b). The
+			     DISPLAYED number stays `pct` (honest window-fill) either way — no
+			     second number, per rafael's call that a raw cost-% contradicts the
+			     window meter on large-window models. -->
+			{@const colorPct = ctxBudget.budgetPercent !== undefined ? Math.min(ctxBudget.budgetPercent, 100) : pct}
+			{@const barColor = colorPct >= 75 ? 'bg-danger' : colorPct >= 60 ? 'bg-warning' : 'bg-accent'}
+			{@const txtColor = colorPct >= 75 ? 'text-danger' : colorPct >= 60 ? 'text-warning' : 'text-text-subtle'}
+			{#if usage}<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{/if}
+			<span
+				class="inline-flex items-center gap-1 shrink-0"
+				title="{t('chat.ctx_occupancy_tooltip')} · {ctxBudget.totalTokens.toLocaleString()} / {ctxBudget.maxTokens.toLocaleString()}"
+			>
+				<span class="hidden sm:inline text-[10px] text-text-subtle/60">{t('chat.ctx_occupancy_label')}</span>
+				<span class="w-10 h-1 rounded-full bg-border overflow-hidden">
+					<span class="block {barColor} h-full rounded-full transition-all duration-500" style="width: {pct}%"></span>
+				</span>
+				<span class="text-[10px] {txtColor}">{pct}%</span>
+			</span>
+			{/if}
+			</div>
 		{/if}
 		<div class="ml-auto flex items-center gap-1">
 			{@render speakButton(msgKey, msgContent)}
@@ -1914,7 +2246,7 @@
 	<!-- Diagnostics panel: opt-in (Advanced metrics setting), never on demo
 	     tenants. Token breakdown + finish reason + iterations are live-only;
 	     duration / tok-s / run-id persist via usage_json and survive a reload. -->
-	{#if usage && !isStreaming && isDiagnosticsEnabled() && !getDemoMode()}
+	{#if usage && !isStreamingMsg && isDiagnosticsEnabled() && !getDemoMode()}
 		{@const tps = tokPerSec(usage)}
 		<details class="mt-1 text-[11px] text-text-subtle/80">
 			<summary class="cursor-pointer text-text-subtle/60 hover:text-text-muted font-mono uppercase tracking-widest text-[10px]">{t('diagnostics.details')}</summary>
@@ -1934,15 +2266,6 @@
 				{/if}
 			</dl>
 		</details>
-	{/if}
-{/snippet}
-
-{#snippet messageTimestamp(createdAt: string | undefined, align: 'left' | 'right')}
-	{#if createdAt}
-		{@const label = formatMessageTime(createdAt)}
-		{#if label}
-			<div class="mt-0.5 text-[10px] text-text-subtle/50 select-none {align === 'right' ? 'text-right pr-1' : ''}">{label}</div>
-		{/if}
 	{/if}
 {/snippet}
 
@@ -2089,6 +2412,29 @@
 									{/each}
 								</div>
 							<!-- Onboarding: all steps with done/current/future states -->
+							{:else if showOnboarding && !onboardingBasicsDone}
+								<!-- D9v2 Step-0 pre-phase: intro card → engine basics, before the chip flow -->
+								<div class="mt-6 space-y-2.5">
+									{#if !onboardingStarted}
+										<div class="w-full rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 p-5 text-center space-y-3">
+											<p class="text-base font-medium text-text">{t('onboard.intro_title')}</p>
+											<p class="text-sm text-text-muted max-w-md mx-auto">{t('onboard.intro_lead')}</p>
+											<div class="pt-1">
+												<button
+													onclick={() => void startOnboarding()}
+													class="rounded-[var(--radius-sm)] bg-accent px-5 py-2 text-sm font-medium text-accent-fg hover:opacity-90 transition-opacity"
+												>
+													{t('onboard.intro_start')}
+												</button>
+											</div>
+											<button onclick={skipOnboarding} class="text-xs text-text-muted hover:text-text transition-colors">
+												{t('onboard.skip_onboarding')}
+											</button>
+										</div>
+									{:else if onboardingSessionId}
+										<OnboardingBasics sessionId={onboardingSessionId} onDone={onBasicsDone} />
+									{/if}
+								</div>
 							{:else if showOnboarding}
 								<div class="mt-6 space-y-2.5">
 									<p class="text-center text-sm text-text-muted mb-4">{t('onboard.ready_hint')}</p>
@@ -2112,10 +2458,10 @@
 												<!-- Step 1: inline URL input (skips LLM ask_user round-trip) -->
 												<div class="w-full rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 p-4 space-y-3">
 													<div class="flex items-center gap-3">
-														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">1</span>
+														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">2</span>
 														<div class="flex-1 min-w-0">
 															<span class="text-sm font-medium text-text">{t('onboard.chip_1')}</span>
-															<span class="ml-2 text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} 1/3</span>
+															<span class="ml-2 text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} 2/4</span>
 														</div>
 													</div>
 													<div class="flex gap-2">
@@ -2123,6 +2469,7 @@
 															type="url"
 															bind:value={onboardingUrl}
 															placeholder={t('onboard.url_placeholder')}
+															oninput={() => { onboardingUrlDerived = false; }}
 															onkeydown={(e) => e.key === 'Enter' && submitOnboardingUrl()}
 															class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-2 text-[16px] md:text-sm outline-none focus:border-accent/60"
 														/>
@@ -2134,6 +2481,11 @@
 															{t('onboard.url_go')}
 														</button>
 													</div>
+													{#if onboardingUrlDeriving}
+														<p class="text-[11px] text-text-subtle">{t('onboard.url_deriving')}</p>
+													{:else if onboardingUrlDerived}
+														<p class="text-[11px] text-accent-text">{t('onboard.url_derived')}</p>
+													{/if}
 												</div>
 											{:else}
 												<!-- Clickable chip -->
@@ -2142,11 +2494,11 @@
 													class="w-full rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 hover:border-accent/60 hover:bg-accent/15 p-4 text-left transition-all cursor-pointer"
 												>
 													<div class="flex items-center gap-3">
-														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{idx + 1}</span>
+														<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{idx + 2}</span>
 														<div class="flex-1 min-w-0">
 															<div class="flex items-center gap-2">
 																<span class="text-sm font-medium text-text">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
-																<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {idx + 1}/3</span>
+																<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {idx + 2}/4</span>
 															</div>
 															<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
 														</div>
@@ -2158,7 +2510,7 @@
 											<!-- Future: faded -->
 											<div class="w-full rounded-[var(--radius-md)] border border-border/50 bg-bg-subtle opacity-40 p-4">
 												<div class="flex items-center gap-3">
-													<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-bg-muted text-text-subtle">{idx + 1}</span>
+													<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-bg-muted text-text-subtle">{idx + 2}</span>
 													<div class="flex-1 min-w-0">
 														<span class="text-sm font-medium text-text-subtle">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
 														<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
@@ -2221,8 +2573,16 @@
 						</div>
 					</div>
 				{:else if msg.role === 'user'}
-					{@const userText = stripNowMarker(msg.content)}
+					{@const userText = stripLoadedContext(stripNowMarker(msg.content))}
 					<div class="flex justify-end items-start gap-1.5">
+						<!-- Timestamp on the operator's own row, pushed hard-left (mr-auto)
+						     so it sits opposite the right-aligned bubble on the same line.
+						     Only the user's turns carry it — the assistant's don't. The
+						     mt nudges it down to line up with the bubble's first text line. -->
+						{#if msg.createdAt}
+							{@const ts = formatMessageTime(msg.createdAt)}
+							{#if ts}<span class="mr-auto mt-2.5 shrink-0 text-[10px] text-text-subtle/50 select-none tabular-nums">{ts}</span>{/if}
+						{/if}
 						{#if msg.queued}
 							<button
 								onclick={() => removeQueuedMessage(msg)}
@@ -2235,7 +2595,7 @@
 						{/if}
 						<button
 							onclick={() => { if (msg.failed) { sendMessage(userText); msg.failed = false; } else { navigator.clipboard.writeText(userText); addToast(t('common.copied'), 'success', 1500); } }}
-							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
+							class="rounded-[var(--radius-md)] px-4 py-2.5 text-sm max-w-[80%] text-left whitespace-pre-wrap break-words cursor-pointer hover:opacity-80 transition-opacity {msg.failed ? 'bg-danger/10 border border-danger/30 text-danger' : msg.queued ? 'bg-bg-muted border border-border text-text-muted' : 'bg-accent/10 border border-accent/20'}"
 						>
 							{#if hasVoicePrefix(userText)}
 								<svg xmlns="http://www.w3.org/2000/svg" class="inline-block h-3.5 w-3.5 mr-1.5 -mt-0.5 text-current opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d={MIC_SVG_PATH} /></svg>{stripVoicePrefix(userText)}
@@ -2249,12 +2609,11 @@
 							{/if}
 						</button>
 					</div>
-					{@render messageTimestamp(msg.createdAt, 'right')}
 				{:else}
 					<!-- EU AI Act Art. 50 §1: persistent visible disclosure that the
 					     message is AI-generated. data-ai-generated exposes the same
 					     fact machine-readably for assistive tech / regulators.
-					     Layout 2026-05-27: badge floats inline with the FIRST
+					     Layout: badge floats inline with the FIRST
 					     TEXT block — not the first block of any type. A turn
 					     that opens with ▸THINKING + tool_calls (Anthropic
 					     extended-thinking + tool-use path) previously stranded
@@ -2316,41 +2675,8 @@
 										<span aria-hidden="true" class="ml-auto md:ml-1 text-[11px] md:text-[10px] {isError ? 'text-danger' : 'text-success'}">{isError ? '✗' : '✓'}</span>
 									{/if}
 								</div>
-								{#if gBlock.toolName === 'spawn_agent' && msg.spawn}
-									{@const sp = msg.spawn}
-									{@const elapsed = Math.max(sp.elapsedS, Math.floor((Date.now() - sp.startedAt) / 1000))}
-									<div class="ml-3 mt-1 mb-1 text-[11px] font-mono text-text-subtle/80 border-l-2 border-warning/30 pl-3 py-1">
-										<div class="flex items-center gap-2 text-text-subtle">
-											<span>{elapsed}s</span>
-											{#if sp.running.length > 0}
-												<span class="inline-block h-1.5 w-1.5 rounded-full bg-warning animate-pulse" aria-hidden="true"></span>
-												<span>{sp.running.length} aktiv</span>
-											{:else}
-												<span>fertig</span>
-											{/if}
-											{#if elapsed >= 120 && sp.running.length > 0}
-												<span class="text-warning">ungewöhnlich lang</span>
-											{/if}
-										</div>
-										{#each sp.running as subName}
-											<div class="flex items-center gap-2 mt-0.5">
-												<span class="text-text-subtle/60">-&gt;</span>
-												<span class="text-text">{subName}</span>
-												{#if sp.lastToolBySub[subName]}
-													<span class="text-text-subtle/60">·</span>
-													<span class="text-text-subtle/70">{sp.lastToolBySub[subName]}</span>
-												{/if}
-											</div>
-										{/each}
-										{#each sp.done as d}
-											<div class="flex items-center gap-2 mt-0.5">
-												<span class={d.ok ? 'text-success' : 'text-danger'}>{d.ok ? '✓' : '✗'}</span>
-												<span class="text-text-subtle/80">{d.name}</span>
-												<span class="text-text-subtle/50">{d.elapsedS}s</span>
-											</div>
-										{/each}
-									</div>
-								{/if}
+							{:else if gBlock.type === 'spawn'}
+								{@render subAgentPanel(msg, gBlock.spawnId)}
 							{:else if gBlock.type === 'thinking' && gBlock.text}
 								<!-- Mask once: the preview must be redacted too, not just
 								     the body — a secret in the first chars would otherwise
@@ -2367,7 +2693,7 @@
 							{:else if gBlock.type === 'text' && gBlock.text}
 								{#if gIdx === firstTextIdx}
 									<span
-										class="ai-badge float-left mr-2 mt-[3px] inline-flex items-center rounded-[var(--radius-sm)] border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-widest text-accent"
+										class="ai-badge float-left mr-2 mt-[3px] inline-flex items-center rounded-[var(--radius-sm)] border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-widest text-accent-text"
 										aria-label={t('chat.ai_generated_aria')}
 									>{t('chat.ai_generated_badge')}</span>
 								{/if}
@@ -2382,7 +2708,7 @@
 						     message content. -->
 						{#if msg.blocks?.length && msg.content}
 							{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
-							{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage)}
+							{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1, msgIdx === messages.length - 1)}
 						{/if}
 						<!-- Fallback for legacy messages without blocks -->
 						{#if !msg.blocks?.length}
@@ -2413,10 +2739,81 @@
 							{#if msg.content}
 								{@const hasArtifact = msg.content.includes('```html') && (msg.content.includes('<!DOCTYPE') || msg.content.includes('<html'))}
 								<MarkdownRenderer content={msg.content} streaming={isStreaming && msgIdx === messages.length - 1} />
-								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage)}
+								{@render messageActions(`msg-${msgIdx}`, msg.content, hasArtifact, msg.usage, isStreaming && msgIdx === messages.length - 1, msgIdx === messages.length - 1)}
 							{/if}
 						{/if}
-						{@render messageTimestamp(msg.createdAt, 'left')}
+						{#if msg.role === 'assistant' && msg.knowledgeWrites?.length}
+							<!-- DK-UX inline chips: a durable-knowledge write made this turn.
+							     Trusted → confirmation + undo. (Untrusted review chip: Slice C.) -->
+							<div class="flex flex-col gap-1 mt-2">
+								{#each msg.knowledgeWrites as kw (kw.id)}
+									{#if kw.status === 'active'}
+										<div class="flex items-center gap-2 text-[11px] text-text-muted">
+											<span class="inline-flex items-center gap-1 rounded-full bg-accent/10 text-accent-text px-2 py-0.5">
+												<span aria-hidden="true">✓</span>
+												{kw.subject ? t('chat.knowledge.saved_to').replace('{subject}', kw.subject) : t('chat.knowledge.saved')}
+											</span>
+											{#if kw.resolved === 'undone'}
+												<span class="text-text-subtle">· {t('chat.knowledge.undone')}</span>
+											{:else}
+												<button
+													class="text-text-subtle hover:text-text underline underline-offset-2"
+													onclick={() => retireKnowledge(msgIdx, kw.id)}
+												>{t('chat.knowledge.undo')}</button>
+											{/if}
+										</div>
+									{:else}
+										<!-- Untrusted capture (turn read external content): a review chip. Shows the
+										     RAW wording (escaped plain text, not markdown) so the person judges the
+										     actual — possibly injected — content, exactly like the review queue.
+										     Keep/discard route to the EXISTING queue-review endpoint. -->
+										<div class="rounded-[var(--radius-md)] border border-amber-500/30 bg-amber-500/5 p-2.5 text-xs space-y-2">
+											<div class="flex items-center gap-2 text-[10px] font-mono text-text-muted">
+												<span class="rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 px-1.5">{t('chat.knowledge.review_tag')}</span>
+												{#if kw.subject}<span>→ {kw.subject}</span>{/if}
+												<span class="text-text-subtle">{t('chat.knowledge.review_hint')}</span>
+											</div>
+											{#if kw.resolved}
+												<p class="text-text-subtle">{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}</p>
+											{:else if editingKnowledgeId === kw.id}
+												<textarea
+													aria-label={t('chat.knowledge.review_edit_aria')}
+													bind:value={editingKnowledgeText}
+													class="w-full text-xs bg-bg-muted border border-border rounded-[var(--radius-sm)] p-2 min-h-[56px]"
+												></textarea>
+												<div class="flex gap-2">
+													<button
+														disabled={!editingKnowledgeText.trim()}
+														class="px-2.5 py-1 rounded-[var(--radius-sm)] bg-accent/10 text-accent-text hover:bg-accent/20 disabled:opacity-50"
+														onclick={() => { void reviewKnowledge(msgIdx, kw.id, 'edit_approve', editingKnowledgeText).then(() => { if (kw.resolved) editingKnowledgeId = null; }); }}
+													>{t('chat.knowledge.review_save_keep')}</button>
+													<button
+														class="px-2.5 py-1 rounded-[var(--radius-sm)] text-text-muted hover:bg-bg-muted"
+														onclick={() => { editingKnowledgeId = null; }}
+													>{t('common.cancel')}</button>
+												</div>
+											{:else}
+												<p class="text-text whitespace-pre-wrap">{kw.text}</p>
+												<div class="flex gap-2">
+													<button
+														class="px-2.5 py-1 rounded-[var(--radius-sm)] bg-accent/10 text-accent-text hover:bg-accent/20"
+														onclick={() => reviewKnowledge(msgIdx, kw.id, 'approve')}
+													>{t('chat.knowledge.review_keep')}</button>
+													<button
+														class="px-2.5 py-1 rounded-[var(--radius-sm)] text-text-muted hover:bg-bg-muted"
+														onclick={() => { editingKnowledgeId = kw.id; editingKnowledgeText = kw.text; }}
+													>{t('chat.knowledge.review_edit')}</button>
+													<button
+														class="px-2.5 py-1 rounded-[var(--radius-sm)] text-red-500/80 hover:bg-red-500/10"
+														onclick={() => reviewKnowledge(msgIdx, kw.id, 'reject')}
+													>{t('chat.knowledge.review_discard')}</button>
+												</div>
+											{/if}
+										</div>
+									{/if}
+								{/each}
+							</div>
+						{/if}
 					</div>
 				{/if}
 			{/each}
@@ -2433,7 +2830,7 @@
 					<div class="flex flex-wrap gap-2 mt-1">
 						{#each lastAssistant.followUps as fu}
 							<button
-								onclick={() => sendMessage(fu.task)}
+								onclick={() => takeFollowUp(fu, lastAssistant.followUps ?? [])}
 								class="rounded-full border border-accent/30 bg-accent/5 px-3 py-1.5 text-xs text-accent-text hover:border-accent/50 hover:bg-accent/10 transition-all"
 							>{fu.label}</button>
 						{/each}
@@ -2451,11 +2848,11 @@
 							class="w-full max-w-lg rounded-[var(--radius-md)] border border-accent/40 bg-accent/10 hover:border-accent/60 hover:bg-accent/15 p-4 text-left transition-all cursor-pointer"
 						>
 							<div class="flex items-center gap-3">
-								<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{onboardingStep + 1}</span>
+								<span class="flex shrink-0 items-center justify-center w-7 h-7 rounded-full text-sm bg-accent/20 text-accent-text">{onboardingStep + 2}</span>
 								<div class="flex-1 min-w-0">
 									<div class="flex items-center gap-2">
 										<span class="text-sm font-medium text-text">{t(`onboard.${chip.key}` as 'onboard.chip_1')}</span>
-										<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {onboardingStep + 1}/3</span>
+										<span class="text-[10px] font-mono uppercase tracking-widest text-accent-text">{t('onboard.step')} {onboardingStep + 2}/4</span>
 									</div>
 									<p class="text-xs text-text-muted mt-0.5">{t(`onboard.${chip.descKey}` as 'onboard.chip_1_desc')}</p>
 								</div>
@@ -2469,44 +2866,17 @@
 				{/if}
 			{/if}
 
-			<!-- Post-onboarding "What's Next" -->
+			<!-- Post-onboarding closing (§8, Activation Principle). Honest expectation-
+			     setting only. The context-grounded JOB proposals are the model's
+			     suggest_follow_ups pills (propose→react); this block deliberately does
+			     NOT enumerate generic capabilities — capability setup (Gmail, push) is
+			     Wave 2's seeded tasks, not a feature menu crammed into the close. -->
 			{#if onboardingJustCompleted && !isStreaming && messages.length > 0}
-				<div class="mt-4 mb-2 w-full max-w-lg rounded-[var(--radius-md)] border border-accent/20 bg-accent/5 p-5">
-					<h3 class="text-sm font-semibold text-text mb-1">{t('onboard.whats_next_title')}</h3>
-					<p class="text-xs text-text-muted mb-3">{t('onboard.whats_next_subtitle')}</p>
-					<div class="space-y-2">
-						<a href="/app/settings/channels/google" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" /></svg>
-							<div>
-								<span class="text-sm font-medium text-text">{t('onboard.whats_next_google')}</span>
-								<p class="text-xs text-text-muted">{t('onboard.whats_next_google_desc')}</p>
-							</div>
-						</a>
-						<a href="/app/settings/account/mobile" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 0 0 6 3.75v16.5a2.25 2.25 0 0 0 2.25 2.25h7.5A2.25 2.25 0 0 0 18 20.25V3.75a2.25 2.25 0 0 0-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3" /></svg>
-							<div>
-								<span class="text-sm font-medium text-text">{t('onboard.whats_next_mobile')}</span>
-								<p class="text-xs text-text-muted">{t('onboard.whats_next_mobile_desc')}</p>
-							</div>
-						</a>
-						<a href="/app/settings/channels/notifications" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" /></svg>
-							<div>
-								<span class="text-sm font-medium text-text">{t('onboard.whats_next_notifications')}</span>
-								<p class="text-xs text-text-muted">{t('onboard.whats_next_notifications_desc')}</p>
-							</div>
-						</a>
-						<a href="/app/intelligence" class="flex items-center gap-3 rounded-[var(--radius-sm)] border border-border/50 px-3 py-2.5 hover:border-accent/30 hover:bg-accent/5 transition-all">
-							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 shrink-0 text-text-subtle" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" /></svg>
-							<div>
-								<span class="text-sm font-medium text-text">{t('onboard.whats_next_knowledge')}</span>
-								<p class="text-xs text-text-muted">{t('onboard.whats_next_knowledge_desc')}</p>
-							</div>
-						</a>
-						<button onclick={() => { onboardingJustCompleted = false; }} class="w-full text-center text-xs text-text-subtle hover:text-text-muted transition-colors mt-2 py-1">
-							{t('onboard.whats_next_chat')}
-						</button>
-					</div>
+				<div class="mt-4 mb-2 w-full max-w-lg rounded-[var(--radius-md)] border border-accent/20 bg-accent/5 p-4">
+					<p class="text-xs text-text-muted leading-relaxed">💡 {t('onboard.limits_note')}</p>
+					<button onclick={() => { onboardingJustCompleted = false; }} class="mt-2 text-xs text-text-subtle hover:text-text-muted transition-colors">
+						{t('onboard.whats_next_chat')}
+					</button>
 				</div>
 			{/if}
 
@@ -2753,8 +3123,19 @@
 					{#if isPermissionGuard}
 						<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
 					{:else}
-						<div class="flex-1 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1">
-							<MarkdownRenderer content={pendingPermission.question} streaming={false} />
+						<!-- renderPromptMarkdown, NOT MarkdownRenderer: the chat renderer
+						     keeps DOMPurify's defaults, which permit `div`, `style` and
+						     `hidden` and retain comments — enough for an interpolated value
+						     (for mail_reply, an external sender's subject) to hide the rest
+						     of the prompt. See prompt-markdown.ts.
+						     The wrap/min-width classes below replace the hardening that came
+						     with MarkdownRenderer's own stylesheet: without them a single
+						     long token — a tracking URL in a body preview — scrolls the
+						     prompt sideways. -->
+						<div class="flex-1 min-w-0 text-sm text-text-muted leading-relaxed max-h-64 overflow-y-auto scrollbar-thin [overflow-wrap:anywhere] [&_strong]:text-text [&_blockquote]:border-l-2 [&_blockquote]:border-accent/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text [&_p]:my-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
+							{@html pendingPermission.segments
+								? renderPromptSegments(pendingPermission.segments)
+								: renderPromptMarkdown(pendingPermission.question)}
 						</div>
 					{/if}
 					<div class="flex items-center gap-1.5 shrink-0">
@@ -2948,10 +3329,13 @@
 	     that turned amber from 60 % up (rafael: "mega scary, kam superfrüh").
 	     The button triggers a user-controlled compaction (compactNow → /compact)
 	     so the user compacts at a good moment instead of being auto-compacted
-	     mid-task. -->
+	     mid-task. No raw % is shown: the offer fires against the cost-aware
+	     compaction budget (min of window + carried-token floor), NOT the real
+	     window, so a "%" here contradicts the footer's window meter on a
+	     large-window model (e.g. Sonnet 5's 1M) — the copy carries the reason
+	     (keep replies fast + low-cost), the footer stays the honest window gauge. -->
 	{#if compactionOffer !== null || (ctxBudget && ctxBudget.usagePercent >= 80)}
 		{@const rawPct = compactionOffer ?? ctxBudget?.usagePercent ?? 80}
-		{@const pct = Math.min(rawPct, 100)}
 		{@const nearNet = rawPct >= 88}
 		<div
 			class="border-t {nearNet ? 'border-warning/30 bg-warning/10 text-warning/90' : 'border-border bg-bg-subtle text-text-subtle'} px-4 py-1.5 text-xs"
@@ -2963,7 +3347,6 @@
 					<path stroke-linecap="round" stroke-linejoin="round" d="M8 7h8m-8 4h8m-8 4h5m6 5l-3-3v-2a2 2 0 00-2-2H6a2 2 0 00-2-2V6a2 2 0 012-2h12a2 2 0 012 2v10a2 2 0 01-2 2h-2z" />
 				</svg>
 				<span class="hidden sm:inline">{t('chat.context_offer')}</span>
-				<span class="font-mono tabular-nums opacity-70">{pct}%</span>
 				{#if nearNet}
 					<span class="opacity-80 hidden md:inline">— {t('chat.context_auto_compact_imminent')}</span>
 				{/if}
@@ -2980,11 +3363,14 @@
 		</div>
 	{/if}
 
-	<!-- Only render for the brief tabs-prompt window before `inBatchMode`
-	     flips. Other prompt kinds always have their own inline form below,
-	     so showing the anchor too gives the user two visually-equivalent
-	     reply surfaces — and the [Antworten] button is only a scroll-locator. -->
-	{#if pendingPromptHead && pendingPromptHead.kind === 'tabs' && !inBatchMode}
+	<!-- The sticky "waiting for you" locator bar. Shown for `tabs` (before
+	     `inBatchMode` flips) AND for `permission` (single ask_user / tool consent):
+	     both are easily missed once the inline form scrolls off, so a run can park
+	     unanswered for many minutes and read as stuck. The [Antworten] button is a
+	     scroll-locator to the inline form (which owns the reply controls), not a
+	     second reply surface. `secret`/`mail` stay excluded — surfacing a credential
+	     prompt's context in a persistent bar risks leaking it (pipeline-status.ts). -->
+	{#if pendingPromptHead && (pendingPromptHead.kind === 'permission' || (pendingPromptHead.kind === 'tabs' && !inBatchMode))}
 		<PromptAnchor prompt={pendingPromptHead} promptCount={runPromptCount} runStartedAt={runStartedAt} />
 	{:else if isStreaming && !pendingPermission && !pendingSecret && !pendingTabsPrompt}
 		<!-- Sticky activity surface above the input. Stays visible during
@@ -2997,6 +3383,38 @@
 			currentToolStartedAt={currentToolStartedAt}
 			lastEventAt={lastEventAt}
 		/>
+	{/if}
+
+	<!-- Deferred follow-ups tray: un-taken siblings of a pill the user took, kept
+	     pinned above the composer so a second matching suggestion isn't lost.
+	     Clicking one runs it as a FRESH in-context turn (sendMessage), not a blind
+	     pre-recorded queue. Glanceable + click-to-run + dismiss only — no editor. -->
+	{#if deferredFollowUpsList.length > 0}
+		<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2">
+			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex flex-wrap items-center gap-2">
+				<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('chat.deferred_title')}</span>
+				{#each deferredFollowUpsList as fu (fu.task)}
+					<div class="inline-flex items-center rounded-full border border-accent/30 bg-accent/5 text-xs text-accent-text hover:border-accent/50 hover:bg-accent/10 transition-all">
+						<button
+							onclick={() => runDeferredFollowUp(fu)}
+							class="rounded-l-full px-3 py-1.5"
+						>{fu.label}</button>
+						<button
+							onclick={() => dismissDeferredFollowUp(fu)}
+							aria-label={t('chat.deferred_dismiss')}
+							title={t('chat.deferred_dismiss')}
+							class="rounded-r-full py-1.5 pl-1 pr-2.5 text-text-subtle hover:text-danger"
+						>×</button>
+					</div>
+				{/each}
+				{#if deferredFollowUpsList.length > 1}
+					<button
+						onclick={() => clearDeferredFollowUps()}
+						class="text-[10px] font-mono uppercase tracking-widest text-text-subtle hover:text-danger"
+					>{t('chat.deferred_clear')}</button>
+				{/if}
+			</div>
+		</div>
 	{/if}
 
 	<!-- Input. NO safe-area-inset-bottom here — the StatusBar below this row
@@ -3016,6 +3434,25 @@
 						</button>
 					</div>
 				{/each}
+			</div>
+		{/if}
+
+		<!-- Model picker: only on an empty chat (before turn 1). Once the chat has a
+		     session, the per-thread control takes over — D18 makes a pick sticky
+		     and re-pickable mid-conversation, reversing D1 ("model fixed").
+		     model-presets W4: on desktop the new-chat picker moved to the nav header
+		     (frees composer space); it stays here on mobile (sm:hidden) where the
+		     header is too cramped for it. 2026-07-30: the mid-thread control follows
+		     the same split — its full "Läuft auf: […]" row cost a composer line on
+		     every running thread, so on desktop it now renders compact in the header
+		     (AppShell) and only mobile keeps the row here. -->
+		{#if currentSessionId === null}
+			<div class="sm:hidden">
+				<ComposerModelPicker />
+			</div>
+		{:else}
+			<div class="sm:hidden">
+				<ThreadModelControl />
 			</div>
 		{/if}
 

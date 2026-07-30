@@ -139,22 +139,24 @@ describe("KnowledgeLayer lifecycle cutover (S5b'-c)", () => {
     expect(graph.getLinkedSubjectIds(b.memoryId)).toContain(acmeId);
   });
 
-  it('purgeThread does NOT touch engine.db when the mirror flag is OFF', async () => {
-    // subjectGraph OFF → store() writes no stub; a manually-planted stub with an
-    // id-parity legacy row must SURVIVE a purge (the gate skips the engine.db reap).
+  it('purgeThread reaps a durable engine.db stub even with the mirror flag OFF (no resurrection on re-flip)', async () => {
+    // subjectGraph OFF → store() writes no stub; but a stub written during an
+    // EARLIER flag-ON window is a durable row. The reap is gated on the STORE
+    // existing (not the reversible flag), so such a stub must be reaped on purge —
+    // else it survives a flag-OFF erase and resurrects (still recallable) on re-flip.
     const { layer, engine } = await newLayer({ subjectGraph: false });
     const graph = new MemoryGraphStore(engine);
 
     const res = await layer.store('legacy only', 'knowledge', scope, { sourceThreadId: 'thread-A' });
     // No stub was mirrored (flag off)…
     expect(graph.getStub(res.memoryId)).toBeNull();
-    // …plant one with the SAME id (id-parity) to prove the purge would find it IF gated on.
+    // …plant one with the SAME id (id-parity) to stand in for a durable stub from a prior flag-ON window.
     graph.upsertStub({ id: res.memoryId, text: 'legacy only', namespace: 'knowledge', scopeType: scope.type, scopeId: scope.id });
     expect(graph.getStub(res.memoryId)).not.toBeNull();
 
     layer.purgeThread('thread-A');
-    // Gate is OFF → engine.db stub untouched (legacy still purged).
-    expect(graph.getStub(res.memoryId)).not.toBeNull();
+    // Store exists → the durable stub IS reaped regardless of the flag; legacy purged too.
+    expect(graph.getStub(res.memoryId)).toBeNull();
     expect(layer.getDb().getMemoryIdsByThread('thread-A')).toEqual([]);
   });
 
@@ -195,20 +197,22 @@ describe("KnowledgeLayer lifecycle cutover (S5b'-c)", () => {
     expect(graph.getStub('dead')).not.toBeNull(); // gate off → engine.db inactive stub untouched
   });
 
-  // ── Part A: isolation (an engine.db failure never breaks the legacy op) ──
+  // ── Part A: engine.db failure handling — gc stays best-effort (swallow), but the
+  //    privacy DELETE/erase family (purgeThread/eraseByPattern/deactivateByPattern)
+  //    RE-THROWS so the legacy source survives for a self-healing retry ──
 
-  it('purgeThread swallows an engine.db failure and still purges legacy', async () => {
+  it('purgeThread RE-THROWS an engine.db failure and leaves legacy intact (self-heal, not orphan)', async () => {
     const { layer, engine } = await newLayer({ subjectGraph: true });
     await layer.store('alpha thread fact for isolation', 'knowledge', scope, { sourceThreadId: 'thread-A' });
     await layer.store('beta thread fact for isolation', 'knowledge', scope, { sourceThreadId: 'thread-A' });
 
     engine.close(); // engine.db ops (purgeMemories) now throw
 
-    // The engine.db reap throws + is swallowed; the legacy purge still runs + reports its count.
-    let purged = -1;
-    expect(() => { purged = layer.purgeThread('thread-A'); }).not.toThrow();
-    expect(purged).toBe(2);
-    expect(layer.getDb().getMemoryIdsByThread('thread-A')).toEqual([]); // legacy purged
+    // engine.db is reaped FIRST: on a reap failure purgeThread re-throws BEFORE the
+    // legacy purge, so the legacy ids survive and a retry re-derives + self-heals —
+    // instead of orphaning a still-recallable engine.db stub under reads-ON.
+    expect(() => layer.purgeThread('thread-A')).toThrow();
+    expect(layer.getDb().getMemoryIdsByThread('thread-A')).toHaveLength(2); // legacy intact → retryable
   });
 
   it('gc swallows an engine.db failure and still runs legacy gc', async () => {

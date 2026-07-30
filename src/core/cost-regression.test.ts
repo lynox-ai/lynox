@@ -86,13 +86,23 @@ const STATIC_PROMPT_FRAGMENTS: readonly string[] = [
   WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
 ];
 
-/** All builtin `ToolEntry` objects exported from the builtin tools barrel. */
+// The Durable Knowledge Substrate (DK.1) tools are MUTUALLY EXCLUSIVE with the six legacy
+// `memory_*` tools at runtime: engine.ts registers exactly one set per `durable_memory_enabled`
+// state (no partial swap). The barrel exports BOTH so the flag can swap them, but a single turn
+// never carries both. The guard must measure the MAX real per-turn prefix, which is the LEGACY
+// set (larger than the 3 DK.1 tools) — so exclude the DK.1 tools here, otherwise the sum
+// double-counts a set that is never on the wire alongside the legacy one.
+const DK1_SWAP_TOOL_NAMES = new Set(['remember', 'recall', 'memory_block_edit', 'memory_retire', 'memory_focus', 'archive_search']);
+
+/** All builtin `ToolEntry` objects exported from the builtin tools barrel (minus the DK.1
+ *  swap tools — see above; they replace the legacy set at runtime, never co-exist with it). */
 const BUILTIN_TOOLS: readonly ToolEntry[] = Object.values(builtinTools).filter(
   (v): v is ToolEntry =>
     typeof v === 'object' &&
     v !== null &&
     'definition' in v &&
-    typeof (v as { definition: unknown }).definition === 'object',
+    typeof (v as { definition: unknown }).definition === 'object' &&
+    !DK1_SWAP_TOOL_NAMES.has((v as ToolEntry).definition.name),
 );
 
 /**
@@ -209,7 +219,42 @@ function measureStaticPrefixTokens(): number {
 // Bumped 22150 → 23000 for the `media_process` tool definition (the 40th tool),
 // a deliberate, intended prefix growth. Keeps a modest headroom over the
 // measured ~22533 so the guard still fires on the next real regression.
-const STATIC_PREFIX_BUDGET = 23000;
+// 2026-07-08: bump 23000 → 23500 (measured 23037) for the ground-first +
+// no-fabrication-on-empty legs appended to GROUNDING_PROMPT_BLOCK (~164 tokens):
+// recommend only AFTER fetching+showing the real data, and say "I could not
+// retrieve X" plainly rather than inventing a figure on an empty/error tool
+// result. Rides the cached prefix (fires on the main agent AND every spawned /
+// pipeline step), a deliberate correctness edit — not accidental growth. Keeps
+// ~2% headroom over the measured value, matching the media_process precedent.
+// 2026-07-17: bump 23500 → 23685 (measured 23671) — the `suggest_follow_ups`
+// builtin tool (the 44th), the structured replacement for the leaky text
+// `<follow_ups>` block: the agent now emits end-of-turn chips as a schema-
+// validated, turn-ending tool call, so nothing leaks as raw JSON and the pills
+// survive thread resume. Description trimmed to minimal first (structural lever,
+// −79 from the untrimmed 23750); the WEB_UI_SYSTEM_PROMPT_SUFFIX follow-up block
+// was rewritten in place (text-block → tool directive, net ~neutral). The
+// residual is one genuine new tool schema — the whole point of the change — and
+// is cache-read priced. Tight headroom by design: the next tool add re-trips it.
+// 2026-07-18: RE-BASELINE DOWN 23685 → 23300 (measured 23273) — extended-tool-
+// description-on-use v1. artifact_save / ask_secret / memory_recall move their fat
+// NARRATIVE prose (recovery rules, anti-patterns, post-first-call flow) out of the
+// always-cached `definition.description` into `ToolEntry.detailedGuidance`, which
+// is injected once per thread ON FIRST USE as a post-breakpoint carrier (cache-safe,
+// render-suppressed, provider-agnostic) — NOT part of the wire schema. Net −398
+// tokens off every turn's prefix from 3 tools; the classifier-free interim reducer
+// that stacks with a later tool-availability classifier. Budget lowered to LOCK the
+// win (not raised) — accidental re-bloat now re-trips against the new floor.
+// 2026-07-18b: RE-BASELINE DOWN 23300 → 23100 (measured 23046) — extended-tool-
+// description v2 splits api_setup too (the action-ROUTING lines — bootstrap/create/
+// refine/fetch_token — stay in the short cached description; the OpenAPI-vs-docs
+// mechanics + the OAuth fetch_token flow + the post-fetch_token "don't set the auth
+// header" rule move to on-use detailedGuidance). api_setup's serialized definition
+// drops from the historical ~992 to 765 tokens (it is no longer the per-tool-budget
+// offender). Cumulative −625 tokens off every turn's prefix from 4 split tools.
+// 2026-07-18: +214 for the Session-Start task-proactivity rewrite (prompts.ts) —
+// the guardrail against the agent autonomously sending mail / mutating tasks from
+// a briefing nudge. Cached (paid once per session); the safety fix justifies it.
+const STATIC_PREFIX_BUDGET = 23350;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
@@ -253,4 +298,38 @@ describe('Tier-1 cost-regression guard', () => {
         `in cost-regression.test.ts.`,
     ).toEqual([]);
   });
+});
+
+describe('extended-tool-description-on-use split invariants', () => {
+  const byName = (n: string): ToolEntry => {
+    const t = BUILTIN_TOOLS.find((x) => x.definition.name === n);
+    if (!t) throw new Error(`tool ${n} not found in BUILTIN_TOOLS`);
+    return t;
+  };
+
+  // For each split tool: a distinctive phrase that was MOVED from the cached
+  // `description` into the on-use `detailedGuidance` — the split's fingerprint.
+  const TARGETS = [
+    { name: 'artifact_save', movedPhrase: 'Web Speech API' },
+    { name: 'ask_secret', movedPhrase: 'dead end' },
+    { name: 'memory_recall', movedPhrase: 'may be stale' },
+    { name: 'api_setup', movedPhrase: 'auto-attached' },
+  ] as const;
+
+  for (const { name, movedPhrase } of TARGETS) {
+    it(`${name}: detailedGuidance holds the moved prose and never reaches the wire schema`, () => {
+      const tool = byName(name);
+      expect(tool.detailedGuidance, `${name} must carry detailedGuidance`).toBeTypeOf('string');
+      expect((tool.detailedGuidance ?? '').length).toBeGreaterThan(50);
+
+      const wire = serializeToolDefinition(tool);
+      // `detailedGuidance` is a ToolEntry field, NOT part of the wire `definition`
+      // → it never enters the cached prompt prefix.
+      expect(wire).not.toContain('detailedGuidance');
+      // The fat prose moved OUT of the always-cached description ...
+      expect(wire).not.toContain(movedPhrase);
+      // ... and is preserved in the on-use guidance (no prose lost, just relocated).
+      expect(tool.detailedGuidance).toContain(movedPhrase);
+    });
+  }
 });

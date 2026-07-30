@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { SessionStore } from './session-store.js';
+import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import { SessionStore, buildResumeContext } from './session-store.js';
 import type { Engine } from './engine.js';
 import type { Session } from './session.js';
+import type { ThreadRecord } from './thread-store.js';
 
 let sessionCounter = 0;
 
@@ -104,6 +106,60 @@ describe('SessionStore', () => {
       expect(engine.createSession).toHaveBeenCalledWith(
         expect.objectContaining({ model: 'deep' }),
       );
+    });
+  });
+
+  describe('resume summary (F5/F6)', () => {
+    // Resume of a long thread (> VERBATIM_THRESHOLD=80, no stored summary) fires
+    // the fire-and-forget generateThreadSummary. Build an engine whose
+    // createSession returns a session with a controllable `run` (the summary run)
+    // + a `loadMessages` (the resumed session), and a threadStore we can inspect.
+    function longThreadEngine(runImpl: () => Promise<string>): {
+      engine: Engine;
+      updateThread: ReturnType<typeof vi.fn>;
+    } {
+      const updateThread = vi.fn();
+      const records = Array.from({ length: 90 }, (_, i) => ({
+        role: i % 2 === 0 ? 'user' : 'assistant',
+        content_json: JSON.stringify(`msg ${i}`),
+      }));
+      const threadStore = {
+        getThread: vi.fn().mockReturnValue({
+          id: 'long', title: 't', model_tier: 'balanced', context_id: null,
+          summary: null, skip_extraction: 0,
+        }),
+        getMessages: vi.fn().mockReturnValue(records),
+        updateThread,
+      };
+      const engine = {
+        createSession: vi.fn().mockImplementation(() => ({
+          loadMessages: vi.fn(),
+          run: vi.fn().mockImplementation(runImpl),
+        })),
+        getThreadStore: vi.fn().mockReturnValue(threadStore),
+        getSecretStore: vi.fn().mockReturnValue({
+          maskSecrets: (s: string) => s.replace(/sk-\w+/g, '«masked»'),
+        }),
+      } as unknown as Engine;
+      return { engine, updateThread };
+    }
+
+    it('F6: masks a secret the summarizer echoed before persisting threads.summary', async () => {
+      const { engine, updateThread } = longThreadEngine(async () => 'recap: the key is sk-LEAK42 and we shipped');
+      new SessionStore().getOrCreate('long', engine);
+      await vi.waitFor(() => expect(updateThread).toHaveBeenCalled());
+      const summaryArg = (updateThread.mock.calls.at(-1)?.[1] as { summary?: string })?.summary ?? '';
+      expect(summaryArg).toContain('«masked»');
+      expect(summaryArg).not.toContain('sk-LEAK42');
+    });
+
+    it('F5: does NOT persist an empty/blocked summary (guard-block string never becomes the authoritative summary)', async () => {
+      // An internal-run budget block THROWS (mirrored here as a rejection); the
+      // outer try/catch swallows it → nothing persisted, retried next resume.
+      const { engine, updateThread } = longThreadEngine(async () => { throw new Error('Daily spending cap reached'); });
+      new SessionStore().getOrCreate('long', engine);
+      await new Promise(r => setTimeout(r, 20)); // let the fire-and-forget settle
+      expect(updateThread).not.toHaveBeenCalled();
     });
   });
 
@@ -236,5 +292,54 @@ describe('SessionStore', () => {
       store.reset('session-y');
       expect(store.get('session-y')).toBeUndefined();
     });
+  });
+});
+
+describe('buildResumeContext (Slice B — delta-since-summary resume)', () => {
+  function mkThread(summary: string | null, summary_up_to: number): ThreadRecord {
+    return { summary, summary_up_to } as unknown as ThreadRecord;
+  }
+  function mkMessages(n: number): BetaMessageParam[] {
+    return Array.from({ length: n }, (_, i) => ({
+      role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+      content: `msg-${i}`,
+    }));
+  }
+
+  it('loads [summary + every message since summary_up_to], closing the gap the fixed recent-window left', () => {
+    const messages = mkMessages(100);
+    // Summary covers up to index 50. The OLD fixed last-40 window started at
+    // index 60 and silently DROPPED messages 50–59; the delta slice includes them.
+    const ctx = buildResumeContext(mkThread('SUMMARY', 50), messages);
+    expect(ctx[1]).toMatchObject({ role: 'assistant', content: 'SUMMARY' });
+    const recent = ctx.slice(2);
+    expect(recent).toHaveLength(50); // messages 50..99, not just the last 40
+    expect(recent[0]).toMatchObject({ content: 'msg-50' }); // the gap-closer is present
+    expect(recent.at(-1)).toMatchObject({ content: 'msg-99' });
+  });
+
+  it('caps the post-summary tail at MAX_RESUME_DELTA so a pathological long tail cannot blow up the payload', () => {
+    const messages = mkMessages(500);
+    const ctx = buildResumeContext(mkThread('SUMMARY', 10), messages); // raw delta would be 490
+    const recent = ctx.slice(2);
+    expect(recent).toHaveLength(120); // capped, not 490
+    expect(recent[0]).toMatchObject({ content: 'msg-380' }); // 500 - 120
+    expect(recent.at(-1)).toMatchObject({ content: 'msg-499' });
+  });
+
+  it('falls back to the fixed recent window for a legacy summary with an unset (0) summary_up_to', () => {
+    const messages = mkMessages(100);
+    const ctx = buildResumeContext(mkThread('LEGACY SUMMARY', 0), messages);
+    const recent = ctx.slice(2);
+    expect(recent).toHaveLength(40); // pre-Slice-B behavior preserved
+    expect(recent[0]).toMatchObject({ content: 'msg-60' });
+  });
+
+  it('uses the placeholder path (unchanged) when no summary exists', () => {
+    const messages = mkMessages(100);
+    const ctx = buildResumeContext(mkThread(null, 0), messages);
+    expect(JSON.stringify(ctx[0]?.content)).toContain('Resuming conversation');
+    expect(JSON.stringify(ctx[0]?.content)).toContain('60'); // dropped count = 100 - 40
+    expect(ctx.slice(2)).toHaveLength(40);
   });
 });

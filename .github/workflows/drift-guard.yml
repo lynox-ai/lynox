@@ -3,9 +3,9 @@ name: Drift Guard
 # Catches the mechanizable slices of documentation/code drift that gitleaks +
 # public-repo-guard don't: committed merge-conflict markers, removed features
 # reappearing in live docs, and dead path references in CLAUDE.md / docs /
-# READMEs. The lefthook pre-push hook runs the same scan locally; this job is
-# the unbypassable gate (`git push --no-verify` skips the hook, not this).
-# Make it a required status check on main.
+# READMEs. The lefthook pre-push hook runs the same scan locally; this job is the
+# gate — `git push --no-verify` skips the hook, not this. It is a required status
+# check on main.
 
 on:
   pull_request:

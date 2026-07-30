@@ -1,16 +1,108 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
-import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey } from './catalog.js';
+import { MODEL_CAPABILITIES, MODEL_MAP, VERTEX_MODEL_MAP, MISTRAL_MODEL_MAP, resolveBalancedModel } from '../../types/models.js';
+import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, vaultSlotForEndpoint, endpointNeedsCredential, mainChatTierLabels, mainChatTierLabelsFromTierSet } from './catalog.js';
+import type { TierSet } from '../../types/config.js';
+import type { CatalogProviderEntry } from './catalog.js';
+import { isAllowlistedEndpoint } from './endpoint-allowlist.js';
 
 describe('LLM_CATALOG', () => {
-  it('exposes the five UI entries (anthropic, mistral, openai-compat, vertex, custom)', () => {
+  it('exposes the native entries plus the gateway/local-runtime presets', () => {
     // Mistral is split out from the generic OpenAI-compatible entry so the
     // EU-sovereign option is a first-class button in the provider picker
-    // rather than hidden behind "OpenAI-compatible endpoint". Both UI
-    // entries serialise to `provider: 'openai'` at the wire — disambiguated
-    // by `preset_id` for the UI.
+    // rather than hidden behind "OpenAI-compatible endpoint". The gateway +
+    // local-runtime presets (2026-07-13) follow the same pattern: all serialise
+    // to `provider: 'openai'` at the wire, disambiguated by `preset_id`.
     const keys = LLM_CATALOG.map(catalogEntryKey).sort();
-    expect(keys).toEqual(['anthropic', 'custom', 'mistral', 'openai-compat', 'vertex']);
+    expect(keys).toEqual([
+      'anthropic', 'custom', 'fireworks', 'groq', 'lmstudio', 'localai',
+      'mistral', 'ollama', 'openai-compat', 'together', 'vertex', 'vllm',
+    ]);
+  });
+
+  // The preset set is NOT free to grow: pinning an endpoint implies lynox may
+  // send a user's data there. `endpoint-allowlist.ts` is a DPA / sub-processor
+  // gate, not a technical one — a non-vetted host makes lynox a controller-side
+  // party to that third-party relationship and has to be disclosed.
+  //
+  // So every preset with a pinned `base_url_default` must resolve to a host the
+  // allowlist already vouches for. This is the tripwire: adding a preset for an
+  // un-vetted host fails HERE, loudly, instead of silently bypassing the
+  // disclosure gate. Such endpoints stay fully reachable through the generic
+  // `openai-compat` tile, which routes them through that gate as designed.
+  it('every pinned preset endpoint is already on the vetted sub-processor allowlist', () => {
+    const offenders = LLM_CATALOG
+      .filter((e) => e.base_url_default !== undefined)
+      .filter((e) => !isAllowlistedEndpoint(e.base_url_default!))
+      .map((e) => `${catalogEntryKey(e)} → ${e.base_url_default!}`);
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('every entry declares a verification level', () => {
+    for (const entry of LLM_CATALOG) {
+      expect(['native', 'verified', 'experimental']).toContain(entry.verification);
+    }
+  });
+
+  // The vault slot now rides on the endpoint, so the host-matching in
+  // `resolveCatalogKey` decides which credential an endpoint is handed. That
+  // makes it a security boundary, not just a UI convenience: a host that could
+  // impersonate a preset would inherit that preset's key — or, worse, could
+  // impersonate a LOOPBACK preset and thereby claim `vault_slot: null`, which is
+  // the "needs no credential" state readiness checks trust.
+  describe('vaultSlotForEndpoint — slot inheritance under a hostile base URL', () => {
+    it('a suffix-spoofing host cannot inherit a vendor preset’s slot', () => {
+      expect(vaultSlotForEndpoint('openai', 'https://api.groq.com.attacker.com/v1')).not.toBe('GROQ_API_KEY');
+      expect(vaultSlotForEndpoint('openai', 'https://groq.com.evil.io/v1')).not.toBe('GROQ_API_KEY');
+      expect(vaultSlotForEndpoint('openai', 'https://evil.com/?proxy=api.groq.com')).not.toBe('GROQ_API_KEY');
+    });
+
+    it('a remote host cannot masquerade as a loopback runtime', () => {
+      // Loopback endpoints are credential-OPTIONAL: readiness does not demand a
+      // key. A remote host that reached that state would slip past the key check.
+      expect(endpointNeedsCredential('openai', 'https://localhost.attacker.com:11434/v1')).toBe(true);
+      expect(vaultSlotForEndpoint('openai', 'https://localhost.attacker.com:11434/v1')).not.toBe('OLLAMA_API_KEY');
+    });
+
+    it('a legitimate vendor subdomain still resolves to the vendor slot', () => {
+      expect(vaultSlotForEndpoint('openai', 'https://eu.groq.com/v1')).toBe('GROQ_API_KEY');
+    });
+
+    it('an unrecognised or empty endpoint falls back to the legacy slot, never to key-less', () => {
+      expect(vaultSlotForEndpoint('openai', '')).toBe('MISTRAL_API_KEY');
+      expect(vaultSlotForEndpoint('openai', 'https://some-proxy.example.com/v1')).toBe('MISTRAL_API_KEY');
+    });
+
+    it('loopback presets get their OWN slot, and do not require a key', () => {
+      // Their own slot is what keeps the leak shut: a Mistral key lives elsewhere
+      // and can never reach them. But an authenticated local gateway (vLLM or
+      // LiteLLM with --api-key) still has somewhere to put its key — an earlier
+      // cut used `null` here and silently 401'd every such install.
+      expect(vaultSlotForEndpoint('openai', 'http://localhost:11434/v1')).toBe('OLLAMA_API_KEY');
+      expect(vaultSlotForEndpoint('openai', 'http://localhost:8000/v1')).toBe('VLLM_API_KEY');
+      expect(endpointNeedsCredential('openai', 'http://localhost:11434/v1')).toBe(false);
+      // Conservative default: an endpoint we cannot place still needs a key.
+      expect(endpointNeedsCredential('openai', 'https://unknown.example.com/v1')).toBe(true);
+    });
+  });
+
+  it('only entries with a proven wire are non-experimental', () => {
+    // The two native providers, plus every preset whose tool-calling has been
+    // PROVEN by a real round-trip in `tests/online/provider-preset-reachability`.
+    //
+    // `ollama` earned its place with a full tool_use → tool_result → answer run
+    // on qwen2.5:7b — mutation-checked, so the assertion is known to be capable
+    // of failing. `fireworks` joined it (2026-07-14) on gpt-oss-120b via the same
+    // round-trip. The rest connect but are unproven: they stay `experimental`,
+    // and the settings UI says so on the tile. Adding a preset without proving
+    // it therefore fails HERE, which is the point.
+    const proven = LLM_CATALOG
+      .filter((e) => e.verification !== 'experimental')
+      .map(catalogEntryKey)
+      .sort();
+
+    expect(proven).toEqual(['anthropic', 'fireworks', 'mistral', 'ollama']);
   });
 
   // Per-entry requires_base_url + requires_region matrix. UI uses these
@@ -31,17 +123,49 @@ describe('LLM_CATALOG', () => {
 
   it('anthropic models pin Sonnet/Opus/Haiku with provider-specific IDs', () => {
     const entry = getCatalogForProvider('anthropic')!;
+    // Two balanced Sonnets (4.6 default + opt-in Sonnet 5), three deep (Opus 4.6
+    // default + Opus 5 flagship + Fable 5 max-quality), one fast.
     const tiers = entry.models.map((m) => m.tier).sort();
-    expect(tiers).toEqual(['balanced', 'deep', 'fast']);
-    const byTier = Object.fromEntries(entry.models.map((m) => [m.tier, m]));
-    expect(byTier['balanced']?.id).toBe('claude-sonnet-4-6');
-    expect(byTier['deep']?.id).toBe('claude-opus-4-6');
+    expect(tiers).toEqual(['balanced', 'balanced', 'deep', 'deep', 'deep', 'fast']);
+    const byId = Object.fromEntries(entry.models.map((m) => [m.id, m]));
+    expect(byId['claude-sonnet-4-6']?.tier).toBe('balanced');
+    expect(byId['claude-sonnet-5']?.tier).toBe('balanced');
+    expect(byId['claude-opus-4-6']?.tier).toBe('deep');
+    expect(byId['claude-opus-5']?.tier).toBe('deep');
+    expect(byId['claude-opus-5']?.pricing).toEqual({ input: 5, output: 25 });
+    expect(byId['claude-opus-5']?.context_window).toBe(1_000_000);
+    expect(byId['claude-fable-5']?.tier).toBe('deep');
+    expect(byId['claude-fable-5']?.pricing).toEqual({ input: 10, output: 50 });
+    expect(byId['claude-fable-5']?.context_window).toBe(1_000_000);
     // Haiku ID has date suffix on Anthropic Direct, NOT on Vertex — pin both.
-    expect(byTier['fast']?.id).toBe('claude-haiku-4-5-20251001');
-    expect(byTier['balanced']?.pricing).toEqual({ input: 3, output: 15 });
-    expect(byTier['deep']?.pricing).toEqual({ input: 15, output: 75 });
-    expect(byTier['fast']?.pricing).toEqual({ input: 0.80, output: 4 });
-    expect(byTier['balanced']?.notes).toContain('Recommended');
+    expect(byId['claude-haiku-4-5-20251001']?.tier).toBe('fast');
+    // Canonical pricing (mirrors MODEL_CAPABILITIES — the pre-existing Opus
+    // 15/75 + Haiku 0.80/4 drift was corrected in the Sonnet 5 pass).
+    expect(byId['claude-sonnet-4-6']?.pricing).toEqual({ input: 3, output: 15 });
+    expect(byId['claude-sonnet-5']?.pricing).toEqual({ input: 3, output: 15 });
+    expect(byId['claude-sonnet-5']?.context_window).toBe(1_000_000);
+    expect(byId['claude-opus-4-6']?.pricing).toEqual({ input: 5, output: 25 });
+    expect(byId['claude-haiku-4-5-20251001']?.pricing).toEqual({ input: 1, output: 5 });
+    expect(byId['claude-sonnet-4-6']?.notes).toContain('Recommended');
+  });
+
+  it('every catalog model in MODEL_CAPABILITIES mirrors its pricing + context window (SoT drift guard)', () => {
+    // catalog.ts re-literals pricing/context_window that models.ts (MODEL_CAPABILITIES) owns,
+    // and has drifted before (Opus 15/75, Haiku 0.80/4, corrected in the Sonnet 5 pass). Derive
+    // the expectation from the SoT so any future divergence fails HERE, not as a wrong cost display.
+    // `tier_models` re-literals the same fields, so it is under the same guard.
+    let checked = 0;
+    for (const model of LLM_CATALOG.flatMap((cat) => [...cat.models, ...(cat.tier_models ?? [])])) {
+      const cap = MODEL_CAPABILITIES[model.id];
+      if (!cap) continue; // custom / provider-specific ids not in the registry
+      checked++;
+      expect(model.context_window, `${model.id} context_window`).toBe(cap.contextWindow);
+      if (model.pricing) {
+        expect(model.pricing.input, `${model.id} pricing.input`).toBe(cap.pricing.input);
+        expect(model.pricing.output, `${model.id} pricing.output`).toBe(cap.pricing.output);
+      }
+    }
+    expect(checked).toBeGreaterThan(0); // the guard actually exercised the registry-backed entries
   });
 
   it('vertex models use Vertex-specific IDs (haiku drops date suffix)', () => {
@@ -62,6 +186,7 @@ describe('LLM_CATALOG', () => {
     // Updated 2026-05-24: mistral-small-2603 retired, replaced by gen-3
     // ministrals in haiku slot; Large 3 ctx 256k + new $0.50/$1.50 pricing.
     expect(entry.models.map((m) => m.id)).toEqual([
+      'mistral-medium-2604',
       'mistral-large-2512',
       'ministral-14b-2512',
       'ministral-3b-2512',
@@ -78,6 +203,9 @@ describe('LLM_CATALOG', () => {
     expect(byId['ministral-3b-2512']?.tier).toBe('fast');
     expect(byId['ministral-8b-2512']?.tier).toBe('fast');
     expect(byId['ministral-14b-2512']?.tier).toBe('balanced');
+    // Deep default is now Medium 3.5 (Large 3 kept as legacy option, still deep-tier).
+    expect(byId['mistral-medium-2604']?.tier).toBe('deep');
+    expect(byId['mistral-medium-2604']?.pricing).toEqual({ input: 1.50, output: 7.50 });
     expect(byId['mistral-large-2512']?.tier).toBe('deep');
     // Mistral Large 3 pricing — 75% cut vs Large 2
     expect(byId['mistral-large-2512']?.pricing).toEqual({ input: 0.50, output: 1.50 });
@@ -142,6 +270,278 @@ describe('LLM_CATALOG', () => {
   });
 });
 
+describe('LLM_CATALOG.tier_models (per-tier picker options on a free-text tile)', () => {
+  it('fireworks pins exactly the two measured preset-slot models — no tier tag', () => {
+    const entry = getCatalogEntryByKey('fireworks')!;
+    expect((entry.tier_models ?? []).map((m) => m.id)).toEqual([
+      'accounts/fireworks/models/glm-5p2',
+      'accounts/fireworks/models/deepseek-v4-pro',
+    ]);
+    for (const m of entry.tier_models ?? []) {
+      // Both are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no
+      // measured tier map) — a `tier` tag here would fake a band mapping.
+      expect(m.tier, `${m.id} must not fake a tier band`).toBeUndefined();
+      expect(m.capabilities).toEqual(['tool_use']);   // text-only on Fireworks
+      expect(m.residency).toContain('Fireworks');
+    }
+  });
+
+  it('the tile stays free-text: tier_models does NOT touch models or main_chat_models', () => {
+    // `models: []` is the tile contract (free-text model id, no pretended tier
+    // map) and `tier_models` exists precisely so that contract stays intact.
+    // A standard-mode picker for fireworks would be the #459 lie.
+    const entry = getCatalogEntryByKey('fireworks')!;
+    expect(entry.models).toHaveLength(0);
+    expect(entry.main_chat_models).toBeUndefined();
+  });
+
+  it('tier_models appears only on entries with an allowlisted pinned endpoint', () => {
+    // Same DPA/sub-processor tripwire as the base_url_default test above: a
+    // tier_models list implies lynox may route a user's data to that host from
+    // a picker option, so the entry must pin a vetted endpoint.
+    const offenders = LLM_CATALOG
+      .filter((e) => (e.tier_models?.length ?? 0) > 0)
+      .filter((e) => e.base_url_default === undefined || !isAllowlistedEndpoint(e.base_url_default))
+      .map(catalogEntryKey);
+    expect(offenders).toEqual([]);
+  });
+
+  it('every tier_models id is registered in MODEL_CAPABILITIES (no unmeasured picker option)', () => {
+    for (const entry of LLM_CATALOG) {
+      for (const m of entry.tier_models ?? []) {
+        expect(MODEL_CAPABILITIES[m.id], `${catalogEntryKey(entry)} → ${m.id}`).toBeDefined();
+      }
+    }
+  });
+
+  it('tier_models is runtime-frozen like models', () => {
+    const entry = getCatalogEntryByKey('fireworks')!;
+    expect(Object.isFrozen(entry.tier_models)).toBe(true);
+    expect(Object.isFrozen(entry.tier_models![0])).toBe(true);
+    expect(Object.isFrozen(entry.tier_models![0]!.pricing)).toBe(true);
+  });
+});
+
+describe('LLM_CATALOG.main_chat_models (standard-mode picker options)', () => {
+  // The main-chat picker renders these verbatim; each option's (tier, balanced_model?)
+  // MUST be a config the engine's tier router resolves BACK to the same model — the
+  // #459 anti-pattern is a picker option that silently routes elsewhere.
+  it('anthropic offers one option per reachable band, balanced split by Sonnet variant', () => {
+    const entry = getCatalogForProvider('anthropic')!;
+    expect(entry.main_chat_models).toEqual([
+      { id: 'claude-haiku-4-5-20251001', tier: 'fast' },
+      { id: 'claude-sonnet-4-6', tier: 'balanced', balanced_model: 'claude-sonnet-4-6' },
+      { id: 'claude-sonnet-5', tier: 'balanced', balanced_model: 'claude-sonnet-5' },
+      { id: 'claude-opus-4-6', tier: 'deep' },
+    ]);
+  });
+
+  it('mistral offers exactly the 3 tier representatives — Ministral 3B (fast extra) is EXCLUDED', () => {
+    // fast→ministral-8b (MISTRAL_MODEL_MAP), so 3B is a catalog extra a
+    // default_tier:'fast' write can never reach; listing it would be the #459 lie.
+    const entry = getCatalogEntryByKey('mistral')!;
+    expect(entry.main_chat_models).toEqual([
+      { id: 'ministral-8b-2512', tier: 'fast' },
+      // balanced == deep == Medium 3.5 (WS2: the 14B main fell below the R1/R3
+      // floor; Mistral has nothing stronger) — two bands, one model, NOT deduped
+      // so the composer's deep band keeps its model label.
+      { id: 'mistral-medium-2604', tier: 'balanced' },
+      { id: 'mistral-medium-2604', tier: 'deep' },
+    ]);
+    const ids = (entry.main_chat_models ?? []).map((o) => o.id);
+    expect(ids).not.toContain('ministral-3b-2512');
+    // Non-Anthropic bands carry NO balanced_model (Mistral doesn't honour the override).
+    expect((entry.main_chat_models ?? []).every((o) => o.balanced_model === undefined)).toBe(true);
+  });
+
+  it('every main_chat_models option maps to a model the catalog actually lists', () => {
+    for (const entry of LLM_CATALOG) {
+      for (const opt of entry.main_chat_models ?? []) {
+        expect(entry.models.some((m) => m.id === opt.id), `${catalogEntryKey(entry)} → ${opt.id}`).toBe(true);
+        // A balanced_model, when present, equals the option id (round-trips the pick).
+        if (opt.balanced_model !== undefined) {
+          expect(opt.tier).toBe('balanced');
+          expect(opt.balanced_model).toBe(opt.id);
+        }
+      }
+    }
+  });
+
+  it('free-text providers (openai-compat, custom) expose no main_chat_models', () => {
+    expect(getCatalogEntryByKey('openai-compat')!.main_chat_models).toBeUndefined();
+    expect(getCatalogForProvider('custom')!.main_chat_models).toBeUndefined();
+  });
+
+  it('main_chat_models is runtime-frozen', () => {
+    const entry = getCatalogForProvider('anthropic')!;
+    expect(Object.isFrozen(entry.main_chat_models)).toBe(true);
+    expect(Object.isFrozen(entry.main_chat_models![0])).toBe(true);
+  });
+
+  // ── The anti-#459 end-to-end guard ──
+  // Every picker option's (tier[, balanced_model]) MUST resolve, through the
+  // SAME maps the engine's tier router uses on the wire, back to the option's own
+  // id. This is what makes the picker honest: a `default_tier`/`balanced_model`
+  // write can never silently route to a different model than the label shown.
+  it('anthropic: each option resolves to its own id via MODEL_MAP / resolveBalancedModel', () => {
+    for (const opt of getCatalogForProvider('anthropic')!.main_chat_models ?? []) {
+      const resolved = opt.tier === 'balanced'
+        ? resolveBalancedModel({ balanced_model: opt.balanced_model })
+        : MODEL_MAP[opt.tier];
+      expect(resolved, `${opt.id} (tier=${opt.tier}, balanced_model=${opt.balanced_model})`).toBe(opt.id);
+    }
+  });
+
+  it('mistral: each option resolves to its own id via MISTRAL_MODEL_MAP', () => {
+    for (const opt of getCatalogEntryByKey('mistral')!.main_chat_models ?? []) {
+      expect(MISTRAL_MODEL_MAP[opt.tier], `${opt.id} (tier=${opt.tier})`).toBe(opt.id);
+    }
+  });
+
+  it('vertex: each option resolves to its own id via VERTEX_MODEL_MAP (haiku suffix-drop)', () => {
+    // Vertex builds main_chat_models too (VERTEX_MODEL_MAP; fast = claude-haiku-4-5,
+    // NOT the ...-20251001 direct id). No balanced variant (vertex doesn't honour
+    // the balanced_model override), so every option is a plain tier representative.
+    const opts = getCatalogForProvider('vertex')!.main_chat_models ?? [];
+    expect(opts.length).toBeGreaterThan(0);
+    for (const opt of opts) {
+      expect(opt.balanced_model).toBeUndefined();
+      expect(VERTEX_MODEL_MAP[opt.tier], `${opt.id} (tier=${opt.tier})`).toBe(opt.id);
+    }
+  });
+});
+
+describe('mainChatTierLabels (composer picker — DEF-0082 name-enrichment + hide)', () => {
+  it('anthropic: per-tier labels, balanced defaults to the configured Sonnet 4.6', () => {
+    const entry = getCatalogForProvider('anthropic')!;
+    expect(mainChatTierLabels(entry, resolveBalancedModel({}))).toEqual({
+      fast: 'Haiku 4.5',
+      balanced: 'Sonnet 4.6',
+      deep: 'Opus 4.6',
+    });
+  });
+
+  it('anthropic: balanced label follows the tenant-selected Sonnet variant (5)', () => {
+    const entry = getCatalogForProvider('anthropic')!;
+    const resolved = resolveBalancedModel({ balanced_model: 'claude-sonnet-5' });
+    expect(mainChatTierLabels(entry, resolved)?.balanced).toBe('Sonnet 5');
+  });
+
+  it('mistral: the three tier representatives, labelled', () => {
+    const entry = getCatalogEntryByKey('mistral')!;
+    expect(mainChatTierLabels(entry, resolveBalancedModel({}))).toEqual({
+      fast: 'Ministral 8B',
+      balanced: 'Mistral Medium 3.5',
+      deep: 'Mistral Medium 3.5',
+    });
+  });
+
+  it('free-text providers (openai-compat, custom) yield undefined → picker hides', () => {
+    expect(mainChatTierLabels(getCatalogEntryByKey('openai-compat')!, resolveBalancedModel({}))).toBeUndefined();
+    expect(mainChatTierLabels(getCatalogForProvider('custom')!, resolveBalancedModel({}))).toBeUndefined();
+  });
+
+  it('a single-model provider (all tiers → one id) yields undefined → picker hides', () => {
+    // Synthetic entry: three bands, all pointing at the SAME catalog model.
+    // The distinct-count guard must collapse it to undefined so a proxy that
+    // serves exactly one model never shows a fake 3-way picker (DEF-0082b).
+    const oneModel: CatalogProviderEntry = {
+      provider: 'openai',
+      preset_id: 'synthetic-single',
+      label: 'Synthetic single-model',
+      models: [{ id: 'only-model', label: 'The Only Model', tier: 'balanced' }],
+      main_chat_models: [
+        { id: 'only-model', tier: 'fast' },
+        { id: 'only-model', tier: 'balanced' },
+        { id: 'only-model', tier: 'deep' },
+      ],
+    } as unknown as CatalogProviderEntry;
+    expect(mainChatTierLabels(oneModel, resolveBalancedModel({}))).toBeUndefined();
+  });
+
+  it('two distinct models across bands DO surface (≥2 is the real-picker threshold)', () => {
+    const twoModel: CatalogProviderEntry = {
+      provider: 'openai',
+      preset_id: 'synthetic-two',
+      label: 'Synthetic two-model',
+      models: [
+        { id: 'small', label: 'Small', tier: 'fast' },
+        { id: 'big', label: 'Big', tier: 'deep' },
+      ],
+      main_chat_models: [
+        { id: 'small', tier: 'fast' },
+        { id: 'big', tier: 'deep' },
+      ],
+    } as unknown as CatalogProviderEntry;
+    expect(mainChatTierLabels(twoModel, resolveBalancedModel({}))).toEqual({ fast: 'Small', deep: 'Big' });
+  });
+
+  it('the distinct threshold is on model id, NOT label — two ids, one shared label still surfaces', () => {
+    // Two genuinely different models that happen to render the same display
+    // label. There IS a real choice (different ids route differently), so the
+    // picker must surface — deduping on the label would wrongly collapse+hide it.
+    const sharedLabel: CatalogProviderEntry = {
+      provider: 'openai',
+      preset_id: 'synthetic-collision',
+      label: 'Synthetic label-collision',
+      models: [
+        { id: 'model-a', label: 'Same Name', tier: 'fast' },
+        { id: 'model-b', label: 'Same Name', tier: 'deep' },
+      ],
+      main_chat_models: [
+        { id: 'model-a', tier: 'fast' },
+        { id: 'model-b', tier: 'deep' },
+      ],
+    } as unknown as CatalogProviderEntry;
+    expect(mainChatTierLabels(sharedLabel, resolveBalancedModel({}))).toEqual({ fast: 'Same Name', deep: 'Same Name' });
+  });
+});
+
+describe('mainChatTierLabelsFromTierSet (hybrid picker — labels follow the tier_set, not the base provider)', () => {
+  it('labels each tier by its configured slot model, across providers', () => {
+    // The exact bug: hybrid config with balanced→Mistral Large, deep→Sonnet, but
+    // the picker showed the Anthropic default (balanced "Sonnet 5", deep "Opus 4.6").
+    // Labels must now follow the tier_set — catalog-wide by model id.
+    const tierSet: TierSet = {
+      fast: { provider: 'anthropic', model_id: 'claude-haiku-4-5-20251001' },
+      balanced: { provider: 'mistral', model_id: 'mistral-large-2512' },
+      deep: { provider: 'anthropic', model_id: 'claude-sonnet-5' },
+    };
+    expect(mainChatTierLabelsFromTierSet(tierSet, 'anthropic')).toEqual({
+      fast: 'Haiku 4.5',
+      balanced: 'Mistral Large 3', // NOT the base-provider "Sonnet 5"
+      deep: 'Sonnet 5', // NOT the base-provider "Opus 4.6"
+    });
+  });
+
+  it('falls an unset tier back to the base provider tier model', () => {
+    // Only balanced is overridden; fast/deep fall back to the base (anthropic).
+    const tierSet: TierSet = { balanced: { provider: 'mistral', model_id: 'mistral-large-2512' } };
+    const out = mainChatTierLabelsFromTierSet(tierSet, 'anthropic');
+    expect(out?.balanced).toBe('Mistral Large 3');
+    expect(out?.fast).toBe('Haiku 4.5');
+    expect(out?.deep).toBe('Opus 4.6');
+  });
+
+  it('labels a Fireworks slot via tier_models — never the raw accounts/… path', () => {
+    // A Fireworks model lives ONLY in the entry's `tier_models` (the tile's
+    // `models` is free-text-empty), so the catalog-wide label lookup must scan
+    // tier_models too. Before that, a custom hybrid with a Fireworks deep slot
+    // labelled the composer band with the raw 'accounts/fireworks/models/…' id.
+    const tierSet: TierSet = {
+      fast: { provider: 'anthropic', model_id: 'claude-haiku-4-5-20251001' },
+      deep: {
+        provider: 'openai',
+        model_id: 'accounts/fireworks/models/glm-5p2',
+        api_base_url: 'https://api.fireworks.ai/inference/v1',
+      },
+    };
+    const out = mainChatTierLabelsFromTierSet(tierSet, 'anthropic');
+    expect(out?.deep).toBe('GLM 5.2');
+    expect(out?.fast).toBe('Haiku 4.5');
+  });
+});
+
 describe('resolveCatalogKey', () => {
   // Single-entry providers — base URL is irrelevant; preset is forced.
   it.each([
@@ -169,10 +569,46 @@ describe('resolveCatalogKey', () => {
   it('hostname normalises case', () => {
     expect(resolveCatalogKey('openai', 'https://API.MISTRAL.AI/v1')).toBe('mistral');
   });
-  it('non-mistral openai host falls through to openai-compat', () => {
-    expect(resolveCatalogKey('openai', 'https://api.groq.com/openai/v1')).toBe('openai-compat');
+  it('an openai host with no preset falls through to openai-compat', () => {
+    // openrouter.ai is deliberately NOT a preset: it is not on the vetted
+    // sub-processor allowlist, so it must keep routing through the generic tile
+    // and its disclosure gate. If someone ever adds an OpenRouter preset without
+    // vetting the host, this line and the allowlist tripwire above both fire.
     expect(resolveCatalogKey('openai', 'https://openrouter.ai/api/v1')).toBe('openai-compat');
-    expect(resolveCatalogKey('openai', 'http://localhost:11434/v1')).toBe('openai-compat');
+    expect(resolveCatalogKey('openai', 'https://api.deepseek.com/v1')).toBe('openai-compat');
+  });
+
+  // Ollama, LM Studio, vLLM and LocalAI ALL live on `localhost` — only the port
+  // tells them apart. Matching on hostname alone resolved every one of them to
+  // whichever sat first in the catalog, so a user who saved LM Studio would come
+  // back to the Ollama tile. These pin the host:port comparison that fixes it.
+  it('loopback presets are disambiguated by port, not just hostname', () => {
+    expect(resolveCatalogKey('openai', 'http://localhost:11434/v1')).toBe('ollama');
+    expect(resolveCatalogKey('openai', 'http://localhost:1234/v1')).toBe('lmstudio');
+    expect(resolveCatalogKey('openai', 'http://localhost:8000/v1')).toBe('vllm');
+    expect(resolveCatalogKey('openai', 'http://localhost:8080/v1')).toBe('localai');
+  });
+
+  it('every loopback spelling of the same port resolves to the same preset', () => {
+    // `localhost`, `127.0.0.1` and `0.0.0.0` are the same machine, and users write
+    // all three. Matching the literal string would send `127.0.0.1:11434` to the
+    // GENERIC tile — whose slot is the shared one — and thus put the Mistral key,
+    // in plaintext, on a local port.
+    expect(resolveCatalogKey('openai', 'http://127.0.0.1:11434/v1')).toBe('ollama');
+    expect(resolveCatalogKey('openai', 'http://0.0.0.0:1234/v1')).toBe('lmstudio');
+  });
+
+  it('a loopback host on an unknown port falls through to the generic tile', () => {
+    // Failing to the generic tile (which shows the base-URL input the user needs)
+    // is the safe direction — far better than silently claiming they are on Ollama
+    // when they are running something else on :9999.
+    expect(resolveCatalogKey('openai', 'http://localhost:9999/v1')).toBe('openai-compat');
+  });
+
+  it('remote gateway presets resolve by host', () => {
+    expect(resolveCatalogKey('openai', 'https://api.groq.com/openai/v1')).toBe('groq');
+    expect(resolveCatalogKey('openai', 'https://api.together.xyz/v1')).toBe('together');
+    expect(resolveCatalogKey('openai', 'https://api.fireworks.ai/inference/v1')).toBe('fireworks');
   });
   it('hostile URL smuggling mistral.ai in path/query does not activate mistral', () => {
     // Substring-match used to leak: `'https://attacker.example.com/?proxy=mistral.ai'`

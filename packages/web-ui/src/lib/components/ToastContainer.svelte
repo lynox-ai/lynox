@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { getToasts, dismissToast } from '../stores/toast.svelte.js';
+	import Icon from '../primitives/Icon.svelte';
+	import { t } from '../i18n.svelte.js';
 
 	const toasts = $derived(getToasts());
 </script>
@@ -23,21 +25,37 @@
 		<div
 			role={toast.type === 'error' ? 'alert' : undefined}
 			class="pointer-events-auto rounded-[var(--radius-md)] px-4 py-3 text-sm shadow-lg transition-all animate-in flex items-start gap-3
-			{toast.type === 'success' ? 'bg-success/15 border border-success/30 text-success' :
-			 toast.type === 'error' ? 'bg-danger/15 border border-danger/30 text-danger' :
-			 'bg-bg-subtle border border-border text-text-muted'}"
+			bg-bg-elevated border border-border border-l-4 text-text
+			{toast.type === 'success' ? 'border-l-success' :
+			 toast.type === 'error' ? 'border-l-danger' :
+			 'border-l-accent'}"
 		>
+			<!-- Type icon (monochrome, tinted by type) — a solid readable toast: the
+			     colour is a small icon + a left accent, not a translucent tint. -->
+			<Icon
+				name={toast.type === 'success' ? 'check_circle' : toast.type === 'error' ? 'warning' : 'info'}
+				size="sm"
+				class={`shrink-0 mt-0.5 ${toast.type === 'success' ? 'text-success' : toast.type === 'error' ? 'text-danger' : 'text-accent'}`}
+			/>
 			<span class="flex-1">{toast.message}</span>
 			{#if toast.action}
 				{@const action = toast.action}
 				<button
 					type="button"
 					onclick={() => { action.handler(); dismissToast(toast.id); }}
-					class="shrink-0 rounded-[var(--radius-sm)] border border-current/40 px-2 py-1 text-xs font-medium hover:bg-current/10 transition-colors"
+					class="shrink-0 rounded-[var(--radius-sm)] border border-border px-2 py-1 text-xs font-medium text-text hover:bg-bg-subtle transition-colors"
 				>
 					{action.label}
 				</button>
 			{/if}
+			<button
+				type="button"
+				onclick={() => dismissToast(toast.id)}
+				aria-label={t('common.dismiss')}
+				class="shrink-0 -mr-1 -mt-0.5 rounded-[var(--radius-sm)] p-1 text-text-muted hover:text-text hover:bg-bg-subtle transition-colors"
+			>
+				<Icon name="x" size="xs" />
+			</button>
 		</div>
 	{/each}
 </div>

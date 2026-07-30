@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
 
-import { mergeDoneUsage, usageFromDoneEvent, type UsageInfo } from './chat-usage.js';
+import {
+	mergeDoneUsage,
+	usageFromDoneEvent,
+	formatTurnTokens,
+	formatUsageMeta,
+	formatUsageMetaParts,
+	shortModelLabel,
+	type UsageInfo,
+} from './chat-usage.js';
 
 /**
  * Regression: the chat cost footer used to ACCUMULATE `turn_end` events. Every
@@ -145,5 +153,89 @@ describe('mergeDoneUsage — REPLACE-on-done contract (multi-turn cost footer)',
 		expect(result?.tokensIn).toBe(500);
 		expect(result?.model).toBe('mistral-small-2603');
 		expect(result?.apiCostUsd).toBeUndefined();
+	});
+});
+
+/**
+ * Footer CLARITY (2026-07-08): the `N tokens` value is a per-turn SUM across
+ * every internal tool-loop iteration of the run, so it can legitimately exceed
+ * the model's context window and reads as "broken" without a qualifier. The
+ * footer is split into `formatTurnTokens` (the `Σ`-prefixed sum) + a separate
+ * co-located occupancy chip (the real window fill), with the $/cache/model tail
+ * rendered by `formatUsageMeta`. These lock the split so the token count and the
+ * meta stay distinct and the sum-nature is glanceable.
+ */
+describe('formatTurnTokens — per-turn SUM label', () => {
+	it('prefixes Σ and sums tokensIn + tokensOut (may exceed the window)', () => {
+		const u: UsageInfo = { tokensIn: 1_500_000, tokensOut: 23_000, cacheRead: 0, cacheWrite: 0, costUsd: 0 };
+		const s = formatTurnTokens(u);
+		expect(s.startsWith('Σ ')).toBe(true);
+		expect(s.endsWith(' tokens')).toBe(true);
+		// Sum of in + out, locale-formatted — re-derived to stay locale-agnostic.
+		expect(s).toContain((1_523_000).toLocaleString());
+	});
+});
+
+describe('formatUsageMeta — footer tail (token count excluded)', () => {
+	it('omits the token count and joins cost · cache · model', () => {
+		const u: UsageInfo = { tokensIn: 1000, tokensOut: 200, cacheRead: 500, cacheWrite: 0, costUsd: 0.04, model: 'mistral-large-2512' };
+		const s = formatUsageMeta(u, true);
+		expect(s).not.toContain('tokens');
+		expect(s).toContain('$0.04');
+		expect(s).toContain('50% cache'); // cacheRead / tokensIn = 500 / 1000
+		expect(s).toContain('mistral-large-2512');
+	});
+
+	it('omits the dollar figures when includeCost=false (demo tenants)', () => {
+		const u: UsageInfo = { tokensIn: 1000, tokensOut: 200, cacheRead: 500, cacheWrite: 0, costUsd: 0.04, model: 'demo-model' };
+		const s = formatUsageMeta(u, false);
+		expect(s).not.toContain('$');
+		expect(s).toContain('50% cache');
+		expect(s).toContain('demo-model');
+	});
+
+	it('surfaces third-party API cost above the $0.001 threshold', () => {
+		const u: UsageInfo = { tokensIn: 100, tokensOut: 10, cacheRead: 0, cacheWrite: 0, costUsd: 0.02, apiCostUsd: 0.05 };
+		expect(formatUsageMeta(u, true)).toContain('API: $0.05');
+	});
+
+	it('drops cache when there were no cache reads', () => {
+		const u: UsageInfo = { tokensIn: 100, tokensOut: 10, cacheRead: 0, cacheWrite: 0, costUsd: 0.02 };
+		expect(formatUsageMeta(u, true)).not.toContain('cache');
+	});
+});
+
+/**
+ * Hosted-inference providers namespace their ids as a path
+ * (`accounts/fireworks/models/glm-5p2`), which crowded the footer line without
+ * adding information (rafael, 2026-07-30). The footer shows the last segment and
+ * keeps the full id in the part's `title`, so nothing is lost — the id is the
+ * provider/tier verification BYOK users rely on.
+ */
+describe('shortModelLabel — path-shaped model ids in the footer', () => {
+	it('shows only the model segment of a path-shaped id', () => {
+		expect(shortModelLabel('accounts/fireworks/models/glm-5p2')).toBe('glm-5p2');
+	});
+
+	it('leaves a plain id untouched (every Anthropic / Mistral id)', () => {
+		expect(shortModelLabel('mistral-medium-2604')).toBe('mistral-medium-2604');
+		expect(shortModelLabel('claude-haiku-4-5-20251001')).toBe('claude-haiku-4-5-20251001');
+	});
+
+	it('falls back to the input when the path has no usable last segment', () => {
+		expect(shortModelLabel('weird/')).toBe('weird');
+		expect(shortModelLabel('/')).toBe('/');
+	});
+
+	it('carries the FULL id in the part title so the verification value survives', () => {
+		const u: UsageInfo = { tokensIn: 100, tokensOut: 10, cacheRead: 0, cacheWrite: 0, costUsd: 0.02, model: 'accounts/fireworks/models/glm-5p2' };
+		const modelPart = formatUsageMetaParts(u, true).at(-1);
+		expect(modelPart).toEqual({ text: 'glm-5p2', title: 'accounts/fireworks/models/glm-5p2' });
+	});
+
+	it('adds no title when nothing was shortened (no spurious tooltip)', () => {
+		const u: UsageInfo = { tokensIn: 100, tokensOut: 10, cacheRead: 0, cacheWrite: 0, costUsd: 0.02, model: 'mistral-medium-2604' };
+		const modelPart = formatUsageMetaParts(u, true).at(-1);
+		expect(modelPart).toEqual({ text: 'mistral-medium-2604' });
 	});
 });

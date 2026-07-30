@@ -16,12 +16,13 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
 import { ApiStore } from './api-store.js';
 import { SecretVault } from './secret-vault.js';
+import { parsePortableMemoryKey, trimMemoryContent } from './memory-file.js';
 import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
 import type { ExportedSecret } from './migration-export.js';
@@ -59,7 +60,16 @@ export interface ImportVerification {
   secretsImported: number;
   databasesRestored: string[];
   artifactsImported: number;
+  memoryFilesImported: number;
   configApplied: boolean;
+}
+
+/** `name` or `name:partN` → the part index; `0` when the payload was not split. */
+function partNumber(chunkName: string): number {
+  const idx = chunkName.indexOf(':part');
+  if (idx === -1) return 0;
+  const n = parseInt(chunkName.slice(idx + ':part'.length), 10);
+  return Number.isFinite(n) ? n : 0;
 }
 
 /** State of an in-progress migration session. */
@@ -83,6 +93,12 @@ const MAX_CHUNKS = 64;
 
 /** Maximum total plaintext size across all chunks (500 MB). */
 const MAX_TOTAL_BYTES = 500 * 1024 * 1024;
+
+/**
+ * Ceiling for the reassembled flat-file memory bundle. A legitimate tree is
+ * `scopeDirs × 4 namespaces × MAX_MEMORY_FILE_BYTES`, so this allows 64 scopes.
+ */
+const MAX_MEMORY_BUNDLE_BYTES = 64 * 1024 * 1024;
 
 /** Whitelist of allowed database file names — prevents path traversal via crafted manifests.
  *  engine.db (Foundation Rework v2 subject-graph) is portable user data — mirrors the export set. */
@@ -302,6 +318,7 @@ export class MigrationImporter {
       secretsImported: 0,
       databasesRestored: [],
       artifactsImported: 0,
+      memoryFilesImported: 0,
       configApplied: false,
     };
 
@@ -309,7 +326,8 @@ export class MigrationImporter {
     // 1. Config (least critical, applied first)
     // 2. SQLite databases (core data)
     // 3. Artifacts (supplementary)
-    // 4. Secrets (most sensitive — last, so we can abort without partial secret state)
+    // 4. Memory (the flat-file store the memory_* tools read)
+    // 5. Secrets (most sensitive — last, so we can abort without partial secret state)
 
     const chunksByType = this.groupChunksByType(manifest.chunks, receivedChunks);
 
@@ -335,13 +353,20 @@ export class MigrationImporter {
       verification.artifactsImported = this.restoreArtifacts(data);
     }
 
-    // 4. Secrets (most sensitive — last)
+    // 4. Memory (flat-file store) — one call for the whole set, so a split
+    // payload is reassembled once instead of last-write-wins per chunk.
+    if (chunksByType.memory.length > 0) {
+      onProgress?.({ phase: 'restoring', currentChunk: chunksByType.memory[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: 'memory' });
+      verification.memoryFilesImported = this.restoreMemory(chunksByType.memory);
+    }
+
+    // 5. Secrets (most sensitive — last)
     for (const { meta, data } of chunksByType.secrets) {
       onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: 'secrets' });
       verification.secretsImported = this.restoreSecrets(data);
     }
 
-    // 5. Re-gate (MANAGED destination only): a migrated api connection's
+    // 6. Re-gate (MANAGED destination only): a migrated api connection's
     // custom_endpoint_ack is a per-instance BYOK-endpoint acceptance that must
     // NOT be inherited — strip it so any custom endpoint re-triggers the
     // disclosure gate before reuse (the engine.db analog of restoreConfig's
@@ -394,6 +419,7 @@ export class MigrationImporter {
       secrets: [],
       sqlite_db: [],
       artifacts: [],
+      memory: [],
       config: [],
     };
 
@@ -464,11 +490,7 @@ export class MigrationImporter {
       // Collect all parts for this database, sorted by part number
       const parts = allDbChunks
         .filter(c => c.meta.name.startsWith(`${baseName}:part`))
-        .sort((a, b) => {
-          const aPart = parseInt(a.meta.name.split(':part')[1]!, 10);
-          const bPart = parseInt(b.meta.name.split(':part')[1]!, 10);
-          return aPart - bPart;
-        });
+        .sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
 
       finalData = Buffer.concat(parts.map(p => p.data));
     } else {
@@ -525,6 +547,68 @@ export class MigrationImporter {
     }
 
     return bundle.index.length;
+  }
+
+  /**
+   * Restore the flat-file memory tree (`memory/<scopeDir>/<namespace>.txt`).
+   *
+   * Both path segments are validated independently against the shapes the
+   * exporter can produce, so a hand-crafted bundle cannot write outside the
+   * memory directory even before the resolved-path check below. Unrecognised
+   * keys are skipped, never coerced.
+   *
+   * @returns the number of files written
+   */
+  private restoreMemory(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): number {
+    // Reassembly + decode + parse holds several copies of the payload at once.
+    // MAX_TOTAL_BYTES (500 MiB) bounds the whole transfer, not this one bundle,
+    // so bound it here: a real memory tree is scopes × 4 × MAX_MEMORY_FILE_BYTES,
+    // i.e. 64 MiB already allows 64 scope directories. Fail closed and loud —
+    // an import that would exhaust the heap must not half-write the tree.
+    const totalBytes = chunks.reduce((n, c) => n + c.data.length, 0);
+    if (totalBytes > MAX_MEMORY_BUNDLE_BYTES) {
+      throw new Error(
+        `Memory bundle too large: ${String(totalBytes)} > ${String(MAX_MEMORY_BUNDLE_BYTES)}`,
+      );
+    }
+
+    // The exporter splits an oversized bundle into `memory:partN`. Reassemble in
+    // part order before parsing — a part boundary can fall mid-UTF-8-sequence,
+    // so the concatenation must happen on the Buffers, never on decoded strings.
+    const ordered = [...chunks].sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
+    const data = ordered.length === 1 ? ordered[0]!.data : Buffer.concat(ordered.map(c => c.data));
+
+    const bundle = JSON.parse(data.toString('utf-8')) as { files: Record<string, string> };
+    if (!bundle.files || typeof bundle.files !== 'object') return 0;
+
+    const memoryDir = join(this.lynoxDir, 'memory');
+    const memoryPrefix = memoryDir + sep;
+    let written = 0;
+
+    for (const [key, content] of Object.entries(bundle.files)) {
+      if (typeof content !== 'string') continue;
+
+      const parsed = parsePortableMemoryKey(key);
+      if (!parsed) continue;
+      const { scopeDir, fileName } = parsed;
+
+      const scopePath = resolve(memoryDir, scopeDir);
+      const filePath = resolve(scopePath, fileName);
+      // Defense-in-depth: the resolved path must sit strictly inside memory/.
+      // A bare startsWith(memoryDir) would also accept a sibling `memoryEVIL/`.
+      if (!filePath.startsWith(memoryPrefix)) continue;
+
+      mkdirSync(scopePath, { recursive: true, mode: DIR_MODE_PRIVATE });
+      // Route through the same trim every `Memory` write uses, so a restored file
+      // is never larger than one the store could have produced itself —
+      // `loadScoped` reads it whole into the model's context. Parity, not a hard
+      // cap: `trimMemoryContent` cannot shrink a single line, and neither can
+      // `Memory`, so a one-line giant stays possible on both paths.
+      writeFileSync(filePath, trimMemoryContent(content), { encoding: 'utf-8', mode: FILE_MODE_PRIVATE });
+      written++;
+    }
+
+    return written;
   }
 
   /**

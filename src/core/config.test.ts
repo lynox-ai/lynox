@@ -22,6 +22,12 @@ describe('Config', () => {
     process.cwd = () => fakeProject;
     delete process.env['ANTHROPIC_API_KEY'];
     delete process.env['ANTHROPIC_BASE_URL'];
+    // Per-endpoint slots — without these, a key set by one case leaks into the
+    // next and the endpoint-scoping assertions pass for the wrong reason.
+    delete process.env['GROQ_API_KEY'];
+    delete process.env['OLLAMA_API_KEY'];
+    delete process.env['TOGETHER_API_KEY'];
+    delete process.env['FIREWORKS_API_KEY'];
     delete process.env['LYNOX_WORKSPACE'];
     delete process.env['LYNOX_EMBEDDING_PROVIDER'];
     delete process.env['LYNOX_USER'];
@@ -38,8 +44,15 @@ describe('Config', () => {
     delete process.env['LYNOX_LLM_PROVIDER'];
     delete process.env['LYNOX_SUBJECT_GRAPH_ENABLED'];
     delete process.env['LYNOX_MEMORY_GRAPH_READS'];
+    delete process.env['LYNOX_MEMORY_SCORING_V2'];
+    delete process.env['LYNOX_RETRIEVAL_SHADOW_LOG'];
+    delete process.env['LYNOX_MEMORY_WRITE_TRUST_GATE'];
+    delete process.env['LYNOX_DEBUG_WIRE_CAPTURE'];
     delete process.env['LYNOX_NETWORK_POLICY'];
     delete process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];
+    delete process.env['LYNOX_TIER_SET_JSON'];
+    delete process.env['LYNOX_BILLING_TIER'];
+    delete process.env['LYNOX_BLOCKED_MODEL_IDS'];
     // Renamed vars (canonical + legacy) — keep both clean so alias tests don't leak
     delete process.env['LYNOX_API_BASE_URL'];
     delete process.env['LYNOX_MAX_TIER'];
@@ -75,6 +88,173 @@ describe('Config', () => {
     expect(config.effort_level).toBe('high');
   });
 
+  describe('model blocklist (LYNOX_BLOCKED_MODEL_IDS → blocked_model_ids)', () => {
+    const writeUserConfig = (obj: Record<string, unknown>) => {
+      const dir = join(fakeHome, '.lynox');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'config.json'), JSON.stringify(obj));
+    };
+
+    it('parses the env var into blocked_model_ids (comma-separated prefixes, trimmed)', async () => {
+      process.env['LYNOX_BLOCKED_MODEL_IDS'] = 'claude-sonnet-, claude-opus- ,claude-fable-';
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().blocked_model_ids).toEqual(['claude-sonnet-', 'claude-opus-', 'claude-fable-']);
+    });
+
+    it('unset env → no blocked_model_ids (byte-identical default path)', async () => {
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().blocked_model_ids).toBeUndefined();
+    });
+
+    it('drops a BLOCKED managed tier_set slot IN-MEMORY; config.json stays byte-identical', async () => {
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['ANTHROPIC_API_KEY'] = 'cp-key';
+      process.env['LYNOX_BLOCKED_MODEL_IDS'] = 'claude-opus-';
+      writeUserConfig({
+        routing_mode: 'hybrid',
+        tier_set: {
+          fast: { provider: 'anthropic', model_id: 'claude-haiku-4-5-20251001' },
+          deep: { provider: 'anthropic', model_id: 'claude-opus-4-6' },
+        },
+      });
+      const configPath = join(fakeHome, '.lynox', 'config.json');
+      const bytesBefore = readFileSync(configPath, 'utf-8');
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_set?.deep).toBeUndefined(); // blocked slot dropped (falls back to base)
+      expect(config.tier_set?.fast?.model_id).toBe('claude-haiku-4-5-20251001'); // allowed slot kept
+      // Non-destructive clamp: the persisted user choice survives on disk, so
+      // clearing the blocklist restores it on the next reload.
+      expect(readFileSync(configPath, 'utf-8')).toBe(bytesBefore);
+    });
+
+    it('empty blocklist env leaves the managed tier_set untouched (no-op)', async () => {
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['ANTHROPIC_API_KEY'] = 'cp-key';
+      process.env['LYNOX_BLOCKED_MODEL_IDS'] = '';
+      writeUserConfig({
+        routing_mode: 'hybrid',
+        tier_set: { deep: { provider: 'anthropic', model_id: 'claude-opus-4-6' } },
+      });
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().tier_set?.deep?.model_id).toBe('claude-opus-4-6');
+    });
+
+    it('clears a worker_profile whose profile model is blocked (raw-id path guard)', async () => {
+      process.env['LYNOX_WORKER_PROFILE'] = 'worker';
+      process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
+        worker: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'claude-fable-5' },
+      });
+      process.env['LYNOX_BLOCKED_MODEL_IDS'] = 'claude-fable-';
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().worker_profile).toBeUndefined();
+    });
+
+    it('keeps a worker_profile whose model is NOT blocked', async () => {
+      process.env['LYNOX_WORKER_PROFILE'] = 'worker';
+      process.env['LYNOX_MODEL_PROFILES_JSON'] = JSON.stringify({
+        worker: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'ministral-8b-2512' },
+      });
+      process.env['LYNOX_BLOCKED_MODEL_IDS'] = 'claude-fable-';
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().worker_profile).toBe('worker');
+    });
+  });
+
+  describe('tier_preset expansion (model-presets W2)', () => {
+    const writeUserConfig = (obj: Record<string, unknown>) => {
+      const dir = join(fakeHome, '.lynox');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'config.json'), JSON.stringify(obj));
+    };
+
+    it('expands a config.json tier_preset to routing_mode:hybrid + the SoT tier_set', async () => {
+      writeUserConfig({ tier_preset: 'balanced' });
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.routing_mode).toBe('hybrid');
+      // ⚖️ balanced main-chat slot = mistral-medium via the Mistral endpoint
+      // (WS2 wire-replay: Ministral 14B was below the R1/R3 orchestration floor).
+      expect(config.tier_set?.balanced).toEqual({
+        provider: 'openai',
+        model_id: 'mistral-medium-2604',
+        api_base_url: 'https://api.mistral.ai/v1',
+      });
+      expect(config.tier_set?.deep).toEqual({ provider: 'anthropic', model_id: 'claude-sonnet-5' });
+    });
+
+    it('an env LYNOX_TIER_SET_JSON slot overrides the preset per-slot (env wins)', async () => {
+      writeUserConfig({ tier_preset: 'balanced' });
+      process.env['LYNOX_TIER_SET_JSON'] = JSON.stringify({
+        deep: { provider: 'openai', model_id: 'my-own-model', api_base_url: 'https://api.mistral.ai/v1' },
+      });
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_set?.deep?.model_id).toBe('my-own-model'); // env slot won
+      expect(config.tier_set?.balanced?.model_id).toBe('mistral-medium-2604'); // preset slot kept
+    });
+
+    it('an unknown tier_preset name FAILS CLOSED (throws, not a silent standard boot)', async () => {
+      writeUserConfig({ tier_preset: 'ultra-cheap' });
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/Unknown tier_preset "ultra-cheap"/);
+    });
+
+    it('a preset referencing an UNREGISTERED model FAILS CLOSED (no Opus-rate FALLBACK misbill)', async () => {
+      const bad = { routing_mode: 'hybrid', tier_set: { deep: { provider: 'openai', model_id: 'ghost-model-not-registered' } } };
+      vi.doMock('./tier-presets.js', () => ({
+        TIER_PRESETS: { bad },
+        expandTierPreset: (name: string) => (name === 'bad' ? bad : undefined),
+      }));
+      writeUserConfig({ tier_preset: 'bad' });
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/unregistered model "ghost-model-not-registered"/);
+      vi.doUnmock('./tier-presets.js');
+    });
+
+    it('a config.json tier_set slot overrides the preset per-slot (preset < config)', async () => {
+      writeUserConfig({
+        tier_preset: 'balanced',
+        tier_set: { deep: { provider: 'anthropic', model_id: 'claude-opus-4-8' } },
+      });
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_set?.deep?.model_id).toBe('claude-opus-4-8'); // config override won over the preset's sonnet-5
+      expect(config.tier_set?.balanced?.model_id).toBe('mistral-medium-2604'); // preset slot kept
+    });
+
+    it('a config tier_set override with an UNREGISTERED model FAILS CLOSED (post-merge guard)', async () => {
+      writeUserConfig({
+        tier_preset: 'balanced',
+        tier_set: { deep: { provider: 'openai', model_id: 'ghost-override-model' } },
+      });
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/unregistered model "ghost-override-model"/);
+    });
+
+    it('expands the ⚡ efficient preset (Fireworks deep slot) end-to-end', async () => {
+      writeUserConfig({ tier_preset: 'efficient' });
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_set?.deep).toEqual({
+        provider: 'openai',
+        model_id: 'accounts/fireworks/models/glm-5p2',
+        api_base_url: 'https://api.fireworks.ai/inference/v1',
+      });
+      expect(config.tier_set?.fast?.model_id).toBe('ministral-8b-2512');
+    });
+
+    it('tier_preset in a PROJECT config is IGNORED (not in PROJECT_SAFE_KEYS — no escalation)', async () => {
+      const projectDir = join(fakeProject, '.lynox');
+      mkdirSync(projectDir, { recursive: true });
+      writeFileSync(join(projectDir, 'config.json'), JSON.stringify({ tier_preset: 'balanced' }));
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_preset).toBeUndefined();
+      expect(config.routing_mode).not.toBe('hybrid');
+    });
+  });
+
   it('project config overrides user config', async () => {
     const userDir = join(fakeHome, '.lynox');
     const projectDir = join(fakeProject, '.lynox');
@@ -99,6 +279,37 @@ describe('Config', () => {
     const { loadConfig } = await import('./config.js');
     const config = loadConfig();
     expect(config.api_key).toBe('sk-from-env');
+  });
+
+  // Main-chat model picker (Slice 1): default_tier is env-as-SEED, not a lock —
+  // a persisted file value (the user's picker choice) wins over the CP env.
+  it('default_tier: a file value WINS over the LYNOX_DEFAULT_MODEL_TIER env (seed, not override)', async () => {
+    const userDir = join(fakeHome, '.lynox');
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(join(userDir, 'config.json'), JSON.stringify({ default_tier: 'deep' }));
+
+    process.env['LYNOX_DEFAULT_MODEL_TIER'] = 'balanced'; // CP-emitted seed
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.default_tier).toBe('deep'); // the user's picker choice wins
+  });
+
+  it('default_tier: the env SEEDS the value when the file has none', async () => {
+    process.env['LYNOX_DEFAULT_MODEL_TIER'] = 'balanced';
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.default_tier).toBe('balanced'); // seed applies on a fresh instance
+  });
+
+  it('max_tier STILL env-wins over a file value (the ceiling is a lock, not a seed)', async () => {
+    const userDir = join(fakeHome, '.lynox');
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(join(userDir, 'config.json'), JSON.stringify({ max_tier: 'deep' }));
+
+    process.env['LYNOX_MAX_MODEL_TIER'] = 'balanced'; // CP cost ceiling — must win
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.max_tier).toBe('balanced'); // env-wins asymmetry vs default_tier
   });
 
   it('keeps network_policy + network_allowed_hosts from config.json (not stripped by .strict())', async () => {
@@ -193,6 +404,113 @@ describe('Config', () => {
     expect(loadConfig().memory_graph_reads).toBeUndefined();
   });
 
+  it('keeps memory_scoring_v2 + retrieval_shadow_log from config.json (Wave 0 — not stripped by .strict())', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      default_tier: 'balanced',
+      memory_scoring_v2: true,
+      retrieval_shadow_log: true,
+    }));
+
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.memory_scoring_v2).toBe(true);
+    expect(config.retrieval_shadow_log).toBe(true);
+    expect(config.default_tier).toBe('balanced'); // config not nulled by an unknown key
+  });
+
+  it('reads memory_scoring_v2 from env explicitly (true/1 vs false/0, no coerce)', async () => {
+    for (const truthy of ['true', '1']) {
+      vi.resetModules();
+      process.env['LYNOX_MEMORY_SCORING_V2'] = truthy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().memory_scoring_v2).toBe(true);
+    }
+    for (const falsy of ['false', '0']) {
+      vi.resetModules();
+      process.env['LYNOX_MEMORY_SCORING_V2'] = falsy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().memory_scoring_v2).toBe(false);
+    }
+    vi.resetModules();
+    process.env['LYNOX_MEMORY_SCORING_V2'] = 'yes';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().memory_scoring_v2).toBeUndefined(); // non-enum ignored, never coerced
+  });
+
+  it('reads debug_wire_capture from env explicitly (true/1 vs false/0, no coerce)', async () => {
+    for (const truthy of ['true', '1']) {
+      vi.resetModules();
+      process.env['LYNOX_DEBUG_WIRE_CAPTURE'] = truthy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().debug_wire_capture).toBe(true);
+    }
+    for (const falsy of ['false', '0']) {
+      vi.resetModules();
+      process.env['LYNOX_DEBUG_WIRE_CAPTURE'] = falsy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().debug_wire_capture).toBe(false);
+    }
+    // a non-enum value is ignored (never coerced to true — an errant env must not
+    // silently enable content capture for a tenant)
+    vi.resetModules();
+    process.env['LYNOX_DEBUG_WIRE_CAPTURE'] = 'yes';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().debug_wire_capture).toBeUndefined();
+  });
+
+  it('keeps debug_wire_capture from config.json (not stripped by .strict())', async () => {
+    const dir = join(fakeHome, '.lynox');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      default_tier: 'balanced',
+      debug_wire_capture: true,
+    }));
+    const { loadConfig } = await import('./config.js');
+    const config = loadConfig();
+    expect(config.debug_wire_capture).toBe(true);
+    expect(config.default_tier).toBe('balanced'); // config not nulled by the new key
+  });
+
+  it('reads retrieval_shadow_log from env explicitly (true/1 vs false/0, no coerce)', async () => {
+    for (const truthy of ['true', '1']) {
+      vi.resetModules();
+      process.env['LYNOX_RETRIEVAL_SHADOW_LOG'] = truthy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().retrieval_shadow_log).toBe(true);
+    }
+    for (const falsy of ['false', '0']) {
+      vi.resetModules();
+      process.env['LYNOX_RETRIEVAL_SHADOW_LOG'] = falsy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().retrieval_shadow_log).toBe(false);
+    }
+    vi.resetModules();
+    process.env['LYNOX_RETRIEVAL_SHADOW_LOG'] = 'on';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().retrieval_shadow_log).toBeUndefined();
+  });
+
+  it('reads memory_write_trust_gate from env explicitly (true/1 vs false/0, no coerce)', async () => {
+    for (const truthy of ['true', '1']) {
+      vi.resetModules();
+      process.env['LYNOX_MEMORY_WRITE_TRUST_GATE'] = truthy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().memory_write_trust_gate).toBe(true);
+    }
+    for (const falsy of ['false', '0']) {
+      vi.resetModules();
+      process.env['LYNOX_MEMORY_WRITE_TRUST_GATE'] = falsy;
+      const { loadConfig } = await import('./config.js');
+      expect(loadConfig().memory_write_trust_gate).toBe(false);
+    }
+    vi.resetModules();
+    process.env['LYNOX_MEMORY_WRITE_TRUST_GATE'] = 'yes';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().memory_write_trust_gate).toBeUndefined(); // non-enum ignored, never coerced
+  });
+
   it('ignores an unrecognised LYNOX_NETWORK_POLICY value', async () => {
     const dir = join(fakeHome, '.lynox');
     mkdirSync(dir, { recursive: true });
@@ -203,6 +521,12 @@ describe('Config', () => {
     const config = loadConfig();
     // env value rejected → config.json value retained, never coerced
     expect(config.network_policy).toBe('allow-list');
+  });
+
+  it('accepts guarded as a LYNOX_NETWORK_POLICY value', async () => {
+    process.env['LYNOX_NETWORK_POLICY'] = 'guarded';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().network_policy).toBe('guarded');
   });
 
   it('saveUserConfig writes with 0600 permissions', async () => {
@@ -287,6 +611,18 @@ describe('Config', () => {
     process.env['LYNOX_MAX_TIER'] = 'deep';
     const { loadConfig } = await import('./config.js');
     expect(loadConfig().max_tier).toBe('fast');
+  });
+
+  it('LYNOX_COMPACTION_MODEL sets compaction_model (canonical + legacy brand value)', async () => {
+    process.env['LYNOX_COMPACTION_MODEL'] = 'fast';
+    const canonical = (await import('./config.js')).loadConfig();
+    expect(canonical.compaction_model).toBe('fast');
+
+    vi.resetModules();
+    delete process.env['LYNOX_COMPACTION_MODEL'];
+    process.env['LYNOX_COMPACTION_MODEL'] = 'haiku'; // legacy brand value, normalized to fast
+    const legacy = (await import('./config.js')).loadConfig();
+    expect(legacy.compaction_model).toBe('fast');
   });
 
   it('LYNOX_DEFAULT_MODEL_TIER (canonical) and the legacy LYNOX_DEFAULT_TIER both set default_tier', async () => {
@@ -492,6 +828,77 @@ describe('Config', () => {
     process.env['MISTRAL_API_KEY'] = 'sk-mistral-yyy';
     const { loadConfig } = await import('./config.js');
     expect(loadConfig().api_key).toBeUndefined();
+  });
+
+  // `api_key` is the LEGACY field that pre-vault callers (spawn, pipeline,
+  // plan-task, process, the orchestrator) pair DIRECTLY with `api_base_url`. It is
+  // filled unconditionally from ANTHROPIC_API_KEY — the documented Docker env var —
+  // which is right for the Anthropic wire and wrong for every other one. The old
+  // code special-cased exactly ONE endpoint (Mistral) and left every other
+  // OpenAI-compatible one holding the Anthropic key: select Groq, and the Anthropic
+  // key goes to Groq as a bearer token; select a local runtime, and it goes to
+  // localhost in plaintext over http.
+  it('does NOT leave the Anthropic key on a Groq endpoint', async () => {
+    writeUserConfig({ provider: 'openai', api_base_url: 'https://api.groq.com/openai/v1' });
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-should-never-reach-groq';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBeUndefined();
+  });
+
+  it('does NOT leave the Anthropic key on a local Ollama endpoint', async () => {
+    writeUserConfig({ provider: 'openai', api_base_url: 'http://localhost:11434/v1' });
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-should-never-reach-localhost';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBeUndefined();
+  });
+
+  it('does NOT leave the Anthropic key on a GENERIC openai endpoint (no preset)', async () => {
+    // The most common non-preset config: an OpenRouter / DeepSeek / bare-proxy URL
+    // that falls through to the generic openai-compat tile. It has no pinned slot,
+    // so an earlier narrowing to "pinned endpoints only" left the inherited
+    // Anthropic key sitting on it — while the vault path stripped it. The two must
+    // strip for the same set of endpoints.
+    writeUserConfig({ provider: 'openai', api_base_url: 'https://openrouter.ai/api/v1' });
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-should-never-reach-openrouter';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBeUndefined();
+  });
+
+  it('uses the endpoint’s OWN key when it has one', async () => {
+    writeUserConfig({ provider: 'openai', api_base_url: 'https://api.groq.com/openai/v1' });
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-xxx';
+    process.env['GROQ_API_KEY'] = 'sk-groq-own';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBe('sk-groq-own');
+  });
+
+  it('keeps a config.json key on a pinned endpoint with no env key of its own', async () => {
+    // The user wrote this key themselves, for this endpoint. The inherited
+    // Anthropic env var must not displace it — and clearing it would be just as
+    // wrong, since it is the only key that actually belongs here.
+    writeUserConfig({ provider: 'openai', api_base_url: 'https://api.groq.com/openai/v1', api_key: 'sk-mine' });
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-xxx';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBe('sk-mine');
+  });
+
+  it('leaves the Anthropic wire untouched (byte-parity for the default install)', async () => {
+    writeUserConfig({ provider: 'anthropic' });
+    process.env['ANTHROPIC_API_KEY'] = 'sk-ant-xxx';
+    const { loadConfig } = await import('./config.js');
+    expect(loadConfig().api_key).toBe('sk-ant-xxx');
+  });
+
+  // The guard shared by BOTH assignment paths — the env one here and the vault
+  // one in engine-init.ts. Keeping them on one predicate is the point: the leak
+  // survived three review rounds because each path was patched separately.
+  it('anthropicKeyMayHoldApiKey: blocks only the openai wire', async () => {
+    const { anthropicKeyMayHoldApiKey } = await import('./config.js');
+    expect(anthropicKeyMayHoldApiKey('openai')).toBe(false);   // Mistral/Groq/Ollama — leak
+    expect(anthropicKeyMayHoldApiKey('anthropic')).toBe(true);
+    expect(anthropicKeyMayHoldApiKey('custom')).toBe(true);    // Anthropic-wire proxy — legit
+    expect(anthropicKeyMayHoldApiKey('vertex')).toBe(true);    // ignores api_key anyway
+    expect(anthropicKeyMayHoldApiKey(undefined)).toBe(true);   // legacy default
   });
 
   it('leaves an anthropic-provider config untouched even with MISTRAL_API_KEY present', async () => {

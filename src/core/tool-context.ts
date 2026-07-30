@@ -13,6 +13,7 @@ import type { CRM } from './crm.js';
 import type { TaskManager } from './task-manager.js';
 import type { RunHistory } from './run-history.js';
 import type { SubjectStore } from './subject-store.js';
+import type { KnowledgeStore } from './knowledge-store.js';
 import type { ThreadStore } from './thread-store.js';
 import type { HookHost } from './metered-request.js';
 import type {
@@ -45,6 +46,10 @@ export interface ToolContext {
    *  Both null unless `subject_graph_enabled` is on (wired in engine init). */
   subjectStore: SubjectStore | null;
   threadStore: ThreadStore | null;
+  /** Durable Knowledge Substrate (DK.1). The user-owned Know store (memory_blocks +
+   *  archival knowledge_entries), exposed to the `remember`/`recall`/`memory_block_edit`
+   *  tools. Null unless `durable_memory_enabled` is on (wired in engine init). */
+  knowledgeStore: KnowledgeStore | null;
 
   // ── Pipeline / process ──
   tools: ToolEntry[];
@@ -99,6 +104,7 @@ export function createToolContext(userConfig: LynoxUserConfig): ToolContext {
     userConfig,
     subjectStore: null,
     threadStore: null,
+    knowledgeStore: null,
     tools: [],
     streamHandler: null,
     networkPolicy: undefined,
@@ -166,4 +172,18 @@ export function applyHttpRateLimits(
  */
 export function applyEnforceHttps(ctx: ToolContext, enforce: boolean): void {
   ctx.enforceHttps = enforce;
+}
+
+/**
+ * The egress hosts admitted for a FULL-CONTROL request under the `guarded`
+ * network policy: the union of connected api_profiles' human-accepted
+ * `custom_endpoint_ack` hosts. Returns `undefined` for any other policy (the
+ * caller then relies on baseline + operator floor only). Centralised so the
+ * http_request handler and api_setup fetch_token compute it identically and
+ * can't drift. Only consulted by `assertHostPolicy` for a full-control surface.
+ */
+export function resolveGuardedAckHosts(ctx: ToolContext | undefined): ReadonlySet<string> | undefined {
+  return ctx?.networkPolicy === 'guarded'
+    ? (ctx.apiStore?.getAcceptedEgressHosts() ?? new Set<string>())
+    : undefined;
 }

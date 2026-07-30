@@ -8,32 +8,81 @@ import { isCriticalTool } from '../tools/permission-guard.js';
  * - `**` matches anything (including `/`)
  * - `*` matches anything except `/`
  * - All other regex-special characters are escaped.
- * No backtracking risk — produced patterns are linear.
+ *
+ * INVARIANT: the emitted pattern never contains two ADJACENT unanchored
+ * quantifiers (`.*`/`[^/]*`), which is the catastrophic-backtracking shape — a
+ * hostile glob (e.g. an imported capability-contract `hostPattern`) tested
+ * against a non-matching host would otherwise freeze the event loop. Adjacency
+ * arises not only from consecutive stars but from repeated double-star groups
+ * separated by slashes: each double-star also consumes its trailing slash, so the
+ * separators vanish and the quantifiers land side by side — both cases coalesce.
+ * Two adjacent unanchored quantifiers are match-equivalent to a single `.*` (both
+ * match any run), so they merge; a quantifier separated by any literal (a `?`, a
+ * dot, a domain label, an un-eaten slash) stays anchored and never backtracks.
  */
 export function globToRegex(glob: string): RegExp {
-  let regex = '';
+  const parts: string[] = [];
+  // Append an unanchored quantifier, merging with a preceding one so the output
+  // can never hold two in a row (`.*` ⊇ `[^/]*`, so the union is always `.*`).
+  const coalesceQuantifier = (q: '.*' | '[^/]*'): void => {
+    const last = parts[parts.length - 1];
+    if (last === '.*' || last === '[^/]*') {
+      parts[parts.length - 1] = '.*';
+    } else {
+      parts.push(q);
+    }
+  };
   let i = 0;
   while (i < glob.length) {
     const ch = glob[i]!;
     if (ch === '*' && glob[i + 1] === '*') {
-      regex += '.*';
+      coalesceQuantifier('.*');
       i += 2;
       if (glob[i] === '/') i++;
     } else if (ch === '*') {
-      regex += '[^/]*';
+      coalesceQuantifier('[^/]*');
       i++;
     } else if (ch === '?') {
-      regex += '[^/]';
+      parts.push('[^/]');
       i++;
     } else if ('.+(){}[]^$|\\'.includes(ch)) {
-      regex += '\\' + ch;
+      parts.push('\\' + ch);
       i++;
     } else {
-      regex += ch;
+      parts.push(ch);
       i++;
     }
   }
-  return new RegExp(`^${regex}$`);
+  return new RegExp(`^${parts.join('')}$`);
+}
+
+/** Structurally-unrelated probe hosts across unrelated TLDs. A single host glob
+ *  that matches ≥2 of these matches (nearly) any host (`*`, `**`, `*.*`, …) — an
+ *  over-broad grant. A bounded label wildcard (`*.googleapis.com`) matches none. */
+const OVERBROAD_HOST_PROBES = [
+  'a.example.com',
+  'b.attacker-domain.net',
+  'c.some-host.org',
+  'internal.local',
+] as const;
+
+/**
+ * Is `pattern` an over-broad host glob — one that grants (nearly) any host rather
+ * than pinning specific ones? Reuses {@link globToRegex} (the SAME matcher the
+ * capability-contract enforcement uses, so this can't drift from it) and tests it
+ * against structurally-unrelated probes: a match on ≥2 unrelated TLDs means the
+ * pattern is a match-anything wildcard = fleet-wide egress intent. An unparseable
+ * pattern is treated as over-broad (fail-closed). Used to reject an over-broad
+ * grant at contract save-time and to flag one on the workflow-import consent surface.
+ */
+export function isOverbroadHostPattern(pattern: string): boolean {
+  let re: RegExp;
+  try {
+    re = globToRegex(pattern);
+  } catch {
+    return true;
+  }
+  return OVERBROAD_HOST_PROBES.filter(h => re.test(h)).length >= 2;
 }
 
 /**

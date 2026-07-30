@@ -91,8 +91,10 @@ describe('KnowledgeLayer subject-graph READ migration (S1d)', () => {
 
     const e = byName.get('Acme GmbH')!;
     expect(e).toMatchObject({
+      // mentionCount is the real memory_subjects link count — Acme is mentioned in
+      // the single stored memory, so 1 (previously hardcoded 0, the "0× Erwähnungen" bug).
       canonicalName: 'Acme GmbH', entityType: 'organization', description: '',
-      scopeType: 'global', scopeId: 'global', mentionCount: 0,
+      scopeType: 'global', scopeId: 'global', mentionCount: 1,
     });
     expect(typeof e.id).toBe('string');
     expect(Array.isArray(e.aliases)).toBe(true);

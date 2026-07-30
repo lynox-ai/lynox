@@ -2,13 +2,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { LynoxUserConfig, ModelProfile, TierSet } from '../types/index.js';
-import { isModelProfile, isTierSlot, MISTRAL_API_BASE } from '../types/index.js';
+import { isModelProfile, isTierSlot, MISTRAL_API_BASE, modelCapability, parseBlockedModelIds, isBlockedModelId } from '../types/index.js';
 import { isMistralHost } from '../types/index.js';
 import { cpSuppliesLLMKey } from '../server/billing-tier.js';
 import { readEnvAlias, envTier } from './env.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { getErrorMessage } from './utils.js';
+import { pinnedVaultSlotForEndpoint } from './llm/catalog.js';
+import { TIER_PRESETS, expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from './tier-presets.js';
 
 const CONFIG_FILENAME = 'config.json';
 const LYNOX_DIR = '.lynox';
@@ -24,13 +26,25 @@ const LYNOX_DIR = '.lynox';
  * outside the curated set. Self-host (not cp_supplied) never runs this — its
  * slots legitimately carry their own keys.
  */
-export function applyManagedTierSetConstraints(tierSet: TierSet): TierSet {
+export function applyManagedTierSetConstraints(tierSet: TierSet, blockedModelIds?: readonly string[]): TierSet {
   const out: TierSet = {};
   const anthropicKey = process.env['ANTHROPIC_API_KEY'];
   const mistralKey = process.env['MISTRAL_API_KEY'];
+  // Canary (model-presets W3): a Fireworks slot (⚡ efficient's deep model) is kept
+  // ONLY when the operator opts this managed instance in via the flag AND the CP
+  // supplies FIREWORKS_API_KEY. Default OFF → the slot drops like any off-allowlist
+  // host (broad managed stays Anthropic/Mistral). The base_url is forced to the
+  // canonical FIREWORKS_API_BASE (no host spoof), mirroring the Mistral branch.
+  const fireworksEnabled = managedFireworksEnabled();
+  const fireworksKey = process.env['FIREWORKS_API_KEY'];
   for (const tier of ['fast', 'balanced', 'deep'] as const) {
     const slot = tierSet[tier];
     if (!slot) continue;
+    // Model blocklist (LYNOX_BLOCKED_MODEL_IDS): a slot naming a blocked model
+    // is dropped in-memory (the tier falls back to the base provider, where the
+    // tier-resolver enforces the same blocklist). config.json is untouched —
+    // clearing the blocklist restores the user's choice on the next reload.
+    if (isBlockedModelId(slot.model_id, blockedModelIds)) continue;
     // Mistral is the registry-canonical 'mistral' OR the LLMProvider form the
     // settings UI persists ('openai' + a Mistral host — same as standard mode).
     // A non-Mistral host on 'openai' (a tenant trying to sneak a free-text
@@ -38,15 +52,50 @@ export function applyManagedTierSetConstraints(tierSet: TierSet): TierSet {
     // ALWAYS forced to the canonical MISTRAL_API_BASE (no host spoof).
     const isMistral = slot.provider === 'mistral'
       || (slot.provider === 'openai' && isMistralHost(slot.api_base_url));
+    // Fireworks (openai wire) — accepted only under the flag, matched by the EXACT
+    // canonical endpoint (no fuzzy host match / no spoof surface).
+    const isFireworks = fireworksEnabled
+      && slot.provider === 'openai'
+      && slot.api_base_url === FIREWORKS_API_BASE;
     if (slot.provider === 'anthropic' && anthropicKey) {
       out[tier] = { provider: 'anthropic', model_id: slot.model_id, api_key: anthropicKey };
     } else if (isMistral && mistralKey) {
       out[tier] = { provider: slot.provider, model_id: slot.model_id, api_key: mistralKey, api_base_url: MISTRAL_API_BASE };
+    } else if (isFireworks && fireworksKey) {
+      out[tier] = { provider: slot.provider, model_id: slot.model_id, api_key: fireworksKey, api_base_url: FIREWORKS_API_BASE };
     }
     // else: off-allowlist provider or missing CP key → drop (falls back to base).
   }
   return out;
 }
+
+/**
+ * May the `ANTHROPIC_API_KEY` value be mirrored into the legacy `api_key` field
+ * for this provider?
+ *
+ * `api_key` is paired DIRECTLY with `api_base_url` by the pre-vault callers
+ * (spawn, pipeline, plan-task, process, the orchestrator). An `ANTHROPIC_API_KEY`
+ * is an Anthropic-wire credential, so it may sit there only on an endpoint that
+ * speaks that wire: `anthropic`, `custom` (an Anthropic-compatible proxy — the
+ * user configured it as one), `vertex` (which ignores it anyway), or the legacy
+ * default (undefined).
+ *
+ * NEVER on `provider: 'openai'`. There the endpoint is Mistral, Groq, Together or
+ * a local Ollama, and pairing the Anthropic key with a Groq base_url — or sending
+ * it in plaintext over http to localhost — is exactly the cross-vendor leak this
+ * whole change closes. The key comes from THAT endpoint's slot instead (see the
+ * openai block in loadConfig).
+ *
+ * Exported + shared so the two places that assign the key — the env path here and
+ * the vault path in engine-init.ts — can never drift apart, which is precisely
+ * how the leak survived three review rounds: each patched one path and missed the
+ * other.
+ */
+export function anthropicKeyMayHoldApiKey(provider: LlmProviderMaybe): boolean {
+  return provider !== 'openai';
+}
+
+type LlmProviderMaybe = LynoxUserConfig['provider'];
 
 /** Override for getLynoxDir(). Set via --data-dir or LYNOX_DATA_DIR. */
 let _dataDirOverride: string | null = null;
@@ -101,7 +150,7 @@ export function loadConfig(): LynoxUserConfig {
 
   // Allowlist: project config cannot override security-sensitive fields
   const PROJECT_SAFE_KEYS: ReadonlySet<string> = new Set([
-    'default_tier', 'thinking_mode', 'effort_level',
+    'default_tier', 'balanced_model', 'thinking_mode', 'effort_level',
     'max_session_cost_usd', 'max_concurrent_runs', 'embedding_provider', 'plugins',
     'organization_id', 'client_id',
     'changeset_review', 'greeting', 'context_name',
@@ -111,7 +160,7 @@ export function loadConfig(): LynoxUserConfig {
     'memory_extraction',
     'memory_half_life_days',
     'pipeline_context_limit', 'pipeline_step_result_limit',
-    'memory_extraction_limit', 'http_response_limit',
+    'memory_extraction_limit', 'http_response_limit', 'http_html_extract',
     'enforce_https',
     'bugsink_dsn',
     'backup_dir', 'backup_schedule', 'backup_retention_days', 'backup_encrypt',
@@ -126,8 +175,13 @@ export function loadConfig(): LynoxUserConfig {
     }
   }
 
-  if (process.env['ANTHROPIC_API_KEY']) {
-    merged.api_key = process.env['ANTHROPIC_API_KEY'];
+  // What the user actually wrote in config.json, captured BEFORE the env var
+  // overwrites it. On a non-Anthropic endpoint this is the only key we can trust
+  // to belong there — see the endpoint-scoped block further down.
+  const configFileApiKey = merged.api_key;
+  const anthropicEnvKey = process.env['ANTHROPIC_API_KEY'];
+  if (anthropicEnvKey) {
+    merged.api_key = anthropicEnvKey;
   }
   // Generic LLM endpoint: `LYNOX_API_BASE_URL` (canonical) with the legacy
   // `ANTHROPIC_BASE_URL` accepted forever (real Anthropic-proxy users + every
@@ -155,6 +209,17 @@ export function loadConfig(): LynoxUserConfig {
   } else if (subjectGraph === 'false' || subjectGraph === '0') {
     merged.subject_graph_enabled = false;
   }
+  // Lazy-tools (Slice 1): Anthropic-direct only — defer heavy/long-tail tool
+  // schemas behind the native tool-search tool so the cached prefix shrinks. The
+  // CP flips this per-tenant via env without editing config.json. Same explicit
+  // 'true'/'1' vs 'false'/'0' parse as the mirror flag above (no z.coerce, which
+  // would treat any non-empty string as true).
+  const lazyTools = process.env['LYNOX_LAZY_TOOLS_ENABLED'];
+  if (lazyTools === 'true' || lazyTools === '1') {
+    merged.lazy_tools_enabled = true;
+  } else if (lazyTools === 'false' || lazyTools === '0') {
+    merged.lazy_tools_enabled = false;
+  }
   // Foundation Rework v2 (S5b): the engine.db memory-recall read flag. Like the
   // mirror flag above, the CP flips this per-tenant via env (after running the
   // s5-backfill) without editing config.json. Explicit 'true'/'1' vs 'false'/'0'
@@ -166,13 +231,67 @@ export function loadConfig(): LynoxUserConfig {
   } else if (memoryReads === 'false' || memoryReads === '0') {
     merged.memory_graph_reads = false;
   }
+  // Memory Foundation Wave 0: the self-reinforcement emergency-stop flag. The CP
+  // flips it per-tenant via env (rafael canary first) without editing config.json.
+  // Explicit 'true'/'1' vs 'false'/'0' (no z.coerce). NOT in PROJECT_SAFE_KEYS — a
+  // project config must not alter the user's memory scoring/write behaviour.
+  const memScoringV2 = process.env['LYNOX_MEMORY_SCORING_V2'];
+  if (memScoringV2 === 'true' || memScoringV2 === '1') {
+    merged.memory_scoring_v2 = true;
+  } else if (memScoringV2 === 'false' || memScoringV2 === '0') {
+    merged.memory_scoring_v2 = false;
+  }
+  // Memory Foundation Wave 0: retrieval shadow-log flag. The CP enables it
+  // per-tenant via env to gather the Wave-2 floor distribution on the real corpus.
+  // Explicit 'true'/'1' vs 'false'/'0' (no z.coerce). NOT in PROJECT_SAFE_KEYS — a
+  // project config must not turn on plaintext retrieval telemetry.
+  const retrievalShadow = process.env['LYNOX_RETRIEVAL_SHADOW_LOG'];
+  if (retrievalShadow === 'true' || retrievalShadow === '1') {
+    merged.retrieval_shadow_log = true;
+  } else if (retrievalShadow === 'false' || retrievalShadow === '0') {
+    merged.retrieval_shadow_log = false;
+  }
+  // Memory Foundation Wave 2: the write-trust gate enforcement flag. The CP flips it
+  // per-tenant via env (rafael canary first, after the shadow window closes) without
+  // editing config.json. Explicit 'true'/'1' vs 'false'/'0' (no z.coerce). NOT in
+  // PROJECT_SAFE_KEYS — a project config must not be able to change the user's memory
+  // trust/write behaviour (an agent-writable flag would be a self-grant of the very
+  // privilege this gate withholds).
+  const memWriteTrustGate = process.env['LYNOX_MEMORY_WRITE_TRUST_GATE'];
+  if (memWriteTrustGate === 'true' || memWriteTrustGate === '1') {
+    merged.memory_write_trust_gate = true;
+  } else if (memWriteTrustGate === 'false' || memWriteTrustGate === '0') {
+    merged.memory_write_trust_gate = false;
+  }
+  // Durable Knowledge Substrate (DK.1): the CP flips it per-tenant via env (rafael
+  // canary first) without editing config.json. Explicit 'true'/'1' vs 'false'/'0' (no
+  // z.coerce). NOT in PROJECT_SAFE_KEYS — a project config must not be able to swap the
+  // whole memory pillar (an agent-writable flag would let injected content route its own
+  // writes past the extraction-decoupling + trust routing this substrate depends on).
+  const durableMemory = process.env['LYNOX_DURABLE_MEMORY_ENABLED'];
+  if (durableMemory === 'true' || durableMemory === '1') {
+    merged.durable_memory_enabled = true;
+  } else if (durableMemory === 'false' || durableMemory === '0') {
+    merged.durable_memory_enabled = false;
+  }
+  // Extended debug capture (operator surface). Lets the CP flip it per-tenant via env
+  // (rafael canary first) without editing config.json. Explicit 'true'/'1' vs 'false'/
+  // '0' (no z.coerce). NOT in PROJECT_SAFE_KEYS — a project config must not be able to
+  // start persisting the fully-assembled request (an agent-writable flag would let
+  // injected content enable capture of what every subsequent turn sent to the model).
+  const debugWireCapture = process.env['LYNOX_DEBUG_WIRE_CAPTURE'];
+  if (debugWireCapture === 'true' || debugWireCapture === '1') {
+    merged.debug_wire_capture = true;
+  } else if (debugWireCapture === 'false' || debugWireCapture === '0') {
+    merged.debug_wire_capture = false;
+  }
   // Outbound egress policy. Lets the CP set it per-tenant via env without
   // editing config.json (the CP env emit itself is a separate slice). Explicit
   // enum parse — an unrecognised value is ignored (falls back to config/default
   // 'allow-all'), never coerced. NOT in PROJECT_SAFE_KEYS: a project config must
   // not be able to weaken a user/operator-set egress policy.
   const netPolicy = process.env['LYNOX_NETWORK_POLICY'];
-  if (netPolicy === 'allow-all' || netPolicy === 'allow-list' || netPolicy === 'deny-all') {
+  if (netPolicy === 'allow-all' || netPolicy === 'allow-list' || netPolicy === 'deny-all' || netPolicy === 'guarded') {
     merged.network_policy = netPolicy;
   }
   const netHosts = process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];
@@ -218,12 +337,43 @@ export function loadConfig(): LynoxUserConfig {
   // Default model tier: `LYNOX_DEFAULT_MODEL_TIER` (canonical) with the legacy
   // `LYNOX_DEFAULT_TIER` accepted forever. envTier normalizes both the canonical
   // band names and the legacy Anthropic-brand names so old env vars keep working.
+  // env-as-SEED (not lock): a persisted file/project `default_tier` — the user's
+  // "Main chat model" picker choice — WINS; the CP env only seeds a fresh
+  // instance that has none. The env var's contract is a floor/default, not a hard
+  // override (env-abi-contract.ts), and this mirrors `LYNOX_LLM_PROVIDER`, which
+  // is deliberately unpinned so the in-app provider switch works. Contrast
+  // `max_tier` below, which STAYS env-wins because it is the cost ceiling/lock.
   const defaultTier = envTier('LYNOX_DEFAULT_MODEL_TIER');
-  if (defaultTier) merged.default_tier = defaultTier;
-  // Max model tier cap (managed hosting cost control — StepHints and pipelines
+  if (defaultTier && merged.default_tier === undefined) merged.default_tier = defaultTier;
+  // Balanced-tier Sonnet selection. The CP (or a self-host operator) can flip a
+  // tenant to Sonnet 5 via env without editing config.json. Assigned as-is; an
+  // unrecognised value is validated + safely defaulted at resolveBalancedModel
+  // (never routes balanced off-Sonnet), so no enum gate is needed here.
+  const balancedModel = process.env['LYNOX_BALANCED_MODEL'];
+  if (balancedModel !== undefined && balancedModel.trim() !== '') {
+    merged.balanced_model = balancedModel.trim();
+  }
+  // Max model tier cap (managed hosting cost control — pipelines and run-options
   // are clamped): `LYNOX_MAX_MODEL_TIER` (canonical) / legacy `LYNOX_MAX_TIER`.
   const maxTier = envTier('LYNOX_MAX_MODEL_TIER');
   if (maxTier) merged.max_tier = maxTier;
+  // Model blocklist: comma-separated model-id PREFIXES the engine refuses to
+  // run (`LYNOX_BLOCKED_MODEL_IDS`, e.g. "claude-opus-"). Mirrors `max_tier`:
+  // env WINS unconditionally over config.json — it is a lock, not a seed.
+  // Unset/blank env leaves any file-config value in place; no value at all =
+  // nothing blocked (byte-identical default path).
+  const blockedModelIdsRaw = process.env['LYNOX_BLOCKED_MODEL_IDS'];
+  if (blockedModelIdsRaw !== undefined && blockedModelIdsRaw.trim() !== '') {
+    merged.blocked_model_ids = parseBlockedModelIds(blockedModelIdsRaw);
+  }
+  // Compaction summarizer tier (Slice A, issue #72 cost). A cost-control knob,
+  // not a user preference (no UI picker) — mirrors `max_tier` above: env WINS
+  // unconditionally rather than only seeding an unset value, so the CP can
+  // guarantee every tenant's compaction runs cheap regardless of a stale/
+  // hand-edited config.json. Default (when neither env nor config.json set it)
+  // is applied at the read site (session.ts), not here.
+  const compactionModel = envTier('LYNOX_COMPACTION_MODEL');
+  if (compactionModel) merged.compaction_model = compactionModel;
   // Account plan tier (separate from LLM model tier) — 'pro' unlocks
   // capabilities like the researcher-role Opus override. Defaults to
   // 'standard' when unset.
@@ -273,10 +423,52 @@ export function loadConfig(): LynoxUserConfig {
   if (merged.worker_profile && !merged.model_profiles?.[merged.worker_profile]) {
     merged.worker_profile = undefined;
   }
+  // Model blocklist × worker profile: background tasks run on the profile's raw
+  // model_id WITHOUT passing through the tier-resolver chokepoint, so a blocked
+  // worker profile must be cleared here (graceful degrade to the main provider,
+  // where the resolver enforces the same blocklist) — same shape as the
+  // dangling-profile guard above.
+  if (merged.worker_profile) {
+    const workerProfile = merged.model_profiles?.[merged.worker_profile];
+    if (workerProfile && isBlockedModelId(workerProfile.model_id, merged.blocked_model_ids)) {
+      merged.worker_profile = undefined;
+    }
+  }
   // Provider-agnostic routing (PR-3d): cp_supplied mirrors the billing-tier
   // key-custody flag (managed/managed_pro) so the managed tier_set allowlist can
   // gate on it. Canonical LYNOX_BILLING_TIER, legacy LYNOX_MANAGED_MODE alias.
   if (cpSuppliesLLMKey(readEnvAlias('LYNOX_BILLING_TIER'))) merged.cp_supplied = true;
+  // Named hybrid strategy (model-presets, W2): a `tier_preset` from config.json
+  // materializes to {routing_mode:'hybrid', tier_set} from the shared TIER_PRESETS
+  // SoT. This is the config.json SOURCE path — placed BEFORE the LYNOX_TIER_SET_JSON
+  // env block (so an env slot still wins per-slot) and BEFORE the managed-hardening
+  // call (so a managed tenant's preset is still allowlist-gated). FAIL-CLOSED: an
+  // unknown preset name, or a preset referencing a model absent from
+  // MODEL_CAPABILITIES, THROWS — never a silent fallthrough to the Opus-rate
+  // FALLBACK_CAPABILITY (a ~9-100× misbill + a false disclosure).
+  if (merged.tier_preset) {
+    const expanded = expandTierPreset(merged.tier_preset);
+    if (!expanded) {
+      throw new Error(
+        `Unknown tier_preset "${merged.tier_preset}". Known presets: ${Object.keys(TIER_PRESETS).join(', ')}.`,
+      );
+    }
+    // The preset is the base; an explicit config.json tier_set slot overrides it
+    // per-slot, and the env block below overrides both (spread-last wins).
+    merged.tier_set = { ...expanded.tier_set, ...merged.tier_set };
+    merged.routing_mode = expanded.routing_mode;
+    // FAIL-CLOSED over the FINAL merged slots (not just the preset's): a config.json
+    // `tier_set` slot layered onto a preset must not smuggle an unregistered model
+    // past the guard into the Opus-rate FALLBACK_CAPABILITY (a ~9-100× misbill + a
+    // false disclosure).
+    for (const slot of Object.values(merged.tier_set)) {
+      if (slot && !modelCapability(slot.model_id)) {
+        throw new Error(
+          `tier_preset "${merged.tier_preset}" resolves to an unregistered model "${slot.model_id}" — refusing to load (it would misbill at the Opus fallback rate and mis-disclose). Register the model in MODEL_CAPABILITIES first.`,
+        );
+      }
+    }
+  }
   // Hybrid Tier-Set delivered as JSON by the CP / op-provisioning
   // (LYNOX_TIER_SET_JSON) → deserialized into `tier_set` (+ routing_mode hybrid).
   // Each slot is validated; a malformed slot is dropped (never reaches client
@@ -304,7 +496,7 @@ export function loadConfig(): LynoxUserConfig {
   // config-load (the PRD ship-blocker) — allowlist + CP key-custody. If every
   // slot is dropped, fall back to standard mode.
   if (merged.cp_supplied && merged.tier_set) {
-    merged.tier_set = applyManagedTierSetConstraints(merged.tier_set);
+    merged.tier_set = applyManagedTierSetConstraints(merged.tier_set, merged.blocked_model_ids);
     if (Object.keys(merged.tier_set).length === 0) {
       merged.tier_set = undefined;
       merged.routing_mode = 'standard';
@@ -344,13 +536,53 @@ export function loadConfig(): LynoxUserConfig {
   // ANTHROPIC_API_KEY in merged.api_key by this point, so guarding on an empty
   // api_key would never fire — the override must win, exactly as the prior
   // eu-sovereign branch did (it overwrote api_key unconditionally).
-  if (merged.provider === 'openai' && isMistralHost(merged.api_base_url) && process.env['MISTRAL_API_KEY']) {
-    merged.api_key = process.env['MISTRAL_API_KEY'];
-    // Single-model fallback when the UI/CP staged no explicit model. Tier
-    // routing (fast/balanced/deep) is wired separately via MISTRAL_MODEL_MAP —
-    // see setOpenAIModelResolver. A pinned versioned snapshot (not `*-latest`)
-    // keeps behaviour reproducible across Mistral model refreshes.
-    if (!merged.openai_model_id) merged.openai_model_id = 'mistral-large-2512';
+  // `api_key` is the LEGACY field that pre-vault callers (spawn, pipeline,
+  // plan-task, process, the orchestrator) pair directly with `api_base_url`. It
+  // therefore has to hold a key that BELONGS to that endpoint.
+  //
+  // Above, it is filled unconditionally from `ANTHROPIC_API_KEY` — the documented
+  // Docker env var. That is right for the Anthropic wire and wrong for every other
+  // one: on `provider: 'openai'` the endpoint may be Mistral, Groq, Together, or a
+  // local Ollama, and handing any of them the Anthropic key is a cross-vendor
+  // credential leak (plaintext over http, in the loopback case). The old code
+  // special-cased exactly ONE endpoint — Mistral — and left the rest holding the
+  // Anthropic key. Generalise it: derive the key from the endpoint, for every
+  // endpoint.
+  if (merged.provider === 'openai') {
+    // ONLY for an endpoint lynox pins by host. A host that fell through to the
+    // generic tile must not be promoted from the shared slot — that is how a
+    // spoofed `api.mistral.ai.evil.com` would be handed the Mistral key, and how a
+    // user's own configured `api_key` would be overwritten by a vendor key that
+    // has nothing to do with their endpoint.
+    const slot = pinnedVaultSlotForEndpoint('openai', merged.api_base_url);
+    const fromSlot = slot ? process.env[slot] : undefined;
+
+    if (fromSlot && fromSlot.length > 0) {
+      // This endpoint's own key. (For Mistral this is the historic promotion,
+      // unchanged; for Groq/Ollama/… it is the new, correctly-scoped one.)
+      merged.api_key = fromSlot;
+    } else if (merged.api_key === anthropicEnvKey && anthropicEnvKey) {
+      // The unconditional ANTHROPIC_API_KEY promotion above does not belong on
+      // ANY openai endpoint — pinned (Groq, Ollama) OR generic (OpenRouter,
+      // DeepSeek, a bare proxy that fell through to the openai-compat tile).
+      // Leaving it there sends the Anthropic key to that endpoint via the raw
+      // config.api_key consumers.
+      //
+      // This is the SAME rule the vault path applies in engine-init via
+      // `anthropicKeyMayHoldApiKey` (false for 'openai'). The two must strip for
+      // the same set of endpoints — the leak survived a round precisely because
+      // this path was narrowed to pinned-only while the vault path was not.
+      if (configFileApiKey) merged.api_key = configFileApiKey;
+      else delete merged.api_key;
+    }
+
+    if (isMistralHost(merged.api_base_url) && !merged.openai_model_id) {
+      // Single-model fallback when the UI/CP staged no explicit model. Tier
+      // routing (fast/balanced/deep) is wired separately via MISTRAL_MODEL_MAP —
+      // see setOpenAIModelResolver. A pinned versioned snapshot (not `*-latest`)
+      // keeps behaviour reproducible across Mistral model refreshes.
+      merged.openai_model_id = 'mistral-large-2512';
+    }
   }
 
   _cachedConfig = merged;

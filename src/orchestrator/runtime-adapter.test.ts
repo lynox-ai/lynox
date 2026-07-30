@@ -1,5 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ToolEntry, LynoxUserConfig } from '../types/index.js';
+import { getModelId } from '../types/index.js';
+import { setTierSetResolver } from '../core/tier-resolver.js';
 import type { RoleConfig } from '../core/roles.js';
 
 const mockSend = vi.fn().mockResolvedValue('mock result');
@@ -27,7 +29,8 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
-import { spawnInline, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, createStepStreamHandler, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, createStepStreamHandler, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import type { AgentDef } from '../types/orchestration.js';
 import type { StreamEvent } from '../types/index.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
 import type { ManifestStep } from '../types/orchestration.js';
@@ -267,14 +270,17 @@ describe('spawnInline thinking gating', () => {
     expect(agentConfig['thinking']).toEqual({ type: 'adaptive' });
   });
 
-  it('honors explicit thinking=enabled on non-Haiku step', async () => {
+  it('maps the legacy thinking=enabled hint to adaptive on non-Haiku step', async () => {
+    // The manual `{type:'enabled', budget_tokens}` shape 400s on Sonnet 5 /
+    // Opus 4.7+ (manual extended thinking removed in the 4.7/5 generation), so
+    // the legacy `'enabled'` hint now resolves to adaptive — safe on 4.6 too.
     const step: ManifestStep = {
       id: 's-step', agent: 's-step', runtime: 'inline',
       model: 'balanced', thinking: 'enabled',
     };
     await spawnInline(step, {}, mockConfig, mockParentTools);
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
-    expect(agentConfig['thinking']).toEqual({ type: 'enabled', budget_tokens: 10_000 });
+    expect(agentConfig['thinking']).toEqual({ type: 'adaptive' });
   });
 
   it('honors explicit thinking=disabled on non-Haiku step', async () => {
@@ -285,6 +291,21 @@ describe('spawnInline thinking gating', () => {
     await spawnInline(step, {}, mockConfig, mockParentTools);
     const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
     expect(agentConfig['thinking']).toEqual({ type: 'disabled' });
+  });
+
+  it('maps the legacy thinking=enabled hint to adaptive on the named-agent path', async () => {
+    // spawnViaAgent is the named-agent pipeline emitter — same 'enabled'→adaptive
+    // mapping so a pre-4.7 manifest hint never emits the 400-ing manual shape.
+    const step: ManifestStep = {
+      id: 'n-step', agent: 'n-step', runtime: 'agent',
+      model: 'balanced', thinking: 'enabled',
+    };
+    const agentDef: AgentDef = {
+      name: 'n-step', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [],
+    };
+    await spawnViaAgent(step, agentDef, {}, mockConfig, undefined, 'run-1');
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['thinking']).toEqual({ type: 'adaptive' });
   });
 
   it('Haiku gate also fires on the canonical model ID (not just the tier alias)', async () => {
@@ -501,6 +522,75 @@ describe('spawnInline + parentMemory propagation (regression-gate for memory_* i
   });
 });
 
+describe('secretStore propagation into pipeline sub-agents (fail-loud secret resolution)', () => {
+  // The orchestrator pipeline path (run_workflow → spawnViaAgent / spawnInline)
+  // previously built each step Agent with NO secretStore. That skipped the whole
+  // secret block in agent.ts: `secret:NAME` refs were neither resolved NOR
+  // fail-loud-guarded, so the literal `secret:NAME` was sent to the external
+  // service (401/empty → model fabricates). These tests pin that the parent's
+  // SecretStore now threads into the built Agent — the precondition for
+  // agent.ts's fail-loud unresolved-secret guard to fire for a sub-agent.
+  // Mirrors spawn.ts threading `parentAgent.secretStore` for `spawn_agent`.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  // A minimal SecretStoreLike stand-in — identity is what we assert (toBe).
+  const mockSecretStore = {
+    getMasked: vi.fn(),
+    resolve: vi.fn(),
+    listNames: vi.fn(),
+    containsSecret: vi.fn(),
+    maskSecrets: vi.fn((t: string) => t),
+    recordConsent: vi.fn(),
+    hasConsent: vi.fn(),
+    isExpired: vi.fn(),
+    findUnresolvedSecretRefs: vi.fn(),
+    extractSecretNames: vi.fn(),
+    resolveSecretRefs: vi.fn(),
+  } as unknown as NonNullable<Parameters<typeof spawnInline>[13]>;
+
+  it('spawnInline threads the given secretStore into the built Agent', async () => {
+    const step: ManifestStep = { id: 'creds', agent: 'creds', runtime: 'inline', task: 'call api with secret' };
+    await spawnInline(
+      step, {}, mockConfig, mockParentTools,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      mockSecretStore,
+    );
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['secretStore']).toBe(mockSecretStore);
+  });
+
+  it('spawnViaAgent threads the given secretStore into the built Agent', async () => {
+    const step: ManifestStep = { id: 'n-creds', agent: 'n-creds', runtime: 'agent', model: 'balanced' };
+    const agentDef: AgentDef = { name: 'n-creds', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] };
+    await spawnViaAgent(
+      step, agentDef, {}, mockConfig, undefined, 'run-1',
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      mockSecretStore,
+    );
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['secretStore']).toBe(mockSecretStore);
+  });
+
+  it('spawnInline leaves secretStore undefined when none supplied (backward-compat)', async () => {
+    const step: ManifestStep = { id: 'no-creds', agent: 'no-creds', runtime: 'inline', task: 'no secret' };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    // Pre-fix behaviour for non-run_workflow callers: no crash, secretStore stays undefined.
+    expect(agentConfig['secretStore']).toBeUndefined();
+  });
+
+  it('spawnViaAgent leaves secretStore undefined when none supplied (backward-compat)', async () => {
+    const step: ManifestStep = { id: 'no-n-creds', agent: 'no-n-creds', runtime: 'agent', model: 'balanced' };
+    const agentDef: AgentDef = { name: 'no-n-creds', version: '1', defaultTier: 'balanced', systemPrompt: 'do it', tools: [] };
+    await spawnViaAgent(step, agentDef, {}, mockConfig, undefined, 'run-1');
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['secretStore']).toBeUndefined();
+  });
+});
+
 describe('INLINE_CORE_TOOLS membership (regression-gate)', () => {
   // Pins the inline-step sandbox allowlist so a future "let me trim a few
   // tools" refactor can't silently break workflows that depend on memory
@@ -521,10 +611,36 @@ describe('INLINE_CORE_TOOLS membership (regression-gate)', () => {
     expect(INLINE_CORE_TOOLS.has('knowledge_search')).toBe(false);
   });
 
-  it('still includes the foundational core tools', () => {
-    for (const name of ['bash', 'read_file', 'write_file', 'http', 'ask_user', 'data_store_query', 'data_store_insert']) {
+  it('still includes the foundational core tools + the external-fetch tools a workflow step needs', () => {
+    for (const name of ['bash', 'read_file', 'write_file', 'http_request', 'web_research', 'ask_user', 'data_store_query', 'data_store_insert']) {
       expect(INLINE_CORE_TOOLS.has(name)).toBe(true);
     }
+    // The old typo: `'http'` matched no registered tool, so http_request was
+    // silently stripped from every inline step since v1.2.2. Lock it out.
+    expect(INLINE_CORE_TOOLS.has('http')).toBe(false);
+  });
+
+  it('every INLINE_CORE_TOOLS name resolves to a real registered tool (catches the http/http_request typo class)', async () => {
+    const builtins = await import('../tools/builtin/index.js');
+    const builtinNames = new Set(
+      Object.values(builtins)
+        .filter((v): v is { definition: { name: string } } =>
+          typeof v === 'object' && v !== null && 'definition' in v &&
+          typeof (v as { definition?: unknown }).definition === 'object')
+        .map((t) => t.definition.name),
+    );
+    // web_research is an INTEGRATION tool (integrations/search/web-search-tool.ts),
+    // not a builtin. Resolve its REAL registered name (the definition is provider-
+    // independent) rather than hard-coding the string — so a rename of the tool
+    // drifts LOUDLY here (INLINE_CORE_TOOLS's 'web_research' would no longer match)
+    // instead of being silently blind-allowlisted (the very typo class this guards).
+    const { createWebSearchTool } = await import('../integrations/search/web-search-tool.js');
+    // The factory interpolates `provider.name` into the description — a minimal
+    // stub is enough to read the (provider-independent) definition name.
+    const webResearchName = createWebSearchTool({ name: 'stub' } as unknown as never).definition.name;
+    const NON_BUILTIN_ALLOWED = new Set([webResearchName]);
+    const unknown = [...INLINE_CORE_TOOLS].filter((n) => !builtinNames.has(n) && !NON_BUILTIN_ALLOWED.has(n));
+    expect(unknown, `INLINE_CORE_TOOLS names with no registered tool: ${unknown.join(', ')}`).toEqual([]);
   });
 });
 
@@ -719,5 +835,232 @@ describe('createStepStreamHandler — A2 step tool-call capture', () => {
     const h = createStepStreamHandler({ onTokens: (i) => { tin += i; } });
     expect(() => { h(toolCall('bash', {})); h(toolResult('bash', 'ok')); h(turnEnd(5, 5)); }).not.toThrow();
     expect(tin).toBe(5);
+  });
+});
+
+// #66: pipeline/workflow steps must follow the hybrid tier_set — the gap that
+// let a hybrid-mode step silently run on the BASE provider (or 404 on a
+// model/endpoint mismatch). The #1 requirement is BYTE-PARITY in standard mode:
+// with no tier_set the built Agent config must be identical to pre-hybrid.
+describe('#66 hybrid tier_set steers pipeline step provider/model (runtime-adapter)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+    setTierSetResolver({ routingMode: 'standard', tierSet: null });
+  });
+  afterEach(() => {
+    setTierSetResolver({ routingMode: 'standard', tierSet: null });
+  });
+
+  const agentCfg = (): Record<string, unknown> =>
+    vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+
+  // getActiveProvider() defaults to 'anthropic' in this isolated test file (no
+  // initLLMProvider call), so a base-anthropic config resolves models on anthropic.
+  const BASE_ANTHROPIC = {
+    api_key: 'base-anthropic-key',
+    provider: 'anthropic',
+    api_base_url: 'https://base.anthropic.example/v1',
+    openai_model_id: 'base-openai-model',
+  } as unknown as LynoxUserConfig;
+
+  describe('STANDARD mode — byte-parity (Agent config identical to pre-hybrid)', () => {
+    it('spawnInline keeps the exact base wire + resolveRunModel model', async () => {
+      const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'balanced' };
+      await spawnInline(step, {}, BASE_ANTHROPIC, mockParentTools);
+      const cfg = agentCfg();
+      expect(cfg['provider']).toBe('anthropic');
+      expect(cfg['apiKey']).toBe('base-anthropic-key');
+      expect(cfg['apiBaseURL']).toBe('https://base.anthropic.example/v1');
+      expect(cfg['openaiModelId']).toBe('base-openai-model');
+      // Model == getModelId(resolved tier, active provider) == the old runModel.modelId.
+      expect(cfg['model']).toBe(getModelId('balanced', 'anthropic'));
+    });
+
+    it('spawnViaAgent keeps the exact base wire + resolveRunModel model', async () => {
+      const step: ManifestStep = { id: 'a', agent: 'analyst', runtime: 'agent', model: 'balanced' };
+      const agentDef: AgentDef = { name: 'analyst', version: '1', defaultTier: 'balanced', systemPrompt: 'x', tools: [] };
+      await spawnViaAgent(step, agentDef, {}, BASE_ANTHROPIC, undefined, 'run-1');
+      const cfg = agentCfg();
+      expect(cfg['provider']).toBe('anthropic');
+      expect(cfg['apiKey']).toBe('base-anthropic-key');
+      expect(cfg['apiBaseURL']).toBe('https://base.anthropic.example/v1');
+      expect(cfg['openaiModelId']).toBe('base-openai-model');
+      expect(cfg['model']).toBe(getModelId('balanced', 'anthropic'));
+    });
+
+    it('a provider-LESS base config yields provider:undefined (NOT coerced to a default)', async () => {
+      // The strongest byte-parity proof: the old code passed `provider: config.provider`
+      // verbatim (undefined stays undefined). A naive `provider: creds.provider` would
+      // have silently coerced this to 'anthropic'. mockConfig.provider is undefined.
+      const step: ManifestStep = { id: 's2', agent: 's2', runtime: 'inline', model: 'fast' };
+      await spawnInline(step, {}, mockConfig, mockParentTools);
+      const cfg = agentCfg();
+      expect(cfg['provider']).toBeUndefined();
+      expect(cfg['apiKey']).toBe('test-key');
+      expect(cfg['apiBaseURL']).toBeUndefined();
+      expect(cfg['openaiModelId']).toBeUndefined();
+    });
+
+    it('a genuine pinned model id survives (not overwritten by the tier→provider map)', async () => {
+      // resolveRunModel passes a real model id through verbatim; the non-cross
+      // branch must keep runModel.modelId, NOT snap.modelId (getModelId(tier,base)).
+      const step: ManifestStep = { id: 's3', agent: 's3', runtime: 'inline', model: 'claude-opus-4-7' };
+      await spawnInline(step, {}, BASE_ANTHROPIC, mockParentTools);
+      expect(agentCfg()['model']).toBe('claude-opus-4-7');
+    });
+  });
+
+  describe('HYBRID mode — the step follows its cross-provider slot', () => {
+    it('spawnInline: a cross openai/Mistral slot drives provider + model + creds', async () => {
+      setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: { balanced: { provider: 'openai', model_id: 'ministral-14b-2512', api_key: 'mistral-slot-key', api_base_url: 'https://api.mistral.ai/v1' } },
+      });
+      const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'balanced' };
+      await spawnInline(step, {}, BASE_ANTHROPIC, mockParentTools);
+      const cfg = agentCfg();
+      expect(cfg['provider']).toBe('openai');
+      expect(cfg['model']).toBe('ministral-14b-2512');
+      expect(cfg['apiKey']).toBe('mistral-slot-key');
+      expect(cfg['apiBaseURL']).toBe('https://api.mistral.ai/v1');
+      expect(cfg['openaiModelId']).toBe('ministral-14b-2512');
+    });
+
+    it('spawnViaAgent: a cross anthropic slot from a Mistral base drives the slot wire', async () => {
+      setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: { deep: { provider: 'anthropic', model_id: 'claude-sonnet-5', api_key: 'sk-ant-slot' } },
+      });
+      const config = {
+        api_key: 'base-mistral-key', provider: 'openai',
+        api_base_url: 'https://api.mistral.ai/v1', openai_model_id: 'ministral-8b-2512',
+      } as unknown as LynoxUserConfig;
+      const step: ManifestStep = { id: 'a', agent: 'analyst', runtime: 'agent', model: 'deep' };
+      const agentDef: AgentDef = { name: 'analyst', version: '1', defaultTier: 'deep', systemPrompt: 'x', tools: [] };
+      await spawnViaAgent(step, agentDef, {}, config, undefined, 'run-2');
+      const cfg = agentCfg();
+      expect(cfg['provider']).toBe('anthropic');
+      expect(cfg['model']).toBe('claude-sonnet-5');
+      expect(cfg['apiKey']).toBe('sk-ant-slot');
+      expect(cfg['apiBaseURL']).toBeUndefined();
+      expect(cfg['openaiModelId']).toBe('claude-sonnet-5');
+    });
+
+    it('a hybrid tier_set with NO slot for the step tier is byte-parity (base wire)', async () => {
+      // fast slot unset → crossProviderSlot=false → base anthropic values kept.
+      setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: { deep: { provider: 'anthropic', model_id: 'claude-sonnet-5', api_key: 'sk-ant-slot' } },
+      });
+      const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'fast' };
+      await spawnInline(step, {}, BASE_ANTHROPIC, mockParentTools);
+      const cfg = agentCfg();
+      expect(cfg['provider']).toBe('anthropic');
+      expect(cfg['apiKey']).toBe('base-anthropic-key');
+      expect(cfg['model']).toBe(getModelId('fast', 'anthropic'));
+    });
+  });
+});
+
+/**
+ * A hybrid tier slot may point at a DIFFERENT endpoint than the base config, and
+ * since Mistral, Groq, Together, Fireworks and a local Ollama all serialise to
+ * `provider: 'openai'`, "same provider" no longer implies "same endpoint".
+ * Resolving the slot's key on the provider alone therefore hands the base key to
+ * a foreign endpoint — a Groq slot under a Mistral base gets the Mistral key,
+ * bearer-tokened over the wire.
+ *
+ * This is not hypothetical: it shipped once INSIDE the fix for the very same bug.
+ * The resolver closure here was declared `(provider)`, TypeScript accepted it
+ * where a `(provider, apiBaseURL)` callback was expected — lower arity is always
+ * assignable — and the endpoint argument was silently dropped, so every slot
+ * resolved against the BASE url. The compiler cannot catch that class of mistake.
+ * These tests can.
+ */
+describe('spawnInline — a foreign-endpoint tier slot never inherits the base key', () => {
+  const GROQ = 'https://api.groq.com/openai/v1';
+  const MISTRAL = 'https://api.mistral.ai/v1';
+  const OLLAMA = 'http://localhost:11434/v1';
+
+  const agentCfg = (): Record<string, unknown> =>
+    vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+
+  /** A Mistral tenant: its key lives in the shared openai slot, MISTRAL_API_KEY. */
+  const BASE_MISTRAL = {
+    provider: 'openai',
+    api_base_url: MISTRAL,
+    openai_model_id: 'mistral-large-2512',
+  } as unknown as LynoxUserConfig;
+
+  beforeEach(() => {
+    vi.mocked(Agent).mockClear();
+    vi.stubEnv('MISTRAL_API_KEY', 'mistral-secret');
+    vi.stubEnv('GROQ_API_KEY', '');
+    vi.stubEnv('OLLAMA_API_KEY', '');
+    vi.stubEnv('OPENAI_API_KEY', '');
+  });
+
+  afterEach(() => {
+    setTierSetResolver({ routingMode: 'standard', tierSet: null });
+    vi.unstubAllEnvs();
+  });
+
+  it('does NOT lend the Mistral key to a Groq slot', async () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { fast: { provider: 'openai', model_id: 'llama-3.3-70b-versatile', api_base_url: GROQ } },
+    });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'fast' };
+    await spawnInline(step, {}, BASE_MISTRAL, mockParentTools);
+
+    const cfg = agentCfg();
+    expect(cfg['apiBaseURL']).toBe(GROQ);       // the slot does reach Groq…
+    expect(cfg['apiKey']).not.toBe('mistral-secret');  // …without the Mistral key.
+  });
+
+  it('uses the Groq slot’s OWN key once it is configured', async () => {
+    vi.stubEnv('GROQ_API_KEY', 'groq-secret');
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { fast: { provider: 'openai', model_id: 'llama-3.3-70b-versatile', api_base_url: GROQ } },
+    });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'fast' };
+    await spawnInline(step, {}, BASE_MISTRAL, mockParentTools);
+
+    expect(agentCfg()['apiKey']).toBe('groq-secret');
+  });
+
+  it('does NOT put the Mistral key on the wire to a local Ollama slot', async () => {
+    // Plaintext, over http, to whatever process happens to hold that port.
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { fast: { provider: 'openai', model_id: 'qwen2.5', api_base_url: OLLAMA } },
+    });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'fast' };
+    await spawnInline(step, {}, BASE_MISTRAL, mockParentTools);
+
+    const cfg = agentCfg();
+    expect(cfg['apiBaseURL']).toBe(OLLAMA);
+    expect(cfg['apiKey']).not.toBe('mistral-secret');
+  });
+
+  it('a slot on the BASE endpoint still resolves normally (no regression)', async () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { fast: { provider: 'openai', model_id: 'ministral-8b-2512', api_base_url: MISTRAL } },
+    });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', model: 'fast' };
+    await spawnInline(step, {}, BASE_MISTRAL, mockParentTools);
+
+    expect(agentCfg()['apiKey']).toBe('mistral-secret');
+  });
+
+  it('B3: INLINE_CORE_TOOLS exposes recall (read) but NOT remember (write)', () => {
+    // A pipeline step builds a FRESH Agent with the untrusted-taint latches cleared, so an
+    // inline `remember` of an upstream step's external content would write it ACTIVE (an H4
+    // pending_review bypass). Only the read side is inline-safe; durable writes stay opt-in.
+    expect(INLINE_CORE_TOOLS.has('recall')).toBe(true);
+    expect(INLINE_CORE_TOOLS.has('remember')).toBe(false);
   });
 });

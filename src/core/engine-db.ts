@@ -5,6 +5,7 @@ import { hkdfSync, randomBytes, createCipheriv, createDecipheriv } from 'node:cr
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
+import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
 
 /**
  * EngineDb — the consolidated per-tenant subject-graph store (Foundation Rework v2, S0).
@@ -178,6 +179,7 @@ const MIGRATIONS: string[] = [
      answer_saved INTEGER,
      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
      questions_json TEXT,
+     segments_json TEXT,
      partial_answers_json TEXT,
      answer_error TEXT,
      multi_select INTEGER,
@@ -511,6 +513,203 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (6);
    ALTER TABLE triggers ADD COLUMN confirmed_at TEXT;
    UPDATE triggers SET confirmed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE effect = 'run_agent';`,
+
+  // v7 (PR-C subject-dedup): the retroactive-merge redirect pointer. When two rows
+  // turn out to be the same real subject (Ada ⊂ Dr. Ada Lovelace), SubjectStore.mergeSubjects
+  // repoints every FK from the duplicate onto the canonical, soft-archives the dup,
+  // and stamps `merged_into = <canonical id>` so a stale id still held anywhere
+  // (a soft `source_run_id`-carried ref, a cached UI id, a DataStore cell mid-flight)
+  // resolves forward via `resolveActiveSubject` instead of dangling. A real self-FK
+  // (mirrors `parent_id`) ON DELETE SET NULL: a hard subject purge nulls the pointer
+  // rather than orphaning it; the merge path itself only soft-archives, never deletes.
+  // Nullable, no default → the ALTER is SQLite-legal (an FK column added by ALTER must
+  // default NULL). The index serves the reverse "who merged into X" read the rollback
+  // uses to find the dup(s) of a canonical.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (7);
+   ALTER TABLE subjects ADD COLUMN merged_into TEXT REFERENCES subjects(id) ON DELETE SET NULL;
+   CREATE INDEX IF NOT EXISTS idx_subjects_merged_into ON subjects(merged_into);`,
+
+  // v8 (Memory Wave 1 — evidence): the untrusted signal + the write channel, the two
+  // DERIVATION INPUTS (PRD §1/§3) that make `source_type` a re-derivable pure function
+  // instead of the only thing stored. Additive ALTER — NEVER edit the v1 CREATE (a column
+  // there would collide with this ALTER on a fresh DB; SQLite ADD COLUMN has no IF NOT
+  // EXISTS). `source_channel` NULLABLE (pre-evidence rows keep NULL + their stamped
+  // source_type; a batch re-derive skips NULL-channel rows per §3 rule 5). `source_untrusted`
+  // DEFAULT 0. `embedding_model` (§1.7) records the vector-space identity so a silent
+  // embedding-default change (no re-embed path) is detectable per row — the Wave-2 floor
+  // binds to it. Mirrors agent-memory.db v6 so the two stores stay column-symmetric — the
+  // trap §1 names is a legacy-only evidence column the engine.db-primary fleet would never see.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (8);
+   ALTER TABLE memories ADD COLUMN source_channel TEXT;
+   ALTER TABLE memories ADD COLUMN source_untrusted INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE memories ADD COLUMN embedding_model TEXT;`,
+
+  // v9 (Durable Knowledge Substrate — DK.1): the two user-owned Know tables. NEW
+  // tables via CREATE (not ALTER) — additive, so a fresh DB and an upgraded DB get
+  // the identical shape, and the v1 CREATE is NEVER edited (an added column there
+  // would collide with a future ALTER on a fresh DB; ADD COLUMN has no IF NOT EXISTS).
+  // These tables exist unconditionally (engine.db is always opened) but are read/written
+  // ONLY when `durable_memory_enabled` is on — flag-OFF stays byte-identical.
+  //
+  //   knowledge_entries — the archival, DURABLE store: no byte-cap, no oldest-first
+  //   trim, no TTL (contrast memory-file.ts). Only explicit transitions: supersede
+  //   (tier-gated), reject (user), delete (user/GDPR — deleteAllData auto-enumerates it).
+  //   `text` is enc()'d at rest by KnowledgeStore; `subject_hint` stays PLAINTEXT (a
+  //   surface name, like subjects.name — used to link on approval, never minted). The
+  //   provenance evidence columns (source_channel/source_untrusted/source_type) make the
+  //   tier a re-derivable pure function (provenance.ts), never the only thing stored.
+  //
+  //   H6 (pin is a STORE INVARIANT, not a prompt convention): the CHECK forbids
+  //   pinned=1 unless the row is active AND its tier is not external_unverified — so an
+  //   injected/untrusted `remember({pin:true})` write can never ride into the every-turn
+  //   `focus` block, and approval can never inherit an attacker-set pin. Defense in depth
+  //   alongside the KnowledgeStore write/approval guard.
+  //
+  //   memory_blocks — the always-loaded working set: only 'profile' + 'playbook' are
+  //   STORED (the 'focus' block is DERIVED per turn, never persisted). char_limit is the
+  //   loud-error bound (no silent trim); over-limit is a tool error, not an eviction.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (9);
+   CREATE TABLE knowledge_entries (
+     id               TEXT PRIMARY KEY,
+     subject_id       TEXT REFERENCES subjects(id) ON DELETE SET NULL,
+     subject_hint     TEXT,                       -- surface name when unmatched (NEVER minted); PLAINTEXT
+     kind             TEXT NOT NULL DEFAULT 'fact'
+                        CHECK (kind IN ('fact','preference','rule','event','block_edit')),
+     text             TEXT NOT NULL,              -- enc()'d at rest by KnowledgeStore
+     pinned           INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0,1)),
+     importance       INTEGER NOT NULL DEFAULT 1 CHECK (importance IN (0,1,2)),
+     status           TEXT NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active','pending_review','rejected','superseded')),
+     source_channel   TEXT,                       -- provenance evidence (re-derivable tier input)
+     source_untrusted INTEGER NOT NULL DEFAULT 0, -- provenance evidence (routes untrusted → pending_review)
+     source_type      TEXT NOT NULL DEFAULT 'agent_inferred'
+                        CHECK (source_type IN ('user_asserted','tool_verified','agent_inferred','external_unverified')),
+     source_thread_id TEXT,                       -- soft ref → history.db threads (audit only; a
+                                                  -- REAL FK to engine.db threads would FK-fail
+                                                  -- since live threads stay in history.db pre-S2)
+     source_run_id    TEXT,                       -- soft ref → history.db runs
+     superseded_by    TEXT,                       -- soft pointer to the retiring entry
+     reviewed_at      TEXT,
+     review_action    TEXT,                       -- approve|edit_approve|reject (audit)
+     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+     updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+     -- H6: pin is a store invariant. Only an active, non-external_unverified row may pin.
+     CHECK (pinned = 0 OR (status = 'active' AND source_type != 'external_unverified'))
+   );
+   CREATE INDEX idx_knowledge_subject_status ON knowledge_entries(subject_id, status);
+   CREATE INDEX idx_knowledge_status         ON knowledge_entries(status);
+   CREATE INDEX idx_knowledge_pinned         ON knowledge_entries(pinned);
+
+   CREATE TABLE memory_blocks (
+     id         TEXT PRIMARY KEY CHECK (id IN ('profile','playbook')),
+     content    TEXT NOT NULL DEFAULT '',
+     char_limit INTEGER NOT NULL,
+     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+   );`,
+
+  // v10 (Onboarding Wave 1 — Layer-1 foundation): the server-side, cross-device
+  // onboarding state that fixes the localStorage-local flow (PRD-ONBOARDING §1/§2.1).
+  // NEW table via CREATE (not ALTER) — additive, so a fresh DB and an upgraded DB
+  // get the identical shape, and the v1 CREATE is NEVER edited (a column added there
+  // would collide with a future ALTER on a fresh DB; ADD COLUMN has no IF NOT EXISTS).
+  //
+  //   A tiny key-value store, one row per (owner_user_id, flag). The composite PK is
+  //   the upsert key. `value` is an opaque non-secret TEXT — NEVER enc()'d (no
+  //   sensitive material lands here) and per-flag typed at the store/endpoint layer,
+  //   not by a DB CHECK (the flag axis differs per key):
+  //     · knowledge_done   → the onboarding THREAD-ID (RF-IRR1): completion + the
+  //                          durable link that makes every onboarding-written DK entry
+  //                          identifiable later (mass-repair by source_thread_id).
+  //     · skipped          → the skip timestamp (presence = skipped).
+  //     · push_nudge       → 'asked_once' | 'declined' (Wave 2, S4/RF-IRR3 nudge state).
+  //     · first_session_at → the first intro-card render-ack timestamp (DC4; written
+  //                          in Wave 1, consumed by the Wave-3 session-1-vs-2 rule).
+  //
+  //   owner_user_id follows the `subjects` precedent (`DEFAULT 'system'`, engine-db.ts
+  //   v1): engine.db has no users table, so the instance is single-operator today and
+  //   the key is user-scoped by shape — a future multi-user engine needs no migration
+  //   (D8). onboarding_flags is auto-wiped by deleteAllData() (GDPR Art. 17, enumerated
+  //   from sqlite_master) and rides the engine.db migration-export set — both structural,
+  //   no per-table plumbing (S2).
+  //
+  //   The `flag` CHECK is deliberately FORWARD-COMPLETE — it lists all four values the
+  //   schema will ever use, including the Wave-2 (push_nudge) and Wave-3-consumed
+  //   (first_session_at) keys, even though this wave only writes knowledge_done/skipped/
+  //   first_session_at. SQLite cannot ALTER a CHECK in place (it needs a table rebuild —
+  //   the exact pain the pending_prompts twin carries), so enumerating the full set now
+  //   trades nothing and avoids a later rebuild; a typo'd flag still fails loud.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (10);
+   CREATE TABLE onboarding_flags (
+     owner_user_id TEXT NOT NULL DEFAULT 'system',
+     flag          TEXT NOT NULL
+                     CHECK (flag IN ('knowledge_done','skipped','push_nudge','first_session_at')),
+     value         TEXT NOT NULL DEFAULT '',
+     updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+     PRIMARY KEY (owner_user_id, flag)
+   );`,
+
+  // ── v11: don't show a first-run onboarding to someone who is not on their first run ──
+  //
+  //   v10 created onboarding_flags EMPTY, and the UI dismisses the stepper only on a
+  //   knowledge_done/skipped row (`ChatView.svelte`: `if (data.knowledgeDone ||
+  //   data.skipped) onboardingDismissed = true`). An instance that has been in use for
+  //   months therefore reads as brand new the moment W1 reaches it, and every existing
+  //   operator is walked through a first-run flow. v10 cannot be edited to fix this — it
+  //   is already applied on the canary, and an edited applied migration never re-runs.
+  //
+  //   The predicate is "does engine.db already hold durable content?" — and it must lead
+  //   with the FLAG-FREE tables. `subjects` / `memories` fill only behind
+  //   `subject_graph_enabled` and `knowledge_entries` only behind `durable_memory_enabled`,
+  //   both default OFF, so a fleet-default instance in use for months has all three EMPTY
+  //   and keeps its real content in agent-memory.db / history.db. Keying on those alone
+  //   made this migration a no-op for the exact state it exists for, firing only on the
+  //   flag-ON canaries. `workflows` / `triggers` / `tasks` are written unconditionally:
+  //   `setVerbGraph` (run-history.ts) is called with no flag check (`engine.ts:942`) and
+  //   the first two are the SOLE authority for their writes, the third an additive mirror
+  //   — only the assignee→subject resolution is flag-coupled.
+  //   All six are empty in a freshly created db and nothing is seeded at first boot, so a
+  //   genuinely new instance running v1..v11 in one go still matches nothing and keeps its
+  //   onboarding. ⚠️ That last property is load-bearing: if a later wave seeds starter
+  //   tasks/workflows into a NEW instance, this predicate starts marking new operators and
+  //   must be re-cut. Thread history would be the most direct signal but lives in the
+  //   run-history db, which a migration here cannot reach.
+  //
+  //   Direction of the risk, stated deliberately: over-marking is repairable (the
+  //   `backfill:` value makes it a one-line DELETE), under-marking is NOT — the operator's
+  //   own reaction to the bug writes a genuine `skipped` row (`ChatView.svelte`), so a
+  //   later migration can no longer tell "v11 missed me" from "I chose to skip". The
+  //   symptom destroys the evidence, which is why the predicate errs wide.
+  //
+  //   Recorded as `skipped` because that is the only forward-declared flag that means
+  //   "do not show this" without also claiming the operator COMPLETED a flow they never
+  //   saw — and the CHECK cannot gain a fifth value without a table rebuild (see v10).
+  //   The provenance goes in \`value\` instead, which nothing parses (the status derives
+  //   booleans from row PRESENCE, `onboarding-flag-store.ts`), so the onboarding funnel
+  //   can still tell a backfill apart from a real user skip rather than counting it.
+  //
+  //   The guard is "no DISMISSING row yet" — knowledge_done or skipped — not "no row at
+  //   all". `first_session_at` is a render-ack, not a completion: the UI dismisses on
+  //   `knowledgeDone || skipped` only. Guarding on any row would let a single app open
+  //   during the window between W1 and this migration reaching a tenant write
+  //   `first_session_at` and permanently block the backfill, leaving that operator with a
+  //   first-run stepper forever. That window is open on the canary right now.
+  //   Idempotent either way: re-running is a no-op and a genuine completion is never
+  //   overwritten (and the PK is per-flag, so a first_session_at row does not collide).
+  //   The guard filters `owner_user_id` to match the row it inserts — engine.db has no
+  //   users table today, but an unfiltered guard would let a future second owner's skip
+  //   suppress the system owner's backfill.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (11);
+   INSERT INTO onboarding_flags (owner_user_id, flag, value)
+   SELECT 'system', 'skipped', 'backfill:pre-w1:' || strftime('%Y-%m-%dT%H:%M:%SZ','now')
+   WHERE NOT EXISTS (
+       SELECT 1 FROM onboarding_flags
+       WHERE owner_user_id = 'system' AND flag IN ('knowledge_done','skipped'))
+     AND (EXISTS (SELECT 1 FROM workflows)
+       OR EXISTS (SELECT 1 FROM triggers)
+       OR EXISTS (SELECT 1 FROM tasks)
+       OR EXISTS (SELECT 1 FROM subjects)
+       OR EXISTS (SELECT 1 FROM knowledge_entries)
+       OR EXISTS (SELECT 1 FROM memories));`,
 ];
 
 /**
@@ -603,8 +802,13 @@ export class EngineDb {
   get isEncrypted(): boolean { return this._encKey !== null; }
 
   /**
-   * Open the SQLite database, running an integrity check. If malformed, rename
-   * the corrupt file aside and create a fresh one (mirrors RunHistory).
+   * Open the SQLite database. ONLY a failed `integrity_check` (genuine file
+   * corruption) may rename the file aside and start fresh. Schema migration runs
+   * AFTER that decision, OUTSIDE the corruption-catch, and fails LOUD (propagates,
+   * keeps the file): a migration error — a transient SQLITE_BUSY/disk-full/IO fault
+   * mid-ALTER, or a deterministic migration bug — must NEVER be mistaken for
+   * corruption and trigger the wipe-and-recreate path, which would silently destroy
+   * the real subject-graph data of a reads-ON tenant while the engine boots "healthy".
    */
   private _openOrRecreate(path: string): void {
     let db = new Database(path);
@@ -613,11 +817,6 @@ export class EngineDb {
       if (result[0]?.integrity_check !== 'ok') {
         throw new Error(`integrity_check: ${result[0]?.integrity_check ?? 'unknown'}`);
       }
-      db.pragma('journal_mode = WAL');
-      db.pragma('foreign_keys = ON');
-      this.db = db;
-      this._ensureSchemaVersion();
-      this._migrate();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`⚠ Engine database corrupted (${msg}) — renaming to .corrupt and starting fresh\n`);
@@ -629,11 +828,25 @@ export class EngineDb {
         try { renameSync(`${path}-shm`, `${corruptPath}-shm`); } catch { /* may not exist */ }
       } catch { /* rename failed */ }
       db = new Database(path);
+    }
+    // Common path for both the healthy open and the freshly-recreated DB. The
+    // busy_timeout absorbs transient cross-process lock contention (e.g. the
+    // operator subject-sweep opening a second handle against the live engine)
+    // instead of throwing an instant SQLITE_BUSY — which mid-migration would be
+    // the very fault that used to trigger the wipe. Migration runs here (not in
+    // the corruption-catch above) so any failure surfaces loud, file intact —
+    // closing the handle first so a caught boot failure (engine.ts keeps running
+    // with engineDb=null) doesn't leak the fd + WAL lock for the process lifetime.
+    try {
+      db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
       db.pragma('journal_mode = WAL');
       db.pragma('foreign_keys = ON');
       this.db = db;
       this._ensureSchemaVersion();
       this._migrate();
+    } catch (err) {
+      try { db.close(); } catch { /* best-effort */ }
+      throw err;
     }
   }
 

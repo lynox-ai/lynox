@@ -370,9 +370,13 @@ export function insertPipelineRun(db: Database.Database, params: {
    *  runs), so a failed run can be resolved back to its workflow for fix/re-run. */
   workflowId?: string | undefined;
 }): void {
+  // 2a: no `completed_at` stamp at INSERT — the row is born 'running' with a
+  // NULL completed_at and is closed out by `updatePipelineRun` at finalize.
+  // (Pre-2a this INSERT was the run-END write, so it stamped completed_at; the
+  // orchestrator is now the single canonical writer via start-INSERT + finalize.)
   db.prepare(`
-    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id, completed_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    INSERT INTO pipeline_runs (id, manifest_name, status, manifest_json, total_duration_ms, total_cost_usd, total_tokens_in, total_tokens_out, step_count, parent_run_id, error, workflow_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     params.id, params.manifestName, params.status, params.manifestJson,
     params.totalDurationMs ?? 0, params.totalCostUsd ?? 0,
@@ -386,6 +390,9 @@ export function updatePipelineRun(db: Database.Database, id: string, params: {
   status?: string | undefined;
   totalDurationMs?: number | undefined;
   totalCostUsd?: number | undefined;
+  totalTokensIn?: number | undefined;
+  totalTokensOut?: number | undefined;
+  stepCount?: number | undefined;
   error?: string | undefined;
 }): void {
   const sets: string[] = [];
@@ -393,6 +400,12 @@ export function updatePipelineRun(db: Database.Database, id: string, params: {
   if (params.status !== undefined) { sets.push('status = ?'); values.push(params.status); }
   if (params.totalDurationMs !== undefined) { sets.push('total_duration_ms = ?'); values.push(params.totalDurationMs); }
   if (params.totalCostUsd !== undefined) { sets.push('total_cost_usd = ?'); values.push(params.totalCostUsd); }
+  // 2a/B2: the finalize path records step_count + token totals (the run-END
+  // INSERT used to carry these; they'd stay 0 otherwise since the start-INSERT
+  // writes the row before any step has run).
+  if (params.totalTokensIn !== undefined) { sets.push('total_tokens_in = ?'); values.push(params.totalTokensIn); }
+  if (params.totalTokensOut !== undefined) { sets.push('total_tokens_out = ?'); values.push(params.totalTokensOut); }
+  if (params.stepCount !== undefined) { sets.push('step_count = ?'); values.push(params.stepCount); }
   if (params.error !== undefined) { sets.push('error = ?'); values.push(params.error); }
   if (sets.length === 0) return;
   sets.push("completed_at = datetime('now')");
@@ -411,8 +424,11 @@ export function insertPipelineStepResult(db: Database.Database, params: {
   tokensOut?: number | undefined;
   costUsd?: number | undefined;
   modelTier?: string | undefined;
-}): void {
-  db.prepare(`
+}): number | bigint {
+  // Returns the AUTOINCREMENT rowid so the caller can defer the result-text and
+  // fill it at run-finalize by id — NOT by (run_id, step_id), which is not
+  // unique (for_each writes N rows per step_id; invariant I5).
+  return db.prepare(`
     INSERT INTO pipeline_step_results (pipeline_run_id, step_id, status, result, error, duration_ms, tokens_in, tokens_out, cost_usd, model_tier)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
@@ -420,7 +436,17 @@ export function insertPipelineStepResult(db: Database.Database, params: {
     params.result ?? '', params.error ?? null,
     params.durationMs ?? 0, params.tokensIn ?? 0, params.tokensOut ?? 0, params.costUsd ?? 0,
     params.modelTier ?? '',
-  );
+  ).lastInsertRowid;
+}
+
+/**
+ * Fill a step row's deferred result-text at run-finalize (2a/B3). The INSERT
+ * writes result='' as-completed (the structural 2b-fence — a crashed run's
+ * partial result-text is never persisted, invariant I4); this UPDATE persists
+ * it only once the run terminates, addressed by the row's own id (I5).
+ */
+export function updatePipelineStepResultText(db: Database.Database, rowId: number | bigint, result: string): void {
+  db.prepare('UPDATE pipeline_step_results SET result = ? WHERE id = ?').run(result, rowId);
 }
 
 export function getRecentPipelineRuns(db: Database.Database, limit = 20): Array<{
@@ -431,8 +457,13 @@ export function getRecentPipelineRuns(db: Database.Database, limit = 20): Array<
   // plans share the `pipeline_runs` table with actual runs but represent
   // templates/plans, not executions. Without this filter, the Workflows
   // run-history tab leaks every saved-workflow library entry.
+  // Also exclude nested sub-pipeline runs (2a/B5, invariant I6): a run with a
+  // parent_run_id is a `runtime:'pipeline'` child recorded for its own drill-down
+  // (reachable by id), NOT a top-level execution — showing it here would pollute
+  // the list with synthetic `<step>-sub` rows. Every pre-B5 row has NULL, so this
+  // is a no-op on existing data.
   return db.prepare(
-    "SELECT id, manifest_name, status, total_duration_ms, total_cost_usd, step_count, error, started_at FROM pipeline_runs WHERE status != 'planned' ORDER BY started_at DESC LIMIT ?"
+    "SELECT id, manifest_name, status, total_duration_ms, total_cost_usd, step_count, error, started_at FROM pipeline_runs WHERE status != 'planned' AND parent_run_id IS NULL ORDER BY started_at DESC LIMIT ?"
   ).all(limit) as Array<{
     id: string; manifest_name: string; status: string; total_duration_ms: number;
     total_cost_usd: number; step_count: number; error: string | null; started_at: string;

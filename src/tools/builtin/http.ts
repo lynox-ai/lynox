@@ -3,10 +3,21 @@ import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
+import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
-import { fetchPinned, isPrivateIP, flattenHeaders, redirectHopHeaders, isCrossOriginHop } from '../../core/network-guard.js';
+import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
+import type { EgressSurface } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
 import { isAllowlistedEndpoint, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
+import {
+  extractHtmlText,
+  isHtmlContentType,
+  DEFAULT_HTML_EXTRACT_THRESHOLD_CHARS,
+  DEFAULT_HTML_EXTRACT_MAX_CHARS,
+  MIN_USEFUL_EXTRACT_CHARS,
+} from '../../core/html-extract.js';
+import type { HtmlExtractResult } from '../../core/html-extract.js';
+import { pv } from '../../core/prompt-value.js';
 
 // Network policy (`networkPolicy`, `allowedHosts`, `allowedWildcards`),
 // HTTPS-enforcement (`enforceHttps`), and cross-session rate limits
@@ -14,11 +25,12 @@ import { isAllowlistedEndpoint, isEndpointAcked } from '../../core/llm/endpoint-
 // ToolContext. Engine-init wires them via applyNetworkPolicy() /
 // applyHttpRateLimits() / applyEnforceHttps() in tool-context.ts. The
 // tool handler reads from `agent.toolContext` and threads it into
-// applyHostPolicy() + fetchWithValidatedRedirects().
+// assertHostPolicy() + fetchWithValidatedRedirects().
 //
-// SSRF defense: isPrivateIP (decodes IPv4-mapped-IPv6 incl. hex form) and the
-// IP-pinning fetch helper come from network-guard.ts. fetchWithValidatedRedirects
-// applies the policy/enforce-https/allow-list checks here and delegates each
+// SSRF defense + user network-policy: the IP-pinning fetch helper (fetchPinned)
+// and the configurable network_policy gate (assertHostPolicy) both come from
+// network-guard.ts. fetchWithValidatedRedirects applies assertHostPolicy per hop
+// (protocol / enforce_https / policy / private-IP early-out) and delegates each
 // HTTP hop to fetchPinned(), which resolves DNS once + pins the connection to
 // the validated IP (closes the DNS-rebinding window between validate + connect).
 
@@ -28,68 +40,14 @@ function friendlyBlockMessage(technical: string): string {
   if (technical.includes('enforce_https')) return 'Only secure HTTPS connections are allowed. HTTP is disabled.';
   if (technical.includes('unsupported protocol')) return 'Only HTTP and HTTPS connections are supported.';
   if (technical.includes('air-gapped')) return 'Network access is disabled in this security mode.';
+  if (technical.includes('guarded egress policy')) return 'That server is not reachable under the current egress policy. Connect it as an API via api_setup, or ask your operator to allow it.';
+  if (technical.includes('unrecognised egress policy')) return 'Network access is blocked by an unrecognised egress policy configuration.';
   if (technical.includes('allow-list')) return 'That server is not in the allowed list for this security mode.';
   if (technical.includes('too many redirects')) return 'The server redirected too many times. The URL may be incorrect.';
   if (technical.includes('hourly')) return 'Hourly request limit reached. Try again later.';
   if (technical.includes('daily')) return 'Daily request limit reached. Try again tomorrow.';
   if (technical.includes('session')) return 'Request limit reached for this session.';
   return technical;
-}
-
-/**
- * Apply user-policy checks BEFORE the SSRF / IP-pinning layer:
- *  - protocol must be http/https
- *  - enforceHttps: reject plain HTTP unless target is localhost
- *  - networkPolicy: deny-all / allow-list
- *  - reject hostname that is itself a private-IP literal (cheap early-out)
- *
- * The DNS-resolve + private-IP check + IP-pinning all happen in fetchPinned()
- * — a single resolve that drives both validation and the socket connect, with
- * no rebind window in between.
- */
-function applyHostPolicy(rawUrl: string, ctx?: ToolContext | undefined): void {
-  const parsed = new URL(rawUrl);
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`Blocked: unsupported protocol "${parsed.protocol}"`);
-  }
-  const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
-
-  // HTTPS enforcement (localhost exempted for development)
-  if (ctx?.enforceHttps && parsed.protocol === 'http:') {
-    if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '::1') {
-      throw new Error('Blocked: HTTP not allowed — enforce_https is enabled. Use HTTPS.');
-    }
-  }
-
-  // Network policy enforcement
-  if (ctx?.networkPolicy === 'deny-all') {
-    // 'Blocked:' prefix so the handler's friendly-message layer rewrites it
-    // (consistent with every other block); 'air-gapped' keeps the mapping match.
-    throw new Error('Blocked: network access denied (air-gapped isolation)');
-  }
-  if (ctx?.networkPolicy === 'allow-list') {
-    let allowed = false;
-    if (ctx.allowedHosts?.has(hostname)) {
-      allowed = true;
-    } else if (ctx.allowedWildcards.length > 0) {
-      for (const domain of ctx.allowedWildcards) {
-        if (hostname === domain || hostname.endsWith(`.${domain}`)) {
-          allowed = true;
-          break;
-        }
-      }
-    }
-    if (!allowed) {
-      throw new Error(`Blocked: hostname "${hostname}" not in network allow-list`);
-    }
-  }
-
-  // Cheap early-out for literal-IP private targets — fetchPinned would catch
-  // these anyway, but rejecting before any DNS attempt keeps the error
-  // synchronous + matches the legacy validateUrl flow.
-  if (isPrivateIP(hostname)) {
-    throw new Error(`Blocked: private IP address "${hostname}"`);
-  }
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -125,6 +83,9 @@ function shouldRewriteToGet(status: number, method: string): boolean {
 export async function fetchWithValidatedRedirects(
   url: string,
   init: RequestInit,
+  // Which egress surface this ride is — REQUIRED so the `guarded` policy can
+  // open discovery reads while gating full-control targets (no safe default).
+  surface: EgressSurface,
   ctx?: ToolContext | undefined,
   // Slice B: for a capability-contract-governed write, every redirect hop must
   // ALSO stay within the contract — `isDangerous`/the consent gate only saw the
@@ -133,7 +94,18 @@ export async function fetchWithValidatedRedirects(
   // Returns true if the hop is permitted. Omitted for non-contract calls (no
   // redirect-behaviour change).
   redirectGuard?: ((nextUrl: string, method: string) => boolean) | undefined,
-): Promise<Response> {
+  // Union of connected api_profiles' human-accepted egress hosts, consulted only
+  // for a full-control surface under `guarded`. Computed in the handler (where
+  // the ApiStore resolves) and re-checked here per redirect hop.
+  guardedAckHosts?: ReadonlySet<string> | undefined,
+  // Returns the FINAL hop alongside the response. Callers need the URL, not
+  // just the bytes: cost attribution profiles by hostname, and link extraction
+  // resolves relative hrefs against it and filters on its origin — so handing
+  // back the REQUESTED url lets one 302 to an attacker attribute the attacker's
+  // paths to the origin the agent trusts, which it will then call WITH the
+  // credentials that origin's api_profile carries. `response.url` cannot serve
+  // here: fetchPinned constructs its Responses, so that field is always empty.
+): Promise<{ response: Response; finalUrl: string }> {
   let currentUrl = url;
   let method = (init.method ?? 'GET').toUpperCase();
   let body = init.body;
@@ -143,7 +115,7 @@ export async function fetchWithValidatedRedirects(
   let headers = flattenHeaders(init.headers);
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
-    applyHostPolicy(currentUrl, ctx);
+    assertHostPolicy(currentUrl, surface, ctx, guardedAckHosts);
     const requestInit: RequestInit = {
       ...init,
       method,
@@ -159,7 +131,7 @@ export async function fetchWithValidatedRedirects(
     const response = await fetchPinned(currentUrl, requestInit);
 
     if (!REDIRECT_STATUSES.has(response.status)) {
-      return response;
+      return { response, finalUrl: currentUrl };
     }
 
     const location = response.headers.get('location');
@@ -321,7 +293,7 @@ function detectGetExfiltration(url: string): string | null {
       return 'base64-like data in URL parameters (possible data exfiltration)';
     }
   } catch {
-    // Invalid URL — will be caught by applyHostPolicy later
+    // Invalid URL — will be caught by assertHostPolicy later
   }
   return null;
 }
@@ -332,6 +304,15 @@ function detectGetExfiltration(url: string): string | null {
  */
 async function maybeShapeJson(json: unknown, url: string, toolContext: ToolContext | undefined): Promise<string> {
   const defaultBody = JSON.stringify(json, null, 2);
+
+  // When an EXPLICIT profile shape errors (esp. include paths that matched no
+  // fields), surface WHY to the agent so it fixes the paths in one pass instead
+  // of thrashing refine→refine. Threaded into every safety-net return below.
+  let explicitShapeError: string | undefined;
+  const shapeHint = (): string =>
+    explicitShapeError
+      ? `\n[response_shape not applied — ${explicitShapeError}. Returning the raw response (capped if large) so you can see its real structure; fix the include paths and retry.]`
+      : '';
 
   // 1. Explicit per-API shape — a profile's `response_shape` wins when present.
   const apiStore = toolContext?.apiStore;
@@ -358,6 +339,7 @@ async function maybeShapeJson(json: unknown, url: string, toolContext: ToolConte
         }
         return result.shaped;
       }
+      explicitShapeError = result.error;
       if (channels.shapeError.hasSubscribers) {
         channels.shapeError.publish({ profileId: profile.id, hostname, error: result.error });
       }
@@ -367,9 +349,9 @@ async function maybeShapeJson(json: unknown, url: string, toolContext: ToolConte
 
   // 2. Safety-net: no explicit shape (or it errored). Return raw unless the body
   //    is large enough to bloat the context, then apply the generic structural cap.
-  if (defaultBody.length <= DEFAULT_SHAPE_THRESHOLD_CHARS) return defaultBody;
+  if (defaultBody.length <= DEFAULT_SHAPE_THRESHOLD_CHARS) return defaultBody + shapeHint();
   const capped = applyShape(json, DEFAULT_LARGE_RESPONSE_SHAPE);
-  if (capped.error) return defaultBody;
+  if (capped.error) return defaultBody + shapeHint();
   if (channels.shapeApplied.hasSubscribers) {
     channels.shapeApplied.publish({
       profileId: '(default-cap)',
@@ -381,7 +363,8 @@ async function maybeShapeJson(json: unknown, url: string, toolContext: ToolConte
   }
   return capped.shaped +
     `\n[note: large API response auto-capped (${capped.beforeChars}→${capped.afterChars} chars) to protect the context window — ` +
-    `define a response_shape on this API profile for precise field selection, or use spawn_agent role='collector' to work the full dataset in an isolated context.]`;
+    `define a response_shape on this API profile for precise field selection, or use spawn_agent role='collector' to work the full dataset in an isolated context.]` +
+    shapeHint();
 }
 
 interface HttpRequestInput {
@@ -499,7 +482,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     let urlAuthType: string | undefined;
     try {
       urlAuthType = toolContext?.apiStore?.getByHostname(new URL(input.url).hostname)?.auth?.type;
-    } catch { /* invalid URL — applyHostPolicy reports it below */ }
+    } catch { /* invalid URL — assertHostPolicy reports it below */ }
     if (urlAuthType !== 'query') {
       const urlSecretMatch = detectSecretInContent(input.url);
       if (urlSecretMatch) {
@@ -533,7 +516,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             !isAllowlistedEndpoint(input.url) &&
             !isEndpointAcked(oauthProfile.custom_endpoint_ack, input.url)
           ) {
-            return `Error: api_profile "${oauthProfile.id}" maps to a non-vetted sub-processor (${reqHostnameForAuth}) with no recorded acceptance — refusing to attach the managed access_token to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility (confirm_custom_endpoint: true) to unblock.`;
+            return `Error: api_profile "${oauthProfile.id}" maps to a non-vetted sub-processor (${reqHostnameForAuth}) with no recorded acceptance — refusing to attach the managed access_token to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.`;
           }
           const tokenKey = `${oauthProfile.id.toUpperCase().replace(/-/g, '_')}_ACCESS_TOKEN`;
           const resolvedToken = agent.secretStore.resolve(tokenKey);
@@ -547,7 +530,26 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           }
         }
       } catch {
-        // Invalid URL — caught by applyHostPolicy below
+        // Invalid URL — caught by assertHostPolicy below
+      }
+    }
+
+    // Under the `guarded` egress policy a full-control http_request may reach
+    // only baseline ∪ the operator floor ∪ hosts a connected api_profile was
+    // human-accepted for. Compute that accepted-host union here (the handler is
+    // where the ApiStore resolves) and gate the target BEFORE the exfil /
+    // write-consent prompts below — so a to-be-blocked host never triggers a
+    // pointless consent prompt and returns the correct block reason.
+    // fetchWithValidatedRedirects re-checks it per redirect hop.
+    const guardedAckHosts = resolveGuardedAckHosts(toolContext);
+    if (toolContext?.networkPolicy === 'guarded') {
+      try {
+        assertHostPolicy(input.url, 'full-control', toolContext, guardedAckHosts);
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith('Blocked:')) {
+          return friendlyBlockMessage(err.message);
+        }
+        // Non-Blocked (e.g. malformed URL) — defer to existing downstream handling.
       }
     }
 
@@ -559,7 +561,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           return `Blocked: ${exfilWarning}`;
         }
         const answer = await agent.promptUser(
-          `⚠ http_request: ${exfilWarning} — Allow?`,
+          pv`⚠ http_request: ${exfilWarning} — Allow?`,
           ['Allow', 'Deny', '\x00'],
         );
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
@@ -605,7 +607,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           pending = (async () => {
             try {
               const answer = await promptUser(
-                `⚠ http_request: ${method} to ${hostname} — Allow outbound data?`,
+                pv`⚠ http_request: ${method} to ${hostname} — Allow outbound data?`,
                 ['Allow', 'Deny', '\x00'],
               );
               const allowed = ['y', 'yes', 'allow'].includes(answer.toLowerCase());
@@ -663,8 +665,8 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         ? (nextUrl: string, redirectMethod: string): boolean =>
             contractGrants('http_request', { url: nextUrl, method: redirectMethod }, contract)
         : undefined;
-      const response = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, toolContext, redirectGuard),
+      const { response, finalUrl: finalRequestUrl } = await Promise.race([
+        fetchWithValidatedRedirects(input.url, opts, 'full-control', toolContext, redirectGuard, guardedAckHosts),
         wallTimeout,
       ]);
       const status = `${response.status} ${response.statusText}`;
@@ -718,6 +720,13 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         wallTimeout,
       ]);
 
+      // HTML gets the same protection JSON has had: a large page is extracted to
+      // text instead of dumping raw markup into the context. Opt-out via
+      // `http_html_extract: false` for the scraping case that needs the markup.
+      const isHtml = !isJson && isHtmlContentType(contentType);
+      const htmlExtractEnabled = agent.toolContext?.userConfig?.http_html_extract ?? true;
+      let htmlExtracted: HtmlExtractResult | undefined;
+
       if (isJson && !truncated) {
         try {
           const json = JSON.parse(text) as unknown;
@@ -727,8 +736,28 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         } catch {
           body = text;
         }
+      } else if (isHtml && htmlExtractEnabled && text.length > DEFAULT_HTML_EXTRACT_THRESHOLD_CHARS) {
+        const extracted = extractHtmlText(text, { baseUrl: finalRequestUrl });
+        // A near-empty extraction means the page is JS-rendered — the raw markup
+        // still carries more (inline JSON, data attributes), so keep it.
+        if (extracted.bodyChars >= MIN_USEFUL_EXTRACT_CHARS) {
+          htmlExtracted = extracted;
+          body = extracted.text;
+        } else {
+          body = text;
+        }
       } else {
         body = text;
+      }
+
+      if (htmlExtracted) {
+        body +=
+          `\n[note: HTML auto-extracted to text (${htmlExtracted.beforeChars}→${htmlExtracted.afterChars} chars) ` +
+          `to protect the context window — title, meta/OG tags, headings and visible text kept; ` +
+          `scripts, styles and markup dropped` +
+          (htmlExtracted.truncated ? `; the extracted text itself hit the ${DEFAULT_HTML_EXTRACT_MAX_CHARS}-char cap` : '') +
+          `. For reading public pages prefer \`web_research\` with action='read'. ` +
+          `Set "http_html_extract": false in config if you need the raw markup.]`;
       }
 
       if (truncated) {
@@ -736,12 +765,15 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // Active delegation hint: a half-cut response in the main context is
         // expensive (eats the cap, may still miss the field the agent needs).
         // A collector sub-agent can fetch + summarize in an isolated context
-        // and return only the relevant slice — that's the cheaper path.
-        body +=
-          `\n... [truncated — response exceeded ${limitKB}KB limit. ` +
-          `For large responses prefer \`spawn_agent\` with role='collector' ` +
-          `(it fetches + summarizes in an isolated context, no main-context bloat). ` +
-          `Or bump "http_response_limit" in config if the full body is unavoidable.]`;
+        // and return only the relevant slice — that's the cheaper path. After a
+        // successful extraction that bloat is already gone, so the hint would be
+        // wrong advice — say only that the page was longer than what we read.
+        body += htmlExtracted
+          ? `\n[note: the page exceeded the ${limitKB}KB read limit — the extraction above covers its first ${limitKB}KB.]`
+          : `\n... [truncated — response exceeded ${limitKB}KB limit. ` +
+            `For large responses prefer \`spawn_agent\` with role='collector' ` +
+            `(it fetches + summarizes in an isolated context, no main-context bloat). ` +
+            `Or bump "http_response_limit" in config if the full body is unavoidable.]`;
       }
 
       const rawResult = `HTTP ${status}\n${respHeaders.join('\n')}\n\n${body}`;
@@ -773,11 +805,12 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // show "$0.0006" alongside the tool_result. per_token / per_unit are
       // deferred — we have no reliable token counter for arbitrary HTTP bodies.
       try {
-        // Use the response's final URL (after redirects) for attribution so a
-        // redirect chain that lands on a different host is profiled against
-        // its actual endpoint, not the original request URL.
-        const finalUrl = response.url || input.url;
-        const parsedFinal = new URL(finalUrl);
+        // Attribute to the final URL after redirects, so a chain landing on a
+        // different host is profiled against its actual endpoint. This used to
+        // read `response.url || input.url`, and `response.url` is always ''
+        // because fetchPinned constructs the Response — so it silently did the
+        // opposite of what this comment promised.
+        const parsedFinal = new URL(finalRequestUrl);
         const profile = toolContext?.apiStore?.getByHostname(parsedFinal.hostname);
         if (profile?.cost?.model === 'per_call' && isFeatureEnabled('api-cost-display')) {
           const streamHandler = toolContext?.streamHandler;

@@ -183,6 +183,12 @@ export class SubjectGraphBackfill {
           sourceRunId: mem.source_run_id,
           sourceType: mem.source_type,
           sourceToolName: mem.source_tool_name,
+          // v8 Wave 1 evidence — carried byte-for-byte from legacy so a re-backfill (or a
+          // fresh engine.db recreate) keeps the stub's evidence in sync. Historical rows are
+          // channel-NULL / untrusted-0 (the v6 defaults) and keep their stamped source_type.
+          sourceChannel: mem.source_channel,
+          sourceUntrusted: mem.source_untrusted === 1,
+          embeddingModel: mem.embedding_model,
           provider: mem.provider,
           embedding: mem.embedding,      // Buffer|null → carried byte-for-byte (no re-embed)
           isActive: mem.is_active,

@@ -402,6 +402,12 @@
 						<span class="rounded bg-success/15 px-2 py-0.5 text-xs font-mono text-success">{verification.artifactsImported}</span>
 					</div>
 				{/if}
+				{#if verification.memoryFilesImported > 0}
+					<div class="flex items-center justify-between px-4 py-3">
+						<span class="text-sm text-text">{t('migration.memory')}</span>
+						<span class="rounded bg-success/15 px-2 py-0.5 text-xs font-mono text-success">{verification.memoryFilesImported}</span>
+					</div>
+				{/if}
 			</div>
 
 			<div class="border-t border-success/20 px-4 py-3 flex justify-center">

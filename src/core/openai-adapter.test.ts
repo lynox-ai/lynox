@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo } from './openai-adapter.js';
+import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo, translateMessages } from './openai-adapter.js';
+import { modelCapability } from '../types/models.js';
 import { StreamProcessor } from './stream.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import type {
@@ -90,7 +91,7 @@ describe('OpenAIAdapter', () => {
       }
     });
 
-    it('does not crash on a usage-only final chunk with no choices array (Mistral)', async () => {
+    it('survives a usage-only final chunk with no choices array and reports its usage (Mistral)', async () => {
       const server = await createMockServer((_req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         res.write(sseChunk({
@@ -119,6 +120,200 @@ describe('OpenAIAdapter', () => {
           .map(e => (e as { delta: { text?: string } }).delta.text)
           .filter(Boolean);
         expect(textDeltas).toEqual(['Hi']);
+        // The trailing chunk carried the ONLY usage of the stream — the
+        // message_delta must be emitted after that chunk is parsed, never
+        // at finish_reason time, or it reports 0/0.
+        const msgDelta = events.find(e => e.type === 'message_delta') as {
+          delta: { stop_reason?: string };
+          usage: { input_tokens: number; output_tokens: number };
+        };
+        expect(msgDelta.delta.stop_reason).toBe('end_turn');
+        expect(msgDelta.usage.input_tokens).toBe(7);
+        expect(msgDelta.usage.output_tokens).toBe(2);
+        // Event ordering must stay Anthropic-canonical even though the
+        // terminal events are now deferred past the trailing chunk.
+        const types = events.map(e => e.type);
+        expect(types.indexOf('content_block_stop')).toBeLessThan(types.indexOf('message_delta'));
+        expect(types.indexOf('message_delta')).toBeLessThan(types.indexOf('message_stop'));
+      } finally {
+        server.close();
+      }
+    });
+
+    it('reports usage from a trailing chunk with empty choices array (OpenAI include_usage / Fireworks)', async () => {
+      // OpenAI `stream_options.include_usage` semantics — used verbatim by
+      // Fireworks: the finish_reason chunk carries `usage: null`, then a
+      // SEPARATE trailing chunk arrives with `choices: []` (empty array, not
+      // missing) and the real usage. The message_delta must carry THIS
+      // chunk's totals — an emission tied to the finish_reason chunk reports
+      // 0/0 tokens downstream (billing, cost guard, run history).
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'fw-1', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hello' }, finish_reason: null }],
+          usage: null,
+        }));
+        res.write(sseChunk({
+          id: 'fw-1', choices: [{ index: 0, delta: {}, finish_reason: 'length' }],
+          usage: null,
+        }));
+        // Trailing usage chunk: empty choices ARRAY + real usage incl. cache.
+        res.write(sseChunk({
+          id: 'fw-1', choices: [],
+          usage: {
+            prompt_tokens: 18, completion_tokens: 30,
+            prompt_tokens_details: { cached_tokens: 4 },
+          },
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+
+        const events = await collectEvents(adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }));
+
+        const msgDelta = events.find(e => e.type === 'message_delta') as {
+          delta: { stop_reason?: string };
+          usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number | null };
+        };
+        expect(msgDelta).toBeDefined();
+        // finish_reason 'length' still maps to 'max_tokens' after deferral.
+        expect(msgDelta.delta.stop_reason).toBe('max_tokens');
+        // Anthropic semantics: input_tokens excludes cached (18 - 4).
+        expect(msgDelta.usage.input_tokens).toBe(14);
+        expect(msgDelta.usage.output_tokens).toBe(30);
+        expect(msgDelta.usage.cache_read_input_tokens).toBe(4);
+
+        // Ordering: content_block_stop → message_delta → message_stop.
+        const types = events.map(e => e.type);
+        expect(types.indexOf('content_block_stop')).toBeLessThan(types.indexOf('message_delta'));
+        expect(types.indexOf('message_delta')).toBeLessThan(types.indexOf('message_stop'));
+        expect(types.filter(t => t === 'message_stop').length).toBe(1);
+
+        // finalMessage() (fresh request against the same mock) must see the
+        // same totals — it reads the message_delta usage.
+        const msg = await adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }).finalMessage();
+        expect(msg.stop_reason).toBe('max_tokens');
+        expect(msg.usage.input_tokens).toBe(14);
+        expect(msg.usage.output_tokens).toBe(30);
+        expect(msg.usage.cache_read_input_tokens).toBe(4);
+      } finally {
+        server.close();
+      }
+    });
+
+    it('reports usage from a trailing chunk after a tool_calls finish', async () => {
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'fw-2', choices: [{
+            index: 0,
+            delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_1', function: { name: 'get_weather', arguments: '{"q":"ZRH"}' } }] },
+            finish_reason: null,
+          }],
+          usage: null,
+        }));
+        res.write(sseChunk({
+          id: 'fw-2', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+          usage: null,
+        }));
+        res.write(sseChunk({
+          id: 'fw-2', choices: [],
+          usage: { prompt_tokens: 25, completion_tokens: 9 },
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+        const events = await collectEvents(adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }));
+        const msgDelta = events.find(e => e.type === 'message_delta') as {
+          delta: { stop_reason?: string };
+          usage: { input_tokens: number; output_tokens: number };
+        };
+        expect(msgDelta.delta.stop_reason).toBe('tool_use');
+        expect(msgDelta.usage.input_tokens).toBe(25);
+        expect(msgDelta.usage.output_tokens).toBe(9);
+      } finally {
+        server.close();
+      }
+    });
+
+    it('reports usage from a final data frame with no trailing newline', async () => {
+      // Some servers close the socket right after the trailing usage frame
+      // without a final newline — the frame must still reach the usage totals
+      // via the post-loop buffer flush.
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'fw-3', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: 'stop' }],
+          usage: null,
+        }));
+        // No trailing newline, no [DONE] — the socket just ends.
+        res.end(`data: ${JSON.stringify({ id: 'fw-3', choices: [], usage: { prompt_tokens: 11, completion_tokens: 3 } })}`);
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+        const events = await collectEvents(adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }));
+        const msgDelta = events.find(e => e.type === 'message_delta') as {
+          usage: { input_tokens: number; output_tokens: number };
+        };
+        expect(msgDelta.usage.input_tokens).toBe(11);
+        expect(msgDelta.usage.output_tokens).toBe(3);
+      } finally {
+        server.close();
+      }
+    });
+
+    it('reports 0/0 usage when the provider never sends usage', async () => {
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(sseChunk({
+          id: 'nu-1', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: 'stop' }],
+        }));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`,
+          apiKey: 'test-key',
+          modelId: 'test-model',
+        });
+        const events = await collectEvents(adapter.beta.messages.stream({
+          model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }));
+        const msgDelta = events.find(e => e.type === 'message_delta') as {
+          usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number | null };
+        };
+        expect(msgDelta.usage.input_tokens).toBe(0);
+        expect(msgDelta.usage.output_tokens).toBe(0);
+        expect(msgDelta.usage.cache_read_input_tokens).toBeNull();
       } finally {
         server.close();
       }
@@ -1131,4 +1326,152 @@ describe('OpenAIAdapter', () => {
       }
     });
   });
+});
+
+describe('translateMessages — user content is never silently dropped', () => {
+  const IMG = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } };
+
+  it('DEF-0073: translates a user image to an image_url part when vision is supported', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [{ type: 'text', text: 'what is this?' }, IMG] },
+    ], { visionSupport: true });
+    const userMsg = out.find((m) => m.role === 'user')!;
+    expect(Array.isArray(userMsg.content)).toBe(true);
+    const parts = userMsg.content as Array<{ type: string; text?: string; image_url?: { url: string } }>;
+    expect(parts).toEqual([
+      { type: 'text', text: 'what is this?' },
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+    ]);
+  });
+
+  it('DEF-0073: translates an image for an unknown/custom model (visionSupport undefined)', () => {
+    const out = translateMessages(undefined, [{ role: 'user', content: [IMG] }], {});
+    const parts = out.find((m) => m.role === 'user')!.content as Array<{ type: string }>;
+    expect(parts[0]!.type).toBe('image_url');
+  });
+
+  it('DEF-0073: throws a clear error for a known non-vision model instead of silently dropping', () => {
+    // Use a genuinely non-vision id: gen-3 Mistral (mistral-large-2512 etc.) is
+    // now vision:true, so codestral — a code model that rejects images — is the
+    // honest example of the visionSupport:false path.
+    expect(() =>
+      translateMessages(undefined, [{ role: 'user', content: [{ type: 'text', text: 'hi' }, IMG] }], {
+        visionSupport: false,
+        modelLabel: 'codestral-2508',
+      }),
+    ).toThrow(/codestral-2508.*cannot process images/i);
+  });
+
+  // #2 CI guard: the online test proves registry→adapter against the real
+  // Mistral API but is skipped in CI (no MISTRAL_API_KEY). This drives the SAME
+  // wiring the production path uses — modelCapability(datedId).features.vision
+  // feeding translateMessages — so a flag flip-back is caught in CI too, not
+  // only in the (skipped) online guard.
+  it('#2: gen-3 Mistral resolves vision:true from the registry → adapter translates the image', () => {
+    for (const id of ['ministral-3b-2512', 'ministral-8b-2512', 'ministral-14b-2512', 'mistral-large-2512']) {
+      const visionSupport = modelCapability(id)?.features?.vision;
+      expect(visionSupport, id).toBe(true);
+      const out = translateMessages(undefined, [{ role: 'user', content: [{ type: 'text', text: 'hi' }, IMG] }], {
+        visionSupport, modelLabel: id,
+      });
+      const parts = out.find((m) => m.role === 'user')!.content as Array<{ type: string }>;
+      expect(parts.some((p) => p.type === 'image_url'), id).toBe(true);
+    }
+  });
+
+  it('#2: a non-vision Mistral id (codestral) resolves vision:false → adapter throws', () => {
+    const visionSupport = modelCapability('codestral-2508')?.features?.vision;
+    expect(visionSupport).toBe(false);
+    expect(() =>
+      translateMessages(undefined, [{ role: 'user', content: [IMG] }], { visionSupport, modelLabel: 'codestral-2508' }),
+    ).toThrow(/cannot process images/i);
+  });
+
+  it('DEF-0074: preserves user text that shares a turn with a tool_result', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'call_1', content: 'result text' },
+        { type: 'text', text: 'and here is my follow-up' },
+      ] },
+    ]);
+    // tool message first (answers the assistant's tool_call), then the user's own text — NOT discarded.
+    const tool = out.find((m) => m.role === 'tool')!;
+    expect(tool.content).toBe('result text');
+    expect(tool.tool_call_id).toBe('call_1');
+    const user = out.find((m) => m.role === 'user')!;
+    expect(user.content).toBe('and here is my follow-up');
+  });
+
+  it('byte-parity: a text-only user message stays a plain string (no array)', () => {
+    const out = translateMessages(undefined, [{ role: 'user', content: [{ type: 'text', text: 'plain' }] }]);
+    expect(out).toEqual([{ role: 'user', content: 'plain' }]);
+  });
+
+  it('byte-parity: a tool_result-only turn emits just the tool message, no empty user message', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_2', content: 'r' }] },
+    ]);
+    expect(out).toEqual([{ role: 'tool', tool_call_id: 'call_2', content: 'r' }]);
+  });
+});
+
+describe('translateMessages — empty-content edge', () => {
+  it('skips an empty user text block that shares a tool_result turn (no content:"" message)', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'c', content: 'r' },
+        { type: 'text', text: '' },
+      ] },
+    ]);
+    // Only the tool message — no trailing empty user message.
+    expect(out).toEqual([{ role: 'tool', tool_call_id: 'c', content: 'r' }]);
+  });
+});
+
+
+describe('OpenAIAdapter — request idle timeout (DEF-openai-adapter-timeout)', () => {
+  const prev = process.env['LYNOX_OPENAI_REQUEST_TIMEOUT_MS'];
+  beforeEach(() => { process.env['LYNOX_OPENAI_REQUEST_TIMEOUT_MS'] = '300'; });
+  afterEach(() => {
+    if (prev === undefined) delete process.env['LYNOX_OPENAI_REQUEST_TIMEOUT_MS'];
+    else process.env['LYNOX_OPENAI_REQUEST_TIMEOUT_MS'] = prev;
+  });
+
+  it('aborts a connection that never sends response headers (silently-dropped socket)', async () => {
+    // Handler accepts the socket and never responds — the openai-wire fetch has no built-in
+    // timeout, so without the idle watchdog this hangs forever (the 2026-07-16 prod-shape hang).
+    const server = await createMockServer(() => { /* hang: never writeHead / end */ });
+    try {
+      const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'k', modelId: 'm' });
+      await expect(
+        collectEvents(adapter.beta.messages.stream({ model: 'm', max_tokens: 10, messages: [{ role: 'user', content: 'Hi' }] })),
+      ).rejects.toThrow(/timed out|no data/i);
+    } finally { server.close(); }
+  }, 5000);
+
+  it('aborts a stream that stalls mid-response (headers + one chunk, then silence)', async () => {
+    const server = await createMockServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(sseChunk({ id: 's', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hi' }, finish_reason: null }] }));
+      // then stall forever — no [DONE], no res.end()
+    });
+    try {
+      const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'k', modelId: 'm' });
+      await expect(
+        collectEvents(adapter.beta.messages.stream({ model: 'm', max_tokens: 10, messages: [{ role: 'user', content: 'Hi' }] })),
+      ).rejects.toThrow(/timed out|no data/i);
+    } finally { server.close(); }
+  }, 5000);
+
+  it('a caller-supplied signal still aborts (composition preserved)', async () => {
+    const server = await createMockServer(() => { /* hang */ });
+    try {
+      const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'k', modelId: 'm' });
+      const ac = new AbortController();
+      setTimeout(() => ac.abort(), 100);
+      await expect(
+        collectEvents(adapter.beta.messages.stream({ model: 'm', max_tokens: 10, messages: [{ role: 'user', content: 'Hi' }] }, { signal: ac.signal })),
+      ).rejects.toThrow();
+    } finally { server.close(); }
+  }, 5000);
 });

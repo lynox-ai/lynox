@@ -1,10 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import BetterSqlite3 from 'better-sqlite3';
 import { RunHistory, hashTask } from './run-history.js';
 import { EngineDb } from './engine-db.js';
+import { CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline-schema-migration.js';
 
 describe('RunHistory', () => {
   const tmpDirs: string[] = [];
@@ -33,6 +34,41 @@ describe('RunHistory', () => {
   it('creates database and schema', () => {
     const h = createHistory();
     expect(h).toBeDefined();
+    h.close();
+  });
+
+  it('fails LOUD on a migration error — never wipes the history DB as if corrupt', () => {
+    // Same class of fix as EngineDb: a migration throw must propagate (keep the
+    // file — it holds the run log, thread anchors + resumable prompts), NOT be
+    // mistaken for corruption and routed to rename-aside + recreate. Reproduce the
+    // non-idempotent fault: a v45-stamped DB whose threads table ALREADY carries
+    // v46's primary_subject_id column, so v46's `ALTER … ADD COLUMN` throws.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-migfail-'));
+    tmpDirs.push(dir);
+    const dbPath = join(dir, 'test.db');
+    const raw = new BetterSqlite3(dbPath);
+    raw.exec(`
+      CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+      INSERT INTO schema_version (version) VALUES (45);
+      CREATE TABLE threads (id TEXT PRIMARY KEY, primary_subject_id TEXT);
+    `);
+    raw.prepare('INSERT INTO threads (id) VALUES (?)').run('keep-me');
+    raw.close();
+
+    // The open THROWS (fail loud), rather than silently recreating.
+    expect(() => new RunHistory(dbPath)).toThrow(/duplicate column name: primary_subject_id/i);
+    // No .corrupt-* sidecar was minted — the original file was left in place…
+    expect(readdirSync(dir).some(f => f.startsWith('test.db.corrupt-'))).toBe(false);
+    // …and the real row survives, still stamped v45 (the v46 txn rolled back).
+    const check = new BetterSqlite3(dbPath);
+    expect(check.prepare("SELECT id FROM threads WHERE id = 'keep-me'").get()).toEqual({ id: 'keep-me' });
+    expect((check.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(45);
+    check.close();
+  });
+
+  it('sets a busy_timeout on the history connection', () => {
+    const h = createHistory();
+    expect(h.getDb().pragma('busy_timeout', { simple: true })).toBe(5000);
     h.close();
   });
 
@@ -526,6 +562,92 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('sweepStuckPipelineRuns flips orphaned running pipeline_runs to interrupted, leaving terminals untouched (2a/B4)', () => {
+    const h = createHistory();
+    h.insertPipelineRun({ id: 'crash', manifestName: 'wf', status: 'running', manifestJson: '{}' });
+    h.insertPipelineRun({ id: 'done', manifestName: 'wf', status: 'completed', manifestJson: '{}', totalCostUsd: 1 });
+    h.insertPipelineRun({ id: 'fail', manifestName: 'wf', status: 'failed', manifestJson: '{}' });
+    // A saved-workflow TEMPLATE lives in pipeline_runs as status='planned' — it
+    // must NEVER be swept (the false-positive class the WHERE clause guards).
+    h.insertPipelineRun({ id: 'tmpl', manifestName: 'wf', status: 'planned', manifestJson: '{}' });
+
+    const swept = h.sweepStuckPipelineRuns();
+    expect(swept).toBe(1); // only the crashed 'running' row
+    expect(h.getPipelineRun('crash')!.status).toBe('interrupted');
+    expect(h.getPipelineRun('done')!.status).toBe('completed'); // untouched
+    expect(h.getPipelineRun('fail')!.status).toBe('failed'); // untouched
+    // getPipelineRun filters out 'planned', so read it back raw to prove the
+    // template survived the sweep unchanged.
+    const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+    const tmpl = db.prepare("SELECT status FROM pipeline_runs WHERE id = 'tmpl'").get() as { status: string };
+    expect(tmpl.status).toBe('planned');
+
+    // Idempotent: 'interrupted' is terminal, a second sweep finds nothing.
+    expect(h.sweepStuckPipelineRuns()).toBe(0);
+    h.close();
+  });
+
+  it('a finalize AFTER the sweep wins — updatePipelineRun is unconditional-by-id (multi-process race)', () => {
+    const h = createHistory();
+    h.insertPipelineRun({ id: 'racer', manifestName: 'wf', status: 'running', manifestJson: '{}' });
+    // A boot sweep in one process marks it interrupted...
+    expect(h.sweepStuckPipelineRuns()).toBe(1);
+    expect(h.getPipelineRun('racer')!.status).toBe('interrupted');
+    // ...but the run was actually still finalizing in another process. The
+    // finalize is keyed by id with NO only-if-running guard, so it corrects the
+    // swept row back to its real terminal status (finalize must always win).
+    h.updatePipelineRun('racer', { status: 'completed', totalCostUsd: 2 });
+    expect(h.getPipelineRun('racer')!.status).toBe('completed');
+    h.close();
+  });
+
+  it('the sweep backfills an interrupted run\'s totals from its step rows, and the cost aggregate then counts it', () => {
+    const h = createHistory();
+    h.insertPipelineRun({ id: 'done', manifestName: 'wfX', status: 'completed', manifestJson: '{}', totalCostUsd: 1, stepCount: 1 });
+    // A crashed run: still 'running' with 0-default totals (its finalize never
+    // ran), but its as-completed step rows carry the REAL spend of the steps that
+    // finished before the crash.
+    h.insertPipelineRun({ id: 'crash', manifestName: 'wfX', status: 'running', manifestJson: '{}' });
+    h.insertPipelineStepResult({ pipelineRunId: 'crash', stepId: 's1', status: 'completed', costUsd: 0.3, tokensIn: 10, tokensOut: 20, durationMs: 5 });
+    h.insertPipelineStepResult({ pipelineRunId: 'crash', stepId: 's2', status: 'completed', costUsd: 0.2, tokensIn: 10, tokensOut: 20, durationMs: 5 });
+
+    expect(h.sweepStuckPipelineRuns()).toBe(1);
+    const crashed = h.getPipelineRun('crash')!;
+    expect(crashed.status).toBe('interrupted');
+    expect(crashed.step_count).toBe(2); // backfilled — not the misleading 0
+    expect(crashed.total_cost_usd).toBeCloseTo(0.5); // its REAL partial spend
+    expect(crashed.total_tokens_in).toBe(20);
+
+    // Its totals are now real, so it is a truthful sample and IS counted.
+    const wf = h.getPipelineCostStats(30).find(s => s.manifest_name === 'wfX');
+    expect(wf?.run_count).toBe(2);
+    h.close();
+  });
+
+  it('a gate-rejected run IS counted in the cost aggregate — its steps ran and cost money', () => {
+    const h = createHistory();
+    h.insertPipelineRun({ id: 'ok', manifestName: 'wfY', status: 'completed', manifestJson: '{}', totalCostUsd: 1, stepCount: 1 });
+    // 'rejected' is a TERMINAL status whose finalize recorded real totals (the
+    // gate rejects AFTER the steps ran). An allowlist of completed/failed silently
+    // dropped this run's real spend from the aggregate — the regression this guards.
+    h.insertPipelineRun({ id: 'gated', manifestName: 'wfY', status: 'rejected', manifestJson: '{}', totalCostUsd: 0.42, stepCount: 3 });
+
+    const wf = h.getPipelineCostStats(30).find(s => s.manifest_name === 'wfY');
+    expect(wf?.run_count).toBe(2);
+    expect(wf?.total_cost_usd).toBeCloseTo(1.42); // the rejected run's spend is not lost
+    h.close();
+  });
+
+  it('an in-flight run (0-placeholder totals) is still excluded from the cost aggregate', () => {
+    const h = createHistory();
+    h.insertPipelineRun({ id: 'done', manifestName: 'wfZ', status: 'completed', manifestJson: '{}', totalCostUsd: 2, stepCount: 1 });
+    h.insertPipelineRun({ id: 'live', manifestName: 'wfZ', status: 'running', manifestJson: '{}' });
+    const wf = h.getPipelineCostStats(30).find(s => s.manifest_name === 'wfZ');
+    expect(wf?.run_count).toBe(1); // the in-flight row has no real totals yet
+    expect(wf?.avg_cost_usd).toBe(2); // not diluted to 1
+    h.close();
+  });
+
   // === v4 Pre-approval audit ===
 
   it('v4 migration creates pre_approval_sets table', () => {
@@ -994,6 +1116,26 @@ describe('RunHistory', () => {
       const [row] = h.getPlannedPipelines(10);
       const parsed = JSON.parse(row!.manifest_json) as { template?: boolean };
       expect(parsed.template).toBe(true);
+      h.close();
+    });
+
+    it('Move 1: a natively-written blob carries the stamped content schema_version', () => {
+      // The write-side half of content versioning — insertPlannedPipeline stamps
+      // it on every native write. Guards against a silent drop of the stamp (which
+      // the migration, repairing only OLD rows, would never surface).
+      const h = createHistory();
+      insertPlanned(h, 'plan-ver', 'ver');
+      const [row] = h.getPlannedPipelines(10);
+      const parsed = JSON.parse(row!.manifest_json) as { schema_version?: number };
+      expect(parsed.schema_version).toBe(CURRENT_PIPELINE_SCHEMA_VERSION);
+      h.close();
+    });
+
+    it('Move 1: migrateWorkflowContentSchema is a no-op when the engine.db workflow store is inert', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-hist-noverb-'));
+      tmpDirs.push(dir);
+      const h = new RunHistory(join(dir, 'test.db')); // no setVerbGraph → store inert
+      expect(h.migrateWorkflowContentSchema()).toEqual({ scanned: 0, migrated: 0 });
       h.close();
     });
 
@@ -2239,6 +2381,8 @@ describe('RunHistory', () => {
         INSERT INTO schema_version (version) VALUES (41);
         -- a real v41 db has threads (created v22); v46 ALTERs it. Minimal stub — this test exercises the tasks split, not threads.
         CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+        -- a real v41 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
+        CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         INSERT INTO tasks (id, title, assignee, priority, due_date) VALUES ('m-todo','Pay invoice','user','high','2026-07-01');
         INSERT INTO tasks (id, title) VALUES ('m-todo-null','Loose note');
         INSERT INTO tasks (id, title, assignee, task_type, schedule_cron, next_run_at) VALUES ('m-cron','Digest','lynox','scheduled','0 9 * * *','2020-01-01T00:00:00.000Z');
@@ -2313,6 +2457,8 @@ describe('RunHistory', () => {
         INSERT INTO schema_version (version) VALUES (41);
         -- a real v41 db has threads (created v22); v46 ALTERs it. Minimal stub for the tasks-split test.
         CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+        -- a real v41 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
+        CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         -- a TRIGGER parent (scheduled) + a kept-TODO child pointing at it (cross-table)
         INSERT INTO tasks (id, title, assignee, task_type, schedule_cron, next_run_at) VALUES ('par-trig','Weekly job','lynox','scheduled','0 9 * * 1','2020-01-01T00:00:00.000Z');
         INSERT INTO tasks (id, title, assignee, parent_task_id) VALUES ('child-of-trig','Subtask','user','par-trig');
@@ -2394,6 +2540,8 @@ describe('RunHistory', () => {
         INSERT INTO schema_version (version) VALUES (42);
         -- a real v42 db has threads (created v22); v46 ALTERs it. Minimal stub for the v43 prompts-migration test.
         CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+        -- a real v41 db also has runs (created v1); v48 ALTERs it (trigger_origin). Minimal stub.
+        CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY);
         INSERT INTO pending_prompts (id, session_id, prompt_type, question, status, expires_at)
           VALUES ('old-1','s-old','ask_user','old q','pending','2099-01-01T00:00:00.000Z');
       `);
