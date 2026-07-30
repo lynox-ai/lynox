@@ -1971,9 +1971,14 @@ export class Session {
    *
    * ONE expression, called by both `_createAgent` and the run-snapshot mirror,
    * because "both call the same helpers" was not enough: the mirror had drifted
-   * to the wrong provider and a review found that reverting it broke no test.
-   * Agreement asserted by a test is agreement someone can edit away; agreement
-   * by construction is not.
+   * to the wrong provider.
+   *
+   * ⚠ This is a smaller guarantee than it looks. Sharing the expression removes
+   * the drift that comes from editing one site's ARGUMENTS; it does not stop
+   * someone replacing the call. A review verified that: re-introducing the exact
+   * pre-fix bug at the mirror still passes every test that touches the identity
+   * prompt. A Session-level test that records a snapshot under a hybrid tier set
+   * and compares it to the live prompt is owed — see the deferred register.
    */
   private _identityContext(
     tierSnap: ReturnType<typeof resolveTierModel>,

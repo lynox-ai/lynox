@@ -245,12 +245,18 @@ export interface TierModelInfo {
  * containing `//` can now render as something a reader takes for a URL; link
  * syntax is still stripped, so it cannot become a live link.
  *
- * The cap is generous because truncation is the SAME failure as stripping — a
- * mid-path cut yields a confidently-stated wrong id. Registered catalog ids run
- * to ~41 chars; a tenant's own `model_id` on a custom namespace can be longer.
+ * Over-long ids are DROPPED, not truncated. Truncation is the same failure as
+ * stripping a character — a mid-path cut yields a confidently-stated wrong id —
+ * so a cap that truncates only moves the lie to a longer input. Returning empty
+ * is the honest outcome and the one the callers already handle: `if (!selfId)
+ * return ''` omits the identity sentence, and the tier map filters the line.
+ * Saying nothing beats saying something false. The bound still exists so an
+ * adversarial id cannot pad the prompt; 128 clears real ids by 3x (registered
+ * catalog ids run to ~41 chars, e.g. `accounts/fireworks/models/deepseek-v4-pro`).
  */
 export function safeModelId(id: string | undefined | null): string {
-  return String(id ?? '').replace(/[^a-zA-Z0-9._:@/-]/g, '').slice(0, 128);
+  const stripped = String(id ?? '').replace(/[^a-zA-Z0-9._:@/-]/g, '');
+  return stripped.length > 128 ? '' : stripped;
 }
 
 export function modelIdentityContext(

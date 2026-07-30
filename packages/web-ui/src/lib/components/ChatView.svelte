@@ -2067,8 +2067,7 @@
 						<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{#if part.title}<span
 								class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
 								title={part.title}
-								aria-label={part.title}
-							>{part.text}</span>{:else}<span class="shrink-0">{part.text}</span>{/if}
+							>{part.text}</span><span class="sr-only">{part.title}</span>{:else}<span class="shrink-0">{part.text}</span>{/if}
 					{/each}
 				{/if}
 		{#if isLast && ctxBudget}

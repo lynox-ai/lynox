@@ -366,18 +366,19 @@ describe('modelIdentityContext sanitization (prompt-injection guard)', () => {
     expect(out).not.toContain('ignore safety');
   });
 
-  it('caps modelId length at 128 chars (DoS-bound)', () => {
-    // Was 64. Raised because truncation is the SAME failure mode as stripping a
-    // character: the identity block orders the agent to state exactly the id it
-    // is given, so a mid-path cut of a hosted-inference id
-    // (`accounts/<tenant-namespace>/models/<model>`) yields a wrong id stated
-    // with authority. The bound exists to keep the prompt finite, and 128 is
-    // finite — real ids run to ~41 chars registered, longer on a tenant's own
-    // namespace. See `safeModelId`.
+  it('DROPS an over-long modelId rather than truncating it', () => {
+    // Was a 64-char truncation. Truncating is the same failure as stripping a
+    // character — a mid-path cut of `accounts/<namespace>/models/<model>` yields
+    // a wrong id, and the identity block orders the agent to state exactly what
+    // it is given. Raising the cap only moved that lie to a longer input, so the
+    // block now omits the id entirely. Saying nothing beats saying something false.
     const long = 'x'.repeat(500);
     const out = modelIdentityContext('openai', long);
-    expect(out.includes('x'.repeat(129))).toBe(false);
-    expect(out.includes('x'.repeat(128))).toBe(true);
+    expect(out).toBe('');
+    expect(safeModelId(long)).toBe('');
+    // Exactly at the bound is still stated.
+    expect(safeModelId('x'.repeat(128))).toHaveLength(128);
+    expect(safeModelId('x'.repeat(129))).toBe('');
   });
 
   it('returns empty string when sanitization strips the entire modelId', () => {
@@ -686,12 +687,12 @@ describe('safeModelId — the one sanitiser all three prompt writers share', () 
     expect(safeModelId('meta-llama/Llama-3.3-70B@together')).toBe('meta-llama/Llama-3.3-70B@together');
   });
 
-  it('does NOT truncate a long path-shaped id mid-path', () => {
-    // Truncation is the same failure as stripping: a mid-path cut yields a
-    // confidently-stated wrong id, because the identity block orders the agent
-    // to state exactly what it is given. 64 chars cut this one; 128 does not.
+  it('keeps a long-but-plausible path-shaped id whole', () => {
+    // 64 chars cut this one mid-path; the bound now clears it. Beyond the bound
+    // the id is dropped rather than cut — see the DoS-bound test.
     const long = 'accounts/some-rather-long-tenant-namespace/models/qwen-3-235b-instruct';
     expect(long.length).toBeGreaterThan(64);
+    expect(long.length).toBeLessThanOrEqual(128);
     expect(safeModelId(long)).toBe(long);
   });
 
