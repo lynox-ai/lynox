@@ -8,7 +8,10 @@ import {
 	applyChildDone,
 	parseAnnouncedSubAgents,
 	batchTotals,
+	foldToolRows,
+	worstStatus,
 	type AttributionState,
+	type ToolCallInfo,
 } from './chat-attribution.js';
 
 /**
@@ -463,5 +466,81 @@ describe('a turn without sub-agents', () => {
 			{ type: 'text', text: 'Kurz geprüft.' },
 			{ type: 'tool_call', index: 0 },
 		]);
+	});
+});
+
+describe('foldToolRows', () => {
+	const call = (name: string, status: ToolCallInfo['status'] = 'done'): ToolCallInfo =>
+		({ name, input: {}, status });
+	// Label by tool name, subject = the call's index-free identity, so a fixture can
+	// produce same-action-different-subject and same-action-same-subject runs.
+	const labelBy = (subjects: string[]) => {
+		let i = 0;
+		return (tc: ToolCallInfo) => ({ action: tc.name, subject: subjects[i++] ?? '' });
+	};
+
+	it('folds a long run of one action into a single row with merged subjects', () => {
+		// The regression this exists for: forty reads rendered as forty rows in the
+		// sub-agent panel while the identical calls folded into one in the parent.
+		const calls = Array.from({ length: 40 }, (_, n) => call('read_file'));
+		const subjects = Array.from({ length: 40 }, (_, n) => `f${n}.ts`);
+
+		const rows = foldToolRows(calls, labelBy(subjects));
+
+		expect(rows).toHaveLength(1);
+		expect(rows[0]!.subjects).toHaveLength(40);
+		expect(rows[0]!.action).toBe('read_file');
+	});
+
+	it('dedups a repeated subject instead of listing it twice', () => {
+		const rows = foldToolRows([call('read_file'), call('read_file')], labelBy(['a.ts', 'a.ts']));
+		expect(rows[0]!.subjects).toEqual(['a.ts']);
+	});
+
+	it('starts a new row when the action changes, and folds back after it', () => {
+		const rows = foldToolRows(
+			[call('read_file'), call('bash'), call('read_file')],
+			labelBy(['a.ts', 'ls', 'b.ts']),
+		);
+		expect(rows.map((r) => r.action)).toEqual(['read_file', 'bash', 'read_file']);
+	});
+
+	it('lets one error or one running call dominate the row it folded into', () => {
+		// A folded row must not report `done` while a member is still running or
+		// failed — that is the whole reason the status is ranked rather than
+		// last-write-wins. Both orderings, so a reducer that only escalates forward
+		// fails the second case.
+		const errLast = foldToolRows([call('read_file'), call('read_file', 'error')], labelBy(['a', 'b']));
+		expect(errLast[0]!.status).toBe('error');
+		const errFirst = foldToolRows([call('read_file', 'error'), call('read_file')], labelBy(['a', 'b']));
+		expect(errFirst[0]!.status).toBe('error');
+		const running = foldToolRows([call('read_file'), call('read_file', 'running')], labelBy(['a', 'b']));
+		expect(running[0]!.status).toBe('running');
+	});
+
+	it('folds across a hidden call rather than being split by it', () => {
+		// A labeller returning null hides the call. The neighbours are still the same
+		// action, so they must end up in ONE row — a fold that treats the hidden call
+		// as a boundary would emit two, which is what the parent transcript does not do.
+		let n = 0;
+		const rows = foldToolRows(
+			[call('read_file'), call('internal_thing'), call('read_file')],
+			(tc) => {
+				n++;
+				return tc.name === 'internal_thing' ? null : { action: 'read_file', subject: `s${n}` };
+			},
+		);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]!.subjects).toEqual(['s1', 's3']);
+	});
+});
+
+describe('worstStatus', () => {
+	it('ranks error over running over done, in both argument orders', () => {
+		expect(worstStatus('done', 'running')).toBe('running');
+		expect(worstStatus('running', 'done')).toBe('running');
+		expect(worstStatus('running', 'error')).toBe('error');
+		expect(worstStatus('error', 'running')).toBe('error');
+		expect(worstStatus('done', 'done')).toBe('done');
 	});
 });

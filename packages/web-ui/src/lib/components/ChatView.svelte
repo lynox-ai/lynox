@@ -70,7 +70,7 @@
 	import { getApiBase, getDemoMode } from '../config.svelte.js';
 	import { isDiagnosticsEnabled } from '../stores/diagnostics.svelte.js';
 	import { formatTurnTokens, formatUsageMetaParts } from '../stores/chat-usage.js';
-	import { batchTotals } from '../stores/chat-attribution.js';
+	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
 	import { formatCost } from '../format.js';
 	import { scrollFade } from '../utils/scroll-fade.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
@@ -541,10 +541,9 @@
 	// done. Encoding it as a numeric rank keeps the rule explicit and makes
 	// the reducer below symmetric ("which member is worst?") rather than a
 	// chain of escalation-only branches.
-	const TOOL_STATUS_RANK: Record<ToolCallInfo['status'], number> = { done: 0, running: 1, error: 2 };
-	function worstStatus(a: ToolCallInfo['status'], b: ToolCallInfo['status']): ToolCallInfo['status'] {
-		return TOOL_STATUS_RANK[a] >= TOOL_STATUS_RANK[b] ? a : b;
-	}
+	// `worstStatus` and the rank table it reads now live in `chat-attribution.ts`
+	// beside `foldToolRows`, which both the parent transcript and the sub-agent
+	// panel fold with. Two copies of "which status wins" is one copy too many.
 
 	/** Group consecutive tool calls with same action, extract plan + step blocks */
 	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): GroupedBlock[] {
@@ -2057,6 +2056,12 @@
 
 			{#each children as child (child.id)}
 				{@const isRunning = child.status === 'running'}
+				<!-- Folded with the SAME reducer the parent transcript uses
+				     (`foldToolRows`): consecutive same-action calls collapse into one
+				     row with merged subjects. Before that, a child that read forty
+				     files rendered forty rows here, where the identical forty calls
+				     used to fold into one in the parent's list. -->
+				{@const childRows = foldToolRows(child.toolCalls, toolCallLabel)}
 				<div class="mt-1">
 					<div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
 						{#if isRunning}
@@ -2097,19 +2102,16 @@
 					     `makeChildStream` forwards tool_call/tool_result and swallows the
 					     child's text and thinking, so this is deliberately a list of
 					     actions, not a transcript. -->
-					{#if child.toolCalls.length > 0}
+					{#if childRows.length > 0}
 						<ul class="ml-3 mt-0.5 border-l border-border pl-2 space-y-0.5">
-							{#each child.toolCalls as tc, tcIdx (tcIdx)}
-								{@const label = toolCallLabel(tc)}
-								{#if label}
-									<li class="flex items-center gap-1.5 text-text-subtle/70">
-										<span
-											class="shrink-0 {tc.status === 'error' ? 'text-danger' : tc.status === 'running' ? 'text-warning' : 'text-text-subtle/40'}"
-											aria-hidden="true"
-										>{tc.status === 'running' ? '…' : tc.status === 'error' ? '✗' : '·'}</span>
-										<span class="truncate">{label.action}{label.subject ? ': ' + label.subject : ''}</span>
-									</li>
-								{/if}
+							{#each childRows as row, rowIdx (rowIdx)}
+								<li class="flex items-center gap-1.5 text-text-subtle/70">
+									<span
+										class="shrink-0 {row.status === 'error' ? 'text-danger' : row.status === 'running' ? 'text-warning' : 'text-text-subtle/40'}"
+										aria-hidden="true"
+									>{row.status === 'running' ? '…' : row.status === 'error' ? '✗' : '·'}</span>
+									<span class="truncate">{row.action}{row.subjects.length > 0 ? ': ' + row.subjects.join(', ') : ''}</span>
+								</li>
 							{/each}
 						</ul>
 					{:else if isRunning}

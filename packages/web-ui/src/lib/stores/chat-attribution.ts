@@ -347,3 +347,60 @@ export function batchTotals(state: AttributionState, spawnId: string): {
 			: Math.max(...children.map((c) => c.elapsedS ?? 0)),
 	};
 }
+
+// ── Tool-row folding ────────────────────────────────────────────────────────
+
+/**
+ * `error` beats `running` beats `done`, so a folded row shows the worst state of
+ * its members. Ranked rather than branched so the reducer is symmetric ("which of
+ * these two is worse?") instead of a chain of escalation-only ifs.
+ */
+const TOOL_STATUS_RANK: Record<ToolCallInfo['status'], number> = { done: 0, running: 1, error: 2 };
+
+export function worstStatus(a: ToolCallInfo['status'], b: ToolCallInfo['status']): ToolCallInfo['status'] {
+	return TOOL_STATUS_RANK[a] >= TOOL_STATUS_RANK[b] ? a : b;
+}
+
+/** One rendered row: consecutive calls of the same action, their subjects merged. */
+export interface ToolRow {
+	action: string;
+	subjects: string[];
+	status: ToolCallInfo['status'];
+}
+
+/**
+ * Fold a flat run of tool calls into rows — consecutive same-action calls become
+ * one row with deduped subjects.
+ *
+ * WHY THIS IS HERE AND NOT IN THE COMPONENT. The parent transcript has folded its
+ * tool calls since long before sub-agents existed: forty `read_file` calls render
+ * as one "Datei gelesen: a, b, c…" row. When child activity moved out of
+ * `msg.toolCalls` and into its own panel, it lost that — the panel emitted one
+ * `<li>` per call, so a `researcher` child that reads forty files turned a
+ * delegation into the longest thing in the transcript. Same data, same intent, so
+ * the same fold, and it lives in the tested module rather than in the template
+ * where a deleted branch is invisible to CI.
+ *
+ * `labelOf` is injected because label resolution needs the i18n `t` the component
+ * owns. A call the labeller hides (returns null) is dropped from the rows, which
+ * is the parent's behaviour too — a hidden call must not break a fold across it,
+ * so the neighbours on either side still merge.
+ */
+export function foldToolRows(
+	calls: readonly ToolCallInfo[],
+	labelOf: (tc: ToolCallInfo) => { action: string; subject: string } | null,
+): ToolRow[] {
+	const rows: ToolRow[] = [];
+	for (const tc of calls) {
+		const label = labelOf(tc);
+		if (!label) continue;
+		const last = rows[rows.length - 1];
+		if (last && last.action === label.action) {
+			if (label.subject && !last.subjects.includes(label.subject)) last.subjects.push(label.subject);
+			last.status = worstStatus(last.status, tc.status);
+		} else {
+			rows.push({ action: label.action, subjects: label.subject ? [label.subject] : [], status: tc.status });
+		}
+	}
+	return rows;
+}

@@ -144,6 +144,11 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
 // === Tests ===
 
 describe('spawn_agent tool', () => {
+  /** Every event the handler streamed, in order. */
+  function streamEvents(onStream: ReturnType<typeof vi.fn>): Array<Record<string, unknown>> {
+    return onStream.mock.calls.map((c) => c[0] as Record<string, unknown>);
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockSend.mockResolvedValue('sub-agent result');
@@ -233,6 +238,62 @@ describe('spawn_agent tool', () => {
     } finally {
       vi.unstubAllEnvs();
       reloadConfig(); // drop the blocklist-bearing cache for sibling tests
+    }
+  });
+
+  it('announces NOTHING when the profile is refused — no model id reaches the UI', async () => {
+    // The refusal above proves the child does not run. It does NOT prove the UI
+    // was never told it would: the `spawn` event used to be streamed BEFORE the
+    // ceiling/blocklist checks ran, so the panel rendered `worker ·
+    // claude-fable-5` as "the model it runs on" and only then errored. A UI that
+    // names a model the run refuses is the third wrong answer the shared
+    // resolution exists to prevent, so assert on the wire, not on the throw.
+    const { reloadConfig } = await import('../../core/config.js');
+    vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+      pinned: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'claude-fable-5' },
+    }));
+    vi.stubEnv('LYNOX_BLOCKED_MODEL_IDS', 'claude-fable-');
+    reloadConfig();
+    try {
+      const onStream = vi.fn();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'worker', task: 'Analyze', profile: 'pinned' }] },
+          makeAgent({ onStream: onStream as StreamHandler }),
+        ),
+      ).rejects.toThrow(/model blocklist/);
+
+      expect(streamEvents(onStream).filter((e) => e['type'] === 'spawn')).toHaveLength(0);
+      expect(JSON.stringify(streamEvents(onStream))).not.toContain('claude-fable-5');
+    } finally {
+      vi.unstubAllEnvs();
+      reloadConfig();
+    }
+  });
+
+  it('refuses the WHOLE batch when only the second spec is impermissible', async () => {
+    // Reserve-and-announce is one step for the batch, so a per-spec refusal after
+    // the announcement would leave a half-announced batch on screen with one
+    // child that never starts. Nothing may be announced.
+    const { reloadConfig } = await import('../../core/config.js');
+    vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+      pinned: { provider: 'openai', api_base_url: 'https://api.mistral.ai/v1', api_key: 'k', model_id: 'claude-fable-5' },
+    }));
+    vi.stubEnv('LYNOX_BLOCKED_MODEL_IDS', 'claude-fable-');
+    reloadConfig();
+    try {
+      const onStream = vi.fn();
+      await expect(
+        spawnAgentTool.handler(
+          { agents: [{ name: 'ok', task: 'A' }, { name: 'bad', task: 'B', profile: 'pinned' }] },
+          makeAgent({ onStream: onStream as StreamHandler }),
+        ),
+      ).rejects.toThrow(/model blocklist/);
+
+      expect(streamEvents(onStream).filter((e) => e['type'] === 'spawn')).toHaveLength(0);
+    } finally {
+      vi.unstubAllEnvs();
+      reloadConfig();
     }
   });
 
@@ -475,10 +536,6 @@ describe('spawn_agent tool', () => {
    * that make the attribution exact.
    */
   describe('batch + child identity', () => {
-    function streamEvents(onStream: ReturnType<typeof vi.fn>): Array<Record<string, unknown>> {
-      return onStream.mock.calls.map((c) => c[0] as Record<string, unknown>);
-    }
-
     it('gives two children sharing a name distinct ids', async () => {
       const onStream = vi.fn();
       await spawnAgentTool.handler(

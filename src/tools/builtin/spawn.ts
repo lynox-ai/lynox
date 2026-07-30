@@ -843,6 +843,12 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     // ceiling was charged for.
     const subAgents: SpawnedSubAgent[] = [];
     let totalEstimate = 0;
+    // Refuse BEFORE announcing, not after. `executeThinker` used to own these
+    // checks, and it runs after the `spawn` event is already on the wire — so a
+    // ceiling-exceeding or blocked profile was announced with its model id and
+    // only then refused. A whole batch is refused if any one spec is: the reserve
+    // + announce step is atomic, and half-announcing is worse than not starting.
+    input.agents.forEach((spec) => { assertSpawnRoutingPermitted(spec, cfg); });
     input.agents.forEach((spec, i) => {
       const { model } = resolveSpawnChildRouting({
         spec,
