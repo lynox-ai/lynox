@@ -26,6 +26,8 @@ import type { MailConnectPromptData } from '../../../types/index.js';
 import { configureMailRateLimits, resetMailRateLimits } from './rate-limit.js';
 import type { MailContext, MailAccountView } from '../context.js';
 import type { MailAccountConfig } from '../provider.js';
+import { flattenPrompt } from '../../../core/prompt-value.js';
+import type { PromptText } from '../../../types/index.js';
 
 /** Minimal MailContext stub for type-aware tool tests. */
 function makeStubContext(accounts: ReadonlyArray<MailAccountConfig>): MailContext {
@@ -354,6 +356,49 @@ describe('mail_send tool', () => {
 // ── mail_reply ─────────────────────────────────────────────────────────────
 
 describe('mail_reply tool', () => {
+  // Reply shares mail_send's body block: the confirmation must state an
+  // oversized body's real size rather than ending in a bare "…". Reply is the
+  // likelier injection path — the untrusted inbound mail is already in context.
+  it('states the real body size in the confirmation when the body is oversized', async () => {
+    const orig = envelope(77, { messageId: '<orig@x>', from: 'alice@example.com', subject: 'Report' });
+    provider.fetch.mockResolvedValue({
+      envelope: orig, text: 'Original.', html: undefined, attachments: [],
+      inReplyTo: undefined, references: undefined,
+    });
+    provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: ['alice@example.com'], rejected: [] });
+    const tool = createMailReplyTool(registry);
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    const body = `Sure, sending it over now.\n\n${'RECORD;'.repeat(2000)}`;
+    await tool.handler({ uid: 77, body }, agent);
+    const flatLen = body.replace(/\s+/g, ' ').trim().length;
+    expect(prompt).toContain(`Body is ${String(flatLen)} chars`);
+    expect(prompt).toContain('only the first 199 are shown');
+  });
+
+  // The reply confirmation renders the REMOTE sender's subject, and the prompt
+  // is markdown-rendered in the web UI. A newline there opens a block-level
+  // HTML comment that swallows the recipients, the body quote and the oversize
+  // warning, leaving a blank prompt to approve. The subject must stay one line.
+  it('keeps a remote sender newline in the subject from swallowing the prompt', async () => {
+    const orig = envelope(78, {
+      messageId: '<orig@x>',
+      from: 'attacker@example.com',
+      subject: 'Invoice\n\n<!--',
+    });
+    provider.fetch.mockResolvedValue({
+      envelope: orig, text: 'Original.', html: undefined, attachments: [],
+      inReplyTo: undefined, references: undefined,
+    });
+    provider.send.mockResolvedValue({ messageId: '<r@x>', accepted: ['attacker@example.com'], rejected: [] });
+    const tool = createMailReplyTool(registry);
+    let prompt = '';
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
+    await tool.handler({ uid: 78, body: 'q'.repeat(400) }, agent);
+    expect(prompt).toContain('Body is 400 chars');
+    expect(prompt.split('\n').some((l) => l.trimStart().startsWith('<!--'))).toBe(false);
+  });
+
   it('blocks reply bodies that contain credentials', async () => {
     const orig = envelope(50, { messageId: '<orig@x>', from: 'alice@example.com', subject: 'API question' });
     provider.fetch.mockResolvedValue({
@@ -650,7 +695,7 @@ describe('mail_send — mass-send guard', () => {
 
     const tool = createMailSendTool(registry, ctx);
     let receivedPrompt = '';
-    const agent: IAgent = { promptUser: async (q: string) => { receivedPrompt = q; return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { receivedPrompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
     await tool.handler({
       to: 'a@x.com, b@x.com, c@x.com',
       subject: 's',
@@ -665,7 +710,7 @@ describe('mail_send — mass-send guard', () => {
     provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
     const tool = createMailSendTool(registry);
     let receivedPrompt = '';
-    const agent: IAgent = { promptUser: async (q: string) => { receivedPrompt = q; return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { receivedPrompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
     await tool.handler({
       to: 'a@x.com, b@x.com, c@x.com, d@x.com, e@x.com, f@x.com',
       subject: 's',
@@ -681,7 +726,7 @@ describe('mail_send — mass-send guard', () => {
     provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
     const tool = createMailSendTool(registry);
     let receivedPrompt = '';
-    const agent: IAgent = { promptUser: async (q: string) => { receivedPrompt = q; return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { receivedPrompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
     await tool.handler({
       to: 'a@x.com, a@x.com, b@x.com',
       cc: 'a@x.com',
@@ -820,7 +865,7 @@ describe('mail_send — mass-send cross-field counting', () => {
     provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
     const tool = createMailSendTool(registry);
     let receivedPrompt = '';
-    const agent: IAgent = { promptUser: async (q: string) => { receivedPrompt = q; return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { receivedPrompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
     await tool.handler({
       to: 'a@x.com, b@x.com',
       cc: 'c@x.com, d@x.com',
@@ -865,7 +910,7 @@ describe('mail_send — persona hint in confirmation prompt', () => {
     provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
     const tool = createMailSendTool(registry, ctx);
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string) => { prompt = q; return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
     await tool.handler({ to: 'bob@example.com', subject: 's', body: 'b' }, agent);
     expect(prompt).toContain('Professional');
   });
@@ -879,7 +924,7 @@ describe('mail_send — persona hint in confirmation prompt', () => {
     provider.send.mockResolvedValue({ messageId: '<m@x>', accepted: [], rejected: [] });
     const tool = createMailSendTool(registry, ctx);
     let prompt = '';
-    const agent: IAgent = { promptUser: async (q: string) => { prompt = q; return 'Yes'; } } as unknown as IAgent;
+    const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
     await tool.handler({ to: 'bob@example.com', subject: 's', body: 'b' }, agent);
     expect(prompt).toContain('Captain Marvel');
   });

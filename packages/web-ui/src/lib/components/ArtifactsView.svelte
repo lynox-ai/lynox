@@ -16,6 +16,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { printHtmlDocument, printMarkdownDocument } from '../utils/artifact-print.js';
 	import { injectArtifactPreview as injectArtifactFit } from '../utils/artifact-frame.js';
+	import { saveOrShareBlob } from '../utils/save-blob.js';
 
 	let selected = $state<Artifact | null>(null);
 	// True when `selected` was opened via the chat deep-link (?id=…) — drives
@@ -167,13 +168,12 @@
 		return 'txt'; // text + unknown
 	}
 
+	// iOS/Android → the native share sheet ("Save to Files"/"Save to Drive"); a raw
+	// <a download> is a dead click on iOS. Desktop → direct download. Same helper +
+	// behaviour as the inline artifact pill's share, so the two views are coherent.
 	function exportArtifact(a: Artifact) {
-		const blob = new Blob([a.content], { type: mimeFor(a.type) });
-		const link = document.createElement('a');
-		link.href = URL.createObjectURL(blob);
-		link.download = `${a.title.replace(/\s+/g, '-').toLowerCase()}.${extensionFor(a.type)}`;
-		link.click();
-		URL.revokeObjectURL(link.href);
+		const filename = `${a.title.replace(/\s+/g, '-').toLowerCase()}.${extensionFor(a.type)}`;
+		void saveOrShareBlob(new Blob([a.content], { type: mimeFor(a.type) }), filename);
 	}
 
 	/** Save as PDF via the browser print pipeline — same path as the inline
@@ -288,10 +288,10 @@
 			{#if selected.type === 'html' || selected.type === 'markdown'}
 				<!-- Print = selectable PDF on desktop; hidden on mobile where iOS
 				     blocks auto-print (a real mobile PDF download is a server-side
-				     follow-up). Mobile keeps "Datei" (raw download). -->
+				     follow-up). Mobile keeps "Teilen" (share sheet → Save to Files). -->
 				<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1 hidden sm:inline-block" onclick={() => handlePrint(selected!)}>{t('artifacts.print')}</button>
 			{/if}
-			<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => exportArtifact(selected!)}>{t('artifacts.download_file')}</button>
+			<button type="button" class="text-xs text-text-muted hover:text-text border border-border rounded-[var(--radius-sm)] px-3 py-1" onclick={() => exportArtifact(selected!)}>{t('artifacts.share')}</button>
 		</div>
 
 		<!-- Artifact content -->

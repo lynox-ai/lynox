@@ -3,7 +3,7 @@
  * Phase 0 spike: evaluate Mistral Voxtral on German business speech with
  * Anglicisms.
  *
- * See pro/docs/internal/prd/voice-transcription-v2.md (Phase 0).
+ * Part of an internal voice-transcription design review (Phase 0).
  *
  * Models tested per clip (both EU-hosted, Mistral La Plateforme / Paris):
  *   - mistral/voxtral-mini-2602       (transcribe-optimized, primary candidate)
@@ -94,7 +94,7 @@ const CLIPS: readonly Clip[] = [
     file: 'spike-08.webm',
     category: 'DE + names + numbers ~30s',
     expected:
-      'Der Roland hat mir geschrieben, sein Dashboard zeigt seit Freitag falsche Zahlen an. Ich glaub das hängt mit dem letzten Release zusammen, Version eins Punkt null Punkt fünf. Kannst du dir mal die Logs anschauen auf dem Server? Die Instanz heisst war Punkt lynox Punkt cloud.',
+      'Der Thomas hat mir geschrieben, sein Dashboard zeigt seit Freitag falsche Zahlen an. Ich glaub das hängt mit dem letzten Release zusammen, Version eins Punkt null Punkt fünf. Kannst du dir mal die Logs anschauen auf dem Server? Die Instanz heisst demo Punkt example Punkt com.',
   },
   {
     id: '09',

@@ -15,7 +15,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import type { TabQuestion, SecretOutcome } from '../types/index.js';
+import type { PromptSegment, TabQuestion, SecretOutcome } from '../types/index.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -29,6 +29,9 @@ export interface PendingPromptRow {
   question: string;
   options_json: string | null;
   questions_json: string | null;
+  /** Frame/value segments (v51). NULL = all frame, i.e. every prompt from
+   *  before the split and every caller still passing a plain string. */
+  segments_json: string | null;
   partial_answers_json: string | null;
   secret_name: string | null;
   secret_key_type: string | null;
@@ -63,6 +66,28 @@ export type PromptOutcome =
   | { status: 'answered'; row: PendingPromptRow }
   | { status: 'expired' }
   | { status: 'aborted' };
+
+/**
+ * Is this payload the engine-posed onboarding card?
+ *
+ * Parsed, not substring-matched. `payload_json` is caller-supplied on
+ * `insertConnectMail`, so a `.includes('onboarding_basics')` would misread an
+ * account id or folder name that merely contains those characters — and it must
+ * agree with the `json_extract(... '$.kind')` the SQL uses, or the two halves of
+ * the same rule can disagree. Malformed JSON is not an onboarding card.
+ */
+function isOnboardingBasicsPayload(payloadJson: string | null): boolean {
+  if (payloadJson === null) return false;
+  try {
+    const parsed: unknown = JSON.parse(payloadJson);
+    return (
+      typeof parsed === 'object' && parsed !== null &&
+      (parsed as { kind?: unknown }).kind === 'onboarding_basics'
+    );
+  } catch {
+    return false;
+  }
+}
 
 export class PromptConflictError extends Error {
   constructor(sessionId: string) {
@@ -108,13 +133,22 @@ export class PromptStore {
   /** Insert a single-question ask_user prompt. Throws PromptConflictError if
    * this session already has a pending prompt. `multiSelect` persists the
    * multi-select-pills opt-in so a reconnect can restore it (v33). */
-  insertAskUser(sessionId: string, question: string, options?: string[], multiSelect?: boolean): string {
+  insertAskUser(
+    sessionId: string,
+    question: string,
+    options?: string[],
+    multiSelect?: boolean,
+    segments?: readonly PromptSegment[],
+  ): string {
     return this._insert({
       sessionId,
       promptType: 'ask_user',
       question,
       optionsJson: options ? JSON.stringify(options) : null,
       questionsJson: null,
+      // Only stored when there is a distinction to preserve — an all-frame
+      // prompt is exactly what NULL already means.
+      segmentsJson: segments?.some((s) => s.kind === 'value') ? JSON.stringify(segments) : null,
       secretName: null,
       secretKeyType: null,
       multiSelect: multiSelect === true,
@@ -173,17 +207,40 @@ export class PromptStore {
     });
   }
 
+  /** Insert the engine-posed Step-0 onboarding-basics prompt (Onboarding Wave 1,
+   * D9v2). Tabs-shaped (so the existing /reply-tabs answers it), but `payload_json`
+   * carries the engine-only marker `{kind:'onboarding_basics', keys}`. That marker is
+   * the promote-path SECURITY DISCRIMINATOR: a model-composed ask_user/tabs prompt has
+   * `payload_json` NULL, so it can never be promoted to `user_asserted` via the
+   * onboarding path — only a prompt this method inserted qualifies. `keys` maps each
+   * answer slot to its catalog key. Throws PromptConflictError on collision. */
+  insertOnboardingBasics(sessionId: string, questions: TabQuestion[], keys: string[]): string {
+    if (questions.length === 0) throw new Error('insertOnboardingBasics: questions must be non-empty');
+    return this._insert({
+      sessionId,
+      promptType: 'ask_user',
+      question: questions[0]!.question,
+      optionsJson: null,
+      questionsJson: JSON.stringify(questions),
+      secretName: null,
+      secretKeyType: null,
+      multiSelect: false,
+      payloadJson: JSON.stringify({ kind: 'onboarding_basics', keys }),
+    });
+  }
+
   private _insert(args: {
     sessionId: string;
     promptType: PromptType;
     question: string;
     optionsJson: string | null;
     questionsJson: string | null;
+    segmentsJson?: string | null;
     secretName: string | null;
     secretKeyType: string | null;
     multiSelect: boolean;
     payloadJson: string | null;
-  }): string {
+  }, retry = false): string {
     const id = randomUUID();
     const expiresAt = new Date(Date.now() + PROMPT_TTL_MS).toISOString();
     try {
@@ -194,6 +251,7 @@ export class PromptStore {
         args.question,
         args.optionsJson,
         args.questionsJson,
+        args.segmentsJson ?? null,
         args.secretName,
         args.secretKeyType,
         null, // answer
@@ -206,11 +264,64 @@ export class PromptStore {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('UNIQUE') || msg.includes('unique')) {
+        // An ABANDONED onboarding card must not wedge the session for 24h.
+        //
+        // The Step-0 basics prompt is written by the UI, not by a run, and the
+        // UI settles it only on SAVE (`/reply-tabs`). Its three other exits —
+        // the "Skip — just start chatting" button and both fail-open error
+        // paths in OnboardingBasics — return without telling the server
+        // anything, and a closed tab does not either. The row then sits
+        // `pending` for the full TTL, and because the per-session UNIQUE index
+        // covers exactly that, EVERY later ask_user / ask_secret on the session
+        // threw. It was invisible too: the pending endpoint reports
+        // `onboarding_basics` as `pending: false`, so the client showed no
+        // prompt while the row blocked the thread.
+        //
+        // An agent prompt therefore supersedes it. This is deliberately not
+        // symmetric: an onboarding card never displaces an agent prompt (the
+        // recursion guard below), because the agent's question is the one a run
+        // is blocked on. Expired rather than deleted, so the row is still
+        // there to explain what happened.
+        // Retry ONCE. The expire below is a separate statement from the insert
+        // that follows it, so "I just cleared the lock" is not a guarantee that
+        // the retry gets it — and if the retry can itself supersede, the depth
+        // is governed by whatever else is writing, not by this function. One
+        // retry is all the fix needs: the card it clears is the only thing it
+        // claims to clear.
+        if (!retry && !isOnboardingBasicsPayload(args.payloadJson)) {
+          const superseded = this._expireAbandonedOnboardingBasics(args.sessionId);
+          if (superseded) return this._insert(args, true);
+        }
         throw new PromptConflictError(args.sessionId);
       }
       throw err;
     }
     return id;
+  }
+
+  /**
+   * Expire a pending `onboarding_basics` row for this session, if that is what
+   * is holding the per-session lock. Returns whether one was expired — so the
+   * caller retries ONCE and, if something else holds the lock, still conflicts.
+   */
+  private _expireAbandonedOnboardingBasics(sessionId: string): boolean {
+    const result = this.db
+      .prepare(
+        // `json_valid` first: `json_extract` THROWS on malformed JSON, and this
+        // runs inside the UNIQUE-conflict catch — so a bad row would replace a
+        // PromptConflictError with a raw SQLite error escaping through it. Every
+        // caller stringifies today, which makes it latent rather than fine.
+        // `status = 'pending'` is load-bearing, not tidiness: without it an
+        // ANSWERED card gets flipped to expired, and `/promote` then refuses it
+        // with "Prompt not answered yet" — the basics the user typed never reach
+        // durable knowledge.
+        `UPDATE pending_prompts SET status = 'expired'
+          WHERE session_id = ? AND status = 'pending'
+            AND json_valid(payload_json)
+            AND json_extract(payload_json, '$.kind') = 'onboarding_basics'`,
+      )
+      .run(sessionId);
+    return result.changes > 0;
   }
 
   // ── Answer ──────────────────────────────────────────────────────────────
@@ -384,9 +495,9 @@ export class PromptStore {
   private _getInsertStmt(): Database.Statement {
     return (this._stmtInsert ??= this.db.prepare(`
       INSERT INTO pending_prompts
-        (id, session_id, prompt_type, question, options_json, questions_json,
+        (id, session_id, prompt_type, question, options_json, questions_json, segments_json,
          secret_name, secret_key_type, answer, answer_saved, status, expires_at, multi_select, payload_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `));
   }
 

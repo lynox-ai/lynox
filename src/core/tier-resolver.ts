@@ -19,7 +19,7 @@
  * Every model-resolution site delegates here.
  */
 
-import { type ModelTier, type LLMProvider, type ProviderKey, type TierSet, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor } from '../types/index.js';
+import { type ModelTier, type LLMProvider, type ProviderKey, type TierSet, type LynoxUserConfig, normalizeTier, clampTier, getModelId, getBetasForProvider, getProviderDescriptor, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../types/index.js';
 import { applyTierGate, type AccountTier } from './roles.js';
 import { channels } from './observability.js';
 import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
@@ -29,7 +29,9 @@ export interface RunModelRequest {
    * The caller's requested tier or model id (spawn `spec.model`, a step hint,
    * a pipeline step). A tier name (canonical or legacy) is gated + clamped; a
    * genuine model id (e.g. a pinned `claude-opus-4-7`) is passed through as the
-   * model id since it carries no tier to gate/clamp. `undefined` → use `defaultTier`.
+   * model id when it is within the ceiling, but REFUSED (throws) when its cost band
+   * exceeds `maxTier` — a specific id cannot be clamped down (DEF-0080). `undefined`
+   * → use `defaultTier`.
    */
   requested?: string | undefined;
   /** Tier used when `requested` is absent (the role default, then the config default). */
@@ -38,6 +40,16 @@ export interface RunModelRequest {
   accountTier: AccountTier | undefined;
   /** Cost ceiling — the resolved tier is clamped down to it. */
   maxTier: ModelTier | undefined;
+  /**
+   * Operator/CP model blocklist (`blocked_model_ids` — model-id prefixes,
+   * case-insensitive). A pinned blocked id is REFUSED (like an over-ceiling
+   * id); a tier whose effective model is blocked falls back to the `fast`
+   * tier of the same provider (or throws when that is blocked too).
+   * Deliberately a REQUIRED property (`undefined` allowed) so every call
+   * site makes an explicit choice — pass the loaded config's
+   * `blocked_model_ids`. Empty/undefined = nothing blocked (byte-identical).
+   */
+  blockedModelIds: readonly string[] | undefined;
   /** Active LLM provider — selects the concrete model id for the resolved tier. */
   provider: LLMProvider;
 }
@@ -59,10 +71,38 @@ export function resolveRunModel(req: RunModelRequest): ResolvedRunModel {
   const requested = req.requested ? req.requested : undefined;
   const normalized = requested !== undefined ? normalizeTier(requested) : undefined;
 
-  // A genuine model id (not a tier name) carries no tier to gate/clamp — pass it
-  // through verbatim as the model id, but still derive a (clamped) tier from the
-  // default so callers that need a cost band (budget, estimation) get one.
+  // A genuine model id (not a tier name) carries no tier to gate/clamp. It names a
+  // specific model/endpoint that cannot be substituted, so an OVER-ceiling id is
+  // REFUSED, not clamped (DEF-0080) — the same rule the spawn profile guard applies
+  // (`profileExceedsMaxTier`, now delegating to the shared predicate). The one live
+  // raw-id ingress that reaches this branch is a pipeline `ManifestStep.model`
+  // (a `string`, not tier-validated). The agent-facing `spawn` tool's `spec.model`
+  // is enum-restricted to fast/balanced/deep at input validation (`spawn.ts` schema
+  // + `SpawnSpec.model: ModelTier`), and the main-chat `opts.model` is `normalizeTier`d
+  // at the HTTP boundary — so a raw id never reaches this throw from those paths;
+  // the check is defense-in-depth for them. DO NOT drop the spawn enum on the belief
+  // that this chokepoint guards `spec.model` — it never exercises that path. Below
+  // the ceiling the id passes through verbatim; the tier is derived (clamped) from
+  // the default so callers that need a cost band still get one.
   if (requested !== undefined && normalized === undefined) {
+    // The id can be an operator/agent-authored manifest string; bound + strip
+    // control chars before it enters an error surface (defense against a crafted
+    // step.model poisoning a downstream context).
+    const shownId = requested.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 80);
+    if (modelIdExceedsMaxTier(requested, req.maxTier)) {
+      const band = modelCapability(requested)?.tier;
+      throw new Error(
+        `Model "${shownId}" is not permitted on this instance: its cost band ${band ? `"${band}"` : '(unknown, treated as deep)'} exceeds the max tier "${req.maxTier ?? ''}". A specific model id cannot be clamped down, so it is refused — request a tier (fast/balanced/deep) instead, which is clamped to the ceiling.`,
+      );
+    }
+    // Model blocklist: a pinned id naming a blocked model is REFUSED — like an
+    // over-ceiling id, a specific id cannot be substituted, so there is nothing
+    // to fall back to (a tier request IS the fallback form).
+    if (isBlockedModelId(requested, req.blockedModelIds)) {
+      throw new Error(
+        `Model "${shownId}" is not permitted on this instance: it is blocked by the operator model blocklist. A specific model id cannot be substituted, so it is refused — request a tier (fast/balanced/deep) instead, which resolves to a permitted model.`,
+      );
+    }
     return { tier: clampTier(req.defaultTier, req.maxTier), modelId: requested };
   }
 
@@ -73,7 +113,66 @@ export function resolveRunModel(req: RunModelRequest): ResolvedRunModel {
   // skipped (which let a run reach a model past a lower max_tier).
   const gatedOverride = normalized !== undefined ? applyTierGate(normalized, req.accountTier) : undefined;
   const tier = clampTier(gatedOverride ?? req.defaultTier, req.maxTier);
+  // Model blocklist: the resolved tier must not land on a blocked model. Judge
+  // the EFFECTIVE model — under hybrid routing the tier's slot model is what
+  // actually runs, and an allowed hybrid slot must NOT be falsely downgraded
+  // just because the base provider's mapping for the tier is blocked. A blocked
+  // effective model falls back to the `fast` tier (the cheapest rung); when even
+  // that is blocked, refuse — never run a blocked model silently. NOTE: the
+  // slot lookup makes this branch read the configured tier-set resolver state
+  // (setTierSetResolver); with an empty/absent blocklist the function stays
+  // pure and byte-identical to before.
+  if (req.blockedModelIds && req.blockedModelIds.length > 0) {
+    if (isBlockedModelId(effectiveTierModelId(tier, req.provider), req.blockedModelIds)) {
+      if (tier !== 'fast' && !isBlockedModelId(effectiveTierModelId('fast', req.provider), req.blockedModelIds)) {
+        return { tier: 'fast', modelId: getModelId('fast', req.provider) };
+      }
+      throw new Error(
+        `No permitted model for tier "${tier}" on this instance: the tier's model and the fast-tier fallback are both blocked by the operator model blocklist.`,
+      );
+    }
+  }
   return { tier, modelId: getModelId(tier, req.provider) };
+}
+
+/**
+ * The model id a tier ACTUALLY runs under the active routing mode: the hybrid
+ * tier_set slot's model when configured, else the base provider's mapping.
+ * Used by the blocklist check above so enforcement judges the executed model,
+ * not a base mapping that hybrid routing would override anyway.
+ */
+function effectiveTierModelId(tier: ModelTier, provider: LLMProvider): string {
+  const slotModel = _routingMode === 'hybrid' ? _tierSet?.[tier]?.model_id : undefined;
+  return slotModel ?? getModelId(tier, provider);
+}
+
+/**
+ * Resolve the engine's DEFAULT main-chat tier from user config — `default_tier`
+ * clamped to `max_tier`, then blocklist-checked through {@link resolveRunModel}
+ * (a blocked default falls back to `fast`). With no blocklist this is exactly
+ * the historical `clampTier(normalizeTier(default_tier) ?? 'balanced', max_tier)`
+ * — byte-identical default path. Unlike per-run resolution this NEVER throws:
+ * a fully-blocked ladder (a CP/operator misconfiguration) must not crash-loop
+ * the container (that would take the whole instance down, UI included), so it
+ * keeps the cheapest tier and lets per-run enforcement surface the error.
+ */
+export function resolveDefaultChatTier(
+  uc: Pick<LynoxUserConfig, 'default_tier' | 'max_tier' | 'account_tier' | 'provider' | 'blocked_model_ids'>,
+): ModelTier {
+  const defaultTier = clampTier(normalizeTier(uc.default_tier) ?? 'balanced', uc.max_tier);
+  if (!uc.blocked_model_ids || uc.blocked_model_ids.length === 0) return defaultTier;
+  try {
+    return resolveRunModel({
+      requested: undefined,
+      defaultTier,
+      accountTier: uc.account_tier,
+      maxTier: uc.max_tier,
+      blockedModelIds: uc.blocked_model_ids,
+      provider: uc.provider ?? 'anthropic',
+    }).tier;
+  } catch {
+    return clampTier('fast', uc.max_tier);
+  }
 }
 
 /**
@@ -158,5 +257,142 @@ export function resolveTierModel(tier: ModelTier, baseProvider: LLMProvider): Ti
     betas: usesBetas ? getBetasForProvider(provider as LLMProvider) : undefined,
     apiKey: slot?.api_key,
     apiBaseURL: slot?.api_base_url,
+  };
+}
+
+/**
+ * Wire-level Agent client config for a resolved per-tier snapshot under hybrid
+ * routing. A CROSS-provider slot — one whose provider differs from the base, or
+ * that carries enriched `api_key`/`api_base_url` (injected by enrichTierSetCreds
+ * / applyManagedTierSetConstraints) — drives the Agent's wire + creds from the
+ * slot, mapping the registry ProviderKey to the wire-level LLMProvider the Agent
+ * client + beta/cache logic understand (mirrors `clientForTierSnapshot`:
+ * mistral→openai). So a hybrid Mistral slot becomes the SAME Agent shape as a
+ * standard managed-Mistral session (provider 'openai' + Mistral host), reusing
+ * that well-tested path end-to-end. A same-provider/standard snapshot returns
+ * `{crossProviderSlot:false}` and the caller keeps its base values (byte-parity).
+ *
+ * Pure + table-testable — this is the seam the hybrid hot-path regression is
+ * pinned to: before this, `session.ts` dispatched a cross-provider tier through
+ * the AMBIENT client with only the model id swapped, so a chat-tier→Mistral slot
+ * sent a Mistral model id to the Anthropic endpoint → 404. Consumed by the
+ * session (main-chat wire) AND spawn (Slice 2 — a subagent's tier follows its
+ * hybrid slot, so a `deep` spawn from a Mistral main lands on the deep slot).
+ */
+export function hybridSlotClientConfig(
+  snap: TierProviderSnapshot,
+  baseProvider: LLMProvider | undefined,
+):
+  | { crossProviderSlot: true; provider: LLMProvider; apiKey: string | undefined; apiBaseURL: string | undefined; openaiModelId: string }
+  | { crossProviderSlot: false } {
+  const isCross = snap.provider !== baseProvider
+    || snap.apiKey !== undefined
+    || snap.apiBaseURL !== undefined;
+  if (!isCross) return { crossProviderSlot: false };
+  const wire = getProviderDescriptor(snap.provider)?.wireClient ?? 'anthropic';
+  const provider: LLMProvider = wire === 'openai' ? 'openai' : wire === 'vertex' ? 'vertex' : 'anthropic';
+  return { crossProviderSlot: true, provider, apiKey: snap.apiKey, apiBaseURL: snap.apiBaseURL, openaiModelId: snap.modelId };
+}
+
+/**
+ * The provider the model-identity prompt must NAME for a run — the one the run
+ * actually talks to, not the one the base config names.
+ *
+ * Under hybrid routing a tier can resolve to a different provider than the base,
+ * and then the identity has to follow the SLOT. Two call sites need this answer:
+ * the live agent prompt and the run-snapshot mirror that records what the agent
+ * saw. They disagreed — the mirror read the base config's provider and skipped the
+ * hybrid branch, so a `balanced→Mistral` slot on an Anthropic base recorded
+ * "You are running on Anthropic (Claude family) as model `mistral-medium-2604`":
+ * self-contradicting, and wrong in the exact artifact you reach for when
+ * diagnosing provider behaviour. A comment claimed the two paths matched; only a
+ * shared function makes that true.
+ *
+ * ⚠ It does NOT only feed the prompt. `_createAgent` passes this same value as
+ * the AgentConfig's `provider` AND as the provider the API key is resolved on,
+ * so it selects the WIRE the run talks to. Read the name as "the provider this
+ * run effectively uses, which is therefore also the one it should say it uses" —
+ * changing it to make a prompt read better retargets the request.
+ *
+ * Pure so the agreement is testable without standing up a Session.
+ */
+export function effectiveProviderForRun(
+  snap: TierProviderSnapshot,
+  baseProvider: LLMProvider | undefined,
+  opts: { profileOverrideProvider?: LLMProvider | undefined; hasProfileOverride: boolean; configProvider: LLMProvider | undefined },
+): LLMProvider | undefined {
+  // An explicit sub-agent profile pins its own provider and ignores the slot.
+  const slotCfg = opts.hasProfileOverride
+    ? { crossProviderSlot: false as const }
+    : hybridSlotClientConfig(snap, baseProvider);
+  return slotCfg.crossProviderSlot
+    ? slotCfg.provider
+    : (opts.profileOverrideProvider ?? opts.configProvider);
+}
+
+/**
+ * The full wire client config for a resolved tier under the active routing mode —
+ * the single seam every FRESH-Agent site (spawn sub-agents, orchestrator pipeline
+ * steps) shares so a hybrid tier_set slot steers a step the same way it steers the
+ * main session. It composes {@link resolveTierModel} + {@link hybridSlotClientConfig}
+ * into the union of what those sites each need: provider, model, and the per-slot
+ * creds (apiKey/apiBaseURL/openaiModelId).
+ *
+ * Two shapes, distinguished by `crossProviderSlot`:
+ *  - **cross** — a hybrid slot whose provider differs from base, or that carries
+ *    enriched creds (see `hybridSlotClientConfig`). The Agent's wire + creds come
+ *    from the slot; a same-provider slot that `enrichTierSetCreds` deliberately
+ *    left key-LESS gets `resolveKey(provider, slotEndpoint)` filled in so a fresh Agent (which
+ *    has no ambient client to borrow a key from) doesn't 401 with an empty key.
+ *  - **non-cross** (standard mode / same-provider) — returns the BASE provider +
+ *    the tier's base model id + undefined creds. A caller that keeps its base
+ *    values when `!crossProviderSlot` is byte-identical to pre-hybrid behavior.
+ *    (The genuine-model-id passthrough — a caller that resolved a pinned model id
+ *    via resolveRunModel — must keep its OWN model id in the non-cross branch,
+ *    since `snap.modelId` here is the tier→provider mapping, not the pin.)
+ *
+ * Pure + table-testable: `resolveKey` is passed in (bound to `resolveProviderApiKey`
+ * over the caller's secret store / env), so no SecretStore is needed in tests.
+ * Mirrors the already-correct + tested spawn.ts consumption exactly.
+ */
+export interface CrossProviderSlotCreds {
+  /** Wire-level provider the Agent client uses (mistral→openai already mapped). */
+  readonly provider: LLMProvider;
+  /** Concrete model id for a cross slot; the tier's base model id otherwise. */
+  readonly model: string;
+  /** Slot API key (or resolveKey fallback) for a cross slot; undefined otherwise. */
+  readonly apiKey: string | undefined;
+  /** Slot API base URL for a cross slot; undefined otherwise. */
+  readonly apiBaseURL: string | undefined;
+  /** OpenAI-compatible model id for a cross slot; undefined otherwise. */
+  readonly openaiModelId: string | undefined;
+  /** True when the resolved tier maps to a cross-provider hybrid slot. */
+  readonly crossProviderSlot: boolean;
+}
+
+export function resolveCrossProviderSlotCreds(
+  tier: ModelTier,
+  baseProvider: LLMProvider,
+  resolveKey: (provider: LLMProvider, apiBaseURL?: string) => string | undefined,
+): CrossProviderSlotCreds {
+  const snap = resolveTierModel(tier, baseProvider);
+  const hybrid = hybridSlotClientConfig(snap, baseProvider);
+  if (hybrid.crossProviderSlot) {
+    return {
+      provider: hybrid.provider,
+      model: hybrid.openaiModelId,
+      apiKey: hybrid.apiKey ?? resolveKey(hybrid.provider, hybrid.apiBaseURL),
+      apiBaseURL: hybrid.apiBaseURL,
+      openaiModelId: hybrid.openaiModelId,
+      crossProviderSlot: true,
+    };
+  }
+  return {
+    provider: baseProvider,
+    model: snap.modelId,
+    apiKey: undefined,
+    apiBaseURL: undefined,
+    openaiModelId: undefined,
+    crossProviderSlot: false,
   };
 }

@@ -14,7 +14,12 @@
  */
 
 /** Tools hidden from inline display (truly redundant or noisy). */
-export const HIDDEN_TOOLS: ReadonlySet<string> = new Set(['artifact_list', 'data_store_list']);
+export const HIDDEN_TOOLS: ReadonlySet<string> = new Set([
+  'artifact_list',
+  'data_store_list',
+  // Terminal follow-up-chips tool: its output is the pills, not a tool card.
+  'suggest_follow_ups',
+]);
 
 /** Result of label resolution. `null` = render nothing (tool is hidden). */
 export interface ToolLabelParts {

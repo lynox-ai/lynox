@@ -8,7 +8,7 @@ sidebar:
 :::note[Multi-Provider BYOK]
 lynox supports multiple LLM providers out of the box, but only two are exercised end-to-end on every release: **Anthropic Claude** (direct API) and **Mistral** (via the OpenAI-compatible adapter pinned to `api.mistral.ai`). Everything else — generic OpenAI-compatible endpoints (Ollama, LM Studio, OpenAI itself, Groq, vLLM, …), the Anthropic-compatible "custom" proxy path, and Google Vertex AI — is **wired but not regularly tested**. Pick those at your own risk and expect rough edges around tool-calling reliability and prompt-cache behaviour.
 
-The **installer** lets you choose your provider and enter credentials — stored encrypted in your local vault. You can switch providers anytime in **Settings → Provider**.
+The **installer** lets you choose your provider and enter credentials — stored encrypted in your local vault. You can switch providers anytime in **Settings → Config**.
 :::
 
 lynox stores all your data locally. Only the AI inference (the LLM request) leaves your machine. You choose where it goes.
@@ -58,6 +58,16 @@ Direct connection to the Anthropic API. Simplest setup, recommended for most use
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+### Balanced-tier model (opt into Claude Sonnet 5)
+
+The **balanced** intelligence tier runs on Claude Sonnet. It defaults to the established Sonnet build; you can opt into **Claude Sonnet 5** — which unlocks a **1M-token context window** — without changing tiers. Pick it from the **Main chat model** dropdown in **Settings → LLM** (both Sonnet builds appear as balanced-band choices), or set it explicitly:
+
+```bash
+LYNOX_BALANCED_MODEL=claude-sonnet-5
+```
+
+The choice also persists in `config.json` (`balanced_model`) and is exposed over `GET`/`PUT /api/config`. Leaving it unset keeps the default balanced model — existing setups are unaffected.
+
 ## OpenAI-Compatible (`provider: openai`)
 
 `provider: 'openai'` is the path for everything that speaks the OpenAI Chat Completions API. No proxy needed — lynox translates natively. The same code path serves **Mistral** (the only target we exercise on every release) and a long list of experimental targets (OpenAI itself, Groq, Gemini, Ollama, LM Studio, vLLM, LiteLLM in OpenAI mode, …).
@@ -72,7 +82,7 @@ The config shape is always the same:
 }
 ```
 
-The wizard (npx installer or in-product **Settings → Provider**) prefills the right values when you pick Mistral or Custom; the manual snippets below are for `~/.lynox/config.json` editors or environment-driven deploys.
+The wizard (npx installer or in-product **Settings → Config**) prefills the right values when you pick Mistral or Custom; the manual snippets below are for `~/.lynox/config.json` editors or environment-driven deploys.
 
 ### Mistral (France, EU) — natively supported
 
@@ -82,7 +92,7 @@ First-class Sonnet replacement, tested on every release. Every Anthropic tier ha
 {
   "provider": "openai",
   "api_base_url": "https://api.mistral.ai/v1",
-  "openai_model_id": "mistral-large-2512"
+  "openai_model_id": "mistral-medium-2604"
 }
 ```
 
@@ -91,18 +101,19 @@ LYNOX_LLM_PROVIDER=openai
 ANTHROPIC_BASE_URL=https://api.mistral.ai/v1
 MISTRAL_API_KEY=<your-mistral-key>            # primary slot for Mistral
 # OPENAI_API_KEY=<your-mistral-key>           # also accepted as fallback
-OPENAI_MODEL_ID=mistral-large-2512
+OPENAI_MODEL_ID=mistral-medium-2604
 ```
 
 - **Key**: console.mistral.ai → API Keys
 - **Models**:
-  - `mistral-large-2512` (recommended — pinned Sonnet-class flagship)
+  - `mistral-medium-2604` (recommended — pinned `deep`-tier pick, Medium 3.5; text-only, no vision)
+  - `mistral-large-2512` (legacy `deep` option — cheaper, weaker; still selectable)
   - `mistral-large-latest` (floating tag — may drift between snapshots, prefer the pinned form in production)
-  - `ministral-14b-2512` (the `balanced` tier pick — best cost/quality midpoint)
+  - `mistral-medium-2604` (the `balanced` tier pick — Ministral 14B proved too weak an orchestrator for the main slot)
   - `ministral-8b-2512` (low-cost orchestration; 100% pass on all 8 bench axes)
   - `codestral-latest` (code-focused)
-- **Pricing**: $0.50 / $1.50 per MTok input/output (Large 3); $0.15 / $0.15 (Ministral 8B)
-- **Tool calling**: bench-verified near-Sonnet quality on Large 3; the pinned snapshot is what we ship.
+- **Pricing**: $1.50 / $7.50 per MTok input/output (Medium 3.5, `deep`); $0.50 / $1.50 (Large 3, legacy); $0.15 / $0.15 (Ministral 8B)
+- **Tool calling**: bench-verified near-Sonnet quality; the pinned Medium 3.5 snapshot is what we ship for `deep`.
 
 :::caution[Experimental — not regularly tested]
 The sections below (Ollama, LM Studio, OpenAI, Groq, Gemini, vLLM) wire `provider: openai` against other endpoints. They work in principle but are not exercised on every release — tool-calling reliability, prompt-cache behaviour, and streaming quirks vary sharply by model and endpoint. Stick with Anthropic or Mistral for production. Use the snippets below at your own risk.
@@ -214,7 +225,7 @@ Use named profiles to run different models for different tasks. Claude handles y
       "provider": "openai",
       "api_base_url": "https://api.mistral.ai/v1",
       "api_key": "your-mistral-key",
-      "model_id": "mistral-large-2512"
+      "model_id": "mistral-medium-2604"
     },
     "gemini-research": {
       "provider": "openai",

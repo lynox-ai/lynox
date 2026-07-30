@@ -915,6 +915,397 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
   });
 });
 
+describe('runManifest — 2a durable pipeline_runs record', () => {
+  function tmpHistory(): { h: RunHistory; cleanup: () => void } {
+    const dir = mkdtempSync(join(tmpdir(), 'runner-2a-'));
+    return { h: new RunHistory(join(dir, 'history.db')), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  }
+
+  it('writes exactly ONE pipeline_runs row: born running → finalized terminal, with totals + workflow linkage', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const mockResponses = new Map([['agent-a', 'ra'], ['agent-b', 'rb']]);
+      const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runHistory: h, workflowId: 'wf-123' });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').all(state.runId) as Array<Record<string, unknown>>;
+      // I1: the start-INSERT is the SOLE INSERT — no double-fire, exactly one row.
+      expect(rows).toHaveLength(1);
+      const row = rows[0]!;
+      expect(row.status).toBe('completed');        // finalize-UPDATE settled it
+      expect(row.completed_at).not.toBeNull();      // finalize stamps completed_at
+      expect(row.started_at).not.toBeNull();        // start-INSERT default
+      expect(row.workflow_id).toBe('wf-123');       // run→workflow linkage threaded
+      // B2: step_count + token/duration totals are 0 at the start-INSERT and
+      // ONLY the finalize UPDATE carries them (spawnMock emits 10 in / 20 out /
+      // 1ms per step across the 2-step MANIFEST) — so these exact non-default
+      // values prove the finalize wired every B2 column, not the DEFAULT 0.
+      expect(row.step_count).toBe(2);
+      expect(row.total_tokens_in).toBe(20);
+      expect(row.total_tokens_out).toBe(40);
+      expect(row.total_duration_ms).toBe(2);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('makes the run VISIBLE as running mid-flight — completed_at still NULL (the 2a headline)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      // onStepStart fires after the start-INSERT (before the step loop) and
+      // before the finalize (in the finally) — so the row is observable in its
+      // in-flight state. The DB is fresh, so the sole 'running' row is this run.
+      let midRun: { status: string; completed_at: string | null } | undefined;
+      const hooks = {
+        onStepStart: () => {
+          midRun ??= db.prepare("SELECT status, completed_at FROM pipeline_runs WHERE status = 'running'")
+            .get() as { status: string; completed_at: string | null } | undefined;
+        },
+      };
+      await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, hooks });
+
+      expect(midRun?.status).toBe('running');       // durable-from-START, not only at end
+      expect(midRun?.completed_at).toBeNull();       // in-flight: not yet finalized
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('finalizes the row as a terminal status (never stuck at running) when the run does not complete', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+      // maxIterations:1 aborts the run mid-way → status 'failed', not 'completed'.
+      const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runHistory: h, limits: { maxIterations: 1 } });
+      expect(state.status).toBe('failed');
+
+      const row = h.getPipelineRun(state.runId);
+      expect(row?.status).toBe('failed');           // finalized terminal, NOT 'running'
+      expect(row?.completed_at).not.toBeNull();     // no stuck-running row
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('a nested sub-pipeline (depth > 0) writes its own row with parent_run_id + is filtered from the top-level list (B5/I6)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // A top-level run (parent_run_id NULL) + a nested run (depth 1 with a
+      // parent_run_id, as spawnPipeline threads).
+      await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h });
+      await runManifest({ ...MANIFEST, name: 'sub-flow' }, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, depth: 1, parentRunId: 'outer-run-id' });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      // Both runs wrote a row — the nested one carries its parent link.
+      const all = db.prepare('SELECT parent_run_id FROM pipeline_runs ORDER BY started_at').all() as Array<{ parent_run_id: string | null }>;
+      expect(all).toHaveLength(2);
+      expect(all.some(r => r.parent_run_id === 'outer-run-id')).toBe(true);
+
+      // ...but the top-level list shows ONLY the top-level run (I6 filter).
+      const list = h.getRecentPipelineRuns(20);
+      expect(list).toHaveLength(1);
+      expect(list[0]!.manifest_name).toBe('test-flow');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('a real runtime:pipeline step threads the OUTER runId onto its nested run row (B5, end-to-end)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // A runtime:'pipeline' step actually nests through executeStep → spawnPipeline
+      // → the nested runManifest (this is the ONLY path that exercises executeStep
+      // passing `state.runId` as the parent). The inner inline step fails
+      // DETERMINISTICALLY — a missing dependency throws "has not run yet" in
+      // buildStepContext, before any model call — so the test needs no network.
+      const nestingManifest: Manifest = {
+        manifest_version: '1.1',
+        name: 'outer-flow',
+        triggered_by: 'test',
+        context: {},
+        execution: 'sequential',
+        agents: [
+          {
+            id: 'nest', agent: 'nest', runtime: 'pipeline',
+            pipeline: [{ id: 'inner', task: 'x', input_from: ['does-not-exist'] }],
+          } as unknown as Manifest['agents'][number],
+        ],
+        gate_points: [],
+        on_failure: 'continue',
+      };
+      // NO mockResponses → the pipeline step nests for real (not spawnMock).
+      const state = await runManifest(nestingManifest, CONFIG, { runHistory: h });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const nested = db.prepare('SELECT parent_run_id FROM pipeline_runs WHERE parent_run_id IS NOT NULL').get() as { parent_run_id: string } | undefined;
+      // The nested row's parent is the OUTER run's id — proving executeStep passed
+      // state.runId (not step.id / the undefined top-level parentRunId).
+      expect(nested?.parent_run_id).toBe(state.runId);
+      // ...and the nested run is filtered out of the top-level list (only the outer).
+      expect(h.getRecentPipelineRuns(20).map(r => r.id)).toEqual([state.runId]);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('both top-level views exclude nested runs, which stay reachable by id (B5 / I6)', () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      h.insertPipelineRun({ id: 'top', manifestName: 'wf', status: 'completed', manifestJson: '{}', totalCostUsd: 3, stepCount: 1 });
+      h.insertPipelineRun({ id: 'child', manifestName: 'nest-sub', status: 'completed', manifestJson: '{}', totalCostUsd: 5, stepCount: 1, parentRunId: 'top' });
+
+      // Cost stats: only the top-level manifest bucket, no synthetic 'nest-sub'.
+      expect(h.getPipelineCostStats(30).map(s => s.manifest_name)).toEqual(['wf']);
+      // Run list: only the top-level run.
+      expect(h.getRecentPipelineRuns(20).map(r => r.id)).toEqual(['top']);
+      // But the nested run is still retrievable by id — drill-down preserved.
+      expect(h.getPipelineRun('child')?.parent_run_id).toBe('top');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('getPipelineStepStats (per-manifest step view) also excludes nested runs (B5)', () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      h.insertPipelineRun({ id: 'top', manifestName: 'wf', status: 'completed', manifestJson: '{}' });
+      h.insertPipelineRun({ id: 'child', manifestName: 'nest-sub', status: 'completed', manifestJson: '{}', parentRunId: 'top' });
+      h.insertPipelineStepResult({ pipelineRunId: 'top', stepId: 's1', status: 'completed', costUsd: 1, modelTier: 'balanced' });
+      h.insertPipelineStepResult({ pipelineRunId: 'child', stepId: 's2', status: 'completed', costUsd: 1, modelTier: 'balanced' });
+      // Only the top-level workflow's steps — no synthetic 'nest-sub' bucket.
+      expect(h.getPipelineStepStats(30).map(s => s.manifest_name)).toEqual(['wf']);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('getPipelineCostStats excludes non-terminal (running/interrupted) rows (B6 / I8)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // A completed run (real $1 cost) + a stuck 'running' row (0 cost, no
+      // finalize): the aggregate must count ONLY the completed one, else the
+      // in-flight row halves the average and inflates the count.
+      h.insertPipelineRun({ id: 'done', manifestName: 'wf', status: 'completed', manifestJson: '{}', totalCostUsd: 1, stepCount: 1 });
+      h.insertPipelineRun({ id: 'live', manifestName: 'wf', status: 'running', manifestJson: '{}' });
+      const stats = h.getPipelineCostStats(30);
+      const wf = stats.find(s => s.manifest_name === 'wf');
+      expect(wf?.run_count).toBe(1);          // the 'running' row is not counted
+      expect(wf?.avg_cost_usd).toBe(1);        // not diluted to 0.5
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('completes cleanly when no runHistory is provided — the writer is opt-in, never crashes', async () => {
+    // No runHistory → no record + no throw. There is no DB to inspect; the
+    // guarantee is that the opt-in writer degrades silently, not that a row
+    // is written.
+    const state = await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]) });
+    expect(state.status).toBe('completed');
+  });
+});
+
+describe('runManifest — 2a/B3 durable step-record', () => {
+  function tmpHistory(): { h: RunHistory; cleanup: () => void } {
+    const dir = mkdtempSync(join(tmpdir(), 'runner-b3-'));
+    return { h: new RunHistory(join(dir, 'history.db')), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  }
+
+  it('writes step rows AS-COMPLETED with the result DEFERRED — empty mid-run, filled only at finalize (I4)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const mockResponses = new Map([['agent-a', 'result-a'], ['agent-b', 'result-b']]);
+      // onStepComplete fires BEFORE this step's own row is inserted, so the first
+      // NON-EMPTY snapshot is step-1's row seen at step-2's callback — the run is
+      // still in flight, so its result MUST be '' (the structural 2b fence:
+      // partial result-text is never persisted mid-run).
+      let midRun: Array<{ status: string; result: string }> = [];
+      const hooks = {
+        onStepComplete: () => {
+          if (midRun.length === 0) {
+            midRun = db.prepare('SELECT status, result FROM pipeline_step_results ORDER BY id').all() as Array<{ status: string; result: string }>;
+          }
+        },
+      };
+      const state = await runManifest(MANIFEST, CONFIG, { mockResponses, runHistory: h, hooks });
+      expect(state.status).toBe('completed');
+
+      expect(midRun.length).toBeGreaterThanOrEqual(1);
+      expect(midRun[0]!.status).toBe('completed');
+      expect(midRun[0]!.result).toBe(''); // I4: NOT persisted mid-run
+
+      // After finalize the result-text is filled — by rowid, so both distinct
+      // rows get their OWN result (I5: no UNIQUE(run_id, step_id) collapse).
+      const rows = db.prepare('SELECT step_id, status, result FROM pipeline_step_results ORDER BY id').all() as Array<{ step_id: string; status: string; result: string }>;
+      expect(rows).toHaveLength(2);
+      expect(rows.map(r => r.status)).toEqual(['completed', 'completed']);
+      expect(rows.find(r => r.step_id === 'step-1')?.result).toBe('result-a');
+      expect(rows.find(r => r.step_id === 'step-2')?.result).toBe('result-b');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('records a stop-failed step in pipeline_step_results even though it never enters state.outputs', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const manifestWithError: Manifest = {
+        ...MANIFEST,
+        on_failure: 'stop',
+        agents: [
+          { id: 'step-1', agent: 'agent-a', runtime: 'mock', input_from: ['does-not-exist'] },
+          { id: 'step-2', agent: 'agent-b', runtime: 'mock' },
+        ],
+      };
+      const state = await runManifest(manifestWithError, CONFIG, { mockResponses: new Map(), runHistory: h });
+      expect(state.status).toBe('failed');
+      expect(state.outputs.has('step-1')).toBe(false); // the batch writer's blind spot
+
+      // B3 closes the gap: /:id/steps (which reads ONLY pipeline_step_results)
+      // now shows the failed step. step-2 never ran (halt) → exactly one row.
+      const rows = db.prepare('SELECT step_id, status, result FROM pipeline_step_results ORDER BY id').all() as Array<{ step_id: string; status: string; result: string }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.step_id).toBe('step-1');
+      expect(rows[0]!.status).toBe('failed');
+      expect(rows[0]!.result).toBe(''); // a failed step carries no result
+
+      // The run's step_count is derived from the RECORDED step rows, so it agrees
+      // with its own /:id/steps list. Summing state.outputs (which the stop-failed
+      // step never entered) would have said 0 steps while the list showed 1.
+      const run = h.getPipelineRun(state.runId)!;
+      expect(run.step_count).toBe(rows.length);
+      expect(run.step_count).toBe(1);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('a nested sub-pipeline (depth > 0) writes its step rows under its OWN run row — no orphan (B5)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const state = await runManifest({ ...MANIFEST, name: 'sub-flow' }, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h, depth: 1, parentRunId: 'outer-run-id' });
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      // The nested run now writes a pipeline_runs row (parent exists), so its
+      // step rows attach to its OWN run id — never orphaned.
+      const rows = db.prepare('SELECT pipeline_run_id FROM pipeline_step_results').all() as Array<{ pipeline_run_id: string }>;
+      expect(rows).toHaveLength(2);
+      expect(rows.every(r => r.pipeline_run_id === state.runId)).toBe(true);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('fills result-text by ROWID, not by (run_id, step_id) — two rows sharing a step_id keep distinct results (I5)', () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // Simulate the for_each shape: two step rows under the SAME run_id + step_id
+      // (no UNIQUE forbids it). A finalize keyed on (run_id, step_id) would collapse
+      // both to one result; keyed on the returned rowid, each keeps its own.
+      h.insertPipelineRun({ id: 'run-x', manifestName: 'wf', status: 'running', manifestJson: '{}' });
+      const rowA = h.insertPipelineStepResult({ pipelineRunId: 'run-x', stepId: 'loop', status: 'completed', result: '' });
+      const rowB = h.insertPipelineStepResult({ pipelineRunId: 'run-x', stepId: 'loop', status: 'completed', result: '' });
+      expect(rowA).not.toBe(rowB);
+      h.updatePipelineStepResultText(rowA, 'item-A');
+      h.updatePipelineStepResultText(rowB, 'item-B');
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare("SELECT result FROM pipeline_step_results WHERE pipeline_run_id = 'run-x' ORDER BY id").all() as Array<{ result: string }>;
+      expect(rows.map(r => r.result)).toEqual(['item-A', 'item-B']);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('records step rows for a PARALLEL run (v1.1), each row keeping its own result', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const parallelManifest: Manifest = {
+        manifest_version: '1.1',
+        name: 'par-flow',
+        triggered_by: 'test',
+        context: {},
+        execution: 'parallel',
+        agents: [
+          { id: 'p-a', agent: 'agent-a', runtime: 'mock' },
+          { id: 'p-b', agent: 'agent-b', runtime: 'mock' },
+        ],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      const state = await runManifest(parallelManifest, CONFIG, { mockResponses: new Map([['agent-a', 'ra'], ['agent-b', 'rb']]), runHistory: h });
+      expect(state.status).toBe('completed');
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare('SELECT step_id, status, result FROM pipeline_step_results ORDER BY step_id').all() as Array<{ step_id: string; status: string; result: string }>;
+      expect(rows).toHaveLength(2);
+      expect(rows.find(r => r.step_id === 'p-a')?.result).toBe('ra');
+      expect(rows.find(r => r.step_id === 'p-b')?.result).toBe('rb');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('records a cached (retry-reused) step with its CACHED result, not blank', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const cached: AgentOutput = {
+        stepId: 'step-1', result: 'cached-a', startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(), durationMs: 5, tokensIn: 1, tokensOut: 2, costUsd: 0, skipped: false,
+      };
+      const state = await runManifest(MANIFEST, CONFIG, { mockResponses: new Map([['agent-b', 'rb']]), runHistory: h, cachedOutputs: new Map([['step-1', cached]]) });
+      expect(state.status).toBe('completed');
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare('SELECT step_id, result FROM pipeline_step_results ORDER BY step_id').all() as Array<{ step_id: string; result: string }>;
+      // The cached step's row must carry its reused result, not '' (a bug pushing
+      // '' instead of cached.result would leave it blank at finalize).
+      expect(rows.find(r => r.step_id === 'step-1')?.result).toBe('cached-a');
+      expect(rows.find(r => r.step_id === 'step-2')?.result).toBe('rb');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('emits exactly ONE row per step under on_failure=continue (fail + success = 2 rows, no double-emit)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      const manifest: Manifest = {
+        ...MANIFEST,
+        on_failure: 'continue',
+        agents: [
+          { id: 'step-1', agent: 'agent-a', runtime: 'mock', input_from: ['does-not-exist'] },
+          { id: 'step-2', agent: 'agent-b', runtime: 'mock' },
+        ],
+      };
+      await runManifest(manifest, CONFIG, { mockResponses: new Map([['agent-b', 'rb']]), runHistory: h });
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare('SELECT step_id, status FROM pipeline_step_results ORDER BY step_id').all() as Array<{ step_id: string; status: string }>;
+      // The continue-failed step enters state.outputs AND hits the catch — it must
+      // still produce exactly ONE row (a double-emit would make this 3).
+      expect(rows).toHaveLength(2);
+      expect(rows.find(r => r.step_id === 'step-1')?.status).toBe('failed');
+      expect(rows.find(r => r.step_id === 'step-2')?.status).toBe('completed');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+});
+
 // === Slice B: per-workflow DoS bounds (S3) ===
 describe('workflowBoundExceeded', () => {
   const counters: SessionCounters = {

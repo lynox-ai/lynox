@@ -126,6 +126,29 @@ describe('AgentMemoryDb v5 — sourceType capture (AC4)', () => {
     expect(db.getMemory(id)?.source_type).toBe('external_unverified');
   });
 
+  it('persists Wave 1 evidence columns (source_channel + source_untrusted)', () => {
+    const id = db.createMemory({
+      text: 'A fact whose write channel and untrusted signal are recorded',
+      namespace: 'knowledge', scopeType: 'context', scopeId: 'c1',
+      sourceType: 'external_unverified', sourceChannel: 'upload', sourceUntrusted: true,
+      embedding: [0.1, 0.2, 0.3],
+    });
+    const row = db.getMemory(id);
+    expect(row?.source_channel).toBe('upload');
+    expect(row?.source_untrusted).toBe(1);
+  });
+
+  it('defaults the Wave 1 evidence columns (NULL channel, untrusted 0) when omitted', () => {
+    const id = db.createMemory({
+      text: 'A legacy-style write with no evidence columns supplied',
+      namespace: 'knowledge', scopeType: 'context', scopeId: 'c1',
+      embedding: [0.1, 0.2, 0.3],
+    });
+    const row = db.getMemory(id);
+    expect(row?.source_channel).toBeNull();
+    expect(row?.source_untrusted).toBe(0);
+  });
+
   it('migration is idempotent — reopening an already-v5 db does not re-run the ALTER', () => {
     // A fresh db is created at v5; closing + reopening the same file runs the
     // _migrate loop again. v5 must be SKIPPED (version-gated) — re-running
@@ -151,10 +174,12 @@ describe('AgentMemoryDb v5 — sourceType capture (AC4)', () => {
     }
   });
 
-  it('migration v5 backfills a pre-existing (legacy) row to agent_inferred', () => {
-    // Seed a raw db with a v1-shape memories table (NO source_type) + one row,
-    // then let AgentMemoryDb open it and run the v5 ALTER — the legacy row must
-    // backfill to agent_inferred via the NOT NULL DEFAULT (AC4).
+  it('migration v5+v6 ALTER a POPULATED legacy table: row backfills to agent_inferred + NULL/0 evidence (§6b GO-cond 3)', () => {
+    // Seed a raw db with a v1-shape memories table (NO source_type / no v6 cols) + one row,
+    // then let AgentMemoryDb open it and run the v5 AND v6 ALTERs over the POPULATED table —
+    // the exercised-against-real-rows proof the GO condition names. The legacy row must
+    // backfill to agent_inferred (v5 NOT NULL DEFAULT) and take the v6 defaults
+    // (source_channel NULL, source_untrusted 0, embedding_model NULL) without data loss.
     const legacyPath = join(tempDir, 'legacy.db');
     const raw = new Database(legacyPath);
     raw.exec(`
@@ -180,6 +205,11 @@ describe('AgentMemoryDb v5 — sourceType capture (AC4)', () => {
       const row = migrated.getMemory('legacy-1');
       expect(row?.source_type).toBe('agent_inferred');
       expect(row?.source_tool_name).toBeNull();
+      // v6 columns land on the pre-existing row with their defaults (text preserved).
+      expect(row?.text).toBe('fact from before v5');
+      expect(row?.source_channel).toBeNull();
+      expect(row?.source_untrusted).toBe(0);
+      expect(row?.embedding_model).toBeNull();
     } finally {
       migrated.close();
     }

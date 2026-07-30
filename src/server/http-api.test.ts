@@ -3,8 +3,12 @@ import type { Server } from 'node:http';
 import { createHmac, randomBytes } from 'node:crypto';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve as resolvePath, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { LynoxHooks } from '../core/engine.js';
+// Mocked below (vi.mock '../core/config.js') — imported so the model-blocklist
+// gate tests can override its return value per-test.
+import { loadConfig } from '../core/config.js';
 
 // === Mock dependencies ===
 
@@ -38,12 +42,32 @@ const mockMemoryDelete = vi.fn().mockResolvedValue(2);
 const mockSecretListNames = vi.fn().mockReturnValue(['ANTHROPIC_API_KEY']);
 const mockSecretSet = vi.fn();
 const mockSecretDelete = vi.fn().mockReturnValue(true);
+// Memory routes reject content containing a secret (parity with the memory_store
+// tool). Default: no secret detected; a case can flip it to assert the 400 guard.
+const mockSecretContains = vi.fn().mockReturnValue(false);
 // Hoisted so /api/secrets/status regression tests can swap userConfig per-case
 // (the bug = "userConfig.api_key empty for non-Anthropic providers" needs the
 // returned config to vary without re-instantiating the Engine mock).
 const mockGetUserConfig = vi.fn().mockReturnValue({});
 const mockSecretResolve = vi.fn().mockReturnValue(null);
 const mockSetApiKey = vi.fn();
+
+// Capture-telemetry recorder — the funnel/proposal emit sites are fire-and-forget; this
+// records every call so a test can assert an event actually fired (the RF-GAP1/GAP2
+// regression guard: the events existed as types but no site emitted them).
+const { captureTelemetryCalls } = vi.hoisted(() => ({
+  captureTelemetryCalls: [] as Array<{ enabled: boolean; entry: Record<string, unknown> }>,
+}));
+vi.mock('../core/capture-telemetry.js', async (orig) => {
+  const actual = await orig<typeof import('../core/capture-telemetry.js')>();
+  return {
+    ...actual,
+    appendCaptureTelemetry: (enabled: boolean, entry: unknown): Promise<void> => {
+      captureTelemetryCalls.push({ enabled, entry: entry as Record<string, unknown> });
+      return Promise.resolve();
+    },
+  };
+});
 // v1.5.2: hoisted so tests can pin "all BYOK slots trigger reloadCredentials".
 // reloadCredentials is the vault-only hot-reload path; reloadUserConfig is
 // the config.json path. Mocked separately for clarity.
@@ -53,6 +77,7 @@ const mockHistoryGetRecentRuns = vi.fn().mockReturnValue([{ id: 'run-1', task_te
 const mockHistorySearchRuns = vi.fn().mockReturnValue([]);
 const mockHistoryGetRun = vi.fn().mockReturnValue({ id: 'run-1', task_text: 'test' });
 const mockHistoryGetRunToolCalls = vi.fn().mockReturnValue([]);
+const mockDeleteWireSnapshotsForThread = vi.fn().mockReturnValue(0);
 const mockHistoryGetStats = vi.fn().mockReturnValue({ total_runs: 5 });
 const mockHistoryGetCostByDay = vi.fn().mockReturnValue([]);
 const mockHistoryGetUsageSummary = vi.fn().mockImplementation((opts: { source: 'calendar-month' | 'rolling' | 'stripe-billing'; label: string; startIso: string; endIso: string }) => ({
@@ -120,6 +145,9 @@ vi.mock('../core/engine.js', () => ({
       update: mockMemoryUpdate,
       delete: mockMemoryDelete,
     });
+    // MemoryFacade (the /api/memory mutation choke point) reads this to mirror to the
+    // knowledge layer; null = doc-only, which is all the route tests assert on.
+    this.getKnowledgeLayer = vi.fn().mockReturnValue(null);
     this.getToolContext = vi.fn().mockReturnValue({ tools: [] });
     this.getSecretStore = vi.fn().mockReturnValue({
       listNames: mockSecretListNames,
@@ -127,12 +155,14 @@ vi.mock('../core/engine.js', () => ({
       recordConsent: vi.fn(),
       deleteSecret: mockSecretDelete,
       resolve: mockSecretResolve,
+      containsSecret: mockSecretContains,
     });
     this.getRunHistory = vi.fn().mockReturnValue({
       getRecentRuns: mockHistoryGetRecentRuns,
       searchRuns: mockHistorySearchRuns,
       getRun: mockHistoryGetRun,
       getRunToolCalls: mockHistoryGetRunToolCalls,
+      deleteWireSnapshotsForThread: mockDeleteWireSnapshotsForThread,
       getStats: mockHistoryGetStats,
       getCostByDay: mockHistoryGetCostByDay,
       getUsageSummary: mockHistoryGetUsageSummary,
@@ -158,6 +188,12 @@ vi.mock('../core/engine.js', () => ({
     // R2b subject-graph surface — null by default (flag off); route tests swap in.
     // getSubjectStore is also read by GET /api/config (has_subject_graph capability).
     this.getSubjectStore = vi.fn().mockReturnValue(null);
+    // getKnowledgeStore is read by GET /api/config (has_durable_memory, DK.2) +
+    // the /api/knowledge/queue routes (503 when null = flag off).
+    this.getKnowledgeStore = vi.fn().mockReturnValue(null);
+    // Onboarding Wave 1 flag store — null by default (engine.db degraded → fail-open
+    // on the READ side); route tests swap in a fake store.
+    this.getOnboardingFlagStore = vi.fn().mockReturnValue(null);
     this.getSubjectFootprint = vi.fn().mockReturnValue(null);
     // The saved-workflow run path now flows through the budget/credit
     // lifecycle (runGuardedSavedWorkflow), which reads these off the engine.
@@ -213,6 +249,10 @@ vi.mock('../core/config.js', () => ({
   }),
   saveUserConfig: vi.fn(),
   reloadConfig: vi.fn(),
+  // The /api/config picker-label branch calls this for a managed hybrid tier_set. These
+  // route tests don't assert the constraint semantics (FN-7 is verified live on staging),
+  // so a passthrough preserves their existing labels.
+  applyManagedTierSetConstraints: vi.fn((ts: unknown) => ts),
   // engine-init.ts (pulled in by http-api.ts for ensureHttpSecret) reads
   // these from config.js — provide them so the real ensureHttpSecret() can
   // run in the T1-1 ordering test. getLynoxDir honours LYNOX_DATA_DIR so the
@@ -404,6 +444,53 @@ describe('LynoxHTTPApi', () => {
         version: expect.any(String),
         uptime_s: expect.any(Number),
       });
+    });
+
+    // Contract fixture pair (K-W2): the REAL health serializer's key tree +
+    // leaf types must match the golden fixture the control plane's rollout
+    // gate / health monitor parse. Values are live (uptime, memory), so the
+    // comparison is structural: same nested key paths, same JS type per leaf.
+    // A field rename on either side fails this or the CP-side pair test.
+    it('matches the contract health-body fixture structurally (both variants)', async () => {
+      const fixturesDir = resolvePath(dirname(fileURLToPath(import.meta.url)), '../contract/fixtures');
+      const res = await fetch(`${baseUrl}/health`);
+      expect(res.status).toBe(200);
+      const live = await res.json() as Record<string, unknown>;
+
+      // Leaf-type witness: `null` in a fixture admits `null | string`
+      // (build_sha is the only such leaf — dev serves null, prod a hex SHA).
+      const structure = (v: unknown): unknown => {
+        if (v === null) return 'null|string';
+        if (Array.isArray(v)) return v.map(structure);
+        if (typeof v === 'object') {
+          return Object.fromEntries(
+            Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b))
+              .map(([k, val]) => [k, structure(val)]),
+          );
+        }
+        return typeof v;
+      };
+      // Contract-OPTIONAL leaves (HealthBody: disk_* absent when statfs('/')
+      // fails) are dropped from both sides so an exotic host can't flake this
+      // test; when the live host DOES serve them, their type is still pinned.
+      const dropOptional = (s: Record<string, unknown>): Record<string, unknown> => {
+        const system = { ...(s['system'] as Record<string, unknown>) };
+        delete system['disk_total_gb'];
+        delete system['disk_used_gb'];
+        return { ...s, system };
+      };
+      const liveSystem = (live['system'] ?? {}) as Record<string, unknown>;
+      if ('disk_total_gb' in liveSystem) expect(typeof liveSystem['disk_total_gb']).toBe('number');
+      if ('disk_used_gb' in liveSystem) expect(typeof liveSystem['disk_used_gb']).toBe('number');
+      const liveStructure = dropOptional(structure(live) as Record<string, unknown>);
+      if (liveStructure['build_sha'] === 'string') liveStructure['build_sha'] = 'null|string';
+
+      for (const name of ['health-body.json', 'health-body.with-sha.json']) {
+        const fixture = JSON.parse(readFileSync(resolvePath(fixturesDir, name), 'utf8')) as unknown;
+        const fixtureStructure = dropOptional(structure(fixture) as Record<string, unknown>);
+        if (fixtureStructure['build_sha'] === 'string') fixtureStructure['build_sha'] = 'null|string';
+        expect(liveStructure, `live /health diverges from fixtures/${name}`).toEqual(fixtureStructure);
+      }
     });
   });
 
@@ -851,6 +938,37 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(400);
     });
 
+    // Agent-opened escalation threads (`escalation-<key>`, see core/escalation.ts) are
+    // legitimate RESUMABLE chats but are NOT UUIDs — rejecting them was the
+    // "conversation could not be opened" bug on agent-escalation threads.
+    it('accepts an escalation-<key> threadId as resume', async () => {
+      const res = await jsonFetch('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ threadId: 'escalation-5cad0bc0' }),
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json() as { sessionId: string };
+      expect(body.sessionId).toBe('escalation-5cad0bc0');
+    });
+
+    it('keeps an escalation id VERBATIM (not lowercased — matches the stored PK)', async () => {
+      const res = await jsonFetch('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ threadId: 'escalation-AbC123' }),
+      });
+      expect(res.status).toBe(201);
+      const body = await res.json() as { sessionId: string };
+      expect(body.sessionId).toBe('escalation-AbC123');   // NOT normalised to lowercase
+    });
+
+    it('rejects an escalation id with path/SQL metachars (injection-safe)', async () => {
+      const res = await jsonFetch('/api/sessions', {
+        method: 'POST',
+        body: JSON.stringify({ threadId: 'escalation-../../etc/passwd' }),
+      });
+      expect(res.status).toBe(400);
+    });
+
     it('deletes a session', async () => {
       mockSessionGet.mockReturnValue(mockSessionInstance);
       const res = await jsonFetch('/api/sessions/test-session', { method: 'DELETE' });
@@ -1160,6 +1278,7 @@ describe('LynoxHTTPApi', () => {
         question TEXT NOT NULL,
         options_json TEXT,
         questions_json TEXT,
+      segments_json TEXT,
         partial_answers_json TEXT,
         secret_name TEXT,
         secret_key_type TEXT,
@@ -1220,6 +1339,104 @@ describe('LynoxHTTPApi', () => {
       } finally {
         engineRef.getPromptStore = originalGetPromptStore;
         runningSessions.delete('stale-1');
+        db.close();
+      }
+    });
+
+    // #77 regression: the run wall-clock must PAUSE while parked on an
+    // ask_user prompt so human think-time never consumes the compute budget.
+    // Pre-fix, the single 30-min setTimeout kept running during the human
+    // wait; a user who answered after it elapsed landed on an already-aborted
+    // run (their /reply was captured but nobody was awaiting it). Here we
+    // shrink the compute budget to 1500 ms (above the 1s re-arm floor so it
+    // reflects the true budget), park the run on a real ask_user prompt, let
+    // the "human" think for 2500 ms (> budget), then answer — and assert the
+    // run CONTINUES to a done event instead of aborting.
+    it('does NOT abort a run parked on ask_user past the wall-clock — human answer CONTINUES it (#77)', async () => {
+      const prevBudget = process.env['LYNOX_RUN_WALL_CLOCK_MS'];
+      process.env['LYNOX_RUN_WALL_CLOCK_MS'] = '1500'; // 1500 ms compute budget
+
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+        question TEXT NOT NULL,
+        options_json TEXT,
+        questions_json TEXT,
+      segments_json TEXT,
+        partial_answers_json TEXT,
+        secret_name TEXT,
+        secret_key_type TEXT,
+        answer TEXT,
+        answer_saved INTEGER,
+        answer_error TEXT,
+        multi_select INTEGER,
+        payload_json TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        answered_at TEXT,
+        expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const realPromptStore = new PromptStore(db);
+
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => realPromptStore;
+
+      try {
+        // The mocked agent loop parks on the handler-wired ask_user callback and
+        // returns only once the human answers — exactly the real park/continue.
+        mockSessionRun.mockImplementationOnce(async () => {
+          const promptUser = mockSessionInstance.promptUser as
+            (q: string, o?: string[]) => Promise<string>;
+          const answer = await promptUser('Continue the plan?', ['yes', 'no']);
+          return `continued:${answer}`;
+        });
+
+        // /run resolves on headers; the SSE body streams until the run ends.
+        const res = await jsonFetch('/api/sessions/wallclock-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'do the thing', protocol: 1 }),
+        });
+        expect(res.status).toBe(200);
+
+        // Wait until the run has parked (prompt row inserted).
+        let pending = realPromptStore.getPending('wallclock-1');
+        for (let i = 0; i < 200 && !pending; i++) {
+          await new Promise<void>((r) => setTimeout(r, 5));
+          pending = realPromptStore.getPending('wallclock-1');
+        }
+        expect(pending).toBeDefined();
+
+        // "Human thinks" for well over the 1500 ms compute budget. Pre-fix the
+        // wall-clock would have fired ~1500 ms in and aborted the parked run.
+        await new Promise<void>((r) => setTimeout(r, 2500));
+        // Still pending after 2500 ms > budget → the wall-clock did NOT fire.
+        expect(realPromptStore.getPending('wallclock-1')).toBeDefined();
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+
+        // Human answers via the real /reply route.
+        const replyRes = await jsonFetch('/api/sessions/wallclock-1/reply', {
+          method: 'POST',
+          body: JSON.stringify({ promptId: pending!.id, answer: 'yes' }),
+        });
+        expect(replyRes.status).toBe(200);
+
+        // The run CONTINUED: a done event carrying the answered result, and the
+        // wall-clock never aborted the session.
+        const text = await res.text();
+        expect(text).toContain('event: done');
+        expect(text).toContain('continued:yes');
+        expect(mockSessionAbort).not.toHaveBeenCalled();
+      } finally {
+        engineRef.getPromptStore = originalGetPromptStore;
+        if (prevBudget === undefined) delete process.env['LYNOX_RUN_WALL_CLOCK_MS'];
+        else process.env['LYNOX_RUN_WALL_CLOCK_MS'] = prevBudget;
         db.close();
       }
     });
@@ -1494,7 +1711,7 @@ describe('LynoxHTTPApi', () => {
       db.prepare(`CREATE TABLE pending_prompts (
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
         prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
-        question TEXT NOT NULL, options_json TEXT, questions_json TEXT,
+        question TEXT NOT NULL, options_json TEXT, questions_json TEXT, segments_json TEXT,
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
@@ -1602,7 +1819,7 @@ describe('LynoxHTTPApi', () => {
       db.prepare(`CREATE TABLE pending_prompts (
         id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
         prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
-        question TEXT NOT NULL, options_json TEXT, questions_json TEXT,
+        question TEXT NOT NULL, options_json TEXT, questions_json TEXT, segments_json TEXT,
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
@@ -1682,7 +1899,7 @@ describe('LynoxHTTPApi', () => {
   // secrets — Shopify, Stripe, DataForSEO, Hetzner, arbitrary integration
   // names — pass on managed by default. This realises the lynox core
   // promise: managed customers can connect their own tools without filing
-  // a support ticket. See [[project_managed_user_secrets_promise]].
+  // a support ticket.
   describe('predictManagedBlocked (admin-only deny-list)', () => {
     let predictManagedBlocked: (name: string) => boolean;
     beforeAll(async () => {
@@ -1810,6 +2027,16 @@ describe('LynoxHTTPApi', () => {
       expect(mockMemoryAppend).toHaveBeenCalledWith('knowledge', 'appended');
     });
 
+    it('CORE-4: rejects a memory write whose content contains a secret (400, parity with memory_store)', async () => {
+      mockSecretContains.mockReturnValueOnce(true);
+      const res = await jsonFetch('/api/memory/knowledge/append', {
+        method: 'POST',
+        body: JSON.stringify({ text: 'my key is sk-LEAK' }),
+      });
+      expect(res.status).toBe(400);
+      expect(mockMemoryAppend).not.toHaveBeenCalled(); // never reaches the store
+    });
+
     it('PATCH updates namespace', async () => {
       const res = await jsonFetch('/api/memory/knowledge', {
         method: 'PATCH',
@@ -1818,6 +2045,17 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
       const body = await res.json() as { updated: boolean };
       expect(body.updated).toBe(true);
+    });
+
+    it('PATCH accepts the UI {old_content,new_content} body (T1 — was a silent no-op)', async () => {
+      mockMemoryUpdate.mockClear();
+      const res = await jsonFetch('/api/memory/knowledge', {
+        method: 'PATCH',
+        body: JSON.stringify({ old_content: 'old text', new_content: 'new text' }),
+      });
+      expect(res.status).toBe(200);
+      // The UI's payload must reach memory.update with the real strings, not '' / ''.
+      expect(mockMemoryUpdate).toHaveBeenCalledWith('knowledge', 'old text', 'new text');
     });
 
     it('DELETE deletes from namespace', async () => {
@@ -1904,6 +2142,126 @@ describe('LynoxHTTPApi', () => {
       expect(res.status).toBe(200);
     });
 
+    // ── Sonnet-variant selection (balanced_model, Sonnet 5 opt-in) ──
+    it('GET exposes the resolved balanced_model (defaults to Sonnet 4.6 when unset)', async () => {
+      // The base mock config sets no balanced_model → resolveBalancedModel
+      // falls back to MODEL_MAP.balanced, so the field is ALWAYS present for
+      // the UI picker to bind to (never undefined).
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['balanced_model']).toBe('claude-sonnet-4-6');
+    });
+
+    it('GET surfaces a persisted Sonnet 5 selection', async () => {
+      const { readUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce({
+        default_tier: 'deep', thinking_mode: 'adaptive', balanced_model: 'claude-sonnet-5',
+      });
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['balanced_model']).toBe('claude-sonnet-5');
+    });
+
+    it('PUT accepts a valid served balanced_model (Sonnet 5) and persists it', async () => {
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ balanced_model: 'claude-sonnet-5' }),
+      });
+      expect(res.status).toBe(200);
+      const { saveUserConfig } = await import('../core/config.js');
+      const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+      expect(lastCall).toBeDefined();
+      expect(lastCall![0]['balanced_model']).toBe('claude-sonnet-5');
+    });
+
+    it('PUT accepts resetting balanced_model to the Sonnet 4.6 default', async () => {
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ balanced_model: 'claude-sonnet-4-6' }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    // model-presets W4 — the settings picker persists a preset choice by name.
+    it('PUT accepts a tier_preset and persists it (model-presets W4)', async () => {
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ tier_preset: 'balanced' }),
+      });
+      expect(res.status).toBe(200);
+      const { saveUserConfig } = await import('../core/config.js');
+      const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+      expect(lastCall![0]['tier_preset']).toBe('balanced');
+    });
+
+    it('PUT tier_preset:null CLEARS the field (switch back to Standard/Custom)', async () => {
+      // A persisted tier_preset force-sets routing_mode='hybrid' at load, so the
+      // ONLY way back to Standard is to physically delete the key. The schema is
+      // .nullable() precisely so `null` reaches the merge loop's delete branch;
+      // omission would preserve the stale preset. Seed an existing preset, then null it.
+      const { readUserConfig, saveUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ tier_preset: 'balanced', default_tier: 'deep' });
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ tier_preset: null, routing_mode: 'standard', tier_set: {} }),
+      });
+      expect(res.status).toBe(200);
+      const lastCall = (saveUserConfig as unknown as { mock: { calls: Array<[Record<string, unknown>]> } }).mock.calls.at(-1);
+      expect('tier_preset' in lastCall![0]).toBe(false); // key deleted, not persisted as null
+      expect(lastCall![0]['routing_mode']).toBe('standard');
+    });
+
+    it('PUT rejects a non-Sonnet balanced_model with 400 AND persists nothing (never routes balanced off-Sonnet)', async () => {
+      // A real Claude id that is NOT a served Sonnet — passes the schema
+      // string check but must be rejected by the served-Sonnet allowlist so
+      // the balanced tier can never resolve to Opus. The whole PUT is atomic-
+      // rejected: saveUserConfig must NOT be called.
+      const { saveUserConfig } = await import('../core/config.js');
+      const before = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ balanced_model: 'claude-opus-4-6' }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json() as { error: string };
+      expect(body.error).toContain('balanced_model');
+      expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(before);
+    });
+
+    it('PUT rejects an unknown balanced_model id with 400 and no write', async () => {
+      const { saveUserConfig } = await import('../core/config.js');
+      const before = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ balanced_model: 'gpt-4o' }),
+      });
+      expect(res.status).toBe(400);
+      expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(before);
+    });
+
+    it('PUT rejects a null balanced_model with 400', async () => {
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ balanced_model: null }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it('PUT with an invalid balanced_model is atomic — a co-submitted valid field is NOT written', async () => {
+      // The invalid value must reject the WHOLE PUT, not partially persist default_tier.
+      const { saveUserConfig } = await import('../core/config.js');
+      const before = (saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+      const res = await jsonFetch('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({ balanced_model: 'gpt-4o', default_tier: 'balanced' }),
+      });
+      expect(res.status).toBe(400);
+      expect((saveUserConfig as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(before);
+    });
+
     it('PUT strips env-pinned provider fields instead of persisting/rejecting them (H-001)', async () => {
       // When LYNOX_LLM_PROVIDER is set the provider is env-controlled; a user
       // PUT of provider/api_base_url/openai_model_id must NOT persist (it would
@@ -1929,13 +2287,15 @@ describe('LynoxHTTPApi', () => {
     it('PUT in managed mode rejects locked-field changes', async () => {
       vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
       try {
+        // max_tier is the cost CEILING — it stays managed-locked even though
+        // default_tier opened up to the user's "Main chat model" picker.
         const res = await jsonFetch('/api/config', {
           method: 'PUT',
-          body: JSON.stringify({ default_tier: 'fast' }), // mock effective is 'deep'
+          body: JSON.stringify({ max_tier: 'fast' }),
         });
         expect(res.status).toBe(403);
         const body = await res.json() as { error: string };
-        expect(body.error).toContain('default_tier');
+        expect(body.error).toContain('max_tier');
       } finally {
         vi.unstubAllEnvs();
         vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
@@ -1991,6 +2351,46 @@ describe('LynoxHTTPApi', () => {
       expect(body['locks']).toEqual({});
     });
 
+    it('GET emits available_tier_presets (model-presets W4) — all available + resolved on self-host', async () => {
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const presets = body['available_tier_presets'] as Record<string, { tiers: Array<Record<string, unknown>>; available: boolean }> | undefined;
+      expect(presets).toBeDefined();
+      // Self-host backs every preset (loader hardening never runs) → no tier_preset lock.
+      expect((body['locks'] as Record<string, unknown>)['tier_preset']).toBeUndefined();
+      for (const p of Object.values(presets!)) expect(p.available).toBe(true);
+      // Per-tier enrichment is server-side (web-ui has no @lynox-ai/core import):
+      // the ⚡ efficient deep slot resolves to the CN-via-Fireworks model + its host disclosure.
+      const efficientDeep = presets!['efficient']!.tiers.find((t) => t['tier'] === 'deep')!;
+      expect(efficientDeep['model_id']).toBe('accounts/fireworks/models/glm-5p2');
+      expect(efficientDeep['provenance']).toBe('CN');
+      expect(efficientDeep['residency']).toBe('US');
+    });
+
+    it('GET main_chat_tiers reflects a tier_preset, not the standard provider map (W4 picker sync)', async () => {
+      // A tier_preset is config-sugar — the raw stored config carries neither
+      // routing_mode nor tier_set (the loader materializes them). So the picker's
+      // main_chat_tiers MUST be derived from the SAME expansion, else it shows the
+      // Anthropic default map (Sonnet/Opus) while the preset routes mistral-medium —
+      // the exact stale-label class the composer picker hit. Real expandTierPreset +
+      // catalog run here (not mocked).
+      const { readUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ tier_preset: 'balanced', provider: 'anthropic', default_tier: 'balanced' });
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const tiers = body['main_chat_tiers'] as Record<string, string> | undefined;
+      expect(tiers).toBeDefined();
+      // balanced preset's balanced tier = mistral-medium-2604 exactly (WS2; NOT a Sonnet
+      // default). Exact catalog-label match — a bare 'Mistral Medium' substring would also
+      // match 'Mistral Medium 3.1' (128k, below the context floor) and 'Mistral Medium
+      // (latest)' (the forbidden -latest tag).
+      expect(tiers!['balanced']).toBe('Mistral Medium 3.5');
+      expect(tiers!['balanced']).not.toContain('Sonnet');
+    });
+
     it('GET surfaces active_model with resolved capability data (Settings v3 Item 6)', async () => {
       const res = await jsonFetch('/api/config');
       expect(res.status).toBe(200);
@@ -2030,17 +2430,20 @@ describe('LynoxHTTPApi', () => {
         const body = await res.json() as Record<string, unknown>;
         const am = body['active_model'] as Record<string, unknown> | undefined;
         expect(am).toBeDefined();
-        // Fixture default_tier='deep' → Mistral 'mistral-large-2512'
-        // (2026-05-29 refresh; was magistral-medium-2509 before it was deprecated).
-        expect(am!['id']).toBe('mistral-large-2512');
+        // Fixture default_tier='deep' → Mistral 'mistral-medium-2604' (Medium 3.5,
+        // the stronger deep; Large 3 was deprecated to a legacy option).
+        expect(am!['id']).toBe('mistral-medium-2604');
         expect(am!['provider']).toBe('openai');
         expect(am!['tier']).toBe('deep');
-        expect(am!['contextWindow']).toBe(256_000);
-        expect(am!['uiLabel']).toBe('Mistral Large 3');
-        // Mistral lineage carries different feature flags than Claude.
+        expect(am!['contextWindow']).toBe(262_144);
+        expect(am!['uiLabel']).toBe('Mistral Medium 3.5');
+        // Mistral lineage carries different feature flags than Claude: no
+        // Anthropic-style extended-thinking toggle. Medium 3.5
+        // (mistral-medium-2604) is multimodal — vision verified live 2026-07-22,
+        // see MISTRAL_FEATURES_GEN3 in models.ts.
         const features = am!['features'] as Record<string, boolean>;
         expect(features['extendedThinking']).toBe(false);
-        expect(features['vision']).toBe(false);
+        expect(features['vision']).toBe(true);
         expect(features['toolUse']).toBe(true);
       } finally {
         providerSpy.mockRestore();
@@ -2081,6 +2484,44 @@ describe('LynoxHTTPApi', () => {
       const body = await res.json() as Record<string, unknown>;
       expect(body['active_provider']).toBeUndefined();
       expect((body['env_overrides'] as Record<string, unknown>)['provider']).toBe(false);
+    });
+
+    it('GET reports debug_wire_capture env-pinned + the EFFECTIVE value over a stale disk value', async () => {
+      // The env var wins over config.json at load, so the raw disk value (false)
+      // must be overwritten in the response and the pin reported — otherwise the
+      // Privacy toggle shows OFF while capture runs and its write is a dead no-op.
+      const { readUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ debug_wire_capture: false });
+      vi.stubEnv('LYNOX_DEBUG_WIRE_CAPTURE', 'true');
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        expect((body['env_overrides'] as Record<string, unknown>)['debug_wire_capture']).toBe(true);
+        expect(body['debug_wire_capture']).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('GET does NOT report debug_wire_capture env-pinned for a non-enum env value', async () => {
+      // config.ts only honors 'true'/'1'/'false'/'0'; anything else is ignored at
+      // load and the field stays owner-writable — reporting mere presence would
+      // lock the toggle over a value that doesn't actually pin anything.
+      const { readUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ debug_wire_capture: true });
+      vi.stubEnv('LYNOX_DEBUG_WIRE_CAPTURE', 'yes');
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        expect((body['env_overrides'] as Record<string, unknown>)['debug_wire_capture']).toBe(false);
+        expect(body['debug_wire_capture']).toBe(true); // disk value untouched
+      } finally {
+        vi.unstubAllEnvs();
+      }
     });
 
     it('GET surfaces LYNOX_STRIPE_PORTAL_LOGIN_URL when set + valid (v1.6.0 billing stopgap)', async () => {
@@ -2200,6 +2641,43 @@ describe('LynoxHTTPApi', () => {
         }
       },
     );
+
+    it('GET on managed tier: an unavailable preset sets the tier_preset lock (W4 wiring)', async () => {
+      // config.js is module-mocked here (loader hardening = identity), so the REAL
+      // availability predicate is unit-tested in tier-preset-signal.test.ts. This
+      // test drives the http-api WIRING: when the loader drops a slot (⚡ efficient's
+      // Fireworks deep, no opt-in) the preset is unavailable → the card is disabled
+      // AND `locks.tier_preset` is set (mirrors the write-gate 403, not a silent
+      // downgrade). Override the mock to drop Fireworks slots for this case.
+      const { applyManagedTierSetConstraints } = await import('../core/config.js');
+      vi.mocked(applyManagedTierSetConstraints).mockImplementation((ts) => {
+        const kept: Record<string, unknown> = {};
+        for (const [tier, slot] of Object.entries(ts as Record<string, { api_base_url?: string }>)) {
+          if (!slot.api_base_url?.includes('fireworks.ai')) kept[tier] = slot;
+        }
+        return kept as ReturnType<typeof applyManagedTierSetConstraints>;
+      });
+      vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        const presets = body['available_tier_presets'] as Record<string, { available: boolean }>;
+        expect(presets['efficient']!.available).toBe(false); // Fireworks deep dropped
+        expect(presets['balanced']!.available).toBe(true);
+        expect(presets['max-quality']!.available).toBe(true);
+        // The lock mirrors the disabled card + the write-gate 403.
+        const locks = body['locks'] as Record<string, Record<string, unknown>>;
+        expect(locks['tier_preset']?.['reason']).toBe('managed-tier');
+        expect((locks['tier_preset']?.['contact_cta'] as Record<string, unknown>)?.['href']).toContain('mailto:support@lynox.ai');
+      } finally {
+        vi.mocked(applyManagedTierSetConstraints).mockImplementation((ts) => ts);
+        vi.unstubAllEnvs();
+        vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+        vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+      }
+    });
 
     it('PUT in managed mode allows no-op locked-field re-send (regression v1.3.5)', async () => {
       // Web UI re-sends every field on every save. A no-op write of `default_tier`
@@ -2639,6 +3117,20 @@ describe('LynoxHTTPApi', () => {
         expect(body.messages).toEqual([]);
       });
     });
+
+    it('DELETE /api/threads/:id deletes the thread AND prunes its wire snapshots', async () => {
+      // Drives the ROUTE wiring, not just the run-history method: dropping the
+      // deleteWireSnapshotsForThread call from the handler must fail this test —
+      // the snapshots would otherwise silently outlive their deleted thread.
+      const deleteThread = vi.fn();
+      mockDeleteWireSnapshotsForThread.mockClear();
+      await withThreadStore({ getThread: () => ({ id: 't-del' }), deleteThread }, async () => {
+        const res = await jsonFetch('/api/threads/t-del', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(deleteThread).toHaveBeenCalledWith('t-del');
+        expect(mockDeleteWireSnapshotsForThread).toHaveBeenCalledWith('t-del');
+      });
+    });
   });
 
   describe('subjects — R2b footprint surface', () => {
@@ -2730,6 +3222,488 @@ describe('LynoxHTTPApi', () => {
         expect(captured[1]![1]).toEqual({ limit: 50 });   // NaN → default
       });
     });
+
+    // ── Knowledge read-surface (DK-UX) — GET entries + blocks, flag-gated + masked-by-store ──
+
+    it('GET /api/knowledge/entries → 503 when durable memory is off (store absent)', async () => {
+      const res = await jsonFetch('/api/knowledge/entries'); // default mock getKnowledgeStore() → null
+      expect(res.status).toBe(503);
+    });
+
+    it('GET /api/knowledge/entries → 200 returns active entries, threading the bounded limit', async () => {
+      const captured: number[] = [];
+      const entries = [{ id: 'k1', subjectName: 'ACME', kind: 'fact', text: 'renews in March', pinned: true }];
+      await swapEngine({ getKnowledgeStore: () => ({ listActive: (n: number) => { captured.push(n); return entries; } }) }, async () => {
+        const res = await jsonFetch('/api/knowledge/entries?limit=50');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ entries });
+        expect(captured[0]).toBe(50);
+      });
+    });
+
+    it('GET /api/knowledge/entries clamps the limit (600→500, abc→200, -5→1 floor)', async () => {
+      const captured: number[] = [];
+      await swapEngine({ getKnowledgeStore: () => ({ listActive: (n: number) => { captured.push(n); return []; } }) }, async () => {
+        await jsonFetch('/api/knowledge/entries?limit=600');
+        await jsonFetch('/api/knowledge/entries?limit=abc');
+        await jsonFetch('/api/knowledge/entries?limit=-5');
+        expect(captured[0]).toBe(500); // over-cap clamped
+        expect(captured[1]).toBe(200); // NaN → default
+        expect(captured[2]).toBe(1);   // negative floored — a bare negative LIMIT would be unbounded
+      });
+    });
+
+    it('GET /api/knowledge/blocks → 503 when durable memory is off', async () => {
+      const res = await jsonFetch('/api/knowledge/blocks');
+      expect(res.status).toBe(503);
+    });
+
+    it('GET /api/knowledge/blocks → 200 returns profile + playbook', async () => {
+      const blocks = { profile: 'prefers terse replies', playbook: 'weekly reports on Mondays' };
+      await swapEngine({ getKnowledgeStore: () => ({ readSurfaceBlocks: () => blocks }) }, async () => {
+        const res = await jsonFetch('/api/knowledge/blocks');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual(blocks);
+      });
+    });
+
+    it('POST /api/knowledge/entries/:id/retire → 503 when durable memory is off', async () => {
+      const res = await jsonFetch('/api/knowledge/entries/k1/retire', { method: 'POST' });
+      expect(res.status).toBe(503);
+    });
+
+    it('POST /api/knowledge/entries/:id/retire → 200 retires the entry as user_asserted', async () => {
+      const captured: Array<[string, string]> = [];
+      const entry = { id: 'k1', status: 'superseded' };
+      await swapEngine({ getKnowledgeStore: () => ({ retireEntry: (id: string, tier: string) => { captured.push([id, tier]); return entry; } }) }, async () => {
+        const res = await jsonFetch('/api/knowledge/entries/k1/retire', { method: 'POST' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ entry });
+        expect(captured[0]).toEqual(['k1', 'user_asserted']); // the USER channel, not the agent's
+      });
+    });
+
+    it('POST /api/knowledge/entries/:id/retire → 404 when the entry is not active (already gone)', async () => {
+      await swapEngine({ getKnowledgeStore: () => ({ retireEntry: () => { throw new Error('No active entry with this id.'); } }) }, async () => {
+        const res = await jsonFetch('/api/knowledge/entries/gone/retire', { method: 'POST' });
+        expect(res.status).toBe(404);
+      });
+    });
+  });
+
+  describe('onboarding flags — Wave 1 foundation (owner-auth, set-only)', () => {
+    function swapEngine(overrides: Record<string, (...args: unknown[]) => unknown>, test: () => Promise<void>): Promise<void> {
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origs: Record<string, unknown> = {};
+      for (const k of Object.keys(overrides)) { origs[k] = engineRef[k]; engineRef[k] = overrides[k]; }
+      return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
+    }
+
+    const statusShape = {
+      knowledgeDone: false, knowledgeThreadId: null, skipped: false,
+      pushNudge: null, firstSessionAt: null,
+    };
+    function fakeStore(over: Partial<typeof statusShape> = {}) {
+      const calls: Array<[string, string | undefined]> = [];
+      return {
+        calls,
+        getStatus: () => ({ ...statusShape, ...over }),
+        set: (flag: string, value: string) => { calls.push(['set:' + flag, value]); },
+        reset: (flag: string) => { calls.push(['reset:' + flag, undefined]); return true; },
+      };
+    }
+
+    // ── READ side fails OPEN (AC-1.7): a degraded engine.db reports done, never 503 ──
+    it('GET /api/onboarding/status → 200 fail-open (knowledgeDone:true, degraded:true) when the store is absent', async () => {
+      const res = await jsonFetch('/api/onboarding/status'); // default mock → null
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        knowledgeDone: true, knowledgeThreadId: null, skipped: false,
+        pushNudge: null, firstSessionAt: null, durableMemory: false, degraded: true,
+      });
+    });
+
+    it('GET /api/onboarding/status → 200 reflects the store status when present', async () => {
+      await swapEngine({ getOnboardingFlagStore: () => fakeStore({ knowledgeDone: true, knowledgeThreadId: 'onb-42' }) }, async () => {
+        const res = await jsonFetch('/api/onboarding/status');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({
+          knowledgeDone: true, knowledgeThreadId: 'onb-42', skipped: false,
+          pushNudge: null, firstSessionAt: null, durableMemory: false, degraded: false,
+        });
+      });
+    });
+
+    // AC-1.7 must not hinge on the client's fetch-error handling: a getStatus() THROW
+    // (a flaky/locked engine.db) fails open too — 200 done:true, not a top-level 500.
+    it('GET /api/onboarding/status → 200 fail-open when the read itself throws (not a 500)', async () => {
+      await swapEngine({ getOnboardingFlagStore: () => ({ getStatus: () => { throw new Error('database is locked'); } }) }, async () => {
+        const res = await jsonFetch('/api/onboarding/status');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({
+          knowledgeDone: true, knowledgeThreadId: null, skipped: false,
+          pushNudge: null, firstSessionAt: null, durableMemory: false, degraded: true,
+        });
+      });
+    });
+
+    // ── WRITE side honestly 503s when it cannot persist (fail-open is a READ property) ──
+    it('POST /api/onboarding/flags/:flag → 503 when the store is absent (a write cannot fail open)', async () => {
+      const res = await jsonFetch('/api/onboarding/flags/knowledge_done', {
+        method: 'POST', body: JSON.stringify({ value: 't1' }),
+      });
+      expect(res.status).toBe(503);
+    });
+
+    it('POST /api/onboarding/flags/:flag → 200 sets the flag and returns fresh status', async () => {
+      const store = fakeStore();
+      await swapEngine({ getOnboardingFlagStore: () => store }, async () => {
+        const res = await jsonFetch('/api/onboarding/flags/knowledge_done', {
+          method: 'POST', body: JSON.stringify({ value: 'onb-thread-9' }),
+        });
+        expect(res.status).toBe(200);
+        expect(store.calls).toContainEqual(['set:knowledge_done', 'onb-thread-9']);
+      });
+    });
+
+    it('POST /flags/skipped emits onboarding_abandoned; knowledge_done does NOT (funnel drop-off, AC-1.4)', async () => {
+      const store = fakeStore();
+      mockGetUserConfig.mockReturnValue({ durable_memory_enabled: true });
+      await swapEngine({ getOnboardingFlagStore: () => store }, async () => {
+        captureTelemetryCalls.length = 0;
+        await jsonFetch('/api/onboarding/flags/skipped', { method: 'POST', body: JSON.stringify({ value: '2026-07-27T00:00:00Z' }) });
+        const abandoned = captureTelemetryCalls.filter((c) => c.entry['event'] === 'onboarding_abandoned');
+        expect(abandoned).toHaveLength(1);
+        expect(abandoned[0]!.enabled).toBe(true); // gated on the DK flag
+        // Contrast (non-tautological): completing (knowledge_done) is NOT an abandonment.
+        captureTelemetryCalls.length = 0;
+        await jsonFetch('/api/onboarding/flags/knowledge_done', { method: 'POST', body: JSON.stringify({ value: 'onb-x' }) });
+        expect(captureTelemetryCalls.filter((c) => c.entry['event'] === 'onboarding_abandoned')).toHaveLength(0);
+      });
+    });
+
+    it('POST /api/onboarding/flags/:flag → 400 for an unknown flag (validated before the DB)', async () => {
+      await swapEngine({ getOnboardingFlagStore: () => fakeStore() }, async () => {
+        const res = await jsonFetch('/api/onboarding/flags/literacy_seen', {
+          method: 'POST', body: JSON.stringify({ value: 'x' }),
+        });
+        expect(res.status).toBe(400);
+      });
+    });
+
+    it('POST /api/onboarding/flags/:flag → 400 when the value exceeds the length cap', async () => {
+      await swapEngine({ getOnboardingFlagStore: () => fakeStore() }, async () => {
+        const res = await jsonFetch('/api/onboarding/flags/knowledge_done', {
+          method: 'POST', body: JSON.stringify({ value: 'x'.repeat(513) }),
+        });
+        expect(res.status).toBe(400);
+      });
+    });
+
+    it('DELETE /api/onboarding/flags/:flag → 200 resets the flag (Settings reactivation, AC-1.5)', async () => {
+      const store = fakeStore();
+      await swapEngine({ getOnboardingFlagStore: () => store }, async () => {
+        const res = await jsonFetch('/api/onboarding/flags/knowledge_done', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ removed: true, degraded: false });
+        expect(store.calls).toContainEqual(['reset:knowledge_done', undefined]);
+      });
+    });
+
+    it('DELETE /api/onboarding/flags/:flag → 400 for an unknown flag', async () => {
+      await swapEngine({ getOnboardingFlagStore: () => fakeStore() }, async () => {
+        const res = await jsonFetch('/api/onboarding/flags/bogus', { method: 'DELETE' });
+        expect(res.status).toBe(400);
+      });
+    });
+
+    // ── S6: owner-auth ('user' scope) — the model has no tool path; an unauthed caller is walled ──
+    it('all onboarding routes require a bearer token (401 without — owner-auth, S6)', async () => {
+      const noAuth = { headers: { Authorization: 'Bearer wrong-token' } };
+      expect((await fetch(`${baseUrl}/api/onboarding/status`, noAuth)).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/onboarding/flags/knowledge_done`, { method: 'POST', ...noAuth })).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/onboarding/flags/knowledge_done`, { method: 'DELETE', ...noAuth })).status).toBe(401);
+    });
+  });
+
+  describe('onboarding knowledge Step-0 (Wave 1, D9v2 / §6.1 engine promotion)', () => {
+    // Swap a REAL PromptStore + REAL KnowledgeStore into the mock engine — the promote
+    // path exercises the true tier derivation, not a stub.
+    async function withStores(
+      test: (
+        ps: import('../core/prompt-store.js').PromptStore,
+        ks: import('../core/knowledge-store.js').KnowledgeStore,
+        db: import('better-sqlite3').Database,
+      ) => Promise<void>,
+      opts?: { noKnowledgeStore?: boolean },
+    ): Promise<void> {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+        question TEXT NOT NULL, options_json TEXT, questions_json TEXT, segments_json TEXT,
+        partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
+        answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pp_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const ps = new PromptStore(db);
+
+      const { mkdtempSync, rmSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const { tmpdir } = await import('node:os');
+      const { EngineDb } = await import('../core/engine-db.js');
+      const { SubjectStore } = await import('../core/subject-store.js');
+      const { KnowledgeStore } = await import('../core/knowledge-store.js');
+      const dir = mkdtempSync(join(tmpdir(), 'lynox-onb-http-'));
+      const edb = new EngineDb(join(dir, 'engine.db'), '');
+      const ks = new KnowledgeStore(edb, new SubjectStore(edb));
+
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origPs = engineRef['getPromptStore'];
+      const origKs = engineRef['getKnowledgeStore'];
+      engineRef['getPromptStore'] = (): unknown => ps;
+      engineRef['getKnowledgeStore'] = (): unknown => (opts?.noKnowledgeStore ? null : ks);
+      try { await test(ps, ks, db); }
+      finally {
+        engineRef['getPromptStore'] = origPs;
+        engineRef['getKnowledgeStore'] = origKs;
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+
+    it('POST /start → 200 with 2 questions + a promptId carrying the onboarding-basics marker', async () => {
+      await withStores(async (ps) => {
+        const res = await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-1' }),
+        });
+        expect(res.status).toBe(200);
+        const b = await res.json() as { promptId: string; questions: unknown[] };
+        expect(b.questions).toHaveLength(2);
+        expect(typeof b.promptId).toBe('string');
+        const row = ps.getById(b.promptId);
+        expect(row?.prompt_type).toBe('ask_user');
+        expect(JSON.parse(row!.payload_json!).kind).toBe('onboarding_basics');
+      });
+    });
+
+    it('SECURITY: /pending-prompt hides an onboarding_basics prompt from the generic chat resume', async () => {
+      await withStores(async (ps) => {
+        // An engine-posed onboarding-basics prompt is owned by the OnboardingBasics
+        // UI. If /pending-prompt surfaced it, the chat's generic tabs card would let
+        // the user answer via /reply-tabs WITHOUT /promote → the §6.1 promotion is
+        // skipped and the basics never reach durable knowledge.
+        await (await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-pp' }),
+        })).json();
+        const hidden = await (await jsonFetch('/api/sessions/onb-pp/pending-prompt')).json();
+        expect(hidden).toMatchObject({ pending: false });
+
+        // Contrast (non-tautological): a normal model ask_user/tabs prompt (payload
+        // NULL) IS still surfaced — the skip is specific to the onboarding marker.
+        ps.insertAskUserTabs('sess-normal', [{ question: 'Which file?' }]);
+        const shown = await (await jsonFetch('/api/sessions/sess-normal/pending-prompt')).json();
+        expect(shown).toMatchObject({ pending: true, kind: 'tabs' });
+      });
+    });
+
+    it('POST /derive-domain returns a search candidate, 400 on no company, degrades to null', async () => {
+      await withStores(async () => {
+        const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+        const origSp = engineRef['getSearchProvider'];
+        // Fake provider captures the query so the lang→buildDomainSearchQuery passthrough
+        // is verified (a dropped `lang` would otherwise pass). First hit is LinkedIn
+        // (skipped by the heuristic), second is the site.
+        let capturedQuery = '';
+        engineRef['getSearchProvider'] = (): unknown => ({
+          search: async (q: string): Promise<unknown[]> => {
+            capturedQuery = q;
+            return [
+              { title: 'X', url: 'https://linkedin.com/company/acme', snippet: '' },
+              { title: 'Acme', url: 'https://www.acme.ch/about', snippet: '' },
+            ];
+          },
+        });
+        try {
+          const ok = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({ company: 'Acme', lang: 'de' }) });
+          expect(ok.status).toBe(200);
+          expect(await ok.json()).toEqual({ domain: 'https://acme.ch' });
+          expect(capturedQuery).toBe('Acme offizielle Website'); // lang passthrough → localized query
+
+          const bad = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({}) });
+          expect(bad.status).toBe(400);
+
+          // Search unavailable → degraded null, never a 500 that would block the UI.
+          engineRef['getSearchProvider'] = (): unknown => null;
+          const deg = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({ company: 'Acme' }) });
+          expect(deg.status).toBe(200);
+          expect(await deg.json()).toEqual({ domain: null });
+
+          // SECURITY: a restrictive network_policy short-circuits BEFORE any search —
+          // the company name never egresses on a locked-down instance.
+          const origCfg = engineRef['getUserConfig'] as () => Record<string, unknown>;
+          capturedQuery = '';
+          engineRef['getSearchProvider'] = (): unknown => ({ search: async (q: string): Promise<unknown[]> => { capturedQuery = q; return [{ title: 'A', url: 'https://acme.ch', snippet: '' }]; } });
+          engineRef['getUserConfig'] = (): unknown => ({ ...origCfg.call(engineRef), network_policy: 'deny-all' });
+          try {
+            const denied = await jsonFetch('/api/onboarding/derive-domain', { method: 'POST', body: JSON.stringify({ company: 'Acme' }) });
+            expect(denied.status).toBe(200);
+            expect(await denied.json()).toEqual({ domain: null });
+            expect(capturedQuery).toBe(''); // never searched
+          } finally {
+            engineRef['getUserConfig'] = origCfg;
+          }
+        } finally {
+          engineRef['getSearchProvider'] = origSp;
+        }
+      });
+    });
+
+    it('POST /start → 400 without a sessionId', async () => {
+      await withStores(async () => {
+        const res = await jsonFetch('/api/onboarding/knowledge/start', { method: 'POST', body: JSON.stringify({}) });
+        expect(res.status).toBe(400);
+      });
+    });
+
+    it('start → answer → promote writes user_asserted VERBATIM from the stored row (AC-1.3a end-to-end)', async () => {
+      await withStores(async (ps, ks) => {
+        const start = await (await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-2' }),
+        })).json() as { promptId: string };
+        // The user answers via the stored PromptStore row (as /reply-tabs would settle it).
+        // Two catalog basics now (company, role) — the abstract goal question was dropped.
+        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder']);
+        // Promote carries ONLY the promptId — the answers come from the stored row, not the body.
+        const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+          method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
+        });
+        expect(res.status).toBe(200);
+        // threadId is the authoritative onboarding thread (== every entry's source_thread_id):
+        // the client stamps knowledge_done with it, so the AC-1.10 repair pointer never drifts.
+        expect(await res.json()).toMatchObject({ degraded: false, threadId: 'onb-2', promoted: 2, queued: 0, skipped: 0 });
+        const active = ks.listActive();
+        expect(active.map(e => e.text).sort()).toEqual(['Company: Acme GmbH', 'Role: Founder']);
+        expect(active.every(e => e.sourceType === 'user_asserted')).toBe(true);
+        expect(active.every(e => e.sourceThreadId === 'onb-2')).toBe(true);
+      });
+    });
+
+    it('SECURITY: promote REFUSES a prompt lacking the engine-only marker (a model ask_user cannot mint user_asserted)', async () => {
+      await withStores(async (ps) => {
+        // A model-composed ask_user/tabs prompt — payload_json is NULL.
+        const pid = ps.insertAskUserTabs('onb-3', [{ question: 'To confirm, type your IBAN CH93 …' }]);
+        ps.answerUserTabs(pid, ['CH93 0000 0000 0000']);
+        const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+          method: 'POST', body: JSON.stringify({ promptId: pid }),
+        });
+        expect(res.status).toBe(400); // refused — the dictation attack cannot reach user_asserted
+      });
+    });
+
+    it('promote → 409 when the prompt is not answered yet', async () => {
+      await withStores(async () => {
+        const start = await (await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-4' }),
+        })).json() as { promptId: string };
+        const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+          method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
+        });
+        expect(res.status).toBe(409);
+      });
+    });
+
+    it('promote → 200 degraded when DK is off (no KnowledgeStore to write into)', async () => {
+      await withStores(async (ps) => {
+        const start = await (await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-5' }),
+        })).json() as { promptId: string };
+        ps.answerUserTabs(start.promptId, ['Acme', 'CEO', 'x']);
+        const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+          method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
+        });
+        expect(res.status).toBe(200);
+        // Degraded shape must match the normal path (includes `rejected` + the threadId the
+        // client still needs to stamp knowledge_done, even with nothing durable written).
+        expect(await res.json()).toMatchObject({ degraded: true, threadId: 'onb-5', promoted: 0, queued: 0, skipped: 0, rejected: 0 });
+      }, { noKnowledgeStore: true });
+    });
+
+    it('a TAINTED live session routes the answers to pending_review, not user_asserted', async () => {
+      await withStores(async (ps, ks) => {
+        const start = await (await jsonFetch('/api/onboarding/knowledge/start', {
+          method: 'POST', body: JSON.stringify({ sessionId: 'onb-taint' }),
+        })).json() as { promptId: string };
+        ps.answerUserTabs(start.promptId, ['Acme GmbH', 'Founder']);
+        // Inject a tainted live session so the endpoint's sawUntrusted read is exercised on
+        // the ARMED side — an "always-false" mis-wire would otherwise pass every other test.
+        const ssRef = (api as unknown as { sessionStore: { get: (id: string) => unknown } }).sessionStore;
+        const origGet = ssRef.get;
+        ssRef.get = (id: string): unknown => (id === 'onb-taint' ? { conversationSawUntrusted: true } : origGet.call(ssRef, id));
+        try {
+          const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+            method: 'POST', body: JSON.stringify({ promptId: start.promptId }),
+          });
+          expect(res.status).toBe(200);
+          expect(await res.json()).toMatchObject({ degraded: false, promoted: 0, queued: 2, skipped: 0, rejected: 0 });
+          expect(ks.listActive()).toHaveLength(0);
+          expect(ks.pendingCount()).toBe(2);
+        } finally {
+          ssRef.get = origGet;
+        }
+      });
+    });
+
+    it('promote refuses a non-null payload with a keys array but the wrong kind (isolates the kind clause)', async () => {
+      await withStores(async (ps, _ks, db) => {
+        // Start from a valid onboarding-basics prompt (so payload.keys IS an array), then
+        // rewrite ONLY the kind. The missing-keys clause now cannot fire — only the kind
+        // clause can produce the 400, so the test actually exercises the discriminator
+        // (deleting the kind check from the endpoint would let this promote, failing here).
+        const pid = ps.insertOnboardingBasics('onb-wrongkind', [{ question: 'q' }], ['company']);
+        db.prepare('UPDATE pending_prompts SET payload_json = ? WHERE id = ?')
+          .run(JSON.stringify({ kind: 'connect_mail', keys: ['company'] }), pid);
+        const res = await jsonFetch('/api/onboarding/knowledge/promote', {
+          method: 'POST', body: JSON.stringify({ promptId: pid }),
+        });
+        expect(res.status).toBe(400);
+      });
+    });
+
+    it('both knowledge routes require a bearer token (401 — owner-auth, S6)', async () => {
+      const noAuth = { headers: { Authorization: 'Bearer wrong-token' } };
+      expect((await fetch(`${baseUrl}/api/onboarding/knowledge/start`, { method: 'POST', ...noAuth })).status).toBe(401);
+      expect((await fetch(`${baseUrl}/api/onboarding/knowledge/promote`, { method: 'POST', ...noAuth })).status).toBe(401);
+    });
+
+    it('review endpoint emits propose_confirmed (approve) and propose_ignored+dismissed (reject) — the funnel numerator (AC-1.4)', async () => {
+      await withStores(async (_ps, ks) => {
+        mockGetUserConfig.mockReturnValue({ durable_memory_enabled: true });
+        // A pending_review proposal (untrusted origin) — exactly the chip a user decides on.
+        const a = ks.write({ text: 'ACME switched banks', sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 'onb-rev', kind: 'fact' });
+        captureTelemetryCalls.length = 0;
+        const approve = await jsonFetch(`/api/knowledge/queue/${a.id}/review`, { method: 'POST', body: JSON.stringify({ action: 'approve' }) });
+        expect(approve.status).toBe(200);
+        const confirmed = captureTelemetryCalls.find((c) => c.entry['event'] === 'propose_confirmed');
+        expect(confirmed).toBeDefined();
+        expect(confirmed!.enabled).toBe(true);
+        expect(confirmed!.entry['entryId']).toBe(a.id);
+        expect(confirmed!.entry['dismissed']).toBeUndefined(); // an approve is not a discard
+
+        const b = ks.write({ text: 'ACME uses Xero', sourceChannel: 'agent', sourceUntrusted: true, sourceThreadId: 'onb-rev', kind: 'fact' });
+        captureTelemetryCalls.length = 0;
+        const reject = await jsonFetch(`/api/knowledge/queue/${b.id}/review`, { method: 'POST', body: JSON.stringify({ action: 'reject' }) });
+        expect(reject.status).toBe(200);
+        const ignored = captureTelemetryCalls.find((c) => c.entry['event'] === 'propose_ignored');
+        expect(ignored).toBeDefined();
+        expect(ignored!.entry['entryId']).toBe(b.id);
+        expect(ignored!.entry['dismissed']).toBe(true); // reject = an active discard
+      });
+    });
   });
 
   describe('thread debug-export (comprehensive)', () => {
@@ -2754,6 +3728,7 @@ describe('LynoxHTTPApi', () => {
         getRunToolCalls: () => [{ tool_name: 'http_request', input_json: `{"k":"${KEY}"}`, output_json: 'ok', duration_ms: 5, sequence_order: 0 }],
         getPromptSnapshot: () => ({ prompt_text: `system ${KEY}` }),
         getCompactionEventsBySession: () => [],
+        getWireSnapshotsForRun: () => [],
       };
       await swapEngine({
         // KEY also in the thread title → proves the whole-bundle scrub covers
@@ -2767,7 +3742,7 @@ describe('LynoxHTTPApi', () => {
           schema: string; thread: { id: string };
           runs: Array<{ provider: string; tool_calls: Array<{ tool_name: string }>; prompt_snapshot: string }>;
         };
-        expect(body.schema).toBe('thread-debug-export/v2');
+        expect(body.schema).toBe('thread-debug-export/v3');
         expect(body.thread.id).toBe('t1');
         expect(body.runs).toHaveLength(1);
         // The per-run telemetry the thin export never carried:
@@ -2776,6 +3751,140 @@ describe('LynoxHTTPApi', () => {
         expect(body.runs[0]!.prompt_snapshot).toContain('system');
         // Secret scrub: the leaked key must NOT survive anywhere in the bundle.
         expect(JSON.stringify(body)).not.toContain(KEY);
+      });
+    });
+
+    it('includes a retention-safe memory snapshot (KG stats + active memories) + sharing notice, secret-scrubbed', async () => {
+      const KEY = 'sk-ant-api03-ZYXWVUTSRQPONMLKJIHGFEDCBA'; // matches a SECRET_PATTERN
+      const kg = {
+        stats: async () => ({ memoryCount: 2, entityCount: 1, relationCount: 0, communityCount: 0 }),
+        getDb: () => ({
+          listAllActiveMemories: () => [
+            { text: `client fact with ${KEY}`, namespace: 'knowledge', scope_type: 'context', scope_id: 'http-api', source_type: 'agent_inferred', source_tool_name: null, confidence: 0.75, confirmation_count: 3, created_at: '2026-07-10T00:00:00Z' },
+          ],
+        }),
+      };
+      await swapEngine({
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getRunHistory: () => ({ getRunsBySession: () => [], getRunToolCalls: () => [], getPromptSnapshot: () => null, getCompactionEventsBySession: () => [], getWireSnapshotsForRun: () => [] }),
+        getKnowledgeLayer: () => kg,
+      }, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as {
+          sharing_notice: string;
+          memory: { kg_stats: { memoryCount: number }; active_memories_shown: number; active_memories: Array<{ source_type: string; scope: string }> };
+        };
+        // The poisoning-diagnostic snapshot: what facts memory holds + how they're classified.
+        expect(body.memory.kg_stats.memoryCount).toBe(2);
+        expect(body.memory.active_memories_shown).toBe(1);
+        expect(body.memory.active_memories[0]!.source_type).toBe('agent_inferred');
+        expect(body.memory.active_memories[0]!.scope).toBe('context:http-api');
+        // Consent notice present (the PII policy: user's own data, share with care).
+        expect(body.sharing_notice).toContain('Share it only with recipients you trust');
+        // Secrets in the memory text are still scrubbed by the whole-bundle pass.
+        expect(JSON.stringify(body)).not.toContain(KEY);
+      });
+    });
+
+    it('bundles wire snapshots + the typed-vs-assembled diff + at-a-glance summary (extended debug capture)', async () => {
+      const typed = 'summarise Q3 revenue';
+      // What the model actually saw: a [Now:] prefix + the typed task + the injected
+      // ephemeral tail (retrieved_context / task_overview / redacted secrets count).
+      const prefix = '[Now:2026-07-22] ';
+      const tail = ' <retrieved_context>kg facts</retrieved_context><task_overview>propose work</task_overview><secrets>2 secrets available (names+last4 redacted)</secrets>';
+      const assembled = `${prefix}${typed}${tail}`;
+      const runHistory = {
+        getRunsBySession: () => [{
+          id: 'run-1', session_id: 't1', task_text: typed, response_text: 'ok', prompt_hash: '',
+          provider: 'openai', status: 'completed', cost_usd: 0.01,
+          tokens_in: 100, tokens_out: 10, tokens_cache_read: 0, tokens_cache_write: 0,
+          composition_json: null, error_text: null,
+        }],
+        getRunToolCalls: () => [],
+        getPromptSnapshot: () => null,
+        getCompactionEventsBySession: () => [],
+        getWireSnapshotsForRun: () => [
+          {
+            run_id: 'run-1', turn_index: 1, model: 'ministral-14b-2512', provider: 'openai',
+            system_prompt_hash: 'sph1', user_message: assembled, user_message_chars: assembled.length,
+            tool_names: ['recall', 'spawn_agent'], tool_count: 2, tool_choice: null, temperature: 0.7,
+            max_tokens: 8192, ephemeral_tail_present: true, ephemeral_tail_chars: 3050, captured_at: 1_700_000_000_000,
+          },
+          {
+            // Turn 2: a later agent iteration — the last user message is a short
+            // tool_result, NOT the typed task, so the typed task is NOT found in it.
+            run_id: 'run-1', turn_index: 2, model: 'ministral-14b-2512', provider: 'openai',
+            system_prompt_hash: 'sph1', user_message: '[tool_result]', user_message_chars: 13,
+            tool_names: ['recall', 'spawn_agent'], tool_count: 2, tool_choice: null, temperature: 0.7,
+            max_tokens: 8192, ephemeral_tail_present: false, ephemeral_tail_chars: 0, captured_at: 1_700_000_000_001,
+          },
+        ],
+      };
+      await swapEngine({
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getRunHistory: () => runHistory,
+      }, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as {
+          schema: string;
+          runs: Array<{ wire_snapshots: Array<{
+            user_message: string; tool_count: number; tool_names: string[];
+            wire_diff: { typed_found: boolean; typed_chars: number; assembled_chars: number; injected_chars: number | null; injected_prefix?: string; injected_suffix?: string };
+          }> }>;
+          wire_capture_summary: { turn_count: number; turns: Array<{ turn_index: number; typed_chars: number; assembled_chars: number; injected_chars: number | null; tool_count: number; ephemeral_tail_present: boolean }> } | null;
+        };
+        expect(body.schema).toBe('thread-debug-export/v3');
+        const snap = body.runs[0]!.wire_snapshots[0]!;
+        // The snapshot rides the run.
+        expect(snap.tool_count).toBe(2);
+        expect(snap.tool_names).toEqual(['recall', 'spawn_agent']);
+        expect(snap.user_message).toBe(assembled);
+        // Step-3 diff (turn 1): the typed task is found inside the assembled message → clean split.
+        expect(snap.wire_diff.typed_found).toBe(true);
+        expect(snap.wire_diff.typed_chars).toBe(typed.length);
+        expect(snap.wire_diff.assembled_chars).toBe(assembled.length);
+        expect(snap.wire_diff.injected_chars).toBe(assembled.length - typed.length);
+        expect(snap.wire_diff.injected_prefix).toBe(prefix);      // the [Now:] prefix
+        expect(snap.wire_diff.injected_suffix).toBe(tail);        // the ephemeral tail
+        // Step-3 diff (turn 2): typed task NOT found → no split, and injected_chars is
+        // NULL (assembled − typed would go negative and mean nothing), not a misleading number.
+        const snap2 = body.runs[0]!.wire_snapshots[1]!;
+        expect(snap2.wire_diff.typed_found).toBe(false);
+        expect(snap2.wire_diff.injected_chars).toBeNull();
+        expect(snap2.wire_diff.injected_prefix).toBeUndefined();
+        expect(snap2.wire_diff.assembled_chars).toBe('[tool_result]'.length);
+        // At-a-glance summary across the thread — both turns, turn 2 injected null.
+        expect(body.wire_capture_summary?.turn_count).toBe(2);
+        expect(body.wire_capture_summary?.turns[0]!.turn_index).toBe(1);
+        expect(body.wire_capture_summary?.turns[0]!.injected_chars).toBe(assembled.length - typed.length);
+        expect(body.wire_capture_summary?.turns[0]!.ephemeral_tail_present).toBe(true);
+        expect(body.wire_capture_summary?.turns[1]!.turn_index).toBe(2);
+        expect(body.wire_capture_summary?.turns[1]!.injected_chars).toBeNull();
+      });
+    });
+
+    it('wire_capture_summary is null when no run captured snapshots (setting off)', async () => {
+      const runHistory = {
+        getRunsBySession: () => [{
+          id: 'run-1', session_id: 't1', task_text: 'x', response_text: 'ok', prompt_hash: '',
+          provider: 'anthropic', status: 'completed', cost_usd: 0, tokens_in: 1, tokens_out: 1,
+          tokens_cache_read: 0, tokens_cache_write: 0, composition_json: null, error_text: null,
+        }],
+        getRunToolCalls: () => [],
+        getPromptSnapshot: () => null,
+        getCompactionEventsBySession: () => [],
+        getWireSnapshotsForRun: () => [],
+      };
+      await swapEngine({
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getRunHistory: () => runHistory,
+      }, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        const body = await res.json() as { wire_capture_summary: unknown; runs: Array<{ wire_snapshots: unknown[] }> };
+        expect(body.wire_capture_summary).toBeNull();
+        expect(body.runs[0]!.wire_snapshots).toEqual([]);
       });
     });
 
@@ -2794,6 +3903,7 @@ describe('LynoxHTTPApi', () => {
         getCompactionEventsBySession: () => [
           { id: 'c1', session_id: 't1', run_id: 'run-1', trigger: 'auto', occupancy_before: 160000, occupancy_after: 8000, messages_before: 12, messages_after: 3, summary_chars: 900, created_at: '2026-06-19T00:00:00Z' },
         ],
+        getWireSnapshotsForRun: () => [],
       };
       await swapEngine({
         getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
@@ -2884,6 +3994,19 @@ describe('LynoxHTTPApi', () => {
 
   // PRD-WORKFLOW-UX D13 — Saved Workflows library endpoints.
   describe('saved workflows library', () => {
+    beforeEach(() => {
+      // The Run path now consent-gates on confirmedAt (F1). Default the resolved
+      // workflow to CONFIRMED so these tests exercise their real subject (params,
+      // errors, not-found) with the gate passed; the gate itself has its own test.
+      // mockReset clears any returnValue leaked from a sibling describe (the global
+      // beforeEach uses clearAllMocks, which does NOT reset returnValue).
+      mockGetPipeline.mockReset();
+      mockGetPipeline.mockReturnValue({
+        id: 'wf-1', name: 'wf', template: true,
+        confirmedAt: '2026-07-01T00:00:00Z', steps: [{ id: 's1', task: 't' }],
+      });
+    });
+
     it('GET /api/workflows/library lists only template rows', async () => {
       mockHistoryGetPlannedPipelines.mockReturnValue([
         { id: 'wf-1', manifest_name: 'Monthly Report', manifest_json: JSON.stringify({ template: true, name: 'Monthly Report', goal: 'Compile the monthly report', steps: [{ id: 's1', task: 'Gather data' }, { id: 's2', task: 'Write summary' }] }), step_count: 2, started_at: '2026-05-21T00:00:00Z' },
@@ -2979,6 +4102,20 @@ describe('LynoxHTTPApi', () => {
       mockRunSavedWorkflow.mockResolvedValue({ ok: false, error: 'Workflow execution failed: boom' });
       const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
       expect(res.status).toBe(400);
+    });
+
+    it('POST /api/workflows/:id/run REFUSES an unconfirmed workflow (F1 import consent gate)', async () => {
+      // Security property: an imported workflow lands unconfirmed; this headless,
+      // autonomy:'autonomous' Run path must not execute its attacker-authorable
+      // steps before the user has reviewed them. The gate fires BEFORE the runner.
+      mockGetPipeline.mockReturnValue({
+        id: 'wf-imp', name: 'Imported', template: true,
+        steps: [{ id: 's1', task: 'exfil' }],
+        // confirmedAt deliberately absent → imported / not-yet-reviewed
+      });
+      const res = await jsonFetch('/api/workflows/wf-imp/run', { method: 'POST' });
+      expect(res.status).toBe(403);
+      expect(mockRunSavedWorkflow).not.toHaveBeenCalled();
     });
 
     it('PATCH /api/workflows/:id renames a saved workflow and evicts the cache', async () => {
@@ -3406,6 +4543,9 @@ describe('LynoxHTTPApi', () => {
         ['custom_endpoints', [{ id: 'mistral-eu', name: 'Mistral EU', base_url: 'https://api.mistral.ai/v1' }]],
         ['disabled_tools', ['web_search']],
         ['context_cost_log', true],
+        // Sonnet-variant opt-in is a user-preference (same provider, ~same
+        // price), so a managed tenant may set it without a 403.
+        ['balanced_model', 'claude-sonnet-5'],
       ])(
         'PUT /api/config accepts user-pref %s in managed mode',
         async (field, value) => {
@@ -3444,7 +4584,9 @@ describe('LynoxHTTPApi', () => {
       });
 
       it.each([
-        ['default_tier', 'fast'],
+        // default_tier is NO LONGER here — it is the user's "Main chat model"
+        // picker, now user-writable on managed (clamped to max_tier at the
+        // engine). See the acceptance test below.
         ['max_session_cost_usd', 1_000_000],
         ['max_daily_cost_usd', 1_000_000],
         ['max_monthly_cost_usd', 1_000_000],
@@ -3476,6 +4618,24 @@ describe('LynoxHTTPApi', () => {
           }
         },
       );
+
+      it('PUT /api/config ACCEPTS a user-scope default_tier change in managed mode (the Main chat model picker)', async () => {
+        // default_tier is now the user's "Main chat model" band — user-writable
+        // on managed (a genuine change from the effective 'deep' → 'balanced'),
+        // never widening blast radius because the engine clamps it to max_tier.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ default_tier: 'balanced' }),
+          });
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
 
       it('PUT /api/config rejects unknown fields under user-scope in managed mode (schema-strict fail-closed)', async () => {
         // PRD-IA-V2 P1-PR-A2: schema is `.strict()`, so a hostile or typo'd
@@ -3623,6 +4783,237 @@ describe('LynoxHTTPApi', () => {
         }
       });
 
+      // Model blocklist (LYNOX_BLOCKED_MODEL_IDS): write-accept ⟺ load-keep —
+      // a tier_set slot naming a blocked model gets an honest 403 (the loader
+      // would drop it and silently reroute the tier otherwise).
+      it('PUT /api/config REJECTS a tier_set slot whose model is on the blocklist (403 with a clear reason)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        // loadConfig is module-mocked here, so the env-merged blocklist is
+        // modeled on the mock (the real env→config parse is covered by
+        // config.test.ts).
+        vi.mocked(loadConfig).mockReturnValue({ default_tier: 'deep', blocked_model_ids: ['claude-sonnet-', 'claude-opus-', 'claude-fable-'] });
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              tier_set: { fast: { provider: 'anthropic', model_id: 'claude-fable-5' } },
+            }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('model blocklist');
+        } finally {
+          vi.mocked(loadConfig).mockReturnValue({ default_tier: 'deep' });
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config ACCEPTS the same tier_set slot when no blocklist is set (no over-rejection)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              tier_set: { fast: { provider: 'anthropic', model_id: 'claude-fable-5' } },
+            }),
+          });
+          // Hard 200: write-accept ⟺ load-keep — without a blocklist the loader
+          // keeps this exact slot, so the gate must accept it.
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config REJECTS a tier_preset whose expanded slot uses a blocked model', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        // ⚖️ balanced preset expands to a claude-sonnet-5 deep slot → blocked.
+        vi.mocked(loadConfig).mockReturnValue({ default_tier: 'deep', blocked_model_ids: ['claude-sonnet-'] });
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ tier_preset: 'balanced' }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('model blocklist');
+        } finally {
+          vi.mocked(loadConfig).mockReturnValue({ default_tier: 'deep' });
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      // RAW Fireworks tier_set slots — the per-tier picker persists these
+      // directly (provider:'openai' + the canonical Fireworks base), so the
+      // write-gate must mirror the loader for them too: off by default, accepted
+      // only under flag+key, honestly rejected (never silently dropped at load)
+      // when the flag is on but the key is not provisioned.
+      it('PUT /api/config REJECTS a raw Fireworks tier_set slot on managed by default (no flag)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              tier_set: { deep: { provider: 'openai', model_id: 'accounts/fireworks/models/glm-5p2', api_base_url: 'https://api.fireworks.ai/inference/v1' } },
+            }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('tier_set');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config ACCEPTS a raw Fireworks tier_set slot once the operator opts in AND provisions the key', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        vi.stubEnv('LYNOX_MANAGED_FIREWORKS_ENABLED', 'true');
+        vi.stubEnv('FIREWORKS_API_KEY', 'cp-fireworks-key');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              tier_set: { deep: { provider: 'openai', model_id: 'accounts/fireworks/models/glm-5p2', api_base_url: 'https://api.fireworks.ai/inference/v1' } },
+            }),
+          });
+          // A hard 200: write-accept ⟺ load-keep — the loader keeps this exact
+          // slot under flag+key, so the gate must accept it (a bare not-403 check
+          // would pass vacuously if a later step rejected it).
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config REJECTS a raw Fireworks tier_set slot when the flag is on but FIREWORKS_API_KEY is UNSET', async () => {
+        // Same false-compliance seam as the tier_preset variant below: the host
+        // check alone would 200, then the loader drops the slot and the tier
+        // silently reroutes to the base model. The gate must reject up front.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        vi.stubEnv('LYNOX_MANAGED_FIREWORKS_ENABLED', 'true');
+        vi.stubEnv('FIREWORKS_API_KEY', ''); // flag on, key NOT provisioned
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+              tier_set: { deep: { provider: 'openai', model_id: 'accounts/fireworks/models/glm-5p2', api_base_url: 'https://api.fireworks.ai/inference/v1' } },
+            }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('FIREWORKS_API_KEY');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      // model-presets W3 — managed tier_preset write-gate. The gate EXPANDS the
+      // preset via the shared SoT and 403s honestly (never silent-strip) when a
+      // slot routes off the curated allowlist.
+      it('PUT /api/config REJECTS the Fireworks-hosted ⚡ efficient preset on managed by default', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ tier_preset: 'efficient' }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('tier_preset');
+          expect(body.error).toContain('efficient');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config ACCEPTS ⚡ efficient once the operator opts in AND provisions the key', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        vi.stubEnv('LYNOX_MANAGED_FIREWORKS_ENABLED', 'true');
+        vi.stubEnv('FIREWORKS_API_KEY', 'cp-fireworks-key'); // the canary needs both the flag AND the key
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ tier_preset: 'efficient' }),
+          });
+          // Fireworks host allowed + key provisioned → the write is ACCEPTED (a bare
+          // not-403 check would pass vacuously if a later step silently dropped it).
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config REJECTS ⚡ efficient when the flag is on but FIREWORKS_API_KEY is UNSET', async () => {
+        // The assembled-review seam: host-accept without key-check would 200 here,
+        // then the loader drops the Fireworks slot and reroutes deep to the costly
+        // base model (false compliance). The write-gate must reject it up front.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        vi.stubEnv('LYNOX_MANAGED_FIREWORKS_ENABLED', 'true');
+        vi.stubEnv('FIREWORKS_API_KEY', ''); // flag on, key NOT provisioned
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ tier_preset: 'efficient' }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('FIREWORKS_API_KEY');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config ACCEPTS the all-Anthropic 💎 max-quality preset on managed (no flag needed)', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ tier_preset: 'max-quality' }),
+          });
+          // All-Anthropic preset — accepted on managed with no flag.
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config REJECTS an unknown tier_preset on managed', async () => {
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/config', {
+            method: 'PUT',
+            body: JSON.stringify({ tier_preset: 'nonexistent-preset' }),
+          });
+          expect(res.status).toBe(403);
+          const body = await res.json() as { error: string };
+          expect(body.error).toContain('unknown tier_preset');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
       // Starter (BYOK) — provider/api_base_url/cost-caps are NOT locked.
       // Customer owns their LLM, owns the config. Config-lock gate must
       // skip them entirely.
@@ -3669,6 +5060,28 @@ describe('LynoxHTTPApi', () => {
           expect(res.status).toBe(400);
           const body = await res.json() as { error: string };
           expect(body.error).toContain('api_base_url');
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      it('PUT /api/config rejects an unknown tier_preset on self-host (400, never persisted → no boot crash-loop)', async () => {
+        // The config loader fail-closes on an unknown preset with a THROW and the engine
+        // ctor has no catch, so a persisted bad name would crash-loop the container. Reject
+        // it at write time on non-managed instances too (managed has its own 403 gate).
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'starter');
+        try {
+          for (const bad of ['nonexistent-preset', '__proto__', 'constructor']) {
+            const res = await jsonFetch('/api/config', {
+              method: 'PUT',
+              body: JSON.stringify({ tier_preset: bad }),
+            });
+            expect(res.status).toBe(400);
+            const body = await res.json() as { error: string };
+            expect(body.error).toContain('Unknown tier_preset');
+          }
         } finally {
           vi.unstubAllEnvs();
           vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
@@ -4689,6 +6102,34 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    it('GET /api/kg/graph returns getGraph nodes+edges and clamps the limit [1,300]', async () => {
+      const getGraph = vi.fn((_limit: number) => Promise.resolve({
+        nodes: [{ id: 'a', canonicalName: 'A', entityType: 'person', aliases: [], description: '', scopeType: 'global', scopeId: 'global', mentionCount: 3, firstSeenAt: '', lastSeenAt: '' }],
+        edges: [{ fromEntityId: 'a', toEntityId: 'a', relationType: 'self', description: '', confidence: 1, sourceMemoryId: '', createdAt: '' }],
+      }));
+      await swapEngine({ getKnowledgeLayer: () => ({ getGraph }) }, async () => {
+        const res = await jsonFetch('/api/kg/graph?limit=80');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { nodes: unknown[]; edges: unknown[] };
+        expect(body.nodes).toHaveLength(1);
+        expect(body.edges).toHaveLength(1);
+        expect(getGraph).toHaveBeenCalledWith(80);
+        // Over-max clamps to 300; a missing/zero limit defaults to 80.
+        await jsonFetch('/api/kg/graph?limit=9999');
+        expect(getGraph).toHaveBeenCalledWith(300);
+      });
+    });
+
+    it('GET /api/kg/graph returns empty graph (never 500) when getGraph throws', async () => {
+      await swapEngine({
+        getKnowledgeLayer: () => ({ getGraph: () => { throw new Error('engine.db closed'); } }),
+      }, async () => {
+        const res = await jsonFetch('/api/kg/graph');
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ nodes: [], edges: [] });
+      });
+    });
+
     it('DELETE /api/data wipes engine.db PII via deleteAllData (Right to Erasure)', async () => {
       const deleteAllData = vi.fn();
       await swapEngine({
@@ -4697,7 +6138,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
           getDb: () => ({
             listEntities: () => [],
             deleteEntity: () => undefined,
-            deactivateMemoriesByPattern: () => [],
+            deactivateAllMemories: () => [],
           }),
         }),
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
@@ -4716,7 +6157,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => ({ deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateMemoriesByPattern: () => [] }),
+          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
         }),
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
@@ -4731,7 +6172,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => ({ deleteAllData }),
         getKnowledgeLayer: () => ({
-          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateMemoriesByPattern: () => [] }),
+          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
         }),
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {
@@ -4745,7 +6186,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       await swapEngine({
         getEngineDb: () => null,
         getKnowledgeLayer: () => ({
-          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateMemoriesByPattern: () => [] }),
+          getDb: () => ({ listEntities: () => [], deleteEntity: () => undefined, deactivateAllMemories: () => [] }),
         }),
         getDataStore: () => ({ listCollections: () => [], dropCollection: () => undefined }),
       }, async () => {

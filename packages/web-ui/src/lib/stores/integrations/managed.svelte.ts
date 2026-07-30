@@ -29,11 +29,16 @@ export function isManaged(): boolean {
  * but the CUSTOMER brings their own LLM key, so UI surfaces that gate on
  * "key already provided" must distinguish.
  *
- * Found 2026-05-27 staging audit: LLMSettings was hiding the API-key input
+ * Found during a staging audit: LLMSettings was hiding the API-key input
  * for every managed tenant including BYOK, leaving the customer with no UI
  * path to set or rotate their own key.
+ *
+ * Named `…ForInstance` (not plain `cpSuppliesLLMKey`) so this zero-arg,
+ * store-bound convenience never shadows the 1-arg contract predicate it
+ * delegates to — the orphan-twin sweep keeps the bare name unique to the
+ * contract module.
  */
-export function cpSuppliesLLMKey(): boolean {
+export function cpSuppliesLLMKeyForInstance(): boolean {
 	return tierCpSuppliesLLMKey(managedTier);
 }
 

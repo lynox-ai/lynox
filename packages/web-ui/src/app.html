@@ -49,8 +49,8 @@
 		<!--
 			Cold-start stale-bundle guard. Runs BEFORE SvelteKit hydrates so
 			it works even when cached chunk hashes 404 against the new
-			deploy (the case that broke Roland's PWA + Rafael's voice send
-			on 2026-05-05). The placeholder is replaced server-side by
+			deploy (the case that broke a customer's PWA session + the
+			operator's voice send). The placeholder is replaced server-side by
 			hooks.server.ts; in dev / non-CI builds it stays as the literal
 			string and the script no-ops.
 		-->

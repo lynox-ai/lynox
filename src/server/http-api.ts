@@ -16,6 +16,8 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
 import { Engine } from '../core/engine.js';
+import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
+import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
 import { extractDocumentText, DocumentExtractError } from '../core/document-extract.js';
 import { ingestDocumentText, pickDocumentScope } from '../core/document-ingest.js';
@@ -24,20 +26,35 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
+import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
+import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
-import { resolveChatContext, type ChatContextRef } from '../core/chat-context.js';
+import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
-import { resolveProviderApiKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
+import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
+import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import { RunAbortedError } from '../core/agent.js';
 import { WEB_UI_SYSTEM_PROMPT_SUFFIX } from '../core/prompts.js';
 import { projectMessages } from '../core/render-projection.js';
+import { isOnboardingFlag } from '../core/onboarding-flag-store.js';
+import { ONBOARDING_BASICS, onboardingBasicQuestion, isOnboardingBasicKey } from '../core/onboarding-catalog.js';
+import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onboarding-promotion.js';
+import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding-domain.js';
+import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
-import type { StreamEvent, PromptMeta, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord } from '../types/index.js';
-import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier } from '../types/index.js';
+import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
+import type {
+  HealthBody,
+  UsageSummaryResponse,
+  OAuthClaimRequest,
+  OAuthClaimResponse,
+} from '../contract/http.js';
+import { WallClockBudget } from './wall-clock-budget.js';
 import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
@@ -106,6 +123,19 @@ const RATE_MAX = 120;
 const RATE_MAX_LOOPBACK = 600; // Higher limit for Web UI proxy on same host
 const PROMPT_TIMEOUT_MS = 24 * 60 * 60_000; // 24 hours — prompts persist in SQLite, survive reconnects
 const ORPHAN_PROMPT_WATCHDOG_MS = 10 * 60_000; // 10 min — orphaned-stream + pending-prompt slot free guard
+/** Run wall-clock: max wall-time a run may spend ACTIVELY COMPUTING. Human
+ *  think-time on a pending prompt is paused out of this budget (#77), so this
+ *  is a compute-only ceiling, not elapsed-time. Overridable for tests/ops via
+ *  LYNOX_RUN_WALL_CLOCK_MS. */
+const DEFAULT_RUN_WALL_CLOCK_MS = 30 * 60_000; // 30 min
+function resolveRunWallClockMs(): number {
+  const raw = process.env['LYNOX_RUN_WALL_CLOCK_MS'];
+  if (raw !== undefined) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return DEFAULT_RUN_WALL_CLOCK_MS;
+}
 /** Hard per-request input cap for POST /api/speak to bound Mistral cost + latency. */
 const SPEAK_MAX_TEXT_CHARS = 10_000;
 /** Mistral Voxtral TTS rate (2026-04): $0.016 per 1 000 characters. No usage headers exposed — billed client-side. */
@@ -127,6 +157,12 @@ const TZ_MAX_LENGTH = 64;
  * statements). Matches the shape `randomUUID()` produces (lowercase hex).
  */
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// Agent-opened escalation threads use `escalation-<key>` ids (see core/escalation.ts),
+// which are legitimate RESUMABLE chat threads but are NOT UUIDs — so the resume
+// (`POST /api/sessions`) must accept them alongside UUIDs. Injection-safe charset
+// (alphanumeric + hyphen, bounded); these ids are used verbatim as the SQLite TEXT PK,
+// never lowercased (unlike UUIDs), so they match the stored thread row exactly.
+const ESCALATION_ID_REGEX = /^escalation-[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 
 /**
  * Three deployment modes the engine has to keep distinct. The billing tier
@@ -194,12 +230,11 @@ const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
  * arbitrary tool credentials without filing a support ticket. The previous
  * allowlist (`BYOK_USER_WRITABLE_SECRETS` — only LLM provider keys) violated
  * that promise — every integration the agent wanted to use needed admin
- * provisioning. Inverted 2026-05-18 after rafael's QA: see
- * [[feedback_canary_pinning]] + [[project_managed_user_secrets_promise]].
+ * provisioning. Inverted 2026-05-18 after QA on a real managed instance.
  *
  * **Deny-list — admin-only patterns** (cookie users get 403 for these):
  *  - `LYNOX_*`        engine-internal infra (HTTP_SECRET, VAULT_KEY, BUGSINK_DSN, etc.)
- *  - `MANAGED_*`      CP-managed control-plane secrets
+ *  - `MANAGED_*`      infrastructure-managed secrets (hosted deployments)
  *  - `MAIL_ACCOUNT_*` channel-managed via Mail settings UI (writes race the
  *                     dedicated mail-account form — they have their own path)
  *  - `GOOGLE_OAUTH_*` channel-managed via Google OAuth flow
@@ -245,9 +280,31 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   // tenants while appearing interactive. Each field can only reduce surface
   // or shape the user's own session — never widen blast radius.
   'max_context_window_tokens',  // LLM Advanced radios (200k / 500k / 1M) — caps the agent trim budget, no cost / capability impact on CP.
+  // Sonnet-variant picker (LLM Advanced): which served Sonnet the `balanced`
+  // tier resolves to (4.6 ↔ 5). A user-preference — same Anthropic provider,
+  // ~same per-token price, debit auto-metered — so it shapes the user's own
+  // session and never widens blast radius. The PUT handler additionally
+  // validates the value against SERVED_BALANCED_SONNET_IDS (400 otherwise), so
+  // an invalid/non-Sonnet id can never reach config even though the field is
+  // user-writable.
+  'balanced_model',
+  // Main-chat model picker (standard mode): the band the main conversation runs
+  // in (fast/balanced/deep → the provider's concrete model). Shapes the user's
+  // own session and NEVER widens blast radius because the engine clamps it to
+  // the CP-emitted `max_tier` ceiling (engine.ts ctor + reloadUserConfig). The
+  // PUT handler additionally validates the value via `normalizeTier` (400
+  // otherwise), so an unrecognised tier can never reach config.
+  'default_tier',
   'custom_endpoints',           // LLM-settings bookmarks — UI sugar over api_base_url, engine still consumes api_base_url.
   'disabled_tools',             // Tool-Toggles — strictly narrows excludeTools, never widens.
   'context_cost_log',           // Diagnostic: opt-in content-free per-turn composition log to the instance's own data dir. Shapes only the user's own session, writes no content, never widens blast radius.
+  // Extended debug capture (operator surface): opt-in, owner-scoped persistence of
+  // the REDACTED per-turn assembled request to the instance's OWN history.db, bundled
+  // into the owner's OWN debug export. Same class as `bugsink_enabled` — the owner
+  // consenting to retain more of their OWN (secret-scrubbed) data, exported only by
+  // their own action; no cross-tenant reach, no blast-radius widening. A managed owner
+  // must be able to arm it for a bug report, so the allowlist accepts it here.
+  'debug_wire_capture',
   // P3-FOLLOWUP-HOTFIX: provider switching between curated managed providers
   // (Anthropic + Mistral; future: openai-native). The value-range guard at
   // `enforceManagedProviderConstraints()` below caps the allowed set —
@@ -266,6 +323,11 @@ const MANAGED_USER_WRITABLE_CONFIG = new Set([
   // key. Persisting the raw value is inert; the load-time transform sanitizes.
   'routing_mode',
   'tier_set',
+  // model-presets W3: a named hybrid strategy. enforceManagedProviderConstraints
+  // EXPANDS it via the shared TIER_PRESETS SoT and 403s if any expanded slot is
+  // off the curated allowlist (never silent-strip); the loader then hardens the
+  // expanded tier_set the same way it does a raw one.
+  'tier_preset',
 ]);
 
 /**
@@ -298,7 +360,25 @@ const MANAGED_CURATED_HOSTS = new Set<string>([
   'https://api.anthropic.com',
 ]);
 
-function enforceManagedProviderConstraints(update: Record<string, unknown>): string | null {
+function enforceManagedProviderConstraints(
+  update: Record<string, unknown>,
+  // Model blocklist (`blocked_model_ids`, env LYNOX_BLOCKED_MODEL_IDS) — the
+  // write-gate mirror of the loader's slot drop + the resolver's refusal
+  // (write-accept ⟺ load-keep ⟺ resolve): a slot naming a blocked model gets
+  // an honest 403 here, never a 200 followed by a silent load-time reroute.
+  blockedModelIds: readonly string[],
+): string | null {
+  // Effective curated HYBRID-SLOT hosts (model-presets W3): the Fireworks host
+  // joins the allowlist for tier_set/tier_preset slots ONLY when the operator opts
+  // this managed instance in (LYNOX_MANAGED_FIREWORKS_ENABLED, default OFF — broad
+  // managed stays Anthropic/Mistral; Fireworks is a new sub-processor, DPA-gated;
+  // ON = the rafael canary). It is NOT added to the TOP-LEVEL provider/endpoint
+  // checks (sections 1-2) — Fireworks is reachable only as a hybrid slot, never as
+  // a standard-mode managed endpoint.
+  const fireworksEnabled = managedFireworksEnabled();
+  const slotHosts = fireworksEnabled
+    ? new Set<string>([...MANAGED_CURATED_HOSTS, FIREWORKS_API_BASE])
+    : MANAGED_CURATED_HOSTS;
   // 1. provider field present — must be in the curated allowlist (anthropic
   //    or openai-with-Mistral-host). 'custom' and 'vertex' are blocked outright.
   if ('provider' in update) {
@@ -337,9 +417,65 @@ function enforceManagedProviderConstraints(update: Record<string, unknown>): str
     for (const [tier, slot] of Object.entries(tierSet as Record<string, unknown>)) {
       if (!slot || typeof slot !== 'object') continue;
       const slotUrl = (slot as Record<string, unknown>)['api_base_url'];
-      if (typeof slotUrl === 'string' && slotUrl.length > 0 && !MANAGED_CURATED_HOSTS.has(slotUrl)) {
+      if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
         return `Managed instance: tier_set slot '${tier}' api_base_url '${slotUrl}' is not a curated Anthropic/Mistral endpoint.`;
       }
+      // Model blocklist: reject a slot naming a blocked model honestly at write
+      // time — the loader would drop it in-memory and silently reroute the tier
+      // (the same false-compliance seam as the Fireworks key check below).
+      const slotModelId = (slot as Record<string, unknown>)['model_id'];
+      if (typeof slotModelId === 'string' && isBlockedModelId(slotModelId, blockedModelIds)) {
+        return `Managed instance: tier_set slot '${tier}' model '${slotModelId}' is not available on this instance (operator model blocklist).`;
+      }
+      // Write-accept ⟺ load-keep for a RAW Fireworks slot. The per-tier picker
+      // persists Fireworks directly as a tier_set slot (not only via a preset),
+      // and the host check above does not see the CP KEY — but the loader
+      // (applyManagedTierSetConstraints) keeps a Fireworks slot only when
+      // FIREWORKS_API_KEY is also provisioned. With the flag ON and the key
+      // UNSET a 200 here would be false compliance: the loader drops the slot
+      // and silently reroutes the tier to the base model. Mirror the
+      // tier_preset key-check in section 4 and reject honestly.
+      if (fireworksEnabled
+        && !process.env['FIREWORKS_API_KEY']
+        && slotUrl === FIREWORKS_API_BASE) {
+        return `Managed instance: tier_set slot '${tier}' routes to Fireworks, but the credential is not provisioned (FIREWORKS_API_KEY) — it would silently fall back to the base model. Provision the key first.`;
+      }
+    }
+  }
+  // 4. tier_preset (model-presets W3) — EXPAND via the same TIER_PRESETS SoT the
+  //    loader uses and validate each expanded slot's host against the effective
+  //    allowlist. An honest 403 (never a silent strip): a preset whose slot routes
+  //    off-allowlist is rejected at WRITE time, so the picker can never advertise a
+  //    preset the loader would reroute (the false-compliance this gate prevents).
+  const tierPreset = update['tier_preset'];
+  if (typeof tierPreset === 'string' && tierPreset.length > 0) {
+    const expanded = expandTierPreset(tierPreset);
+    if (!expanded) {
+      return `Managed instance: unknown tier_preset '${tierPreset}'.`;
+    }
+    for (const [tier, slot] of Object.entries(expanded.tier_set)) {
+      const slotUrl = slot?.api_base_url;
+      if (typeof slotUrl === 'string' && slotUrl.length > 0 && !slotHosts.has(slotUrl)) {
+        return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' routes to '${slotUrl}', which is not a curated Anthropic/Mistral endpoint${fireworksEnabled ? '' : ' (a Fireworks-hosted preset requires the operator opt-in)'}.`;
+      }
+      // Model blocklist: a preset whose expanded slot names a blocked model is
+      // rejected honestly (never advertised, then silently rerouted at load).
+      if (slot && isBlockedModelId(slot.model_id, blockedModelIds)) {
+        return `Managed instance: tier_preset '${tierPreset}' slot '${tier}' uses model '${slot.model_id}', which is not available on this instance (operator model blocklist).`;
+      }
+    }
+    // Write-accept ⟺ load-keep for the flag-gated Fireworks slot. The host check
+    // above does not see the CP KEY, but the loader (applyManagedTierSetConstraints)
+    // keeps a Fireworks slot only when FIREWORKS_API_KEY is also provisioned — so
+    // with the flag ON but the key UNSET the write would 200 while the loader drops
+    // the slot and silently reroutes deep to the base (costly Opus) model: the exact
+    // "picker advertises a preset the loader reroutes" false-compliance this gate
+    // exists to prevent. Reject it instead. (Anthropic/Mistral keys are always
+    // provisioned on managed, so only the opt-in Fireworks key needs this check.)
+    if (fireworksEnabled
+      && !process.env['FIREWORKS_API_KEY']
+      && Object.values(expanded.tier_set).some((s) => s?.api_base_url === FIREWORKS_API_BASE)) {
+      return `Managed instance: tier_preset '${tierPreset}' needs a Fireworks credential that is not provisioned (FIREWORKS_API_KEY) — it would silently fall back to the base model. Provision the key first.`;
     }
   }
   return null;
@@ -547,7 +683,7 @@ export class LynoxHTTPApi {
   private readonly dynamicRoutes: DynamicRoute[] = [];
   private rateGcTimer: ReturnType<typeof setInterval> | null = null;
   private providerStatusCache: { data: ProviderStatus; expiresAt: number } | null = null;
-  private healthCache: { data: Record<string, unknown>; expiresAt: number } | null = null;
+  private healthCache: { data: HealthBody; expiresAt: number } | null = null;
   // 30 s TTL per (period, windowStart) key. Usage Dashboard typically re-opens
   // the tab with the same window multiple times in quick succession — this
   // keeps repeated SQLite scans off the hot path without stale-data risk, since
@@ -616,8 +752,10 @@ export class LynoxHTTPApi {
     return null;
   }
 
-  /** Collect system + process metrics for the health endpoint. Cached 10s. */
-  private async _collectHealthMetrics(): Promise<Record<string, unknown>> {
+  /** Collect system + process metrics for the health endpoint. Cached 10s.
+   *  The body is a WIRE SHAPE (`src/contract/http.ts` HealthBody) — the
+   *  control plane's rollout gate parses `version`/`build_sha` off it. */
+  private async _collectHealthMetrics(): Promise<HealthBody> {
     const now = Date.now();
     if (this.healthCache && this.healthCache.expiresAt > now) return this.healthCache.data;
 
@@ -648,7 +786,7 @@ export class LynoxHTTPApi {
     // misconfigured docker-compose file) that would otherwise surface as a
     // non-null garbage SHA and force every rollout into the rollback path.
     const buildSha = (process.env['BUILD_SHA'] ?? '').trim();
-    const data: Record<string, unknown> = {
+    const data: HealthBody = {
       status: 'ok',
       version: PKG_VERSION,
       build_sha: buildSha.length > 0 ? buildSha : null,
@@ -988,17 +1126,7 @@ export class LynoxHTTPApi {
     const tier = readEnvAlias('LYNOX_BILLING_TIER') ?? null;
     const isManagedTier = cpSuppliesLLMKey(tier);
 
-    interface CpSummary {
-      managed: boolean;
-      tier?: string;
-      budget_cents?: number;
-      topup_cents?: number;
-      available_cents?: number;
-      used_cents?: number;
-      balance_cents?: number;
-      period?: { start_iso: string; end_iso: string; source: 'stripe-billing' } | null;
-    }
-    let cpSummary: CpSummary | null = null;
+    let cpSummary: UsageSummaryResponse | null = null;
     if (isManagedTier && period === 'current') {
       const { fetchControlPlaneUsageSummary } = await import('../core/managed-usage-summary.js');
       cpSummary = await fetchControlPlaneUsageSummary();
@@ -1539,7 +1667,7 @@ export class LynoxHTTPApi {
           configured = !!(userConfig.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
         } else if (provider === 'custom') {
           const customBase = userConfig.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL');
-          const customKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+          const customKey = resolveProviderApiKey({ provider, apiBaseURL: userConfig.api_base_url, secretStore: store, userConfig });
           configured = !!customBase && !!customKey;
         } else if (provider === 'openai') {
           // Parity with GET /api/secrets/status (line ~2496): an OpenAI-compat
@@ -1547,10 +1675,14 @@ export class LynoxHTTPApi {
           // = unusable, so the status bar must reflect that. Without the
           // model-id check the two truth sources would disagree (SetupBanner
           // still demands setup while StatusBar already shows green).
-          const openaiKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
-          configured = !!userConfig.api_base_url && !!openaiKey && !!userConfig.openai_model_id;
+          const openaiKey = resolveProviderApiKey({ provider, apiBaseURL: userConfig.api_base_url, secretStore: store, userConfig });
+          // A loopback runtime (Ollama et al.) serves unauthenticated on the
+          // user's own box. Demanding a key there would leave a perfectly
+          // working local install stuck behind a banner it cannot satisfy.
+          const openaiNeedsKey = endpointNeedsCredential(provider, userConfig.api_base_url);
+          configured = !!userConfig.api_base_url && (!openaiNeedsKey || !!openaiKey) && !!userConfig.openai_model_id;
         } else {
-          const anthropicKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+          const anthropicKey = resolveProviderApiKey({ provider, apiBaseURL: userConfig.api_base_url, secretStore: store, userConfig });
           configured = !!anthropicKey;
         }
       } catch {
@@ -1761,19 +1893,35 @@ export class LynoxHTTPApi {
     this.addStatic('user', 'POST /api/sessions', async (_req, res, _params, body) => {
       const opts = body && typeof body === 'object' ? body as Record<string, unknown> : {};
       const rawThreadId = typeof opts['threadId'] === 'string' ? opts['threadId'] : undefined;
-      // Lowercase-normalise BEFORE the regex check. SQLite TEXT PRIMARY KEY
-      // is case-sensitive with the default BINARY collation, so an uppercased
-      // UUID resend would mint a NEW sessionStore Map entry + a NEW thread row
-      // in SQLite, silently forking history. `randomUUID()` always emits
-      // lowercase; normalising here makes resume tolerant to either case.
-      const threadId = rawThreadId?.toLowerCase();
-      if (threadId !== undefined && !UUID_REGEX.test(threadId)) {
-        errorResponse(res, 400, 'Invalid threadId — expected UUID');
-        return;
+      // Resolve the resume id, accepting two shapes:
+      //  • a UUID — lowercase-normalised BEFORE the check. SQLite TEXT PRIMARY KEY
+      //    is case-sensitive (BINARY collation), so an uppercased UUID resend would
+      //    mint a NEW sessionStore entry + a NEW thread row, silently forking
+      //    history. `randomUUID()` always emits lowercase; normalising makes resume
+      //    case-tolerant.
+      //  • an `escalation-<key>` id — an agent-opened, RESUMABLE chat thread whose id
+      //    is NOT a UUID. Used VERBATIM (never lowercased) so it matches the stored
+      //    thread PK exactly. Rejecting these was the "conversation could not be
+      //    opened" bug on agent-escalation threads.
+      let threadId: string | undefined;
+      if (rawThreadId !== undefined) {
+        const lower = rawThreadId.toLowerCase();
+        if (UUID_REGEX.test(lower)) {
+          threadId = lower;
+        } else if (ESCALATION_ID_REGEX.test(rawThreadId)) {
+          threadId = rawThreadId;
+        } else {
+          errorResponse(res, 400, 'Invalid threadId — expected a UUID or escalation id');
+          return;
+        }
       }
       const sessionId = threadId ?? randomUUID();
       const session = this.sessionStore.getOrCreate(sessionId, engine, {
         model: typeof opts['model'] === 'string' ? normalizeTier(opts['model']) : undefined,
+        // Provenance (P1, DEF-0095): the picker declares 'user' vs 'default'.
+        // Only stamped for a genuinely NEW thread (createThread is OR IGNORE on
+        // resume). Absent/invalid → 'unknown' at the ctor.
+        source: normalizeThreadModelSource(opts['source']),
         effort: typeof opts['effort'] === 'string' ? opts['effort'] as 'low' | 'medium' | 'high' : undefined,
         systemPromptSuffix: WEB_UI_SYSTEM_PROMPT_SUFFIX,
       });
@@ -1909,7 +2057,19 @@ export class LynoxHTTPApi {
             ref,
             engine.getInboxRuntime()?.state ?? null,
           );
-          if (preamble) contextPreamble = `${preamble}\n\n`;
+          // Close the loaded-context block with an explicit boundary sentinel
+          // before the user's own text (closeLoadedContext, the single source of
+          // this framing). Two jobs: (1) a clear end-of-loaded-context marker for
+          // the model (the block already OPENS with a `[Loaded …]` line); (2) the
+          // chat UI strips the whole preamble on replay — it's engine framing,
+          // not the user's words, and without a boundary it leaks into the user
+          // bubble on resume (the [Now:] marker shares this store-as-sent /
+          // strip-at-render contract). The sentinel can't be forged on its own
+          // line by the interpolated FREE-TEXT fields — they pass
+          // chat-context.oneLine(), which collapses newlines — and the id fields
+          // are internally-generated (single-tenant). Keep in sync with the
+          // web-ui stripLoadedContext() matcher (packages/web-ui now-marker.ts).
+          if (preamble) contextPreamble = closeLoadedContext(preamble);
         }
       }
       // Defense-in-depth: the client sanitises chat-over-bespoke framings, but
@@ -1936,13 +2096,15 @@ export class LynoxHTTPApi {
         preflightKeyOk = !!(preflightCfg.gcp_project_id ?? process.env['GCP_PROJECT_ID'] ?? process.env['ANTHROPIC_VERTEX_PROJECT_ID']);
       } else if (preflightProvider === 'custom') {
         const base = preflightCfg.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL');
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
+        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
         preflightKeyOk = !!base && !!key;
       } else if (preflightProvider === 'openai') {
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
-        preflightKeyOk = !!preflightCfg.api_base_url && !!key && !!preflightCfg.openai_model_id;
+        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
+        preflightKeyOk = !!preflightCfg.api_base_url
+          && (!endpointNeedsCredential(preflightProvider, preflightCfg.api_base_url) || !!key)
+          && !!preflightCfg.openai_model_id;
       } else {
-        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
+        const key = preflightStore ? resolveProviderApiKey({ provider: preflightProvider, apiBaseURL: preflightCfg.api_base_url, secretStore: preflightStore, userConfig: preflightCfg }) : undefined;
         preflightKeyOk = !!key;
       }
       if (!preflightKeyOk) {
@@ -1985,9 +2147,11 @@ export class LynoxHTTPApi {
       let task: string | unknown[];
       if (files.length > 0) {
         const content: unknown[] = [];
-        // Anthropic's vision endpoint enforces ≤5 MB on the base64 payload itself
-        // (not the decoded bytes). Reject earlier with a typed error so the user
-        // sees a friendly message instead of a raw provider 400.
+        // 5 MB base64-payload cap (not decoded bytes), applied to every provider
+        // as a conservative floor derived from Anthropic's vision limit. Reject
+        // earlier with a typed error so the user sees a friendly message instead
+        // of a raw provider 400. The frontend downscales to 1568px first, so a
+        // real photo/screenshot lands far under this on any provider.
         const MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024;
         const MAX_FILE_B64_BYTES = 10 * 1024 * 1024;
         const MAX_TEXT_FILE_DECODED_CHARS = 200_000;
@@ -2018,7 +2182,7 @@ export class LynoxHTTPApi {
             const sizeMb = (file.data.length / (1024 * 1024)).toFixed(1);
             const limitMb = (limit / (1024 * 1024)).toFixed(0);
             const reason = isImage
-              ? `Image too large: ${sizeMb} MB exceeds ${limitMb} MB Anthropic vision limit. Resize or compress before uploading.`
+              ? `Image too large: ${sizeMb} MB exceeds the ${limitMb} MB image limit. Resize or compress before uploading.`
               : `File too large: ${sizeMb} MB exceeds ${limitMb} MB limit.`;
             errorResponse(res, 413, reason);
             return;
@@ -2097,6 +2261,20 @@ export class LynoxHTTPApi {
 
       let aborted = false;
 
+      // ── Pausable run wall-clock (compute-only 30-min budget) ──
+      // The wall-clock is a single timer, but a run PARKED on a pending prompt
+      // (ask_user / tabs / ask_secret / connect_mail) is waiting on a HUMAN,
+      // not computing. Human think-time must NOT consume the budget —
+      // otherwise someone who answers after the budget elapsed lands on an
+      // already-aborted run (their reply is captured but nobody awaits it; the
+      // #77 prod bug). We PAUSE the timer on every prompt-start and re-arm it
+      // with the REMAINING budget on prompt-settle. The budget arithmetic lives
+      // in WallClockBudget (unit-tested); this handler owns the actual timer.
+      const wallClockBudget = new WallClockBudget(resolveRunWallClockMs());
+      // `undefined` = no live timer (paused, fired, or not yet armed). Kept in
+      // sync with wallClockBudget.paused; the guards below never touch a stale id.
+      let streamTimeout: ReturnType<typeof setTimeout> | undefined;
+
       // ── Per-run identity + resumable event buffer ──
       // `runId` identifies this run to the client-queryable registry
       // (GET /api/runs/active) and the resumable stream endpoint
@@ -2162,14 +2340,24 @@ export class LynoxHTTPApi {
       let hasActivePendingPrompt = false;
 
       // Wire promptUser — writes prompt to SQLite, event-driven wait.
-      session.promptUser = async (question: string, options?: string[], meta?: PromptMeta): Promise<string> => {
+      session.promptUser = async (rawQuestion: string | PromptText, options?: string[], meta?: PromptMeta): Promise<string> => {
         if (!promptStore) return 'n'; // fallback if store unavailable
-        const promptId = promptStore.insertAskUser(sessionId, question, options, meta?.multiSelect === true);
+        // Both forms go out: `segments` is what a client that understands the
+        // frame/value split renders, `question` is the flattened text every
+        // older client, the CLI and the logs already expect. They must agree —
+        // the flattened form IS the concatenation of the segments.
+        const segments = promptSegments(rawQuestion);
+        const question = flattenPrompt(rawQuestion);
+        const promptId = promptStore.insertAskUser(sessionId, question, options, meta?.multiSelect === true, segments);
         hasActivePendingPrompt = true;
+        pauseWallClock(); // parked on a human — don't spend the compute budget
         // Best-effort SSE notification (client may not be connected).
         if (!aborted && !res.writableEnded) {
           const data = JSON.stringify({
             promptId, question, options, timeoutMs: PROMPT_TIMEOUT_MS,
+            // Omitted when there is nothing to distinguish (an all-frame
+            // prompt), so the payload does not grow for un-migrated callers.
+            segments: segments.some((s: PromptSegment) => s.kind === 'value') ? segments : undefined,
             step_id: meta?.stepId, step_task: meta?.stepTask,
             // Multi-select pills (toggle several + Send). The client posts the
             // chosen labels back as a JSON array string via the normal /reply;
@@ -2181,6 +2369,7 @@ export class LynoxHTTPApi {
         }
         const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
         hasActivePendingPrompt = false;
+        resumeWallClock(); // human answered/dismissed — resume the compute budget
         if (outcome.status === 'answered') return outcome.row.answer ?? '__dismissed__';
         // Surface an explicit reason to the client — no silent 'n' default.
         if (!aborted && !res.writableEnded) {
@@ -2198,6 +2387,7 @@ export class LynoxHTTPApi {
           if (!promptStore) return [];
           const promptId = promptStore.insertAskUserTabs(sessionId, questions);
           hasActivePendingPrompt = true;
+          pauseWallClock(); // parked on a human — don't spend the compute budget
           if (!aborted && !res.writableEnded) {
             const data = JSON.stringify({
               promptId, questions, timeoutMs: PROMPT_TIMEOUT_MS,
@@ -2207,6 +2397,7 @@ export class LynoxHTTPApi {
           }
           const outcome = await promptStore.waitForSettled(promptId, sessionAbortController.signal);
           hasActivePendingPrompt = false;
+          resumeWallClock(); // human answered/dismissed — resume the compute budget
           if (outcome.status === 'answered' && outcome.row.answer) {
             try {
               const parsed = JSON.parse(outcome.row.answer) as unknown;
@@ -2264,6 +2455,7 @@ export class LynoxHTTPApi {
 
         const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType);
         hasActivePendingPrompt = true;
+        pauseWallClock(); // parked on a human — don't spend the compute budget
         if (!aborted && !res.writableEnded) {
           const data = JSON.stringify({
             promptId, name, prompt, key_type: keyType,
@@ -2273,6 +2465,7 @@ export class LynoxHTTPApi {
         }
         const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
         hasActivePendingPrompt = false;
+        resumeWallClock(); // human answered/dismissed — resume the compute budget
         // answer_error wins over answer_saved when set — see SecretOutcome contract
         // (server-side rejection must not be mistranslated as a user cancel).
         if (row?.answer_error === 'managed_blocked') return 'managed_blocked';
@@ -2301,6 +2494,7 @@ export class LynoxHTTPApi {
           JSON.stringify(data),
         );
         hasActivePendingPrompt = true;
+        pauseWallClock(); // parked on a human — don't spend the compute budget
         if (!aborted && !res.writableEnded) {
           const payload = JSON.stringify({
             promptId, ...data,
@@ -2310,6 +2504,7 @@ export class LynoxHTTPApi {
         }
         const row = await promptStore.waitForAnswer(promptId, sessionAbortController.signal);
         hasActivePendingPrompt = false;
+        resumeWallClock(); // human answered/dismissed — resume the compute budget
         // answer_saved === 1 means the consent step POSTed the account and the
         // route accepted it. No row (expired / session aborted) or a 0 flag is
         // a dismissal — the agent must NOT fall back to asking for the password
@@ -2339,17 +2534,46 @@ export class LynoxHTTPApi {
         }
       }, 10_000);
 
-      // Wall-clock backstop (30 min max). Fires for a still-streaming run AND
-      // for a headless run whose client already disconnected (disconnect≠abort
-      // leaves this armed). `res.destroyed` guards the post-disconnect case so
-      // we never call res.end() on a torn-down socket.
-      const streamTimeout = setTimeout(() => {
+      // Wall-clock backstop (compute-only budget, 30 min default). Fires for a
+      // still-streaming run AND for a headless run whose client already
+      // disconnected (disconnect≠abort leaves this armed). `res.destroyed`
+      // guards the post-disconnect case so we never call res.end() on a
+      // torn-down socket.
+      //
+      // The abort action is factored out so the INITIAL arm and every
+      // pause/resume re-arm reuse the EXACT same teardown — no drift.
+      const fireWallClockAbort = (): void => {
         aborted = true;
         clearInterval(keepaliveTimer);
         sessionAbortController.abort();
         session.abort();
         if (!res.writableEnded && !res.destroyed) res.end();
-      }, 30 * 60_000);
+        streamTimeout = undefined; // timer consumed — keep the paused/armed invariant honest
+      };
+      // Arm (or re-arm) the wall-clock with whatever compute budget remains.
+      const armWallClock = (): void => {
+        streamTimeout = setTimeout(fireWallClockAbort, wallClockBudget.arm(Date.now()));
+      };
+      // PAUSE at prompt-start: stop the timer and bank the compute-time spent so
+      // far. Idempotent — with no live timer it is a no-op, so a defensive
+      // double-pause can never double-subtract the budget.
+      const pauseWallClock = (): void => {
+        if (streamTimeout === undefined) return;
+        clearTimeout(streamTimeout);
+        streamTimeout = undefined;
+        wallClockBudget.pause(Date.now());
+      };
+      // RESUME at prompt-settle: re-arm with the remaining (compute-only)
+      // budget. Skips re-arming if the run was already aborted (a disconnect set
+      // `aborted` while parked → the run either finishes headless with no
+      // wall-clock, matching the prior disconnect-drops-the-timer behavior, or a
+      // takeover is about to throw RunAbortedError). Skips if a timer is somehow
+      // already live so it never stacks two timers.
+      const resumeWallClock = (): void => {
+        if (aborted || streamTimeout !== undefined) return;
+        armWallClock();
+      };
+      armWallClock();
 
       req.on('close', () => {
         clearInterval(keepaliveTimer);
@@ -2383,11 +2607,14 @@ export class LynoxHTTPApi {
           }
         }, ORPHAN_PROMPT_WATCHDOG_MS);
         if (hasActivePendingPrompt) {
-          // Already parked on a prompt at close → the agent loop is blocked on
-          // the prompt (not computing), so the 30-min compute backstop is moot.
-          // Drop it; the orphan watchdog above bounds the wait. The user can
-          // reconnect and answer (the loop keeps polling SQLite).
-          clearTimeout(streamTimeout);
+          // Already parked on a prompt at close → the wall-clock is already
+          // PAUSED (pauseWallClock cleared it at prompt-start), so there is
+          // normally no live timer here. The guarded clearTimeout is defense in
+          // depth against any race where it was re-armed; the orphan watchdog
+          // above bounds the wait. The user can reconnect and answer (the loop
+          // keeps polling SQLite) — resumeWallClock then no-ops because `aborted`
+          // is now set, matching the prior disconnect-drops-the-timer behavior.
+          if (streamTimeout !== undefined) clearTimeout(streamTimeout);
         }
         // else: RUNNING with no prompt → Tier-1 disconnect≠abort. Do NOT abort
         // the session; let it finish headless. Eager-persist keeps the
@@ -2449,7 +2676,9 @@ export class LynoxHTTPApi {
           res.end();
         }
       } finally {
-        clearTimeout(streamTimeout);
+        // May be undefined if the run ended while paused on a prompt (or the
+        // timer already fired) — guard the clear so we never touch a stale id.
+        if (streamTimeout !== undefined) clearTimeout(streamTimeout);
         clearInterval(keepaliveTimer);
         this.runningSessions.delete(sessionId);
         // Free the concurrency slot + abort handle (idempotent). The next queued
@@ -2589,6 +2818,20 @@ export class LynoxHTTPApi {
       if (!ps) { jsonResponse(res, 200, { pending: false }); return; }
       const row = ps.getPending(params['id']!);
       if (!row) { jsonResponse(res, 200, { pending: false }); return; }
+      // The engine-posed onboarding Step-0 basics prompt is tabs-SHAPED (so
+      // /reply-tabs answers it) but is OWNED by the OnboardingBasics UI, not the
+      // generic chat resumable-prompt path. Never surface it here: the generic
+      // tabs card's submit calls /reply-tabs WITHOUT /promote, so answering it
+      // there would settle the prompt and silently skip the §6.1 promotion (the
+      // basics never reach durable knowledge). Same `payload.kind` discriminator
+      // the promote gate uses. Reported as no-pending → the flow resumes through
+      // OnboardingBasics, the only path that promotes.
+      if (row.payload_json) {
+        try {
+          const p = JSON.parse(row.payload_json) as { kind?: unknown };
+          if (p && p.kind === 'onboarding_basics') { jsonResponse(res, 200, { pending: false }); return; }
+        } catch { /* malformed payload → fall through to normal handling */ }
+      }
       // Never leak secret answers back to client
       const isTabs = row.prompt_type === 'ask_user' && !!row.questions_json;
       const kind = isTabs
@@ -2604,6 +2847,11 @@ export class LynoxHTTPApi {
         promptType: row.prompt_type,
         kind,
         question: row.question,
+        // Restore the frame/value split too (v51). Without this a reload would
+        // silently downgrade a restored prompt to all-frame — the boundary
+        // would hold right up until someone refreshed the page, which is the
+        // worst possible place for it to stop holding.
+        segments: row.segments_json ? JSON.parse(row.segments_json) as unknown[] : undefined,
         options: row.options_json ? JSON.parse(row.options_json) as string[] : undefined,
         // Restore the multi-select-pills opt-in (v33) so a reconnect mid-prompt
         // re-renders multi-select instead of degrading to single-select.
@@ -2900,6 +3148,45 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { ok: result.success, summary: result.summary });
     }));
 
+    // Mid-thread model re-pick (arc:model-selector P1, §5.1b) — the "continue a
+    // historical chat on another model" half of the ask. Resolves an EXISTING
+    // live session (never mints — `get`, not `getOrCreate`, so an unknown id is a
+    // 404 not a new thread; S2). Refuses 409 while a run is in flight (swapping
+    // the agent mid-turn would orphan the in-flight output — the same hazard
+    // /compact guards). The Session method clamps (S1) + pre-checks downgrade
+    // overflow (D20/F9) + persists the requested pick; a downgrade that wouldn't
+    // fit the smaller window is refused BEFORE any write with a 422 the client
+    // renders as actionable copy (U1).
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'PATCH', '/api/sessions/:id/model', async (_req, res, params, body) => {
+      const sessionId = params['id']!;
+      const session = this.sessionStore.get(sessionId);
+      if (!session) { errorResponse(res, 404, 'Session not found'); return; }
+      if (this.runningSessions.has(sessionId)) {
+        errorResponse(res, 409, 'Cannot change the model while a run is in progress');
+        return;
+      }
+      const b = body as Record<string, unknown> | null;
+      const requestedTier = typeof b?.['tier'] === 'string' ? normalizeTier(b['tier']) : undefined;
+      if (!requestedTier) {
+        errorResponse(res, 400, 'Invalid or missing tier — expected fast, balanced, or deep');
+        return;
+      }
+      const result = session.repickModel(requestedTier);
+      if (!result.ok) {
+        // Downgrade overflow (D20/F9): the occupied context does not fit the
+        // target window. 422 (distinct from the 409 busy case) + machine-readable
+        // fields; the client localizes the "chat too long for {tier}" copy.
+        jsonResponse(res, 422, {
+          error: 'context_overflow',
+          targetTier: result.targetTier,
+          occupancy: result.occupancy,
+          window: result.window,
+        });
+        return;
+      }
+      jsonResponse(res, 200, { ok: true, model: result.tier, modelId: result.modelId });
+    }));
+
     // ── Threads ──
     this.addStatic('user', 'GET /api/threads', async (req, res) => {
       const threadStore = engine.getThreadStore();
@@ -2977,6 +3264,10 @@ export class LynoxHTTPApi {
       // Also clean up in-memory session
       this.sessionStore.reset(params['id']!);
       threadStore.deleteThread(params['id']!);
+      // Extended debug capture: drop the thread's captured wire_snapshots too (the
+      // runs stay — they are the cost ledger). Without this the redacted-but-personal
+      // snapshots outlive their deleted thread with no other prune path.
+      engine.getRunHistory()?.deleteWireSnapshotsForThread(params['id']!);
       jsonResponse(res, 200, { ok: true });
     }));
 
@@ -3039,9 +3330,23 @@ export class LynoxHTTPApi {
       const thread = threadStore.getThread(id);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
 
-      const messages = projectMessages(threadStore.getMessages(id, { fromSeq: 0, limit: 50000 }));
+      // Raw per-iteration view: the debug export exists to reveal the row-by-row
+      // truth (incl. what the merged chat bubble hides), so it must NOT collapse
+      // a turn's assistant iterations the way the UI /messages endpoint does.
+      const messages = projectMessages(threadStore.getMessages(id, { fromSeq: 0, limit: 50000 }), { mergeTurns: false });
 
       const history = engine.getRunHistory();
+      // Extended debug capture (step-3 at-a-glance view): a flat per-turn table across
+      // the whole thread so the injected delta is one glance away without walking the
+      // nested per-run snapshots. Collected from the strongly-typed WireSnapshotRecord
+      // as the per-run snapshots are built (below), so it needs no re-parse. `null`
+      // (empty) when no run captured wire snapshots (setting off for this thread) so a
+      // consumer can cheaply tell "was capture on?". PRD §8/§9.
+      const wireSummaryRows: Array<{
+        run_id: string; turn_index: number; model: string; provider: string;
+        typed_chars: number; assembled_chars: number; injected_chars: number | null;
+        tool_count: number; ephemeral_tail_present: boolean; ephemeral_tail_chars: number;
+      }> = [];
       const runs = history
         ? history.getRunsBySession(id).map((run) => {
             // Tier 2: parse the per-run composition (stored as a JSON string) into
@@ -3070,6 +3375,55 @@ export class LynoxHTTPApi {
                 sequence_order: tc.sequence_order,
               })),
               prompt_snapshot: run.prompt_hash ? (history.getPromptSnapshot(run.prompt_hash)?.prompt_text ?? null) : null,
+              // Extended debug capture (operator surface + step-3 diff): the REDACTED
+              // per-turn wire snapshots for this run — "what the model actually saw" —
+              // present only when the owner-consent `debug_wire_capture` setting was on
+              // during the run. Each snapshot carries a `wire_diff` that isolates the
+              // injected ephemeral tail: the operator TYPED `run.task_text`, the model
+              // SAW `user_message` (the FULL assembled request incl. `[Now:]` /
+              // <retrieved_context> / <task_overview> / <secrets>-count). On turn 1 the
+              // typed task is found inside the assembled message → clean prefix/suffix
+              // split; on later agent iterations the last user message is a tool_result,
+              // not the typed task, so `typed_found` is false and only the counts show.
+              // That delta is the whole diagnostic value (it is what flips a weak model).
+              // NB `indexOf` takes the FIRST occurrence, and `typed` (task_text) is
+              // un-redacted while `assembled` is secrets-scrubbed — so a typed task that
+              // is echoed earlier in the tail, or carries a secret-shaped token, can miss
+              // the match; that only degrades to the `typed_found:false` shape (raw sizes,
+              // no split), never a wrong number. See pro docs …/extended-debug-capture.md.
+              wire_snapshots: history.getWireSnapshotsForRun(run.id).map((snap) => {
+                const typed = rest.task_text ?? '';
+                const assembled = snap.user_message;
+                const idx = typed.length > 0 ? assembled.indexOf(typed) : -1;
+                const typedFound = idx >= 0;
+                // `injected_chars` (assembled − typed) is meaningful ONLY when the typed
+                // task is found inside the assembled message. On later agent iterations
+                // the last user message is a short tool_result, so assembled − typed goes
+                // NEGATIVE and means nothing → `null` (don't emit a misleading number).
+                const injectedChars = typedFound ? assembled.length - typed.length : null;
+                const wire_diff = typedFound
+                  ? {
+                      typed_found: true,
+                      typed_chars: typed.length,
+                      assembled_chars: assembled.length,
+                      injected_chars: injectedChars,
+                      injected_prefix: assembled.slice(0, idx),
+                      injected_suffix: assembled.slice(idx + typed.length),
+                    }
+                  : {
+                      typed_found: false,
+                      typed_chars: typed.length,
+                      assembled_chars: assembled.length,
+                      injected_chars: injectedChars,   // null — not measurable this turn
+                    };
+                wireSummaryRows.push({
+                  run_id: snap.run_id, turn_index: snap.turn_index, model: snap.model, provider: snap.provider,
+                  typed_chars: typed.length, assembled_chars: assembled.length, injected_chars: injectedChars,
+                  tool_count: snap.tool_count, ephemeral_tail_present: snap.ephemeral_tail_present,
+                  ephemeral_tail_chars: snap.ephemeral_tail_chars,
+                });
+                return { ...snap, wire_diff };
+              }),
             };
           })
         : [];
@@ -3108,17 +3462,59 @@ export class LynoxHTTPApi {
         };
       })();
 
+      // Memory snapshot (retention-safe): the tenant's OWN stored facts + KG stats, so a
+      // debugger can see cross-subject bleed / poisoning directly — the runtime <fact>
+      // injection the agent reacts to is derived from exactly this. Reads ALREADY-persisted
+      // memory (the legacy write-authoritative store, complete regardless of the read-cutover
+      // flag) — NO new always-on retention. Capped, and secret-scrubbed with the rest of the
+      // bundle below; PII is kept (the user's own data, exported by their own action — see
+      // sharing_notice). Best-effort: a KG hiccup must not fail the whole export.
+      const MEMORY_SNAPSHOT_CAP = 200;
+      const knowledgeLayer = engine.getKnowledgeLayer();
+      let memory: unknown = null;
+      if (knowledgeLayer) {
+        try {
+          memory = {
+            kg_stats: await knowledgeLayer.stats(),
+            active_memories_shown: 0,
+            active_memories: knowledgeLayer.getDb().listAllActiveMemories(MEMORY_SNAPSHOT_CAP).map((m) => ({
+              text: m.text,
+              namespace: m.namespace,
+              scope: `${m.scope_type}:${m.scope_id}`,
+              source_type: m.source_type,
+              source_tool_name: m.source_tool_name,
+              confidence: m.confidence,
+              confirmation_count: m.confirmation_count,
+              created_at: m.created_at,
+            })),
+          };
+          (memory as { active_memories_shown: number; active_memories: unknown[] }).active_memories_shown =
+            (memory as { active_memories: unknown[] }).active_memories.length;
+        } catch { memory = { error: 'memory snapshot unavailable' }; }
+      }
+
+      // Assembled from the strongly-typed `wireSummaryRows` collected during the per-run
+      // snapshot build above — no re-parse of the emitted bundle.
+      const wireCaptureSummary = wireSummaryRows.length > 0
+        ? { turn_count: wireSummaryRows.length, turns: wireSummaryRows }
+        : null;
+
       const buildSha = (process.env['BUILD_SHA'] ?? '').trim();
       const bundle = {
         exported_at: new Date().toISOString(),
         exported_by: 'lynox debug-export',
-        schema: 'thread-debug-export/v2',
+        schema: 'thread-debug-export/v3',
         engine: { version: PKG_VERSION, build_sha: buildSha.length > 0 ? buildSha : null },
+        // The export is the user's own data, exported by their own action; it contains PII
+        // (kept — scrubbing it would destroy the diagnostic value) with SECRETS masked below.
+        sharing_notice: 'This export contains your own conversation data — including personal information and stored memories — with secrets masked. Share it only with recipients you trust.',
         thread,
         debug_summary: debugSummary,
+        wire_capture_summary: wireCaptureSummary,
         messages,
         runs,
         compaction_events: compactionEvents,
+        memory,
       };
       // Secret-scrub the WHOLE bundle in one pass — messages AND runs AND tool
       // I/O AND prompt snapshots — so a credential pasted in chat or passed as a
@@ -3153,7 +3549,8 @@ export class LynoxHTTPApi {
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
       const content = body && typeof body === 'object' && 'content' in body ? String((body as Record<string, unknown>)['content']) : '';
-      await memory.save(ns, content);
+      if (engine.getSecretStore()?.containsSecret(content)) { errorResponse(res, 400, 'Cannot store content containing secret values in memory. Remove secrets and try again.'); return; }
+      await new MemoryFacade(memory, engine.getKnowledgeLayer()).replaceDocument(ns, content);
       jsonResponse(res, 200, { ok: true });
     }));
 
@@ -3164,7 +3561,8 @@ export class LynoxHTTPApi {
       const ns = params['ns'] as MemoryNs;
       const text = body && typeof body === 'object' && 'text' in body ? String((body as Record<string, unknown>)['text']) : '';
       if (!text) { errorResponse(res, 400, 'Missing text'); return; }
-      await memory.append(ns, text);
+      if (engine.getSecretStore()?.containsSecret(text)) { errorResponse(res, 400, 'Cannot store content containing secret values in memory. Remove secrets and try again.'); return; }
+      await new MemoryFacade(memory, engine.getKnowledgeLayer()).append(ns, text);
       jsonResponse(res, 200, { ok: true });
     }));
 
@@ -3175,7 +3573,7 @@ export class LynoxHTTPApi {
       const ns = params['ns'] as MemoryNs;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const pattern = url.searchParams.get('pattern') ?? '';
-      const deleted = await memory.delete(ns, pattern);
+      const deleted = await new MemoryFacade(memory, engine.getKnowledgeLayer()).delete(ns, pattern);
       jsonResponse(res, 200, { deleted });
     }));
 
@@ -3184,12 +3582,296 @@ export class LynoxHTTPApi {
       if (!requireService(res, memory, 'Memory')) return;
       if (!VALID_MEMORY_NS.has(params['ns']!)) { errorResponse(res, 400, 'Invalid memory namespace'); return; }
       const ns = params['ns'] as MemoryNs;
+      // Accept BOTH body contracts: the UI sends {old_content,new_content}; older/tool
+      // callers send {old,new}. Reading only {old,new} made every UI inline edit a
+      // silent no-op (empty strings → identity replace, reported as success).
       const b = body as Record<string, unknown> | null;
-      const oldText = b && typeof b['old'] === 'string' ? b['old'] : '';
-      const newText = b && typeof b['new'] === 'string' ? b['new'] : '';
-      const updated = await memory.update(ns, oldText, newText);
+      const pick = (primary: string, fallback: string): string => {
+        const v = b?.[primary] ?? b?.[fallback];
+        return typeof v === 'string' ? v : '';
+      };
+      const oldText = pick('old', 'old_content');
+      const newText = pick('new', 'new_content');
+      if (engine.getSecretStore()?.containsSecret(newText)) { errorResponse(res, 400, 'Cannot store content containing secret values in memory. Remove secrets and try again.'); return; }
+      const updated = await new MemoryFacade(memory, engine.getKnowledgeLayer()).update(ns, oldText, newText);
       jsonResponse(res, 200, { updated });
     }));
+
+    // ── Knowledge review queue (DK.2) — the pending_review surface ──
+    // Present ONLY when `durable_memory_enabled` (getKnowledgeStore() returns null
+    // otherwise → requireService 503). Single-tenant, user scope: the queue is the
+    // tenant's OWN untrusted-turn captures awaiting the human trust event. The
+    // reviewer sees the RAW text deliberately (a human must judge injected content
+    // on its actual wording — masking here would hide exactly what needs judging).
+    this.addStatic('user', 'GET /api/knowledge/queue', async (req, res) => {
+      const store = engine.getKnowledgeStore();
+      if (!requireService(res, store, 'Durable memory')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 100, 500));
+      jsonResponse(res, 200, { entries: store.listPending(limit), pendingCount: store.pendingCount() });
+    });
+
+    // Cheap badge poll (the Intelligence-Hub tab pill).
+    this.addStatic('user', 'GET /api/knowledge/queue/count', async (_req, res) => {
+      const store = engine.getKnowledgeStore();
+      if (!requireService(res, store, 'Durable memory')) return;
+      jsonResponse(res, 200, { pendingCount: store.pendingCount() });
+    });
+
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/knowledge/queue/:id/review', async (_req, res, params, body) => {
+      const store = engine.getKnowledgeStore();
+      if (!requireService(res, store, 'Durable memory')) return;
+      const b = body as Record<string, unknown> | null;
+      const action = typeof b?.['action'] === 'string' ? b['action'] : '';
+      if (action !== 'approve' && action !== 'edit_approve' && action !== 'reject') {
+        errorResponse(res, 400, "action must be 'approve', 'edit_approve' or 'reject'"); return;
+      }
+      const editedText = typeof b?.['text'] === 'string' ? b['text'] : undefined;
+      if (action === 'edit_approve' && !editedText?.trim()) { errorResponse(res, 400, 'edit_approve needs text'); return; }
+      // Approval promotes to the agent-readable active set — the same secret guard
+      // as every other durable write surface (mirror of the memory PUT above).
+      if (editedText && engine.getSecretStore()?.containsSecret(editedText)) {
+        errorResponse(res, 400, 'Cannot store content containing secret values. Remove secrets and try again.'); return;
+      }
+      try {
+        const entry = store.reviewEntry(params['id']!, action, editedText);
+        if (!entry) { errorResponse(res, 404, 'No queued entry with this id'); return; }
+        // Funnel (PRD-ONBOARDING §7 / AC-1.4): the human decision on a review chip pairs with
+        // propose_shown at write time. approve/edit_approve = propose_confirmed; reject =
+        // propose_ignored (dismissed:true = an active discard, per capture-telemetry S5).
+        // Entry-id only — never the fact text.
+        void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
+          ts: Date.now(),
+          event: action === 'reject' ? 'propose_ignored' : 'propose_confirmed',
+          thread: undefined,
+          model: undefined,
+          untrusted: false,
+          entryId: params['id']!,
+          ...(action === 'reject' ? { dismissed: true } : {}),
+        });
+        jsonResponse(res, 200, { entry });
+      } catch (err) {
+        errorResponse(res, 400, err instanceof Error ? err.message : 'Review failed');
+      }
+    }));
+
+    // ── Knowledge read-surface (DK-UX) — the "Wissen" browse tab ──
+    // Present ONLY when `durable_memory_enabled` (getKnowledgeStore() null otherwise
+    // → requireService 503). Single-tenant, user scope: the tenant's OWN active memory.
+    // Unlike the review queue these reads are MASKED (a browse/display surface — the
+    // store applies the same two-layer H7 masking as the always-loaded block render).
+    this.addStatic('user', 'GET /api/knowledge/entries', async (req, res) => {
+      const store = engine.getKnowledgeStore();
+      if (!requireService(res, store, 'Durable memory')) return;
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 200, 500));
+      jsonResponse(res, 200, { entries: store.listActive(limit) });
+    });
+
+    this.addStatic('user', 'GET /api/knowledge/blocks', async (_req, res) => {
+      const store = engine.getKnowledgeStore();
+      if (!requireService(res, store, 'Durable memory')) return;
+      jsonResponse(res, 200, store.readSurfaceBlocks());
+    });
+
+    // Undo of a just-made trusted write (the inline "rückgängig" chip, DK-UX). A USER act
+    // via the UI (user_asserted tier) — NOT an agent tool, so it is not agent-self-approvable.
+    // retireEntry refuses when the entry is not active (already retired) or outranks the user
+    // channel; 404 for gone, 400 for a refusal.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/knowledge/entries/:id/retire', async (_req, res, params) => {
+      const store = engine.getKnowledgeStore();
+      if (!requireService(res, store, 'Durable memory')) return;
+      try {
+        const entry = store.retireEntry(params['id']!, 'user_asserted');
+        jsonResponse(res, 200, { entry });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Retire failed';
+        errorResponse(res, /no active entry/i.test(msg) ? 404 : 400, msg);
+      }
+    }));
+
+    // ── Onboarding flags (Onboarding Wave 1) — server-side, cross-device state ──
+    // 'user' scope = owner-authenticated (S6): the model has NO tool path here, only
+    // the authenticated operator via the UI can read/set these. UNCONDITIONAL of the DK
+    // flag — onboarding runs regardless (the store is present whenever engine.db is).
+    // The READ side fails OPEN (AC-1.7) on BOTH failure modes — a null store (engine.db
+    // down) AND a read that throws (a flaky/locked engine.db mid-SELECT): either way it
+    // reports onboarding as done so a long-time user is never re-nagged. AC-1.7 must not
+    // hinge on how the client treats a failed fetch, so the throw path fails open too.
+    // Writes honestly 503 (they can't persist).
+    this.addStatic('user', 'GET /api/onboarding/status', async (_req, res) => {
+      // `durableMemory` tells the client which memory tool the onboarding prompts
+      // must name — `remember` (DK-on) vs `memory_store` (DK-off default). Naming
+      // the wrong one references a non-existent tool (engine registers them XOR on
+      // `durable_memory_enabled`). failOpen defaults it to false (DK-off), the safe
+      // majority default — and onboarding is dismissed on the failOpen path anyway.
+      const durableMemory = engine.getUserConfig().durable_memory_enabled === true;
+      const failOpen = {
+        knowledgeDone: true, knowledgeThreadId: null, skipped: false,
+        pushNudge: null, firstSessionAt: null, durableMemory: false, degraded: true,
+      };
+      const store = engine.getOnboardingFlagStore();
+      if (!store) { jsonResponse(res, 200, failOpen); return; }
+      try {
+        jsonResponse(res, 200, { ...store.getStatus(), durableMemory, degraded: false });
+      } catch {
+        jsonResponse(res, 200, failOpen);
+      }
+    });
+
+    // Set (upsert) one flag. Set-only for the owner, never the model. `value` carries
+    // the durable link (knowledge_done → onboarding thread-id; first_session_at →
+    // render-ack timestamp); bounded to keep it a link/state, not free text.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/onboarding/flags/:flag', async (_req, res, params, body) => {
+      const store = engine.getOnboardingFlagStore();
+      if (!requireService(res, store, 'Onboarding state')) return;
+      const flag = params['flag'] ?? '';
+      if (!isOnboardingFlag(flag)) { errorResponse(res, 400, 'Unknown onboarding flag'); return; }
+      const b = body as Record<string, unknown> | null;
+      const value = typeof b?.['value'] === 'string' ? b['value'] : '';
+      if (value.length > 512) { errorResponse(res, 400, 'value too long (max 512 chars)'); return; }
+      store.set(flag, value);
+      // Funnel (PRD-ONBOARDING §7 / AC-1.4): an explicit skip is the server-observable
+      // abandonment signal (the third funnel event beside started/step_completed). No
+      // content — the `skipped` value is a timestamp.
+      if (flag === 'skipped') {
+        void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
+          ts: Date.now(), event: 'onboarding_abandoned', thread: undefined,
+          model: undefined, untrusted: false,
+        });
+      }
+      jsonResponse(res, 200, { ...store.getStatus(), degraded: false });
+    }));
+
+    // Reset one flag (the Settings per-layer reactivation path, AC-1.5). Idempotent —
+    // `removed:false` when the flag was already absent.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/onboarding/flags/:flag', async (_req, res, params) => {
+      const store = engine.getOnboardingFlagStore();
+      if (!requireService(res, store, 'Onboarding state')) return;
+      const flag = params['flag'] ?? '';
+      if (!isOnboardingFlag(flag)) { errorResponse(res, 400, 'Unknown onboarding flag'); return; }
+      const removed = store.reset(flag);
+      jsonResponse(res, 200, { removed, ...store.getStatus(), degraded: false });
+    }));
+
+    // ── Onboarding knowledge Step-0 (Onboarding Wave 1, D9v2 / §6.1) ──
+    // The engine-posed "clean phase" basics. 'user' scope = owner-auth (S6); the model
+    // has NO tool path here. Step-0 is DECOUPLED from the model run (no model = no tools,
+    // so AC-1.12 holds structurally). The answers flow through the PromptStore so the
+    // promoted text is provably the user's typed answer (verbatim, AC-1.3a) — read from
+    // the stored row at promote time, never re-sent by the client.
+    this.addStatic('user', 'POST /api/onboarding/knowledge/start', async (_req, res, _params, body) => {
+      const promptStore = engine.getPromptStore();
+      if (!requireService(res, promptStore, 'Prompt store')) return;
+      const b = body as Record<string, unknown> | null;
+      const sessionId = typeof b?.['sessionId'] === 'string' ? b['sessionId'] : '';
+      if (!sessionId) { errorResponse(res, 400, 'Missing sessionId'); return; }
+      const lang = b?.['lang'] === 'de' ? 'de' : 'en';
+      const questions: TabQuestion[] = ONBOARDING_BASICS.map(basic => ({
+        question: onboardingBasicQuestion(basic, lang),
+        header: basic.label,
+      }));
+      const keys = ONBOARDING_BASICS.map(basic => basic.key);
+      try {
+        const promptId = promptStore.insertOnboardingBasics(sessionId, questions, keys);
+        void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
+          ts: Date.now(), event: 'onboarding_started', thread: sessionId,
+          model: undefined, untrusted: false, step: 0,
+        });
+        jsonResponse(res, 200, { promptId, questions });
+      } catch (err) {
+        // PromptConflictError — this session already has a pending prompt.
+        errorResponse(res, 409, err instanceof Error ? err.message : 'Could not start onboarding');
+      }
+    });
+
+    // Promote the answered Step-0 prompt. Reads the VERBATIM answers from the settled
+    // PromptStore row (NOT the request body → AC-1.3a) and runs the §6.1 promotion
+    // boundary. Refuses any prompt lacking the engine-only `onboarding_basics` marker —
+    // a model-composed ask_user/tabs prompt can never reach user_asserted this way.
+    this.addStatic('user', 'POST /api/onboarding/knowledge/promote', async (_req, res, _params, body) => {
+      const promptStore = engine.getPromptStore();
+      if (!requireService(res, promptStore, 'Prompt store')) return;
+      const b = body as Record<string, unknown> | null;
+      const promptId = typeof b?.['promptId'] === 'string' ? b['promptId'] : '';
+      if (!promptId) { errorResponse(res, 400, 'Missing promptId'); return; }
+      const row = promptStore.getById(promptId);
+      if (!row) { errorResponse(res, 404, 'No such prompt'); return; }
+
+      // Security discriminator: only an ENGINE-posed onboarding-basics prompt promotes.
+      let payload: { kind?: unknown; keys?: unknown } | null = null;
+      try { payload = row.payload_json ? JSON.parse(row.payload_json) as { kind?: unknown; keys?: unknown } : null; } catch { payload = null; }
+      if (!payload || payload.kind !== 'onboarding_basics' || !Array.isArray(payload.keys)) {
+        errorResponse(res, 400, 'Not an onboarding-basics prompt'); return;
+      }
+      if (row.status !== 'answered' || !row.answer) { errorResponse(res, 409, 'Prompt not answered yet'); return; }
+
+      // DK off → no KnowledgeStore to promote into. Degraded, honest no-op.
+      const knowledgeStore = engine.getKnowledgeStore();
+      // `threadId` is the AUTHORITATIVE onboarding thread (== every promoted entry's
+      // source_thread_id). The client stamps knowledge_done with THIS, not a client-side
+      // session guess, so the AC-1.10 repair pointer can never drift from the data (RF-IRR1).
+      if (!knowledgeStore) { jsonResponse(res, 200, { degraded: true, threadId: row.session_id, promoted: 0, queued: 0, skipped: 0, rejected: 0 }); return; }
+
+      // Parse the VERBATIM stored answers (JSON string[] for a tabs prompt).
+      let storedAnswers: string[];
+      try {
+        const parsed = JSON.parse(row.answer) as unknown;
+        if (!Array.isArray(parsed) || !parsed.every((a): a is string => typeof a === 'string')) throw new Error('bad');
+        storedAnswers = parsed;
+      } catch { errorResponse(res, 500, 'Stored answers malformed'); return; }
+
+      const payloadKeys = (payload.keys as unknown[]).filter((k): k is string => typeof k === 'string');
+      const answers: OnboardingBasicAnswer[] = [];
+      for (let i = 0; i < payloadKeys.length && i < storedAnswers.length; i++) {
+        const k = payloadKeys[i]!;
+        if (isOnboardingBasicKey(k)) answers.push({ key: k, answer: storedAnswers[i]! });
+      }
+
+      // Clean-latch defense in depth (BEST-EFFORT): read the live session's latch if
+      // present; an evicted / fresh session reads clean → user_asserted. Safe because the
+      // PRIMARY control is engine-mediation — the answer is the verbatim PromptStore row,
+      // model-untouched — so the latch only adds S1b-dictation defence when observed armed
+      // (sessionStore.get is in-memory-only; it does not rehydrate).
+      const liveSession = this.sessionStore.get(row.session_id);
+      const sawUntrusted = liveSession?.conversationSawUntrusted ?? false;
+
+      const result = promoteOnboardingBasics(answers, { knowledgeStore, sawUntrusted, threadId: row.session_id });
+      void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
+        ts: Date.now(), event: 'onboarding_step_completed', thread: row.session_id,
+        model: undefined, untrusted: sawUntrusted, step: 0,
+      });
+      jsonResponse(res, 200, { degraded: false, threadId: row.session_id, ...result });
+    });
+
+    // ── Onboarding domain derive (Onboarding W1, Activation Principle) ──
+    // Pre-fill a candidate website from the Step-0 company name so the scan step is a
+    // one-tap CONFIRM, not a blank field (propose→react). NON-agent search (SearXNG/DDG)
+    // + a pure heuristic — no model call, so provider-agnostic and free. Owner-auth
+    // (S6). Degrades to {domain:null} when search is unavailable OR nothing clean
+    // surfaces → the UI leaves the field empty (today's manual fallback, never wrong).
+    this.addStatic('user', 'POST /api/onboarding/derive-domain', async (_req, res, _params, body) => {
+      const b = body as Record<string, unknown> | null;
+      const company = typeof b?.['company'] === 'string' ? b['company'].trim().slice(0, 120) : '';
+      if (!company) { errorResponse(res, 400, 'Missing company'); return; }
+      const lang = typeof b?.['lang'] === 'string' ? b['lang'] : 'en';
+      // Honor the operator's network_policy: this direct provider.search() call does
+      // NOT thread a ToolContext, so its internal egress gate would see policy=undefined
+      // (=allow-all) and leak the company name externally on a locked-down instance.
+      // Discovery is genuinely open only on allow-all/guarded (or unset=allow-all); on
+      // deny-all/allow-list we skip the search entirely → {domain:null} (manual field),
+      // never a policy bypass. (Same discovery-surface posture web_research honors.)
+      const policy = engine.getUserConfig().network_policy;
+      if (policy === 'deny-all' || policy === 'allow-list') { jsonResponse(res, 200, { domain: null }); return; }
+      const provider = engine.getSearchProvider();
+      if (!provider) { jsonResponse(res, 200, { domain: null }); return; }
+      try {
+        const results = await provider.search(buildDomainSearchQuery(company, lang));
+        jsonResponse(res, 200, { domain: deriveBusinessDomain(results) });
+      } catch {
+        jsonResponse(res, 200, { domain: null });
+      }
+    });
 
     // ── Subjects (Record-on-spine R2b) — read-only subject-graph surface ──
     // Present ONLY when `subject_graph_enabled` (getSubjectStore/getSubjectFootprint
@@ -3260,16 +3942,18 @@ export class LynoxHTTPApi {
       } else if (provider === 'custom') {
         // Custom needs api_base_url configured + a key in the CUSTOM_API_KEY slot
         const customBase = userConfig.api_base_url ?? readEnvAlias('LYNOX_API_BASE_URL');
-        const customKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+        const customKey = resolveProviderApiKey({ provider, apiBaseURL: userConfig.api_base_url, secretStore: store, userConfig });
         llmConfigured = !!customBase && !!customKey;
       } else if (provider === 'openai') {
         // OpenAI-compatible needs api_base_url + a key (env MISTRAL_API_KEY /
         // OPENAI_API_KEY or vault) + model id
-        const openaiKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
-        llmConfigured = !!userConfig.api_base_url && !!openaiKey && !!userConfig.openai_model_id;
+        const openaiKey = resolveProviderApiKey({ provider, apiBaseURL: userConfig.api_base_url, secretStore: store, userConfig });
+        llmConfigured = !!userConfig.api_base_url
+          && (!endpointNeedsCredential(provider, userConfig.api_base_url) || !!openaiKey)
+          && !!userConfig.openai_model_id;
       } else {
         // Anthropic direct — needs API key (env, vault, or legacy config.api_key)
-        const anthropicKey = resolveProviderApiKey({ provider, secretStore: store, userConfig });
+        const anthropicKey = resolveProviderApiKey({ provider, apiBaseURL: userConfig.api_base_url, secretStore: store, userConfig });
         llmConfigured = !!anthropicKey;
       }
       const searxngUrl = userConfig.searxng_url ?? process.env['SEARXNG_URL'];
@@ -3481,8 +4165,12 @@ export class LynoxHTTPApi {
 
     // ── Config ──
     this.addStatic('user', 'GET /api/config', async (_req, res) => {
-      const { readUserConfig } = await import('../core/config.js');
+      const { readUserConfig, applyManagedTierSetConstraints, loadConfig: loadEffectiveConfig } = await import('../core/config.js');
       const config = readUserConfig();
+      // Effective model blocklist (env-merged by loadConfig — readUserConfig is
+      // the raw file): threaded into the preset-availability signal and the
+      // picker labels so neither advertises a model the loader drops.
+      const effectiveBlockedModelIds = loadEffectiveConfig().blocked_model_ids;
       // Canonical redaction: strips top-level secrets (with `${key}_configured`
       // markers for the UI) AND nested tier_set/model_profiles api_keys.
       const redacted = redactConfigForResponse(config);
@@ -3531,12 +4219,22 @@ export class LynoxHTTPApi {
         // R2b subject-graph surface: true iff subject_graph_enabled wired the store
         // (fleet OFF today) → the Web UI shows/hides the Subjects tab on this probe.
         has_subject_graph: engine.getSubjectStore() !== null,
+        // DK.2 durable-memory surface: true iff durable_memory_enabled wired the
+        // KnowledgeStore → the Web UI shows/hides the review-queue tab on this probe.
+        has_durable_memory: engine.getKnowledgeStore() !== null,
         // Hard-limits exposure: full numbers for self-host/BYOK,
         // opaque tier-tag for managed (prevents DoS-knob disclosure).
         hard_limits: isManagedTier
           ? { tier: 'managed', contact_for_quotas: true }
           : limitsMod.getHardLimits(),
       };
+      // model-presets W4: the per-preset "Modell-Strategie" signal the settings
+      // cards + header picker render from. Availability reuses the loader
+      // hardening (applyManagedTierSetConstraints), so a card is disabled iff the
+      // loader would actually drop a slot AND the write-gate would 403 — no false
+      // advertising. Computed once; feeds both the tier_preset lock below and the
+      // emitted `available_tier_presets` payload.
+      const tierPresetSignal = buildTierPresetSignal({ isManagedTier, blockedModelIds: effectiveBlockedModelIds });
       // Lock metadata for every `can_set_X = false` decision. UI renders a
       // human-readable reason instead of an unexplained disabled input.
       const locks: CapabilityLocks = {};
@@ -3553,6 +4251,17 @@ export class LynoxHTTPApi {
           contact_cta: { href: 'mailto:support@lynox.ai?subject=Quota%20adjustment', label: 'Contact support' },
         };
         locks.custom_endpoints = { reason: 'managed-tier' };
+        // A managed instance without the Fireworks opt-in can't back the ⚡
+        // efficient preset (its deep slot has no CP key) — so the card is
+        // disabled, not silently downgraded. The lock carries the same support
+        // channel as the limits lock; the per-preset `available` flag says WHICH
+        // preset(s) are affected.
+        if (Object.values(tierPresetSignal).some((p) => !p.available)) {
+          locks.tier_preset = {
+            reason: 'managed-tier',
+            contact_cta: { href: 'mailto:support@lynox.ai?subject=Model%20preset%20availability', label: 'Contact support' },
+          };
+        }
       }
       redacted['locks'] = locks;
       // Settings v3 Item 6 (model-aware context-window radios): resolve the
@@ -3610,6 +4319,61 @@ export class LynoxHTTPApi {
         // Surface for support tracing.
         console.warn(`[http-api] /config: no MODEL_CAPABILITIES entry for ${activeModelId} (tier=${activeTier}, provider=${activeProvider})`);
       }
+      // Sonnet-variant selection (Sonnet 5 opt-in): surface the RESOLVED
+      // `balanced_model` so the LLM-Advanced variant picker always has a
+      // concrete served-Sonnet value to bind to — present even when the field
+      // is unset (defaults to Sonnet 4.6) or holds a stale/invalid value
+      // (resolveBalancedModel falls it back to the default). The redaction
+      // spread already carries the raw stored value; overriding it with the
+      // resolver guarantees the UI never sees `undefined` or a non-served id.
+      redacted['balanced_model'] = resolveBalancedModel(config);
+
+      // main_chat_tiers (DEF-0082): the active provider's per-tier model LABEL,
+      // for the composer picker's two follow-ups —
+      //   (a) name-enrichment: render "Tief (Opus 4.6)" instead of a bare tier;
+      //   (b) hide the picker on a single-model provider (a custom / OpenAI-compat
+      //       proxy whose three tiers all resolve to the same one model).
+      // Absent when the active provider exposes fewer than two DISTINCT tier
+      // models; that absence is the signal the composer reads to hide itself.
+      // Derived by `mainChatTierLabels` from the catalog's `main_chat_models` —
+      // where the tier→model maps live — so labels can't drift from what routes.
+      // In HYBRID routing each tier may run a different provider+model (tier_set),
+      // so the labels must be resolved through the tier_set — otherwise the picker
+      // shows the active provider's default map (e.g. "Ausgewogen (Sonnet 5)")
+      // while the tier actually routes to the slot's model (e.g. Mistral Large).
+      // Standard routing keeps the single-provider derivation.
+      //
+      // model-presets W4: a `tier_preset` is config-sugar — the loader materializes
+      // it to {routing_mode:'hybrid', tier_set} at load, so the RAW config here
+      // carries neither. Derive the effective tier_set from the SAME expansion, or
+      // the picker shows the standard provider map (Sonnet/Opus) while the preset
+      // actually routes Ministral 14B etc. (the exact stale-label class rafael hit).
+      // Mirror the loader's explicit-over-preset precedence (config.ts: `{...expanded,
+      // ...config.tier_set}`) so a hand-edited config carrying BOTH a preset and an
+      // explicit tier_set slot labels what actually routes, not the bare preset.
+      const effectiveTierSet = config.tier_preset
+        ? { ...expandTierPreset(config.tier_preset)?.tier_set, ...(config.tier_set ?? {}) }
+        : (config.routing_mode === 'hybrid' ? config.tier_set : undefined);
+      if (effectiveTierSet) {
+        // On a managed tenant the runtime drops any tier_set slot the CP can't back (no key for
+        // that provider), so the picker must label the CONSTRAINED set — otherwise it shows a
+        // model that never routes (e.g. "Ausgewogen (Mistral Large)" while it routes Sonnet).
+        const constrained = isManagedTier ? applyManagedTierSetConstraints(effectiveTierSet, effectiveBlockedModelIds) : effectiveTierSet;
+        const tierLabels = mainChatTierLabelsFromTierSet(constrained, activeProvider);
+        if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
+      } else {
+        const mainChatEntry = getCatalogEntryByKey(resolveCatalogKey(activeProvider, config.api_base_url));
+        if (mainChatEntry) {
+          const tierLabels = mainChatTierLabels(mainChatEntry, resolveBalancedModel(config));
+          if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
+        }
+      }
+      // model-presets W4: the "Modell-Strategie" cards + the header picker render
+      // the resolved per-tier model, provenance chip, and R2-gated host
+      // disclosure per preset — plus the `available` flag that disables a preset
+      // the CP can't back. Server-authoritative so the client needs no
+      // @lynox-ai/core import and the disclosure gate stays honest.
+      redacted['available_tier_presets'] = tierPresetSignal;
       // Bugsink-toggle UX requires the page to know whether a DSN is
       // configured (env or vault) without leaking the DSN itself.
       redacted['bugsink_dsn_configured'] = !!(process.env['LYNOX_BUGSINK_DSN'] || secretNames.has('LYNOX_BUGSINK_DSN') || config.bugsink_dsn);
@@ -3620,9 +4384,26 @@ export class LynoxHTTPApi {
       // refreshes — still on Anthropic because env trumps disk). Tell the UI
       // so it can render a banner instead of accepting the click in silence.
       // Symmetric for any future env override we add to the same screen.
+      // LYNOX_DEBUG_WIRE_CAPTURE wins over config.json at load (config.ts) — but
+      // only for the exact enum the loader parses ('true'/'1'/'false'/'0'). The
+      // pinned marker must use the SAME enum: any other value is ignored by the
+      // loader and the field stays owner-writable, so reporting mere env PRESENCE
+      // would lock the Privacy toggle over a value that doesn't actually pin.
+      const wireCaptureEnv = process.env['LYNOX_DEBUG_WIRE_CAPTURE'];
+      const wireCaptureEnvOn = wireCaptureEnv === 'true' || wireCaptureEnv === '1';
+      const wireCaptureEnvOff = wireCaptureEnv === 'false' || wireCaptureEnv === '0';
       redacted['env_overrides'] = {
         provider: !!process.env['LYNOX_LLM_PROVIDER'],
+        // Env-pinned marker for the Privacy toggle: the raw disk value spread
+        // above can read OFF while capture actually runs, so the UI needs both
+        // the pin (disable the toggle) and the EFFECTIVE value (overwritten below).
+        debug_wire_capture: wireCaptureEnvOn || wireCaptureEnvOff,
       };
+      if (wireCaptureEnvOn) {
+        redacted['debug_wire_capture'] = true;
+      } else if (wireCaptureEnvOff) {
+        redacted['debug_wire_capture'] = false;
+      }
 
       // F1b: when the provider is env-pinned it never lands in config.json, so
       // `provider`/`api_base_url` are absent from the spread above and the
@@ -3644,8 +4425,7 @@ export class LynoxHTTPApi {
       // Account/Billing page can render a working CTA that drops the customer
       // into Stripe's email-OTP login (Stripe handles auth + portal — no
       // cross-domain cookie tanz). Set per-instance via `sync-env` admin API
-      // until the PR 3 sprint moves it into the CP config-generator pipeline.
-      // See [[project_pr3_stripe_portal_sso_deferred]] for the full SSO plan.
+      // until the CP config-generator pipeline takes it over.
       const stripePortalUrl = process.env['LYNOX_STRIPE_PORTAL_LOGIN_URL'];
       if (stripePortalUrl && /^https:\/\/billing\.stripe\.com\//.test(stripePortalUrl)) {
         redacted['stripe_portal_login_url'] = stripePortalUrl;
@@ -3678,6 +4458,34 @@ export class LynoxHTTPApi {
         errorResponse(res, 400, `Invalid config: ${parsed.error.issues.map(i => i.message).join(', ')}`);
         return;
       }
+      // Sonnet-variant selection: the schema admits any 1–64-char string
+      // (`balanced_model` is intentionally NOT a z.enum — an unrecognised value
+      // must degrade at the resolver, not null the whole `.strict()` config).
+      // Enforce the served-Sonnet allowlist HERE, before any persistence, so an
+      // invalid or non-Sonnet id (e.g. an Opus id, or a typo) is rejected with a
+      // clear 400 and can never route the `balanced` tier off-Sonnet. Runs for
+      // EVERY tier (self-host + managed) and before the managed lock-gate, so a
+      // bad value is a 400 (invalid), not a 403 (the field itself IS writable).
+      const incomingBalancedModel = (parsed.data as Record<string, unknown>)['balanced_model'];
+      if (incomingBalancedModel !== undefined) {
+        if (typeof incomingBalancedModel !== 'string' || !SERVED_BALANCED_SONNET_IDS.has(incomingBalancedModel)) {
+          errorResponse(res, 400, `Invalid balanced_model: must be one of ${[...SERVED_BALANCED_SONNET_IDS].join(', ')}`);
+          return;
+        }
+      }
+      // tier_preset name validation for NON-managed (self-host / BYOK) instances: reject an
+      // unknown or prototype-chain name at WRITE time so it can never persist into config.json.
+      // The loader fail-closes on an unknown preset with a THROW and the engine ctor's
+      // loadConfig() has no catch — so a persisted bad name would crash-loop the container
+      // until a hand-edit. Managed instances are already covered by the stricter gate below
+      // (which also validates slot hosts + the Fireworks opt-in key and returns 403).
+      if (!requiresConfigLockGate(readEnvAlias('LYNOX_BILLING_TIER'))) {
+        const incomingTierPreset = (parsed.data as Record<string, unknown>)['tier_preset'];
+        if (typeof incomingTierPreset === 'string' && incomingTierPreset.length > 0 && !expandTierPreset(incomingTierPreset)) {
+          errorResponse(res, 400, `Unknown tier_preset '${incomingTierPreset}'.`);
+          return;
+        }
+      }
       // Managed-pool tiers (managed / managed_pro / eu): CP locks provider +
       // cost-caps + integrations. Starter BYOK is NOT gated here — customer
       // owns their LLM, owns their config. The Web UI re-sends every field on
@@ -3687,14 +4495,17 @@ export class LynoxHTTPApi {
       // Schema is `.strict()` (PRD-IA-V2 P1-PR-A2) — unknown fields already
       // 400 before we get here, so this loop only sees real schema fields.
       if (requiresConfigLockGate(readEnvAlias('LYNOX_BILLING_TIER'))) {
-        const fileConfig = loadConfig() as Record<string, unknown>;
+        const effectiveConfig = loadConfig();
+        const fileConfig = effectiveConfig as Record<string, unknown>;
         const update = parsed.data as Record<string, unknown>;
         // P3-FOLLOWUP-HOTFIX: value-range validation for the curated provider
         // allowlist. `provider` is in MANAGED_USER_WRITABLE_CONFIG (so the
         // strict-diff below lets it pass) — this is the additional guard that
         // caps the allowed set to Anthropic + Mistral. Reject FIRST so a
-        // malformed save can't pollute downstream config-merge state.
-        const providerReason = enforceManagedProviderConstraints(update);
+        // malformed save can't pollute downstream config-merge state. The
+        // effective model blocklist (env-merged by loadConfig) rides along so
+        // the gate can 403 a blocked tier_set/tier_preset model honestly.
+        const providerReason = enforceManagedProviderConstraints(update, effectiveConfig.blocked_model_ids ?? []);
         if (providerReason) {
           errorResponse(res, 403, providerReason);
           return;
@@ -4062,6 +4873,25 @@ export class LynoxHTTPApi {
           }
           runParams = rawParams as Record<string, unknown>;
         }
+      }
+      // Consent gate — mirror the worker-loop cron gate (worker-loop.ts:574).
+      // This Run path executes the workflow headless with autonomy:'autonomous'
+      // (no per-action approval prompt), so it must not run a workflow whose steps
+      // the user has never seen. A self-built workflow is first-run-confirmed at
+      // save (process.ts); an IMPORTED workflow lands unconfirmed on purpose, its
+      // steps being attacker-authorable. Refuse an unconfirmed workflow here
+      // rather than headless-running arbitrary imported bash. (Resolve via
+      // getPipeline so a prefix id + the post-confirm cache eviction are handled;
+      // a not-found id falls through to runGuardedSavedWorkflow's 404.)
+      const { getPipeline } = await import('../tools/builtin/pipeline.js');
+      const plannedForRun = getPipeline(params['id']!, history);
+      if (plannedForRun && !plannedForRun.confirmedAt) {
+        errorResponse(
+          res,
+          403,
+          'This workflow needs first-run confirmation before it can run unattended. Review its steps and schedule it (the consent step confirms it), or run it from a chat where each action asks for your approval.',
+        );
+        return;
       }
       // Route through the budget + managed-credit lifecycle (cap, credit gate,
       // cost report) — runSavedWorkflow alone bypasses all three.
@@ -4453,16 +5283,36 @@ export class LynoxHTTPApi {
         return;
       }
       const bodyKey = typeof b['api_key'] === 'string' ? b['api_key'] : '';
-      // Vault fallback: when the user already saved the key earlier and now
-      // hits "Verbindung testen" without re-typing, the form posts an empty
-      // body key. Pre-1.5.2 the endpoint 400'd "API key required" even though
-      // the vault had the value.
-      const apiKey = bodyKey || (resolveProviderApiKey({
-        provider: provider as LLMProvider,
-        secretStore: engine.getSecretStore(),
-        userConfig: engine.getUserConfig(),
-      }) ?? '');
       const baseUrl = typeof b['base_url'] === 'string' ? b['base_url'] : '';
+      // Vault fallback: when the user already saved the key earlier and now
+      // hits "test connection" without re-typing, the form posts an empty body
+      // key. Pre-1.5.2 the endpoint 400'd "API key required" even though the
+      // vault had the value.
+      //
+      // Resolve against the endpoint being TESTED, not just the provider. This is
+      // the leak in its purest form otherwise: a user with a Mistral key saved,
+      // testing a Groq endpoint without re-typing a key, would have that Mistral
+      // key bearer-tokened straight to Groq by the fallback.
+      //
+      // SECURITY — `base_url` here is untrusted request input, unlike every other
+      // resolveProviderApiKey() caller (which passes the STORED userConfig.api_base_url).
+      // resolveProviderApiKey falls through to the generic tile's SHARED slot (the
+      // managed pool key) for any host it doesn't recognise, so a request with an
+      // arbitrary base_url and no typed key would bearer-token the pool key straight
+      // to that host. Gate the vault fallback to an endpoint the stored key actually
+      // belongs to: the provider default (no base_url → Anthropic/Vertex tile), a host
+      // that matches a preset (pinned slot, not a generic fall-through), or a vetted
+      // LLM host. A free-text/unknown base_url with no typed key gets the pre-1.5.2
+      // "API key required" — the user must supply it, never the shared pool key. A
+      // body-supplied key is the caller's own credential and always passes through.
+      const apiKey = bodyKey || (mayFallBackToStoredKey(provider as LLMProvider, baseUrl)
+        ? (resolveProviderApiKey({
+            provider: provider as LLMProvider,
+            apiBaseURL: baseUrl || undefined,
+            secretStore: engine.getSecretStore(),
+            userConfig: engine.getUserConfig(),
+          }) ?? '')
+        : '');
       const model = typeof b['model'] === 'string' ? b['model'] : '';
       const started = Date.now();
       try {
@@ -5130,7 +5980,10 @@ export class LynoxHTTPApi {
             'Content-Type': 'application/json',
             'x-instance-secret': httpSecret,
           },
-          body: JSON.stringify({ instance_id: instanceId, claim_nonce: claimNonce }),
+          body: JSON.stringify({
+            instance_id: instanceId,
+            claim_nonce: claimNonce,
+          } satisfies OAuthClaimRequest),
         });
 
         if (!claimRes.ok) {
@@ -5139,12 +5992,9 @@ export class LynoxHTTPApi {
           return;
         }
 
-        const tokens = (await claimRes.json()) as {
-          access_token: string;
-          refresh_token: string;
-          expires_at: number;
-          scopes: string[];
-        };
+        // Shape owned by the wire contract — the control plane compiles the same
+        // declaration, so a field rename cannot land on one side alone.
+        const tokens = (await claimRes.json()) as OAuthClaimResponse;
 
         await google.setTokens(tokens);
         jsonResponse(res, 200, { ok: true, scopes: tokens.scopes });
@@ -5757,6 +6607,19 @@ export class LynoxHTTPApi {
       }
     }));
 
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'GET', '/api/kg/graph', async (req, res) => {
+      const kg = engine.getKnowledgeLayer();
+      if (!kg) { jsonResponse(res, 200, { nodes: [], edges: [] }); return; }
+      const url = new URL(req.url ?? '', `http://${req.headers.host ?? 'localhost'}`);
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '80', 10) || 80, 1), 300);
+      try {
+        const graph = await kg.getGraph(limit);
+        jsonResponse(res, 200, graph);
+      } catch {
+        jsonResponse(res, 200, { nodes: [], edges: [] });
+      }
+    }));
+
     // ── Thread Insights + Metrics ──────────────────────────────────
 
     this.addStatic('user', 'GET /api/thread-insights', async (req, res) => {
@@ -6147,7 +7010,7 @@ export class LynoxHTTPApi {
             entities = db.listEntities({ limit: 200 });
           }
           // Also deactivate all memories
-          db.deactivateMemoriesByPattern('%');
+          db.deactivateAllMemories();
         } catch { /* best effort */ }
       }
 

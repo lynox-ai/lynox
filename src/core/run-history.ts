@@ -6,12 +6,16 @@ import { sha256Short } from './utils.js';
 import { getLynoxDir } from './config.js';
 import { CRYPTO_ALGORITHM, CRYPTO_KEY_LENGTH, CRYPTO_IV_LENGTH, CRYPTO_TAG_LENGTH } from './crypto-constants.js';
 import { ensureDirSync } from './atomic-write.js';
-import type { TaskRecord, TriggerRecord, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract } from '../types/index.js';
+import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
+import type { TaskRecord, TriggerRecord, TriggerSource, TriggerEffect, InlinePipelineStep, CapabilityContract, ModelTier } from '../types/index.js';
+import type { WireSnapshot } from './wire-capture.js';
+import { normalizeTier } from '../types/index.js';
 import { validateContractAgainstSteps } from '../orchestrator/contract-validation.js';
 import * as analytics from './run-history-analytics.js';
 import * as persistence from './run-history-persistence.js';
 import type { EngineDb } from './engine-db.js';
-import { WorkflowStore } from './workflow-store.js';
+import { WorkflowStore, type ContentMigrationCounts } from './workflow-store.js';
+import { migratePipelineBlob, CURRENT_PIPELINE_SCHEMA_VERSION } from './pipeline-schema-migration.js';
 import { TriggerStore } from './trigger-store.js';
 import { TaskStore, taskRecordToRow } from './task-store.js';
 
@@ -209,6 +213,30 @@ export interface PromptSnapshotRecord {
   profile_name: string;
   prompt_text: string;
   first_seen_at: string;
+}
+
+/**
+ * A persisted redacted wire snapshot (extended debug capture, operator surface).
+ * snake_case to match the debug-export bundle convention (runs / tool_calls). The
+ * `user_message` is REDACTED at capture (secrets catalog scrubbed) and DECRYPTED here
+ * for the owner's own export. See {@link import('./wire-capture.js').WireSnapshot}.
+ */
+export interface WireSnapshotRecord {
+  run_id: string;
+  turn_index: number;
+  model: string;
+  provider: string;
+  system_prompt_hash: string;
+  user_message: string;
+  user_message_chars: number;
+  tool_names: string[];
+  tool_count: number;
+  tool_choice: string | null;
+  temperature: number | null;
+  max_tokens: number;
+  ephemeral_tail_present: boolean;
+  ephemeral_tail_chars: number;
+  captured_at: number;
 }
 
 function generateId(): string {
@@ -1119,6 +1147,91 @@ const MIGRATIONS: string[] = [
 
    ALTER TABLE threads ADD COLUMN primary_subject_id TEXT;
    CREATE INDEX IF NOT EXISTS idx_threads_primary_subject ON threads(primary_subject_id);`,
+
+  // v47 — Model Execution Policy (arc:model-selector) Wave P1, provenance
+  // (DEF-0094/DEF-0095): record WHO chose a thread's `model_tier`, so a sticky
+  // per-thread pick (D18) is distinguishable from a machine default. The picker
+  // already ships (#958/#960/#964) writing real user picks into `model_tier` with
+  // no way to tell them from defaults — this column starts capturing that. Three
+  // values (`'user'` deliberate pick · `'default'` new thread, picker untouched ·
+  // `'unknown'` origin not observed). ADVISORY-ONLY: it MUST NOT gate any tier/
+  // cost/capability decision (it is client-supplied → a client could lie), so a
+  // mislabel authorises nothing. Column-ADD is O(1) metadata; every existing row
+  // starts `'unknown'`. The `≠default → 'user'` RECOVERY of pre-column picks is a
+  // gated boot-backfill in engine.ts (needs the per-instance `default_tier` +
+  // legacy brand-name normalisation, neither expressible in static migration SQL).
+  // Un-guarded ADD COLUMN is safe: the runner execs MIGRATIONS[i>=currentVersion],
+  // so v47 runs exactly once.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (47);
+   ALTER TABLE threads ADD COLUMN model_tier_source TEXT NOT NULL DEFAULT 'unknown';`,
+
+  // v48 — Model Execution Policy Wave P1, run attribution (DEF-0097, D21): a
+  // cron/WorkerLoop-fired run must be distinguishable from a user chat turn so the
+  // policy is auditable ("what did my nightly automation burn?"). A SEPARATE
+  // nullable column, NOT a new `run_type` value — `run_type` is a closed structural
+  // union feeding the usage/billing filters, and a new value could silently pass
+  // them + miscount automation as user turns (product-not-sum at the schema level).
+  // Nullable: every pre-v48 row (and any run without an explicit origin) reads NULL
+  // = "unattributed / legacy". Plumbed from the worker call sites → run() →
+  // insertRun; the HistoryView surface is a fast P1-follow (data accrues now).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (48);
+   ALTER TABLE runs ADD COLUMN trigger_origin TEXT;`,
+
+  // v49 — Model Execution Policy Wave P1: the exactly-once marker for the
+  // provenance RECOVERY backfill (DEF-0095). The v47 column starts every existing
+  // row at 'unknown'; a boot-backfill in engine.ts then labels a thread whose tier
+  // differs from the instance default as a likely deliberate pick ('user'). That
+  // recovery needs the per-instance `default_tier` + legacy brand-name
+  // normalisation — neither expressible in static migration SQL — so it runs in
+  // engine.ts, gated exactly-once by THIS marker (mirrors engine.db's
+  // `verb_backfill_marker`). Flag-independent (history.db only, no engine.db).
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (49);
+   CREATE TABLE IF NOT EXISTS model_provenance_backfill_marker (
+     id INTEGER PRIMARY KEY,
+     done INTEGER NOT NULL DEFAULT 0
+   );
+   INSERT OR IGNORE INTO model_provenance_backfill_marker (id, done) VALUES (1, 0);`,
+
+  // v50 — Extended debug capture, operator surface (pro
+  // docs/internal/prd/extended-debug-capture.md §9 step 2). Mirrors prompt_snapshots:
+  // per (run_id, turn_index) it stores the REDACTED fully-assembled outbound request
+  // — "what the model actually saw". `user_message` is the FULL last user message
+  // incl. the ephemeral tail with the <secrets> catalog scrubbed at capture time
+  // (redactWireUserMessage) AND encrypted at rest (this._enc, like runs.task_text) —
+  // it is redacted-but-personal owner data. `system_prompt_hash` points into
+  // prompt_snapshots (the big system text is not duplicated per turn). Written ONLY
+  // when the owner-consent `debug_wire_capture` setting is on. Pruned when the thread
+  // is deleted (DELETE /api/threads/:id → deleteWireSnapshotsForThread) or when a run
+  // is explicitly removed (deleteRun cascade); there is no time-based prune, so a live
+  // thread's snapshots persist for as long as the thread does.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (50);
+   CREATE TABLE IF NOT EXISTS wire_snapshots (
+     run_id TEXT NOT NULL,
+     turn_index INTEGER NOT NULL,
+     model TEXT NOT NULL,
+     provider TEXT NOT NULL,
+     system_prompt_hash TEXT NOT NULL,
+     user_message TEXT NOT NULL,
+     user_message_chars INTEGER NOT NULL,
+     tool_names TEXT NOT NULL,
+     tool_count INTEGER NOT NULL,
+     tool_choice TEXT,
+     temperature REAL,
+     max_tokens INTEGER NOT NULL,
+     ephemeral_tail_present INTEGER NOT NULL,
+     ephemeral_tail_chars INTEGER NOT NULL,
+     captured_at INTEGER NOT NULL,
+     PRIMARY KEY (run_id, turn_index)
+   );`,
+
+  // v51: Frame/value segments for confirmation prompts. `question` stays the
+  // flattened text (the CLI, the logs and any client that predates this read
+  // it); `segments_json` carries which spans the SYSTEM wrote and which were
+  // interpolated, so the renderer can put values in text nodes instead of
+  // parsing them as markdown. NULL means "all frame" — every prompt written
+  // before this migration, and every caller still passing a plain string.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (51);
+   ALTER TABLE pending_prompts ADD COLUMN segments_json TEXT;`,
 ];
 
 export class RunHistory {
@@ -1223,8 +1336,14 @@ export class RunHistory {
   }
 
   /**
-   * Open the SQLite database, running an integrity check.
-   * If the database is malformed, rename the corrupt file and create a fresh one.
+   * Open the SQLite database. ONLY a failed `integrity_check` (genuine file
+   * corruption) may rename the file aside and start fresh. Schema migration runs
+   * AFTER that decision, OUTSIDE the corruption-catch, and fails LOUD (propagates,
+   * keeps the file): a migration error — a transient SQLITE_BUSY/disk-full/IO fault
+   * mid-migration, or a deterministic migration bug — must NEVER be mistaken for
+   * corruption and trigger the wipe-and-recreate path, which would silently destroy
+   * the run log + thread anchors + resumable prompts this DB holds. (Mirrors the
+   * EngineDb open flow — same class of fix.)
    */
   private _openOrRecreate(path: string): void {
     let db = new Database(path);
@@ -1233,10 +1352,6 @@ export class RunHistory {
       if (result[0]?.integrity_check !== 'ok') {
         throw new Error(`integrity_check: ${result[0]?.integrity_check ?? 'unknown'}`);
       }
-      db.pragma('journal_mode = WAL');
-      db.pragma('foreign_keys = ON');
-      this.db = db;
-      this._migrate();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       process.stderr.write(`⚠ History database corrupted (${msg}) — renaming to .corrupt and starting fresh\n`);
@@ -1248,10 +1363,22 @@ export class RunHistory {
         try { renameSync(`${path}-shm`, `${corruptPath}-shm`); } catch { /* may not exist */ }
       } catch { /* rename failed */ }
       db = new Database(path);
+    }
+    // Common path for both the healthy open and the freshly-recreated DB. The
+    // busy_timeout absorbs transient cross-process lock contention (prompt-store
+    // polls this DB every 2s; the operator sweep repoints thread anchors here)
+    // instead of an instant SQLITE_BUSY. Migration runs here (not in the
+    // corruption-catch) so any failure surfaces loud, file intact; the handle is
+    // closed on throw so a caught boot failure doesn't leak the fd + WAL lock.
+    try {
+      db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
       db.pragma('journal_mode = WAL');
       db.pragma('foreign_keys = ON');
       this.db = db;
       this._migrate();
+    } catch (err) {
+      try { db.close(); } catch { /* best-effort */ }
+      throw err;
     }
   }
 
@@ -1328,11 +1455,16 @@ export class RunHistory {
     roleId?: string | undefined;
     kind?: 'llm' | 'voice_stt' | 'voice_tts' | undefined;
     units?: number | undefined;
+    /** What fired this run (DEF-0097, v48): e.g. `'cron'` / `'watch'` for a
+     *  WorkerLoop-scheduled turn, absent (→ NULL) for a live user chat turn or a
+     *  legacy row. A SEPARATE dimension from `run_type` (the closed structural
+     *  union) so automation is auditable without polluting the billing filters. */
+    triggerOrigin?: string | undefined;
   }): string {
     const id = generateId();
     this.db.prepare(`
-      INSERT INTO runs (id, session_id, task_hash, task_text, model_tier, model_id, prompt_hash, run_type, batch_parent_id, spawn_parent_id, spawn_depth, context_id, status, tenant_id, archetype_id, kind, units, provider)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)
+      INSERT INTO runs (id, session_id, task_hash, task_text, model_tier, model_id, prompt_hash, run_type, batch_parent_id, spawn_parent_id, spawn_depth, context_id, status, tenant_id, archetype_id, kind, units, provider, trigger_origin)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       params.sessionId ?? '',
@@ -1351,6 +1483,7 @@ export class RunHistory {
       params.kind ?? null,
       params.units ?? 0,
       params.provider ?? '',
+      params.triggerOrigin ?? null,
     );
     return id;
   }
@@ -1748,6 +1881,53 @@ export class RunHistory {
     return row ?? { cost_usd: 0, tokens_in: 0, tokens_out: 0 };
   }
 
+  // ── Model-provenance backfill (arc:model-selector P1, DEF-0095) ──
+  // The exactly-once gate for the boot-backfill in engine.ts, mirroring engine.db's
+  // `verb_backfill_marker`. The recovery itself lives here (it owns the threads DB)
+  // but is DRIVEN from engine.ts because it needs the per-instance default tier.
+
+  isModelProvenanceBackfillDone(): boolean {
+    try {
+      const row = this.db.prepare('SELECT done FROM model_provenance_backfill_marker WHERE id = 1').get() as
+        { done: number } | undefined;
+      return row?.done === 1;
+    } catch {
+      // Marker table absent (a pre-v49 DB mid-migration / a degraded open) → treat
+      // as not-done so the next healthy boot retries rather than skipping silently.
+      return false;
+    }
+  }
+
+  markModelProvenanceBackfillDone(): void {
+    this.db.prepare('UPDATE model_provenance_backfill_marker SET done = 1 WHERE id = 1').run();
+  }
+
+  /**
+   * One-shot recovery of pre-column provenance (DEF-0095): the v47 column starts
+   * every existing thread at `'unknown'`. A thread whose NORMALISED tier differs
+   * from the instance default was almost certainly a deliberate pick (the composer
+   * picker shipped before this column), so label it `'user'` — strictly better
+   * than a blanket `'unknown'` that erases every real historical pick. Only touches
+   * rows still at `'unknown'` (never clobbers a fresh `'user'`/`'default'` write).
+   * Normalises legacy brand names (`sonnet`/`opus`/`haiku`) since the DB DDL default
+   * is `'sonnet'` and pre-rename rows carry brand names; an unparseable tier is
+   * treated as the default (NOT claimed as a pick — conservative). BEST-EFFORT +
+   * ADVISORY-ONLY: an internal `fast`/escalation thread on a non-default instance is
+   * over-labelled `'user'`, which is harmless because `source` gates nothing (v47
+   * caveat; the `'inferred'` refinement is register-deferred DEF-0127). Returns the
+   * number of rows labelled.
+   */
+  backfillModelTierSourceFromDefault(defaultTier: ModelTier): number {
+    const rows = this.db.prepare(
+      "SELECT id, model_tier FROM threads WHERE model_tier_source = 'unknown'",
+    ).all() as Array<{ id: string; model_tier: string }>;
+    const toMark = rows.filter(r => (normalizeTier(r.model_tier) ?? defaultTier) !== defaultTier);
+    if (toMark.length === 0) return 0;
+    const upd = this.db.prepare("UPDATE threads SET model_tier_source = 'user' WHERE id = ?");
+    this.db.transaction((ids: string[]) => { for (const id of ids) upd.run(id); })(toMark.map(r => r.id));
+    return toMark.length;
+  }
+
   getStats(): RunStats {
     const totals = this.db.prepare(`
       SELECT COUNT(*) as total_runs,
@@ -1856,6 +2036,40 @@ export class RunHistory {
       `UPDATE runs
          SET status = 'failed',
              stop_reason = CASE WHEN stop_reason = '' THEN 'interrupted' ELSE stop_reason END
+       WHERE status = 'running'`,
+    ).run().changes;
+  }
+
+  /**
+   * Boot-time recovery for the pipeline_runs record (2a/B4) — the sibling of
+   * {@link sweepStuckRuns} for the `runs` table. A workflow run still 'running'
+   * at boot was killed mid-flight (the finalize in runManifest's `finally` never
+   * ran) and can never close itself; one-engine-per-DB means no other live
+   * writer, so every 'running' row is an orphan. Flip it to the terminal
+   * 'interrupted' so it stops reading as perpetually in-flight in the run list.
+   *
+   * The finalize never ran, so the run's totals are still their 0 defaults — but
+   * its as-completed step rows (B3) DO carry the real spend of every step that
+   * finished before the crash. So the sweep also BACKFILLS step_count + totals
+   * from those rows: an interrupted run then reports "3 steps · $0.42" instead of
+   * a misleading "0 steps · $0", and becomes a truthful sample for the cost
+   * aggregate (which excludes only rows whose totals are still placeholders).
+   *
+   * Multi-process safety: this sweep is unconditional-by-status while the
+   * finalize (updatePipelineRun) is unconditional-by-id — so a run swept here
+   * but still finalizing in another process is corrected back to its real
+   * terminal status by the finalize, which must therefore NEVER be guarded with
+   * "only-if-running". Returns the number of rows swept.
+   */
+  sweepStuckPipelineRuns(): number {
+    return this.db.prepare(
+      `UPDATE pipeline_runs SET
+         status = 'interrupted',
+         step_count = (SELECT COUNT(*) FROM pipeline_step_results WHERE pipeline_run_id = pipeline_runs.id),
+         total_cost_usd = (SELECT COALESCE(SUM(cost_usd), 0) FROM pipeline_step_results WHERE pipeline_run_id = pipeline_runs.id),
+         total_tokens_in = (SELECT COALESCE(SUM(tokens_in), 0) FROM pipeline_step_results WHERE pipeline_run_id = pipeline_runs.id),
+         total_tokens_out = (SELECT COALESCE(SUM(tokens_out), 0) FROM pipeline_step_results WHERE pipeline_run_id = pipeline_runs.id),
+         total_duration_ms = (SELECT COALESCE(SUM(duration_ms), 0) FROM pipeline_step_results WHERE pipeline_run_id = pipeline_runs.id)
        WHERE status = 'running'`,
     ).run().changes;
   }
@@ -2089,6 +2303,87 @@ export class RunHistory {
     return persistence.getPromptSnapshot(this.db, hash);
   }
 
+  /**
+   * Persist a REDACTED per-turn wire snapshot (extended debug capture, operator
+   * surface). Called only when the owner-consent `debug_wire_capture` setting is on,
+   * once per outbound turn from the Agent seam (via the Session `onWireSnapshot`
+   * callback). `user_message` is already secrets-redacted by `buildWireSnapshot`; it
+   * is additionally ENCRYPTED at rest here (like runs.task_text) since it is personal
+   * owner data. A snapshot without a runId is dropped — it cannot be keyed or exported.
+   * INSERT OR REPLACE so a rare (run_id, turn_index) re-fire overwrites rather than
+   * throwing into the (swallowed) capture path.
+   */
+  insertWireSnapshot(snapshot: WireSnapshot): void {
+    if (!snapshot.runId) return;
+    this.db.prepare(
+      `INSERT OR REPLACE INTO wire_snapshots
+        (run_id, turn_index, model, provider, system_prompt_hash, user_message,
+         user_message_chars, tool_names, tool_count, tool_choice, temperature,
+         max_tokens, ephemeral_tail_present, ephemeral_tail_chars, captured_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      snapshot.runId,
+      snapshot.turnIndex,
+      snapshot.model,
+      snapshot.provider,
+      snapshot.systemPromptHash,
+      this._enc(snapshot.userMessage),
+      snapshot.userMessageChars,
+      JSON.stringify(snapshot.toolNames),
+      snapshot.toolCount,
+      snapshot.toolChoice ?? null,
+      snapshot.temperature ?? null,
+      snapshot.maxTokens,
+      snapshot.ephemeralTailPresent ? 1 : 0,
+      snapshot.ephemeralTailChars,
+      snapshot.capturedAt,
+    );
+  }
+
+  /**
+   * Read the persisted wire snapshots for a run, decrypted + turn-ordered, for the
+   * owner's own debug export. `tool_names` is parsed back from its JSON column; a
+   * malformed row degrades to an empty list rather than failing the whole export.
+   */
+  getWireSnapshotsForRun(runId: string): WireSnapshotRecord[] {
+    const rows = this.db.prepare(
+      `SELECT run_id, turn_index, model, provider, system_prompt_hash, user_message,
+              user_message_chars, tool_names, tool_count, tool_choice, temperature,
+              max_tokens, ephemeral_tail_present, ephemeral_tail_chars, captured_at
+       FROM wire_snapshots WHERE run_id = ? ORDER BY turn_index ASC`,
+    ).all(runId) as Array<{
+      run_id: string; turn_index: number; model: string; provider: string;
+      system_prompt_hash: string; user_message: string; user_message_chars: number;
+      tool_names: string; tool_count: number; tool_choice: string | null;
+      temperature: number | null; max_tokens: number; ephemeral_tail_present: number;
+      ephemeral_tail_chars: number; captured_at: number;
+    }>;
+    return rows.map((r) => {
+      let toolNames: string[] = [];
+      try {
+        const parsed: unknown = JSON.parse(r.tool_names);
+        if (Array.isArray(parsed)) toolNames = parsed.filter((n): n is string => typeof n === 'string');
+      } catch { /* malformed row → empty tool list, keep the rest of the snapshot */ }
+      return {
+        run_id: r.run_id,
+        turn_index: r.turn_index,
+        model: r.model,
+        provider: r.provider,
+        system_prompt_hash: r.system_prompt_hash,
+        user_message: this._dec(r.user_message),
+        user_message_chars: r.user_message_chars,
+        tool_names: toolNames,
+        tool_count: r.tool_count,
+        tool_choice: r.tool_choice,
+        temperature: r.temperature,
+        max_tokens: r.max_tokens,
+        ephemeral_tail_present: r.ephemeral_tail_present === 1,
+        ephemeral_tail_chars: r.ephemeral_tail_chars,
+        captured_at: r.captured_at,
+      };
+    });
+  }
+
   insertScope(id: string, type: string, name: string, parentId?: string | undefined): void {
     persistence.insertScope(this.db, id, type, name, parentId);
   }
@@ -2269,6 +2564,9 @@ export class RunHistory {
     status?: string | undefined;
     totalDurationMs?: number | undefined;
     totalCostUsd?: number | undefined;
+    totalTokensIn?: number | undefined;
+    totalTokensOut?: number | undefined;
+    stepCount?: number | undefined;
     error?: string | undefined;
   }): void {
     persistence.updatePipelineRun(this.db, id, params);
@@ -2285,8 +2583,12 @@ export class RunHistory {
     tokensOut?: number | undefined;
     costUsd?: number | undefined;
     modelTier?: string | undefined;
-  }): void {
-    persistence.insertPipelineStepResult(this.db, params);
+  }): number | bigint {
+    return persistence.insertPipelineStepResult(this.db, params);
+  }
+
+  updatePipelineStepResultText(rowId: number | bigint, result: string): void {
+    persistence.updatePipelineStepResultText(this.db, rowId, result);
   }
 
   getRecentPipelineRuns(limit = 20): Array<{
@@ -2354,10 +2656,20 @@ export class RunHistory {
       id: planned.id,
       name: planned.name,
       description: planned.goal,
-      definitionJson: JSON.stringify(planned),
+      // Move 1 (PRD §4.1): stamp the content-schema version on every native
+      // write. The spread preserves whatever fields the producer passed and adds
+      // the version, so the stored blob is versioned regardless of caller shape.
+      definitionJson: JSON.stringify({ ...planned, schema_version: CURRENT_PIPELINE_SCHEMA_VERSION }),
       isTemplate: planned.template === true,
       sourceRunId: null,
     });
+  }
+
+  /** Move 1 (PRD §4.1): forward-migrate every stored workflow-definition blob to
+   *  the current content-schema version. Boot-time, per-blob version-gated,
+   *  idempotent, forward-only. No-op when the engine.db workflow store is inert. */
+  migrateWorkflowContentSchema(): ContentMigrationCounts {
+    return this._workflowStore?.migrateContentSchema(migratePipelineBlob) ?? { scanned: 0, migrated: 0 };
   }
 
   getPlannedPipeline(id: string): { id: string; manifest_json: string } | undefined {
@@ -2589,6 +2901,9 @@ export class RunHistory {
         this.db.prepare('DELETE FROM pipeline_step_results WHERE pipeline_run_id = ?').run(pr.id);
       }
       this.db.prepare('DELETE FROM pipeline_runs WHERE parent_run_id = ?').run(id);
+      // Extended debug capture: wire snapshots are keyed by run_id, so retention
+      // rides run deletion (the PRD §5 rolling window). No-op when capture is off.
+      this.db.prepare('DELETE FROM wire_snapshots WHERE run_id = ?').run(id);
       const result = this.db.prepare('DELETE FROM runs WHERE id = ?').run(id);
       return result.changes > 0;
     });
@@ -2618,6 +2933,26 @@ export class RunHistory {
   }
 
   /**
+   * Delete the wire_snapshots captured for a thread's runs — WITHOUT touching the
+   * runs themselves (they are the cost ledger and must survive thread deletion).
+   * A thread's runs are its `session_id` rows (session id == thread id), and
+   * wire_snapshots are keyed by run_id, so this scopes by that run set. Called when
+   * a thread is deleted via the HTTP route so captured snapshots don't linger on
+   * disk after their thread is gone. Returns the number of snapshot rows removed.
+   */
+  deleteWireSnapshotsForThread(threadId: string): number {
+    const runIds = this.db.prepare('SELECT id FROM runs WHERE session_id = ?').all(threadId) as Array<{ id: string }>;
+    if (runIds.length === 0) return 0;
+    const del = this.db.prepare('DELETE FROM wire_snapshots WHERE run_id = ?');
+    const tx = this.db.transaction(() => {
+      let removed = 0;
+      for (const { id } of runIds) removed += del.run(id).changes;
+      return removed;
+    });
+    return tx();
+  }
+
+  /**
    * VACUUM the database to reclaim space and purge deleted records from WAL.
    */
   vacuum(): void {
@@ -2634,7 +2969,7 @@ export class RunHistory {
     const tables = [
       'run_tool_calls', 'run_spawns', 'prompt_snapshots', 'memory_embeddings',
       'pre_approval_sets', 'pre_approval_events', 'pipeline_runs', 'pipeline_step_results',
-      'advisor_suggestions', 'tasks', 'security_events', 'processes', 'runs',
+      'advisor_suggestions', 'tasks', 'security_events', 'processes', 'wire_snapshots', 'runs',
     ];
     this.db.pragma('foreign_keys = OFF');
     for (const table of tables) {
@@ -2697,6 +3032,23 @@ export class RunHistory {
         inputJson ? encWithKey(inputJson, newEncKey) : row.input_json,
         outputJson ? encWithKey(outputJson, newEncKey) : row.output_json,
         row.id,
+      );
+      count++;
+    }
+
+    // Re-encrypt wire snapshots (user_message) — the redacted-but-personal assembled
+    // request. Keyed by (run_id, turn_index); only present when debug_wire_capture ran.
+    const wireRows = this.db.prepare(
+      `SELECT run_id, turn_index, user_message FROM wire_snapshots WHERE user_message LIKE ?`,
+    ).all(encPrefix) as Array<{ run_id: string; turn_index: number; user_message: string }>;
+
+    const updateWire = this.db.prepare('UPDATE wire_snapshots SET user_message = ? WHERE run_id = ? AND turn_index = ?');
+    for (const row of wireRows) {
+      const userMessage = this._dec(row.user_message);
+      updateWire.run(
+        userMessage ? encWithKey(userMessage, newEncKey) : row.user_message,
+        row.run_id,
+        row.turn_index,
       );
       count++;
     }

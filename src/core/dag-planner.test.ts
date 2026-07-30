@@ -212,7 +212,7 @@ describe('planDAG', () => {
 
     await planDAG('test goal', {
       apiKey: 'sk-test-key',
-      apiBaseURL: 'http://localhost:8317',
+      apiBaseURL: 'http://localhost:11434',
     });
 
     expect(mockCreate).toHaveBeenCalledTimes(1);

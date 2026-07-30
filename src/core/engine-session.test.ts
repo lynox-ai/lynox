@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // === Mocks ===
 
@@ -23,6 +23,9 @@ const mockSend = vi.fn().mockResolvedValue('response');
 const mockReset = vi.fn();
 const mockAbort = vi.fn();
 const mockGetMessages = vi.fn().mockReturnValue([]);
+// Shared so an override survives the compaction-tier `_recreateAgent` swap (the
+// summarizer runs on the RE-created agent, not the one present when the test set up).
+const mockGetUnpersistedTail = vi.fn().mockReturnValue([]);
 const mockLoadMessages = vi.fn();
 const mockSetContinuationPrompt = vi.fn();
 const mockSetKnowledgeContext = vi.fn();
@@ -36,10 +39,16 @@ vi.mock('./agent.js', () => ({
       this.name = 'RunAbortedError';
     }
   },
-  Agent: vi.fn().mockImplementation(function (config: { toolResultBlobStore?: unknown }) {
+  Agent: vi.fn().mockImplementation(function (config: {
+    toolResultBlobStore?: unknown;
+    onStream?: ((event: unknown) => void | Promise<void>) | undefined;
+  }) {
     // @ts-expect-error mock constructor — capture the Session-owned blob store
     // so compaction tests can assert recall round-trips through the real store.
     this.toolResultBlobStore = config?.toolResultBlobStore;
+    // @ts-expect-error mock constructor — capture the extended-debug-capture persist
+    // sink so a test can assert Session wires it iff debug_wire_capture is on.
+    this.onWireSnapshot = (config as { onWireSnapshot?: unknown })?.onWireSnapshot;
     // @ts-expect-error mock constructor
     this.send = mockSend;
     // @ts-expect-error mock constructor
@@ -51,7 +60,8 @@ vi.mock('./agent.js', () => ({
     // @ts-expect-error mock constructor — identity-based persist seam. The mock
     // never appends in-loop, so the unpersisted tail is empty (nothing new to
     // write) and markPersisted is a no-op; mirrors a fully-checkpointed buffer.
-    this.getUnpersistedTail = vi.fn().mockReturnValue([]);
+    // Shared fn so a per-test override survives `_recreateAgent` (see decl).
+    this.getUnpersistedTail = mockGetUnpersistedTail;
     // @ts-expect-error mock constructor
     this.markPersisted = vi.fn();
     // @ts-expect-error mock constructor — mirrors the pre-PR1 char-estimate so
@@ -73,8 +83,11 @@ vi.mock('./agent.js', () => ({
     this.promptUser = undefined;
     // @ts-expect-error mock constructor
     this.promptTabs = undefined;
-    // @ts-expect-error mock constructor
-    this.onStream = null;
+    // @ts-expect-error mock constructor — captures Session's real streamHandler
+    // closure so tests can invoke `agent.onStream(event)` directly to exercise
+    // Session's event-interception logic (turn_end model/contextWindow inject,
+    // context_budget budgetPercent inject, etc.) without a full run().
+    this.onStream = config?.onStream ?? null;
     // @ts-expect-error mock constructor
     this.name = 'lynox';
     // @ts-expect-error mock constructor
@@ -104,6 +117,8 @@ vi.mock('./memory.js', () => ({
     this.loadAll = vi.fn().mockResolvedValue(undefined);
     // @ts-expect-error mock constructor
     this.maybeUpdate = vi.fn();
+    // @ts-expect-error mock constructor
+    this.setMeteredHost = vi.fn();
     // @ts-expect-error mock constructor
     this.appendScoped = vi.fn();
     // @ts-expect-error mock constructor
@@ -161,6 +176,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   httpRequestTool: { definition: { name: 'http_request' }, handler: vi.fn() },
   runWorkflowTool: { definition: { name: 'run_workflow' }, handler: vi.fn() },
   updateWorkflowTool: { definition: { name: 'update_workflow_steps' }, handler: vi.fn() },
+  exportWorkflowTool: { definition: { name: 'export_workflow' }, handler: vi.fn() },
+  importWorkflowTool: { definition: { name: 'import_workflow' }, handler: vi.fn() },
   diagnoseWorkflowTool: { definition: { name: 'diagnose_workflow_run' }, handler: vi.fn() },
   setPipelineConfig: vi.fn(),
   setPlanTaskConfig: vi.fn(),
@@ -184,6 +201,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactHistoryTool: { definition: { name: 'artifact_history' }, handler: vi.fn() },
   artifactRestoreTool: { definition: { name: 'artifact_restore' }, handler: vi.fn() },
   recallToolResultTool: { definition: { name: 'recall_tool_result' }, handler: vi.fn() },
+  suggestFollowUpsTool: { definition: { name: 'suggest_follow_ups' }, handler: vi.fn() },
   mediaProcessTool: { definition: { name: 'media_process' }, handler: vi.fn() },
 }));
 
@@ -299,6 +317,7 @@ vi.mock('./project.js', () => ({
 
 const mockInsertRun = vi.fn().mockReturnValue('run-123');
 const mockInsertPromptSnapshot = vi.fn();
+const mockInsertWireSnapshot = vi.fn();
 
 vi.mock('./run-history.js', () => ({
   RunHistory: vi.fn().mockImplementation(function () {
@@ -306,12 +325,18 @@ vi.mock('./run-history.js', () => ({
     this.insertRun = mockInsertRun;
     // @ts-expect-error mock constructor
     this.insertPromptSnapshot = mockInsertPromptSnapshot;
+    // @ts-expect-error mock constructor — extended debug capture persist sink.
+    this.insertWireSnapshot = mockInsertWireSnapshot;
     // @ts-expect-error mock constructor
     this.updateRun = vi.fn();
     // @ts-expect-error mock constructor — per-thread rollup source (session.ts:776).
     // Without it the first-run rollup throws before the title path, so the
     // fast-tier title metering never fires.
     this.getThreadTotals = vi.fn().mockReturnValue({ tokens_in: 0, tokens_out: 0, cost_usd: 0 });
+    // @ts-expect-error mock constructor — P1 provenance backfill gate (engine.ts
+    // boot). 'done' so the one-shot backfill is skipped in these mocked-DB tests;
+    // the real recovery is covered by run-history-provenance-backfill.test.ts.
+    this.isModelProvenanceBackfillDone = vi.fn().mockReturnValue(true);
     // @ts-expect-error mock constructor — debug-export Tier 2 compaction events.
     this.insertCompactionEvent = vi.fn();
     // @ts-expect-error mock constructor
@@ -354,6 +379,8 @@ import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages
 import { Memory } from './memory.js';
 import { channels } from './observability.js';
 import { configurePersistentBudget, resetPersistentBudget } from './session-budget.js';
+import { initLLMProvider } from './llm-client.js';
+import { MISTRAL_MODEL_MAP, setOpenAIModelResolver } from '../types/index.js';
 // === Helper ===
 
 async function createEngineAndSession(config: Record<string, unknown> = {}): Promise<{ engine: Engine; session: Session }> {
@@ -369,6 +396,7 @@ describe('Engine + Session (Orchestrator)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetMessages.mockReturnValue([]);
+    mockGetUnpersistedTail.mockReturnValue([]);
     mockRegister.mockReturnThis();
     // Enable feature flags for tests
     process.env['LYNOX_FEATURE_PLUGINS'] = '1';
@@ -384,10 +412,10 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool.
-      // 35 builtin always (incl. edit_file + update_workflow_steps + diagnose_workflow_run + media_process); +1 `web_research`
+      // 38 builtin always (incl. edit_file + update_workflow_steps + export_workflow + import_workflow + diagnose_workflow_run + media_process + suggest_follow_ups); +1 `web_research`
       // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
       // isn't configured; +5 mail tools when vault is available.
-      expect([38, 43]).toContain(mockRegister.mock.calls.length);
+      expect([41, 46]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -404,6 +432,41 @@ describe('Engine + Session (Orchestrator)', () => {
       const engine = new Engine({} as import('../types/index.js').LynoxConfig);
       const result = await engine.init();
       expect(result).toBe(engine);
+    });
+
+    it('first-turn briefing (2026-07-18): drops scope-label + data-table leaks, wires task overview', async () => {
+      const { TaskManager } = await import('./task-manager.js');
+      const { engine } = await createEngineAndSession();
+      const briefing = engine.getBriefing() ?? '';
+
+      // #3b: the UNSCOPED <data_collections> dump is gone even though the DataStore
+      // mock returns a collection (pre-fix, this branch injected <data_collections>).
+      expect(briefing).not.toContain('<data_collections>');
+      // #3a: the <memory_scopes> transport-label leak is gone (scopes still resolve).
+      expect(briefing).not.toContain('<memory_scopes>');
+
+      // L2a: the engine computes <task_overview> UNCONDITIONALLY (not CLI-gated) —
+      // getBriefingSummary is invoked when the Session is built (via getTaskBriefing),
+      // on this non-CLI path. The lift is what this asserts; the summary CONTENT is
+      // covered by task-manager.test.ts.
+      const summaryCalled = vi.mocked(TaskManager).mock.instances.some(
+        (inst) => (((inst as { getBriefingSummary?: { mock?: { calls: unknown[] } } }).getBriefingSummary?.mock?.calls.length) ?? 0) > 0,
+      );
+      expect(summaryCalled, 'Engine must call TaskManager.getBriefingSummary for the task overview (L2a lift)').toBe(true);
+    });
+
+    it('recomputes the task overview per Session (B2) — not frozen at engine boot', async () => {
+      const { engine } = await createEngineAndSession();
+      // getTaskBriefing() reads the live TaskManager on every call, so a later Session
+      // sees CURRENT tasks — not the boot snapshot the old init-time freeze served to
+      // every new thread for the container's lifetime.
+      const tm = (engine as unknown as { _taskManager: { getBriefingSummary: ReturnType<typeof vi.fn> } })._taskManager;
+      tm.getBriefingSummary.mockReturnValue('OVERVIEW-1');
+      expect(engine.getTaskBriefing()).toBe('OVERVIEW-1');
+      tm.getBriefingSummary.mockReturnValue('OVERVIEW-2');
+      expect(engine.getTaskBriefing()).toBe('OVERVIEW-2');
+      // The static briefing does NOT carry the (now per-Session) overview.
+      expect(engine.getBriefing() ?? '').not.toContain('OVERVIEW-1');
     });
   });
 
@@ -425,6 +488,36 @@ describe('Engine + Session (Orchestrator)', () => {
         // succeeded so the identity-based eager-persist won't duplicate the row.
         expect.objectContaining({ suppressTools: false }),
       );
+    });
+
+    it('extended debug capture: wires onWireSnapshot → insertWireSnapshot when debug_wire_capture is ON', async () => {
+      // userConfig is loaded from disk, not the engine ctor — mutate it BEFORE the
+      // session's _createAgent reads it (the flag gates the callback at build time).
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.getUserConfig().debug_wire_capture = true;
+      const session = engine.createSession();
+      try {
+        // Session passed a persist sink to the Agent (the flag is on).
+        const agent = (session as unknown as { agent: { onWireSnapshot?: (s: unknown) => void } }).agent;
+        expect(typeof agent.onWireSnapshot).toBe('function');
+        // Invoking it routes to RunHistory.insertWireSnapshot (the operator persist path).
+        const snap = { runId: 'run-123', turnIndex: 1, userMessage: 'x' };
+        agent.onWireSnapshot!(snap);
+        expect(mockInsertWireSnapshot).toHaveBeenCalledWith(snap);
+      } finally {
+        // loadConfig() memoizes a singleton — reset so the flag doesn't leak into
+        // later tests (see the mutation-leak note in this file's compaction tests).
+        delete engine.getUserConfig().debug_wire_capture;
+      }
+    });
+
+    it('extended debug capture: does NOT wire onWireSnapshot when the flag is OFF (default)', async () => {
+      const { session } = await createEngineAndSession();
+      mockSend.mockResolvedValueOnce('ok');
+      await session.run('Hello');
+      const agent = (session as unknown as { agent: { onWireSnapshot?: unknown } }).agent;
+      expect(agent.onWireSnapshot).toBeUndefined();   // byte-identical hot path
     });
 
     it('Tier 2: a failed run records raw error detail (error_text) for failure-class triage', async () => {
@@ -497,6 +590,25 @@ describe('Engine + Session (Orchestrator)', () => {
           summaryChars: 'summary text'.length,
         }),
       );
+    });
+
+    it('CORE-5: an internal (compaction) run does NOT persist its summarizer prompt/summary as visible thread rows', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const threadStore = engine.getThreadStore()!;
+      const appendSpy = vi.spyOn(threadStore, 'appendMessages');
+      // The summarizer run leaves a non-empty unpersisted tail (the "Summarize the
+      // conversation…" user turn + the raw summary reply). Pre-fix these leaked to
+      // disk as display_only=0 rows and rendered as spurious bubbles on reload (and
+      // rode backup/export unmasked). The internal-run guards must skip persisting them.
+      mockGetUnpersistedTail.mockReturnValue([
+        { role: 'user', content: 'Summarize the conversation so far' },
+        { role: 'assistant', content: 'a raw internal summary' },
+      ]);
+      mockSend.mockResolvedValueOnce('summary text'); // the internal summary run
+      const result = await session.compact('keep the goal');
+      expect(result.success).toBe(true);
+      // The internal run's messages are machinery — never appended as thread rows.
+      expect(appendSpy).not.toHaveBeenCalled();
     });
 
     it('#4: preserves the most-recent user image across a compaction (re-attached inline)', async () => {
@@ -610,10 +722,10 @@ describe('Engine + Session (Orchestrator)', () => {
   describe('registerPipelineTools()', () => {
     it('pipeline tools are registered at init', async () => {
       await createEngineAndSession();
-      // 35 builtin always (incl. edit_file + update_workflow_steps + diagnose_workflow_run + media_process); +1 `web_research`
+      // 38 builtin always (incl. edit_file + update_workflow_steps + export_workflow + import_workflow + diagnose_workflow_run + media_process + suggest_follow_ups); +1 `web_research`
       // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
       // isn't configured; +5 mail tools when vault is available.
-      expect([38, 43]).toContain(mockRegister.mock.calls.length);
+      expect([41, 46]).toContain(mockRegister.mock.calls.length);
     });
 
     it('registerPipelineTools is idempotent after init', async () => {
@@ -667,6 +779,87 @@ describe('Engine + Session (Orchestrator)', () => {
     });
   });
 
+  // -- arc:model-selector P1 §5.1b: the mid-thread re-pick (repickModel) --
+  describe('repickModel() — mid-thread tier change', () => {
+    it('clamps to max_tier on the live session but persists the REQUESTED (unclamped) pick as "user"', async () => {
+      const { engine, session } = await createEngineAndSession();
+      engine.getUserConfig().max_tier = 'balanced';
+      const updateSpy = vi.spyOn(engine.getThreadStore()!, 'updateThread');
+      try {
+        const result = session.repickModel('deep');
+        expect(result.ok).toBe(true);
+        // Live session runs the CLAMPED tier (S1 money-safety — setModel is A5, unclamped).
+        expect(result.ok && result.tier).toBe('balanced');
+        expect(session.getModelTier()).toBe('balanced');
+        // The ROW records INTENT — the requested tier, source 'user' (RF-ARCH4 /
+        // Fable: resume re-clamps, so an over-ceiling row never causes an over-ceiling run).
+        expect(updateSpy).toHaveBeenCalledWith(session.sessionId, {
+          model_tier: 'deep',
+          model_tier_source: 'user',
+        });
+      } finally {
+        updateSpy.mockRestore();
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
+    it('switches to the exact tier when no ceiling applies', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const updateSpy = vi.spyOn(engine.getThreadStore()!, 'updateThread');
+      try {
+        const result = session.repickModel('deep');
+        expect(result.ok && result.tier).toBe('deep');
+        expect(session.getModelTier()).toBe('deep');
+        expect(updateSpy).toHaveBeenCalledWith(session.sessionId, {
+          model_tier: 'deep',
+          model_tier_source: 'user',
+        });
+      } finally {
+        updateSpy.mockRestore();
+      }
+    });
+
+    it('falls back to fast when the requested tier resolves to a blocked model (trial cost-leak guard)', async () => {
+      // Wires the main-session model-resolution path (session.ts repickModel) to
+      // the blocklist: without `blockedModelIds: uc.blocked_model_ids` threaded
+      // through, a trial that blocks premium Anthropic ids would still run Opus
+      // on the CP pool key here. Blocking deep+balanced leaves fast (Haiku) as
+      // the only unblocked tier — the resolver must land there.
+      const { engine, session } = await createEngineAndSession();
+      engine.getUserConfig().blocked_model_ids = ['claude-opus-', 'claude-sonnet-', 'claude-fable-'];
+      try {
+        const result = session.repickModel('deep');
+        expect(result.ok && result.tier).toBe('fast');
+        expect(session.getModelTier()).toBe('fast');
+      } finally {
+        delete engine.getUserConfig().blocked_model_ids;
+      }
+    });
+
+    it('refuses a downgrade that overflows the target window, with NO write (D20/F9)', async () => {
+      const { engine, session } = await createEngineAndSession();
+      // Force a small effective window (floors at MIN_EFFECTIVE = 32k) + an
+      // occupancy above it, so the target tier cannot hold the context.
+      engine.getUserConfig().max_context_window_tokens = 1;
+      mockGetMessages.mockReturnValue([{ role: 'user', content: 'x'.repeat(120_000) }]);
+      const updateSpy = vi.spyOn(engine.getThreadStore()!, 'updateThread');
+      const before = session.getModelTier();
+      try {
+        const result = session.repickModel('fast');
+        expect(result.ok).toBe(false);
+        expect(!result.ok && result.reason).toBe('overflow');
+        expect(!result.ok && result.occupancy).toBeGreaterThan(!result.ok ? result.window : 0);
+        // Refuse is BEFORE any write, and the live tier is untouched.
+        expect(updateSpy).not.toHaveBeenCalled();
+        expect(session.getModelTier()).toBe(before);
+      } finally {
+        updateSpy.mockRestore();
+        mockGetMessages.mockReturnValue([]);
+        delete engine.getUserConfig().max_context_window_tokens;
+      }
+    });
+  });
+
   describe('_recreateAgent() — costGuard survives recreation', () => {
     it('preserves a per-run costGuard set at createSession across agent recreation', async () => {
       const engine = new Engine({} as import('../types/index.js').LynoxConfig);
@@ -701,6 +894,196 @@ describe('Engine + Session (Orchestrator)', () => {
 
       const rebuiltConfig = vi.mocked(Agent).mock.calls[0]![0];
       expect(rebuiltConfig.costGuard).toEqual({ maxBudgetUSD: 15 });
+    });
+  });
+
+  describe('createSession — managed per-run cost ceiling ($10 CP-owned, C2 / DEF-0083)', () => {
+    // The main-chat path sets no costGuard of its own (T-within), so createSession
+    // defaults one from the CP-emitted, clamped LYNOX_MANAGED_RUN_COST_CEILING_USD.
+    // Ships atomically with the balance mirror (managed-hook.ts) — FB-BOUND-3.
+    const ENV = 'LYNOX_MANAGED_RUN_COST_CEILING_USD';
+    afterEach(() => { delete process.env[ENV]; });
+
+    it('defaults an interactive managed session to the CP-owned per-run costGuard', async () => {
+      process.env[ENV] = '10';
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.createSession(); // no opts → the main-chat path
+      const born = vi.mocked(Agent).mock.calls.at(-1)![0];
+      expect(born.costGuard).toEqual({ maxBudgetUSD: 10 });
+    });
+
+    it('clamps a tenant-tampered ceiling to [1, 50] and falls back to $10 on garbage', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const cases: ReadonlyArray<readonly [string, number]> = [
+        ['100', 50], // above ceiling → clamped down (can't disable the guard)
+        ['0.5', 1], // below floor → clamped up (can't set uselessly low)
+        ['abc', 10], // non-numeric → default
+        ['0', 10], // zero → default
+        ['-5', 10], // negative → default
+      ];
+      for (const [raw, expected] of cases) {
+        process.env[ENV] = raw;
+        vi.mocked(Agent).mockClear();
+        engine.createSession();
+        const born = vi.mocked(Agent).mock.calls.at(-1)![0];
+        expect(born.costGuard).toEqual({ maxBudgetUSD: expected });
+      }
+    });
+
+    it('does NOT override an explicit costGuard — the WorkerLoop keeps its own $15', async () => {
+      process.env[ENV] = '10';
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.createSession({ costGuard: { maxBudgetUSD: 15 } }); // executeStandard's shape
+      const born = vi.mocked(Agent).mock.calls.at(-1)![0];
+      expect(born.costGuard).toEqual({ maxBudgetUSD: 15 });
+    });
+
+    it('applies NO default guard on self-host / BYOK (ceiling env absent)', async () => {
+      delete process.env[ENV];
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.createSession();
+      const born = vi.mocked(Agent).mock.calls.at(-1)![0];
+      expect(born.costGuard).toBeUndefined();
+    });
+  });
+
+  describe('_recreateAgent() — session identity survives, per-rebuild isolation does not', () => {
+    // The costGuard block above fixed ONE field. The rule was never about
+    // costGuard: `agentOverrides` was replaced wholesale, so a bare rebuild
+    // (registry hot-reload, provider swap, compaction override) also stripped
+    // autonomy, the iteration budget and the named model
+    // profile. These pin the general rule — AND its boundary: `excludeTools` is a
+    // transient per-instance isolation and must still be lifted by an empty
+    // recreate (see session-disabled-tools-invariant.test.ts).
+    const FALLBACK_PROFILE = {
+      provider: 'openai' as const,
+      api_base_url: 'https://api.mistral.ai/v1',
+      api_key: 'sk-mistral-test',
+      model_id: 'mistral-large-2512',
+    };
+    // NOTE on the try/finally below: `loadConfig()` memoises into a module-level
+    // `_cachedConfig` (config.ts:89), so every Engine in this file shares ONE
+    // userConfig object — an un-deleted mutation leaks into every later test.
+    // Same reason the max_tier / compaction_model tests below clean up after
+    // themselves.
+
+    it('preserves autonomy + maxIterations across a bare rebuild — a background task must not lose them', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({});
+      // The WorkerLoop shape (worker-loop.ts:481).
+      session._recreateAgent({ maxIterations: 40, autonomy: 'autonomous' });
+
+      // A registry hot-reload / config swap then rebuilds with no args
+      // (session.ts:458 / :469). Before the fix this dropped `autonomy`, so an
+      // unattended background run started hitting approval gates nobody answers.
+      vi.mocked(Agent).mockClear();
+      session._recreateAgent();
+
+      const rebuilt = vi.mocked(Agent).mock.calls[0]![0];
+      expect(rebuilt.autonomy).toBe('autonomous');
+      expect(rebuilt.maxIterations).toBe(40);
+    });
+
+    it('preserves the named model profile across a bare rebuild — no silent provider/residency fallback', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.getUserConfig().model_profiles = { fallback: FALLBACK_PROFILE };
+
+      try {
+        const session = engine.createSession({});
+        session._recreateAgent({ profile: 'fallback' });
+
+        const withProfile = vi.mocked(Agent).mock.calls.at(-1)![0];
+        expect(withProfile.provider).toBe('openai');
+        expect(withProfile.apiBaseURL).toBe('https://api.mistral.ai/v1');
+        expect(withProfile.openaiModelId).toBe('mistral-large-2512');
+
+        // A compaction override (runOptions.modelTier) rebuilds with no args.
+        // Before the fix `_profileOverride` was nulled here,
+        // so the managed WorkerLoop's cheap EU model silently became the main
+        // provider — a data-residency change, not just a cost one.
+        vi.mocked(Agent).mockClear();
+        session._recreateAgent();
+
+        const rebuilt = vi.mocked(Agent).mock.calls[0]![0];
+        expect(rebuilt.provider).toBe('openai');
+        expect(rebuilt.apiBaseURL).toBe('https://api.mistral.ai/v1');
+        expect(rebuilt.openaiModelId).toBe('mistral-large-2512');
+      } finally {
+        delete engine.getUserConfig().model_profiles;
+      }
+    });
+
+    it('a partial override changes only what it supplies (worker-loop.ts:752 shape)', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.getUserConfig().model_profiles = { fallback: FALLBACK_PROFILE };
+
+      try {
+        const session = engine.createSession({});
+        session._recreateAgent({ maxIterations: 40, autonomy: 'autonomous' });
+
+        // Supplying ONLY a profile must not wipe the iteration budget / autonomy.
+        vi.mocked(Agent).mockClear();
+        session._recreateAgent({ profile: 'fallback' });
+
+        const rebuilt = vi.mocked(Agent).mock.calls[0]![0];
+        expect(rebuilt.maxIterations).toBe(40);
+        expect(rebuilt.autonomy).toBe('autonomous');
+        expect(rebuilt.openaiModelId).toBe('mistral-large-2512');
+      } finally {
+        delete engine.getUserConfig().model_profiles;
+      }
+    });
+
+    it('a key passed as explicit undefined does not erase carried identity', async () => {
+      // The footgun a spread-merge would have re-introduced: a caller forwarding
+      // an optional value (`autonomy: cfg.autonomy`) must not silently wipe it.
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({});
+      session._recreateAgent({ maxIterations: 40, autonomy: 'autonomous' });
+
+      vi.mocked(Agent).mockClear();
+      session._recreateAgent({ autonomy: undefined, maxIterations: undefined });
+
+      const rebuilt = vi.mocked(Agent).mock.calls[0]![0];
+      expect(rebuilt.autonomy).toBe('autonomous');
+      expect(rebuilt.maxIterations).toBe(40);
+    });
+
+    it('still rejects an unknown profile name', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({});
+
+      expect(() => session._recreateAgent({ profile: 'nope' })).toThrow(/Unknown model profile "nope"/);
+    });
+
+    it('does NOT carry excludeTools — a per-rebuild isolation is still lifted by an empty recreate', async () => {
+      // The boundary of the rule, pinned so nobody "generalises" the fix above
+      // into carrying everything. `excludeTools` is a TRANSIENT per-instance
+      // isolation, not session identity: a caller lifts it by recreating without
+      // it. Same invariant as session-disabled-tools-invariant.test.ts, guarded
+      // here from the preservation side.
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({});
+
+      session._recreateAgent({ excludeTools: ['spawn_agent'], autonomy: 'autonomous' });
+      expect(vi.mocked(Agent).mock.calls.at(-1)![0].excludeTools).toContain('spawn_agent');
+
+      vi.mocked(Agent).mockClear();
+      session._recreateAgent();
+
+      const rebuilt = vi.mocked(Agent).mock.calls[0]![0];
+      expect(rebuilt.excludeTools ?? []).not.toContain('spawn_agent'); // isolation lifted
+      expect(rebuilt.autonomy).toBe('autonomous');                     // identity kept
     });
   });
 
@@ -1069,7 +1452,15 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(result.success).toBe(false);
       expect(result.summary).toBe('');
       expect(mockReset).not.toHaveBeenCalled();        // thread NOT wiped on failure
-      expect(mockLoadMessages).not.toHaveBeenCalled();
+      // Slice A (issue #72 cost): the compaction-tier swap restores the session's
+      // real tier in run()'s `finally` — success OR failure — via a scoped
+      // _recreateAgent(), which round-trips the agent's OWN unchanged messages
+      // through loadMessages(). That identity round-trip is expected here; what
+      // must NEVER happen is the failure content (guard string / provider error)
+      // getting injected as if it were an authoritative summary.
+      for (const call of mockLoadMessages.mock.calls) {
+        expect(JSON.stringify(call[0])).not.toContain('provider 503');
+      }
     });
 
     it('recall_tool_result round-trips the evicted payload by id', async () => {
@@ -1092,7 +1483,9 @@ describe('Engine + Session (Orchestrator)', () => {
         { id: 'tr-1' },
         { toolResultBlobStore: store } as unknown as import('../types/index.js').IAgent,
       );
-      expect(recalled).toBe(payload);
+      // The payload round-trips intact; recall now also re-marks it untrusted (Wave 1.2
+      // replay a) since the evicted content carried no marker, so assert containment.
+      expect(recalled).toContain(payload);
     });
 
     it('carries a blob forward across a second compaction so recall still works', async () => {
@@ -1176,19 +1569,376 @@ describe('Engine + Session (Orchestrator)', () => {
       }
     });
 
-    it('clean input still gets the tagging instruction but no forgery warning', async () => {
+    it('clean input gets the tagging instruction + the always-on forgery guard, but fires no security event', async () => {
       const { session } = await createEngineAndSession();
       mockGetMessages.mockReturnValue([
         { role: 'user', content: 'plain conversation, nothing forged here' },
       ]);
       const runSpy = vi.spyOn(session, 'run').mockResolvedValue('SUMMARY');
+      const events: Array<{ source?: string }> = [];
+      const onMsg = (m: unknown): void => { events.push(m as { source?: string }); };
+      channels.securityInjection.subscribe(onMsg);
+      try {
+        const res = await session.compact();
+        expect(res.success).toBe(true);
+        const prompt = String(runSpy.mock.calls.at(-1)?.[0] ?? '');
+        expect(prompt).toContain('<fact kind=');
+        // The forgery guard is now UNCONDITIONAL — a structural defense (detection can
+        // miss), so it is present even on clean input...
+        expect(prompt).toContain('NOT engine markers');
+        // ...but nothing forged was detected, so no security event fires.
+        expect(events.some(e => e.source === 'compaction')).toBe(false);
+        // tool_verified is no longer offered as a self-assignable summary kind (Wave-0.6-aligned).
+        expect(prompt).not.toContain('a tool result confirmed it');
+        // AC6: tagging must NOT cause the summarizer to drop/disown open tasks.
+        expect(prompt).toContain('do not drop or disown');
+      } finally {
+        channels.securityInjection.unsubscribe(onMsg);
+      }
+    });
+
+    it('masks secret values the summarizer echoed BEFORE the summary is persisted/returned', async () => {
+      const { engine, session } = await createEngineAndSession();
+      // Control the secretStore so the test does not depend on what the test env
+      // happens to register — it asserts the compaction WIRING: the summary is run
+      // through maskSecrets before it is persisted/returned (it rides backup/export
+      // + resume, so a raw secret must not live there).
+      const maskSecrets = vi.fn((t: string) => t.replace('sk-ant-SECRET', '***MASKED***'));
+      vi.spyOn(engine, 'getSecretStore').mockReturnValue(
+        { maskSecrets } as unknown as ReturnType<typeof engine.getSecretStore>,
+      );
+      mockGetMessages.mockReturnValue([
+        { role: 'user', content: 'my key is sk-ant-SECRET' },
+      ]);
+      vi.spyOn(session, 'run').mockResolvedValue('User shared key sk-ant-SECRET for the API.');
       const res = await session.compact();
       expect(res.success).toBe(true);
-      const prompt = String(runSpy.mock.calls.at(-1)?.[0] ?? '');
-      expect(prompt).toContain('<fact kind=');
-      expect(prompt).not.toContain('NOT engine markers');
-      // AC6: tagging must NOT cause the summarizer to drop/disown open tasks.
-      expect(prompt).toContain('do not drop or disown');
+      expect(maskSecrets).toHaveBeenCalledWith('User shared key sk-ant-SECRET for the API.');
+      expect(res.summary).toBe('User shared key ***MASKED*** for the API.');
+    });
+  });
+
+  // -- DEF-0067: a per-session opts.model is clamped to the cost ceiling at ctor --
+
+  describe('ctor clamps opts.model to max_tier (DEF-0067)', () => {
+    // The composer model picker sends `model` on POST /api/sessions, and a resumed
+    // thread's persisted tier reaches the ctor as opts.model via session-store — so
+    // an over-ceiling per-session tier must be clamped HERE, else the picker escapes
+    // max_tier. The ceiling is read fresh from engine.getUserConfig() at ctor time.
+    it('clamps a deep pick down to a balanced ceiling set BEFORE creation', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.getUserConfig().max_tier = 'balanced';
+      try {
+        const session = engine.createSession({ model: 'deep' });
+        expect(session.getModelTier()).toBe('balanced');
+      } finally {
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
+    it('clamps a deep pick down to a fast ceiling', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      engine.getUserConfig().max_tier = 'fast';
+      try {
+        expect(engine.createSession({ model: 'deep' }).getModelTier()).toBe('fast');
+        // A pick at or below the ceiling is untouched.
+        expect(engine.createSession({ model: 'fast' }).getModelTier()).toBe('fast');
+      } finally {
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
+    it('does not clamp when there is no ceiling (self-host default)', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      // max_tier unset → the pick stands.
+      expect(engine.createSession({ model: 'deep' }).getModelTier()).toBe('deep');
+    });
+  });
+
+  // -- compact() summarizer model tier (Slice A, issue #72 cost) --
+
+  describe('compact() summarizer model tier', () => {
+    it('runs the summary on compaction_model (default fast), not the session tier, and restores the session tier after', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ model: 'deep' });
+      expect(session.getModelTier()).toBe('deep');
+
+      mockGetMessages.mockReturnValue([
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'hello' },
+      ]);
+      mockSend.mockResolvedValueOnce('SUMMARY TEXT');
+      vi.mocked(Agent).mockClear();
+
+      const result = await session.compact();
+      expect(result.success).toBe(true);
+
+      // The summarizer run itself must be constructed on the fast (Haiku)
+      // tier — NOT the session's own configured `deep` (Opus) tier. The
+      // scoped swap-and-restore also reconstructs a `deep` Agent immediately
+      // after (to hand the live session back its real tier), so the LAST
+      // construction during compact() must be the restore, not the summarizer.
+      const constructedModels = vi.mocked(Agent).mock.calls.map((call) => call[0]?.model);
+      expect(constructedModels.some((m) => m?.includes('haiku') === true)).toBe(true);
+      expect(constructedModels.at(-1)).toBe('claude-opus-4-6');
+
+      // The live session's configured tier is UNCHANGED once compact() returns
+      // — and no further Agent reconstruction is needed for the next turn
+      // (the restore already left it on `deep`), so a plain run() reuses the
+      // existing agent rather than rebuilding again.
+      expect(session.getModelTier()).toBe('deep');
+      vi.mocked(Agent).mockClear();
+      mockSend.mockResolvedValueOnce('next turn reply');
+      await session.run('continue please');
+      expect(Agent).not.toHaveBeenCalled();
+    });
+
+    it('honors an explicit compaction_model override from userConfig instead of the fast default', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ model: 'deep' });
+      // userConfig is loaded from disk, not the engine ctor — mutate it directly
+      // (same pattern as the tool_result_blob_threshold_chars test above).
+      engine.getUserConfig().compaction_model = 'balanced';
+
+      mockGetMessages.mockReturnValue([{ role: 'user', content: 'hi' }]);
+      mockSend.mockResolvedValueOnce('SUMMARY TEXT');
+      vi.mocked(Agent).mockClear();
+
+      const result = await session.compact();
+      expect(result.success).toBe(true);
+
+      const constructedModels = vi.mocked(Agent).mock.calls.map((call) => call[0]?.model);
+      expect(constructedModels.some((m) => m === 'claude-sonnet-4-6')).toBe(true); // balanced tier used
+      expect(constructedModels.some((m) => m?.includes('haiku') === true)).toBe(false); // NOT the fast default
+      expect(session.getModelTier()).toBe('deep');
+
+      delete engine.getUserConfig().compaction_model;
+    });
+
+    it('clamps an operator-set compaction_model that exceeds the tenant max_tier cost ceiling', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ model: 'deep' });
+      // An operator sets compaction_model to `deep` (e.g. Opus) but the tenant's
+      // own cost ceiling is `balanced` — the override must resolve through the
+      // same `resolveRunModel` clamp as every other tier-selection site, so the
+      // summarizer never exceeds the tenant's max_tier.
+      engine.getUserConfig().compaction_model = 'deep';
+      engine.getUserConfig().max_tier = 'balanced';
+
+      mockGetMessages.mockReturnValue([{ role: 'user', content: 'hi' }]);
+      mockSend.mockResolvedValueOnce('SUMMARY TEXT');
+      vi.mocked(Agent).mockClear();
+
+      try {
+        const result = await session.compact();
+        expect(result.success).toBe(true);
+
+        const constructedModels = vi.mocked(Agent).mock.calls.map((call) => call[0]?.model);
+        // The summarizer must be clamped DOWN to balanced (Sonnet) — never the
+        // requested deep (Opus) — proving the max_tier ceiling took effect. Same
+        // as the plain compaction_model-override test above, the scoped
+        // swap-and-restore also reconstructs a `deep` Agent immediately after
+        // (to hand the live session back its real tier), so the summarizer
+        // construction is specifically the FIRST call, not just "some" call.
+        expect(constructedModels[0]).toBe('claude-sonnet-4-6');
+        expect(constructedModels.at(-1)).toBe('claude-opus-4-6');
+        // The live session's own configured tier is restored to `deep` once
+        // compact() returns — the clamp is scoped to this one summarizer run.
+        expect(session.getModelTier()).toBe('deep');
+      } finally {
+        delete engine.getUserConfig().compaction_model;
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
+    it('reads the FRESH ceiling on the run-path clamp, not the stale tool context (DEF-0077)', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ model: 'deep' });
+      // Operator wants deep summaries...
+      engine.getUserConfig().compaction_model = 'deep';
+      // ...but a CP sync-env then LOWERS the cost ceiling to `fast`. Reproduce the
+      // exact divergence reloadUserConfig() creates: it reassigns `this.userConfig`
+      // (so engine.getUserConfig() is the FRESH object with max_tier `fast`) but
+      // never re-binds `_toolContext.userConfig`, which still points at the OLD
+      // object (no ceiling). The run-path clamp must read the fresh ceiling — or a
+      // post-downgrade compaction silently fails to bite (DEF-0077).
+      engine.getUserConfig().max_tier = 'fast';
+      const toolCtx = engine.getToolContext();
+      (toolCtx as { userConfig: import('../types/index.js').LynoxUserConfig }).userConfig = {
+        ...toolCtx.userConfig,
+        max_tier: undefined,
+      };
+
+      mockGetMessages.mockReturnValue([{ role: 'user', content: 'hi' }]);
+      mockSend.mockResolvedValueOnce('SUMMARY TEXT');
+      vi.mocked(Agent).mockClear();
+
+      try {
+        const result = await session.compact();
+        expect(result.success).toBe(true);
+
+        const constructedModels = vi.mocked(Agent).mock.calls.map((call) => call[0]?.model);
+        // The summarizer (FIRST construction) must be clamped DOWN to the FRESH
+        // `fast` ceiling (Haiku). Without the fix the clamp reads the stale tool
+        // context (no ceiling) and the summarizer builds on the un-clamped `deep`
+        // (Opus) — this assertion fails. The scoped restore rebuilds `deep` last.
+        expect(constructedModels[0]?.includes('haiku')).toBe(true);
+        expect(constructedModels.at(-1)).toBe('claude-opus-4-6');
+        expect(session.getModelTier()).toBe('deep');
+      } finally {
+        delete engine.getUserConfig().compaction_model;
+        delete engine.getUserConfig().max_tier;
+      }
+    });
+
+    it('is provider-agnostic — under Mistral/openai the fast tier resolves to the Mistral small model, never a hardcoded Haiku', async () => {
+      // Model-agnosticity proof (rafael follow-up): the summarizer must ride the
+      // `fast` TIER through `resolveTierModel(getActiveProvider())`, not a
+      // hardcoded Anthropic id. Force the active provider to openai + the Mistral
+      // tier-map (exactly what a managed-EU / BYOK-Mistral tenant bootstraps) and
+      // assert the summarizer Agent is built on `ministral-8b-2512` — Mistral's
+      // fast model — with no `claude-*` id constructed anywhere in the flow.
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const session = engine.createSession({ model: 'deep' });
+
+      mockGetMessages.mockReturnValue([{ role: 'user', content: 'hi' }]);
+      mockSend.mockResolvedValueOnce('SUMMARY TEXT');
+
+      await initLLMProvider('openai');
+      setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
+      try {
+        vi.mocked(Agent).mockClear();
+        const result = await session.compact();
+        expect(result.success).toBe(true);
+
+        const constructedModels = vi.mocked(Agent).mock.calls.map((call) => call[0]?.model);
+        // The summarizer ran on Mistral's FAST-tier model...
+        expect(constructedModels.some((m) => m === MISTRAL_MODEL_MAP.fast)).toBe(true); // 'ministral-8b-2512'
+        // ...and NOTHING in the compaction flow was a hardcoded Anthropic id.
+        expect(constructedModels.some((m) => m?.startsWith('claude-') === true)).toBe(false);
+        expect(session.getModelTier()).toBe('deep');
+      } finally {
+        // Restore the module-global provider + resolver so sibling tests (which
+        // rely on the Anthropic default) are unaffected.
+        setOpenAIModelResolver({ map: null, fallbackModelId: null });
+        await initLLMProvider('anthropic');
+      }
+    });
+  });
+
+  // -- Slice B (#86/#80): compact() persists the summary durably to thread.summary --
+
+  describe('compact() durable summary persistence', () => {
+    it('writes the summary + summary_up_to to the thread row so resume builds on it (fixes #86 null + #80 double-summarize)', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const threadStore = engine.getThreadStore();
+      expect(threadStore).not.toBeNull();
+      const session = engine.createSession({ model: 'deep' });
+
+      const updateSpy = vi.spyOn(threadStore!, 'updateThread');
+      // Stub the api-message-count so summary_up_to is deterministic (the real
+      // count depends on eager-persist, which is mocked away here).
+      vi.spyOn(threadStore!, 'getApiMessageCount').mockReturnValue(7);
+
+      mockGetMessages.mockReturnValue([
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'hello' },
+      ]);
+      mockSend.mockResolvedValueOnce('DURABLE SUMMARY TEXT');
+
+      const result = await session.compact();
+      expect(result.success).toBe(true);
+
+      // The fact-tagged summary from THIS compaction must land in thread.summary
+      // (not stay null waiting for the resume-time generateThreadSummary
+      // fallback), with summary_up_to = the api-message-count at persist time.
+      expect(updateSpy).toHaveBeenCalledWith(
+        session.sessionId,
+        expect.objectContaining({ summary: 'DURABLE SUMMARY TEXT', summary_up_to: 7 }),
+      );
+    });
+
+    it('does NOT persist a summary when the summary run yields nothing (guarded early-return, thread stays intact)', async () => {
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      await engine.init();
+      const threadStore = engine.getThreadStore();
+      expect(threadStore).not.toBeNull();
+      const session = engine.createSession({ model: 'deep' });
+
+      const updateSpy = vi.spyOn(threadStore!, 'updateThread');
+      mockGetMessages.mockReturnValue([{ role: 'user', content: 'hi' }]);
+      mockSend.mockResolvedValueOnce(''); // empty reply → compaction is a no-op
+
+      const result = await session.compact();
+      expect(result.success).toBe(false);
+      // No summary produced → the early return fires BEFORE reset()/persist, so
+      // no summary is written (a stale/empty summary must never overwrite a good
+      // one, and the live thread is left whole).
+      expect(updateSpy).not.toHaveBeenCalledWith(
+        session.sessionId,
+        expect.objectContaining({ summary: expect.anything() }),
+      );
+    });
+  });
+
+  // -- _compactionInFlight: serialize user turns behind a background auto-compaction --
+
+  describe('_compactionInFlight serialization', () => {
+    type WithCompactionGate = { _compactionInFlight: Promise<void> | null };
+
+    it('a non-internal run() awaits an in-flight compaction at entry, then proceeds once it resolves', async () => {
+      const { session } = await createEngineAndSession();
+
+      // Control the "in-flight compaction" promise directly instead of relying
+      // on real auto-compaction timing — deterministic gate, not a sleep race.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = () => resolve(); });
+      (session as unknown as WithCompactionGate)._compactionInFlight = gate;
+
+      mockSend.mockClear();
+      mockSend.mockResolvedValueOnce('turn reply');
+
+      const p = session.run('user turn');
+
+      // Flush the FULL microtask queue AND two macrotask turns: an un-gated run
+      // reaches agent.send() within this window (its pre-send awaits — the
+      // dynamic import + KG retrieval — settle in ≤1 macrotask under the mocks),
+      // so mockSend STILL being uncalled discriminates the entry-await actually
+      // holding the turn from mere slowness (a plain microtask flush would pass
+      // even if the gate were removed, since the dynamic import outlives it).
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(mockSend).not.toHaveBeenCalled();
+
+      release();
+      const result = await p;
+      expect(result).toBe('turn reply');
+      expect(mockSend).toHaveBeenCalled();
+    });
+
+    it('an internal:true run does NOT wait on an in-flight compaction (the summary run must not await itself)', async () => {
+      const { session } = await createEngineAndSession();
+
+      // Deliberately never released. If an internal run incorrectly awaited
+      // this gate, `session.run` below would hang and the test would fail on
+      // timeout — a deterministic failure mode, not a flake.
+      (session as unknown as WithCompactionGate)._compactionInFlight = new Promise<void>(() => {});
+
+      mockSend.mockClear();
+      mockSend.mockResolvedValueOnce('internal reply');
+
+      const result = await session.run('x', { internal: true, noTools: true });
+      expect(result).toBe('internal reply');
+      expect(mockSend).toHaveBeenCalled();
     });
   });
 
@@ -1234,6 +1984,23 @@ describe('Engine + Session (Orchestrator)', () => {
 
       await (session as unknown as AutoCompact)._autoCompactIfNeeded();
 
+      expect(compactSpy).toHaveBeenCalledWith(undefined, { confirmScope: true, trigger: 'auto' });
+    });
+
+    it('a single-run leap from <80% straight past 90% still fires the prepare offer (not skipped) before auto-compacting', async () => {
+      const { session } = await createEngineAndSession();
+      const events: Array<{ type: string; usagePercent?: number }> = [];
+      session.onStream = (e) => { events.push(e as { type: string; usagePercent?: number }); return Promise.resolve(); };
+      // No prior check ever landed in [80,90) — usage jumps in one turn from
+      // well below the prepare threshold to well above the auto-compact one.
+      vi.spyOn(session as unknown as AutoCompact, '_compactionUsagePercent').mockReturnValue(95);
+      const compactSpy = vi.spyOn(session, 'compact').mockResolvedValue({ success: true, summary: 'S' });
+
+      await (session as unknown as AutoCompact)._autoCompactIfNeeded();
+
+      const offers = events.filter(e => e.type === 'compaction_offer');
+      expect(offers).toHaveLength(1);
+      expect(offers[0]!.usagePercent).toBe(95);
       expect(compactSpy).toHaveBeenCalledWith(undefined, { confirmScope: true, trigger: 'auto' });
     });
 
@@ -1285,6 +2052,47 @@ describe('Engine + Session (Orchestrator)', () => {
       agentMock.getEstimatedOccupancyTokens = () => 150_000;
       // budget 300K → ceiling 375K → 150K/375K = 40% — below the offer; no trim.
       expect((session as unknown as AutoCompact)._compactionUsagePercent()).toBe(40);
+    });
+  });
+
+  describe('context_budget stream event: budgetPercent injection', () => {
+    type AgentOnStream = { model: string; getEstimatedOccupancyTokens: () => number;
+      onStream: (event: unknown) => void | Promise<void> };
+
+    it('injects budgetPercent (the cost-aware compaction-trigger figure) alongside the honest usagePercent', async () => {
+      const { session } = await createEngineAndSession({ compaction_token_budget: 150_000 });
+      const events: Array<Record<string, unknown>> = [];
+      session.onStream = (e) => { events.push(e as Record<string, unknown>); return Promise.resolve(); };
+      const agentMock = (session as unknown as { agent: AgentOnStream }).agent;
+      agentMock.model = 'claude-sonnet-4-6[1m]'; // 1M native window
+      // 150K carried tokens: honest window meter ~15%, but the cost-aware
+      // budget ceiling (150K / 0.8 = 187.5K) puts the trigger figure at 80% —
+      // the same divergence the L1 tests above exercise on _compactionUsagePercent.
+      agentMock.getEstimatedOccupancyTokens = () => 150_000;
+
+      await agentMock.onStream({
+        type: 'context_budget',
+        totalTokens: 150_000,
+        maxTokens: 1_000_000,
+        usagePercent: 15,
+        agent: 'lynox',
+      });
+
+      expect(events).toHaveLength(1);
+      expect(events[0]!['usagePercent']).toBe(15);   // honest meter left untouched
+      expect(events[0]!['budgetPercent']).toBe(80);  // cost-aware trigger figure injected
+    });
+
+    it('does not add budgetPercent to unrelated event types', async () => {
+      const { session } = await createEngineAndSession();
+      const events: Array<Record<string, unknown>> = [];
+      session.onStream = (e) => { events.push(e as Record<string, unknown>); return Promise.resolve(); };
+      const agentMock = (session as unknown as { agent: AgentOnStream }).agent;
+
+      await agentMock.onStream({ type: 'text', text: 'hi', agent: 'lynox' });
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).not.toHaveProperty('budgetPercent');
     });
   });
 

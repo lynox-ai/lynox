@@ -127,6 +127,9 @@
 			labelKey: 'settings.section_account',
 			items: [
 				{ href: '/app/settings/account/appearance', titleKey: 'settings.account.appearance', descKey: 'settings.account.appearance_desc' },
+				// Onboarding Wave 1 (AC-1.5): per-layer reactivation of the getting-started
+				// flow. All-tier (getting-started is plan-independent).
+				{ href: '/app/settings/account/onboarding', titleKey: 'settings.account.onboarding', descKey: 'settings.account.onboarding_desc' },
 				{ href: '/app/settings/account/billing', titleKey: 'settings.account.billing', descKey: 'settings.account.billing_desc', managedOnly: true },
 				{ href: '/app/settings/account/security', titleKey: 'settings.account.security', descKey: 'settings.account.security_desc' },
 				{ href: '/app/settings/account/mobile', titleKey: 'settings.account.mobile', descKey: 'mobile.settings_desc', hideOnMobile: true },

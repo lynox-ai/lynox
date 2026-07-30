@@ -38,6 +38,8 @@ import {
   checkRecipientDedup,
   recordMailSend,
 } from './tools/rate-limit.js';
+import { pv, singleLine } from '../../core/prompt-value.js';
+import type { PromptText } from '../../types/index.js';
 
 /**
  * Recipient count above which callers should force explicit confirmation
@@ -256,34 +258,96 @@ export async function sendMail(
   return { ok: true, result, followupId };
 }
 
+/** Chars of the whitespace-flattened body rendered inline in the preview. */
+const BODY_PREVIEW_CHARS = 200;
+
+/**
+ * Render the body block for the confirmation preview.
+ *
+ * The gate exists so a human approves the RESOLVED send rather than the
+ * agent's description of it — so the preview must not silently hide most of
+ * what goes on the wire. `truncate` alone appends a bare "…", which reads the
+ * same whether 20 or 40'000 chars were cut: an approver sees a plausible
+ * opening line and no signal that a payload follows it. That is exactly the
+ * shape a prompt-injection- or hallucination-driven send takes (the body is
+ * also the exfil channel the `detectSecretInContent` scan above only covers
+ * for *credential*-shaped content, not for bulk data). So when the body does
+ * not fit, say how large it really is and that the remainder is unseen.
+ */
+export function buildBodyBlock(body: string): PromptText {
+  const flat = body.replace(/\s+/g, ' ').trim();
+  if (flat.length === 0) return pv`> _(empty body)_`;
+  if (flat.length <= BODY_PREVIEW_CHARS) return pv`> ${flat}`;
+  const shown = truncate(flat, BODY_PREVIEW_CHARS);
+  // Count from the rendered string (minus the ellipsis truncate appends) rather
+  // than re-deriving truncate's own `max - 1`: a change there would otherwise
+  // make this sentence quietly lie. Both numbers are `flat` lengths — mixing in
+  // the raw `body.length` would overstate the hidden volume for any normal
+  // multi-line mail, since collapsing only ever shortens.
+  const shownChars = shown.length - 1;
+  return pv`> ${shown}\n\n⚠ **Body is ${String(flat.length)} chars — only the first ${String(shownChars)} are shown above.**`;
+}
+
+// Two mechanisms, and they cover DIFFERENT surfaces — this is the rule, not a
+// belt-and-braces habit:
+//   `pv`         separates frame from value, and the web renderer puts values
+//                in text nodes. That is what makes a value inert where markdown
+//                is parsed.
+//   `singleLine` collapses a value that is single-line BY NATURE (a header, an
+//                address, an id). The CLI renders the FLATTENED string with no
+//                markdown at all, so nothing there distinguishes a value's
+//                newline from the frame's — the collapse is what protects that
+//                surface, and only there does it cost a legitimate value
+//                nothing.
+// A legitimately multi-line value (a body, a plan summary) gets `pv` alone; a
+// header field gets both. On `mail_reply` the Subject is chosen by whoever sent
+// the mail, so it is attacker-controlled with no model in the loop — which is
+// why this file was the first to need either.
+
+/**
+ * Render an address list for a preview: one line, each address flattened.
+ *
+ * `mail_send` gets its recipients from `parseAddressList`, which already drops
+ * any segment containing CR/LF. `mail_reply` does NOT: its default recipient is
+ * `original.envelope.replyTo[0] ?? original.envelope.from[0]` and its Cc comes
+ * from `original.envelope.to`/`.cc` — parsed IMAP values that never pass
+ * through `parseAddress`. The guarantee is therefore not uniform across
+ * callers, so the preview does not depend on it.
+ */
+export function previewAddressList(addrs: ReadonlyArray<MailAddress>): string {
+  return addrs.map((a) => singleLine(a.address)).join(', ');
+}
+
 /**
  * Build the agent-prompt preview text the tool wrapper shows to the
  * user. Kept in send-core so the inbox-pane (if it ever surfaces a
  * preview elsewhere) can render the same shape.
  */
-export function buildSendPreview(ctx: SendCoreBeforeSendCtx): string {
+export function buildSendPreview(ctx: SendCoreBeforeSendCtx): PromptText {
   const personaLine = ctx.accountConfig
     ? `\n  Persona: ${truncate(personaFor(ctx.accountConfig), 160)}`
     : '';
-  const bodyPreview = truncate(ctx.body.replace(/\s+/g, ' '), 200);
+  const bodyPreview = buildBodyBlock(ctx.body);
   if (ctx.isMassSend) {
-    return (
-      `⚠ **MASS SEND** — ${String(ctx.uniqueRecipientCount)} recipients\n\n` +
-      `**Account:** ${ctx.provider.accountId}${personaLine ? `\n**Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}\n` +
-      `**Recipients:**\n${[...ctx.to, ...ctx.cc, ...ctx.bcc].map((a) => `  • ${a.address}`).join('\n')}\n` +
-      `**Subject:** ${ctx.subject}\n\n` +
-      `> ${bodyPreview}`
-    );
+    return pv`⚠ **MASS SEND** — ${String(ctx.uniqueRecipientCount)} recipients
+
+**Account:** ${ctx.provider.accountId}${personaLine ? pv`
+**Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}
+**Recipients:**
+${[...ctx.to, ...ctx.cc, ...ctx.bcc].map((a) => `  • ${singleLine(a.address)}`).join('\n')}
+**Subject:** ${singleLine(ctx.subject)}
+
+${bodyPreview}`;
   }
-  return (
-    `**Send email?**\n\n` +
-    `**To:** ${ctx.to.map((a) => a.address).join(', ')}` +
-    `${ctx.cc.length > 0 ? `\n**Cc:** ${ctx.cc.map((a) => a.address).join(', ')}` : ''}` +
-    `${ctx.bcc.length > 0 ? `\n**Bcc:** ${ctx.bcc.map((a) => a.address).join(', ')}` : ''}\n` +
-    `**Subject:** ${ctx.subject}\n` +
-    `**From:** ${ctx.provider.accountId}${personaLine ? ` · _${truncate(personaFor(ctx.accountConfig!), 80)}_` : ''}\n\n` +
-    `> ${bodyPreview}`
-  );
+  return pv`**Send email?**
+
+**To:** ${previewAddressList(ctx.to)}${ctx.cc.length > 0 ? pv`
+**Cc:** ${previewAddressList(ctx.cc)}` : ''}${ctx.bcc.length > 0 ? pv`
+**Bcc:** ${previewAddressList(ctx.bcc)}` : ''}
+**Subject:** ${singleLine(ctx.subject)}
+**From:** ${ctx.provider.accountId}${personaLine ? pv` · _${truncate(personaFor(ctx.accountConfig!), 80)}_` : ''}
+
+${bodyPreview}`;
 }
 
 /**
@@ -306,7 +370,7 @@ function parseAddress(raw: string): MailAddress | null {
   // synthetic SMTP headers (Bcc:, Subject:, body separator) when the
   // value reaches the wire. Most MTAs re-encode but we never want to
   // rely on that — drop any segment containing such bytes.
-  if (/[\r\n -]/.test(raw)) return null;
+  if (/[\r\n\x00-\x1f]/.test(raw)) return null;
   const angle = raw.match(/^\s*(?:"?([^"<]*?)"?\s*)?<([^>]+)>\s*$/);
   if (angle) {
     const name = angle[1]?.trim();

@@ -56,7 +56,9 @@ vi.mock('./project.js', () => ({
   detectProjectRoot: vi.fn(),
 }));
 
-import { generateInitBriefing, initMemoryInstance, configureBudgetAndRateLimits } from './engine-init.js';
+import { generateInitBriefing, initMemoryInstance, configureBudgetAndRateLimits, initScopes } from './engine-init.js';
+import { guardedCapableLineRegex, GUARDED_CAPABLE_MARKER } from '../contract/marker.js';
+import { resolveActiveScopes } from './scope-resolver.js';
 import { createToolContext } from './tool-context.js';
 import type { LynoxContext, LynoxConfig, LynoxUserConfig } from '../types/index.js';
 import type { SecretStore } from './secret-store.js';
@@ -120,6 +122,35 @@ describe('generateInitBriefing', () => {
       [],
     );
     expect(result.briefing).toBeUndefined();
+  });
+});
+
+describe('initScopes — no <memory_scopes> leak (2026-07-18)', () => {
+  it('resolves scopes for retrieval but never surfaces a <memory_scopes> block', () => {
+    // The `context:http-api` transport scope label used to be echoed to the model
+    // as `<memory_scopes>`, which it reported as "Fokus: http-api (Projekt/Kontext)"
+    // and confabulated a project around. Scopes must still resolve — just not leak.
+    //
+    // Load-bearing setup: a NON-EMPTY scope so the OLD `if (scopes.length > 0)` leak
+    // branch WOULD have fired — otherwise (with the default []-mock) the assertion
+    // below passes on unpatched code too, which makes it worthless.
+    vi.mocked(resolveActiveScopes).mockReturnValueOnce([
+      { type: 'context', id: 'http-api' },
+      { type: 'user', id: 'u1' },
+    ] as unknown as ReturnType<typeof resolveActiveScopes>);
+
+    const result = initScopes(
+      { user_id: 'u1' } as unknown as LynoxUserConfig,
+      cliContext,
+      mockRunHistory,
+      null,
+    );
+    expect(result.scopes.length).toBeGreaterThan(0); // the leak branch's precondition held
+    // The scope id 'http-api' is legitimately RETURNED (it drives retrieval) — what
+    // must be gone is the `<memory_scopes>` briefing string built FROM it.
+    expect(JSON.stringify(result)).not.toContain('memory_scopes');
+    // The `briefingPart` field is gone from ScopeResult entirely.
+    expect('briefingPart' in result).toBe(false);
   });
 });
 
@@ -204,5 +235,60 @@ describe('configureBudgetAndRateLimits — http-tool security wiring', () => {
     const ctx = createToolContext(base);
     configureBudgetAndRateLimits(mockRunHistory, { ...base, enforce_https: true }, ctx);
     expect(ctx.enforceHttps).toBe(true);
+  });
+
+  it('wires the guarded policy + keeps the operator floor onto the ToolContext', () => {
+    const ctx = createToolContext(base);
+    configureBudgetAndRateLimits(
+      mockRunHistory,
+      { ...base, network_policy: 'guarded', network_allowed_hosts: ['ops.example.com'] },
+      ctx,
+    );
+    expect(ctx.networkPolicy).toBe('guarded');
+    // The operator floor is still split into allowedHosts under guarded.
+    expect(ctx.allowedHosts).toEqual(new Set(['ops.example.com']));
+  });
+
+  // ── Guarded-capable boot marker (rollout-order gate; contract `marker.ts`) ──
+  //
+  // Half of the emit↔match pair. This end proves the REAL emit site produces a
+  // line the contract's pattern accepts; `tests/contract-marker.test.ts` proves
+  // that pattern is still the one the control plane was built against (golden
+  // pin) and that it rejects tenant-planted near-misses. Asserting against the
+  // pattern rather than a literal here is deliberate: hand-typing the line in
+  // BOTH places would make the pair pass by construction — the pin belongs in
+  // exactly one file, and this is not it.
+  function captureBootLines(policy: 'allow-all' | 'guarded' | 'deny-all'): string[] {
+    const ctx = createToolContext(base);
+    const writeSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      configureBudgetAndRateLimits(mockRunHistory, { ...base, network_policy: policy }, ctx);
+      // Read the captured calls BEFORE mockRestore() (which resets mock.calls).
+      return writeSpy.mock.calls.map((c) => String(c[0]));
+    } finally {
+      writeSpy.mockRestore();
+    }
+  }
+
+  it.each(['allow-all', 'guarded', 'deny-all'] as const)(
+    'boot-logs a line the capability pattern matches, under policy %s',
+    (policy) => {
+      const marked = captureBootLines(policy).filter((l) =>
+        guardedCapableLineRegex().test(l.replace(/\n$/, '')),
+      );
+      // Exactly one — a second marked line would mean the gate's `grep -c` count
+      // no longer tells capability apart from log volume.
+      expect(marked).toHaveLength(1);
+      expect(marked[0]).toContain(policy);
+    },
+  );
+
+  it('emits the marker unconditionally — the gate must not read the ACTIVE policy as the capability', () => {
+    // The whole point of the marker: an image that is merely CAPABLE of
+    // honouring `guarded` must say so while still running allow-all, because
+    // the control plane checks capability BEFORE it emits the value. If this
+    // ever became conditional the gate would deadlock (never capable, so never
+    // emitted, so never capable) and the symptom would be silence.
+    expect(captureBootLines('allow-all').some((l) => l.includes(GUARDED_CAPABLE_MARKER))).toBe(true);
   });
 });

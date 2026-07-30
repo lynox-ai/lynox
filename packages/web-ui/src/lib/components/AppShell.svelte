@@ -3,13 +3,16 @@
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
 	import { slide } from 'svelte/transition';
-	import { newChat, resumeThread, getSessionId, getSkipExtraction, toggleSkipExtraction } from '../stores/chat.svelte.js';
+	import { newChat, resumeThread, getSessionId, getSkipExtraction, toggleSkipExtraction, compactNow, getIsCompacting } from '../stores/chat.svelte.js';
 	import { loadThreads, getThreads, archiveThread, deleteThread, renameThread, toggleFavorite, onActiveThreadRemoved, startVisibilityRefresh, startActiveRunsPoll, getRunStatus, markThreadRead } from '../stores/threads.svelte.js';
 	import { t, getLocale, setLocale } from '../i18n.svelte.js';
+	import { addToast } from '../stores/toast.svelte.js';
 	import { timeAgo } from '../utils/time.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { getApiBase, getContextPanelEnabled } from '../config.svelte.js';
 	import Icon from '../primitives/Icon.svelte';
+	import HeaderModelPicker from './HeaderModelPicker.svelte';
+	import ThreadModelControl from './ThreadModelControl.svelte';
 	import StatusBar from './StatusBar.svelte';
 	import SetupBanner from './SetupBanner.svelte';
 	import PublicDemoBanner from './PublicDemoBanner.svelte';
@@ -139,6 +142,20 @@
 	function closeMenu() {
 		openMenuId = null;
 		menuAnchor = null;
+	}
+
+	// #74: manual context compaction from the top-right thread menu — a cost-
+	// control lever the user can trigger anytime (the compaction_offer button only
+	// appears in the [80,90) prepare zone, which a single large run can leap past).
+	// Only offered for the ACTIVE session thread (compactNow acts on the loaded
+	// session). Reuses the same guarded /compact path as the offer button.
+	async function handleCompactActive() {
+		const result = await compactNow();
+		if (result.ok) {
+			addToast(t('chat.compact_done'), 'success');
+		} else if (result.error && result.error !== 'already-compacting' && result.error !== 'streaming' && result.error !== 'no-session') {
+			addToast(t('chat.compact_failed'), 'error');
+		}
 	}
 
 	/**
@@ -835,10 +852,25 @@
 					{@render cmdkHint()}
 				{/if}
 
-				<!-- Right: private toggle + locale dropdown + sign out -->
+				<!-- Right: model picker (new chat) + private toggle + locale + sign out -->
 				<div class="flex items-center gap-1">
-					<!-- Private mode toggle (chat page only) -->
+					<!-- Model picker (model-presets W4) — new-chat only, relocated here
+					     from above the composer to free composer space. Picks the tier
+					     (balanced/deep) for turn 1; once the chat starts it hands over to
+					     the per-thread control in the slot right below. -->
+					{#if isActive('/app', true) && !getSessionId()}
+						<div class="hidden sm:block mr-1">
+							<HeaderModelPicker />
+						</div>
+					{/if}
 					{#if isActive('/app', true) && getSessionId()}
+						<!-- Per-thread model control, same slot, once a session exists
+						     (2026-07-30). Desktop only — mobile keeps the labelled row above
+						     the composer, where there is room for it. -->
+						<div class="hidden sm:block mr-1">
+							<ThreadModelControl compact />
+						</div>
+						<!-- Private mode toggle -->
 						<button
 							onclick={() => void toggleSkipExtraction()}
 							class="flex items-center gap-1.5 text-xs transition-colors min-h-[2.5rem] px-2 py-2 rounded hover:bg-bg-muted {getSkipExtraction() ? 'text-warning' : 'text-text-subtle hover:text-text'}"
@@ -846,10 +878,10 @@
 							title={getSkipExtraction() ? t('threads.private_on') : t('threads.private_off')}
 						>
 							{#if getSkipExtraction()}
-								<Icon name="eye_off" size="xs" />
+								<Icon name="ghost" size="xs" />
 								<span class="hidden md:inline font-mono">{t('threads.private')}</span>
 							{:else}
-								<Icon name="eye" size="xs" />
+								<Icon name="ghost" size="xs" />
 							{/if}
 						</button>
 					{/if}
@@ -986,6 +1018,15 @@
 				class="fixed z-[70] min-w-[200px] rounded-[var(--radius-md)] border border-border bg-bg shadow-lg overflow-hidden"
 				style="top: {Math.min(menuAnchor.bottom + 4, window.innerHeight - 240)}px; left: {Math.max(8, Math.min(menuAnchor.right - 200, window.innerWidth - 208))}px"
 			>
+				{#if activeThread.id === getSessionId()}
+					<li role="none">
+						<button type="button" role="menuitem"
+							disabled={getIsCompacting()}
+							onclick={(e: MouseEvent) => { e.stopPropagation(); closeMenu(); void handleCompactActive(); }}
+							class="block w-full px-3 py-2 text-left text-[12px] text-text-muted hover:bg-bg-subtle hover:text-text min-h-[44px] disabled:opacity-50"
+						>{t('threads.compact')}</button>
+					</li>
+				{/if}
 				<li role="none">
 					<button type="button" role="menuitem"
 						onclick={(e: MouseEvent) => { e.stopPropagation(); const id = activeThread.id; const title = activeThread.title || formatThreadDate(activeThread.created_at); closeMenu(); startRename(id, title); }}

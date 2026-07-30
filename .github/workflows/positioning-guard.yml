@@ -4,8 +4,8 @@ name: Positioning Guard
 # (pro/docs/internal/POSITIONING.md → Vocabulary → Avoid): no legacy category
 # labels ("AI engine", "agent runtime"), no OSI-flavoured "open source" (lynox
 # is ELv2, not OSI-approved), no tired "The AI that…" patterns. The lefthook
-# pre-push hook runs the same scan locally; this job is the unbypassable gate
-# (`git push --no-verify` skips the hook, not this). Make it a required check.
+# pre-push hook runs the same scan locally; this job is the gate — `git push
+# --no-verify` skips the hook, not this. It is a required status check on main.
 
 on:
   pull_request:

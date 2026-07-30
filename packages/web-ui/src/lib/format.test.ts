@@ -103,7 +103,8 @@ describe('getModelPricing + estimateCost', () => {
 			input_tokens: 1_000_000,
 			output_tokens: 0,
 		});
-		expect(cost).toBeCloseTo(0.80, 4);
+		// Haiku input = $1/M (canonical; the pre-existing 0.80 drift was corrected).
+		expect(cost).toBeCloseTo(1.0, 4);
 	});
 
 	it('includes cache token cost', () => {
@@ -113,7 +114,16 @@ describe('getModelPricing + estimateCost', () => {
 			cache_creation_input_tokens: 1_000_000,
 			cache_read_input_tokens: 1_000_000,
 		});
-		// 3.75 + 0.3 = 4.05
-		expect(cost).toBeCloseTo(4.05, 4);
+		// Sonnet cacheWrite = input×2 = $6/M (1h TTL; the stale 3.75 5m-rate was
+		// corrected), cacheRead = $0.30/M → 6 + 0.3 = 6.3.
+		expect(cost).toBeCloseTo(6.3, 4);
+	});
+
+	it('prices claude-sonnet-5 at the Sonnet sticker rate', () => {
+		const p = getModelPricing('claude-sonnet-5');
+		expect(p.input).toBe(3);
+		expect(p.output).toBe(15);
+		expect(p.cacheWrite).toBe(6);
+		expect(p.cacheRead).toBe(0.3);
 	});
 });

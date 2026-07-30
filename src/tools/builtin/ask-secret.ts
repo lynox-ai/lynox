@@ -1,9 +1,10 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 
 interface AskSecretInput {
-  name: string;
-  prompt: string;
+  name?: string | undefined;
+  prompt?: string | undefined;
   key_type?: string | undefined;
+  action?: 'collect' | 'list' | undefined;
 }
 
 const NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
@@ -18,15 +19,22 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
     input_schema: {
       type: 'object' as const,
       properties: {
+        action: {
+          type: 'string',
+          enum: ['collect', 'list'],
+          description:
+            'Optional, default "collect" (prompt for a new secret). "list" returns already-stored secret ' +
+            'names (masked, no plaintext) so you reference an existing key instead of re-collecting it.',
+        },
         name: {
           type: 'string',
           description:
             'Vault key name in UPPER_SNAKE_CASE (e.g. STRIPE_API_KEY, GITHUB_TOKEN). ' +
-            'Must start with a letter, only A-Z, 0-9, underscore. Max 64 chars.',
+            'Must start with a letter, only A-Z, 0-9, underscore. Max 64 chars. Required for action:"collect".',
         },
         prompt: {
           type: 'string',
-          description: 'Human-readable prompt shown to the user (e.g. "Enter your Stripe API key")',
+          description: 'Human-readable prompt shown to the user (e.g. "Enter your Stripe API key"). Required for action:"collect".',
         },
         key_type: {
           type: 'string',
@@ -35,19 +43,72 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
             'Examples: "stripe" (sk_live_/sk_test_), "openai" (sk-), "github" (ghp_/gho_/ghs_)',
         },
       },
-      required: ['name', 'prompt'],
+      required: [],
     },
   },
+  detailedGuidance:
+    'For a third-party API/integration credential, first confirm the consuming integration exists — ' +
+    'you created/bootstrapped its api_setup profile this turn, or api_setup({action:"list"|"view"}) shows it registered. ' +
+    'Asking before the integration is set up is a dead end (you do not yet know the auth scheme or key format, ' +
+    'and the user has nothing to plug it into). This applies only to a credential a specific api_setup integration ' +
+    'will consume — not to standalone keys (an LLM provider key, or a token used directly via http_request).',
   handler: async (input: AskSecretInput, agent: IAgent): Promise<string> => {
+    const action = input.action ?? 'collect';
+
+    if (action === 'list') {
+      // Read-only discovery: surface the names the agent MAY reference (infra
+      // secrets excluded) + masked values — never plaintext. The fresh, queryable
+      // counterpart to the boot-time <secrets> briefing, which goes stale the
+      // moment a secret is stored mid-session.
+      const store = agent.secretStore;
+      const names = store?.listAgentVisibleNames?.() ?? [];
+      if (names.length === 0) {
+        return 'No secrets are stored in the vault yet. Use ask_secret (action:"collect") to add one.';
+      }
+      const listing = names.map(n => `${n} (${store!.getMasked(n) ?? '****'})`).join(', ');
+      return `Secrets already in the vault — reference with secret:NAME, never re-collect an existing one:\n${listing}`;
+    }
+
+    // action: 'collect'
+    if (!input.name || !input.prompt) {
+      return 'Error: ask_secret with action:"collect" needs both `name` and `prompt`. To see what is already stored, call ask_secret with action:"list".';
+    }
     if (!NAME_PATTERN.test(input.name)) {
       return `Error: Invalid secret name "${input.name}". Must be UPPER_SNAKE_CASE (A-Z, 0-9, _), start with a letter, max 64 chars.`;
     }
+
+    // Reconcile an already-stored name BEFORE prompting. Two match classes with DIFFERENT
+    // handling — the distinction is what keeps a legitimate SECOND key in the same vendor
+    // namespace reachable:
+    //  - EXACT (normalized) match — a re-spelling of a key already stored (Z_AI_API_KEY
+    //    vs a stored ZAI_API_KEY). Collecting would duplicate it → HARD-BLOCK, point at
+    //    the existing name.
+    //  - VENDOR-namespace-only match — same leading token, different key (DATAFORSEO_API_
+    //    LOGIN while DATAFORSEO_B64 is stored; AWS_SECRET_ACCESS_KEY after
+    //    AWS_ACCESS_KEY_ID; STRIPE_API_KEY after STRIPE_WEBHOOK_SECRET). A vendor
+    //    legitimately holds more than one distinct key, so blocking here would dead-end a
+    //    genuine second key (and tempt referencing the WRONG existing one). Surface the
+    //    sibling as a non-blocking hint on the prompt and STILL collect.
+    const nearMatches = agent.secretStore?.findNameMatches?.(input.name) ?? [];
+    const normName = (s: string): string => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const reqNorm = normName(input.name);
+    const exactMatches = nearMatches.filter(n => normName(n) === reqNorm);
+    if (exactMatches.length > 0) {
+      const refs = exactMatches.map(n => `secret:${n}`).join(' or ');
+      return `A key with the same name is already in the vault: ` +
+        `${exactMatches.map(n => `"${n}"`).join(', ')}. Reference ${refs} instead of collecting a duplicate. ` +
+        `Only collect again if you genuinely need a separate key under a clearly different name.`;
+    }
+    const vendorHint = nearMatches.length > 0
+      ? ` (Related keys already in the vault under the same vendor: ${nearMatches.map(n => `"${n}"`).join(', ')} — ` +
+        `reference one of those with secret:NAME if this is the same credential; otherwise continue to store the new key.)`
+      : '';
 
     if (!agent.promptSecret) {
       return 'Secure secret input is not available in this context. Ask the user to enter the key in Settings → API Keys instead. Do NOT ask the user to paste the secret into chat.';
     }
 
-    const outcome = await agent.promptSecret(input.name, input.prompt, input.key_type);
+    const outcome = await agent.promptSecret(input.name, `${input.prompt}${vendorHint}`, input.key_type);
 
     switch (outcome) {
       case 'saved':

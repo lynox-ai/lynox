@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry, CapabilityContract, WorkflowLimits } from '../types/index.js';
+import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry, CapabilityContract, WorkflowLimits, SecretStoreLike } from '../types/index.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import { resolveRunModel } from '../core/tier-resolver.js';
 import { calculateCost } from '../core/pricing.js';
@@ -18,6 +18,7 @@ import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestSt
 import { GateRejectedError, GateExpiredError } from '../types/orchestration.js';
 import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, DEFAULT_PROMPT_BUDGET } from './prompt-budget.js';
+import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
 
@@ -32,6 +33,14 @@ export interface RunManifestOptions {
   depth?: number | undefined;
   runHistory?: RunHistory | undefined;
   parentRunId?: string | undefined;
+  /**
+   * 2a: the saved-workflow id this run executes (undefined for ad-hoc/inline
+   * runs). Threaded here so the orchestrator's start-INSERT stamps the run→
+   * workflow linkage (Slice-C2 "Fix in chat" / diagnose) — previously the
+   * tool-layer `persistPipelineRun` carried it, but the pipeline_runs writer
+   * now lives in `runManifest`.
+   */
+  workflowId?: string | undefined;
   autonomy?: import('../types/index.js').AutonomyLevel | undefined;
   /**
    * Parent session's prompt callbacks. When provided, sub-agents in this run
@@ -89,6 +98,16 @@ export interface RunManifestOptions {
    * (undefined = no run-level bound, only the existing per-step/session guards).
    */
   limits?: WorkflowLimits | undefined;
+  /**
+   * Parent agent's SecretStore, threaded into each step sub-agent's
+   * `new Agent({ secretStore })` so a workflow step's tools resolve `secret:NAME`
+   * refs against the vault AND the fail-loud unresolved-secret guard (agent.ts)
+   * fires. Set by the in-session `run_workflow` tool from `agent.secretStore`
+   * (mirrors how `spawn_agent` threads `parentAgent.secretStore`). Absent for
+   * non-`run_workflow` entries (headless saved-workflow, ad-hoc tests) →
+   * unchanged pre-fix behaviour (the step agent's `secretStore` stays undefined).
+   */
+  secretStore?: SecretStoreLike | undefined;
 }
 
 /**
@@ -111,6 +130,8 @@ export interface RunCtxInput {
   hooks?: RunHooks | undefined;
   capabilityContract?: CapabilityContract | undefined;
   limits?: WorkflowLimits | undefined;
+  secretStore?: SecretStoreLike | undefined;
+  workflowId?: string | undefined;
 }
 
 /**
@@ -140,6 +161,8 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     hooks: input.hooks,
     capabilityContract: input.capabilityContract,
     limits: input.limits,
+    secretStore: input.secretStore,
+    workflowId: input.workflowId,
   };
 }
 
@@ -249,6 +272,40 @@ export async function runManifest(
 
   options.hooks?.onRunStart?.();
 
+  // 2a durable run-record: the orchestrator is the SINGLE canonical writer of
+  // the pipeline_runs row (invariant I1). A start-INSERT here makes an in-flight
+  // run visible ('running'); the finalize-UPDATE in the `finally` below closes
+  // it out — and runs even on a thrown error, so a caught catastrophic failure
+  // never leaves the row stuck at 'running'. A hard process death (SIGKILL /
+  // container stop) skips the finally, leaving a 'running' row that the boot
+  // sweep (B4) relabels 'interrupted' on the next start (and which the cost
+  // aggregate already ignores — it filters to terminal rows, B6).
+  // Every run at ANY depth writes its row (B5): a nested sub-pipeline stamps its
+  // parent's runId (parent_run_id), so the top-level per-manifest views — the run
+  // list, the cost aggregate and the step stats, all filtered to parent_run_id IS
+  // NULL — keep it out while it stays reachable by id (invariant I6). The write is
+  // fire-and-forget: a history failure must never break or mask the run.
+  const rh = options.runHistory;
+  if (rh !== undefined) {
+    try {
+      rh.insertPipelineRun({
+        id: runId,
+        manifestName: manifest.name,
+        status: 'running',
+        manifestJson: JSON.stringify(manifest),
+        ...(options.workflowId !== undefined ? { workflowId: options.workflowId } : {}),
+        ...(options.parentRunId !== undefined ? { parentRunId: options.parentRunId } : {}),
+      });
+    } catch { /* fire-and-forget */ }
+  }
+
+  // 2a/B3 durable step-record: each step writes its pipeline_step_results row
+  // AS-COMPLETED (result='' deferred) into this accumulator; the finally below
+  // fills the result-text by rowid once the run terminates. Present whenever the
+  // run row is (any depth with RunHistory), so a nested run's step rows attach to
+  // its own parent run row — never an orphan (B5 lifted the old depth-0 gate).
+  const stepRows: StepRowAccumulator | undefined = rh !== undefined ? [] : undefined;
+
   // Effective options carry the (possibly-augmented) parentPrompt so
   // executeStep / spawners pick up the per-run budget without mutating the
   // caller's options.
@@ -257,18 +314,64 @@ export async function runManifest(
     : { ...options, parentPrompt };
 
   const mode = getExecutionMode(manifest);
-  if (mode === 'parallel') {
-    await runParallel(manifest, state, config, agentsDir, effectiveOptions, stepCounters);
-  } else {
-    await runSequential(manifest, state, config, agentsDir, effectiveOptions, stepCounters);
-  }
+  try {
+    if (mode === 'parallel') {
+      await runParallel(manifest, state, config, agentsDir, effectiveOptions, stepCounters, stepRows);
+    } else {
+      await runSequential(manifest, state, config, agentsDir, effectiveOptions, stepCounters, stepRows);
+    }
 
-  if (state.status === 'running') {
-    state.status = 'completed';
-    state.completedAt = new Date().toISOString();
+    if (state.status === 'running') {
+      state.status = 'completed';
+      state.completedAt = new Date().toISOString();
+    }
+    options.hooks?.onRunComplete?.(state);
+    return state;
+  } catch (err) {
+    // A thrown (catastrophic) error must not leave the record at 'running':
+    // settle the in-memory state to 'failed' so the finalize records a terminal
+    // row. Re-throw — recording must never swallow the caller's error.
+    if (state.status === 'running') {
+      state.status = 'failed';
+      state.error = state.error ?? (err instanceof Error ? err.message : String(err));
+      state.completedAt = new Date().toISOString();
+    }
+    throw err;
+  } finally {
+    if (rh !== undefined) {
+      try {
+        // Totals + step_count derive from the RECORDED step rows, never from
+        // state.outputs: a stop-failed or GATE-REJECTED step gets a row but never
+        // enters outputs (the catch halts first), so summing outputs would
+        // under-count both the steps and the real spend — and leave the run row
+        // disagreeing with its own /:id/steps list. `stepRows` is present exactly
+        // when `rh` is (same gate), so this is the same set the rows were written from.
+        const rows = stepRows ?? [];
+        rh.updatePipelineRun(runId, {
+          status: state.status,
+          totalDurationMs: rows.reduce((s, o) => s + o.durationMs, 0),
+          totalCostUsd: rows.reduce((s, o) => s + o.costUsd, 0),
+          totalTokensIn: rows.reduce((s, o) => s + o.tokensIn, 0),
+          totalTokensOut: rows.reduce((s, o) => s + o.tokensOut, 0),
+          stepCount: rows.length,
+          error: state.error,
+        });
+      } catch { /* fire-and-forget */ }
+
+      // 2a/B3: NOW persist the deferred step result-texts (each row was inserted
+      // result='' as-completed). This runs only on run termination (completed /
+      // failed) — a hard crash skips the finally, so a crashed run's step rows
+      // keep result='' on disk (invariant I4, the structural 2b fence). Filled
+      // by rowid, never by (run_id, step_id), so for_each's N-per-step survives.
+      if (stepRows !== undefined) {
+        const limit = config.pipeline_step_result_limit ?? DEFAULT_RESULT_BYTES;
+        for (const { rowId, result } of stepRows) {
+          if (result === '') continue; // skipped / failed steps carry no result
+          try { rh.updatePipelineStepResultText(rowId, truncateResult(result, limit)); } catch { /* fire-and-forget */ }
+        }
+      }
+    }
   }
-  options.hooks?.onRunComplete?.(state);
-  return state;
 }
 
 /**
@@ -303,6 +406,7 @@ async function runSequential(
   agentsDir: string,
   options: RunManifestOptions,
   stepCounters: SessionCounters,
+  stepRows: StepRowAccumulator | undefined,
 ): Promise<void> {
   const startMs = Date.parse(state.startedAt);
   let iterations = 0;
@@ -314,7 +418,7 @@ async function runSequential(
       state.completedAt = new Date().toISOString();
       return;
     }
-    const result = await executeStep(step, manifest, state, config, agentsDir, options, stepCounters);
+    const result = await executeStep(step, manifest, state, config, agentsDir, options, stepCounters, stepRows);
     iterations++;
     if (result === 'halt') return;
   }
@@ -329,6 +433,7 @@ async function runParallel(
   agentsDir: string,
   options: RunManifestOptions,
   stepCounters: SessionCounters,
+  stepRows: StepRowAccumulator | undefined,
 ): Promise<void> {
   const { phases } = computePhases(manifest.agents);
   const stepsById = new Map(manifest.agents.map(s => [s.id, s]));
@@ -348,7 +453,7 @@ async function runParallel(
 
     const promises = phase.stepIds.map(async (stepId) => {
       const step = stepsById.get(stepId)!;
-      return executeStep(step, manifest, state, config, agentsDir, options, stepCounters);
+      return executeStep(step, manifest, state, config, agentsDir, options, stepCounters, stepRows);
     });
 
     const settled = await Promise.allSettled(promises);
@@ -374,6 +479,62 @@ async function runParallel(
 
 type StepResult = 'ok' | 'halt';
 
+/**
+ * 2a/B3 accumulator: the pipeline_step_results rowid each step wrote AS-COMPLETED
+ * paired with the step's result-text, held IN MEMORY until run-finalize persists
+ * it. The row was inserted with result='' (invariant I4 — the structural 2b
+ * fence: a crash before finalize leaves result='' on disk, so the partial
+ * result-text is never persisted). Present for any run with a RunHistory,
+ * matching the pipeline_runs row — a nested run's step rows attach to its own
+ * parent run row (B5), so they never orphan.
+ */
+type StepRowAccumulator = Array<{
+  rowId: number | bigint;
+  result: string;
+  /** The step's recorded spend. The run's finalize sums THESE (not state.outputs)
+   *  so the run row and the /:id/steps list can never disagree: a stop-failed or
+   *  gate-rejected step gets a row but never enters state.outputs, which would
+   *  otherwise make the run under-count both its step_count and its real cost. */
+  costUsd: number;
+  tokensIn: number;
+  tokensOut: number;
+  durationMs: number;
+}>;
+
+/**
+ * Insert one pipeline_step_results row as-completed (result='' deferred) and
+ * record its rowid + result-text for the finalize fill. Best-effort: the
+ * durable record must never break or mask the run.
+ */
+function recordStepRow(
+  runHistory: RunHistory,
+  runId: string,
+  step: ManifestStep,
+  output: AgentOutput,
+  acc: StepRowAccumulator,
+): void {
+  const status = output.skipped ? 'skipped' : output.error ? 'failed' : 'completed';
+  try {
+    const rowId = runHistory.insertPipelineStepResult({
+      pipelineRunId: runId,
+      stepId: step.id,
+      status,
+      result: '', // I4: deferred — filled by id at run-finalize, never mid-run
+      error: output.error,
+      durationMs: output.durationMs,
+      tokensIn: output.tokensIn,
+      tokensOut: output.tokensOut,
+      costUsd: output.costUsd,
+      modelTier: step.model ?? 'balanced',
+    });
+    acc.push({
+      rowId, result: output.result,
+      costUsd: output.costUsd, tokensIn: output.tokensIn,
+      tokensOut: output.tokensOut, durationMs: output.durationMs,
+    });
+  } catch { /* best-effort */ }
+}
+
 async function executeStep(
   step: ManifestStep,
   manifest: Manifest,
@@ -382,11 +543,13 @@ async function executeStep(
   agentsDir: string,
   options: RunManifestOptions,
   stepCounters: SessionCounters,
+  stepRows: StepRowAccumulator | undefined,
 ): Promise<StepResult> {
   // Check cached outputs for retry (skip already-completed steps)
   if (options.cachedOutputs?.has(step.id)) {
     const cached = options.cachedOutputs.get(step.id)!;
     state.outputs.set(step.id, cached);
+    if (stepRows && options.runHistory) recordStepRow(options.runHistory, state.runId, step, cached, stepRows);
     options.hooks?.onStepRetrySkipped?.(step.id);
     return 'ok';
   }
@@ -401,6 +564,14 @@ async function executeStep(
   // on (becomes `model_id`, '' for mock/pipeline steps that resolve no model).
   let toolSeq = 0;
   let stepModelId = '';
+  // Also hoisted: a step's real spend. A GATE-REJECTED step has already RUN and
+  // cost money (the gate check happens AFTER the step completes) — but it throws
+  // before `state.outputs.set`, so the catch is the only place that can record
+  // what it actually cost. Left at 0 when the step throws before executing.
+  let costUsd = 0;
+  let stepTokensIn = 0;
+  let stepTokensOut = 0;
+  let stepDurationMs = 0;
 
   try {
     const stepContext = buildStepContext(state.globalContext, step, state.outputs, config.pipeline_context_limit);
@@ -409,7 +580,9 @@ async function executeStep(
     const condContext = buildConditionContext(state.globalContext, state.outputs);
 
     if (!shouldRunStep(condContext, step.conditions)) {
-      state.outputs.set(step.id, makeSkipped(step.id, 'conditions not met'));
+      const skipped = makeSkipped(step.id, 'conditions not met');
+      state.outputs.set(step.id, skipped);
+      if (stepRows && options.runHistory) recordStepRow(options.runHistory, state.runId, step, skipped, stepRows);
       options.hooks?.onStepSkipped?.(step.id, 'conditions not met');
       return 'ok';
     }
@@ -453,7 +626,6 @@ async function executeStep(
       : undefined;
 
     let r: { result: string; tokensIn: number; tokensOut: number; durationMs: number };
-    let costUsd = 0;
 
     // Build per-step pre-approval set if configured
     let stepPreApproval: PreApprovalSet | undefined;
@@ -472,7 +644,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -495,7 +667,7 @@ async function executeStep(
       stepModelId = stepModel; // A2: stamp the resolved model on the step run at finalize
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall);
+      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
@@ -505,10 +677,16 @@ async function executeStep(
       stepModelId = stepModel; // A2: stamp the resolved model on the step run at finalize
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall);
+      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }
+
+    // The step has RUN — stamp its real spend on the hoisted vars so the catch
+    // below can still record it if the gate rejects (which happens next).
+    stepTokensIn = r.tokensIn;
+    stepTokensOut = r.tokensOut;
+    stepDurationMs = r.durationMs;
 
     // Gate point check after step completes (real and mock paths)
     if (manifest.gate_points.includes(step.id) && options.gateAdapter) {
@@ -559,6 +737,9 @@ async function executeStep(
         });
       } catch { /* best-effort */ }
     }
+    // 2a/B3: durable pipeline_step_results row, written as-completed with its
+    // result-text DEFERRED to run-finalize (invariant I4).
+    if (stepRows && options.runHistory) recordStepRow(options.runHistory, state.runId, step, output, stepRows);
     return 'ok';
 
   } catch (err: unknown) {
@@ -568,8 +749,25 @@ async function executeStep(
     // rest like response_text). The error also surfaces via state.error/outputs.
     if (stepRunId && options.runHistory) {
       try {
-        options.runHistory.updateRun(stepRunId, { status: 'failed', errorText: error.message, toolCallCount: toolSeq, modelId: stepModelId });
+        options.runHistory.updateRun(stepRunId, {
+          status: 'failed', errorText: error.message, toolCallCount: toolSeq, modelId: stepModelId,
+          // Real spend of a step that RAN and was then rejected/failed (0 if it
+          // threw before executing) — kept in sync with the step row below.
+          costUsd, tokensIn: stepTokensIn, tokensOut: stepTokensOut, durationMs: stepDurationMs,
+        });
       } catch { /* best-effort */ }
+    }
+    // 2a/B3: record the failed step in pipeline_step_results too (result=''), so
+    // it shows in the /:id/steps list even under on_failure='stop', which halts
+    // WITHOUT adding the step to state.outputs (the batch writer's blind spot).
+    // Covers every caught mode (stop/notify/continue/gate) exactly once here —
+    // carrying its REAL cost, which a gate-rejected step has already incurred.
+    if (stepRows && options.runHistory) {
+      recordStepRow(options.runHistory, state.runId, step, {
+        stepId: step.id, result: '', startedAt: stepStart, completedAt: new Date().toISOString(),
+        durationMs: stepDurationMs, tokensIn: stepTokensIn, tokensOut: stepTokensOut, costUsd,
+        skipped: false, error: error.message,
+      }, stepRows);
     }
 
     if (err instanceof GateRejectedError || err instanceof GateExpiredError) {
@@ -630,6 +828,7 @@ function resolveModelForCost(step: ManifestStep, defaultTier: ModelTier, config:
     defaultTier,
     accountTier: config.account_tier,
     maxTier: config.max_tier,
+    blockedModelIds: config.blocked_model_ids,
     provider: getActiveProvider(),
   }).modelId;
 }

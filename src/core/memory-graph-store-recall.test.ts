@@ -237,4 +237,21 @@ describe('MemoryGraphStore recall reads (Foundation Rework v2 — S5b)', () => {
     expect(mem.memoriesMentioningSubject(alice, true, 10)[0]!.text).toMatch(/Alice memo/);
     engine.close();
   });
+
+  it('relatedMemoriesViaSubjects excludes memories whose mentioned subject is ARCHIVED (garbage-sweep guard)', () => {
+    const { engine, mem, subs, rels } = make();
+    const real = subs.findOrCreate({ kind: 'organization', name: 'Meridian AG' }).id;
+    const junk = subs.findOrCreate({ kind: 'person', name: 'data' }).id;   // will be archived by the sweep
+    rels.createRelationship({ fromSubjectId: junk, toSubjectId: real, kind: 'related_to', description: 'x' });
+    seed(mem, 'm-junk', 'a memory mentioning junk', [1, 0, 0, 0]);
+    mem.linkSubjects('m-junk', [junk]);
+
+    // Before archive: querying the real subject pulls the junk-mentioned memory via the edge.
+    expect(mem.relatedMemoriesViaSubjects(real, true, 10).map(r => r.id)).toEqual(['m-junk']);
+    // After the sweep archives the junk subject, its mention drops out of graph-expand —
+    // "archived ⇒ out of recall" is now a mechanism-level invariant.
+    subs.archiveSubject(junk);
+    expect(mem.relatedMemoriesViaSubjects(real, true, 10)).toHaveLength(0);
+    engine.close();
+  });
 });

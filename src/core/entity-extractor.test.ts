@@ -199,6 +199,15 @@ describe('isValidEntity', () => {
     expect(isValidEntity('proposal/negotiation', 'project')).toBe(false);
   });
 
+  it('rejects junk-SHAPED person names that are NOT stopwords (the person-shape gate)', () => {
+    // 'CSV' / 'target' are NOT in KG_COMMON_NOUNS — only isJunkPersonShape catches them.
+    expect(isValidEntity('CSV', 'person')).toBe(false);
+    expect(isValidEntity('target', 'person')).toBe(false);
+    // …but the SAME shape on a non-person kind is kept (kind-conditional).
+    expect(isValidEntity('CSV', 'organization')).toBe(true);
+    expect(isValidEntity('target', 'product')).toBe(true);
+  });
+
   it('rejects multi-word phrases where all words are stopwords', () => {
     expect(isValidEntity('tracking report', 'product')).toBe(false);
   });

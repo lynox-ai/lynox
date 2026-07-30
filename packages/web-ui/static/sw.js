@@ -32,17 +32,17 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
 
   // Inbox push payloads carry { data: { itemId } } so the click can land
-  // directly on the offending mail. Escalation pushes (Slice B3) carry
-  // { data: { threadId } } — the wakeup lands in the chat, where the unread
-  // escalated thread floats to the top of the list (a per-thread deep-link
-  // route doesn't exist yet; /app + unread-first surfacing is the target).
+  // directly on the offending mail. Task / escalation pushes carry
+  // { data: { threadId } } → deep-link to that conversation via
+  // `/app?thread=<id>` (the /app page's onMount resumes it), so a completed
+  // background task opens its OWN thread instead of a blank new chat.
   // Falls back to '/' for plain pushes (reminders, scheduled-send results).
   const data = event.notification.data || {};
   const itemId = data.itemId;
   const threadId = data.threadId;
   const target = itemId
     ? `/app/inbox?item=${encodeURIComponent(itemId)}`
-    : (threadId ? '/app' : '/');
+    : (threadId ? `/app?thread=${encodeURIComponent(threadId)}` : '/');
   const deepLink = Boolean(itemId || threadId);
 
   event.waitUntil(

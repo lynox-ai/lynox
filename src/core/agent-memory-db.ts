@@ -13,7 +13,9 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { embedToBlob, blobToEmbed, cosineSimilarity } from './embedding.js';
 import { channels } from './observability.js';
+import { SQLITE_BUSY_TIMEOUT_MS } from './sqlite-constants.js';
 import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js';
+import { canSupersede, provenanceRank } from './provenance.js';
 
 /** Row cap for an `exhaustive` similarity scan (dedup). 50× the old dedup floor
  *  of 100 so an older duplicate past the newest window is caught, but still a
@@ -21,6 +23,16 @@ import { DEFAULT_PROVENANCE_KIND, type ProvenanceKind } from '../types/memory.js
  *  every store() for a large, ceiling-less scope (e.g. `global`). A single scope
  *  realistically stays well under this because dedup + GC keep it bounded. */
 const DEDUP_EXHAUSTIVE_SCAN_LIMIT = 5_000;
+
+/** Escape SQLite LIKE metacharacters so a literal user string matches literally.
+ *  The backslash MUST be escaped FIRST (it is the ESCAPE char), then `%` and `_`.
+ *  Every call site that feeds literal user memory text into `text LIKE ?` MUST
+ *  pair this with `ESCAPE '\'` — business memory routinely contains `%` ("20%
+ *  Rabatt") / `_`, and an unescaped metachar turns a targeted match into a
+ *  wildcard over-match (a GDPR over-deletion on the erase path). */
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, c => `\\${c}`);
+}
 
 // ── Row Types (internal, not exported) ──────────────────────────
 
@@ -45,6 +57,13 @@ export interface MemoryRow {
   // v5 provenance lifecycle — present on every row (NOT NULL DEFAULT backfill).
   source_type: string;
   source_tool_name: string | null;
+  // v6 Wave 1 evidence — the derivation inputs for source_type. Optional on the row
+  // type (like `subject_id`): the write path always sets them, but not every recall
+  // SELECT projects them. `source_channel` is NULL on pre-evidence (v5-era) rows;
+  // `source_untrusted` DEFAULT 0. `embedding_model` (§1.7) is the vector-space identity.
+  source_channel?: string | null | undefined;
+  source_untrusted?: number | undefined;
+  embedding_model?: string | null | undefined;
   // Foundation Rework v2 — Context-Hierarchy Scoping (Slice C). The engine.db recall
   // path (MemoryGraphStore) projects the memory's PRIMARY subject (the thread anchor
   // it inherited in Slice B, or the person/org heuristic pick) so retrieval can weight
@@ -266,6 +285,24 @@ const MIGRATIONS: string[] = [
   `INSERT OR IGNORE INTO schema_version (version) VALUES (5);
    ALTER TABLE memories ADD COLUMN source_type TEXT NOT NULL DEFAULT 'agent_inferred';
    ALTER TABLE memories ADD COLUMN source_tool_name TEXT;`,
+
+  // v6 (Memory Wave 1 — evidence): the write channel + the untrusted signal. Both are
+  // DERIVATION INPUTS (PRD §1/§3): `source_type` becomes a pure function of them at the
+  // store boundary, so the tier is re-derivable and never the only thing stored. Additive
+  // ALTER (never edit the applied v1 CREATE — migrations track by version and a column
+  // added to v1 would collide with this ALTER on a fresh DB). `source_channel` is
+  // NULLABLE: pre-evidence rows keep NULL and their v5-stamped `source_type` — they are
+  // NOT retroactively re-derived (a batch re-derive floors NULL-channel rows per §3 rule 5,
+  // so it must skip them). `source_untrusted` DEFAULT 0 — a pre-existing row is not marked
+  // untrusted. `embedding_model` records WHICH model produced this row's vector (§1.7):
+  // there is no re-embed path, so a silent embedding-default change would otherwise
+  // orphan row↔vector-space identity irreversibly — the Wave-2 floor binds to it. NULL on
+  // pre-evidence rows (their model is reconstructible from the then-current config).
+  // Mirrors engine.db v8.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (6);
+   ALTER TABLE memories ADD COLUMN source_channel TEXT;
+   ALTER TABLE memories ADD COLUMN source_untrusted INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE memories ADD COLUMN embedding_model TEXT;`,
 ];
 
 // ── Database Class ──────────────────────────────────────────────
@@ -284,6 +321,9 @@ export class AgentMemoryDb {
     this.dbPath = dbPath;
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
+    // Wait out transient lock contention instead of throwing an instant
+    // SQLITE_BUSY (parity with the other engine SQLite stores).
+    this.db.pragma(`busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this._ensureSchemaVersion();
@@ -382,7 +422,7 @@ export class AgentMemoryDb {
 
   findEntityByAlias(alias: string): EntityRow | null {
     // JSON array search: look for the alias string within the JSON aliases column
-    const escaped = alias.replace(/[%_]/g, c => `\\${c}`);
+    const escaped = escapeLike(alias);
     return this.db.prepare(`
       SELECT * FROM entities
       WHERE aliases LIKE ? ESCAPE '\\'
@@ -544,6 +584,64 @@ export class AgentMemoryDb {
     });
   }
 
+  /**
+   * Physically erase a set of memories by id — the hard-delete cascade behind
+   * `memory_delete` / the UI delete (GDPR Art. 17). {@link purgeByThread} keys on
+   * `source_thread_id`; erasure keys on an arbitrary id-set (matched by pattern via
+   * {@link findMemoryIdsByPattern}), so the ids are staged in a TEMP table and every
+   * downstream query references them by subquery. That does two things a chunked
+   * IN-list cannot: it sidesteps SQLite's 999-variable limit AND keeps the
+   * orphan-entity NOT EXISTS correct across the WHOLE set — chunking the IN-list
+   * would falsely spare an entity mentioned by two erased memories that fell in
+   * different chunks. Deletes memories + mentions + relations(source_memory_id) +
+   * supersedes (+ clears dangling `superseded_by` pointers) + reference-counted
+   * orphan entities (an entity still mentioned by a SURVIVING memory is kept — a
+   * shared subject is never over-erased). One transaction (atomic per erase).
+   * Returns the number of memories deleted.
+   */
+  purgeMemoriesByIds(ids: string[]): number {
+    if (ids.length === 0) return 0;
+    return this.transaction(() => {
+      // A leftover temp table from an aborted prior call (temp tables are
+      // connection-scoped) would carry stale ids — drop before (re)create.
+      this.db.exec('DROP TABLE IF EXISTS _erase_ids');
+      this.db.exec('CREATE TEMP TABLE _erase_ids (id TEXT PRIMARY KEY)');
+      try {
+        const ins = this.db.prepare('INSERT OR IGNORE INTO _erase_ids (id) VALUES (?)');
+        for (const id of ids) ins.run(id);
+
+        const memSub = 'SELECT id FROM _erase_ids';
+
+        // 1. Orphan entities: mentioned by an erased memory and by NO surviving one.
+        const orphanEntities = this.db.prepare(`
+          SELECT DISTINCT m.entity_id FROM mentions m
+          WHERE m.memory_id IN (${memSub})
+          AND NOT EXISTS (
+            SELECT 1 FROM mentions m2
+            WHERE m2.entity_id = m.entity_id
+            AND m2.memory_id NOT IN (${memSub})
+          )
+        `).all() as Array<{ entity_id: string }>;
+
+        // 2. Mentions of the erased memories.
+        this.db.prepare(`DELETE FROM mentions WHERE memory_id IN (${memSub})`).run();
+        // 3. Relations sourced from the erased memories.
+        this.db.prepare(`DELETE FROM relations WHERE source_memory_id IN (${memSub})`).run();
+        // 4. Supersedes: clear dangling pointers, then drop the lineage records.
+        this.db.prepare(`UPDATE memories SET superseded_by = NULL WHERE superseded_by IN (${memSub})`).run();
+        this.db.prepare(`DELETE FROM supersedes WHERE new_memory_id IN (${memSub}) OR old_memory_id IN (${memSub})`).run();
+        // 5. Orphan entities (and their cooccurrences/relations) — reuses deleteEntity.
+        for (const oe of orphanEntities) this.deleteEntity(oe.entity_id);
+        // 6. The memories themselves.
+        const deleted = this.db.prepare(`DELETE FROM memories WHERE id IN (${memSub})`).run().changes;
+
+        return deleted;
+      } finally {
+        this.db.exec('DROP TABLE IF EXISTS _erase_ids');
+      }
+    });
+  }
+
   // ── Memory Operations ─────────────────────────────────────────
 
   createMemory(props: {
@@ -556,6 +654,11 @@ export class AgentMemoryDb {
     sourceThreadId?: string | undefined;
     sourceType?: ProvenanceKind | undefined;
     sourceToolName?: string | undefined;
+    // Wave 1 evidence (persisted so `source_type` stays a re-derivable pure function).
+    sourceChannel?: string | undefined;
+    sourceUntrusted?: boolean | undefined;
+    // Wave 1.7: the embedding model identity this row's vector lives in (no re-embed path).
+    embeddingModel?: string | undefined;
     provider?: string | undefined;
     embedding: number[];
   }): string {
@@ -565,13 +668,16 @@ export class AgentMemoryDb {
 
     this.db.prepare(`
       INSERT INTO memories (id, text, namespace, scope_type, scope_id, source_run_id,
-        source_thread_id, source_type, source_tool_name, provider, embedding, confidence,
+        source_thread_id, source_type, source_tool_name, source_channel, source_untrusted,
+        embedding_model, provider, embedding, confidence,
         is_active, retrieval_count, confirmation_count, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.75, 1, 0, 0, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0.75, 1, 0, 0, ?, ?)
     `).run(
       id, props.text, props.namespace, props.scopeType, props.scopeId,
       props.sourceRunId ?? null, props.sourceThreadId ?? null,
       props.sourceType ?? DEFAULT_PROVENANCE_KIND, props.sourceToolName ?? null,
+      props.sourceChannel ?? null, props.sourceUntrusted ? 1 : 0,
+      props.embeddingModel ?? null,
       props.provider ?? 'onnx', embBlob, now, now,
     );
 
@@ -605,10 +711,33 @@ export class AgentMemoryDb {
     return row?.source_thread_id ?? undefined;
   }
 
-  supersedMemory(memoryId: string, supersededById: string): void {
+  /**
+   * Retire `memoryId`, marking it superseded by `supersededById`.
+   *
+   * `opts.trustGate` (Memory Foundation Wave 2 — the write-trust gate, default off →
+   * byte-identical) turns on the defense-in-depth BACKSTOP: both rows already exist when
+   * this is called (the new row was created first), so it DB-looks-up both `source_type`s
+   * and REFUSES (no-op, returns false) a strictly-lower-trust retire — an
+   * `agent_inferred`/`external_unverified` write can never silently delete a
+   * `user_asserted` truth. The primary gate is the resolution-finalization demotion in
+   * KnowledgeLayer (so a blocked pair never reaches here); this backstop guards a direct
+   * misuse. Returns true iff the retire was applied.
+   */
+  supersedMemory(memoryId: string, supersededById: string, opts?: { trustGate?: boolean }): boolean {
+    if (opts?.trustGate) {
+      const existing = this.db.prepare('SELECT source_type FROM memories WHERE id = ?')
+        .get(memoryId) as { source_type: string } | undefined;
+      const incoming = this.db.prepare('SELECT source_type FROM memories WHERE id = ?')
+        .get(supersededById) as { source_type: string } | undefined;
+      if (existing && incoming
+        && !canSupersede(incoming.source_type as ProvenanceKind, existing.source_type as ProvenanceKind)) {
+        return false;
+      }
+    }
     this.db.prepare(`
       UPDATE memories SET is_active = 0, superseded_by = ?, updated_at = ? WHERE id = ?
     `).run(supersededById, new Date().toISOString(), memoryId);
+    return true;
   }
 
   /** Increment confirmation count and boost confidence (capped at 1.0). Called on dedup match. */
@@ -620,6 +749,20 @@ export class AgentMemoryDb {
     `).run(now, memoryId);
   }
 
+  /**
+   * Add `delta` to a memory's confirmation_count (no confidence bump). Used to CARRY
+   * FORWARD an accumulated confirmation count onto a keeper/raised row when a duplicate
+   * is superseded (consolidation transfer; the Wave-2 dedup tier-raise), so the merge
+   * doesn't drop the confirmations the retired row had earned. No-op for delta ≤ 0.
+   * Mirrors {@link MemoryGraphStore.addConfirmations} for the legacy store.
+   */
+  addConfirmations(memoryId: string, delta: number): void {
+    if (delta <= 0) return;
+    this.db.prepare(`
+      UPDATE memories SET confirmation_count = confirmation_count + ?, updated_at = ? WHERE id = ?
+    `).run(delta, new Date().toISOString(), memoryId);
+  }
+
   updateMemoryRetrieved(memoryId: string): void {
     const now = new Date().toISOString();
     this.db.prepare(`
@@ -628,14 +771,15 @@ export class AgentMemoryDb {
   }
 
   findMemoriesByTextPattern(pattern: string, namespace?: string | undefined): MemoryRow[] {
+    const like = `%${escapeLike(pattern)}%`;
     if (namespace) {
       return this.db.prepare(`
-        SELECT * FROM memories WHERE is_active = 1 AND text LIKE ? AND namespace = ?
-      `).all(`%${pattern}%`, namespace) as MemoryRow[];
+        SELECT * FROM memories WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' AND namespace = ?
+      `).all(like, namespace) as MemoryRow[];
     }
     return this.db.prepare(`
-      SELECT * FROM memories WHERE is_active = 1 AND text LIKE ?
-    `).all(`%${pattern}%`) as MemoryRow[];
+      SELECT * FROM memories WHERE is_active = 1 AND text LIKE ? ESCAPE '\\'
+    `).all(like) as MemoryRow[];
   }
 
   /**
@@ -704,13 +848,61 @@ export class AgentMemoryDb {
    * (a single LIKE scan; see the same idiom in mail/state.ts `bumpScheduledAttempt`).
    */
   deactivateMemoriesByPattern(pattern: string, namespace?: string | undefined): string[] {
-    const like = `%${pattern}%`;
+    const like = `%${escapeLike(pattern)}%`;
     const now = new Date().toISOString();
     const rows = (namespace
-      ? this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? AND namespace = ? RETURNING id').all(now, like, namespace)
-      : this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? RETURNING id').all(now, like)
+      ? this.db.prepare("UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' AND namespace = ? RETURNING id").all(now, like, namespace)
+      : this.db.prepare("UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' RETURNING id").all(now, like)
     ) as { id: string }[];
     return rows.map(r => r.id);
+  }
+
+  /**
+   * Soft-delete EVERY active memory (optionally within a namespace) — the wipe-all
+   * primitive for the Right-to-Erasure route (`DELETE /api/data`). Distinct from
+   * {@link deactivateMemoriesByPattern}, which now LIKE-escapes its argument as a
+   * LITERAL match: a `'%'` passed there no longer means "match everything", so the
+   * "deactivate all" intent needs its own predicate-free statement.
+   */
+  deactivateAllMemories(namespace?: string | undefined): string[] {
+    const now = new Date().toISOString();
+    const rows = (namespace
+      ? this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 AND namespace = ? RETURNING id').all(now, namespace)
+      : this.db.prepare('UPDATE memories SET is_active = 0, updated_at = ? WHERE is_active = 1 RETURNING id').all(now)
+    ) as { id: string }[];
+    return rows.map(r => r.id);
+  }
+
+  /**
+   * The ids of every memory whose text matches `pattern` (LIKE) — the read half of
+   * the erasure path. Unlike {@link deactivateMemoriesByPattern} this does NOT filter
+   * on `is_active`: a GDPR erasure must also reap rows a prior soft-delete left as
+   * `is_active = 0` (their text + embedding still ride backups/exports — exactly the
+   * residue erasure exists to remove). Pure read; the caller ({@link KnowledgeLayer.eraseByPattern})
+   * feeds the ids to {@link purgeMemoriesByIds} (legacy) and the engine.db mirror.
+   * The match runs HERE because engine.db text is encrypted and cannot be LIKE-matched.
+   */
+  findMemoryIdsByPattern(pattern: string, namespace?: string | undefined): string[] {
+    const like = `%${escapeLike(pattern)}%`;
+    const rows = (namespace
+      ? this.db.prepare("SELECT id FROM memories WHERE text LIKE ? ESCAPE '\\' AND namespace = ?").all(like, namespace)
+      : this.db.prepare("SELECT id FROM memories WHERE text LIKE ? ESCAPE '\\'").all(like)
+    ) as { id: string }[];
+    return rows.map(r => r.id);
+  }
+
+  /**
+   * All active memories, newest first, across every scope (capped). The debug-export
+   * snapshot: it answers "what facts does this tenant's memory hold" for diagnosing
+   * cross-subject bleed / poisoning, so it is deliberately scope-INDEPENDENT (unlike
+   * {@link listActiveMemories}, which the recall path scopes). Reads the legacy store —
+   * write-authoritative and complete regardless of the read-cutover flag.
+   */
+  listAllActiveMemories(limit = 200): MemoryRow[] {
+    const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.floor(limit), 1), 1000) : 200;
+    return this.db.prepare(
+      'SELECT * FROM memories WHERE is_active = 1 ORDER BY created_at DESC LIMIT ?',
+    ).all(safeLimit) as MemoryRow[];
   }
 
   updateMemoryText(
@@ -719,13 +911,14 @@ export class AgentMemoryDb {
     namespace?: string | undefined,
     embedding?: number[] | undefined,
   ): string | null {
+    const like = `%${escapeLike(oldText)}%`;
     const row = namespace
       ? this.db.prepare(`
-          SELECT id FROM memories WHERE is_active = 1 AND text LIKE ? AND namespace = ? LIMIT 1
-        `).get(`%${oldText}%`, namespace) as { id: string } | undefined
+          SELECT id FROM memories WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' AND namespace = ? LIMIT 1
+        `).get(like, namespace) as { id: string } | undefined
       : this.db.prepare(`
-          SELECT id FROM memories WHERE is_active = 1 AND text LIKE ? LIMIT 1
-        `).get(`%${oldText}%`) as { id: string } | undefined;
+          SELECT id FROM memories WHERE is_active = 1 AND text LIKE ? ESCAPE '\\' LIMIT 1
+        `).get(like) as { id: string } | undefined;
 
     if (!row) return null;
     // Update the embedding in the SAME statement when the caller supplies one,
@@ -1198,6 +1391,18 @@ export class AgentMemoryDb {
       tokenize: (text: string) => ReadonlySet<string>;
       disagree: (a: ReadonlySet<string>, b: ReadonlySet<string>) => boolean;
     },
+    // Memory Foundation Wave 0 (memory_scoring_v2): when false, the merge still
+    // supersedes duplicates but does NOT transfer the victims' confirmation counts
+    // to the keeper (the third self-reinforcement feeder — PRD §2.2). The inline
+    // UPDATE is skipped and each pair's `victimConfirmations` is zeroed so the
+    // caller's engine.db mirror transfers nothing either. Default true (legacy).
+    transferConfirmations = true,
+    // Memory Foundation Wave 2 (the write-trust gate): when true, the keeper-sort's
+    // PRIMARY key becomes the provenance rank (highest-trust wins), so consolidating a
+    // `user_asserted` + `agent_inferred` cluster keeps the `user_asserted` row — a
+    // low-trust duplicate can never win the merge and retire a user's truth. Default
+    // false → the legacy confirmation-count-then-length sort (byte-identical).
+    enforceTrustGate = false,
   ): ConsolidationPair[] {
     // scopeId='*' means all scopes of this type
     const rows = scopeId === '*'
@@ -1258,10 +1463,17 @@ export class AgentMemoryDb {
 
       if (cluster.length < 2) continue;
 
-      // Keep the best memory: highest confirmation_count, then longest text
+      // Keep the best memory. Under the trust gate the PRIMARY key is the provenance
+      // rank (highest-trust wins) so a low-trust duplicate can't retire a user truth;
+      // then highest confirmation_count, then longest text. Flag off → the legacy
+      // confirmation-count-then-length sort (byte-identical).
       cluster.sort((a, b) => {
         const ra = rows[a]!;
         const rb = rows[b]!;
+        if (enforceTrustGate) {
+          const rankDiff = provenanceRank(rb.source_type as ProvenanceKind) - provenanceRank(ra.source_type as ProvenanceKind);
+          if (rankDiff !== 0) return rankDiff;
+        }
         if (rb.confirmation_count !== ra.confirmation_count) return rb.confirmation_count - ra.confirmation_count;
         return rb.text.length - ra.text.length;
       });
@@ -1272,7 +1484,7 @@ export class AgentMemoryDb {
         const victim = rows[cluster[k]!]!;
         this.supersedMemory(victim.id, keeper.id);
         this.createSupersedes(keeper.id, victim.id, 'consolidation');
-        if (victim.confirmation_count > 0) {
+        if (transferConfirmations && victim.confirmation_count > 0) {
           this.db.prepare(`
             UPDATE memories SET confirmation_count = confirmation_count + ?, updated_at = ? WHERE id = ?
           `).run(victim.confirmation_count, now, keeper.id);
@@ -1280,7 +1492,8 @@ export class AgentMemoryDb {
         merged.add(cluster[k]!);
         // Return the victim→keeper pair so KnowledgeLayer can mirror the supersede
         // + confirmation transfer onto the engine.db stubs (recall-parity cutover).
-        pairs.push({ victimId: victim.id, keeperId: keeper.id, victimConfirmations: victim.confirmation_count });
+        // Wave 0: `victimConfirmations` is zeroed when the transfer is suppressed.
+        pairs.push({ victimId: victim.id, keeperId: keeper.id, victimConfirmations: transferConfirmations ? victim.confirmation_count : 0 });
       }
     }
 

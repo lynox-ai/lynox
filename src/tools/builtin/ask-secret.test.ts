@@ -1,5 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { askSecretTool } from './ask-secret.js';
+import { SecretStore } from '../../core/secret-store.js';
 import type { IAgent } from '../../types/index.js';
 
 function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
@@ -162,5 +163,120 @@ describe('askSecretTool', () => {
     // The result should never contain the actual secret value
     expect(result).not.toContain(secret);
     expect(result).toContain('saved securely');
+  });
+});
+
+describe('askSecretTool — discovery + reconciliation (DEF-vault-name-discovery)', () => {
+  const cleanSecretEnv = (): void => {
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith('LYNOX_SECRET_')) delete process.env[key];
+    }
+  };
+  beforeEach(cleanSecretEnv);
+  afterEach(cleanSecretEnv);
+
+  it('reconciles a near-identical requested name instead of collecting a duplicate (ZAI/Z_AI)', async () => {
+    process.env['LYNOX_SECRET_ZAI_API_KEY'] = 'sk-zai-secretvalue';
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const agent = makeAgent({ promptSecret, secretStore: new SecretStore() });
+
+    const result = await askSecretTool.handler(
+      { name: 'Z_AI_API_KEY', prompt: 'Enter your z.ai key' },
+      agent,
+    );
+    // The loop is dead: the agent is pointed at the existing name, not re-prompted.
+    expect(result).toContain('ZAI_API_KEY');
+    expect(result).toContain('secret:ZAI_API_KEY');
+    expect(promptSecret).not.toHaveBeenCalled();
+    expect(result).not.toContain('sk-zai-secretvalue'); // value never surfaces
+  });
+
+  it('collects a same-VENDOR-namespace second key (hint, NOT hard-block) — DATAFORSEO class', async () => {
+    // DATAFORSEO_API_LOGIN is potentially a DISTINCT credential from a stored
+    // DATAFORSEO_B64 (same vendor, no normalize-collision). The vendor namespace
+    // legitimately holds more than one key, so we surface the sibling as a non-blocking
+    // hint on the prompt and STILL collect — a hard block here would dead-end a genuine
+    // second key. (If it IS the same credential, the hint tells the user to cancel and
+    // reference the existing one.)
+    process.env['LYNOX_SECRET_DATAFORSEO_B64'] = 'base64-creds-value';
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const agent = makeAgent({ promptSecret, secretStore: new SecretStore() });
+
+    const result = await askSecretTool.handler(
+      { name: 'DATAFORSEO_API_LOGIN', prompt: 'Enter DataForSEO login' },
+      agent,
+    );
+    expect(promptSecret).toHaveBeenCalledTimes(1); // collected, not dead-ended
+    // the sibling is surfaced as a non-blocking hint appended to the prompt
+    expect(promptSecret.mock.calls[0]?.[1]).toContain('DATAFORSEO_B64');
+    expect(result).toContain('saved securely');
+    expect(result).not.toContain('base64-creds-value'); // value never surfaces
+  });
+
+  it('collects a legitimate second same-vendor key (AWS id → secret) instead of dead-ending', async () => {
+    // Regression (release-review v2.8.0): the vendor-namespace reconcile used to
+    // HARD-BLOCK ANY second key sharing the leading token, so AWS_SECRET_ACCESS_KEY after
+    // a stored AWS_ACCESS_KEY_ID (the canonical AWS pair) could never be stored by the
+    // agent — and it was tempted to reference the WRONG existing key. It must collect the
+    // NEW key while hinting at the sibling.
+    process.env['LYNOX_SECRET_AWS_ACCESS_KEY_ID'] = 'AKIAEXAMPLE';
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const agent = makeAgent({ promptSecret, secretStore: new SecretStore() });
+
+    const result = await askSecretTool.handler(
+      { name: 'AWS_SECRET_ACCESS_KEY', prompt: 'Enter your AWS secret access key' },
+      agent,
+    );
+    expect(promptSecret).toHaveBeenCalledTimes(1);
+    expect(promptSecret.mock.calls[0]?.[0]).toBe('AWS_SECRET_ACCESS_KEY'); // the NEW key
+    expect(promptSecret.mock.calls[0]?.[1]).toContain('AWS_ACCESS_KEY_ID'); // sibling hinted
+    expect(result).toContain('saved securely');
+  });
+
+  it('still HARD-BLOCKS an exact-normalized duplicate under a different spelling (ZAI/Z_AI)', async () => {
+    // The exact-match dedup path must survive the vendor-second-key relaxation:
+    // Z_AI_API_KEY normalizes to the stored ZAI_API_KEY → collecting would duplicate it.
+    process.env['LYNOX_SECRET_ZAI_API_KEY'] = 'sk-zai-secretvalue';
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const agent = makeAgent({ promptSecret, secretStore: new SecretStore() });
+
+    const result = await askSecretTool.handler(
+      { name: 'Z_AI_API_KEY', prompt: 'Enter your z.ai key' },
+      agent,
+    );
+    expect(promptSecret).not.toHaveBeenCalled(); // hard-blocked (duplicate)
+    expect(result).toContain('secret:ZAI_API_KEY');
+  });
+
+  it('still collects when the requested name matches an existing one exactly (overwrite path)', async () => {
+    process.env['LYNOX_SECRET_STRIPE_API_KEY'] = 'sk-old';
+    const promptSecret = vi.fn().mockResolvedValue('saved');
+    const agent = makeAgent({ promptSecret, secretStore: new SecretStore() });
+
+    await askSecretTool.handler({ name: 'STRIPE_API_KEY', prompt: 'Re-enter' }, agent);
+    expect(promptSecret).toHaveBeenCalledWith('STRIPE_API_KEY', 'Re-enter', undefined);
+  });
+
+  it('action:"list" surfaces stored names + masked values, never plaintext or infra names', async () => {
+    process.env['LYNOX_SECRET_ZAI_API_KEY'] = 'sk-zai-secretvalue';
+    process.env['LYNOX_SECRET_MAIL_ACCOUNT_SHOP'] = 'infra-cred'; // infra → must not appear
+    const agent = makeAgent({ secretStore: new SecretStore() });
+
+    const result = await askSecretTool.handler({ action: 'list' }, agent);
+    expect(result).toContain('ZAI_API_KEY');
+    expect(result).not.toContain('sk-zai-secretvalue'); // no plaintext value
+    expect(result).not.toContain('MAIL_ACCOUNT_SHOP'); // infra excluded
+  });
+
+  it('action:"list" reports an empty vault cleanly', async () => {
+    const agent = makeAgent({ secretStore: new SecretStore() });
+    const result = await askSecretTool.handler({ action: 'list' }, agent);
+    expect(result).toContain('No secrets');
+  });
+
+  it('collect still errors clearly when name/prompt are missing', async () => {
+    const agent = makeAgent({ secretStore: new SecretStore() });
+    const result = await askSecretTool.handler({ action: 'collect' }, agent);
+    expect(result).toContain('needs both');
   });
 });

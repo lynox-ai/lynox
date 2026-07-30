@@ -12,22 +12,12 @@
  * contract.
  */
 
+import type { UsageSummaryResponse } from '../contract/http.js';
+
 const CP_SUMMARY_TIMEOUT_MS = 5_000;
 
-export interface ControlPlaneUsageSummary {
-  managed: boolean;
-  tier?: string;
-  budget_cents?: number;
-  /** Genuine top-ups (credit packs) granted this period. Added headroom on top
-   *  of the included budget. Present since the topup-aware /summary fix. */
-  topup_cents?: number;
-  /** included budget + top-ups. The denominator the dashboard should size
-   *  against; falls back to budget_cents when an older CP omits it. */
-  available_cents?: number;
-  used_cents?: number;
-  balance_cents?: number;
-  period?: { start_iso: string; end_iso: string; source: 'stripe-billing' } | null;
-}
+/** Pre-contract public name for the wire shape — now sourced from `src/contract/http.ts`. */
+export type ControlPlaneUsageSummary = UsageSummaryResponse;
 
 /**
  * Fetch the control-plane view of this instance's usage. Returns null on

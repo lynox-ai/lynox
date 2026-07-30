@@ -94,6 +94,8 @@ vi.mock('./memory.js', () => ({
     // @ts-expect-error mock constructor
     this.maybeUpdate = vi.fn();
     // @ts-expect-error mock constructor
+    this.setMeteredHost = vi.fn();
+    // @ts-expect-error mock constructor
     this.appendScoped = vi.fn();
     // @ts-expect-error mock constructor
     this.loadScoped = vi.fn().mockResolvedValue(null);
@@ -150,6 +152,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   httpRequestTool: { definition: { name: 'http_request' }, handler: vi.fn() },
   runWorkflowTool: { definition: { name: 'run_workflow' }, handler: vi.fn() },
   updateWorkflowTool: { definition: { name: 'update_workflow_steps' }, handler: vi.fn() },
+  exportWorkflowTool: { definition: { name: 'export_workflow' }, handler: vi.fn() },
+  importWorkflowTool: { definition: { name: 'import_workflow' }, handler: vi.fn() },
   diagnoseWorkflowTool: { definition: { name: 'diagnose_workflow_run' }, handler: vi.fn() },
   setPipelineConfig: vi.fn(),
   setPlanTaskConfig: vi.fn(),
@@ -173,6 +177,7 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactHistoryTool: { definition: { name: 'artifact_history' }, handler: vi.fn() },
   artifactRestoreTool: { definition: { name: 'artifact_restore' }, handler: vi.fn() },
   recallToolResultTool: { definition: { name: 'recall_tool_result' }, handler: vi.fn() },
+  suggestFollowUpsTool: { definition: { name: 'suggest_follow_ups' }, handler: vi.fn() },
   mediaProcessTool: { definition: { name: 'media_process' }, handler: vi.fn() },
 }));
 
@@ -306,6 +311,9 @@ vi.mock('./run-history.js', () => ({
     this.close = vi.fn();
     // @ts-expect-error mock constructor — S3a verb-graph mirror wiring (engine.ts).
     this.setVerbGraph = vi.fn();
+    // @ts-expect-error mock constructor — P1 provenance backfill gate (engine.ts boot):
+    // 'done' → the one-shot backfill is skipped in this mocked-DB test.
+    this.isModelProvenanceBackfillDone = vi.fn().mockReturnValue(true);
     // @ts-expect-error mock constructor
     this.getDb = vi.fn().mockReturnValue({
       prepare: vi.fn().mockReturnValue({ run: vi.fn(), get: vi.fn(), all: vi.fn().mockReturnValue([]) }),

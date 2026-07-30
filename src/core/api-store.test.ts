@@ -280,6 +280,53 @@ describe('ApiStore', () => {
     });
   });
 
+  describe('getAcceptedEgressHosts (guarded network policy)', () => {
+    // This set is the ONLY profile-derived widen path for the guarded egress
+    // policy — a leak here (admitting a non-accepted host) defeats the gate, so
+    // the accepted:true / array-shape guards are security-critical.
+    it('unions custom_endpoint_ack.hosts across profiles (incl. token_url ≠ base_url)', () => {
+      store.register({
+        id: 'p1', name: 'P1', base_url: 'https://api.p1.net/v1', description: 'x',
+        custom_endpoint_ack: { accepted: true, hosts: ['api.p1.net', 'token.p1.net'], accepted_at: 'now' },
+      });
+      store.register({
+        id: 'p2', name: 'P2', base_url: 'https://api.p2.net/v1', description: 'x',
+        custom_endpoint_ack: { accepted: true, hosts: ['api.p2.net'], accepted_at: 'now' },
+      });
+      expect(store.getAcceptedEgressHosts()).toEqual(new Set(['api.p1.net', 'token.p1.net', 'api.p2.net']));
+    });
+
+    it('EXCLUDES a profile whose ack is not accepted:true (no leak of a rejected host)', () => {
+      store.register({
+        id: 'rej', name: 'Rej', base_url: 'https://api.rej.net/v1', description: 'x',
+        // accepted:false must never contribute — a relaxed `!= null` check would leak it.
+        custom_endpoint_ack: { accepted: false as unknown as true, hosts: ['api.rej.net'], accepted_at: 'now' },
+      });
+      expect(store.getAcceptedEgressHosts().has('api.rej.net')).toBe(false);
+    });
+
+    it('EXCLUDES a profile with no ack at all', () => {
+      store.register(SAMPLE_PROFILE); // no custom_endpoint_ack
+      expect(store.getAcceptedEgressHosts().size).toBe(0);
+    });
+
+    it('does not throw when a corrupt profile has accepted:true but a non-array hosts', () => {
+      // loadFromDirectory / engine.db parse profiles with no schema validation, so a
+      // hand-edited/corrupt ack must not brick EVERY guarded request.
+      store.register({
+        id: 'bad', name: 'Bad', base_url: 'https://api.bad.net/v1', description: 'x',
+        custom_endpoint_ack: { accepted: true, hosts: undefined as unknown as string[], accepted_at: 'now' },
+      });
+      store.register({
+        id: 'good', name: 'Good', base_url: 'https://api.good.net/v1', description: 'x',
+        custom_endpoint_ack: { accepted: true, hosts: ['api.good.net'], accepted_at: 'now' },
+      });
+      expect(() => store.getAcceptedEgressHosts()).not.toThrow();
+      // The valid profile still contributes; the corrupt one is skipped, not fatal.
+      expect(store.getAcceptedEgressHosts()).toEqual(new Set(['api.good.net']));
+    });
+  });
+
   describe('v2 schema migration', () => {
     let tmpDir: string;
     let stderrSpy: ReturnType<typeof vi.spyOn>;

@@ -1,0 +1,14 @@
+{
+  "managed": true,
+  "tier": "managed",
+  "budget_cents": 3000,
+  "topup_cents": 500,
+  "available_cents": 3500,
+  "used_cents": 515,
+  "balance_cents": 2985,
+  "period": {
+    "start_iso": "2026-01-01T00:00:00.000Z",
+    "end_iso": "2026-02-01T00:00:00.000Z",
+    "source": "stripe-billing"
+  }
+}

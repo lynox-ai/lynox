@@ -105,7 +105,7 @@ function makeSession(result: string | Error = 'Done.'): Session {
   const runFn = result instanceof Error
     ? vi.fn<(task: string) => Promise<string>>().mockRejectedValue(result)
     : vi.fn<(task: string) => Promise<string>>().mockResolvedValue(result);
-  return { run: runFn, _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+  return { sessionId: 'thread-worker-test', run: runFn, _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
 }
 
 function makeEngine(opts?: {
@@ -194,6 +194,7 @@ describe('WorkerLoop', () => {
     );
     expect(session.run).toHaveBeenCalledWith(
       'Task: Daily Report\n\nGenerate the daily report',
+      { triggerOrigin: 'cron' },
     );
   });
 
@@ -357,6 +358,9 @@ describe('WorkerLoop', () => {
         body: 'All done.',
         taskId: task.id,
         priority: 'normal',
+        // #13: the completion notification deep-links to the run's thread so a
+        // tap opens the result, not a blank new chat.
+        data: expect.objectContaining({ threadId: 'thread-worker-test' }) as Record<string, string>,
       }),
     );
   });
@@ -551,7 +555,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith('Task: Daily Report');
+    expect(session.run).toHaveBeenCalledWith('Task: Daily Report', { triggerOrigin: 'cron' });
   });
 
   it('does not duplicate the title when description equals title', async () => {
@@ -568,7 +572,7 @@ describe('WorkerLoop', () => {
     await loop.tick();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(session.run).toHaveBeenCalledWith('Task: Daily Report');
+    expect(session.run).toHaveBeenCalledWith('Task: Daily Report', { triggerOrigin: 'cron' });
   });
 
   // ---- 13. resolveTaskInput resolves pending input ----
@@ -660,6 +664,7 @@ describe('WorkerLoop', () => {
 
     // Session that triggers a prompt during run, then waits forever
     const session = {
+      sessionId: 'thread-worker-test',
       run: vi.fn<(task: string) => Promise<string>>().mockReturnValue(new Promise(() => {})),
       _recreateAgent: vi.fn(),
       promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
@@ -684,6 +689,14 @@ describe('WorkerLoop', () => {
       // This creates pending input
       void session.promptUser('Approve this?', ['Yes', 'No']);
       await vi.advanceTimersByTimeAsync(0);
+      // #13: the question notification deep-links to the asking thread so a tap
+      // lands where the answer is expected — same wiring as the completion notify.
+      expect(router.notify).toHaveBeenCalledWith(
+        expect.objectContaining({
+          inquiry: expect.objectContaining({ question: 'Approve this?' }) as { question: string },
+          data: expect.objectContaining({ threadId: 'thread-worker-test' }) as Record<string, string>,
+        }),
+      );
     }
 
     // Verify pending input exists
@@ -842,6 +855,9 @@ describe('WorkerLoop', () => {
   //   the next tick can fire it again.
   it('executes a scheduled saved workflow and leaves the template row byte-identical', async () => {
     vi.useRealTimers();
+    // This suite's beforeEach does NOT reset mockRunManifest — reset here so the
+    // call-count + call-args assertions below observe only THIS test's tick.
+    mockRunManifest.mockReset();
     mockRunManifest.mockResolvedValueOnce(makeRunState({ runId: 'fresh-run-monthly', status: 'completed' }));
 
     // Round-trip through JSON so we capture exactly what SQLite would hold.
@@ -864,7 +880,9 @@ describe('WorkerLoop', () => {
     // row before AND after the tick and assert deep equality.
     const stored = { manifest_json: templateBefore };
     const taskManager = makeTaskManager();
-    const insertedRuns: unknown[] = [];
+    // Stable ref (getRunHistory returns a fresh object each call) so we can
+    // assert the tool layer no longer inserts a run row (2a: runManifest owns it).
+    const insertPipelineRunMock = vi.fn();
 
     const engine = {
       getTaskManager: vi.fn(() => taskManager),
@@ -875,9 +893,10 @@ describe('WorkerLoop', () => {
       getMemory: vi.fn(() => null),
       getRunHistory: vi.fn(() => ({
         getPlannedPipeline: vi.fn(() => ({ id: 'saved-monthly-report', manifest_json: stored.manifest_json })),
-        // persistPipelineRun calls these for the FRESH run row (separate id);
-        // they must NOT touch the template row.
-        insertPipelineRun: vi.fn((row: unknown) => { insertedRuns.push(row); }),
+        // 2a: the fresh pipeline_runs row is written by runManifest (mocked in
+        // this suite); the tool-layer keeps only the step-results batch. Neither
+        // touches the template row.
+        insertPipelineRun: insertPipelineRunMock,
         insertPipelineStepResult: vi.fn(),
       })),
     } as unknown as Engine;
@@ -917,9 +936,16 @@ describe('WorkerLoop', () => {
     expect(JSON.stringify(liveTemplate)).toBe(templateBefore);
     expect(stored.manifest_json).toBe(templateBefore);
 
-    // 3. The fresh run row is a SEPARATE pipeline_runs entry (its own
-    //    runId), not a mutation of the template row.
-    expect(insertedRuns.length).toBe(1);
+    // 3. The run→workflow linkage is threaded into runManifest — the single
+    //    canonical pipeline_runs writer (2a) — so the fresh run records its own
+    //    runId + workflow_id as a SEPARATE entry, never a mutation of the
+    //    template row (whose byte-identity #2 asserts).
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
+    const runOpts = mockRunManifest.mock.calls[0]?.[2] as { workflowId?: string } | undefined;
+    expect(runOpts?.workflowId).toBe('saved-monthly-report');
+    // The tool layer no longer double-inserts the run row — that would be the
+    // I1-violating second INSERT (PK collision → stuck 'running').
+    expect(insertPipelineRunMock).not.toHaveBeenCalled();
   });
 
   // Lock the headline cron-fires-N-times guarantee: a scheduled
@@ -1241,6 +1267,29 @@ describe('WorkerLoop', () => {
     await fire(makeTask({ id: 't-cost', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60, last_hash: baselineHash }) }));
     expect(createSession).toHaveBeenCalledTimes(1); // still just the baseline run
     expect(recordTaskRun).toHaveBeenCalledWith('t-cost', 'No changes detected', 'success');
+  });
+
+  it('SECURITY: the watch analysis run suppresses ALL tools (untrusted page content cannot reach a tool)', async () => {
+    // DEF-0099: the analysis prompt embeds up to 8 KB of the WATCHED PAGE —
+    // content the user did not author and an attacker may control. The session
+    // is autonomous + headless, where a non-critical dangerous tool AUTO-GRANTS.
+    // So an injected "run bash …" must have nothing to call: the run is toolless.
+    vi.useRealTimers();
+    const analysisSession = { run: vi.fn().mockResolvedValue('Summary.'), _recreateAgent: vi.fn(), promptUser: undefined } as unknown as Session;
+    const engine = {
+      getTaskManager: vi.fn(() => ({ recordTaskRun: vi.fn(), updateWatchConfig: vi.fn() } as unknown as TaskManager)),
+      getUserConfig: vi.fn(() => ({})),
+      createSession: vi.fn(() => analysisSession),
+      escalateToUser: vi.fn(() => null),
+    } as unknown as Engine;
+    const loop = new WorkerLoop(engine, makeNotificationRouter(false), 60_000);
+    const fire = (loop as unknown as { executeWatch: (t: TriggerRecord) => Promise<void> }).executeWatch.bind(loop);
+
+    mockFetchPinned.mockResolvedValueOnce(new Response('<html><body><main>Watched page content</main></body></html>', { status: 200 }));
+    await fire(makeTask({ id: 't-sec', source: 'watch', effect: 'run_agent', watch_config: JSON.stringify({ url: 'https://x.test', interval_minutes: 60 }) }));
+
+    const runOpts = (analysisSession.run as unknown as { mock: { calls: Array<[string, { noTools?: boolean } | undefined]> } }).mock.calls[0]?.[1];
+    expect(runOpts?.noTools).toBe(true);
   });
 
   // Hard gate at execution time: WorkerLoop only runs autonomous pipelines.

@@ -589,4 +589,12 @@ describe('captureProcess — provider plumbing', () => {
     const body = mockCreate.mock.calls[0]![0] as { model: string };
     expect(body.model.startsWith('claude-haiku')).toBe(true);
   });
+
+  it('B5: a suggest_follow_ups-only run captures as no-action (empty spine, no junk replay step)', async () => {
+    // suggest_follow_ups is a terminal UI action mandated on every web-ui turn; it must be
+    // filtered (INTERNAL_TOOLS) so it never freezes into a persisted, replay-executed step.
+    // Old behaviour: not filtered → one action call → an annotated junk step.
+    const record = await captureProcess('run1', 'X', [call('suggest_follow_ups', '{}', 0)], { description: '' });
+    expect(record.steps).toHaveLength(0);
+  });
 });

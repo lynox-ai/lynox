@@ -1,0 +1,67 @@
+name: gate-record
+
+# The merge rule in CLAUDE.md — every relevant gate ran, findings fixed, a delta
+# round on the fixes came back clean, CI green — was prose for four revisions and
+# lost to the default every time. This job is the mechanism.
+#
+# What it can and cannot do, stated plainly because the difference matters: CI
+# cannot judge whether a review was any good, so most of the record is an
+# ATTESTATION. The exception is the head SHA, which CI establishes on its own —
+# and that is the failure that actually recurs: the gates ran, then three more
+# commits landed and nobody re-ran them. `synchronize` re-runs this job on every
+# push, so the record goes red the moment it stops describing the code.
+#
+# `edited` is in the trigger list because the record lives in the PR body: without
+# it, fixing a stale record would need a dummy commit.
+#
+# EXPECT A RED RUN AFTER EVERY PUSH, then a green one. That is not flakiness: the
+# push fires `synchronize`, and at that instant the record genuinely does describe
+# an older commit. Updating `head:` fires `edited` and the check goes green.
+# Branch protection reads the LATEST run for the name, so the earlier red does not
+# block the merge — it stays in the list as the receipt that the record was
+# re-taken rather than left behind.
+#
+# This job is a required status check on main.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  gate-record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Need both endpoints to list what the PR changes.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Check the record against this head
+        # Everything reaches the script through the filesystem or argv, never
+        # through a shell interpolation: the body is author-controlled text and
+        # would otherwise be a command-injection sink in our own CI.
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$PR_BODY" > /tmp/pr-body.txt
+          # Three dots: what the BRANCH changed, from the merge base. Two dots
+          # compares the two trees, so once main moves ahead every file changed
+          # there shows up as this PR's — which reds a docs-only PR the moment
+          # somebody else lands code, and the script's own list is then wrong.
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" > /tmp/pr-files.txt
+          node scripts/gate-record.mjs \
+            --body-file /tmp/pr-body.txt \
+            --head "$HEAD_SHA" \
+            --files-file /tmp/pr-files.txt \
+            --author "$PR_AUTHOR"

@@ -3,11 +3,27 @@ import { cpSuppliesLLMKey } from '../utils/billing-tier.js';
 import { estimateCost } from '../format.js';
 import { t } from '../i18n.svelte.js';
 import { mergeDoneUsage, type UsageInfo } from './chat-usage.js';
+import {
+	recordToolCall,
+	recordToolResult,
+	recordSpawn,
+	applySpawnProgress,
+	applyChildDone,
+	SPAWN_EVENT,
+	SPAWN_PROGRESS_EVENT,
+	SPAWN_CHILD_DONE_EVENT,
+	type ToolCallInfo,
+	type SpawnProgress,
+	type SubAgentActivity,
+	type ContentBlock,
+} from './chat-attribution.js';
+import { parseFollowUps, followUpsFromToolInput, computeDeferredTray, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
+import { selectReattachTarget, type ReattachTarget } from '../utils/active-runs.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
 // `import { UsageInfo } from './chat.svelte.js'` callers keep working.
@@ -18,9 +34,7 @@ export type { UsageInfo } from './chat-usage.js';
 // Follow-up parsing (<follow_ups>…</follow_ups> block extraction)
 // ---------------------------------------------------------------------------
 
-const FOLLOW_UP_RE = /<follow_ups>\s*([\s\S]*?)\s*<\/follow_ups>/;
-const MAX_FOLLOW_UPS = 4;
-const MAX_LABEL_LENGTH = 40;
+// Follow-up suggestion parsing lives in ./follow-ups.ts (pure module, unit-tested).
 
 /** Resolved once per module load — the user's tz doesn't change mid-tab. Server falls back to UTC if `''`. */
 const USER_TIMEZONE: string = (() => {
@@ -30,42 +44,6 @@ const USER_TIMEZONE: string = (() => {
 		return '';
 	}
 })();
-
-function parseFollowUps(text: string): { suggestions: FollowUpSuggestion[]; cleanText: string } {
-	const match = FOLLOW_UP_RE.exec(text);
-	if (!match) return { suggestions: [], cleanText: text };
-
-	const cleanText = text.replace(FOLLOW_UP_RE, '').trimEnd();
-	let suggestions: FollowUpSuggestion[] = [];
-
-	try {
-		const parsed: unknown = JSON.parse(match[1]!);
-		if (!Array.isArray(parsed)) return { suggestions: [], cleanText };
-
-		for (const item of parsed) {
-			if (typeof item !== 'object' || item === null) continue;
-			const obj = item as Record<string, unknown>;
-			if (typeof obj['label'] !== 'string' || typeof obj['task'] !== 'string') continue;
-			if (!obj['label'].trim() || !obj['task'].trim()) continue;
-			suggestions.push({
-				label: obj['label'].trim().slice(0, MAX_LABEL_LENGTH),
-				task: obj['task'].trim(),
-			});
-		}
-	} catch {
-		return { suggestions: [], cleanText };
-	}
-
-	// Deduplicate by label
-	const seen = new Set<string>();
-	suggestions = suggestions.filter(s => {
-		if (seen.has(s.label)) return false;
-		seen.add(s.label);
-		return true;
-	});
-
-	return { suggestions: suggestions.slice(0, MAX_FOLLOW_UPS), cleanText };
-}
 
 // `UsageInfo` and `usageFromDoneEvent` live in ./chat-usage.ts (pure module,
 // unit-tested) and are re-exported at the top of this file for back-compat.
@@ -81,14 +59,18 @@ export interface ApiCallCost {
 	costUsd: number;
 }
 
-export type ContentBlock =
-	| { type: 'text'; text: string }
-	| { type: 'thinking'; text: string }
-	| { type: 'tool_call'; index: number };
+export type { ContentBlock } from './chat-attribution.js';
 
-export interface FollowUpSuggestion {
-	label: string;
-	task: string;
+/** DK-UX inline chip for a durable-knowledge write (from the `knowledge_write` SSE event). */
+export interface KnowledgeWriteChip {
+	id: string;
+	subject?: string | undefined;
+	kind?: string | undefined;
+	status: 'active' | 'pending_review';
+	/** Raw wording (for the untrusted review chip). Client-only; never re-enters model context. */
+	text: string;
+	/** UI-local once the user resolves the chip, so it renders as done and the buttons retire. */
+	resolved?: 'undone' | 'kept' | 'discarded' | undefined;
 }
 
 export interface ChatMessage {
@@ -98,8 +80,14 @@ export interface ChatMessage {
 	/** Ordered blocks for interleaved rendering (text ↔ tool calls) */
 	blocks?: ContentBlock[];
 	pipeline?: PipelineInfo;
-	/** Sub-agent delegation progress (set when spawn_agent fires). */
-	spawn?: SpawnProgress;
+	/** Sub-agent delegations in this turn, keyed by the engine's `spawnId`.
+	 *  A map, not a single object: the agent loop runs several `spawn_agent`
+	 *  calls concurrently, and the old single field let the second batch
+	 *  overwrite the first. */
+	spawns?: Record<string, SpawnProgress>;
+	/** Flat index of every delegated child in this turn, keyed by child id.
+	 *  Holds each child's OWN tool calls — the main agent's stay in `toolCalls`. */
+	subAgents?: Record<string, SubAgentActivity>;
 	thinking?: string;
 	usage?: UsageInfo;
 	/** Profiled-API calls fired by this message's tool invocations. Each entry
@@ -114,6 +102,11 @@ export interface ChatMessage {
 	failed?: boolean;
 	/** Agent-generated follow-up suggestions (parsed from <follow_ups> block) */
 	followUps?: FollowUpSuggestion[];
+	/** DK-UX: durable-knowledge writes made during this turn, surfaced as inline chips
+	 *  (trusted → "gemerkt · rückgängig", untrusted → keep/discard review). CLIENT-ONLY:
+	 *  populated from the SSE side-channel, never persisted to the thread and never folded
+	 *  back into model context (so a resume cannot re-inject the untrusted wording). */
+	knowledgeWrites?: KnowledgeWriteChip[];
 	/** Set on a synthetic marker bubble inserted when the engine auto-compacts
 	 *  the conversation — renders as an inline "conversation compacted" divider. */
 	compactionNote?: { previousPercent: number };
@@ -131,27 +124,7 @@ export interface ChatMessage {
 	_toolSinceText?: boolean;
 }
 
-export interface SpawnProgress {
-	/** All sub-agents spawned in this delegation. */
-	agents: string[];
-	/** Sub-agents currently running. */
-	running: string[];
-	/** Sub-agents that have completed, with outcome. */
-	done: Array<{ name: string; ok: boolean; elapsedS: number }>;
-	/** Last-seen tool name per sub-agent. */
-	lastToolBySub: Record<string, string>;
-	/** Seconds since the delegation started. */
-	elapsedS: number;
-	/** Client timestamp when the spawn started (for fallback elapsed if no heartbeat). */
-	startedAt: number;
-}
-
-export interface ToolCallInfo {
-	name: string;
-	input: unknown;
-	result?: string;
-	status: 'running' | 'done' | 'error';
-}
+export type { ToolCallInfo, SpawnProgress, SubAgentActivity } from './chat-attribution.js';
 
 export interface PipelineStepInfo {
 	id: string;
@@ -170,8 +143,38 @@ export interface PipelineInfo {
 	steps: PipelineStepInfo[];
 }
 
+/** One span of a prompt, tagged with who wrote it (engine v51). */
+export interface PromptSegment {
+	kind: 'frame' | 'value';
+	text: string;
+}
+
+/**
+ * Read the frame/value segments off a wire payload.
+ *
+ * Deliberately strict: anything malformed collapses to `undefined`, i.e. the
+ * all-frame rendering that predates the split. A half-parsed segment list would
+ * be worse than none — it would claim a boundary it cannot back.
+ */
+function parsePromptSegments(raw: unknown): PromptSegment[] | undefined {
+	if (!Array.isArray(raw) || raw.length === 0) return undefined;
+	const out: PromptSegment[] = [];
+	for (const item of raw) {
+		if (typeof item !== 'object' || item === null) return undefined;
+		const kind = (item as Record<string, unknown>)['kind'];
+		const text = (item as Record<string, unknown>)['text'];
+		if ((kind !== 'frame' && kind !== 'value') || typeof text !== 'string') return undefined;
+		out.push({ kind, text });
+	}
+	return out;
+}
+
 export interface PermissionPrompt {
+	/** Flattened text. Always present; the only form an older engine sends. */
 	question: string;
+	/** Frame/value split, when the engine provides it. Absent means all-frame,
+	 *  which is exactly how this rendered before the split existed. */
+	segments?: PromptSegment[];
 	options?: string[];
 	/** Timeout in ms from server — used for countdown display */
 	timeoutMs?: number;
@@ -246,6 +249,11 @@ interface PersistedChat {
 	 *  whole snapshot down with it); on reload their bubble is reconciled to
 	 *  `failed` so the user re-sends rather than seeing a silently-stuck pill. */
 	queues?: Record<string, { id: string; task: string }[]>;
+	/** Per-thread "deferred follow-ups" tray: the un-taken siblings of a pill the
+	 *  user clicked, kept visible + clickable so a second matching suggestion
+	 *  isn't lost when taking the first (rafael 2026-07-17). Plain {label,task}
+	 *  JSON — persisted exactly like `queues`, no payload concern. */
+	deferredFollowUps?: Record<string, FollowUpSuggestion[]>;
 }
 
 function readPersistedRoot(): PersistedChat {
@@ -267,6 +275,7 @@ function readPersistedRoot(): PersistedChat {
 			sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : null,
 			threads: raw.threads ?? {},
 			...(raw.queues ? { queues: raw.queues } : {}),
+			...(raw.deferredFollowUps ? { deferredFollowUps: raw.deferredFollowUps } : {}),
 		};
 	} catch { /* corrupt data */ }
 	return { sessionId: null, threads: {} };
@@ -275,6 +284,11 @@ function readPersistedRoot(): PersistedChat {
 /** Restore a thread's pending send-queue (text-only entries — see PersistedChat.queues). */
 function loadPersistedQueue(threadId: string): QueuedMessage[] {
 	return (readPersistedRoot().queues?.[threadId] ?? []).map((q) => ({ id: q.id, task: q.task }));
+}
+
+/** Restore a thread's deferred-follow-ups tray (see PersistedChat.deferredFollowUps). */
+function loadDeferredFollowUps(threadId: string): FollowUpSuggestion[] {
+	return (readPersistedRoot().deferredFollowUps?.[threadId] ?? []).map((f) => ({ label: f.label, task: f.task }));
 }
 
 function writePersistedRoot(root: PersistedChat): void {
@@ -312,9 +326,10 @@ function dropEmptyUserMessages(list: ChatMessage[]): ChatMessage[] {
  */
 export function dropPersistedThread(threadId: string): void {
 	const root = readPersistedRoot();
-	if (threadId in root.threads || root.queues?.[threadId]) {
+	if (threadId in root.threads || root.queues?.[threadId] || root.deferredFollowUps?.[threadId]) {
 		delete root.threads[threadId];
 		if (root.queues) delete root.queues[threadId];
+		if (root.deferredFollowUps) delete root.deferredFollowUps[threadId];
 		if (root.sessionId === threadId) root.sessionId = null;
 		writePersistedRoot(root);
 	}
@@ -352,6 +367,10 @@ function persistChatNow(): void {
 		root.queues = root.queues ?? {};
 		if (fileless.length > 0) root.queues[sessionId] = fileless;
 		else if (root.queues[sessionId]) delete root.queues[sessionId];
+		// Persist the deferred-follow-ups tray alongside, same per-thread shape.
+		root.deferredFollowUps = root.deferredFollowUps ?? {};
+		if (deferredFollowUps.length > 0) root.deferredFollowUps[sessionId] = deferredFollowUps.map((f) => ({ label: f.label, task: f.task }));
+		else if (root.deferredFollowUps[sessionId]) delete root.deferredFollowUps[sessionId];
 	}
 	writePersistedRoot(root);
 }
@@ -360,6 +379,12 @@ export interface ContextBudget {
 	totalTokens: number;
 	maxTokens: number;
 	usagePercent: number;
+	// Cost-aware compaction-budget occupancy (Session._compactionUsagePercent),
+	// injected by the engine alongside the honest window-fill `usagePercent`
+	// above. Optional: absent on older engines / non-lazy paths. Consumers
+	// use it as a COLOR signal only — never render it as a second number,
+	// it can diverge from usagePercent on large-window models (#78b).
+	budgetPercent?: number | undefined;
 }
 
 export interface ChangesetFileInfo {
@@ -373,6 +398,8 @@ export interface ChangesetFileInfo {
 const persisted = loadPersistedChat();
 let messages = $state<ChatMessage[]>(persisted.messages);
 let sessionId = $state<string | null>(persisted.sessionId);
+// Deferred-follow-ups tray for the current thread (rehydrated on resume/switch).
+let deferredFollowUps = $state<FollowUpSuggestion[]>(persisted.sessionId ? loadDeferredFollowUps(persisted.sessionId) : []);
 let isStreaming = $state(false);
 let streamingActivity = $state<'thinking' | 'tool' | 'writing' | 'idle'>('idle');
 let streamingToolName = $state<string | null>(null);
@@ -467,6 +494,16 @@ function emitCompletedTextBlock(content: string, key: string): void {
 }
 
 let sessionModel = $state<string | null>(null);
+// The current thread's capability TIER (`fast`/`balanced`/`deep`) — distinct from
+// `sessionModel`, which the turn_end SSE frame overwrites with the concrete
+// model-id (e.g. `claude-sonnet-4-6`). Set only from the tier-bearing POST/resume/
+// re-pick responses (never turn_end), so the per-thread model control (P1 §5.1b)
+// always reads a real tier. null before a session exists / on a new chat.
+let sessionTier = $state<string | null>(null);
+// The tier the composer model picker chose for the NEXT new chat (null = let the
+// server use default_tier). Sent as `model` on the session-create POST; cleared on
+// newChat() so every new chat starts from default_tier (no stickiness).
+let pendingModel = $state<string | null>(null);
 let contextWindow = $state<number>(200_000);
 let contextBudget = $state<ContextBudget | null>(null);
 // Set when the engine offers a "prepare & compact" at the prepare threshold
@@ -557,24 +594,33 @@ if (typeof window !== 'undefined') {
  * agent with zero history → user sees old thread in UI but agent can't see it
  * (2026-05-18 staging QA from rafael prod).
  */
-async function ensureSession(resumeThreadId?: string | null): Promise<string> {
+export async function ensureSession(resumeThreadId?: string | null): Promise<string> {
 	if (sessionId) return sessionId;
 	// Fire the hosting-tier probe alongside session creation — by the time
 	// any LLM error surfaces, the tier is known and error copy branches
 	// correctly.
 	void probeManagedTier();
-	const init: RequestInit = resumeThreadId
-		? {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ threadId: resumeThreadId }),
-		}
-		: { method: 'POST' };
+	// `source` records provenance (P1, DEF-0095): a NON-null pendingModel means the
+	// user actively picked → 'user'; an untouched new chat → 'default'. Resume sends
+	// no source (createThread is OR IGNORE on an existing thread, so the thread keeps
+	// its original provenance). ADVISORY-ONLY server-side — it gates nothing.
+	const body: Record<string, unknown> = resumeThreadId
+		? { threadId: resumeThreadId }
+		: pendingModel
+			// The composer picker's tier for this new chat. The engine clamps it to
+			// max_tier at the ctor, so an over-ceiling value is safe here.
+			? { model: pendingModel, source: 'user' }
+			: { source: 'default' };
+	const init: RequestInit = {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body),
+	};
 	const res = await fetch(`${getApiBase()}/sessions`, init);
 	if (res.status === 401) throw new SessionExpiredError();
 	const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
 	sessionId = data.sessionId;
-	if (data.model) sessionModel = data.model;
+	if (data.model) { sessionModel = data.model; sessionTier = data.model; }
 	if (data.contextWindow) contextWindow = data.contextWindow;
 	return sessionId;
 }
@@ -646,7 +692,7 @@ export async function sendMessage(task: string, displayText?: string | FileAttac
 		const display = displayText ?? task;
 		const fileNames = files?.map((f) => f.name).join(', ');
 		const id = newQueueId();
-		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, queued: true, queueId: id });
+		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, queued: true, queueId: id, createdAt: new Date().toISOString() });
 		messageQueue.push({ id, task, files, ...(runOptions ? { runOptions } : {}) });
 		// Flush immediately so a reload before the next persist tick (or before
 		// the run ends) can recover the queued turn instead of losing it.
@@ -680,6 +726,64 @@ function mapApiError(status: number, detail: string): string {
 	if (status === 529 || lower.includes('overloaded'))
 		return t('chat.error_overloaded');
 	return t('chat.error_start');
+}
+
+/** True while ANY human prompt is awaiting an answer. Proof the run reached the
+ *  server and is parked — used to tell a mid-run drop from a pre-run failure. */
+function hasAnyPendingPrompt(): boolean {
+	return pendingPermission !== null || pendingTabsPrompt !== null
+		|| pendingSecretPrompt !== null || pendingMailConnect !== null;
+}
+
+/**
+ * Recover a live `/run` whose SSE stream dropped mid-run (mobile background,
+ * proxy idle, tab freeze) WITHOUT the user reloading the thread (the #83 bug:
+ * the answer to an ask_user prompt looked "not sent" and the continuation only
+ * appeared after a manual reload-from-history).
+ *
+ * If the run is still live server-side, restore any pending prompt (so the user
+ * answers INTO the prompt form = a `/reply`, not a normal message that hits the
+ * busy path) and re-attach to the run's resumable buffer stream via the SAME
+ * tested path a manual reload uses (`reattachRun`). Returns true only when the
+ * re-attach actually took over the stream.
+ */
+async function reattachToActiveRun(sid: string, assistantIdx: number): Promise<boolean> {
+	let target: ReattachTarget | null = null;
+	try {
+		const res = await fetch(`${getApiBase()}/runs/active`);
+		if (!res.ok) return false;
+		target = selectReattachTarget(await res.json(), sid);
+	} catch {
+		return false; // no way to reach the registry — let the caller fall back
+	}
+	if (!target) return false; // run already finished/gone — nothing to re-attach to
+	// Restore a prompt that survived the disconnect so the reply routes correctly.
+	await checkPendingPrompt();
+	// Drop an empty in-progress assistant bubble so the re-attach's own lazily
+	// created bubble doesn't duplicate it.
+	const a = messages[assistantIdx];
+	if (a && a.role === 'assistant' && !a.content && !a.blocks?.length && !a.toolCalls?.length) {
+		messages.splice(assistantIdx, 1);
+	}
+	// `since` = what THIS client already rendered, so no event double-renders.
+	const since = lastAppliedSeq > 0 ? lastAppliedSeq : target.lastPersistedSeq;
+	const epochBefore = streamEpoch;
+	await reattachRun(sid, target.runId, since, _resumeGeneration);
+	if (streamEpoch !== epochBefore) return true; // reattachRun took over + owns teardown
+	// Non-takeover: the run finished in the tiny /runs/active → /stream gap
+	// (reattachRun 404'd before claiming the stream). We already spliced the empty
+	// bubble and may have restored a now-stale prompt, so reconcile to the
+	// authoritative persisted transcript instead of leaving the just-finished turn
+	// invisible until a manual reload. Return true so the caller skips its own
+	// (now stale-indexed) cleanup + tail.
+	isStreaming = false;
+	streamingActivity = 'idle';
+	streamingToolName = null;
+	streamingToolPhase = null;
+	pendingPermission = null;
+	pendingTabsPrompt = null;
+	await reconcileThread();
+	return true;
 }
 
 async function _executeRun(task: string, files?: FileAttachment[], displayText?: string, runOptions?: RunOptions, queueId?: string): Promise<void> {
@@ -718,7 +822,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		userMsgIdx = queuedIdx;
 	} else {
 		const fileNames = files?.map((f) => f.name).join(', ');
-		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display });
+		messages.push({ role: 'user', content: fileNames ? `${display}\n📎 ${fileNames}` : display, createdAt: new Date().toISOString() });
 		userMsgIdx = messages.length - 1;
 	}
 
@@ -814,7 +918,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		// the run will only progress once the user answers, and a bare
 		// "Agent arbeitet noch — wartet…" banner with the actual prompt
 		// hidden somewhere is exactly the dead-end the user reported.
-		if (pendingPermission || pendingSecretPrompt || pendingTabsPrompt || pendingMailConnect) {
+		if (hasAnyPendingPrompt()) {
 			// If a prior 409 poll loop is still running (re-entrant call before
 			// its finally block ran), cut it now so its tick doesn't flip
 			// `isStreaming` back on after we clear it below.
@@ -925,6 +1029,10 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	const decoder = new TextDecoder();
 	let buffer = '';
 	lastAppliedSeq = 0; // fresh run → reset the resume checkpoint
+	// Set when a terminal `done`/`error` event arrives → the run reached a real
+	// end. If the stream instead ends WITHOUT one (EOF/throw), it dropped mid-run
+	// and we try to re-attach to the still-live run (#83) instead of ending blind.
+	let sawTerminal = false;
 
 	try {
 		while (true) {
@@ -948,6 +1056,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 				} else if (line.startsWith('data: ') && eventType) {
 					try {
 						const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
+						if (eventType === 'done' || eventType === 'error') sawTerminal = true;
 						handleSSEEvent(eventType, data, assistantIdx, userMsgIdx);
 						if (eventSeq > 0) lastAppliedSeq = eventSeq;
 					} catch { /* skip malformed SSE events */ }
@@ -957,8 +1066,14 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 			}
 		}
 	} catch {
-		// SSE connection error — retry once if not already retried
-		if (!retried) {
+		// SSE connection error. A MID-RUN drop (events streamed or a prompt is
+		// pending → the run is live server-side) must NOT re-POST /run — that
+		// collides with the parked run (409) and strands the user's answer as
+		// "not sent" (the #83 bug). Leave it to the re-attach recovery after the
+		// finally. Only a PRE-RUN failure (nothing streamed, no prompt) is retried.
+		if (lastAppliedSeq > 0 || hasAnyPendingPrompt()) {
+			// mid-run drop → recovered below via reattachToActiveRun()
+		} else if (!retried) {
 			retried = true;
 			try {
 				await new Promise(r => setTimeout(r, 2000));
@@ -1006,6 +1121,15 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		try { reader.cancel(); } catch { /* already closed */ }
 	}
 
+	// Stream ended without a terminal done/error while still marked streaming (not
+	// a user stop): the transport dropped mid-run (mobile background, proxy idle, tab
+	// freeze) or the run aborted. If the run is still live server-side, re-attach to
+	// its resumable stream so the continuation AND any pending prompt recover live —
+	// the user never has to reload from history (the #83 bug).
+	if (!sawTerminal && isStreaming && await reattachToActiveRun(sid, assistantIdx)) {
+		return; // the re-attach owns streaming state + persistence + queue drain
+	}
+
 	isStreaming = false;
 	streamingActivity = 'idle';
 	streamingToolName = null;
@@ -1014,9 +1138,13 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	pendingTabsPrompt = null;
 	retryStatus = null;
 
-	// Parse follow-up suggestions from assistant response
+	// Parse follow-up suggestions from assistant response. FALLBACK only: if the
+	// agent used the suggest_follow_ups tool, the tool_call handler already set
+	// followUps live — the text parse must not run (there is no trailer to strip,
+	// and it must not override the structured pills). Text-form output (legacy or
+	// weak models) still lands here.
 	const lastMsg = messages[assistantIdx];
-	if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content) {
+	if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content && !lastMsg.followUps) {
 		const parsed = parseFollowUps(lastMsg.content);
 		if (parsed.suggestions.length > 0) {
 			lastMsg.followUps = parsed.suggestions;
@@ -1055,6 +1183,41 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 		// Small delay so the UI updates before next run starts
 		setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
 	}
+}
+
+/**
+ * Mirror a turn's delegation state into the Context sidebar.
+ *
+ * Aggregated across every batch on the turn. The panel is a single view and
+ * used to be fed from one `msg.spawn` object, so with two concurrent
+ * `spawn_agent` calls it showed only whichever fired last. The inline transcript
+ * is the exact, per-batch view; this stays the roll-up.
+ */
+function syncSpawnContext(msg: ChatMessage): void {
+	const children = Object.values(msg.subAgents ?? {});
+	if (children.length === 0) return;
+	// Keyed by NAME because that is what the panel renders — which means an
+	// ambiguous name gets NO entry rather than one twin's tool shown for both.
+	// The inline transcript is the exact, id-keyed view.
+	const nameCounts = new Map<string, number>();
+	for (const c of children) nameCounts.set(c.name, (nameCounts.get(c.name) ?? 0) + 1);
+	const lastTool: Record<string, string> = {};
+	for (const c of children) {
+		if (nameCounts.get(c.name) !== 1) continue;
+		const last = c.toolCalls[c.toolCalls.length - 1];
+		if (last) lastTool[c.name] = last.name;
+	}
+	setContext({
+		type: 'spawn',
+		title: 'spawn_agent',
+		spawnAgents: children.map((c) => c.name),
+		spawnRunning: children.filter((c) => c.status === 'running').map((c) => c.name),
+		spawnDone: children
+			.filter((c) => c.status !== 'running')
+			.map((c) => ({ name: c.name, ok: c.status === 'done', elapsedS: c.elapsedS ?? 0 })),
+		spawnLastTool: lastTool,
+		spawnElapsedS: Math.max(0, ...Object.values(msg.spawns ?? {}).map((sp) => sp.elapsedS)),
+	});
 }
 
 function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number, userIdx: number): void {
@@ -1151,24 +1314,26 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case 'tool_call': {
 			const toolName = String(data['name'] ?? '');
 			const toolInput = data['input'];
-			msg.toolCalls = msg.toolCalls ?? [];
-			// Dedup: skip if last tool call has same name and is still running
-			const lastTc = msg.toolCalls[msg.toolCalls.length - 1];
-			if (!(lastTc && lastTc.name === toolName && lastTc.status === 'running'
-				&& JSON.stringify(lastTc.input) === JSON.stringify(toolInput))) {
-				const tcIndex = msg.toolCalls.length;
-				msg.toolCalls.push({ name: toolName, input: toolInput, status: 'running' });
-				// Interleaved blocks: add tool_call block in order. If the previous
-				// block was text, that text just became "complete" — emit it so
-				// auto-speak can start playing it without waiting for turn_end.
-				msg.blocks = msg.blocks ?? [];
-				const prevBlock = msg.blocks[msg.blocks.length - 1];
-				if (prevBlock && prevBlock.type === 'text') {
-					emitCompletedTextBlock(prevBlock.text, `msg-${idx}-block-${msg.blocks.length - 1}`);
-				}
-				msg.blocks.push({ type: 'tool_call', index: tcIndex });
+			// suggest_follow_ups is a terminal, INVISIBLE tool: its input IS the
+			// follow-up pills. Populate them directly and render nothing — no tool
+			// card, no context flash, not pushed to toolCalls/blocks. The turn ends
+			// server-side (endsTurn), so no further model output follows.
+			if (toolName === 'suggest_follow_ups') {
+				const fu = followUpsFromToolInput(toolInput);
+				if (fu.length > 0) msg.followUps = fu;
+				break;
 			}
-			msg._toolSinceText = true;
+			// One function owns the routing so a child's call CANNOT land in the main
+			// agent's list — see recordToolCall. It reports where the event went; the
+			// streaming indicator follows, and a dropped event moves nothing.
+			const where = recordToolCall(msg, data, (text, blockIndex) => {
+				emitCompletedTextBlock(text, `msg-${idx}-block-${blockIndex}`);
+			});
+			if (where === 'dropped') break;
+			// `_toolSinceText` splits the MAIN agent's prose into a new paragraph after
+			// its own tool calls. A child's activity is not a break in the parent's
+			// text flow, so it must not set the flag.
+			if (where === 'parent') msg._toolSinceText = true;
 			streamingActivity = 'tool';
 			streamingToolName = toolName;
 			streamingToolPhase = null;
@@ -1178,7 +1343,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// few ticks later with running/done counts; letting the tool_call
 			// path set tool+spawn_agent first causes a visible flash to the
 			// generic tool card before the spawn view takes over.
-			if (toolName !== 'ask_user' && toolName !== 'ask_secret' && toolName !== 'spawn_agent') {
+			// A child's tool must not steal the sidebar from the delegation panel the
+			// user is following, so the Context switch is parent-only.
+			if (where === 'parent' && toolName !== 'ask_user' && toolName !== 'ask_secret' && toolName !== 'spawn_agent') {
 				setContext({ type: 'tool', toolName, toolInput, title: toolName });
 			}
 			break;
@@ -1215,11 +1382,13 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		}
 		case 'tool_result': {
 			const toolName = String(data['name'] ?? '');
-			const tc = msg.toolCalls?.find((t) => t.name === toolName && t.status === 'running')
-				?? msg.toolCalls?.findLast((t) => t.name === toolName);
+			// Routing again lives in one place: a child's result closes the CHILD's
+			// call. The old code searched a single shared list, so a child's
+			// `read_file` result closed the parent's still-running `read_file` — and a
+			// delegation doing the same thing as its parent is the normal case.
+			const { scope, call: tc } = recordToolResult(msg, data);
+			if (scope !== 'dropped') persistChat();
 			if (tc) {
-				tc.result = String(data['result'] ?? '');
-				tc.status = data['isError'] === true ? 'error' : 'done';
 				setContext({
 					type: tc.name === 'write_file' ? 'file' : 'tool',
 					toolName: tc.name,
@@ -1227,80 +1396,37 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					toolResult: tc.result,
 					filePath: tc.name === 'write_file' ? String((tc.input as Record<string, unknown>)?.['path'] ?? '') : undefined,
 					title: tc.name,
-				});
-				persistChat();
+			});
 			}
 			streamingToolPhase = null;
 			break;
 		}
-		case 'spawn': {
-			// Delegation started. Track progress so the UI can show which
-			// sub-agents are running, elapsed time, and last tool per sub.
-			const agents = (data['agents'] as string[] | undefined) ?? [];
-			msg.spawn = {
-				agents,
-				running: [...agents],
-				done: [],
-				lastToolBySub: {},
-				elapsedS: 0,
-				startedAt: Date.now(),
-			};
+		case SPAWN_EVENT: {
+			// Delegation started. Registers the batch, its children, and the block that
+			// places the panel where the delegation happened — chronologically, not
+			// pinned to whichever tool row came last.
+			if (!recordSpawn(msg, data, Date.now())) break;
 			streamingActivity = 'tool';
 			streamingToolName = 'spawn_agent';
 			currentToolStartedAt = Date.now();
-			// Surface delegation in the Context panel so the sidebar shows
-			// live sub-agent state alongside the inline ChatView block.
-			setContext({
-				type: 'spawn',
-				title: 'spawn_agent',
-				spawnAgents: agents,
-				spawnRunning: [...agents],
-				spawnDone: [],
-				spawnLastTool: {},
-				spawnElapsedS: 0,
-			});
+			syncSpawnContext(msg);
 			break;
 		}
-		case 'spawn_progress': {
-			if (!msg.spawn) break;
-			msg.spawn.elapsedS = Number(data['elapsedS'] ?? 0);
-			msg.spawn.running = (data['running'] as string[] | undefined) ?? msg.spawn.running;
-			msg.spawn.lastToolBySub = (data['lastToolBySub'] as Record<string, string> | undefined) ?? msg.spawn.lastToolBySub;
-			// Keep the Context-panel in sync; done list carries over since
-			// progress events don't re-emit it.
-			setContext({
-				type: 'spawn',
-				title: 'spawn_agent',
-				spawnAgents: msg.spawn.agents,
-				spawnRunning: [...msg.spawn.running],
-				spawnDone: [...msg.spawn.done],
-				spawnLastTool: { ...msg.spawn.lastToolBySub },
-				spawnElapsedS: msg.spawn.elapsedS,
-			});
+		case SPAWN_PROGRESS_EVENT: {
+			applySpawnProgress(msg, data);
+			syncSpawnContext(msg);
 			break;
 		}
-		case 'spawn_child_done': {
-			if (!msg.spawn) break;
-			const sub = String(data['subAgent'] ?? '');
-			const ok = data['ok'] === true;
-			const elapsedS = Number(data['elapsedS'] ?? 0);
-			msg.spawn.running = msg.spawn.running.filter(a => a !== sub);
-			msg.spawn.done = [...msg.spawn.done, { name: sub, ok, elapsedS }];
-			setContext({
-				type: 'spawn',
-				title: 'spawn_agent',
-				spawnAgents: msg.spawn.agents,
-				spawnRunning: [...msg.spawn.running],
-				spawnDone: [...msg.spawn.done],
-				spawnLastTool: { ...msg.spawn.lastToolBySub },
-				spawnElapsedS: msg.spawn.elapsedS,
-			});
+		case SPAWN_CHILD_DONE_EVENT: {
+			applyChildDone(msg, data);
+			syncSpawnContext(msg);
 			break;
 		}
 		case 'prompt':
 			if (!pendingPermission) runPromptCount++;
 			pendingPermission = {
 				question: String(data['question'] ?? ''),
+				segments: parsePromptSegments(data['segments']),
 				options: data['options'] as string[] | undefined,
 				timeoutMs: data['timeoutMs'] as number | undefined,
 				receivedAt: Date.now(),
@@ -1440,8 +1566,14 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			const total = data['totalTokens'] as number | undefined;
 			const max = data['maxTokens'] as number | undefined;
 			const pct = data['usagePercent'] as number | undefined;
+			const budgetPct = data['budgetPercent'] as number | undefined;
 			if (total != null && max != null && pct != null) {
-				contextBudget = { totalTokens: total, maxTokens: max, usagePercent: pct };
+				contextBudget = {
+					totalTokens: total,
+					maxTokens: max,
+					usagePercent: pct,
+					...(budgetPct != null ? { budgetPercent: budgetPct } : {}),
+				};
 				if (max) contextWindow = max;
 			}
 			break;
@@ -1609,6 +1741,27 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// left users unsure whether compaction had lost their context.
 			messages.push({ role: 'assistant', content: '', compactionNote: { previousPercent: prevPct ?? 0 } });
 			addToast(t('context.compacted').replace('{pct}', String(prevPct ?? '?')), 'info', 5000);
+			break;
+		}
+		case 'knowledge_write': {
+			// DK-UX: a durable-knowledge write happened this turn. Batch onto the assistant
+			// message as an inline chip (trusted → "gemerkt · rückgängig"; untrusted →
+			// keep/discard review). Client-only: never persisted, never re-injected into
+			// model context — so a resume cannot re-surface the untrusted wording.
+			const id = String(data['id'] ?? '');
+			if (!id) break;
+			const status = data['status'] === 'pending_review' ? 'pending_review' : 'active';
+			msg.knowledgeWrites = msg.knowledgeWrites ?? [];
+			// Dedup by id — a Tier-2 SSE replay on reconnect can re-deliver the event.
+			if (!msg.knowledgeWrites.some((w) => w.id === id)) {
+				msg.knowledgeWrites.push({
+					id,
+					subject: typeof data['subject'] === 'string' ? data['subject'] : undefined,
+					kind: typeof data['kind'] === 'string' ? data['kind'] : undefined,
+					status,
+					text: String(data['text'] ?? ''),
+				});
+			}
 			break;
 		}
 	}
@@ -1856,6 +2009,7 @@ export async function checkPendingPrompt(): Promise<void> {
 		} else if (promptType === 'ask_user') {
 			pendingPermission = {
 				question: String(data['question'] ?? ''),
+				segments: parsePromptSegments(data['segments']),
 				options: data['options'] as string[] | undefined,
 				timeoutMs: data['timeoutMs'] as number | undefined,
 				receivedAt: Date.now(),
@@ -2020,13 +2174,56 @@ export function removeQueuedMessage(target: ChatMessage): void {
 	messageQueue.splice(queueIdx, 1);
 }
 
+/** DK-UX: undo a just-made trusted durable write (the inline "rückgängig" chip). A USER
+ *  action on a user-scope route — retires the active entry (status → superseded). Not an
+ *  agent tool, so the agent can never self-undo; only the person clicking can. */
+export async function retireKnowledge(msgIdx: number, id: string): Promise<void> {
+	const chip = messages[msgIdx]?.knowledgeWrites?.find((w) => w.id === id);
+	if (!chip || chip.resolved) return;
+	try {
+		const res = await fetch(`${getApiBase()}/knowledge/entries/${id}/retire`, { method: 'POST' });
+		if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		chip.resolved = 'undone';
+	} catch {
+		addToast(t('chat.knowledge.undo_failed'), 'error', 4000);
+	}
+}
+
+/** DK-UX: resolve an untrusted durable capture from the inline review chip. Routes to the
+ *  EXISTING queue-review endpoint (approve/edit_approve/reject) — a USER act on a user-scope
+ *  route, never agent-callable, so the agent can never self-approve its injected capture. */
+export async function reviewKnowledge(
+	msgIdx: number,
+	id: string,
+	action: 'approve' | 'edit_approve' | 'reject',
+	editedText?: string,
+): Promise<void> {
+	const chip = messages[msgIdx]?.knowledgeWrites?.find((w) => w.id === id);
+	if (!chip || chip.resolved) return;
+	try {
+		const res = await fetch(`${getApiBase()}/knowledge/queue/${id}/review`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(editedText !== undefined ? { action, text: editedText } : { action }),
+		});
+		if (!res.ok) {
+			const body = (await res.json().catch(() => null)) as { error?: string } | null;
+			throw new Error(body?.error ?? `HTTP ${res.status}`);
+		}
+		if (editedText !== undefined) chip.text = editedText;
+		chip.resolved = action === 'reject' ? 'discarded' : 'kept';
+	} catch (e) {
+		addToast(e instanceof Error ? e.message : t('chat.knowledge.review_failed'), 'error', 4000);
+	}
+}
+
 export function getMessages() {
 	return messages;
 }
 /** Add a temporary placeholder message (e.g. voice transcription bubble). Returns its index. */
 export function pushPlaceholder(content: string): number {
 	const idx = messages.length;
-	messages.push({ role: 'user', content });
+	messages.push({ role: 'user', content, createdAt: new Date().toISOString() });
 	return idx;
 }
 /** Update placeholder content at given index (for live transcription). */
@@ -2073,6 +2270,50 @@ export function getLastAppliedSeq(): number {
 }
 export function getQueueLength() {
 	return messageQueue.length;
+}
+
+// --- Deferred follow-ups tray -------------------------------------------------
+// When the user clicks one follow-up pill, its un-taken siblings would otherwise
+// vanish with the turn. Instead they land in a per-thread tray that stays pinned
+// above the composer until taken or dismissed — so a second matching suggestion
+// isn't lost, and taking it later runs as a FRESH turn with full accumulated
+// context (not a blind pre-recorded queue). Client-only; no engine/agent state.
+const MAX_DEFERRED_FOLLOW_UPS = 8;
+
+export function getDeferredFollowUps(): FollowUpSuggestion[] {
+	return deferredFollowUps;
+}
+
+/**
+ * Take a follow-up pill from an in-transcript set: run it now AND keep the set's
+ * un-taken siblings in the tray (deduped by task, newest-last, capped).
+ */
+export function takeFollowUp(clicked: FollowUpSuggestion, set: FollowUpSuggestion[]): void {
+	const next = computeDeferredTray(deferredFollowUps, clicked, set, MAX_DEFERRED_FOLLOW_UPS);
+	if (next !== deferredFollowUps) {
+		deferredFollowUps = next;
+		persistChatNow();
+	}
+	void sendMessage(clicked.task);
+}
+
+/** Run a tray pill: fire it as a fresh in-context turn and remove it from the tray. */
+export function runDeferredFollowUp(fu: FollowUpSuggestion): void {
+	dismissDeferredFollowUp(fu);
+	void sendMessage(fu.task);
+}
+
+/** Dismiss a single tray pill (the × on a chip). */
+export function dismissDeferredFollowUp(fu: FollowUpSuggestion): void {
+	deferredFollowUps = deferredFollowUps.filter((f) => f.task !== fu.task);
+	persistChatNow();
+}
+
+/** Clear the whole tray ("alle ×"). */
+export function clearDeferredFollowUps(): void {
+	if (deferredFollowUps.length === 0) return;
+	deferredFollowUps = [];
+	persistChatNow();
 }
 /** Monotonic counter, bumped each time a streaming text block closes. */
 export function getCompletedTextBlockGen(): number {
@@ -2129,6 +2370,12 @@ export function getAuthError() {
 }
 export function getSessionModel() {
 	return sessionModel;
+}
+/** The current thread's capability tier (`fast`/`balanced`/`deep`), or null before
+ *  a session exists. Drives the per-thread model control (P1 §5.1b) — unlike
+ *  {@link getSessionModel}, never a concrete model-id. */
+export function getSessionTier() {
+	return sessionTier;
 }
 export function getContextWindow() {
 	return contextWindow;
@@ -2229,7 +2476,10 @@ export function newChat() {
 	// "run interrupted" warning on a chat that never ran anything).
 	runInterrupted = null;
 	messageQueue = [];
+	deferredFollowUps = [];
 	sessionModel = null;
+	sessionTier = null;
+	pendingModel = null; // no stickiness — the next new chat starts at default_tier
 	contextBudget = null;
 	runStartedAt = null;
 	runPromptCount = 0;
@@ -2239,6 +2489,57 @@ export function newChat() {
 
 export function getSessionId() {
 	return sessionId;
+}
+
+/** Set the tier the next new chat will run on (composer model picker). Ignored
+ *  once a session exists — a new pick on a live thread goes through
+ *  {@link repickSessionModel} instead (D18 reverses D1). */
+export function setPendingModel(tier: string | null): void {
+	if (sessionId) return;
+	pendingModel = tier;
+}
+
+/** Re-pick the model tier of the CURRENT live/historical thread — the mid-thread
+ *  control (arc:model-selector P1 §5.1b, "continue a historical chat on another
+ *  model"). PATCHes /api/sessions/:id/model; on success the live session swaps and
+ *  the thread row is persisted as a 'user' pick (sticky on resume). Returns a
+ *  discriminated result so the caller can surface the downgrade-overflow refusal
+ *  (422) as actionable copy. Refuses locally when there is no session yet or a run
+ *  is streaming (the server 409s the latter regardless — this is just fast-path UX). */
+export async function repickSessionModel(tier: string): Promise<
+	| { ok: true; model: string }
+	| { ok: false; reason: 'busy' | 'no_session' | 'error' }
+	| { ok: false; reason: 'overflow'; targetTier: string; occupancy: number; window: number }
+> {
+	if (!sessionId) return { ok: false, reason: 'no_session' };
+	if (isStreaming) return { ok: false, reason: 'busy' };
+	try {
+		const res = await fetch(`${getApiBase()}/sessions/${sessionId}/model`, {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ tier }),
+		});
+		if (res.ok) {
+			const data = (await res.json()) as { model?: string; modelId?: string };
+			// `model` is the resolved (clamped) TIER; `modelId` is the concrete
+			// model-id. Keep sessionModel a model-id (consistent with the turn_end
+			// frame + the StatusBar tooltip) and sessionTier the tier (drives the
+			// per-thread control). Falling back to the tier only if modelId is absent.
+			if (data.model) {
+				sessionTier = data.model;
+				sessionModel = data.modelId ?? data.model;
+			}
+			return { ok: true, model: data.model ?? tier };
+		}
+		if (res.status === 422) {
+			const data = (await res.json()) as { targetTier?: string; occupancy?: number; window?: number };
+			return { ok: false, reason: 'overflow', targetTier: data.targetTier ?? tier, occupancy: data.occupancy ?? 0, window: data.window ?? 0 };
+		}
+		if (res.status === 409) return { ok: false, reason: 'busy' };
+		return { ok: false, reason: 'error' };
+	} catch {
+		return { ok: false, reason: 'error' };
+	}
 }
 
 let _resumeGeneration = 0;
@@ -2400,6 +2701,30 @@ async function reattachRun(threadId: string, runId: string, since: number, gen: 
 	}
 }
 
+/**
+ * Prepare a server transcript for display before it replaces the local copy.
+ * The server persists the agent's RAW output, so the last assistant turn still
+ * carries the `<follow_ups>` / bare-JSON trailer in its content — rendering it
+ * verbatim leaks that JSON into the bubble and the pills never reappear. Strip
+ * it, then re-derive the pills from a `suggest_follow_ups` tool call on the last
+ * assistant turn (structured pills win over the text fallback). Shared by BOTH
+ * adopt paths (resumeThread + reconcileThread) — reconcile used to skip it, so a
+ * settled shorter (#4-merged) transcript adopted on mount leaked the trailer.
+ */
+function hydrateServerTranscript(serverMessages: ChatMessage[]): void {
+	stripFollowUpsFromHistory(serverMessages);
+	for (let i = serverMessages.length - 1; i >= 0; i -= 1) {
+		const m = serverMessages[i];
+		if (!m || m.role !== 'assistant') continue;
+		const tc = m.toolCalls?.find((t) => t.name === 'suggest_follow_ups');
+		if (tc) {
+			const fu = followUpsFromToolInput(tc.input);
+			if (fu.length > 0) m.followUps = fu;
+		}
+		break; // only the last assistant turn carries the current pills
+	}
+}
+
 export async function resumeThread(threadId: string): Promise<void> {
 	// Race-condition guard: if another resumeThread call starts, this one aborts
 	const gen = ++_resumeGeneration;
@@ -2432,6 +2757,8 @@ export async function resumeThread(threadId: string): Promise<void> {
 	skipExtraction = false;
 	// Restore any pending send-queue for this thread (durable across reload).
 	messageQueue = loadPersistedQueue(threadId);
+	// Restore the deferred-follow-ups tray for this thread (durable across reload).
+	deferredFollowUps = loadDeferredFollowUps(threadId);
 	// Reconcile restored bubbles: a `queued` bubble with no matching live queue
 	// entry (file-bearing — not persisted — or lost before the flush) is marked
 	// `failed` so the user can re-send instead of staring at a pill that will
@@ -2481,11 +2808,15 @@ export async function resumeThread(threadId: string): Promise<void> {
 		}
 		const data = (await res.json()) as { sessionId: string; model?: string; contextWindow?: number };
 		sessionId = data.sessionId;
-		if (data.model) sessionModel = data.model;
+		if (data.model) { sessionModel = data.model; sessionTier = data.model; }
 		if (data.contextWindow) contextWindow = data.contextWindow;
 
-		// Load thread metadata (extraction flag)
-		const threadRes = await fetch(`${getApiBase()}/threads/${threadId}`, {
+		// Load thread metadata (extraction flag). `threadId` can originate from a
+		// notification deep-link (`/app?thread=…`), so encode it into the path —
+		// consistent with the service worker, and defensive even though it's
+		// same-origin + single-tenant.
+		const encThreadId = encodeURIComponent(threadId);
+		const threadRes = await fetch(`${getApiBase()}/threads/${encThreadId}`, {
 			signal: controller.signal,
 		});
 		if (gen !== _resumeGeneration) return;
@@ -2497,7 +2828,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 		}
 
 		// Load messages for display
-		const msgRes = await fetch(`${getApiBase()}/threads/${threadId}/messages`, {
+		const msgRes = await fetch(`${getApiBase()}/threads/${encThreadId}/messages`, {
 			signal: controller.signal,
 		});
 		if (gen !== _resumeGeneration) return; // superseded by newer click
@@ -2543,6 +2874,9 @@ export async function resumeThread(threadId: string): Promise<void> {
 					return cm;
 				}),
 			);
+			// Strip the raw follow-up trailer + re-derive the pills before rendering
+			// the server transcript (see hydrateServerTranscript).
+			hydrateServerTranscript(serverMessages);
 			// Server is authoritative once it returns, BUT: a mid-persist
 			// window can return fewer messages than the local snapshot
 			// (classic case: user sent a turn, navigated to /app/artifacts
@@ -2551,7 +2885,24 @@ export async function resumeThread(threadId: string): Promise<void> {
 			// keep the local copy — it probably contains the in-flight
 			// user turn that the server hasn't persisted yet. Equal-or-more
 			// means the server caught up; use it.
-			if (serverMessages.length >= localMessages.length) {
+			//
+			// Exception: a SETTLED thread (no active run) with no unpersisted
+			// local message (`failed`/`queued`) whose server transcript is merely
+			// SHORTER — the projection legitimately collapsed it, e.g. the #4
+			// multi-step-turn merge. Without this, a thread cached with the old
+			// (longer, fragmented) shape would never adopt the merged transcript,
+			// so the fix wouldn't reach already-viewed threads. `failed`/`queued`
+			// rows are local-only + unrecoverable, so their presence keeps local.
+			const hasUnpersistedLocal = localMessages.some((m) =>
+				m.failed || m.queued || m.knowledgeWrites?.some((w) => w.status === 'pending_review'));
+			// The shorter-transcript adoption must NOT fire while a turn is streaming: the
+			// fetch above awaited a round-trip, and a turn sent in that window is in local
+			// `messages` but not yet on the server (activeRun null, not failed/queued), so
+			// adopting the shorter server list would wipe the in-flight user bubble +
+			// placeholder. The `>=` path stays unguarded — a thread switch that legitimately
+			// loads an equal-or-longer transcript is unaffected.
+			if (serverMessages.length >= localMessages.length
+				|| (!isStreaming && !resumeActiveRun && !hasUnpersistedLocal)) {
 				messages = serverMessages;
 				adoptedServer = true;
 			}
@@ -2604,7 +2955,7 @@ export async function resumeThread(threadId: string): Promise<void> {
  * currently streaming, refetch the canonical message list from the server
  * and swap it in when it's at least as long as the local snapshot.
  *
- * Why this exists (F13, rafael HN-launch QA 2026-05-27): when the user
+ * Why this exists (F13, demo-walk hardening): when the user
  * navigates away from /app mid-stream (e.g. clicks Settings), ChatView
  * unmounts + the SSE listener is torn down. The engine finishes the run
  * server-side, persists the assistant message to history, and bills the
@@ -2661,11 +3012,34 @@ export async function reconcileThread(): Promise<void> {
 				return cm;
 			}),
 		);
+		// Strip the raw follow-up trailer + re-derive pills, exactly as
+		// resumeThread does — reconcile adopts the same server transcript and must
+		// not leak the raw JSON / drop the pills when it swaps in a settled thread.
+		hydrateServerTranscript(serverMessages);
 		// Mirror resumeThread's mid-persist guard: only swap when the server
 		// has caught up to the local snapshot. A shorter server list means a
 		// turn is still being persisted; keep local until it lands.
+		// AND only when the active thread hasn't changed since this fetch began
+		// (`tid === sessionId`) — the same guard the activeRun re-attach below
+		// already uses. Without it, a thread switch mid-fetch (a notification
+		// deep-link `resumeThread`, or a manual click) would clobber the newly
+		// opened thread's messages with the stale thread's server transcript.
+		// Exception (mirrors resumeThread): a settled thread (no active run) with
+		// no unpersisted local message adopts a merely-shorter server transcript
+		// too, so a thread cached with the old fragmented shape picks up the #4
+		// merged projection instead of staying stale forever.
+		const hasUnpersistedLocal = messages.some((m) =>
+			m.failed || m.queued || m.knowledgeWrites?.some((w) => w.status === 'pending_review'));
 		let adopted = false;
-		if (serverMessages.length >= messages.length) {
+		// RE-CHECK isStreaming HERE, not just at entry: the fetch above awaited a full
+		// round-trip, during which the user may have sent a turn (tapped a follow-up pill
+		// on remount). That turn is in local `messages` + streaming, but the server does
+		// not know its run yet (activeRun null) and it is not failed/queued — so the
+		// `(!data.activeRun && !hasUnpersistedLocal)` disjunct would adopt the shorter
+		// server transcript and WIPE the just-sent user bubble + streaming placeholder.
+		// Never adopt while a turn is in flight.
+		if (tid === sessionId && !isStreaming
+			&& (serverMessages.length >= messages.length || (!data.activeRun && !hasUnpersistedLocal))) {
 			messages = serverMessages;
 			adopted = true;
 			persistChatNow();
