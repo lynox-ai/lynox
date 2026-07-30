@@ -1,31 +1,44 @@
 /**
- * Which names fold onto one subject — per RESOLVER, because there are three.
+ * Which names fold onto one subject — per RESOLVER, because there are three,
+ * and PERSONS GO THROUGH TWO OF THEM depending on where the name came from.
  *
  * WHY THIS FILE EXISTS. The durable-knowledge rollout carries a blocker filed as
- * "same-named subjects merge irreversibly, no ledger", and the plan was to size
- * it with a production query. Reading the code first was cheaper and changed the
- * question — but the FIRST version of this file then got the answer wrong in a
- * way worth recording, because it is the failure mode this whole exercise is
- * about: it characterised `findOrCreate` and reported the result as "the
- * matcher". Production does not route persons through `findOrCreate` at all
- * (`knowledge-layer.ts` sends `person` → `resolvePersonSubject`, `engagement` →
- * `findOrCreateEngagement`), and `resolvePersonSubject` deliberately DOES fold on
- * a token subset. The instrument answered a question; it was not the question.
+ * "same-named subjects merge irreversibly, no ledger". Sizing it turned out not
+ * to need a production query — but it took three attempts to state the answer
+ * correctly, and both wrong versions were wrong the same way: they described
+ * ONE resolver and called it "the matcher".
  *
- * What holds after the correction:
+ *   v1: characterised `findOrCreate` and reported "no fuzzy matching anywhere".
+ *       False — extraction resolves persons through `resolvePersonSubject`,
+ *       which folds on a token subset.
+ *   v2: corrected to "production never routes persons through `findOrCreate`".
+ *       Also false, inverted: CRM contacts (`crm.ts`) and task assignees
+ *       (`task-store.ts` → `resolveAssigneeToSubjectId`) do exactly that.
  *
- *  - No resolver here merges two existing rows. Each attaches the incoming
- *    surface form to an existing subject as an ALIAS, or creates a new one.
- *    Nothing is deleted. (`mergeSubjects` — separate and explicit — is the call
- *    that redirects a row via `merged_into`, and it IS ledgered.)
- *  - So the failure mode is two real entities sharing one row, not data loss.
- *  - A fold does not reliably leave a trace: `_mergeAliases` dedupes
- *    case-insensitively, so a case-variant fold writes nothing at all. The alias
- *    list is a record of some folds, not of folding.
+ * The verified account, checked at each call site:
  *
- * These are CHARACTERISATION tests: they pin current behaviour so a future
- * loosening fails here rather than merging quietly in someone's graph. Where the
- * pinned behaviour is a real risk, the test says so instead of implying it is fine.
+ *   organization / product / service  → `findOrCreate`
+ *   person, from EXTRACTION           → `resolvePersonSubject`  (subset fold)
+ *   person, from CRM or an ASSIGNEE   → `findOrCreate`          (no subset fold)
+ *   engagement                        → `findOrCreateEngagement`
+ *
+ * That split is the finding, and it points the opposite way from the blocker it
+ * was filed under: the same human entered as the contact "Ada" and extracted
+ * from a mail as "Dr. Ada Lovelace" becomes TWO subjects. Over-merging was the
+ * worry; under one of the two person paths, fragmentation is the behaviour.
+ *
+ * What holds across all of them: none MERGES two existing rows. Each either
+ * attaches the incoming surface form to an existing subject as an alias, or
+ * creates a new one — with one exception, engagement's orphan-adopt, which
+ * re-parents an existing row. (`mergeSubjects` is the separate, explicit,
+ * LEDGERED call that redirects a row via `merged_into`.)
+ *
+ * And a fold does not reliably leave a trace: `_mergeAliases` dedupes
+ * case-insensitively, so a case-variant fold writes nothing at all.
+ *
+ * CHARACTERISATION, not aspiration: these pin current behaviour so a future
+ * change fails here rather than merging quietly in someone's graph. Where the
+ * pinned behaviour is a real risk, the test says so.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -49,20 +62,15 @@ describe('subject folding, per resolver', () => {
     tmpDirs.length = 0;
   });
 
-  // ── findOrCreate: organization / product / service ───────────────────────
-  //
-  // The name-deduped kinds MINUS person, which has its own resolver below.
-
-  describe('findOrCreate (organization, product, service)', () => {
+  describe('findOrCreate — organization, product, service', () => {
     /** Create `first`, then offer `second`. Did the second land on the first? */
     function folds(first: string, second: string, kind = 'organization' as const): boolean {
       const store = makeStore();
       const a = store.findOrCreate({ kind, name: first });
-      // Anchors the negatives: without this, every `expect(...).toBe(false)`
-      // below also passes against a findOrCreate broken to ALWAYS create.
+      // Anchors the negatives: without this, every `toBe(false)` below also
+      // passes against a findOrCreate broken to ALWAYS create.
       expect(a.created).toBe(true);
-      const b = store.findOrCreate({ kind, name: second });
-      return b.id === a.id;
+      return store.findOrCreate({ kind, name: second }).id === a.id;
     }
 
     it('folds on case, whitespace and trailing punctuation', () => {
@@ -73,7 +81,7 @@ describe('subject folding, per resolver', () => {
 
     it('does not fold the punctuated form stored FIRST', () => {
       // The asymmetry the implementation admits to: the normalised query is
-      // matched against stored RAW names, so the clean form has to arrive first.
+      // matched against stored RAW names, so the clean form must arrive first.
       expect(folds('Meridian AG.', 'Meridian AG')).toBe(false);
     });
 
@@ -82,6 +90,14 @@ describe('subject folding, per resolver', () => {
       expect(folds('Meridian AG', 'Meridian')).toBe(false);
       expect(folds('Meridian AG', 'Meridian Bau AG')).toBe(false);
       expect(folds('Meridian AG', 'Meridan AG')).toBe(false);
+    });
+
+    it('behaves the same for product and service', () => {
+      // The block used to be titled for three kinds and exercise one.
+      for (const kind of ['product', 'service'] as const) {
+        expect(folds('Orion Suite', 'orion suite', kind), kind).toBe(true);
+        expect(folds('Orion Suite', 'Orion', kind), kind).toBe(false);
+      }
     });
 
     it('does not fold across kind or owner', () => {
@@ -93,36 +109,32 @@ describe('subject folding, per resolver', () => {
     });
 
     it('folds a name that equals a stored ALIAS, not just the canonical name', () => {
-      // The second lookup stage, which the first version of this file never
-      // reached — deleting the `findByAlias` call left all of it green, because
-      // the normalised fallback happened to cover every case it had.
+      // The second lookup stage. The first version of this file never reached it
+      // — deleting the `findByAlias` call left every test green, because the
+      // normalised fallback happened to cover each case it had.
       const store = makeStore();
       const a = store.findOrCreate({ kind: 'organization', name: 'Meridian AG', aliases: ['Meridian Group'] });
       expect(store.findOrCreate({ kind: 'organization', name: 'Meridian Group' }).id).toBe(a.id);
     });
 
-    it('⚠️ folds onto ONE of two subjects sharing an alias, without saying which', () => {
-      // `findByAlias` scans with no ORDER BY and aliases carry no unique index,
-      // so this resolves to whichever row SQLite returns first. Two distinct
-      // organisations that each list "Meridian" then make a third mention of
-      // "Meridian" a coin flip — a cross-entity fold, and the one case here
-      // where the pinned behaviour is simply wrong rather than merely blunt.
+    it('⚠️ picks the FIRST row when two subjects share an alias, by scan order alone', () => {
+      // `findByAlias` full-scans with no ORDER BY, and aliases carry no unique
+      // index — so a third mention of "Meridian" resolves to whichever row the
+      // scan reaches first. Asserted as `a` because that is what it OBSERVABLY
+      // does, not because anything specifies it: no index, no tie-break, no
+      // error. This is the one pinned behaviour here that is wrong rather than
+      // merely blunt — two distinct organisations, and a silent cross-entity
+      // fold decided by row order.
       const store = makeStore();
       const a = store.findOrCreate({ kind: 'organization', name: 'Meridian AG', aliases: ['Meridian'] });
       const b = store.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
       expect(b.id).not.toBe(a.id);
-      const third = store.findOrCreate({ kind: 'organization', name: 'Meridian' });
-      expect([a.id, b.id]).toContain(third.id); // one of them; nothing decides which
+      expect(store.findOrCreate({ kind: 'organization', name: 'Meridian' }).id).toBe(a.id);
     });
   });
 
-  // ── resolvePersonSubject: the path production actually uses for people ────
-
-  describe('resolvePersonSubject (person)', () => {
+  describe('resolvePersonSubject — persons from EXTRACTION', () => {
     it('folds a token SUBSET into the fuller name when it is unambiguous', () => {
-      // "Ada" lands on "Dr. Ada Lovelace". This is the loose match the first
-      // version of this file reported as absent — on the most identity-sensitive
-      // kind there is.
       const store = makeStore();
       const full = store.resolvePersonSubject('Dr. Ada Lovelace');
       const short = store.resolvePersonSubject('Ada');
@@ -130,15 +142,17 @@ describe('subject folding, per resolver', () => {
       expect(short.resolved).toBe('subset');
     });
 
-    it('folds a title-stripped variant onto the same person', () => {
+    it('folds a title-stripped variant through the equal-key branch', () => {
       const store = makeStore();
       const plain = store.resolvePersonSubject('Ada Lovelace');
-      expect(store.resolvePersonSubject('Dr. Ada Lovelace').id).toBe(plain.id);
+      const titled = store.resolvePersonSubject('Dr. Ada Lovelace');
+      expect(titled.id).toBe(plain.id);
+      // Which branch matters: this one shares a token key, the test above is a
+      // strict subset. Without the assertion the two are indistinguishable.
+      expect(titled.resolved).toBe('canonical');
     });
 
-    it('REFUSES when the subset is ambiguous — it mints rather than guesses', () => {
-      // The design this resolver gets right, and it is the shape the register
-      // entry asks for elsewhere: with two candidates it declines to choose.
+    it('REFUSES an ambiguous subset — mints rather than guesses, and still folds a clear one', () => {
       const store = makeStore();
       const a = store.resolvePersonSubject('Ada Lovelace');
       const b = store.resolvePersonSubject('Ada Byron');
@@ -146,19 +160,36 @@ describe('subject folding, per resolver', () => {
       expect(ambiguous.id).not.toBe(a.id);
       expect(ambiguous.id).not.toBe(b.id);
       expect(ambiguous.created).toBe(true);
+      // In the SAME store, so the refusal cannot be confused with a subset scan
+      // that never runs: delete the scan and this line fails while the three
+      // above still pass.
+      expect(store.resolvePersonSubject('Byron').id).toBe(b.id);
     });
 
     it('⚠️ folds the FIRST exact homonym — two different people become one', () => {
       // Ambiguity protects only from the second collision onward. The first
-      // "Thomas Müller" to arrive absorbs the next one, silently, and no string
-      // rule can separate them: they need a second identity signal.
+      // "Thomas Müller" absorbs the next, and no string rule separates them.
       const store = makeStore();
       const first = store.resolvePersonSubject('Thomas Müller');
       expect(store.resolvePersonSubject('Thomas Müller').id).toBe(first.id);
     });
   });
 
-  // ── What a fold leaves behind ────────────────────────────────────────────
+  describe('⚠️ the two person paths disagree', () => {
+    it('a CRM contact or assignee does NOT subset-fold, where extraction would', () => {
+      // `crm.ts` and `resolveAssigneeToSubjectId` both call
+      // `findOrCreate({kind:'person'})`, which has no subset stage. So the same
+      // human, entered as the contact "Ada" and extracted from a mail as
+      // "Dr. Ada Lovelace", becomes two subjects — fragmentation, the mirror of
+      // the over-merge the register entry worries about. Pinned so the
+      // divergence is visible; not endorsed.
+      const store = makeStore();
+      const extracted = store.resolvePersonSubject('Dr. Ada Lovelace');
+      const viaContact = store.findOrCreate({ kind: 'person', name: 'Ada' });
+      expect(viaContact.id).not.toBe(extracted.id);
+      expect(viaContact.created).toBe(true);
+    });
+  });
 
   describe('the trace a fold leaves', () => {
     it('records a differing surface form', () => {
@@ -169,12 +200,11 @@ describe('subject folding, per resolver', () => {
     });
 
     it('⚠️ records NOTHING for a case-variant or an exact homonym', () => {
-      // `_mergeAliases` dedupes case-insensitively, and `createSubject` seeds the
-      // list with the canonical name — so these folds are invisible afterwards.
-      // Asserted on the RAW array: the first version of this file checked
-      // `aliases.map(toLowerCase).toContain('meridian ag')`, which the ORIGINAL
-      // name satisfies. It passed while proving nothing, which is worse than
-      // absent, because the register entry rested on it.
+      // `_mergeAliases` dedupes case-insensitively and `createSubject` seeds the
+      // list with the canonical name, so these folds leave no trace. Asserted on
+      // the RAW array: the first version lower-cased it before looking for the
+      // folded form, which the ORIGINAL name satisfies — it passed while proving
+      // nothing, and the register entry rested on it.
       const store = makeStore();
       const { id } = store.findOrCreate({ kind: 'organization', name: 'Meridian AG' });
       store.findOrCreate({ kind: 'organization', name: 'meridian ag' });
@@ -186,16 +216,29 @@ describe('subject folding, per resolver', () => {
     });
   });
 
-  // ── Out of scope here, and named so the omission is not read as absence ──
+  describe('what these resolvers do NOT see', () => {
+    it('an archived subject is invisible, so its name mints a fresh duplicate', () => {
+      // Both lookups filter `archived_at IS NULL`, and the canonical index is
+      // partial to match. Archiving is therefore not "soft delete" from the
+      // graph's point of view — the next mention of the same name starts a new
+      // subject beside the old one rather than reviving it.
+      const store = makeStore();
+      const a = store.findOrCreate({ kind: 'organization', name: 'Meridian AG' });
+      store.archiveSubject(a.id);
+      const b = store.findOrCreate({ kind: 'organization', name: 'Meridian AG' });
+      expect(b.id).not.toBe(a.id);
+      expect(b.created).toBe(true);
+    });
+  });
 
   it('engagement is a THIRD resolver and is not characterised here', () => {
     // `findOrCreateEngagement` keys on (normalised name, parent), strips a
     // leading "Projekt"/"Project" — a prefix strip the findOrCreate block above
     // correctly denies for its own kinds — and has an orphan-adopt path that
-    // rewrites `parent_id` with no ledger entry. Different rules, different
-    // risks; pinning them belongs with the engagement work, not here. This test
-    // exists so that reading only the blocks above does not leave the impression
-    // that they cover the graph.
+    // RE-PARENTS an existing row, the one place any of this mutates a subject
+    // rather than appending to it. Different rules, different risks; pinning
+    // them belongs with the engagement work. This test exists so that reading
+    // only the blocks above does not read as coverage of the whole graph.
     const store = makeStore();
     const a = store.findOrCreateEngagement('Projekt Orion', null);
     expect(store.findOrCreateEngagement('Orion', null).id).toBe(a.id);
