@@ -75,8 +75,19 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
     const clip = (n: string): string =>
       n.replace(/\p{Cf}/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 60);
     const dupSafe = clip(dup.name), canonSafe = clip(canon.name);
+    // "This is reversible." used to end this sentence, and it was false three ways:
+    // there is no undo the USER can reach (`rollbackMergeRun` has one non-test caller,
+    // the `subject-sweep` CLI), and the ledger it needs lives in `~/.lynox/sweeps/`,
+    // which is in NONE of `backup.ts`'s lists and in neither the migration export set
+    // nor the import whitelist — so a migration, a restore or a container recreate
+    // makes every past merge unreversible without anyone noticing.
+    //
+    // A consent prompt is the last thing a user reads before a destructive action, so
+    // it is the wrong place to be aspirational. It now says the one thing that decides
+    // their answer — they cannot take this back themselves — and leaves the operator
+    // path to the result message, which hands over the actual ledger file.
     const answer = await agent.promptUser(
-      pv`Merge "${dupSafe}" into "${canonSafe}"? Every note, task and mention of "${dupSafe}" moves to "${canonSafe}", and "${dupSafe}" is archived. This is reversible.`,
+      pv`Merge "${dupSafe}" into "${canonSafe}"? Every note, task and mention of "${dupSafe}" moves to "${canonSafe}", and "${dupSafe}" is archived. You cannot undo this yourself.`,
       ['Merge', 'Cancel'],
     );
     if (answer !== 'Merge') return `Cancelled — "${dup.name}" and "${canon.name}" were left as separate entries.`;
@@ -85,7 +96,13 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
       const r = runMerge(subjects, agent.toolContext.dataStore, agent.toolContext.threadStore, getLynoxDir(), dup.id, canon.id);
       if (!r.ok) return `Merge refused: ${r.reason}`;
       const cells = r.dataStoreRows > 0 ? `, ${r.dataStoreRows} record cell${r.dataStoreRows === 1 ? '' : 's'} repointed` : '';
-      return `Merged "${r.dupName}" into "${r.canonicalName}" — one person now${cells}. Reversible from the merge ledger.`;
+      // `runMerge` has always returned `ledgerPath` and this line always threw it
+      // away, then claimed reversibility in the abstract. Handing over the actual
+      // file is what turns "reversible" from a promise into an address: it is the
+      // only input `rollbackMergeRun` takes, and it is NOT covered by backup or
+      // migration — so a user who might ever want this undone needs to keep it.
+      return `Merged "${r.dupName}" into "${r.canonicalName}" — one person now${cells}. `
+        + `An operator can reverse this from ${r.ledgerPath} — that file is not included in backups, so keep it if this may need undoing.`;
     } catch (err) {
       return `subjects_merge error: ${getErrorMessage(err)}`;
     }

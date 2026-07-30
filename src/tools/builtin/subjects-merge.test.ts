@@ -50,6 +50,45 @@ describe('subjects_merge tool (PR-C3)', () => {
     tmpDirs.length = 0;
   });
 
+  // ── The consent prompt must not promise an undo the user does not have ──────
+  //
+  // It used to end "This is reversible." Three independent reasons it was not:
+  // `rollbackMergeRun`'s only non-test caller is the `subject-sweep` CLI, and the
+  // ledger it reads lives in `~/.lynox/sweeps/`, which appears in NONE of
+  // `backup.ts`'s three lists and in neither the migration export set nor the
+  // import whitelist — so a migration or a restore silently makes every past
+  // merge unreversible.
+  it('tells the user they cannot undo it, and does not claim reversibility', async () => {
+    const agent = makeAgent('Merge');
+    await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);
+
+    // `pv` hands promptUser a PromptText (frame/value segments), not a string —
+    // flatten the segments rather than String()-ing the object, which yields
+    // "[object Object]" and would make any assertion below vacuously false.
+    const arg = (agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as
+      { segments?: Array<{ text: string }> } | string | undefined;
+    const prompt = typeof arg === 'string' ? arg : (arg?.segments ?? []).map((sg) => sg.text).join('');
+    // MUTATION THIS KILLS: restoring "This is reversible." to the prompt.
+    // Killed by THIS assert (`subjects-merge.test.ts`, the `toMatch(/cannot undo/i)`
+    // line below) — the older assert two tests down only checks `toContain('Merged')`
+    // on the RESULT and passes with any prompt wording.
+    expect(prompt).toMatch(/cannot undo this yourself/i);
+    expect(prompt).not.toMatch(/is reversible/i);
+  });
+
+  it('hands over the ledger path instead of an abstract reversibility claim', async () => {
+    const agent = makeAgent('Merge');
+    const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);
+
+    // MUTATION THIS KILLS: dropping `r.ledgerPath` from the result string (it was
+    // discarded for the tool's whole life while the message claimed reversibility).
+    // Killed by the `/sweeps/` assert on the NEXT line — `toContain('Merged')`
+    // elsewhere does not constrain the tail of this message at all.
+    expect(res).toMatch(/sweeps[/\\]merge-/);
+    expect(res).toMatch(/not included in backups/i);
+    expect(res).not.toMatch(/Reversible from the merge ledger/i);
+  });
+
   it('confirmed merge folds the duplicate into the canonical (by name)', async () => {
     const agent = makeAgent('Merge');
     const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);
