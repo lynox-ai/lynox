@@ -198,6 +198,15 @@ describe('recordToolCall', () => {
 		expect(state.subAgents!['s1:0']!.toolCalls.map((c) => c.input)).toEqual([{ path: 'a' }, { path: 'b' }]);
 	});
 
+	it('does NOT dedup two DIFFERENT tools that happen to share an input', () => {
+		const state = withDelegation();
+		recordToolCall(state, { name: 'read_file', input: {}, subAgentId: 's1:0' });
+		recordToolCall(state, { name: 'list_dir', input: {}, subAgentId: 's1:0' });
+		// `{}` is a common input, so without the name comparison the dedup
+		// swallows the second call and the child under-reports its work.
+		expect(state.subAgents!['s1:0']!.toolCalls.map((c) => c.name)).toEqual(['read_file', 'list_dir']);
+	});
+
 	it('does NOT dedup a repeat of a call that already CLOSED', () => {
 		const state = withDelegation();
 		recordToolCall(state, { name: 'read_file', input: { path: 'a' }, subAgentId: 's1:0' });
@@ -278,12 +287,21 @@ describe('recordToolResult', () => {
 		const state = withDelegation();
 		recordToolCall(state, { name: 'read_file', input: { path: 'a' } });
 		recordToolCall(state, { name: 'read_file', input: { path: 'b' } });
-		// Close the LATER one first — parallel tool calls settle out of order.
+		// Reachable via THREAD RESUME, not via the live stream: the server pairs
+		// results to calls by `tool_use_id` and the client rehydrates the list
+		// verbatim, so a turn can be restored with a later call already closed
+		// while an earlier one is not. (The live path cannot produce this — it
+		// always closes the FIRST running match, so a mid-stream state where a
+		// later call is done and an earlier one is running never arises.)
 		state.toolCalls![1]!.status = 'done';
 		state.toolCalls![1]!.result = 'b done';
 		const { call } = recordToolResult(state, { name: 'read_file', result: 'a done' });
-		// `findLast` alone would re-close 'b' and overwrite its result; the
-		// running-first lookup is what makes the name unambiguous.
+		// `findLast` alone would re-close 'b' and overwrite a result it already
+		// has. Running-first does NOT make the name unambiguous — with BOTH
+		// running, this still closes 'a' for a result that belongs to 'b'. Name
+		// matching stays approximate for one agent's own parallel same-tool
+		// calls; what the per-agent lists fixed was the PARENT/CHILD collision,
+		// which is a different one.
 		expect(call?.input).toEqual({ path: 'a' });
 		expect(state.toolCalls![1]!.result).toBe('b done');
 	});
