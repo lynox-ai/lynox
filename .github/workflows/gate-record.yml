@@ -21,7 +21,20 @@ name: gate-record
 # block the merge — it stays in the list as the receipt that the record was
 # re-taken rather than left behind.
 #
-# This job is a required status check on main.
+# This job is a required status check on main — AND `enforce_admins` is false on
+# this repo, so `gh pr merge --admin` overrides it exactly as it overrides every
+# other required check. That is not a hole this job opened and not one it can
+# close; the override exists because a broken check must not be able to freeze a
+# release, which stopped being hypothetical the day this one went red on its own
+# PR twice. Read "required" as "you have to decide to skip it", not as "you
+# cannot". The §4b pre-`--admin` green-bundle rule in CLAUDE.md still applies.
+#
+# One cost of turning it on, recorded because it surprised me: an open PR whose
+# branch predates this workflow gets NO run at all, so the required check sits at
+# "expected" forever and the PR cannot merge. Editing the body does not help —
+# the workflow has to exist in the PR's merge ref. `gh pr update-branch` is the
+# fix; a PR with conflicts cannot be rescued that way at all, but it could not
+# merge anyway.
 
 on:
   pull_request:
