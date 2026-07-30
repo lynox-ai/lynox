@@ -89,12 +89,24 @@ function parseArgs(argv) {
 export function extractRecord(body, mark = MARK) {
   // HTML comments come out FIRST. GitHub renders none of them, so a record
   // inside one is invisible to every human who opens the PR while satisfying
-  // this check — and the template puts an instruction comment directly above the
-  // block, which makes "forgot to close the comment" a one-character path to a
-  // green tick over a record nobody can read.
-  const visible = body.replace(/<!--[\s\S]*?-->/g, '');
+  // this check.
+  //
+  // Two details, both learned by getting them wrong:
+  //   · The opener must START A LINE. Stripping any `<!--` anywhere ate a record
+  //     that sat below prose mentioning `` `<!--` `` in inline code — a false red
+  //     on a PR whose only crime was discussing this guard. Line-anchored is also
+  //     what CommonMark treats as an HTML block, so it matches what GitHub hides.
+  //   · An UNTERMINATED comment hides everything after it, to the end of the
+  //     body. The first version only stripped well-formed pairs, so "forgot to
+  //     close the comment" still bought a green tick over an invisible record —
+  //     the exact hole the comment above claimed to close.
+  const visible = body
+    .replace(/^[ \t]*<!--[\s\S]*?-->/gm, '')
+    .replace(/^[ \t]*<!--[\s\S]*$/m, '');
   // Both fences anchored to the start of a line, as a fenced block is defined.
-  const fence = new RegExp('^```' + mark + '[ \\t]*\\n([\\s\\S]*?)^```', 'gm');
+  // `\r?` because GitHub's web editor writes CRLF: without it every PR body
+  // authored in a browser went red with "no gate record" while showing one.
+  const fence = new RegExp('^```' + mark + '[ \\t]*\\r?\\n([\\s\\S]*?)^```', 'gm');
   const found = [...visible.matchAll(fence)];
   if (found.length === 0) return null;
   if (found.length > 1) return { error: `found ${found.length} record blocks; a body may carry one` };

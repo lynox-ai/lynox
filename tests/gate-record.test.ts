@@ -97,12 +97,52 @@ describe('gate-record — the record itself', () => {
     expect(v.errors.join(' ')).toContain('no gate record');
   });
 
-  it('does not accept a record indented into some other block', () => {
-    // A fenced block is defined at the start of a line. Indented, it is a code
-    // sample inside a list item or a quoted diff — someone else's record pasted
-    // for discussion, not a claim about this PR.
+  it('does not see a record under an UNCLOSED html comment either', () => {
+    // The half-closed version of the hole above, and the one its own comment
+    // named: an unterminated `<!--` hides everything after it to the end of the
+    // body on GitHub, while a strip that only matches well-formed pairs leaves
+    // the record perfectly visible to the regex. Forgetting one `-->` bought a
+    // green tick over a record nobody could read.
+    const v = evaluate({ body: `<!-- forgot to close\n\n${record()}`, head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors.join(' ')).toContain('no gate record');
+  });
+
+  it('is not fooled by prose that MENTIONS the comment syntax AROUND the record', () => {
+    // The other direction, and the one that costs trust: a PR whose body
+    // discusses this guard had its real record stripped, because any `<!--`
+    // anywhere opened a strip that a later `-->` closed. A false red teaches
+    // people to route around the check.
+    //
+    // The two mentions must straddle the record. With both on the same side the
+    // strip removes only the prose between them and the record survives — so a
+    // test written that way passes against the very implementation it exists to
+    // rule out. (Found by mutating the line, not by reading it.)
+    const body = 'An HTML comment opens with `<!--`.\n\n'
+      + record()
+      + '\n…and closes with `-->`.\n';
+    expect(evaluate({ body, head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('reads a record from a body written in a browser (CRLF)', () => {
+    // GitHub's web editor writes `\r\n`. The opener required a bare `\n`, so
+    // every browser-authored PR reported "no gate record" while displaying one —
+    // the widest false red this guard could have shipped with.
+    const body = record().replace(/\n/g, '\r\n');
+    expect(evaluate({ body, head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('does not accept a record whose OPENING fence is indented', () => {
     const indented = record().split('\n').map((l) => (l ? '    ' + l : l)).join('\n');
     expect(evaluate({ body: indented, head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  it('does not accept a record whose CLOSING fence is indented', () => {
+    // Pins the closing anchor specifically. Indenting the whole block kills the
+    // opener, so that test passes with the closing fence unanchored — it proved
+    // half of what it looked like it proved. Here the opener is untouched.
+    const body = record().replace(/\n```\n$/, '\n    ```\n');
+    expect(evaluate({ body, head: HEAD, files: CODE }).ok).toBe(false);
   });
 
   it('rejects TWO records rather than picking one', () => {
