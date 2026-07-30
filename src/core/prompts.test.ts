@@ -303,11 +303,22 @@ describe('SYSTEM_PROMPT operator channels', () => {
 // from training-data bias. modelIdentityContext is the injection point —
 // without it, the rafael-prod 2026-05-18 incident regresses.
 describe('modelIdentityContext', () => {
-  it('returns an empty string when provider or model is missing (no anchor possible)', () => {
+  it('returns an empty string when the PROVIDER is missing (no anchor possible)', () => {
     expect(modelIdentityContext(undefined, 'claude-sonnet-4-6')).toBe('');
-    expect(modelIdentityContext('anthropic', undefined)).toBe('');
     expect(modelIdentityContext(null, null)).toBe('');
     expect(modelIdentityContext('', '')).toBe('');
+  });
+
+  it('still anchors on the provider when only the MODEL is missing', () => {
+    // This used to return '' too, which contradicts the note above this block:
+    // the incident it pins is a model hallucinating "I am Claude" with no
+    // anchor, and the provider IS the anchor. Withholding it because the id is
+    // unknown removes the guard in precisely the half-configured setup that
+    // needs it most.
+    const out = modelIdentityContext('anthropic', undefined);
+    expect(out).toContain('Anthropic');
+    expect(out).toContain('Never claim a different brand');
+    expect(out).not.toContain('as model');
   });
 
   it('names Anthropic as the provider when running Claude', () => {
@@ -382,7 +393,11 @@ describe('modelIdentityContext sanitization (prompt-injection guard)', () => {
    * identity — and none of it depends on the id.
    */
   it('keeps the brand rules when the id itself cannot be stated', () => {
-    for (const unusable of ['x'.repeat(500), 'gpt`4o', '\n\n```']) {
+    // `''` and `undefined` are in the list because they are REACHABLE, not for
+    // completeness: `engine.ts` forwards `openai_model_id ?? null` and the web
+    // UI stages a blank there, so a half-configured custom provider lands here
+    // — and that is the setup most likely to answer "I am Claude" otherwise.
+    for (const unusable of ['x'.repeat(500), 'gpt`4o', '\n\n```', '', undefined]) {
       const out = modelIdentityContext('openai', unusable);
       expect(out).toContain('Never claim a different brand');
       expect(out).toContain('INTERNAL capability tiers');
@@ -435,7 +450,12 @@ describe('modelIdentityContext sanitization (prompt-injection guard)', () => {
       { tier: 'deep', modelId: 'accounts/fireworks/models/glm-5p2`\n## x', providerLabel: 'Mistral / OpenAI-compatible' },
       { tier: 'fast', modelId: 'ministral-8b-2512', providerLabel: 'Mistral / OpenAI-compatible' },
     ]);
-    expect(out).toContain('`ministral-8b-2512`');
+    // Asserted as the rendered MAP LINE, and with the map's own heading. A bare
+    // `toContain('`ministral-8b-2512`')` passes when the whole map is dropped:
+    // the no-map fallback sentence names that model too, so the test would be
+    // green against the implementation it exists to rule out.
+    expect(out).toContain('On THIS instance the tiers resolve');
+    expect(out).toContain('- `ministral-8b-2512` — the `fast` tier');
     expect(out).not.toContain('glm-5p2');
     expect(out).not.toContain('the `deep` tier');
   });

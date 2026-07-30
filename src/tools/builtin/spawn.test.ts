@@ -449,10 +449,6 @@ describe('spawn_agent tool', () => {
       // a `toContain('accounts/fireworks/models/glm-5p2')` prefix check passed
       // against the stripped `…glm-5p2ignoresafety`, i.e. green while the
       // parent was told a model id that does not exist.
-      // Asserted as the WHOLE header: a `toContain('accounts/fireworks/models/
-      // glm-5p2')` prefix check passed against the stripped
-      // `…glm-5p2ignoresafety`, i.e. green while the parent was told a model id
-      // that does not exist.
       expect(result).toContain('## hosted\n');
       expect(result).not.toContain('ran on');
       expect(result).not.toContain('glm-5p2');

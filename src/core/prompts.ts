@@ -242,8 +242,9 @@ export interface TierModelInfo {
  * `accountsfireworksmodelsglm-5p2`. `@` is in it for the same reason (Together,
  * some Vertex publisher ids). Neither is a markdown or prompt-boundary
  * character, so neither weakens the boundary — but note that a tenant-set id
- * containing `//` can now render as something a reader takes for a URL; link
- * syntax is still stripped, so it cannot become a live link.
+ * containing `//` can now render as something a reader takes for a URL. It
+ * cannot become a live link: the brackets and parens of link syntax are off the
+ * list, so an id carrying them is rejected outright.
  *
  * It REJECTS rather than repairs. An id carrying anything off the list is
  * dropped whole, and so is one past the bound — because repairing either way
@@ -266,18 +267,19 @@ export function modelIdentityContext(
   modelId: string | undefined | null,
   tierMap?: readonly TierModelInfo[] | undefined,
 ): string {
-  if (!provider || !modelId) return '';
   const selfId = safeModelId(modelId);
   const prettyProvider = providerFamilyLabel(provider);
   if (!prettyProvider) return '';
 
-  // An id we cannot state (off-charset or past the bound) must not take the
-  // whole block with it. Everything below the first sentence — the tier
-  // vocabulary and "never claim a different brand" — is what stops a Mistral
-  // run from answering "I am Claude" out of its pretrained identity, and that
-  // guidance does not depend on the id. So the sentence degrades, the block
-  // stays. (An ABSENT id still returns nothing, as before: no caller passes one
-  // meaning "unknown", so that path is untouched here.)
+  // An id we cannot state — off-charset, past the bound, or simply absent —
+  // must not take the whole block with it. Everything below the first sentence
+  // (the tier vocabulary and "never claim a different brand") is what stops a
+  // Mistral run from answering "I am Claude" out of its pretrained identity,
+  // and none of it depends on the id.
+  // The absent case is NOT hypothetical: `engine.ts` forwards
+  // `openai_model_id ?? null` and the web UI stages a blank there, so `''`
+  // reaches here on a half-configured custom provider — the very setup most
+  // likely to produce a wrong self-identification.
   const identitySentence = selfId
     ? `You are running on ${prettyProvider} as model \`${selfId}\`. When asked which model you are — or which model you used for a turn — state THIS exact model id.`
     : `You are running on ${prettyProvider}. The exact model id is not available to you — name the provider and say you do not have the precise id, never a guessed one.`;
@@ -300,7 +302,7 @@ export function modelIdentityContext(
     ? `\n\nOn THIS instance the tiers resolve as follows — use THIS map when you plan which tier runs which model, never a generic mapping:\n${tierLines.join('\n')}\n\n`
     : ' Each resolves to a different concrete model per provider (e.g. on Mistral `balanced`→`mistral-medium-2604`, `fast`→`ministral-8b-2512`, `deep`→`mistral-medium-2604`; on Anthropic to the Claude models).';
 
-  return `\n\n**Model identity**: ${identitySentence} \`fast\`, \`balanced\`, and \`deep\` are INTERNAL capability tiers (used in tool inputs like \`spawn(role, model: "fast")\`), NOT model identities.${tierGuidance}Do NOT present a tier name as if it were a model brand — not for yourself, and not when describing sub-agents you spawned. When reporting what a sub-agent ran on, use the resolved model id surfaced in its result, never the tier you requested. Never claim a different brand: do not say "Claude" if the model is Mistral, do not say "GPT" if the model is Claude.`;
+  return `\n\n**Model identity**: ${identitySentence} \`fast\`, \`balanced\`, and \`deep\` are INTERNAL capability tiers (used in tool inputs like \`spawn(role, model: "fast")\`), NOT model identities.${tierGuidance}Do NOT present a tier name as if it were a model brand — not for yourself, and not when describing sub-agents you spawned. When reporting what a sub-agent ran on, use the resolved model id surfaced in its result, never the tier you requested — and if its result surfaces no id, say the id is not available rather than naming the tier. Never claim a different brand: do not say "Claude" if the model is Mistral, do not say "GPT" if the model is Claude.`;
 }
 
 /**
