@@ -9,7 +9,6 @@ import type { LynoxHooks } from '../core/engine.js';
 // Mocked below (vi.mock '../core/config.js') — imported so the model-blocklist
 // gate tests can override its return value per-test.
 import { loadConfig } from '../core/config.js';
-import { SecretStore, maskSecretPatterns } from '../core/secret-store.js';
 
 // === Mock dependencies ===
 
@@ -157,11 +156,6 @@ vi.mock('../core/engine.js', () => ({
       deleteSecret: mockSecretDelete,
       resolve: mockSecretResolve,
       containsSecret: mockSecretContains,
-      // Identity, which is what a real SecretStore with an empty vault returns.
-      // It was absent, and the debug-export route now masks by value as well as
-      // by pattern — so its absence made the route 500 rather than under-mask,
-      // which is the fixture failing to mirror `SecretStoreLike`, not the route.
-      maskSecrets: (text: string) => text,
     });
     this.getRunHistory = vi.fn().mockReturnValue({
       getRecentRuns: mockHistoryGetRecentRuns,
@@ -3757,136 +3751,6 @@ describe('LynoxHTTPApi', () => {
         expect(body.runs[0]!.prompt_snapshot).toContain('system');
         // Secret scrub: the leaked key must NOT survive anywhere in the bundle.
         expect(JSON.stringify(body)).not.toContain(KEY);
-      });
-    });
-
-    // ── The class the pattern scrub structurally cannot reach ──────────────
-    //
-    // `maskSecretPatterns` matches known key SHAPES. The export's sharing notice
-    // promises "secrets masked", and for an app password, a bare bearer token or
-    // a credential inside a URL that promise was false — no prefix, no match,
-    // and the generic high-entropy pattern is deliberately off to avoid masking
-    // legitimate debug data. `SecretStore.maskSecrets` masks by VALUE from this
-    // tenant's own vault, so it covers exactly that class (DEF-export-masker-gaps).
-    //
-    // A real SecretStore, not a stub: a stub with a `maskSecrets` method would
-    // prove the route calls something, which is not the claim.
-    it('masks a prefix-less vault value that the pattern scrub cannot recognise', async () => {
-      const OPAQUE = 'qmzTPLvRWdJHxkeUYSAFNBCG';   // no prefix — no SECRET_PATTERN matches it
-      // Loaded via `LYNOX_SECRET_*`, the vault-free injection path — `set()`
-      // needs a real vault, and a stub would test the stub.
-      vi.stubEnv('LYNOX_SECRET_APP_PASSWORD', OPAQUE);
-      const store = new SecretStore();
-
-      // Control: the pattern scrub alone genuinely does not catch it. Without
-      // this the test could pass because the value never reached the bundle.
-      expect(maskSecretPatterns(OPAQUE)).toContain(OPAQUE);
-
-      await swapEngine({
-        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: `T ${OPAQUE}` }), getMessages: () => [] }),
-        getRunHistory: () => ({
-          getRunsBySession: () => [],
-          getCompactionEventsBySession: () => [],
-          getWireSnapshotsForRun: () => [],
-        }),
-        getSecretStore: () => store,
-      }, async () => {
-        const res = await jsonFetch('/api/threads/t1/debug-export');
-        expect(res.status).toBe(200);
-        const raw = JSON.stringify(await res.json());
-        // MUTATION THIS KILLS: dropping the `secretStore.maskSecrets(...)` call
-        // from the scrub chain — the export then ships the vault value verbatim.
-        expect(raw).not.toContain(OPAQUE);
-        expect(raw).toContain('***');   // masked, not merely dropped
-      });
-    });
-
-    // ⚠️ The FIRST version of this block asserted that a document-level scrub
-    // "survives" adversarial values, and it passed — because it picked
-    // `abc"def\\ghi`, a backslash MID-value, which JSON escapes so the literal
-    // never matches. That is the one arrangement where the argument holds. The
-    // cases below are the ones that do not, each verified to throw against the
-    // string-level form, and they are why the scrub now walks the structure.
-    it.each([
-      ['a short value made of JSON structure', '":'],
-      ['a short value ending in a backslash', 'x\\'],
-      // Above the export's length floor, so it is masked for real — and it is
-      // the case that distinguishes a walk from a string replacement. A vault
-      // holds whatever its owner put there; "no one would store that" is not a
-      // property the scrub may rely on.
-      ['a LONG value that is itself JSON structure', ',"runs":'],
-      ['a long value spanning a key boundary', '","title":"'],
-    ])('does not corrupt the document for %s', async (_label, secret) => {
-      vi.stubEnv('LYNOX_SECRET_ADVERSARIAL', secret);
-      const store = new SecretStore();
-      await swapEngine({
-        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: `x ${secret} y` }), getMessages: () => [] }),
-        getRunHistory: () => ({
-          getRunsBySession: () => [],
-          getCompactionEventsBySession: () => [],
-          getWireSnapshotsForRun: () => [],
-        }),
-        getSecretStore: () => store,
-      }, async () => {
-        const res = await jsonFetch('/api/threads/t1/debug-export');
-        // MUTATION THIS KILLS: scrubbing `JSON.stringify(bundle)` as one string
-        // instead of walking it. That form throws a SyntaxError on re-parse and
-        // the route answers 500.
-        expect(res.status).toBe(200);
-        const body = await res.json() as { thread: { id: string } };
-        expect(body.thread.id).toBe('t1');
-      });
-    });
-
-    it('leaves ordinary prose alone — a short vault value is not a credential', async () => {
-      // Masking by value across a whole document with the historical floor of 2
-      // rewrites every incidental occurrence: a vault value of `ab` turns
-      // "about the cabbage table" into "***out the c***bage t***le", silently
-      // destroying what a debug export exists to show.
-      vi.stubEnv('LYNOX_SECRET_TINY', 'ab');
-      const store = new SecretStore();
-      await swapEngine({
-        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'about the cabbage table' }), getMessages: () => [] }),
-        getRunHistory: () => ({
-          getRunsBySession: () => [],
-          getCompactionEventsBySession: () => [],
-          getWireSnapshotsForRun: () => [],
-        }),
-        getSecretStore: () => store,
-      }, async () => {
-        const res = await jsonFetch('/api/threads/t1/debug-export');
-        const body = await res.json() as { thread: { title: string } };
-        // MUTATION THIS KILLS: dropping EXPORT_MASK_MIN_LEN and inheriting the
-        // default floor of 2.
-        expect(body.thread.title).toBe('about the cabbage table');
-      });
-    });
-
-    it('still masks the values that ARE long enough, through the walk', async () => {
-      vi.stubEnv('LYNOX_SECRET_UNICODE', 'schlüssel-Ω-value');
-      vi.stubEnv('LYNOX_SECRET_NEWLINE', 'tok\nen\tvalue');
-      const store = new SecretStore();
-
-      await swapEngine({
-        getThreadStore: () => ({
-          getThread: () => ({ id: 't1', title: 'schlüssel-Ω-value and tok\nen\tvalue' }),
-          getMessages: () => [],
-        }),
-        getRunHistory: () => ({
-          getRunsBySession: () => [],
-          getCompactionEventsBySession: () => [],
-          getWireSnapshotsForRun: () => [],
-        }),
-        getSecretStore: () => store,
-      }, async () => {
-        const res = await jsonFetch('/api/threads/t1/debug-export');
-        expect(res.status).toBe(200);
-        const body = await res.json() as { thread: { id: string } };
-        expect(body.thread.id).toBe('t1');
-        // Masked inside the string value — and the document still parses, which
-        // the string-level form could not promise for these characters.
-        expect(JSON.stringify(body)).not.toContain('schlüssel-Ω-value');
-        expect(JSON.stringify(body)).not.toContain('tok\nen\tvalue');
       });
     });
 

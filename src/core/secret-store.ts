@@ -296,28 +296,10 @@ export class SecretStore implements SecretStoreLike {
     return false;
   }
 
-  /**
-   * Mask every stored secret VALUE occurring in `text`.
-   *
-   * ⚠️ `text` must be ONE plain string, never a serialized document. Masking
-   * across a JSON serialization corrupts it: a value made of structural
-   * characters (`":`) matches the document's own syntax, and a value ending in
-   * a backslash matches the first half of a `\\` escape pair. Both produce a
-   * `SyntaxError` on re-parse — measured, not reasoned. To scrub a structure,
-   * walk it and mask each string value individually.
-   *
-   * `minLength` raises the floor on which secrets participate. The default of 2
-   * is the historical behaviour and right for the call sites that scrub a tool
-   * argument or a model response, where over-masking is harmless. It is wrong
-   * for a whole-document scrub: a 3-character vault value rewrites every
-   * incidental occurrence in ordinary prose, which silently destroys the very
-   * thing a debug export exists to show. Those callers pass a higher floor and
-   * rely on `maskSecretPatterns` for anything shorter.
-   */
-  maskSecrets(text: string, minLength = 2): string {
+  maskSecrets(text: string): string {
     let result = text;
     for (const secret of this.secrets.values()) {
-      if (secret.value.length < Math.max(2, minLength)) continue;
+      if (secret.value.length < 2) continue;
       let masked = maskValue(secret.value);
       // Guard against a degenerate mask that CONTAINS the raw value (e.g. a
       // value made of the mask's own '*' chars, like "***ab" → "*****ab"): it

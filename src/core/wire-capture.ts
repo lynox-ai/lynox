@@ -15,7 +15,7 @@
  * SDK-type-free by design: callers extract plain strings/arrays, so this module has
  * no Anthropic-SDK dependency and is reusable by the eval's wire-replay consumer.
  */
-import { existsSync, mkdirSync, writeFileSync, lstatSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, lstatSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { sha256Short } from './utils.js';
@@ -248,8 +248,12 @@ function captureRefused(env: NodeJS.ProcessEnv): boolean {
   return refused;
 }
 
-/** Test seam — the announcement is once per process by design. */
-export function _resetCaptureRefusalNotice(): void { refusalAnnounced = false; }
+/** Test seam — both notices are once-per-reason by design, so a test that asserts one must
+ *  be able to clear the memo rather than depend on suite ORDER. */
+export function _resetCaptureRefusalNotice(): void {
+  refusalAnnounced = false;
+  sinkWarnings.clear();
+}
 
 /**
  * The dev/eval sink is armed by a runtime FILE-GATE: a file must exist at the gate path
@@ -286,24 +290,47 @@ export function wireSinkDir(env: NodeJS.ProcessEnv = process.env): string {
  * `mkdirSync(dir, { mode })` applies the mode only when it CREATES the directory. An existing
  * `~/.lynox/wire-sink` at 0755 keeps 0755, and an existing symlink is followed to wherever it
  * points — so a pre-planted path defeats the move off `/tmp` entirely. `DEF-wire-capture-prod-gate`
- * asks for exactly this ("incl. tightening a pre-existing loose/symlinked dir"), which the mode
- * argument alone does not deliver.
+ * asks for exactly this ("incl. tightening a pre-existing loose/symlinked dir").
  *
- * Returns null when the path must not be used; the callers already swallow failures.
+ * It REFUSES a loose directory rather than tightening it, and that is the correction of a first
+ * version which called `chmodSync`. The path comes from `LYNOX_DEBUG_WIRE_SINK`, i.e. entirely
+ * from the environment, is not validated to be a sink, and the engine runs as root in the image —
+ * so a stale or mistyped value (`/tmp`, a shared log dir, a bind mount) had the engine
+ * re-permissioning someone else's directory as a side effect of a debug feature. Refusing costs
+ * an operator one `chmod`; tightening costs whoever else was using that path.
+ *
+ * Returns null when the path must not be used. Every rejection says why: the callers swallow
+ * failures by design, and a capture that silently produces nothing is the exact confusion the
+ * provisioned-instance refusal above exists to avoid.
  */
 function prepareSinkDir(dir: string): string | null {
   const existing = lstatSync(dir, { throwIfNoEntry: false });
   if (existing) {
-    // A symlink is refused outright rather than "fixed": following it would write the capture
-    // wherever the link points, and re-pointing someone's deliberate link is not our call.
-    if (existing.isSymbolicLink()) return null;
-    if (!existing.isDirectory()) return null;
-    // Tighten a loose mode in place. 0o777 masks off the file-type bits.
-    if ((existing.mode & 0o777) !== 0o700) chmodSync(dir, 0o700);
+    if (existing.isSymbolicLink()) {
+      warnSinkRefused(`sink path is a symlink (${dir}) — refusing to follow it`);
+      return null;
+    }
+    if (!existing.isDirectory()) {
+      warnSinkRefused(`sink path exists and is not a directory (${dir})`);
+      return null;
+    }
+    const mode = existing.mode & 0o777;
+    if (mode !== 0o700) {
+      warnSinkRefused(`sink dir ${dir} is mode ${mode.toString(8)}, expected 700 — refusing rather than re-permissioning a path this process does not own`);
+      return null;
+    }
     return dir;
   }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
+}
+
+/** One line per distinct reason, so a hot path cannot spam the log. */
+const sinkWarnings = new Set<string>();
+function warnSinkRefused(reason: string): void {
+  if (sinkWarnings.has(reason)) return;
+  sinkWarnings.add(reason);
+  process.stderr.write(`[lynox] wire capture sink refused: ${reason}\n`);
 }
 
 /**

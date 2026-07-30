@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, beforeAll } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, beforeEach } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +9,7 @@ import {
   extractWireFields,
   isWireSinkEnabled,
   isProvisionedInstance,
+  _resetCaptureRefusalNotice,
   wireSinkDir,
   writeWireSnapshot,
   captureWireSnapshot,
@@ -437,35 +438,109 @@ describe('sink defaults that no test was pinning', () => {
 });
 
 describe('a sink dir that already exists is not trusted as found', () => {
-  it('refuses a symlinked sink dir rather than following it', () => {
+  beforeEach(() => { _resetCaptureRefusalNotice(); });
+
+  function captureStderr(): { lines: string[]; restore: () => void } {
+    const lines: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as { write: unknown }).write = (chunk: unknown): boolean => { lines.push(String(chunk)); return true; };
+    return { lines, restore: () => { (process.stderr as { write: unknown }).write = orig; } };
+  }
+
+  it('refuses a symlinked sink dir rather than following it, and says so', () => {
     // `mkdirSync(dir, {mode})` sets the mode only when it CREATES the dir, so a
     // pre-planted symlink survived the move off /tmp untouched and redirected
     // the capture wherever it pointed. DEF-wire-capture-prod-gate asks for this
     // explicitly ("incl. tightening a pre-existing loose/symlinked dir").
-    const base = mkdtempSync(join(tmpdir(), 'lynox-symlink-'));
+    const base = mkdtempSync(join(tmpdir(), 'lynox-link-'));
     const elsewhere = join(base, 'elsewhere');
     mkdirSync(elsewhere);
     const sink = join(base, 'sink');
     symlinkSync(elsewhere, sink);
 
-    writeWireSnapshot(SNAP, { LYNOX_DEBUG_WIRE_SINK: sink });
+    const cap = captureStderr();
+    try { writeWireSnapshot(SNAP, { LYNOX_DEBUG_WIRE_SINK: sink }); } finally { cap.restore(); }
 
     // MUTATION THIS KILLS: reverting to a bare mkdirSync — the file lands in
     // the symlink target and this directory is no longer empty.
     expect(readdirSync(elsewhere)).toHaveLength(0);
+    // And the refusal is not silent: a capture that produces nothing while the
+    // marker is armed is the exact confusion this file's other notice exists for.
+    // Assert the REASON, not a word that also occurs in the temp path — the
+    // first version of this line matched `/symlink/` against a tmpdir named
+    // `lynox-symlink-…`, so removing the symlink branch (which then falls
+    // through to the not-a-directory branch) left it green.
+    expect(cap.lines.join('')).toMatch(/refusing to follow it/);
     rmSync(base, { recursive: true, force: true });
   });
 
-  it('tightens a pre-existing world-readable sink dir to 0700', () => {
+  it('REFUSES a pre-existing loose dir instead of re-permissioning it', () => {
+    // A first version chmod'ed it to 0700. The path is entirely env-supplied,
+    // is not validated to be a sink, and the engine runs as root in the image —
+    // so a stale `LYNOX_DEBUG_WIRE_SINK` had a debug feature silently
+    // re-permissioning someone else's directory. Refusing costs an operator one
+    // chmod; tightening costs whoever else was using that path.
     const base = mkdtempSync(join(tmpdir(), 'lynox-loose-'));
     const sink = join(base, 'sink');
     mkdirSync(sink, { mode: 0o755 });
-    expect(statSync(sink).mode & 0o777).toBe(0o755);
 
-    writeWireSnapshot(SNAP, { LYNOX_DEBUG_WIRE_SINK: sink });
+    const cap = captureStderr();
+    try { writeWireSnapshot(SNAP, { LYNOX_DEBUG_WIRE_SINK: sink }); } finally { cap.restore(); }
 
-    expect(statSync(sink).mode & 0o777).toBe(0o700);
-    expect(readdirSync(sink)).toHaveLength(1);   // and it still wrote
+    // MUTATION THIS KILLS: chmod'ing instead of refusing, and equally a bare
+    // mkdirSync (which would write into the 0755 dir).
+    expect(statSync(sink).mode & 0o777).toBe(0o755);   // untouched
+    expect(readdirSync(sink)).toHaveLength(0);          // and nothing written
+    expect(cap.lines.join('')).toMatch(/mode 755/);
     rmSync(base, { recursive: true, force: true });
+  });
+
+  it('refuses when the sink path is a regular file', () => {
+    const base = mkdtempSync(join(tmpdir(), 'lynox-file-'));
+    const sink = join(base, 'sink');
+    writeFileSync(sink, '');
+    const cap = captureStderr();
+    try { writeWireSnapshot(SNAP, { LYNOX_DEBUG_WIRE_SINK: sink }); } finally { cap.restore(); }
+    // MUTATION THIS KILLS: dropping the `!existing.isDirectory()` branch.
+    expect(cap.lines.join('')).toMatch(/not a directory/);
+    expect(readFileSync(sink, 'utf8')).toBe('');
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it('creates a fresh sink dir at 0700 and writes into it', () => {
+    // The control: refusing everything would also pass the three tests above.
+    const base = mkdtempSync(join(tmpdir(), 'lynox-fresh-'));
+    const sink = join(base, 'sink');
+    writeWireSnapshot(SNAP, { LYNOX_DEBUG_WIRE_SINK: sink });
+    expect(statSync(sink).mode & 0o777).toBe(0o700);
+    expect(readdirSync(sink)).toHaveLength(1);
+    rmSync(base, { recursive: true, force: true });
+  });
+});
+
+describe('the provisioned-instance refusal announces itself', () => {
+  beforeEach(() => { _resetCaptureRefusalNotice(); });
+
+  it('writes one line to stderr, and only once per process', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-notice-'));
+    const gate = join(dir, 'on');
+    writeFileSync(gate, '');
+    const env = { LYNOX_DEBUG_WIRE_GATE_FILE: gate, LYNOX_BILLING_TIER: 'managed' };
+
+    const lines: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as { write: unknown }).write = (chunk: unknown): boolean => { lines.push(String(chunk)); return true; };
+    try {
+      isWireSinkEnabled(env);
+      isWireSinkEnabled(env);
+      isRawWireSinkEnabled(env);
+    } finally { (process.stderr as { write: unknown }).write = orig; }
+
+    // MUTATION THIS KILLS: deleting the announcement — it was presented as a
+    // deliverable and had zero tests, while its reset seam was exported and
+    // called by nothing, which reads as coverage without being any.
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/LYNOX_DEBUG_WIRE_ALLOW_PROVISIONED/);
+    rmSync(dir, { recursive: true, force: true });
   });
 });

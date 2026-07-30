@@ -45,35 +45,6 @@ import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onb
 import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding-domain.js';
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
-
-/**
- * Minimum secret length that participates in the debug export's mask-by-value.
- *
- * Below this a vault value is not a credential, it is a fragment: masking every
- * occurrence of a 3-character string rewrites ordinary prose and silently
- * destroys the export's diagnostic value. Shape-based masking still covers
- * anything shorter that actually looks like a key.
- */
-const EXPORT_MASK_MIN_LEN = 8;
-
-/**
- * Apply `fn` to every STRING VALUE in a JSON-shaped structure, leaving keys,
- * numbers, booleans and null untouched.
- *
- * The point is that scrubbing happens INSIDE string values rather than across a
- * serialization, so the result re-serializes to valid JSON by construction. See
- * the debug-export route for what the string-level form does to a document.
- */
-function maskDeep(value: unknown, fn: (s: string) => string): unknown {
-  if (typeof value === 'string') return fn(value);
-  if (Array.isArray(value)) return value.map((v) => maskDeep(v, fn));
-  if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = maskDeep(v, fn);
-    return out;
-  }
-  return value;
-}
 import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
@@ -3549,48 +3520,13 @@ export class LynoxHTTPApi {
       // I/O AND prompt snapshots — so a credential pasted in chat or passed as a
       // tool argument can't surface unmasked. (Per-field masking of only `runs`
       // left the `messages` array — the largest free-text surface — exposed.)
-      // TWO scrubs, and they fail in opposite directions — which is why both run.
-      //
-      // `maskSecretPatterns` matches KNOWN key SHAPES (sk-…, AKIA…, xox…). It
-      // needs no knowledge of this tenant, and it catches a key pasted into a
-      // chat message that the vault has never seen. What it cannot catch is the
-      // large class with no recognisable prefix: an app password, a bare bearer
-      // token, a credential embedded in a URL. The generic high-entropy pattern
-      // is deliberately skipped there to avoid masking legitimate debug data.
-      //
-      // `SecretStore.maskSecrets` (secret-store.ts:299) masks by VALUE, from this
-      // tenant's own vault. It has no shape requirement at all, so it covers
-      // exactly the prefix-less class the pattern scrub misses — for every value
-      // the owner actually stored. Its blind spot is the mirror image: a secret
-      // that was never put in the vault.
-      //
-      // The sharing notice promises "secrets masked". With only the pattern
-      // scrub that promise overstated its own coverage, which matters precisely
-      // when an export leaves the owner's hands (DEF-export-masker-gaps).
-      // Value-masking runs FIRST so a vault value that also happens to look like
-      // a known shape is masked by identity rather than by guess.
-      //
-      // Both scrubs run PER STRING VALUE over the walked structure, never across
-      // `JSON.stringify(bundle)`. Masking a serialized document corrupts it, and
-      // not in a corner case: a vault value of `":` matches the document's own
-      // syntax, and one ending in a backslash matches the first half of a `\\`
-      // escape pair — each yields a SyntaxError on re-parse, i.e. a 500 on this
-      // route. Measured, after a first version of this change shipped the string
-      // form with a test that happened to pick the one arrangement where it
-      // survives (a backslash mid-value is escaped, so it never matches).
-      // Walking is safe by construction: masks land inside string values and
-      // re-serialization cannot be malformed.
-      //
-      // Object KEYS are deliberately not masked — they are schema field names
-      // here, and rewriting them would break the export's shape for no gain.
-      const secretStore = engine.getSecretStore();
-      const scrubString = (s: string): string =>
-        // EXPORT_MASK_MIN_LEN, not the default 2: this scrubs a whole document,
-        // where a 3-character vault value rewrites every incidental occurrence
-        // in ordinary prose. `maskSecretPatterns` still covers short values that
-        // carry a recognisable key shape.
-        maskSecretPatterns(secretStore ? secretStore.maskSecrets(s, EXPORT_MASK_MIN_LEN) : s);
-      const scrubbed: unknown = maskDeep(bundle, scrubString);
+      // NOTE: maskSecretPatterns matches KNOWN key shapes (sk-…, AKIA…, xox…);
+      // prefix-less opaque tokens are NOT masked (the generic high-entropy
+      // pattern is skipped to avoid over-masking legit debug data). This is
+      // user-scoped own-thread data; the scrub is defense-in-depth for sharing.
+      // A stricter export-only scrub (masking prefix-less opaque tokens) remains
+      // a follow-up hardening — not in this Tier-2 scope.
+      const scrubbed: unknown = JSON.parse(maskSecretPatterns(JSON.stringify(bundle)));
       jsonResponse(res, 200, scrubbed);
     }));
 
