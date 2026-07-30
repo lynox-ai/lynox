@@ -537,13 +537,10 @@
 		return `${parsed.toLocaleDateString(locale, { day: 'numeric', month: 'short' })} ${time}`;
 	}
 
-	// Precedence for the grouped tool-row status: error wins, running over
-	// done. Encoding it as a numeric rank keeps the rule explicit and makes
-	// the reducer below symmetric ("which member is worst?") rather than a
-	// chain of escalation-only branches.
-	// `worstStatus` and the rank table it reads now live in `chat-attribution.ts`
-	// beside `foldToolRows`, which both the parent transcript and the sub-agent
-	// panel fold with. Two copies of "which status wins" is one copy too many.
+	// `worstStatus` and the rank table it reads now live in `chat-attribution.ts`,
+	// beside `foldToolRows`. It is the ONLY thing the transcript's fold below and
+	// the sub-agent panel's share — the two loops are separate implementations.
+	// Two copies of "which status wins" was one copy too many.
 
 	/** Group consecutive tool calls with same action, extract plan + step blocks */
 	function groupedToolCalls(blocks: import('../stores/chat.svelte.js').ContentBlock[], toolCalls: ToolCallInfo[]): GroupedBlock[] {
@@ -2045,9 +2042,18 @@
 					<span>{t('spawn.done')}</span>
 				{/if}
 				<span class="text-text-subtle/50">{children.length - running.length}/{children.length}</span>
+				<!-- Spend when it is known, otherwise the engine's CEILING while the
+				     batch is still running — `≤`, never `~`, because that figure is
+				     maxIterations × a full output fill and the real bill is usually a
+				     fraction of it. `batchTotals` decides which of the two exists;
+				     asking `> 0` here is a rendering question, not a second guard. -->
 				{#if totals.costUsd > 0}
 					<span class="text-text-subtle/50" aria-hidden="true">·</span>
 					<span class="text-text-subtle/70">{formatCost(totals.costUsd)}</span>
+				{:else if totals.estimateMaxUsd !== null}
+					<span class="text-text-subtle/50" aria-hidden="true">·</span>
+					<span class="text-text-subtle/70" title={t('spawn.est_max_hint')}
+						>≤ {formatCost(totals.estimateMaxUsd)}</span><span class="sr-only">{t('spawn.est_max_hint')}</span>
 				{/if}
 				{#if elapsed >= 120 && running.length > 0}
 					<span class="text-warning">{t('spawn.slow')}</span>
@@ -2056,11 +2062,14 @@
 
 			{#each children as child (child.id)}
 				{@const isRunning = child.status === 'running'}
-				<!-- Folded with the SAME reducer the parent transcript uses
-				     (`foldToolRows`): consecutive same-action calls collapse into one
-				     row with merged subjects. Before that, a child that read forty
-				     files rendered forty rows here, where the identical forty calls
-				     used to fold into one in the parent's list. -->
+				<!-- `foldToolRows`: consecutive same-action calls collapse into one row
+				     with merged subjects. A SECOND implementation of the transcript's
+				     inline fold, not a shared one — `groupedToolCalls` above keeps its
+				     own loop (it interleaves `plan_task` / `artifact_save` and emits a
+				     richer row), and the two share only `worstStatus`. They can drift.
+				     Before the fold, a child that read forty files rendered forty rows
+				     here, where the identical forty fold into one in the parent's
+				     list. -->
 				{@const childRows = foldToolRows(child.toolCalls, toolCallLabel)}
 				<div class="mt-1">
 					<div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">

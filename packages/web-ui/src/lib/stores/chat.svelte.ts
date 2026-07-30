@@ -9,6 +9,9 @@ import {
 	recordSpawn,
 	applySpawnProgress,
 	applyChildDone,
+	SPAWN_EVENT,
+	SPAWN_PROGRESS_EVENT,
+	SPAWN_CHILD_DONE_EVENT,
 	type ToolCallInfo,
 	type SpawnProgress,
 	type SubAgentActivity,
@@ -1398,7 +1401,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			streamingToolPhase = null;
 			break;
 		}
-		case 'spawn': {
+		case SPAWN_EVENT: {
 			// Delegation started. Registers the batch, its children, and the block that
 			// places the panel where the delegation happened — chronologically, not
 			// pinned to whichever tool row came last.
@@ -1409,12 +1412,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			syncSpawnContext(msg);
 			break;
 		}
-		case 'spawn_progress': {
+		case SPAWN_PROGRESS_EVENT: {
 			applySpawnProgress(msg, data);
 			syncSpawnContext(msg);
 			break;
 		}
-		case 'spawn_child_done': {
+		case SPAWN_CHILD_DONE_EVENT: {
 			applyChildDone(msg, data);
 			syncSpawnContext(msg);
 			break;
