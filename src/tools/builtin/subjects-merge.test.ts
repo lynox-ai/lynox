@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from '../../core/engine-db.js';
@@ -13,7 +13,7 @@ import { flattenPrompt, isPromptText } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
 
 /**
- * PR-C3 subjects_merge chat tool — the confirmed, reversible surface over
+ * PR-C3 subjects_merge chat tool — the confirmed, consent-gated surface over
  * SubjectStore.mergeSubjects. requiresConfirmation ⇒ it owns its confirmation via
  * promptUser and fails closed with no interactive channel; it shares the merge
  * runner's ledger (hermetic here via setDataDir into a tmp dir).
@@ -71,11 +71,17 @@ describe('subjects_merge tool (PR-C3)', () => {
     // below). Nothing else in this file reads `definition.description` at all — the
     // prompt and result tests above are blind to it, which is exactly how the original
     // claim survived a change whose whole purpose was to remove it.
-    // NB: no blanket /can be undone/ assert — the correct text CONTAINS that phrase,
-    // inside the instruction "do NOT tell the user it can be undone from chat". A
-    // negative assert broad enough to catch the claim also catches its negation.
-    expect(desc).not.toMatch(/is reversible/i);
-    expect(desc).toMatch(/command-line rollback/i);
+    // A negative assert on ONE phrasing is not a pin. The first version was
+    // `not.toMatch(/is reversible/i)` and a delta round put "merges ARE reversible"
+    // straight back into this string with all 9112 tests green — plural escapes a
+    // substring, and so do "undoable", "can be rolled back", "not permanent".
+    //
+    // So: name the one clause that is allowed to use this vocabulary, and forbid the
+    // vocabulary everywhere else in the string. A rewrite of the sanctioned sentence
+    // fails the toContain; a reintroduction anywhere else fails the negative.
+    const SANCTIONED = 'Undoing needs a command-line rollback from a ledger file that is not in any backup.';
+    expect(desc).toContain(SANCTIONED);
+    expect(desc.replace(SANCTIONED, '')).not.toMatch(/revers|undo|roll ?back|permanent/i);
   });
 
   it('names the real undo route instead of claiming reversibility', async () => {
@@ -89,6 +95,11 @@ describe('subjects_merge tool (PR-C3)', () => {
     // Assert the shape first, then use the helper this file already imports.
     const arg = (agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
     expect(isPromptText(arg), 'the consent prompt must stay a pv PromptText').toBe(true);
+    // The brand alone is not the boundary: a 4-line wrapper returning one all-`frame`
+    // segment passes `isPromptText` and puts KG-derived names back into markdown frame,
+    // which is exactly what `pv` exists to prevent. Pin the KIND.
+    expect((arg as { segments: Array<{ kind: string; text: string }> }).segments)
+      .toContainEqual({ kind: 'value', text: 'Dr. Ada Lovelace' });
     const prompt = flattenPrompt(arg as Parameters<typeof flattenPrompt>[0]);
     // The wording is tier-neutral on purpose. "You cannot undo this yourself" was the
     // first attempt and is FALSE for a self-hoster: `subject-sweep --rollback` ships in
@@ -117,11 +128,16 @@ describe('subjects_merge tool (PR-C3)', () => {
     const written = readdirSync(join(dir, 'sweeps')).filter((f) => f.startsWith('merge-'));
     expect(written, 'runMerge must have written exactly one ledger').toHaveLength(1);
 
-    // MUTATION THIS KILLS: replacing `${r.ledgerPath}` with ANY constant, including a
-    // plausible one. Killed by this assert (`subjects-merge.test.ts`, the
-    // `toContain(written[0])` below) — the older shape regex could not tell the two apart.
-    expect(res).toContain(written[0]!);
-    expect(existsSync(join(dir, 'sweeps', written[0]!))).toBe(true);
+    // `readdirSync` returns BASENAMES, so asserting on `written[0]` alone pinned the
+    // filename and nothing about the directory — a delta round shipped both a bare
+    // basename and a reconstructed `/backups/sweeps/` path with the suite green, the
+    // second being verbatim the failure the comment above claims to kill. Assert the
+    // full path the tool must actually emit.
+    //
+    // MUTATION THIS KILLS: any constant, any basename-only form, any reconstructed
+    // directory. Killed by this assert — `subjects-merge.test.ts`, the
+    // `toContain(join(dir, 'sweeps', written[0]!))` on the next line.
+    expect(res).toContain(join(dir, 'sweeps', written[0]!));
     expect(res).toMatch(/not included in backups/i);
     expect(res).not.toMatch(/Reversible from the merge ledger/i);
   });

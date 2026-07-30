@@ -32,13 +32,23 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
   // [BLOCKED] would otherwise route through the worker-wired promptUser as a
   // rubber-stampable notification, not a hard deny).
   destructive: { mode: 'data' },
+  // The behavioural instruction lives here, not in `description`. `subjects_merge` is a
+  // LAZY_DEFERRED tool, so its description is what tool-search matches against and wants to
+  // stay keyword-rich (`agent.ts:111-112`) — while narrative prose in a definition rides the
+  // cached prefix on every turn. `detailedGuidance` is the repo's purpose-built home for
+  // exactly this split and is loaded only once the tool is actually reached.
+  detailedGuidance:
+    'Never tell the user a merge is reversible, undoable or can be rolled back from chat. It '
+    + 'cannot: the rollback is a command-line step against a ledger file under ~/.lynox/sweeps/, '
+    + 'and that file is in no backup and in neither migration list, so a restore or a tenant '
+    + 'migration ends the possibility silently. Say what the result message says.',
   definition: {
     name: 'subjects_merge',
     description:
       'Merge two person entries that are the SAME real person into one (e.g. a bare first name "Ada" ' +
       'and the fuller "Dr. Ada Lovelace"), moving all their notes, tasks and mentions onto the kept entry. ' +
       'Use ONLY when confident they are one person. Pass the shorter/duplicate name as `duplicate` and the ' +
-      'fuller/correct name as `canonical`. Confirm required. Undoing needs a command-line rollback — never call it reversible.',
+      'fuller/correct name as `canonical`. You will be asked to confirm. Undoing needs a command-line rollback from a ledger file that is not in any backup.',
     input_schema: {
       type: 'object' as const,
       properties: {
