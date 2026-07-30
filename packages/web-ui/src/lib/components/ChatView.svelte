@@ -537,10 +537,6 @@
 		return `${parsed.toLocaleDateString(locale, { day: 'numeric', month: 'short' })} ${time}`;
 	}
 
-	// Precedence for the grouped tool-row status: error wins, running over
-	// done. Encoding it as a numeric rank keeps the rule explicit and makes
-	// the reducer below symmetric ("which member is worst?") rather than a
-	// chain of escalation-only branches.
 	// `worstStatus` and the rank table it reads now live in `chat-attribution.ts`
 	// beside `foldToolRows`, which both the parent transcript and the sub-agent
 	// panel fold with. Two copies of "which status wins" is one copy too many.
@@ -2047,7 +2043,11 @@
 				<span class="text-text-subtle/50">{children.length - running.length}/{children.length}</span>
 				{#if totals.costUsd > 0}
 					<span class="text-text-subtle/50" aria-hidden="true">·</span>
-					<span class="text-text-subtle/70">{formatCost(totals.costUsd)}</span>
+					<!-- Marked `~` while it is still the engine's up-front reservation:
+					     a batch showing no cost at all reads as free, and the reserved
+					     figure is the only honest number before the first child settles.
+					     Real spend replaces it the moment there is any. -->
+					<span class="text-text-subtle/70">{totals.costIsEstimate ? '~' : ''}{formatCost(totals.costUsd)}</span>
 				{/if}
 				{#if elapsed >= 120 && running.length > 0}
 					<span class="text-warning">{t('spawn.slow')}</span>
@@ -2056,15 +2056,14 @@
 
 			{#each children as child (child.id)}
 				{@const isRunning = child.status === 'running'}
-				<!-- Folded with the same reducer the parent transcript uses
-				     (`foldToolRows`): consecutive same-action calls collapse into one
-				     row with merged subjects. Not byte-identical to the transcript —
-				     `groupedToolCalls` pulls `plan_task` and `artifact_save` out
-				     before grouping, so those break a fold there and not here; a
-				     child rendering either is not a case this panel has. Before the
-				     fold, a child that read forty files rendered forty rows here,
-				     where the identical forty calls
-				     used to fold into one in the parent's list. -->
+				<!-- `foldToolRows`: consecutive same-action calls collapse into one row
+				     with merged subjects. A SECOND implementation of the transcript's
+				     inline fold, not a shared one — `groupedToolCalls` above keeps its
+				     own loop (it interleaves `plan_task` / `artifact_save` and emits a
+				     richer row), and the two share only `worstStatus`. They can drift.
+				     Before the fold, a child that read forty files rendered forty rows
+				     here, where the identical forty fold into one in the parent's
+				     list. -->
 				{@const childRows = foldToolRows(child.toolCalls, toolCallLabel)}
 				<div class="mt-1">
 					<div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">

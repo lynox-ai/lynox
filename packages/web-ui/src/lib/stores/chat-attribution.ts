@@ -46,7 +46,26 @@ export interface SpawnProgress {
 	elapsedS: number;
 	/** Client clock at batch start — the fallback elapsed before the first heartbeat. */
 	startedAt: number;
+	/** What the engine reserved for this batch up front, before any child ran. */
+	estimatedCostUSD?: number | undefined;
 }
+
+/**
+ * The three wire event types whose payloads the reducers below consume.
+ *
+ * They live here for the same reason the reducers take raw payloads: the only
+ * place they are used is `chat.svelte.ts`'s `switch`, which this repo's vitest
+ * cannot import. A `case 'spawn_progres':` typo is a case that never runs and a
+ * batch that never updates, and nothing in CI would notice. Exported as
+ * constants, the strings sit in a module a test can read.
+ *
+ * They are an attestation of the wire, not a cross-repo check: nothing here can
+ * see the engine's `StreamEvent` union. The pinning test states the literals so
+ * a change to these values has to be a deliberate edit of a test.
+ */
+export const SPAWN_EVENT = 'spawn';
+export const SPAWN_PROGRESS_EVENT = 'spawn_progress';
+export const SPAWN_CHILD_DONE_EVENT = 'spawn_child_done';
 
 /** Ordered blocks for interleaved rendering (text ↔ thinking ↔ tools ↔ spawns). */
 export type ContentBlock =
@@ -127,11 +146,29 @@ export function parseAnnouncedSubAgents(raw: unknown): AnnouncedSubAgent[] {
 }
 
 /** Register a batch and its children. Idempotent on replay of the same `spawnId`. */
+/**
+ * The ONE rule for a dollar figure arriving on the wire — used by both the
+ * per-child spend and the batch's up-front reservation.
+ *
+ * `undefined` means "no figure to show", and 0 counts as that: a model with no
+ * pricing entry reports 0, and "$0.0000" reads as "this was free" rather than
+ * "we don't know". A NaN or a stringified amount is a malformed frame; letting
+ * either through puts NaN in a total that is then rendered.
+ *
+ * Callers must NOT re-check the result. An identical guard downstream masks
+ * every mutation of this one, which is exactly how the first version of this
+ * passed its own malformed-input test with the check deleted.
+ */
+function reportableUsd(value: unknown): number | undefined {
+	return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 function startSpawn(
 	state: AttributionState,
 	spawnId: string,
 	children: AnnouncedSubAgent[],
 	startedAt: number,
+	estimatedCostUSD?: number | undefined,
 ): void {
 	if (!spawnId || children.length === 0) return;
 	state.spawns = state.spawns ?? {};
@@ -142,6 +179,7 @@ function startSpawn(
 		childIds: children.map((c) => c.id),
 		elapsedS: 0,
 		startedAt,
+		...(estimatedCostUSD !== undefined ? { estimatedCostUSD } : {}),
 	};
 	for (const c of children) {
 		state.subAgents[c.id] = {
@@ -272,7 +310,7 @@ export function recordSpawn(state: AttributionState, data: Record<string, unknow
 	const children = parseAnnouncedSubAgents(data['subAgents']);
 	if (!spawnId || children.length === 0) return false;
 	if (state.spawns?.[spawnId]) return true; // replayed frame — already placed
-	startSpawn(state, spawnId, children, now);
+	startSpawn(state, spawnId, children, now, reportableUsd(data['estimatedCostUSD']));
 	state.blocks = state.blocks ?? [];
 	state.blocks.push({ type: 'spawn', spawnId });
 	return true;
@@ -311,12 +349,10 @@ export function applySpawnProgress(state: AttributionState, data: Record<string,
 export function applyChildDone(state: AttributionState, data: Record<string, unknown>): void {
 	const child = childFor(state, data['subAgentId']);
 	if (!child) return;
-	const costUsd = data['costUsd'];
 	child.status = data['ok'] === true ? 'done' : 'error';
 	child.elapsedS = Number(data['elapsedS'] ?? 0);
-	// A model with no pricing entry reports 0. Showing "$0.0000" would read as
-	// "this was free" rather than "we don't know", so leave it unset instead.
-	if (typeof costUsd === 'number' && Number.isFinite(costUsd) && costUsd > 0) child.costUsd = costUsd;
+	const costUsd = reportableUsd(data['costUsd']);
+	if (costUsd !== undefined) child.costUsd = costUsd;
 }
 
 /**
@@ -331,6 +367,8 @@ export function batchTotals(state: AttributionState, spawnId: string): {
 	children: SubAgentActivity[];
 	running: SubAgentActivity[];
 	costUsd: number;
+	/** True when `costUsd` is the engine's up-front reservation, not spend. */
+	costIsEstimate: boolean;
 	settledElapsedS: number | null;
 } {
 	const batch = state.spawns?.[spawnId];
@@ -338,10 +376,20 @@ export function batchTotals(state: AttributionState, spawnId: string): {
 		.map((id) => state.subAgents?.[id])
 		.filter((c): c is SubAgentActivity => !!c);
 	const running = children.filter((c) => c.status === 'running');
+	const spent = children.reduce((sum, c) => sum + (c.costUsd ?? 0), 0);
+	// Until the first child settles there is no spend to report, and a batch
+	// showing nothing where a cost will appear reads as "this is free". The
+	// engine reserved a figure before it started — show THAT, marked as the
+	// estimate it is, and let real spend replace it the moment there is any.
+	// Deliberately NOT re-validated here — `reportableUsd` already decided, and a
+	// second `> 0` at this line would make every mutation of that one invisible.
+	const estimate = batch?.estimatedCostUSD;
+	const costIsEstimate = spent === 0 && estimate !== undefined;
 	return {
 		children,
 		running,
-		costUsd: children.reduce((sum, c) => sum + (c.costUsd ?? 0), 0),
+		costUsd: costIsEstimate ? estimate : spent,
+		costIsEstimate,
 		settledElapsedS: running.length > 0 || children.length === 0
 			? null
 			: Math.max(...children.map((c) => c.elapsedS ?? 0)),
@@ -377,9 +425,12 @@ export interface ToolRow {
  * as one "Datei gelesen: a, b, c…" row. When child activity moved out of
  * `msg.toolCalls` and into its own panel, it lost that — the panel emitted one
  * `<li>` per call, so a `researcher` child that reads forty files turned a
- * delegation into the longest thing in the transcript. Same data, same intent, so
- * the same fold, and it lives in the tested module rather than in the template
- * where a deleted branch is invisible to CI.
+ * delegation into the longest thing in the transcript. Same data, same intent —
+ * but NOT literally the transcript's fold: `groupedToolCalls` in ChatView keeps
+ * its own loop, because it also interleaves `plan_task` / `artifact_save` blocks
+ * and emits a richer row. The two share only `worstStatus`, and can drift. What
+ * this placement buys is that the PANEL's fold sits in a tested module instead
+ * of a template, where a deleted branch is invisible to CI.
  *
  * `labelOf` is injected because label resolution needs the i18n `t` the component
  * owns. A call the labeller hides (returns null) is dropped from the rows, which

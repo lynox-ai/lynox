@@ -10,6 +10,9 @@ import {
 	batchTotals,
 	foldToolRows,
 	worstStatus,
+	SPAWN_EVENT,
+	SPAWN_PROGRESS_EVENT,
+	SPAWN_CHILD_DONE_EVENT,
 	type AttributionState,
 	type ToolCallInfo,
 } from './chat-attribution.js';
@@ -434,6 +437,68 @@ describe('batchTotals elapsed', () => {
 	it('reports nothing for a batch it does not know', () => {
 		const state = withDelegation();
 		expect(batchTotals(state, 's9')).toMatchObject({ children: [], costUsd: 0, settledElapsedS: null });
+	});
+});
+
+/**
+ * The engine reserves a figure for the batch before any child runs and puts it
+ * on the `spawn` event. Nothing read it — a field on the wire with no reader is
+ * the same defect as a reducer with no caller, just pointing the other way.
+ */
+describe('batchTotals — the up-front reservation', () => {
+	const withEstimate = (usd: unknown): AttributionState => {
+		const state: AttributionState = {};
+		recordSpawn(state, { ...batch('s1', [{ id: 's1:0', name: 'researcher' }]), estimatedCostUSD: usd }, 1000);
+		return state;
+	};
+
+	it('stands in for spend while nothing has settled, marked as an estimate', () => {
+		const t = batchTotals(withEstimate(0.04), 's1');
+		expect(t.costUsd).toBe(0.04);
+		expect(t.costIsEstimate).toBe(true);
+	});
+
+	it('is REPLACED by real spend the moment a child settles', () => {
+		const state = withEstimate(0.04);
+		applyChildDone(state, { subAgentId: 's1:0', ok: true, elapsedS: 9, costUsd: 0.0021 });
+		const t = batchTotals(state, 's1');
+		// Not 0.0421, and not still 0.04: the reservation was a prediction of this
+		// very number, so keeping either alongside it double-counts the batch.
+		expect(t.costUsd).toBe(0.0021);
+		expect(t.costIsEstimate).toBe(false);
+	});
+
+	it('claims nothing when the engine sent no estimate', () => {
+		const t = batchTotals(withDelegation(), 's1');
+		expect(t.costUsd).toBe(0);
+		// `costIsEstimate` false with a zero cost is what makes the caller render
+		// nothing at all, rather than a "~$0.0000" that reads as "this is free".
+		expect(t.costIsEstimate).toBe(false);
+	});
+
+	it('ignores a malformed estimate rather than rendering NaN', () => {
+		// `Infinity` is the one that needs `Number.isFinite` — every other value
+		// here already fails the `> 0` test (`NaN > 0` is false), so a list
+		// without it leaves that check unpinned.
+		for (const bad of ['0.04', Number.NaN, Number.POSITIVE_INFINITY, -1, null, undefined]) {
+			const t = batchTotals(withEstimate(bad), 's1');
+			expect(t.costUsd).toBe(0);
+			expect(t.costIsEstimate).toBe(false);
+		}
+	});
+});
+
+/**
+ * The event-type strings. Their only use is the `switch` in `chat.svelte.ts`,
+ * which vitest cannot import — so a typo there is a case that never runs, with
+ * nothing in CI to notice. This does not verify them against the engine (no
+ * cross-repo type is reachable here); it makes changing them a deliberate act.
+ */
+describe('wire event types', () => {
+	it('are the names the engine emits', () => {
+		expect(SPAWN_EVENT).toBe('spawn');
+		expect(SPAWN_PROGRESS_EVENT).toBe('spawn_progress');
+		expect(SPAWN_CHILD_DONE_EVENT).toBe('spawn_child_done');
 	});
 });
 
