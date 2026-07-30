@@ -28,7 +28,8 @@ import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
 import { CostGuard } from './cost-guard.js';
-import { deriveTurnUntrusted } from './untrusted-signals.js';
+import { deriveTurnUntrusted, describeTurnUntrusted } from './untrusted-signals.js';
+import { appendUntrustedCauseLog } from './untrusted-cause-log.js';
 import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
 import { isDangerous } from '../tools/permission-guard.js';
@@ -249,8 +250,8 @@ export class Agent implements IAgent {
    * config.json file), which on managed-tier engines is stale after the
    * user switches provider via the LLM Settings UI — sub-agent gets
    * undefined apiBaseURL → llm-client throws "OpenAI provider requires
-   * apiBaseURL and openaiModelId" → spawn fails. Per [[bug 2026-05-24
-   * staging-walk Case 26]].
+   * apiBaseURL and openaiModelId" → spawn fails. Found on a staging walk
+   * on 2026-05-24.
    */
   private readonly inheritedApiKey: string | undefined;
   private readonly inheritedApiBaseURL: string | undefined;
@@ -460,6 +461,25 @@ export class Agent implements IAgent {
   /** Wave 1.2: mark this run tainted (spawn propagates a shared-Memory child's taint here).
    *  Also arms the sticky conversation latch (DK.1 F5). */
   noteUntrustedData(): void { this._sawUntrustedData = true; this._conversationSawUntrusted = true; }
+  /**
+   * Re-arm ONLY the sticky conversation latch, without touching the run-scoped
+   * marker.
+   *
+   * For compaction. Compaction rewrites the context of the SAME conversation,
+   * but it does it through `reset()` — which is the fresh-conversation path and
+   * therefore clears the latch by design — and then `loadMessages()`, which
+   * re-derives the latch from the new context. The post-compaction seed is a
+   * summary: it carries no wrapped-untrusted marker and no `tool_use` block
+   * naming an external-content tool, so the re-derivation lands on FALSE and the
+   * durable-write gate silently disarms on a conversation that HAS ingested
+   * untrusted data. Auto-compaction fires on context pressure, so the threads
+   * this hits are exactly the long research ones most likely to be tainted.
+   *
+   * `noteUntrustedData()` is the wrong tool here: it would also arm the
+   * run-scoped marker, claiming this turn saw untrusted content when it only
+   * inherited the conversation's history.
+   */
+  restoreConversationTaint(): void { this._conversationSawUntrusted = true; }
   /**
    * DK.1 (H4): the set of tool NAMES executed on THIS run. The `_sawUntrustedData` content
    * marker is allowlist-by-omission — `bash`/`curl`/`read_file`/`media_process`/`api_setup`
@@ -829,6 +849,21 @@ export class Agent implements IAgent {
       });
       return;
     }
+    // Recorded on BOTH branches, because a numerator without a denominator answers
+    // nothing: the whole question is what SHARE of extractions the union cancels, and
+    // `capture_eligible` above only fires when DK is ON, so it cannot serve as the
+    // denominator for this DK-OFF path. The clean case logs `cause:'none'`.
+    void appendUntrustedCauseLog(this.toolContext?.userConfig?.retrieval_shadow_log === true, {
+      ts: Date.now(),
+      site: 'auto-extract',
+      cause: describeTurnUntrusted(this),
+      untrusted: turnUntrusted,
+      threadId: this.currentThreadId,
+      runId: this.currentRunId,
+    });
+    // The heaviest consequence of the union, and the least visible: on the legacy path an
+    // untrusted turn does not ROUTE the capture, it CANCELS it. There is no queue entry to
+    // find afterwards, so without the line above this abstention leaves no trace at all.
     if (turnUntrusted) return;
     const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
     this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));

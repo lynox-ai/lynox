@@ -135,7 +135,7 @@ export function streamHandler(event: StreamEvent, stdout: NodeJS.WriteStream): v
       break;
 
     case 'spawn':
-      stdout.write(renderSpawn(event.agents, event.estimatedCostUSD));
+      stdout.write(renderSpawn(event.subAgents.map(s => s.name), event.estimatedCostUSD));
       break;
 
     case 'turn_end': {

@@ -1,0 +1,5 @@
+# Config flags whose ABSENCE means ENABLED — regenerate with scripts/default-on-inventory.sh --update
+# Adding a line here is a deliberate statement: this ships ON for every instance that sets nothing.
+bugsink_enabled
+changeset_review
+http_html_extract

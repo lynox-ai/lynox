@@ -15,6 +15,12 @@ pre-push:
   commands:
     security-scan:
       run: sh scripts/security-scan.sh
+    default-on-inventory:
+      # What runs when an operator configures nothing? v2.11.0 shipped a config
+      # flag reading `?? true`, so a new HTML parser went live fleet-wide without
+      # anyone deciding it. Pairs with the `default-on-inventory` CI job, which is
+      # the gate for the bypassed case.
+      run: bash scripts/default-on-inventory.sh
     public-repo-guard:
       # Block internal infra / control-plane / ops leaks (staging hostnames,
       # CP DB schema, SSH-as-root chains) from reaching this PUBLIC repo —

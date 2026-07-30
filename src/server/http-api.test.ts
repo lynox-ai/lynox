@@ -1899,7 +1899,7 @@ describe('LynoxHTTPApi', () => {
   // secrets — Shopify, Stripe, DataForSEO, Hetzner, arbitrary integration
   // names — pass on managed by default. This realises the lynox core
   // promise: managed customers can connect their own tools without filing
-  // a support ticket. See [[project_managed_user_secrets_promise]].
+  // a support ticket.
   describe('predictManagedBlocked (admin-only deny-list)', () => {
     let predictManagedBlocked: (name: string) => boolean;
     beforeAll(async () => {
