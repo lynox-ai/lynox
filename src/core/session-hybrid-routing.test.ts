@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { hybridSlotClientConfig } from './session.js';
-import { resolveTierModel, setTierSetResolver, identityProviderForRun } from './tier-resolver.js';
+import { resolveTierModel, setTierSetResolver, effectiveProviderForRun } from './tier-resolver.js';
 import { modelIdentityContext, providerFamilyLabel } from './prompts.js';
 
 /**
@@ -81,7 +81,7 @@ describe('hybridSlotClientConfig — hybrid hot-path routing', () => {
  * the one that matters: it asserts the two writers AGREE, which is the property
  * that broke — a per-writer assertion would have passed on the broken code.
  */
-describe('identityProviderForRun — which provider the identity prompt names', () => {
+describe('effectiveProviderForRun — which provider the identity prompt names', () => {
   beforeEach(() => setTierSetResolver({ routingMode: 'standard', tierSet: {} }));
   afterAll(() => setTierSetResolver({ routingMode: 'standard', tierSet: {} }));
 
@@ -89,7 +89,7 @@ describe('identityProviderForRun — which provider the identity prompt names', 
 
   it('standard mode → the base config provider', () => {
     const snap = resolveTierModel('balanced', 'anthropic');
-    expect(identityProviderForRun(snap, 'anthropic', { ...noOverride, configProvider: 'anthropic' })).toBe('anthropic');
+    expect(effectiveProviderForRun(snap, 'anthropic', { ...noOverride, configProvider: 'anthropic' })).toBe('anthropic');
   });
 
   it('hybrid balanced→Mistral on an Anthropic base → names the SLOT (openai wire), not the base', () => {
@@ -99,7 +99,7 @@ describe('identityProviderForRun — which provider the identity prompt names', 
     });
     const snap = resolveTierModel('balanced', 'anthropic');
     // Pre-fix the snapshot mirror returned 'anthropic' here → "Anthropic (Claude family)".
-    expect(identityProviderForRun(snap, 'anthropic', { ...noOverride, configProvider: 'anthropic' })).toBe('openai');
+    expect(effectiveProviderForRun(snap, 'anthropic', { ...noOverride, configProvider: 'anthropic' })).toBe('openai');
   });
 
   it('an explicit sub-agent profile pins its own provider and ignores the slot', () => {
@@ -108,20 +108,25 @@ describe('identityProviderForRun — which provider the identity prompt names', 
       tierSet: { balanced: { provider: 'mistral', model_id: 'mistral-medium-2604' } },
     });
     const snap = resolveTierModel('balanced', 'anthropic');
-    expect(identityProviderForRun(snap, 'anthropic', {
+    expect(effectiveProviderForRun(snap, 'anthropic', {
       hasProfileOverride: true,
       profileOverrideProvider: 'anthropic',
       configProvider: 'anthropic',
     })).toBe('anthropic');
   });
 
+  // Scope note: this checks ONE rendered block against itself — the sentence vs
+  // the tier line below it, which is the self-contradiction the prod snapshot
+  // showed. It does NOT prove the two WRITERS agree; that is now true by
+  // construction (`Session._identityContext` is the only expression building it),
+  // because a test asserting the agreement passed even with the mirror reverted.
   it('the rendered identity line and its own tier map name the SAME provider family', () => {
     setTierSetResolver({
       routingMode: 'hybrid',
       tierSet: { balanced: { provider: 'mistral', model_id: 'mistral-medium-2604', api_key: 'sk-test', api_base_url: 'https://api.mistral.ai/v1' } },
     });
     const snap = resolveTierModel('balanced', 'anthropic');
-    const identityProvider = identityProviderForRun(snap, 'anthropic', { ...noOverride, configProvider: 'anthropic' });
+    const identityProvider = effectiveProviderForRun(snap, 'anthropic', { ...noOverride, configProvider: 'anthropic' });
     const tierMap = (['fast', 'balanced', 'deep'] as const).map((tier) => {
       const s = resolveTierModel(tier, 'anthropic');
       return { tier, modelId: s.modelId, providerLabel: providerFamilyLabel(s.provider) };

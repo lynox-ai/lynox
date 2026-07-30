@@ -403,6 +403,36 @@ describe('spawn_agent tool', () => {
     expect(payloadIdx).toBeGreaterThan(envelopeIdx);
   });
 
+  it('reports a path-shaped model id to the parent WITHOUT mangling it', async () => {
+    // The result header lands OUTSIDE the untrusted-data envelope and the identity
+    // prompt orders the agent to report the id surfaced here. This site used to
+    // sanitise with its OWN charset, which stripped `/` — so a Fireworks child was
+    // reported as `accountsfireworksmodelsglm-5p2`: a wrong id, vouched for by the
+    // prompt. Third writer of a model id into model context; one list now.
+    const { setTierSetResolver } = await import('../../core/tier-resolver.js');
+    try {
+      setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: {
+          balanced: {
+            provider: 'openai',
+            model_id: 'accounts/fireworks/models/glm-5p2',
+            api_key: 'sk-test',
+            api_base_url: 'https://api.fireworks.ai/inference/v1',
+          },
+        },
+      });
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'hosted', task: 'think' }] },
+        makeAgent(),
+      );
+      expect(result).toContain('accounts/fireworks/models/glm-5p2');
+      expect(result).not.toContain('accountsfireworksmodelsglm-5p2');
+    } finally {
+      setTierSetResolver({ routingMode: 'standard', tierSet: null });
+    }
+  });
+
   it('preserves legitimate content in spawn_agent result (H-002 non-regression)', async () => {
     mockSend.mockResolvedValue('Found 3 results: A, B, C.');
 

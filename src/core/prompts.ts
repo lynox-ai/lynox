@@ -226,22 +226,40 @@ export interface TierModelInfo {
  *  When present it replaces the old generic per-provider example, so the agent
  *  plans against the map it actually runs, not a hallucinated one (the fast/
  *  balanced inversion bug). Both live call sites pass it in lockstep. */
+/**
+ * Clamp a model id to the conventional model-id charset, for any prompt that
+ * states one.
+ *
+ * Exported because THREE writers put a model id into model context — this
+ * function's identity block, the tier→model map beside it, and the
+ * `## <name> (ran on \`<model>\`)` header `spawn_agent` builds for the parent —
+ * and two of them disagreed on the charset. That mattered: the identity block
+ * tells the agent to state the id it is given, so a writer that mangles it
+ * differently makes the agent report a wrong id with authority. One list.
+ *
+ * `/` is in it. Hosted-inference providers use path-shaped ids
+ * (`accounts/fireworks/models/glm-5p2`), and stripping the slashes produced
+ * `accountsfireworksmodelsglm-5p2`. `@` is in it for the same reason (Together,
+ * some Vertex publisher ids). Neither is a markdown or prompt-boundary
+ * character, so neither weakens the boundary — but note that a tenant-set id
+ * containing `//` can now render as something a reader takes for a URL; link
+ * syntax is still stripped, so it cannot become a live link.
+ *
+ * The cap is generous because truncation is the SAME failure as stripping — a
+ * mid-path cut yields a confidently-stated wrong id. Registered catalog ids run
+ * to ~41 chars; a tenant's own `model_id` on a custom namespace can be longer.
+ */
+export function safeModelId(id: string | undefined | null): string {
+  return String(id ?? '').replace(/[^a-zA-Z0-9._:@/-]/g, '').slice(0, 128);
+}
+
 export function modelIdentityContext(
   provider: string | undefined | null,
   modelId: string | undefined | null,
   tierMap?: readonly TierModelInfo[] | undefined,
 ): string {
   if (!provider || !modelId) return '';
-  // Sanitize: strip backticks + control chars + any markdown/prompt boundary
-  // chars, then cap length. Anything outside the allow-list is treated as
-  // adversarial. `/` is IN the list: hosted-inference providers use path-shaped
-  // ids (`accounts/fireworks/models/glm-5p2`), and stripping the slashes rendered
-  // `accountsfireworksmodelsglm-5p2` into a prompt that then orders the agent to
-  // "state THIS exact model id" — a wrong id, stated with authority. A slash is
-  // not a markdown or prompt-boundary character, so allowing it costs nothing.
-  const safeId = (id: string | undefined | null): string =>
-    String(id ?? '').replace(/[^a-zA-Z0-9._:/-]/g, '').slice(0, 64);
-  const selfId = safeId(modelId);
+  const selfId = safeModelId(modelId);
   const prettyProvider = providerFamilyLabel(provider);
   if (!selfId || !prettyProvider) return '';
 
@@ -253,7 +271,7 @@ export function modelIdentityContext(
   // light backtick/control strip is enough to keep the code-span intact.
   const tierLines = (tierMap ?? [])
     .map((e) => ({
-      id: safeId(e.modelId),
+      id: safeModelId(e.modelId),
       tier: String(e.tier).replace(/[^a-zA-Z]/g, '').slice(0, 16),
       family: String(e.providerLabel).replace(/`/g, '').slice(0, 48),
     }))

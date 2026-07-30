@@ -308,9 +308,15 @@ export function hybridSlotClientConfig(
  * diagnosing provider behaviour. A comment claimed the two paths matched; only a
  * shared function makes that true.
  *
+ * ⚠ It does NOT only feed the prompt. `_createAgent` passes this same value as
+ * the AgentConfig's `provider` AND as the provider the API key is resolved on,
+ * so it selects the WIRE the run talks to. Read the name as "the provider this
+ * run effectively uses, which is therefore also the one it should say it uses" —
+ * changing it to make a prompt read better retargets the request.
+ *
  * Pure so the agreement is testable without standing up a Session.
  */
-export function identityProviderForRun(
+export function effectiveProviderForRun(
   snap: TierProviderSnapshot,
   baseProvider: LLMProvider | undefined,
   opts: { profileOverrideProvider?: LLMProvider | undefined; hasProfileOverride: boolean; configProvider: LLMProvider | undefined },

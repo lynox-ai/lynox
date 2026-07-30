@@ -10,6 +10,7 @@ import {
   WEB_SEARCH_FALLBACK_PROMPT_SUFFIX,
   DATASTORE_PROMPT_SUFFIX,
   GROUNDING_PROMPT_BLOCK,
+  safeModelId,
 } from './prompts.js';
 import type { TierModelInfo } from './prompts.js';
 import { resolveTierModel, setTierSetResolver } from './tier-resolver.js';
@@ -365,12 +366,18 @@ describe('modelIdentityContext sanitization (prompt-injection guard)', () => {
     expect(out).not.toContain('ignore safety');
   });
 
-  it('caps modelId length at 64 chars (DoS-bound)', () => {
+  it('caps modelId length at 128 chars (DoS-bound)', () => {
+    // Was 64. Raised because truncation is the SAME failure mode as stripping a
+    // character: the identity block orders the agent to state exactly the id it
+    // is given, so a mid-path cut of a hosted-inference id
+    // (`accounts/<tenant-namespace>/models/<model>`) yields a wrong id stated
+    // with authority. The bound exists to keep the prompt finite, and 128 is
+    // finite — real ids run to ~41 chars registered, longer on a tenant's own
+    // namespace. See `safeModelId`.
     const long = 'x'.repeat(500);
     const out = modelIdentityContext('openai', long);
-    // The capped substring shouldn't include the 65th 'x'.
-    expect(out.includes('x'.repeat(65))).toBe(false);
-    expect(out.includes('x'.repeat(64))).toBe(true);
+    expect(out.includes('x'.repeat(129))).toBe(false);
+    expect(out.includes('x'.repeat(128))).toBe(true);
   });
 
   it('returns empty string when sanitization strips the entire modelId', () => {
@@ -665,5 +672,38 @@ describe('SYSTEM_PROMPT grounding rule', () => {
     expect(SYSTEM_PROMPT).toContain("Ground figures AND tailored advice in THIS case's data");
     expect(SYSTEM_PROMPT).toContain('generic playbook dressed as case-specific analysis');
     expect(SYSTEM_PROMPT).toMatch(/an estimate or generic playbook presented as verified data/);
+  });
+});
+
+describe('safeModelId — the one sanitiser all three prompt writers share', () => {
+  it('keeps a path-shaped hosted-inference id intact', () => {
+    expect(safeModelId('accounts/fireworks/models/glm-5p2')).toBe('accounts/fireworks/models/glm-5p2');
+  });
+
+  it('keeps an @-bearing id intact', () => {
+    // Together / some Vertex publisher ids. `spawn_agent`'s header allowed `@`
+    // while the identity block did not — the disagreement this function ends.
+    expect(safeModelId('meta-llama/Llama-3.3-70B@together')).toBe('meta-llama/Llama-3.3-70B@together');
+  });
+
+  it('does NOT truncate a long path-shaped id mid-path', () => {
+    // Truncation is the same failure as stripping: a mid-path cut yields a
+    // confidently-stated wrong id, because the identity block orders the agent
+    // to state exactly what it is given. 64 chars cut this one; 128 does not.
+    const long = 'accounts/some-rather-long-tenant-namespace/models/qwen-3-235b-instruct';
+    expect(long.length).toBeGreaterThan(64);
+    expect(safeModelId(long)).toBe(long);
+  });
+
+  it('still strips markdown and prompt-boundary characters', () => {
+    expect(safeModelId('gpt`4o')).toBe('gpt4o');
+    expect(safeModelId('a<b>c')).toBe('abc');
+    expect(safeModelId('x\ny')).toBe('xy');
+    expect(safeModelId('[link](http://x)')).toBe('linkhttp://x');
+  });
+
+  it('collapses a missing id to empty rather than "null"', () => {
+    expect(safeModelId(undefined)).toBe('');
+    expect(safeModelId(null)).toBe('');
   });
 });

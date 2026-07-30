@@ -17,7 +17,7 @@ import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget } from '../../core/session-budget.js';
 import { escapeXml, wrapUntrustedData } from '../../core/data-boundary.js';
-import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../../core/prompts.js';
+import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId } from '../../core/prompts.js';
 import {
   DEFAULT_SPAWN_BUDGET_USD,
   DEFAULT_SPAWN_MAX_TURNS,
@@ -891,7 +891,12 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // the conventional model-id charset to prevent markdown / boundary-tag
         // injection into the parent context (defense-in-depth; same pattern as
         // `modelIdentityContext`'s safeId).
-        const safeModel = String(outcome.value.model).replace(/[^a-zA-Z0-9._:@-]/g, '').slice(0, 64);
+        // The SAME sanitiser the identity block uses. This header lands OUTSIDE
+        // the untrusted-data envelope and the identity prompt orders the agent to
+        // report the id surfaced here, so a second charset meant a Fireworks child
+        // was reported as `accountsfireworksmodelsglm-5p2` — mangled, and stated
+        // with authority because the prompt vouches for it.
+        const safeModel = safeModelId(outcome.value.model);
         sections.push(`## ${spec.name} (ran on \`${safeModel}\`)\n\n${wrapped}`);
         childRunIds.push(outcome.value.childRunId);
       } else {
