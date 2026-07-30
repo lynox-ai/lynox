@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { hybridSlotClientConfig } from './session.js';
-import { resolveTierModel, setTierSetResolver } from './tier-resolver.js';
+import { resolveTierModel, setTierSetResolver, identityProviderForRun } from './tier-resolver.js';
+import { modelIdentityContext, providerFamilyLabel } from './prompts.js';
 
 /**
  * Regression for the hybrid hot-path 404 (caught on the v1.14 routing release
@@ -64,5 +65,72 @@ describe('hybridSlotClientConfig — hybrid hot-path routing', () => {
   it('standard managed-Mistral base (provider openai) → unchanged, no spurious switch', () => {
     const snap = resolveTierModel('balanced', 'openai');
     expect(hybridSlotClientConfig(snap, 'openai')).toEqual({ crossProviderSlot: false });
+  });
+});
+
+/**
+ * The identity prompt has TWO writers — the live agent prompt and the run-snapshot
+ * mirror that records what the agent saw — and they disagreed on the hybrid case.
+ * The mirror named the BASE config's provider, so a `balanced→Mistral` slot on an
+ * Anthropic base recorded "You are running on Anthropic (Claude family) as model
+ * `mistral-medium-2604`". Wrong, self-contradicting (its own tier map said
+ * Mistral), and wrong in the exact artifact used to diagnose provider behaviour —
+ * found in a real prod snapshot (rafael, 2026-07-30).
+ *
+ * These drive the shared resolver through the REAL tier-set flow. The last case is
+ * the one that matters: it asserts the two writers AGREE, which is the property
+ * that broke — a per-writer assertion would have passed on the broken code.
+ */
+describe('identityProviderForRun — which provider the identity prompt names', () => {
+  beforeEach(() => setTierSetResolver({ routingMode: 'standard', tierSet: {} }));
+  afterAll(() => setTierSetResolver({ routingMode: 'standard', tierSet: {} }));
+
+  const noOverride = { hasProfileOverride: false, profileOverrideProvider: undefined } as const;
+
+  it('standard mode → the base config provider', () => {
+    const snap = resolveTierModel('balanced', 'anthropic');
+    expect(identityProviderForRun(snap, 'anthropic', { ...noOverride, configProvider: 'anthropic' })).toBe('anthropic');
+  });
+
+  it('hybrid balanced→Mistral on an Anthropic base → names the SLOT (openai wire), not the base', () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { balanced: { provider: 'mistral', model_id: 'mistral-medium-2604', api_key: 'sk-test', api_base_url: 'https://api.mistral.ai/v1' } },
+    });
+    const snap = resolveTierModel('balanced', 'anthropic');
+    // Pre-fix the snapshot mirror returned 'anthropic' here → "Anthropic (Claude family)".
+    expect(identityProviderForRun(snap, 'anthropic', { ...noOverride, configProvider: 'anthropic' })).toBe('openai');
+  });
+
+  it('an explicit sub-agent profile pins its own provider and ignores the slot', () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { balanced: { provider: 'mistral', model_id: 'mistral-medium-2604' } },
+    });
+    const snap = resolveTierModel('balanced', 'anthropic');
+    expect(identityProviderForRun(snap, 'anthropic', {
+      hasProfileOverride: true,
+      profileOverrideProvider: 'anthropic',
+      configProvider: 'anthropic',
+    })).toBe('anthropic');
+  });
+
+  it('the rendered identity line and its own tier map name the SAME provider family', () => {
+    setTierSetResolver({
+      routingMode: 'hybrid',
+      tierSet: { balanced: { provider: 'mistral', model_id: 'mistral-medium-2604', api_key: 'sk-test', api_base_url: 'https://api.mistral.ai/v1' } },
+    });
+    const snap = resolveTierModel('balanced', 'anthropic');
+    const identityProvider = identityProviderForRun(snap, 'anthropic', { ...noOverride, configProvider: 'anthropic' });
+    const tierMap = (['fast', 'balanced', 'deep'] as const).map((tier) => {
+      const s = resolveTierModel(tier, 'anthropic');
+      return { tier, modelId: s.modelId, providerLabel: providerFamilyLabel(s.provider) };
+    });
+    const out = modelIdentityContext(identityProvider, snap.modelId, tierMap);
+    // The self-contradiction the prod snapshot showed: the sentence said Anthropic
+    // while the balanced line right below it said Mistral.
+    expect(out).toContain('You are running on Mistral');
+    expect(out).not.toContain('You are running on Anthropic');
+    expect(out).toContain('`mistral-medium-2604` — the `balanced` tier (Mistral');
   });
 });

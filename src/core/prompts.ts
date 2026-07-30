@@ -233,10 +233,14 @@ export function modelIdentityContext(
 ): string {
   if (!provider || !modelId) return '';
   // Sanitize: strip backticks + control chars + any markdown/prompt boundary
-  // chars, then cap length. Model IDs are conventionally `[a-z0-9._-]+` —
-  // anything else is treated as adversarial.
+  // chars, then cap length. Anything outside the allow-list is treated as
+  // adversarial. `/` is IN the list: hosted-inference providers use path-shaped
+  // ids (`accounts/fireworks/models/glm-5p2`), and stripping the slashes rendered
+  // `accountsfireworksmodelsglm-5p2` into a prompt that then orders the agent to
+  // "state THIS exact model id" — a wrong id, stated with authority. A slash is
+  // not a markdown or prompt-boundary character, so allowing it costs nothing.
   const safeId = (id: string | undefined | null): string =>
-    String(id ?? '').replace(/[^a-zA-Z0-9._:-]/g, '').slice(0, 64);
+    String(id ?? '').replace(/[^a-zA-Z0-9._:/-]/g, '').slice(0, 64);
   const selfId = safeId(modelId);
   const prettyProvider = providerFamilyLabel(provider);
   if (!selfId || !prettyProvider) return '';

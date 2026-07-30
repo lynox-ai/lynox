@@ -295,6 +295,36 @@ export function hybridSlotClientConfig(
 }
 
 /**
+ * The provider the model-identity prompt must NAME for a run — the one the run
+ * actually talks to, not the one the base config names.
+ *
+ * Under hybrid routing a tier can resolve to a different provider than the base,
+ * and then the identity has to follow the SLOT. Two call sites need this answer:
+ * the live agent prompt and the run-snapshot mirror that records what the agent
+ * saw. They disagreed — the mirror read the base config's provider and skipped the
+ * hybrid branch, so a `balanced→Mistral` slot on an Anthropic base recorded
+ * "You are running on Anthropic (Claude family) as model `mistral-medium-2604`":
+ * self-contradicting, and wrong in the exact artifact you reach for when
+ * diagnosing provider behaviour. A comment claimed the two paths matched; only a
+ * shared function makes that true.
+ *
+ * Pure so the agreement is testable without standing up a Session.
+ */
+export function identityProviderForRun(
+  snap: TierProviderSnapshot,
+  baseProvider: LLMProvider | undefined,
+  opts: { profileOverrideProvider?: LLMProvider | undefined; hasProfileOverride: boolean; configProvider: LLMProvider | undefined },
+): LLMProvider | undefined {
+  // An explicit sub-agent profile pins its own provider and ignores the slot.
+  const slotCfg = opts.hasProfileOverride
+    ? { crossProviderSlot: false as const }
+    : hybridSlotClientConfig(snap, baseProvider);
+  return slotCfg.crossProviderSlot
+    ? slotCfg.provider
+    : (opts.profileOverrideProvider ?? opts.configProvider);
+}
+
+/**
  * The full wire client config for a resolved tier under the active routing mode —
  * the single seam every FRESH-Agent site (spawn sub-agents, orchestrator pipeline
  * steps) shares so a hybrid tier_set slot steers a step the same way it steers the

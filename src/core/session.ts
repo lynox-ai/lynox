@@ -26,7 +26,7 @@ import type {
   PromptText,
 } from '../types/index.js';
 import { effectiveContextWindow } from '../types/index.js';
-import { resolveRunModel, resolveTierModel, hybridSlotClientConfig } from './tier-resolver.js';
+import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, identityProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
 import { Agent, RunAbortedError } from './agent.js';
@@ -755,13 +755,13 @@ export class Session {
     }
     // Mirror the prompt-assembly that _createAgent uses so the hash and the
     // recorded snapshot reflect what the Agent actually sees (Fix C, v1.5.2).
-    // The resolved tier map is built from the SAME base provider `_createAgent`
-    // uses (`getActiveProvider()`), so the snapshot's identity context matches
-    // the agent's. This mirror APPROXIMATES _createAgent — it reproduces the
+    // Both the tier map and the identity provider come from the SAME helpers
+    // `_createAgent` calls, so the hybrid-slot case can no longer diverge here.
+    // This mirror still APPROXIMATES _createAgent — it reproduces the
     // durable-substrate suffix and identity context, but not yet every other
-    // suffix / hybrid-slot identity delta (tracked in the deferred register).
+    // suffix delta (tracked in the deferred register).
     const runIdentityContext = modelIdentityContext(
-      this._profileOverride?.provider ?? this.engine.getUserConfig().provider,
+      this._identityProvider(runSnap, runBaseProvider),
       model,
       this._identityTierMap(runBaseProvider),
     );
@@ -1971,6 +1971,19 @@ export class Session {
   }
 
   /**
+   * The provider the identity prompt must name for this run. Thin binding over
+   * {@link identityProviderForRun} (pure, in tier-resolver) — used by BOTH
+   * `_createAgent` and the run-snapshot mirror so the two cannot drift.
+   */
+  private _identityProvider(tierSnap: ReturnType<typeof resolveTierModel>, baseProvider: LLMProvider): LLMProvider | undefined {
+    return identityProviderForRun(tierSnap, baseProvider, {
+      profileOverrideProvider: this._profileOverride?.provider,
+      hasProfileOverride: this._profileOverride !== undefined && this._profileOverride !== null,
+      configProvider: this.engine.getUserConfig().provider,
+    });
+  }
+
+  /**
    * Feature-gated proactive-deep escalation suffix. Resolves the deep-slot
    * provider so the Anthropic (premium) cost-gate applies. Empty unless the
    * `proactive-deep` flag is on AND the deep slot is cheap (or the Anthropic
@@ -2015,9 +2028,8 @@ export class Session {
     const slotCfg = this._profileOverride
       ? { crossProviderSlot: false as const }
       : hybridSlotClientConfig(tierSnap, baseProvider);
-    const effectiveProvider: LLMProvider | undefined = slotCfg.crossProviderSlot
-      ? slotCfg.provider
-      : (this._profileOverride?.provider ?? userConfig.provider);
+    // Same resolution the run-snapshot mirror uses — see `_identityProvider`.
+    const effectiveProvider: LLMProvider | undefined = this._identityProvider(tierSnap, baseProvider);
     const entries = registry.getEntries();
     // Wrap handlers with the plugin gate while PRESERVING every ToolEntry field
     // (endsTurn, detailedGuidance, …) — see applyPluginToolGate for why the spread
