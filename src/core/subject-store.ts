@@ -497,11 +497,16 @@ export class SubjectStore {
     `).all(kind, ownerUserId, `%"${escaped}"%`) as SubjectRow[];
     // LIKE is case-sensitive on the JSON; confirm a real case-insensitive alias hit.
     const lower = alias.toLowerCase();
-    for (const r of rows) {
-      const list = this._parseAliases(r.aliases);
-      if (list.some(a => a.toLowerCase() === lower)) return r;
-    }
-    return null;
+    const hits = rows.filter(r => this._parseAliases(r.aliases).some(a => a.toLowerCase() === lower));
+    // AMBIGUOUS → refuse, never guess. Aliases carry no unique index and this
+    // scan has no ORDER BY, so returning the first hit meant two distinct
+    // subjects sharing an alias were silently collapsed by row order — on the
+    // WRITE path a cross-entity fold with no trace, and on the read paths
+    // (recall scope, retrieval, the merge tool's duplicate lookup) an arbitrary
+    // subject's memories answering for another's. Declining is the same rule
+    // `resolvePersonSubject` already applies to an ambiguous subset: the caller
+    // then mints or reports nothing, which is recoverable. A wrong hit is not.
+    return hits.length === 1 ? hits[0]! : null;
   }
 
   // ── Self-person + assignee resolution (S4a task-cutover) ──────

@@ -63,6 +63,12 @@
  * CHARACTERISATION, not aspiration: these pin current behaviour so a future
  * change fails here rather than merging quietly in someone's graph. Where the
  * pinned behaviour is a real risk, the test says so.
+ *
+ * ONE thing this file did not merely characterise but got FIXED: `findByAlias`
+ * used to return the first row of an unordered scan, so two subjects sharing an
+ * alias were collapsed by row order. That is not blunt, it is wrong, and it does
+ * not rest on a frequency assumption — every fold writes aliases, so the
+ * constellation builds itself. It refuses on ambiguity now.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -142,18 +148,26 @@ describe('subject folding, per resolver', () => {
       expect(store.findOrCreate({ kind: 'organization', name: 'Meridian Group' }).id).toBe(a.id);
     });
 
-    it('⚠️ picks the FIRST row when two subjects share an alias, by scan order alone', () => {
-      // `findByAlias` full-scans with no ORDER BY, and aliases carry no unique
-      // index — so a third mention of "Meridian" resolves to whichever row the
-      // scan reaches first. Asserted as `a` because that is what it OBSERVABLY
-      // does, not because anything specifies it: no index, no tie-break, no
-      // error. This is the one pinned behaviour here that is wrong rather than
-      // merely blunt — two distinct organisations, and a silent cross-entity
-      // fold decided by row order.
+    it('REFUSES when two subjects share an alias — it mints rather than guesses', () => {
+      // `findByAlias` full-scans with no ORDER BY and aliases carry no unique
+      // index, so returning the first hit collapsed two distinct organisations
+      // by row order — silently, and with no trace. It declines now, the same
+      // rule `resolvePersonSubject` applies to an ambiguous subset: minting a
+      // third row is recoverable, resolving to the wrong one is not.
       const store = makeStore();
       const a = store.findOrCreate({ kind: 'organization', name: 'Meridian AG', aliases: ['Meridian'] });
       const b = store.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
       expect(b.id).not.toBe(a.id);
+      const third = store.findOrCreate({ kind: 'organization', name: 'Meridian' });
+      expect(third.id).not.toBe(a.id);
+      expect(third.id).not.toBe(b.id);
+      expect(third.created).toBe(true);
+    });
+
+    it('still resolves an UNambiguous alias — the refusal is not a blanket off-switch', () => {
+      const store = makeStore();
+      const a = store.findOrCreate({ kind: 'organization', name: 'Meridian AG', aliases: ['Meridian'] });
+      store.findOrCreate({ kind: 'organization', name: 'Nordberg AG', aliases: ['Nordberg'] });
       expect(store.findOrCreate({ kind: 'organization', name: 'Meridian' }).id).toBe(a.id);
     });
   });
