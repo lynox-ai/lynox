@@ -12,10 +12,10 @@
  * Keys:   ANTHROPIC_API_KEY / MISTRAL_API_KEY / OPENROUTER_API_KEY env, else ~/.lynox/config.json.
  * Cost:   a few cheap turns per candidate.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { createLLMClient } from '../../src/core/llm-client.js';
 
 const MISTRAL_BASE = 'https://api.mistral.ai/v1';
@@ -80,15 +80,40 @@ export function classifySpawn(content: ContentBlock[]): { deep: boolean; delegat
   const toolUses = content.filter(b => b.type === 'tool_use');
   const tools = toolUses.map(b => b.name ?? '?');
   const spawns = toolUses.filter(b => b.name === 'spawn_agent');
-  const specsOf = (b: ContentBlock): Array<{ model?: string }> => {
+  // `input` is model-controlled: narrow it, never cast it. A cast let `agents: [null]`
+  // through and threw inside `.some()`, which surfaced as a run-level ERROR.
+  const specsOf = (b: ContentBlock): unknown[] => {
     const input = b.input as { agents?: unknown } | undefined;
-    return Array.isArray(input?.agents) ? input.agents as Array<{ model?: string }> : [];
+    return Array.isArray(input?.agents) ? input.agents : [];
   };
+  const isDeep = (a: unknown): boolean =>
+    typeof a === 'object' && a !== null && (a as { model?: unknown }).model === 'deep';
   return {
-    deep: spawns.some(b => specsOf(b).some(a => a.model === 'deep')),
+    deep: spawns.some(b => specsOf(b).some(isDeep)),
     delegated: spawns.length > 0,
     tools,
   };
+}
+
+/**
+ * The verdict for one candidate. Pure and exported so `tests/model-fitness-replay.test.ts`
+ * can drive it: this arithmetic decides which model gets a production slot, and it used to
+ * live inline in a script that nothing typechecks and nothing tests.
+ *
+ * The escalation bar is computed against `runs`, NOT against the surviving runs. Scoring it
+ * against the survivors let a single transient failure flip the verdict: with runs=3,
+ * ['esc','inline','ERROR'] reached ESCALATE (bar dropped to 1) while the error-free
+ * ['esc','inline','inline'] stayed inline (bar 2) — the same one real escalation.
+ */
+export function decideVerdict(hows: string[], runs: number): {
+  verdict: 'ESCALATE' | 'inline' | 'INVALID'; escalated: number; valid: number; errors: number;
+} {
+  const errors = hows.filter(h => h === 'ERROR').length;
+  const valid = hows.length - errors;
+  const escalated = hows.filter(h => h === 'spawn_agent{deep}' || h === 'judge:offer').length;
+  // >1/3 errored, or nothing survived → an outage is not a measurement.
+  if (errors * 3 > runs || valid === 0) return { verdict: 'INVALID', escalated, valid, errors };
+  return { verdict: escalated >= Math.ceil(runs / 2) ? 'ESCALATE' : 'inline', escalated, valid, errors };
 }
 
 /**
@@ -180,27 +205,24 @@ async function main(): Promise<void> {
     const results = [] as Array<Awaited<ReturnType<typeof replayOne>>>;
     for (let i = 0; i < runs; i++) results.push(await replayOne(c, body, key, keys.anthropic));
     const errs = results.filter(r => r.how === 'ERROR');
-    // ERRORs leave the DENOMINATOR — they used to stay in it, so a provider outage scored as
-    // "0/3 escalated → inline" and printed a ✓ against expect=inline. An outage is not a result.
-    const valid = results.filter(r => r.how !== 'ERROR');
-    const escalated = valid.filter(r => r.how === 'spawn_agent{deep}' || r.how === 'judge:offer').length;
+    const { verdict, escalated, valid } = decideVerdict(results.map(r => r.how), runs);
     const hows = [...new Set(results.map(r => r.how))].join(',');
     const avgMs = Math.round(results.reduce((s, r) => s + r.ms, 0) / results.length);
-    const tooManyErrors = errs.length * 3 > runs; // >1/3 failed → not a measurement
-    const verdict = tooManyErrors || valid.length === 0
-      ? 'INVALID'
-      : (escalated >= Math.ceil(valid.length / 2) ? 'ESCALATE' : 'inline');
     const match = verdict === 'INVALID'
       ? `— ${errs.length}/${runs} errored, no verdict`
       : ((verdict === 'ESCALATE' ? 'escalate' : 'inline') === expect ? '✓' : '✗ MISMATCH');
     if (c.label.startsWith('ministral-14b')) controlVerdict = verdict;
-    console.log(`  ${c.label.padEnd(26)} ${verdict.padEnd(9)} ${escalated}/${valid.length}  [${hows}]  ${avgMs}ms  expect=${expect} ${match}`);
+    console.log(`  ${c.label.padEnd(26)} ${verdict.padEnd(9)} ${escalated}/${runs} (${valid} valid)  [${hows}]  ${avgMs}ms  expect=${expect} ${match}`);
     if (errs.length) console.log(`      errors: ${[...new Set(errs.map(e => e.error))].join(' | ')}`);
-    // The tool calls are WHY a verdict is what it is: an 'inline' with spawn_agent in this list
-    // means "delegated, but not deep-tagged" — a different finding than "answered it itself".
+    // Which tools were called across the runs — an escalation that is not deep-tagged shows up
+    // here as spawn_agent next to a `spawn_agent{not-deep}` verdict. Tool names are
+    // model-controlled, so they are quoted rather than written raw to the terminal.
     const toolsSeen = [...new Set(results.flatMap(r => r.tools))];
-    const avg = (f: (r: typeof results[number]) => number): number => Math.round(results.reduce((s, r) => s + f(r), 0) / results.length);
-    console.log(`      ↳ tools: ${toolsSeen.length ? toolsSeen.join(', ') : '(none)'}  ·  avg tok in/out: ${avg(r => r.inTok)}/${avg(r => r.outTok)}`);
+    // Input tokens are reported per-run: providers that cache the prompt report near-zero on
+    // repeats, so a mean across runs understates a cold call several-fold.
+    const perRunIn = results.map(r => r.inTok).join('/');
+    const avgOut = Math.round(results.reduce((s, r) => s + r.outTok, 0) / results.length);
+    console.log(`      ↳ tools: ${toolsSeen.length ? JSON.stringify(toolsSeen.join(', ')) : '(none)'}  ·  tok in per run: ${perRunIn}  ·  avg out: ${avgOut}`);
     const snip = (results.find(r => r.text)?.text ?? '').replace(/\s+/g, ' ').slice(0, 320);
     console.log(`      ↳ response head: ${JSON.stringify(snip)}`);
   }
@@ -226,9 +248,25 @@ async function main(): Promise<void> {
   }
 }
 
-// Run only when invoked as a CLI, so the detector can be imported and tested offline.
-// Deliberately fail-OPEN: if argv[1] is missing or unresolvable we still run, because a guard
-// that silently stops the script from executing is the worse failure of the two.
-let invokedDirectly = true;
-try { if (process.argv[1]) invokedDirectly = import.meta.url === pathToFileURL(process.argv[1]).href; } catch { /* run */ }
-if (invokedDirectly) void main();
+/**
+ * Is this module the process entry point, rather than an import?
+ *
+ * Both sides are realpath-resolved, because comparing `import.meta.url` against a raw
+ * `argv[1]` compares UNEQUAL whenever the two spell the same file differently — a symlink is
+ * enough — and `main()` then never runs while the process still exits 0. A script that
+ * silently does nothing is the worst outcome available here, so every uncertain case runs:
+ * no entry, or either side unresolvable, returns true.
+ *
+ * Resolution failure must NOT fall back to comparing the raw strings. An earlier version did
+ * exactly that, which reintroduced the silent-no-op for a deleted or relocated argv[1].
+ */
+export function isDirectInvocation(moduleUrl: string, entry: string | undefined): boolean {
+  if (!entry) return true;
+  try {
+    return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(entry);
+  } catch {
+    return true;
+  }
+}
+
+if (isDirectInvocation(import.meta.url, process.argv[1])) void main();
