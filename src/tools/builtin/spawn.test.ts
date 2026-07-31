@@ -615,6 +615,33 @@ describe('spawn_agent tool', () => {
     );
   });
 
+  /**
+   * Dispatch takes about a second; waiting for the children takes minutes. The
+   * `spawn_agent` activity label says "delegating", which described the whole
+   * wait — measured at 212s on a real deep review against a ~1s dispatch. The
+   * handover to a `waiting` phase must be emitted AFTER the batch is announced
+   * (so the UI has the panel to sit under) and BEFORE the parent blocks on the
+   * children, which is the entire window it needs to cover.
+   */
+  it('hands the activity label over to a waiting phase once the batch is running', async () => {
+    const onStream = vi.fn();
+    await spawnAgentTool.handler(
+      { agents: [{ name: 'reviewer', task: 'Review' }] },
+      makeAgent({ onStream: onStream as StreamHandler }),
+    );
+
+    const evs = streamEvents(onStream);
+    const spawnIdx = evs.findIndex((e) => e['type'] === 'spawn');
+    const waitIdx = evs.findIndex((e) => e['type'] === 'tool_progress' && e['phase'] === 'waiting');
+
+    expect(waitIdx).toBeGreaterThan(-1);
+    expect(evs[waitIdx]).toMatchObject({ type: 'tool_progress', tool: 'spawn_agent', phase: 'waiting' });
+    // Ordering is the point: after the announcement, before any child finishes.
+    expect(waitIdx).toBeGreaterThan(spawnIdx);
+    const firstDoneIdx = evs.findIndex((e) => e['type'] === 'spawn_child_done');
+    expect(firstDoneIdx).toBeGreaterThan(waitIdx);
+  });
+
   it('forwards a filtered stream wrapper to child agents for progress visibility', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     const onStream = vi.fn() as StreamHandler;

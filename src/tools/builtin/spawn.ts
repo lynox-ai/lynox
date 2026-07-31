@@ -870,6 +870,14 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
 
     if (agent.onStream) {
       await agent.onStream({ type: 'spawn', spawnId, subAgents, estimatedCostUSD: totalEstimate, agent: agent.name });
+      // Hand the activity label over from "delegating" to "waiting". Dispatch is
+      // over by this line; everything after it is the parent BLOCKED on
+      // `Promise.allSettled` below. Without this the status sits on "Delegating
+      // to sub-agents…" for the entire child run — measured at 212s on a real
+      // deep review, describing a step that took about a second. `api_setup`
+      // already uses this same tool_progress channel for a 5-8s gap; the
+      // minutes-long one had no phase at all.
+      await agent.onStream({ type: 'tool_progress', tool: 'spawn_agent', phase: 'waiting', agent: agent.name });
     }
 
     // Sub-agent progress state — visible to the UI via forwarded events.
