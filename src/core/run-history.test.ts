@@ -2695,5 +2695,57 @@ describe('RunHistory', () => {
       h.close();
     });
   });
-});
 
+  /**
+   * A delegated turn bills across several rows: the parent run plus one per
+   * spawned child (and their children). The per-message cost line needs that
+   * sum, so it does NOT understate a delegated answer — a measured thread
+   * showed $0.38 for a turn that actually billed $0.4532.
+   *
+   * Reads `runs.spawn_parent_id` (written when the child row is inserted, on
+   * the same path that later records its cost) rather than the `run_spawns`
+   * table, which a separate subscription fills.
+   */
+  describe('getDescendantCostUsd', () => {
+    it('sums every descendant, at any depth, but never the run itself', () => {
+      const h = createHistory();
+      const parent = h.insertRun({ taskText: 'parent', modelTier: 'balanced', modelId: 'mistral-medium-2604' });
+      h.updateRun(parent, { costUsd: 0.3834 });
+
+      const child = h.insertRun({
+        taskText: 'deep review', modelTier: 'deep', modelId: 'glm-5p2',
+        spawnParentId: parent, spawnDepth: 1,
+      });
+      h.updateRun(child, { costUsd: 0.0698 });
+
+      const grandchild = h.insertRun({
+        taskText: 'nested', modelTier: 'fast', modelId: 'ministral-8b-2512',
+        spawnParentId: child, spawnDepth: 2,
+      });
+      h.updateRun(grandchild, { costUsd: 0.01 });
+
+      expect(h.getDescendantCostUsd(parent)).toBeCloseTo(0.0798, 6);
+      // The child's own subtree, and a leaf with nothing under it.
+      expect(h.getDescendantCostUsd(child)).toBeCloseTo(0.01, 6);
+      expect(h.getDescendantCostUsd(grandchild)).toBe(0);
+      h.close();
+    });
+
+    it('returns 0 for a run that delegated nothing', () => {
+      const h = createHistory();
+      const solo = h.insertRun({ taskText: 'solo', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
+      h.updateRun(solo, { costUsd: 0.12 });
+      expect(h.getDescendantCostUsd(solo)).toBe(0);
+      h.close();
+    });
+
+    it('ignores a sibling run that shares no spawn parent', () => {
+      const h = createHistory();
+      const parent = h.insertRun({ taskText: 'p', modelTier: 'balanced', modelId: 'm' });
+      const unrelated = h.insertRun({ taskText: 'other turn', modelTier: 'balanced', modelId: 'm' });
+      h.updateRun(unrelated, { costUsd: 9.99 });
+      expect(h.getDescendantCostUsd(parent)).toBe(0);
+      h.close();
+    });
+  });
+});

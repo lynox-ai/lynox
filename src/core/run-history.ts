@@ -2251,6 +2251,33 @@ export class RunHistory {
     ).all(...ids) as RunRecord[];
   }
 
+  /**
+   * Total spend of everything `runId` spawned, at any depth — the number a
+   * per-message cost line needs to stop understating a delegated turn.
+   *
+   * Walks `runs.spawn_parent_id` rather than the `run_spawns` table that
+   * {@link getSpawnTree} uses: the parent link is written by the spawn path
+   * itself when the child run is inserted, while `run_spawns` is filled from a
+   * separate `spawnEnd` subscription. Both should agree, but only the column is
+   * on the write path that also records the cost, so it cannot be half-present.
+   * Uses `idx_runs_spawn_parent`.
+   *
+   * Deliberately NOT folded into the parent's own `cost_usd`: each child is its
+   * own row, and thread totals sum all rows — adding children upward would
+   * double-count the thread. Callers surface it as a separate figure.
+   */
+  getDescendantCostUsd(runId: string): number {
+    const row = this.db.prepare(`
+      WITH RECURSIVE descendants AS (
+        SELECT id, cost_usd FROM runs WHERE spawn_parent_id = ?
+        UNION ALL
+        SELECT r.id, r.cost_usd FROM runs r JOIN descendants d ON r.spawn_parent_id = d.id
+      )
+      SELECT COALESCE(SUM(cost_usd), 0) as total FROM descendants
+    `).get(runId) as { total: number } | undefined;
+    return row?.total ?? 0;
+  }
+
   // === Analytics delegates ===
 
   getRepeatTasks(contextId: string, minCount: number, days: number) {
