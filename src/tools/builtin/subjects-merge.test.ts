@@ -106,21 +106,30 @@ describe('subjects_merge tool (PR-C3)', () => {
     expect(subjectsMergeTool.destructive).toEqual({ mode: 'data' });
   });
 
-  it('merges ORGANIZATIONS when told the kind — the recovery path for the kind minted most', async () => {
-    // This tool resolved `person` only, which made the placeholder that an ambiguous
-    // name collapses onto unreachable for every other kind — and `organization` is the
-    // durable-knowledge write path's DEFAULT kind. The recovery that justifies
-    // collecting mentions on a placeholder has to cover the kinds actually collected.
-    const a = subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG' });
-    const dup = subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau' });
-    const other = subjects.findOrCreate({ kind: 'organization', name: 'Nordberg AG' });
-    expect(a.ambiguous || dup.ambiguous || other.ambiguous).toBe(false);
-    const agent = makeAgent('Merge');
+  it('merges ORGANIZATIONS when told the kind, and is UNREACHABLE for them without it', async () => {
+    // The tool resolved `person` only, while `organization` is the durable-knowledge
+    // write path's DEFAULT kind and the bulk of a real graph — so the one user-reachable
+    // way to fix a duplicate could not name most of what needed fixing. Both halves are
+    // asserted: with the kind it merges, and WITHOUT it the same call fails. Only the
+    // second half can fail if `kind` is ignored and hardcoded back to 'person'.
+    const id = (r: { ambiguous: boolean } & Record<string, unknown>): string => {
+      if (r.ambiguous) throw new Error('fixture should not be ambiguous');
+      return r['id'] as string;
+    };
+    const canon = id(subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG' }));
+    const dup = id(subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau' }));
+    const other = id(subjects.findOrCreate({ kind: 'organization', name: 'Nordberg AG' }));
+
+    const withoutKind = await subjectsMergeTool.handler(
+      { duplicate: 'Meridian Bau', canonical: 'Meridian Bau AG' }, makeAgent('Merge'));
+    expect(withoutKind).toMatch(/no person named/);
+    expect(subjects.getSubject(dup)!.merged_into).toBeNull();
+
     const res = await subjectsMergeTool.handler(
-      { duplicate: 'Meridian Bau', canonical: 'Meridian Bau AG', kind: 'organization' }, agent);
+      { duplicate: 'Meridian Bau', canonical: 'Meridian Bau AG', kind: 'organization' }, makeAgent('Merge'));
     expect(res).not.toMatch(/^Error/);
-    expect(subjects.getSubject(dup.ambiguous ? '' : dup.id)!.merged_into).toBe(a.ambiguous ? '' : a.id);
-    expect(subjects.getSubject(other.ambiguous ? '' : other.id)!.merged_into).toBeNull();   // untouched
+    expect(subjects.getSubject(dup)!.merged_into).toBe(canon);
+    expect(subjects.getSubject(other)!.merged_into).toBeNull();   // untouched
   });
 
   it('refuses a kind it must not merge by name', async () => {

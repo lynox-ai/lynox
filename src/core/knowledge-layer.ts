@@ -1003,7 +1003,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           : kind === 'person'
             ? subjects.resolvePersonSubject(e.name, { aliases: e.aliases })
             : subjects.findOrCreate({ kind, name: e.name, aliases: e.aliases });
-        // See the twin above: an unidentifying name gets no edge, and the skip is counted.
+        // Same decision as the twin above, but NOT the same cost, and the difference
+        // matters: this path is the AUTHORITATIVE persistence (no legacy entity write
+        // runs beside it), so a skipped entity is not merely an unwritten edge — that
+        // entity does not enter the graph at all. It is still the right call: the
+        // alternative is attaching it to one of several subjects that answer to the
+        // name, which corrupts a real record instead of omitting one. The memory itself
+        // is unaffected and the skip is counted.
         if (isAmbiguousResolution(resolution)) {
           channels.subjectAmbiguous.publish({ kind, candidateCount: resolution.candidateIds.length });
           continue;

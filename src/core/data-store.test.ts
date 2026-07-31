@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { DataStore } from './data-store.js';
 import type { SubjectColumnBridge } from './subject-store.js';
+import { SubjectStore, makeSubjectColumnBridge } from './subject-store.js';
+import { EngineDb } from './engine-db.js';
 import type { MemoryScopeRef } from '../types/index.js';
 
 const scope: MemoryScopeRef = { type: 'context', id: 'test-proj' };
@@ -1302,6 +1304,34 @@ describe('DataStore', () => {
         subjectsByName: true,
       });
       expect(or.rows).toHaveLength(3);            // the shared branch still contributes
+    });
+
+    it('an insert under a shared name KEEPS the record, unlinked — it does not lose the row', () => {
+      // The write bridge could resolve, bind-to-a-guess, or fail. Failing loudly costs
+      // more than it looks: `insertRecords` catches per record, so a throw discards the
+      // whole row including columns that have nothing to do with the subject. The
+      // module's own policy is the right one — a resolve failure stores null — so the
+      // record lands with an empty link and its other data intact.
+      // Through the REAL bridge and a real SubjectStore, not the stub: this is the one
+      // place the two halves meet, and a stub that mints on write would hide exactly the
+      // disagreement being tested.
+      const subjDir = makeTmpDb();
+      const subjects = new SubjectStore(new EngineDb(subjDir, ''));
+      ds.setSubjectBridge(makeSubjectColumnBridge(subjects));
+      subjects.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Meier'] });
+      subjects.findOrCreate({ kind: 'person', name: 'Bernd Meier', aliases: ['Meier'] });
+      seedAppointments(ds);
+
+      const res = ds.insertRecords({
+        collection: 'appointments',
+        records: [{ note: 'ambiguous patient', patient: 'Meier' }],
+      });
+      expect(res.inserted).toBe(1);
+      const row = ds.queryRecords({ collection: 'appointments' })
+        .rows.find(r => r['note'] === 'ambiguous patient');
+      expect(row).toBeDefined();
+      expect(row!['note']).toBe('ambiguous patient');   // the unrelated column survived
+      expect(row!['patient']).toBeNull();               // only the edge is missing
     });
 
     it('AND-joins a widened $eq with a sibling $in by INTERSECTING', () => {

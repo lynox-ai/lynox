@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { channels } from './observability.js';
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import type { EntityType } from '../types/index.js';
@@ -61,9 +62,21 @@ export type SubjectResolution =
   | { ambiguous: true; candidateIds: readonly string[] };
 
 /**
- * The sentence an interactive caller shows when a name does not identify one subject.
- * It NAMES the candidates, because the whole point is that the asker can disambiguate:
- * a bare "ambiguous" leaves them guessing which two things collided.
+ * The error a NON-interactive caller throws or logs. It carries NO names: several callers
+ * write `err.message` to stderr under an explicit data-minimisation promise (`crm.ts`:
+ * "Contact name omitted from the log — it is plaintext PII"), and a message naming the
+ * colliding contacts breaks exactly that promise. The count diagnoses; the names belong
+ * only where a human is being asked to choose.
+ */
+export function ambiguityError(kind: string, candidateIds: readonly string[]): Error {
+  return new Error(`this name matches ${String(candidateIds.length)} ${kind} entries — it does not identify one`);
+}
+
+/**
+ * The sentence shown when a human or an agent is being asked to disambiguate. This one
+ * NAMES the candidates, because that is the point: a bare "ambiguous" leaves the asker
+ * guessing which two things collided. Use it where the text is DISPLAYED, never on a path
+ * that logs — see {@link ambiguityError}.
  *
  * Names are KG-extracted from untrusted content, so each is stripped of Unicode
  * format/invisible characters and whitespace-collapsed before display — the same
@@ -107,16 +120,21 @@ export function makeSubjectColumnBridge(subjectStore: SubjectStore): SubjectColu
   const narrow = (kind: string): SubjectKind =>
     (KNOWN_SUBJECT_KINDS as readonly string[]).includes(kind) ? (kind as SubjectKind) : 'person';
   return {
-    // WRITE path. An ambiguous name THROWS rather than binding the record to a guess or
-    // to an invented row: linking a record is an identity claim, and this is exactly the
-    // case where no identity is known. The message names the candidates so the caller
-    // (an agent, which can retry) has something to act on. Without this the insert and
-    // the later query disagree — measured: a row written under a shared name read back
-    // as 0 under `$eq` while still appearing under `$neq`.
+    // WRITE path. An ambiguous name binds NOTHING — but it returns null rather than
+    // throwing, because this module already states what a resolve failure means and the
+    // call site is written for exactly that: "a resolve FAILURE → store null (unlinked),
+    // NOT the raw name". Throwing loses the WHOLE RECORD instead of just the link, since
+    // `insertRecords` catches per record — measured: two records in, one landed, the
+    // other's unrelated columns gone with it. The record keeps its data and carries no
+    // subject edge, which is the honest outcome when no identity is known, and the skip
+    // is counted so it is not silent.
     resolve: (name, kind) => {
       const k = narrow(kind);
       const r = subjectStore.findOrCreate({ kind: k, name });
-      if (r.ambiguous) throw new Error(describeAmbiguity(subjectStore, name, r.candidateIds));
+      if (r.ambiguous) {
+        channels.subjectAmbiguous.publish({ kind: k, candidateCount: r.candidateIds.length });
+        return null;
+      }
       return r.id;
     },
     // A SET, because a single id cannot express what an ambiguous name means and every

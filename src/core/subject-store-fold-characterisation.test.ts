@@ -105,7 +105,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { SubjectStore, makeSubjectColumnBridge } from './subject-store.js';
+import { SubjectStore, makeSubjectColumnBridge, ambiguityError, describeAmbiguity } from './subject-store.js';
 
 describe('subject folding, per resolver', () => {
   const tmpDirs: string[] = [];
@@ -365,19 +365,40 @@ describe('subject folding, per resolver', () => {
       expect(bridge.findAll('Nobody At All', 'person')).toEqual([]);
     });
 
-    it('the WRITE half throws rather than binding a record to a guess', () => {
-      // `resolve` links a record to a subject, which is an identity claim — exactly what
-      // is unavailable here. Binding to one candidate, or to an invented row, made the
-      // write and the later read disagree: a row stored under a shared name came back as
-      // ZERO under `$eq` while still appearing under `$neq`.
+    it('the loggable error carries NO names, while the displayed one does', () => {
+      // Two audiences, two texts. `crm.ts` writes `err.message` to stderr under an
+      // explicit promise that the contact name is omitted as plaintext PII, so an error
+      // naming the colliding contacts breaks that promise silently — it did, and no test
+      // held it. The DISPLAY variant is the opposite requirement: it must name them, or
+      // the person being asked to disambiguate cannot.
+      const store = makeStore();
+      const a = store.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Meier'] });
+      const b = store.findOrCreate({ kind: 'person', name: 'Bernd Meier', aliases: ['Meier'] });
+      const ids = [idOf(a), idOf(b)];
+
+      const logged = ambiguityError('person', ids).message;
+      expect(logged).not.toMatch(/Anna|Bernd|Meier/);    // no names
+      expect(logged).not.toContain(idOf(a));             // and no ids either
+      expect(logged).toMatch(/matches 2 person/);        // the count still diagnoses
+
+      const shown = describeAmbiguity(store, 'Meier', ids);
+      expect(shown).toContain('Anna Meier');
+      expect(shown).toContain('Bernd Meier');
+    });
+
+    it('the WRITE half binds nothing — and does not throw, which would cost the record', () => {
+      // `resolve` links a record to a subject, an identity claim that is unavailable
+      // here, so it binds nothing. It returns null rather than throwing for a reason the
+      // DataStore states itself ("a resolve FAILURE → store null (unlinked)"): the insert
+      // catches PER RECORD, so a throw discards the whole row — measured, two records in,
+      // one landed, the other's unrelated columns gone with it. Null keeps the record and
+      // drops only the edge.
       const store = makeStore();
       const bridge = makeSubjectColumnBridge(store);
       store.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Meier'] });
       store.findOrCreate({ kind: 'person', name: 'Bernd Meier', aliases: ['Meier'] });
-      expect(() => bridge.resolve('Meier', 'person')).toThrow(/more than one/);
-      // It NAMES the candidates — the caller is an agent that can retry with a full name.
-      expect(() => bridge.resolve('Meier', 'person')).toThrow(/Anna Meier/);
-      expect(store.count({ kinds: ['person'] })).toBe(2);   // the attempt wrote nothing
+      expect(bridge.resolve('Meier', 'person')).toBeNull();
+      expect(store.count({ kinds: ['person'] })).toBe(2);   // and it invented nothing
     });
 
     it('the WRITE half still resolves an unambiguous name', () => {
