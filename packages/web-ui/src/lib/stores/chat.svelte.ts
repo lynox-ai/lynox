@@ -1415,6 +1415,19 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case SPAWN_PROGRESS_EVENT: {
 			applySpawnProgress(msg, data);
 			syncSpawnContext(msg);
+			// Re-arm the waiting label. `spawn_agent` emits the phase once when the
+			// batch starts, but a child's tool calls are forwarded onto this same
+			// stream, and the `tool_call` case overwrites `streamingToolName` and
+			// nulls the phase. So on any child that uses tools the label was lost
+			// seconds in and never came back, leaving the indicator stuck on whatever
+			// the child's LAST tool was for the rest of a minutes-long wait. This
+			// heartbeat runs every 5s while children are still running (and stops when
+			// they finish), which makes it the only signal that can restore it. The
+			// child's own tool activity still shows in between — that is real and
+			// informative; what it must not do is outlive the tool it describes.
+			streamingActivity = 'tool';
+			streamingToolName = 'spawn_agent';
+			streamingToolPhase = { tool: 'spawn_agent', phase: 'waiting' };
 			break;
 		}
 		case SPAWN_CHILD_DONE_EVENT: {
@@ -1544,6 +1557,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					...(prev?.ttfbMs !== undefined ? { ttfbMs: prev.ttfbMs } : {}),
 					...(turnStop !== undefined ? { stopReason: turnStop } : {}),
 					...(turnIters !== undefined ? { iterations: turnIters } : {}),
+					// Sub-agent spend is written by the terminal `done` frame, so today
+					// no turn_end can follow it and this carry is inert. It is here
+					// because this rebuild is an explicit allowlist: anything not named
+					// is dropped, and "the events happen to arrive in this order" is a
+					// weaker guarantee than naming the field.
+					...(prev?.spawnCostUsd !== undefined ? { spawnCostUsd: prev.spawnCostUsd } : {}),
 				};
 				// Context budget is owned solely by the engine `context_budget`
 				// event (exact API usage). turn_end no longer writes it — the old

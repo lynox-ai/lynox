@@ -200,6 +200,16 @@ export interface RunUsageSummary {
   cacheWrite: number;
   costUsd: number;
   model: string;
+  /** Spend of every sub-agent this run spawned, at any depth. Absent when the
+   *  run delegated nothing.
+   *
+   *  Kept SEPARATE from `costUsd` on purpose: each child run is its own row in
+   *  RunHistory, and a thread total is the sum over rows, so folding children
+   *  into the parent's cost would double-count the thread. The UI adds the two
+   *  for the "what did this answer cost" figure and names the split in the
+   *  tooltip — before this, a delegated turn under-reported by whatever the
+   *  children spent (measured: $0.38 shown, $0.45 actually billed). */
+  spawnCostUsd?: number;
   /** Diagnostics (opt-in UI panel): the run's id for log/Bugsink correlation
    *  and its wall-to-wall agent duration. Persisted via setMessageUsage so the
    *  diagnostics detail survives a thread resume. */
@@ -945,6 +955,17 @@ export class Session {
         cache_read_input_tokens: cacheRead,
       });
 
+      // What this run's sub-agents spent, if it delegated. Read from RunHistory
+      // rather than tracked in memory: the children are already rows there,
+      // written before `spawn_agent` returns (the parent blocks on them), so by
+      // this line the figure is complete. Best-effort — a cost line must never
+      // be the reason a turn fails.
+      let spawnCostUsd = 0;
+      if (runHistory && this.currentRunId) {
+        try { spawnCostUsd = runHistory.getDescendantCostUsd(this.currentRunId); }
+        catch { spawnCostUsd = 0; }
+      }
+
       // Snapshot this run's usage in the UI footer's convention (tokensIn =
       // base input + both cache buckets). Stashed for getLastRunUsage() so the
       // HTTP API can echo it in the `done` event — a fallback that renders the
@@ -956,6 +977,7 @@ export class Session {
         cacheWrite,
         costUsd,
         model,
+        ...(spawnCostUsd > 0 ? { spawnCostUsd } : {}),
         ...(this.currentRunId ? { runId: this.currentRunId } : {}),
         durationMs,
       };

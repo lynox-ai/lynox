@@ -783,6 +783,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.activity.tool.artifact_list': { de: 'Sucht Artefakte...', en: 'Searching artifacts...' },
 	'chat.activity.tool.artifact_delete': { de: 'Löscht Artefakt...', en: 'Deleting artifact...' },
 	'chat.activity.tool.spawn_agent': { de: 'Verteilt Aufgaben...', en: 'Delegating to sub-agents...' },
+	// Dispatch takes about a second; waiting for the children takes minutes. The
+	// generic label above describes only the first, so `spawn.ts` hands over to
+	// this phase as soon as the batch is running.
+	'chat.activity.tool.spawn_agent.waiting': { de: 'Sub-Agenten arbeiten...', en: 'Sub-agents working...' },
 	'chat.activity.tool.read_file': { de: 'Liest Datei...', en: 'Reading file...' },
 	'chat.activity.tool.write_file': { de: 'Schreibt Datei...', en: 'Writing file...' },
 	'chat.activity.tool.list_files': { de: 'Listet Dateien...', en: 'Listing files...' },

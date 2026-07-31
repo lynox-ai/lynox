@@ -2251,6 +2251,54 @@ export class RunHistory {
     ).all(...ids) as RunRecord[];
   }
 
+  /**
+   * Total spend of everything `runId` spawned, at any depth — the number a
+   * per-message cost line needs to stop understating a delegated turn.
+   *
+   * Walks `runs.spawn_parent_id` rather than the `run_spawns` table that
+   * {@link getSpawnTree} uses: the parent link is written by the spawn path
+   * itself when the child run is inserted, while `run_spawns` is filled from a
+   * separate `spawnEnd` subscription. Both should agree, but only the column is
+   * on the write path that also records the cost, so it cannot be half-present.
+   * Uses `idx_runs_spawn_parent`.
+   *
+   * Deliberately NOT folded into the parent's own `cost_usd`: each child is its
+   * own row, and thread totals sum all rows — adding children upward would
+   * double-count the thread. Callers surface it as a separate figure.
+   *
+   * Carries the same two guards as every other spend aggregate in this file
+   * (see `getThreadTotals` / `getStats`): `run_type != 'pipeline_step'` is the
+   * stated A2 billing invariant — a pipeline step must NEVER move a spend
+   * aggregate — and `status != 'running'` keeps an in-flight row out. Neither
+   * is reachable today (pipeline steps point at a `pipeline_runs` id, which no
+   * `runs.id` can equal, and a running row still has `cost_usd = 0`), but an
+   * aggregate that omits the house guards is one writer away from moving money
+   * quietly, and the invariant is stated as a rule rather than a nicety.
+   *
+   * `UNION` rather than `UNION ALL`: dedup on `(id, cost_usd)` where `id` is
+   * the primary key drops no legitimate row, and it makes a cyclic
+   * `spawn_parent_id` terminate instead of spinning. A cycle is unreachable
+   * from the writers in this repo — every edge points at a strictly earlier row
+   * — but `better-sqlite3` is synchronous and this sits on the run-end path, so
+   * the failure mode would be the whole engine wedging, not a wrong number.
+   * That asymmetry is worth one keyword.
+   */
+  getDescendantCostUsd(runId: string): number {
+    const row = this.db.prepare(`
+      WITH RECURSIVE descendants AS (
+        SELECT id, cost_usd FROM runs WHERE spawn_parent_id = ?
+        UNION
+        SELECT r.id, r.cost_usd FROM runs r JOIN descendants d ON r.spawn_parent_id = d.id
+      )
+      SELECT COALESCE(SUM(cost_usd), 0) as total
+      FROM descendants
+      WHERE id IN (
+        SELECT id FROM runs WHERE status != 'running' AND run_type != 'pipeline_step'
+      )
+    `).get(runId) as { total: number } | undefined;
+    return row?.total ?? 0;
+  }
+
   // === Analytics delegates ===
 
   getRepeatTasks(contextId: string, minCount: number, days: number) {

@@ -239,3 +239,84 @@ describe('shortModelLabel — path-shaped model ids in the footer', () => {
 		expect(modelPart).toEqual({ text: 'mistral-medium-2604' });
 	});
 });
+
+/**
+ * A delegated turn is billed across MORE than one run: the main run plus one
+ * row per spawned sub-agent. The footer used to show only the main run, so a
+ * real deep-review turn read "$0.38" against $0.45 actually billed — an 18%
+ * understatement, and the thread total (which sums all rows) did not match the
+ * sum of the per-message lines. `spawnCostUsd` carries the children's spend
+ * alongside — never folded into `costUsd`, because that value is also the
+ * parent's own run row and folding would double-count the thread.
+ */
+describe('sub-agent cost rollup in the footer', () => {
+	const withSpawn: UsageInfo = {
+		tokensIn: 258200, tokensOut: 3177, cacheRead: 20528, cacheWrite: 0,
+		costUsd: 0.3834, spawnCostUsd: 0.0698, model: 'mistral-medium-2604',
+	};
+
+	it('shows the SUM of the main run and its sub-agents', () => {
+		const costPart = formatUsageMetaParts(withSpawn, true)[0];
+		expect(costPart?.text).toBe('$0.45');
+	});
+
+	it('names the parts in the tooltip so the main-run figure stays recoverable', () => {
+		const costPart = formatUsageMetaParts(withSpawn, true)[0];
+		expect(costPart?.title).toBe('main $0.38 · sub-agents $0.07');
+	});
+
+	/**
+	 * `formatCost` switches from 2 to 4 decimals below $0.01, so phrasing the
+	 * tooltip as "a + b" produced arithmetic that visibly does not check out
+	 * whenever the sub-agent spend is sub-cent — the common case for `fast`-tier
+	 * children. Labelled parts state the same two numbers without claiming they
+	 * add up to the headline at the displayed precision.
+	 */
+	it('does not render a sum that fails to add up when sub-agent spend is sub-cent', () => {
+		const subCent: UsageInfo = {
+			tokensIn: 1000, tokensOut: 10, cacheRead: 0, cacheWrite: 0,
+			costUsd: 0.375, spawnCostUsd: 0.005,
+		};
+		const costPart = formatUsageMetaParts(subCent, true)[0];
+		// Headline rounds to the same $0.38 as the main run alone...
+		expect(costPart?.text).toBe('$0.38');
+		// ...so the tooltip must not read as "$0.38 + $0.0050", which invites a
+		// subtraction that yields the wrong main-run figure.
+		expect(costPart?.title).toBe('main $0.38 · sub-agents $0.0050');
+		expect(costPart?.title).not.toContain('+');
+	});
+
+	it('leaves a non-delegating turn exactly as before — no sum, no tooltip', () => {
+		const plain: UsageInfo = { tokensIn: 100, tokensOut: 10, cacheRead: 0, cacheWrite: 0, costUsd: 0.02 };
+		expect(formatUsageMetaParts(plain, true)[0]).toEqual({ text: '$0.02' });
+	});
+
+	it('still hides the figures on a demo tenant (includeCost=false)', () => {
+		const parts = formatUsageMetaParts(withSpawn, false);
+		expect(parts.every((p) => !p.text.startsWith('$'))).toBe(true);
+	});
+
+	it('parses spawnCostUsd off the done event', () => {
+		const parsed = usageFromDoneEvent({
+			tokensIn: 1000, tokensOut: 10, cacheRead: 0, cacheWrite: 0,
+			costUsd: 0.3834, spawnCostUsd: 0.0698,
+		});
+		expect(parsed?.spawnCostUsd).toBe(0.0698);
+	});
+
+	it('omits spawnCostUsd when the turn delegated nothing', () => {
+		const parsed = usageFromDoneEvent({
+			tokensIn: 1000, tokensOut: 10, cacheRead: 0, cacheWrite: 0, costUsd: 0.05,
+		});
+		expect(parsed).not.toHaveProperty('spawnCostUsd');
+	});
+
+	it('survives the done-merge that replaces a turn_end-accumulated total', () => {
+		const prior: UsageInfo = { tokensIn: 5, tokensOut: 1, cacheRead: 0, cacheWrite: 0, costUsd: 0.01 };
+		const merged = mergeDoneUsage(prior, {
+			tokensIn: 1000, tokensOut: 10, cacheRead: 0, cacheWrite: 0,
+			costUsd: 0.3834, spawnCostUsd: 0.0698,
+		});
+		expect(merged?.spawnCostUsd).toBe(0.0698);
+	});
+});
