@@ -314,6 +314,7 @@ describe('extended-tool-description-on-use split invariants', () => {
     { name: 'ask_secret', movedPhrase: 'dead end' },
     { name: 'memory_recall', movedPhrase: 'may be stale' },
     { name: 'api_setup', movedPhrase: 'auto-attached' },
+    { name: 'subjects_merge', movedPhrase: 'Never tell the user a merge is reversible' },
   ] as const;
 
   for (const { name, movedPhrase } of TARGETS) {
