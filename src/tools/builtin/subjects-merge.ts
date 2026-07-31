@@ -3,6 +3,8 @@ import { getLynoxDir } from '../../core/config.js';
 import { runMerge } from '../../core/subject-merge-runner.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { pv } from '../../core/prompt-value.js';
+import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
+import type { SubjectKind } from '../../core/subject-store.js';
 
 // Foundation Rework v2 — subject dedup (PR-C3). The chat-native surface over the
 // SubjectStore.mergeSubjects primitive: when two person entries turn out to be the
@@ -16,19 +18,18 @@ import { pv } from '../../core/prompt-value.js';
 // path the operator sweep uses).
 
 /**
- * The kinds this tool can fold. Deliberately the name-deduped set: those are the kinds
- * whose identity IS their name, so two rows of the same kind sharing one are the
- * duplicate this tool exists to resolve. Anything else (an engagement, an `other`) has
- * composite or no name-identity and must not be merged by name.
+ * The kinds this tool can fold: the name-deduped set, imported rather than restated.
+ * Those are exactly the kinds whose identity IS their name, so two rows of one kind
+ * sharing a name are the duplicate this tool exists to resolve; an engagement
+ * (provider×client×period) or an `other` has no name-identity and must not be merged
+ * by name. Re-declaring the list here would be a second source of truth that drifts
+ * silently the day a kind joins or leaves the deduped set.
  *
- * It was `person`-only until the second security round showed why that is not a safe
- * default: a shared alias makes the write path mint a row named after the alias, and the
- * kind it mints most is `organization` (the durable-knowledge write path's default) —
- * exactly the kind the only user-reachable merge surface could not name. The recovery
- * that justifies minting has to cover the kinds that actually get minted.
+ * It was `person`-only until a security round showed why that is not a safe default:
+ * `organization` is the durable-knowledge write path's DEFAULT kind and made up the bulk
+ * of a real graph, so the only user-reachable merge surface could not name most of what
+ * it needed to fix.
  */
-const MERGEABLE_KINDS = ['person', 'organization', 'product', 'service'] as const;
-type MergeableKind = typeof MERGEABLE_KINDS[number];
 
 interface SubjectsMergeInput {
   duplicate: string;
@@ -56,7 +57,7 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
       properties: {
         duplicate: { type: 'string', description: 'The duplicate to fold away (kept as an alias of the canonical).' },
         canonical: { type: 'string', description: 'The correct / fuller entry to keep.' },
-        kind: { type: 'string' as const, enum: [...MERGEABLE_KINDS], description: 'Defaults to person.' },
+        kind: { type: 'string' as const, enum: [...NAME_DEDUPED_SUBJECT_KINDS], description: 'Defaults to person.' },
       },
       required: ['duplicate', 'canonical'],
     },
@@ -70,14 +71,16 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
     if (!dupName || !canonName) return 'Error: pass both `duplicate` and `canonical` names.';
 
     const rawKind = input.kind?.trim() || 'person';
-    if (!(MERGEABLE_KINDS as readonly string[]).includes(rawKind)) {
-      return `Error: \`kind\` must be one of ${MERGEABLE_KINDS.join(', ')}.`;
+    if (!(NAME_DEDUPED_SUBJECT_KINDS as readonly string[]).includes(rawKind)) {
+      return `Error: \`kind\` must be one of ${NAME_DEDUPED_SUBJECT_KINDS.join(', ')}.`;
     }
-    const kind = rawKind as MergeableKind;
+    const kind = rawKind as SubjectKind;
 
     // Resolve each name to a single active subject of that kind (canonical name → alias).
-    // A SHARED name resolves to nothing here on purpose: which of several was meant is a
-    // question this tool must not answer by guessing, least of all before a repoint.
+    // A name SEVERAL entries answer to resolves to nothing here on purpose — which was
+    // meant is not a question to guess before a graph-wide repoint. (A name that is one
+    // entry's canonical name and another's alias is not that case: `findCanonical` runs
+    // first and answers it, deliberately.)
     const dup = subjects.findCanonical(dupName, kind) ?? subjects.findByAlias(dupName, kind);
     if (!dup) return `Error: no ${kind} named "${dupName}" found in the knowledge graph.`;
     const canon = subjects.findCanonical(canonName, kind) ?? subjects.findByAlias(canonName, kind);
@@ -110,7 +113,7 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
       const r = runMerge(subjects, agent.toolContext.dataStore, agent.toolContext.threadStore, getLynoxDir(), dup.id, canon.id);
       if (!r.ok) return `Merge refused: ${r.reason}`;
       const cells = r.dataStoreRows > 0 ? `, ${r.dataStoreRows} record cell${r.dataStoreRows === 1 ? '' : 's'} repointed` : '';
-      return `Merged "${r.dupName}" into "${r.canonicalName}" — one person now${cells}. Reversible from the merge ledger.`;
+      return `Merged "${r.dupName}" into "${r.canonicalName}" — one entry now${cells}. Reversible from the merge ledger.`;
     } catch (err) {
       return `subjects_merge error: ${getErrorMessage(err)}`;
     }

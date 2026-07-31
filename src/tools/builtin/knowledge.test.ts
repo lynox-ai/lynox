@@ -376,6 +376,22 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
     expect(out).not.toMatch(/focus set/i);
   });
 
+  it('memory_focus reports ambiguity from the PERSON alias arm too', async () => {
+    // The org arm and the person arm are separate branches. Every earlier fixture made
+    // the ORG alias the ambiguous one, so the person-alias check never ran — deleting it
+    // passed the whole suite. Here no organization carries the name at all, so the chain
+    // reaches the person alias stage and only that branch can produce the refusal.
+    const { agent } = make();
+    const subjects = agent.toolContext.subjectStore!;
+    subjects.findOrCreate({ kind: 'person', name: 'Zorin Marek', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'person', name: 'Anna Roth', aliases: ['Meridian'] });
+    expect(subjects.findCanonical('Meridian', 'organization')).toBeNull();
+    expect(subjects.findCanonical('Meridian', 'person')).toBeNull();
+    expect(subjects.findByAliasResolved('Meridian', 'organization').ambiguous).toBe(false);
+    const out = await memoryFocusTool.handler({ subject: 'Meridian' }, agent);
+    expect(out).toMatch(/more than one/i);
+  });
+
   it('memory_focus still focuses a CANONICAL match despite an ambiguous alias elsewhere', async () => {
     // Same precedence rule as the recall scope, and the fixture has to reach the
     // ambiguity stage to prove it: the CANONICAL hit must sit in the person arm, which

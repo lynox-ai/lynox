@@ -1060,7 +1060,12 @@ export class DataStore {
     const out: Record<string, unknown> = {};
     const narrowIn = (ids: unknown[]): void => {
       const prev = out['$in'];
-      out['$in'] = Array.isArray(prev) ? prev.filter(p => ids.includes(p)) : ids;
+      const next = Array.isArray(prev) ? prev.filter(p => ids.includes(p)) : ids;
+      // An EMPTY intersection means "nothing can satisfy both clauses" — which is a
+      // legitimate zero-row answer, not a malformed filter. Emitting `[]` would hand the
+      // validator an empty `$in` and turn that answer into a thrown error, so the
+      // unmatchable sentinel carries it instead.
+      out['$in'] = next.length > 0 ? next : [UNRESOLVABLE_SUBJECT];
     };
     const widenNin = (ids: unknown[]): void => {
       const prev = out['$nin'];

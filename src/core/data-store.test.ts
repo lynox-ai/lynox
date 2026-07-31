@@ -1304,6 +1304,68 @@ describe('DataStore', () => {
       expect(or.rows).toHaveLength(3);            // the shared branch still contributes
     });
 
+    it('AND-joins a widened $eq with a sibling $in by INTERSECTING', () => {
+      // Clauses in one operator object are AND-joined, so widening `$eq` into a set must
+      // narrow against a sibling `$in`, not replace or union it. Nothing covered this:
+      // replacing the intersect with a plain assignment passed the entire suite.
+      const { bridge, shareName } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+      const anna = bridge.findAll('Anna Meier', 'person')[0]!;
+      const ben = bridge.findAll('Ben Roth', 'person')[0]!;
+      shareName('Meier', 'person', [anna, ben]);
+
+      // "is one of {anna,ben}" AND "is one of {ben}" ⇒ ben only ⇒ his single row.
+      // BOTH key orders, because clause order must not change an AND — and because with
+      // only the `$eq`-first order a plain "last write wins" implementation gives the same
+      // answer by luck and the assertion proves nothing.
+      for (const filter of [
+        { patient: { $eq: 'Meier', $in: ['Ben Roth'] } },
+        { patient: { $in: ['Ben Roth'], $eq: 'Meier' } },
+      ]) {
+        const both = ds.queryRecords({ collection: 'appointments', filter, subjectsByName: true });
+        expect(both.rows, JSON.stringify(filter)).toHaveLength(1);
+        expect(both.rows[0]!['patient']).toBe('Ben Roth');
+      }
+    });
+
+    it('AND-joins a widened $neq with a sibling $nin by UNIONING', () => {
+      // The negated polarity composes the other way: excluding {anna,ben} AND excluding
+      // {ben} excludes all three. Same coverage gap as the intersect above.
+      const { bridge, shareName } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+      const anna = bridge.findAll('Anna Meier', 'person')[0]!;
+      const ben = bridge.findAll('Ben Roth', 'person')[0]!;
+      shareName('Meier', 'person', [anna, ben]);
+
+      const out = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: { $neq: 'Meier', $nin: ['Ben Roth'] } },
+        subjectsByName: true,
+      });
+      expect(out.rows).toHaveLength(0);
+    });
+
+    it('an EMPTY intersection returns zero rows instead of throwing', () => {
+      // The widened set can end up disjoint from its sibling — a legitimate "nothing
+      // satisfies both". Emitting an empty `$in` would hand the validator a malformed
+      // filter and turn that answer into an error.
+      const { bridge, shareName } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+      const anna = bridge.findAll('Anna Meier', 'person')[0]!;
+      const ben = bridge.findAll('Ben Roth', 'person')[0]!;
+      shareName('Meier', 'person', [anna, ben]);
+
+      const out = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: { $eq: 'Meier', $in: ['Nobody At All'] } },
+        subjectsByName: true,
+      });
+      expect(out.rows).toHaveLength(0);
+    });
+
     it('filters linked/unlinked rows via $is_null on a subject column', () => {
       const { bridge } = makeStubBridge();
       ds.setSubjectBridge(bridge);

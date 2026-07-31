@@ -12,7 +12,7 @@
 
 import type { DataStore } from './data-store.js';
 import type { EngineDb } from './engine-db.js';
-import { SubjectStore } from './subject-store.js';
+import { SubjectStore, describeAmbiguity } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 
 // ── Types ──
@@ -258,14 +258,20 @@ export class CRM {
     const subjects = this.subjectStore!;
     const relationships = this.relationshipStore!;
     engine.getDb().transaction(() => {
-      const { id: personId } = subjects.findOrCreate({ kind: 'person', name });
+      // A contact whose name several people answer to cannot be filed against one of
+      // them by guess — the caller is a user-facing CRM write and can be told to use the
+      // full name. The transaction rolls back, so no half-linked contact is left behind.
+      const person = subjects.findOrCreate({ kind: 'person', name });
+      if (person.ambiguous) throw new Error(describeAmbiguity(subjects, name, person.candidateIds));
+      const personId = person.id;
       if (c.email || c.phone || c.type) {
         subjects.setPersonDetail(personId, { email: c.email, phone: c.phone, type: c.type });
       }
       const company = c.company?.trim();
       if (company) {
-        const { id: orgId } = subjects.findOrCreate({ kind: 'organization', name: company });
-        relationships.createRelationship({ fromSubjectId: personId, toSubjectId: orgId, kind: 'works_for' });
+        const org = subjects.findOrCreate({ kind: 'organization', name: company });
+        if (org.ambiguous) throw new Error(describeAmbiguity(subjects, company, org.candidateIds));
+        relationships.createRelationship({ fromSubjectId: personId, toSubjectId: org.id, kind: 'works_for' });
       }
     })();
   }

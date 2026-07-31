@@ -70,8 +70,8 @@
  * not rest on a frequency assumption — every fold writes aliases, so the
  * constellation builds itself. It refuses on ambiguity now.
  *
- * The refusal took two attempts, and the first one is worth keeping in view here
- * because both failures are the kind a reading of the code does not catch:
+ * It took THREE attempts, and all three failures are the kind a reading of the code does
+ * not catch — which is why they are recorded here rather than only in the history:
  *
  *   · It did not fire in German. The count was taken over rows an
  *     `aliases LIKE` prefilter had already reduced, and SQLite folds case for
@@ -84,8 +84,16 @@
  *     caller, and several legitimately treat that as KEEP LOOKING — so the
  *     refusal fell into wider matchers and produced new silent wrong answers
  *     (a third person via the subset scan; a person answering an organization
- *     scope; an exclusion filter that quietly stopped excluding). Ambiguity is
- *     now its own answer, and each call site says what it does about it.
+ *     scope; an exclusion filter that quietly stopped excluding).
+ *   · Then the write path tried to ANSWER anyway, by collecting such mentions on a row
+ *     named after the shared name. That row won `findCanonical`, so the name resolved to
+ *     it from then on — and its only exit was a bulk repoint moving every collected fact
+ *     onto ONE candidate, i.e. the original defect again, later and in bulk. A store
+ *     cannot answer "which of these two" by inventing a third.
+ *
+ * What holds now: ambiguity is its own return value, and each caller says what it does
+ * about it — refuse loudly where a human can disambiguate, skip the edge (and COUNT it)
+ * where the mirror is additive.
  *
  * Which is why the fixtures here are German pairs rather than the tidier ASCII
  * ones: on this product the umlaut case is the normal case, and a test suite
@@ -101,6 +109,12 @@ import { SubjectStore, makeSubjectColumnBridge } from './subject-store.js';
 
 describe('subject folding, per resolver', () => {
   const tmpDirs: string[] = [];
+
+  /** The id of a resolution that must not be ambiguous — fails loudly if it is. */
+  function idOf(r: { ambiguous: boolean } & Record<string, unknown>): string {
+    if (r.ambiguous) throw new Error('expected an unambiguous resolution, got the candidate set');
+    return r['id'] as string;
+  }
 
   function makeStore(): SubjectStore {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-fold-'));
@@ -121,8 +135,8 @@ describe('subject folding, per resolver', () => {
       const a = store.findOrCreate({ kind, name: first });
       // Anchors the negatives: without this, every `toBe(false)` below also
       // passes against a findOrCreate broken to ALWAYS create.
-      expect(a.created).toBe(true);
-      return store.findOrCreate({ kind, name: second }).id === a.id;
+      expect(a.ambiguous === false && a.created).toBe(true);
+      return idOf(store.findOrCreate({ kind, name: second })) === idOf(a);
     }
 
     it('folds on case, whitespace and trailing punctuation', () => {
@@ -169,20 +183,26 @@ describe('subject folding, per resolver', () => {
       expect(store.findOrCreate({ kind: 'organization', name: 'Meridian Group' }).id).toBe(a.id);
     });
 
-    it('REFUSES when two subjects share an alias — it mints rather than guesses', () => {
-      // `findByAlias` full-scans with no ORDER BY and aliases carry no unique
-      // index, so returning the first hit collapsed two distinct organisations
-      // by row order — silently, and with no trace. It declines now, the same
-      // rule `resolvePersonSubject` applies to an ambiguous subset: minting a
-      // third row is recoverable, resolving to the wrong one is not.
+    it('REPORTS the candidates when two subjects share a name — it does not answer', () => {
+      // `findByAlias` full-scanned with no ORDER BY and aliases carry no unique index,
+      // so returning the first hit collapsed two distinct organisations by row order,
+      // silently. Two later attempts to replace that with an ANSWER were both wrong:
+      // taking one of the two, and minting a third row named after the shared name (which
+      // then won `findCanonical`, and could only be undone by a bulk repoint that moves
+      // every collected fact onto ONE candidate — the original defect, later and larger).
+      // The store does not invent an identity: it hands back who it could have meant.
       const store = makeStore();
       const a = store.findOrCreate({ kind: 'organization', name: 'Meridian AG', aliases: ['Meridian'] });
       const b = store.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
-      expect(b.id).not.toBe(a.id);
+      expect(a.ambiguous).toBe(false);
+      expect(b.ambiguous).toBe(false);
       const third = store.findOrCreate({ kind: 'organization', name: 'Meridian' });
-      expect(third.id).not.toBe(a.id);
-      expect(third.id).not.toBe(b.id);
-      expect(third.created).toBe(true);
+      expect(third.ambiguous).toBe(true);
+      if (third.ambiguous) {
+        expect([...third.candidateIds].sort()).toEqual([idOf(a), idOf(b)].sort());
+      }
+      // and nothing was written — the count is unchanged.
+      expect(store.count({ kinds: ['organization'] })).toBe(2);
     });
 
     it('still resolves an UNambiguous alias — the refusal is not a blanket off-switch', () => {
@@ -201,41 +221,9 @@ describe('subject folding, per resolver', () => {
       const store = makeStore();
       store.findOrCreate({ kind: 'organization', name: 'Nordberg AG', aliases: ['Meridian AG.'] });
       store.findOrCreate({ kind: 'organization', name: 'Ostwald AG', aliases: ['Meridian AG.'] });
-      const clean = store.findOrCreate({ kind: 'organization', name: 'Meridian AG' });
-      const minted = store.findOrCreate({ kind: 'organization', name: 'Meridian AG.' });
-      expect(minted.id).not.toBe(clean.id);
-      expect(minted.created).toBe(true);
-    });
-
-    it('the placeholder does NOT take the ambiguous name — it stays free', () => {
-      // The security round's central finding. A row named after the ambiguous name wins
-      // `findCanonical`, which precedes the alias stage in every chain, so the short name
-      // would resolve to the placeholder from then on — permanently, silently, and
-      // plantable: the second carrier that makes a name ambiguous can come from extracted
-      // content. Measured before the fix: after the placeholder existed, a recall scoped
-      // to the bare name returned ONLY the placeholder's facts and the real subject's were
-      // unreachable under that name.
-      const store = makeStore();
-      const real = store.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
-      store.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
-      const placeholder = store.findOrCreate({ kind: 'organization', name: 'Meridian' });
-      expect(placeholder.created).toBe(true);
-      expect(placeholder.id).not.toBe(real.id);
-      // The name is still nobody's canonical — that is the whole point.
-      expect(store.findCanonical('Meridian', 'organization')).toBeNull();
-      // And it did not become a third carrier of the alias either.
-      expect(JSON.parse(store.getSubject(placeholder.id)!.aliases)).toEqual([]);
-    });
-
-    it('repeat mentions of the same ambiguous name collapse onto ONE placeholder', () => {
-      // Otherwise every mention mints a row and the ambiguity becomes a growth vector.
-      const store = makeStore();
-      store.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
-      store.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
-      const first = store.findOrCreate({ kind: 'organization', name: 'Meridian' });
-      const second = store.findOrCreate({ kind: 'organization', name: 'Meridian' });
-      expect(second.id).toBe(first.id);
-      expect(second.created).toBe(false);
+      store.findOrCreate({ kind: 'organization', name: 'Meridian AG' });
+      const after = store.findOrCreate({ kind: 'organization', name: 'Meridian AG.' });
+      expect(after.ambiguous).toBe(true);
     });
 
     it('sees the ambiguity when the shared alias differs in a NON-ASCII case', () => {
@@ -249,13 +237,11 @@ describe('subject folding, per resolver', () => {
       // the SQL layer did not pre-judge; folding IN SQL does not fix this,
       // because that `lower()` is the same ASCII-only one.
       const store = makeStore();
-      const a = store.findOrCreate({ kind: 'organization', name: 'Müller Bau AG', aliases: ['Müller'] });
-      const b = store.findOrCreate({ kind: 'organization', name: 'Müller Handel AG', aliases: ['MÜLLER'] });
-      expect(b.id).not.toBe(a.id);
-      const third = store.findOrCreate({ kind: 'organization', name: 'müller' });
-      expect(third.created).toBe(true);
-      expect(third.id).not.toBe(a.id);
-      expect(third.id).not.toBe(b.id);
+      store.findOrCreate({ kind: 'organization', name: 'Müller Bau AG', aliases: ['Müller'] });
+      store.findOrCreate({ kind: 'organization', name: 'Müller Handel AG', aliases: ['MÜLLER'] });
+      const hit = store.findOrCreate({ kind: 'organization', name: 'müller' });
+      expect(hit.ambiguous).toBe(true);
+      if (hit.ambiguous) expect(hit.candidateIds).toHaveLength(2);
     });
   });
 
@@ -296,7 +282,7 @@ describe('subject folding, per resolver', () => {
       expect(store.resolvePersonSubject('Byron').id).toBe(b.id);
     });
 
-    it('an ambiguous ALIAS mints — it does not fall through to the looser subset scan', () => {
+    it('an ambiguous ALIAS reports back — it does not fall through to the looser subset scan', () => {
       // The steps after the alias lookup are progressively wider matchers, so
       // treating "two people already carry this alias" as a plain miss let the
       // name bind to a THIRD person who carried neither — worse than the
@@ -309,13 +295,14 @@ describe('subject folding, per resolver', () => {
       const b = store.findOrCreate({ kind: 'person', name: 'Bernd Meier', aliases: ['Ada'] });
       const third = store.findOrCreate({ kind: 'person', name: 'Ada Lovelace' });
       const resolved = store.resolvePersonSubject('Ada');
-      expect(resolved.id).not.toBe(third.id);
-      expect(resolved.id).not.toBe(a.id);
-      expect(resolved.id).not.toBe(b.id);
-      expect(resolved.created).toBe(true);
+      expect('ambiguous' in resolved && resolved.ambiguous).toBe(true);
+      // Nothing was bound and nothing was written: still exactly the three we made.
+      expect(store.count({ kinds: ['person'] })).toBe(3);
       // The subset scan still runs for a name the alias stage did not refuse —
-      // otherwise the four lines above would also pass with the scan deleted.
-      expect(store.resolvePersonSubject('Lovelace').id).toBe(third.id);
+      // otherwise the lines above would also pass with the scan deleted.
+      const clear = store.resolvePersonSubject('Lovelace');
+      expect('ambiguous' in clear).toBe(false);
+      if (!('ambiguous' in clear)) expect(clear.id).toBe(idOf(third));
     });
 
     it('⚠️ folds the FIRST exact homonym — two different people become one', () => {
@@ -374,8 +361,30 @@ describe('subject folding, per resolver', () => {
       const store = makeStore();
       const bridge = makeSubjectColumnBridge(store);
       const a = store.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Anna'] });
-      expect(bridge.findAll('Anna', 'person')).toEqual([a.id]);
+      expect(bridge.findAll('Anna', 'person')).toEqual([idOf(a)]);
       expect(bridge.findAll('Nobody At All', 'person')).toEqual([]);
+    });
+
+    it('the WRITE half throws rather than binding a record to a guess', () => {
+      // `resolve` links a record to a subject, which is an identity claim — exactly what
+      // is unavailable here. Binding to one candidate, or to an invented row, made the
+      // write and the later read disagree: a row stored under a shared name came back as
+      // ZERO under `$eq` while still appearing under `$neq`.
+      const store = makeStore();
+      const bridge = makeSubjectColumnBridge(store);
+      store.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Meier'] });
+      store.findOrCreate({ kind: 'person', name: 'Bernd Meier', aliases: ['Meier'] });
+      expect(() => bridge.resolve('Meier', 'person')).toThrow(/more than one/);
+      // It NAMES the candidates — the caller is an agent that can retry with a full name.
+      expect(() => bridge.resolve('Meier', 'person')).toThrow(/Anna Meier/);
+      expect(store.count({ kinds: ['person'] })).toBe(2);   // the attempt wrote nothing
+    });
+
+    it('the WRITE half still resolves an unambiguous name', () => {
+      const store = makeStore();
+      const bridge = makeSubjectColumnBridge(store);
+      const a = store.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Anna'] });
+      expect(bridge.resolve('Anna', 'person')).toBe(idOf(a));
     });
 
     it('returns EVERY candidate for a shared name — the caller decides the polarity', () => {

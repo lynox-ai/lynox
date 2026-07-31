@@ -111,16 +111,16 @@ describe('subjects_merge tool (PR-C3)', () => {
     // name collapses onto unreachable for every other kind — and `organization` is the
     // durable-knowledge write path's DEFAULT kind. The recovery that justifies
     // collecting mentions on a placeholder has to cover the kinds actually collected.
-    const a = subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
-    const b = subjects.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
-    const placeholder = subjects.findOrCreate({ kind: 'organization', name: 'Meridian' });
-    expect(placeholder.created).toBe(true);
+    const a = subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG' });
+    const dup = subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau' });
+    const other = subjects.findOrCreate({ kind: 'organization', name: 'Nordberg AG' });
+    expect(a.ambiguous || dup.ambiguous || other.ambiguous).toBe(false);
     const agent = makeAgent('Merge');
     const res = await subjectsMergeTool.handler(
-      { duplicate: 'Meridian (unresolved)', canonical: 'Meridian Bau AG', kind: 'organization' }, agent);
+      { duplicate: 'Meridian Bau', canonical: 'Meridian Bau AG', kind: 'organization' }, agent);
     expect(res).not.toMatch(/^Error/);
-    expect(subjects.getSubject(placeholder.id)!.merged_into).toBe(a.id);
-    expect(subjects.getSubject(b.id)!.merged_into).toBeNull();   // untouched
+    expect(subjects.getSubject(dup.ambiguous ? '' : dup.id)!.merged_into).toBe(a.ambiguous ? '' : a.id);
+    expect(subjects.getSubject(other.ambiguous ? '' : other.id)!.merged_into).toBeNull();   // untouched
   });
 
   it('refuses a kind it must not merge by name', async () => {
