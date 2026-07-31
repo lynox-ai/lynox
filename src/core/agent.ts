@@ -22,8 +22,9 @@ import type {
   PromptTabsFn,
   PromptSecretFn,
   PromptMailConnectFn,
+  CacheProfile,
 } from '../types/index.js';
-import { getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL } from '../types/index.js';
+import { getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -415,12 +416,64 @@ export class Agent implements IAgent {
   /** Wallclock (ms) of the most recent API call — used by the warm-cache-miss
    *  detector to distinguish a broken cache from a legit post-TTL cold read. */
   private _lastCallAt = 0;
+  /** True once this agent has observed a cache READ on any call — the gate the
+   *  warm-miss detector actually needs.
+   *
+   *  Configuration cannot answer "does this endpoint cache?". `custom` is
+   *  registered `automatic-prefix`, but the engine strips its `cache_control`
+   *  (it is Anthropic-wire) AND withholds `prompt_cache_key` (that is
+   *  openai-wire only, see `shouldSendPromptCacheKey`) — so it reports zero
+   *  cache reads forever, by construction. An OpenAI-compatible endpoint
+   *  (Ollama, vLLM, LM Studio) may likewise report `prompt_tokens` without
+   *  `prompt_tokens_details.cached_tokens`. Warning those users on every
+   *  tool-loop iteration is exactly the "cry wolf on an entire provider class"
+   *  the previous gate was defending against.
+   *
+   *  Observation settles it without a per-provider table: a cache that never
+   *  existed cannot break, and one that produced a hit and then stopped is
+   *  precisely the regression worth reporting. Not reset by `loadMessages` —
+   *  whether the endpoint caches is a property of the endpoint, not of the
+   *  message buffer. */
+  private _sawCacheRead = false;
   // Warm-cache-miss thresholds (see the detector in `_loop`). Conservative on
   // purpose — only fire on a real break, never on a small prompt or a cold/
   // post-TTL read.
   private static readonly CACHE_HEALTH_MIN_PROMPT = 4000;
   private static readonly CACHE_HEALTH_MIN_HIT_RATIO = 0.3;
+  /** Grace window for `explicit-breakpoint` providers (Anthropic/Vertex): the
+   *  agent writes every breakpoint at `AGENT_CACHE_TTL` = 1h, so a gap under
+   *  ~50min should still have been warm. */
   private static readonly CACHE_TTL_GRACE_MS = 50 * 60 * 1000;
+  /** Grace window for `automatic-prefix` providers (Mistral and other
+   *  OpenAI-compatible endpoints). Deliberately much shorter than the 1h
+   *  breakpoint window: these providers cache transparently and publish no TTL
+   *  we can pin, and a real thread measured 95% hit at a 62s gap but only 8% at
+   *  a 74min gap — so a long gap is a legitimate cold read there, not a break.
+   *  Five minutes keeps the detector to the range where a miss cannot be
+   *  explained by expiry on any known prefix cache. */
+  private static readonly CACHE_PREFIX_GRACE_MS = 5 * 60 * 1000;
+
+  /**
+   * How long after the previous call a hit should still have been expected.
+   *
+   * This answers only "how long does this provider's cache live?" — NOT "does
+   * this endpoint cache at all?". That second question cannot be answered from
+   * the provider id (see `_sawCacheRead`) and is deliberately not asked here.
+   *
+   * `none` yields 0, which suppresses the detector. No `LLMProvider` currently
+   * maps to it — every registered provider claims a real mechanism — so this
+   * arm is unreachable from the agent loop today and exists for the registry's
+   * `?? { mechanism: 'none' }` fallback should an unregistered key ever reach
+   * it. It is NOT the safety valve for custom proxies; `_sawCacheRead` is.
+   */
+  static cacheGraceMsFor(mechanism: CacheProfile['mechanism']): number {
+    switch (mechanism) {
+      case 'explicit-breakpoint': return Agent.CACHE_TTL_GRACE_MS;
+      case 'automatic-prefix':
+      case 'context-cache':       return Agent.CACHE_PREFIX_GRACE_MS;
+      case 'none':                return 0;
+    }
+  }
 
   /**
    * Pure predicate for the warm-cache-miss detector (unit-tested directly).
@@ -431,16 +484,55 @@ export class Agent implements IAgent {
    * @param realInput   realInput of this call (base + cache_read + cache_write)
    * @param cacheRead   cache_read_input_tokens of this call
    * @param gapMs       ms since the previous call (Infinity = no prior call)
+   * @param graceMs     provider-specific window (see {@link cacheGraceMsFor});
+   *                    0 suppresses the detector for providers we cannot judge
    *
    * Suppressed (returns false) on: cold start (no prior, gap = Infinity),
    * post-TTL resume (gap ≥ grace window → a legit cold read), and small
    * prompts (below the min where caching meaningfully matters).
    */
-  static isWarmCacheMiss(prevPrompt: number, realInput: number, cacheRead: number, gapMs: number): boolean {
+  static isWarmCacheMiss(
+    prevPrompt: number,
+    realInput: number,
+    cacheRead: number,
+    gapMs: number,
+    graceMs: number = Agent.CACHE_TTL_GRACE_MS,
+  ): boolean {
     return prevPrompt >= Agent.CACHE_HEALTH_MIN_PROMPT
       && realInput >= Agent.CACHE_HEALTH_MIN_PROMPT
-      && gapMs < Agent.CACHE_TTL_GRACE_MS
+      && gapMs < graceMs
       && cacheRead < prevPrompt * Agent.CACHE_HEALTH_MIN_HIT_RATIO;
+  }
+
+  /**
+   * The FULL warn-or-not decision for the warm-cache-miss detector — the
+   * predicate above plus the conditions that gate it. Kept static and pure
+   * (like {@link isWarmCacheMiss}) so the whole decision is unit-testable; the
+   * agent loop is then a single call.
+   *
+   * Warns only when ALL hold:
+   *  - this agent has ALREADY seen a cache read (`sawCacheRead`). This is the
+   *    load-bearing gate. A cache that never existed cannot break, and several
+   *    supported configurations never produce one: `custom` is Anthropic-wire
+   *    with `cache_control` stripped and no `prompt_cache_key`, and an
+   *    OpenAI-compatible endpoint may omit `cached_tokens` entirely. Gating on
+   *    the provider's declared mechanism instead would warn those users on
+   *    every tool-loop iteration, seconds apart, forever.
+   *  - a non-zero grace window for the provider's mechanism, and
+   *  - the prompt should have been warm but read back almost nothing.
+   */
+  static shouldWarnCacheMiss(args: {
+    prevPrompt: number;
+    realInput: number;
+    cacheRead: number;
+    gapMs: number;
+    mechanism: CacheProfile['mechanism'];
+    sawCacheRead: boolean;
+  }): boolean {
+    if (!args.sawCacheRead) return false;
+    const graceMs = Agent.cacheGraceMsFor(args.mechanism);
+    if (graceMs <= 0) return false;
+    return Agent.isWarmCacheMiss(args.prevPrompt, args.realInput, args.cacheRead, args.gapMs, graceMs);
   }
 
   private _loopToolCount = 0;
@@ -1236,6 +1328,14 @@ export class Agent implements IAgent {
         }
         return extractText([]);
       }
+      // Stamped BEFORE the call, not after it. The warm-miss detector asks "was
+      // the cache entry still alive when this request hit the provider?", so the
+      // interval it needs ends at dispatch. Measuring it after the response was
+      // processed folded this call's own duration into the gap — invisible
+      // against a 50-minute window, but a single long generate (the stream
+      // timeout alone is 10 minutes) can exceed the 5-minute one on its own and
+      // silence the detector precisely on the expensive turns.
+      const callStartedAt = Date.now();
       const response = await this._callAPI();
 
       // Strip thinking blocks — signatures are invalidated by proxies
@@ -1294,15 +1394,26 @@ export class Agent implements IAgent {
         // inside the cache TTL — reads back almost nothing from cache. It does
         // NOT fire on a cold start (no prior call) or a post-TTL resume (gap
         // beyond the grace window), both of which legitimately read zero.
-        // Gated to providers that actually do prompt caching: custom/openai
-        // proxies (e.g. Mistral) strip cache_control and never report
-        // cache_read, so without this gate the detector would cry wolf on
-        // EVERY warm turn of an entire provider class. Anthropic-direct and
-        // Vertex both report cache_read, so both keep the detector.
-        const now = Date.now();
+        //
+        // Gated on whether this agent has EVER seen a cache read, not on the
+        // provider id. The old `!isCustomProxy` gate rested on "openai proxies
+        // (e.g. Mistral) … never report cache_read", and that premise is false:
+        // a real Mistral thread reported 117,088 cache-read tokens on one turn
+        // and 20,528 on another, so the detector was mute on a whole provider
+        // class. But the inverse gate — "trust the registered mechanism" — is
+        // just as wrong in the other direction: `custom` is registered
+        // `automatic-prefix` while the engine strips its `cache_control` and
+        // withholds `prompt_cache_key`, so it reports zero cache reads forever
+        // and would warn on every tool-loop iteration. Observation answers both:
+        // see `_sawCacheRead`. The mechanism still picks the grace WINDOW, which
+        // is a TTL question and safe to answer from configuration.
         const prevPrompt = this._lastRealInputTokens ?? 0;
-        const gapMs = this._lastCallAt > 0 ? now - this._lastCallAt : Infinity;
-        if (!this.isCustomProxy && Agent.isWarmCacheMiss(prevPrompt, realInput, cacheRead, gapMs)) {
+        const gapMs = this._lastCallAt > 0 ? callStartedAt - this._lastCallAt : Infinity;
+        if (Agent.shouldWarnCacheMiss({
+          prevPrompt, realInput, cacheRead, gapMs,
+          mechanism: getCacheProfile(this.provider).mechanism,
+          sawCacheRead: this._sawCacheRead,
+        })) {
           const expectedMin = Math.round(prevPrompt * Agent.CACHE_HEALTH_MIN_HIT_RATIO);
           const detail = `prompt-cache likely broken: a warm ~${Math.round(realInput / 1000)}k-token prompt read only ${cacheRead} cached tokens (expected ≳${expectedMin}). A volatile prefix re-bills the whole history every turn.`;
           channels.cacheHealth.publish({
@@ -1320,7 +1431,10 @@ export class Agent implements IAgent {
             void this.onStream({ type: 'warning', code: 'cache_break', detail, agent: this.name });
           }
         }
-        this._lastCallAt = now;
+        // Read BEFORE this update (above), latched after: the first call that
+        // produces a hit must not arm the detector for its own evaluation.
+        if (cacheRead > 0) this._sawCacheRead = true;
+        this._lastCallAt = callStartedAt;
 
         if (realInput > 0) {
           this._lastRealInputTokens = realInput;
