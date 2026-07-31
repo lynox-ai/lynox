@@ -145,6 +145,24 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     expect(hits.some(h => h.text.includes('net-30'))).toBe(true);
   });
 
+  it('an AMBIGUOUS organization scope returns nothing, not the person of that name', () => {
+    // The explicit-subject lookup is a chain: organization canonical → organization
+    // alias → person canonical → person alias. An ambiguous organization alias used
+    // to read as "no organization" and drop into the person arm, so a query scoped to
+    // a company answered out of a person's facts — a wrong-scope read the caller
+    // cannot see happened. Ambiguity ends the chain with the same empty scope an
+    // unknown name gets: no answer beats an answer from the wrong namespace.
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
+    ks.write({ text: 'Meridian owes a personal favour', subjectName: 'Meridian', subjectKind: 'person', sourceChannel: 'agent', sourceUntrusted: false });
+    // The person exists and the fact is findable when asked for unambiguously —
+    // otherwise the assertion below would pass against a store that recalls nothing.
+    expect(subjects.findCanonical('Meridian', 'person')).not.toBeNull();
+    expect(ks.recall({ query: 'personal favour' }).some(h => h.text.includes('favour'))).toBe(true);
+    expect(ks.recall({ query: 'personal favour', subjectName: 'Meridian' })).toEqual([]);
+  });
+
   // ── Focus derivation (H2-gated) ──
 
   it('focus is H2-gated: a ghost subject with no active entries renders nothing', () => {

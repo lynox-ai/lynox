@@ -59,7 +59,23 @@ export function makeSubjectColumnBridge(subjectStore: SubjectStore): SubjectColu
     resolve: (name, kind) => subjectStore.findOrCreate({ kind: narrow(kind), name }).id,
     find: (name, kind) => {
       const k = narrow(kind);
-      return (subjectStore.findCanonical(name, k) ?? subjectStore.findByAlias(name, k))?.id ?? null;
+      const canonical = subjectStore.findCanonical(name, k);
+      if (canonical) return canonical.id;
+      // An AMBIGUOUS alias must not leave as a null. The caller maps null to a sentinel
+      // id, which matches nothing under `$eq`/`$in` — correct for a name nobody carries
+      // — but under `$neq`/`$nin` it reads "not equal to a thing that does not exist"
+      // and matches EVERY row, so the caller's exclusion silently disappears. The two
+      // cases only look alike: for an absent name "matches everything" is the right
+      // answer, for an ambiguous one it is a filter that quietly stopped filtering.
+      // Which subject was meant is a question this bridge cannot answer, so it refuses
+      // the same way a `$like` on a subject column does — visibly, to the caller.
+      const { row, ambiguous } = subjectStore.findByAliasResolved(name, k);
+      if (ambiguous) {
+        throw new Error(
+          `"${name}" matches more than one ${k} — filter by the full name to say which one.`,
+        );
+      }
+      return row?.id ?? null;
     },
     name: (id) => subjectStore.getSubject(id)?.name ?? null,
   };
@@ -364,9 +380,21 @@ export class SubjectStore {
       // normalized query against stored raw names, so the clean form must have been
       // stored first — full symmetry would need a stored normalized-name column.
       const normalized = normalizeSubjectName(params.kind, params.name);
-      const existing = this.findCanonical(params.name, params.kind, owner)
-        ?? this.findByAlias(params.name, params.kind, owner)
-        ?? (normalized !== params.name ? this.findCanonical(normalized, params.kind, owner) : null);
+      const canonical = this.findCanonical(params.name, params.kind, owner);
+      const aliasHit = canonical ? null : this.findByAliasResolved(params.name, params.kind, owner);
+      // AMBIGUOUS alias → mint, and stop looking. Two subjects already carry this alias,
+      // so there is no right answer to fold into; continuing to the normalized fallback
+      // would only widen the net. The new row is a THIRD subject named after the alias,
+      // and once it exists `findCanonical` resolves the name to it from then on — which
+      // is the deliberate trade: the pre-change behaviour returned whichever of the two
+      // real subjects SQLite yielded first, so mentions landed on a real person's record
+      // at random and contaminated it. A separate row FRAGMENTS instead: the real
+      // subjects keep their data unpolluted, the outcome is deterministic, and
+      // `subjects_merge` can fold the three once a human knows who was meant. Splitting
+      // is recoverable, silently merging two identities is not.
+      const existing = canonical
+        ?? aliasHit?.row
+        ?? (!aliasHit?.ambiguous && normalized !== params.name ? this.findCanonical(normalized, params.kind, owner) : null);
       if (existing) {
         // Fold the caller's surface forms into the existing subject's aliases
         // (case-insensitive — case-variants of an existing alias are no-ops).
@@ -488,25 +516,62 @@ export class SubjectStore {
     `).get(name, kind, ownerUserId) as SubjectRow | undefined ?? null;
   }
 
-  /** Alias lookup (JSON-array contains, case-insensitive), scoped to kind + owner + active. */
-  findByAlias(alias: string, kind: string, ownerUserId = DEFAULT_OWNER): SubjectRow | null {
-    const escaped = alias.replace(/[%_\\]/g, c => `\\${c}`);
-    const rows = this.db.prepare(`
-      SELECT * FROM subjects
-      WHERE kind = ? AND owner_user_id = ? AND archived_at IS NULL AND aliases LIKE ? ESCAPE '\\'
-    `).all(kind, ownerUserId, `%"${escaped}"%`) as SubjectRow[];
-    // LIKE is case-sensitive on the JSON; confirm a real case-insensitive alias hit.
+  /**
+   * Alias lookup that reports WHY it found nothing: the row when exactly ONE active
+   * subject of this kind+owner carries the alias, else `ambiguous` to distinguish
+   * "several carry it" from "none does".
+   *
+   * That distinction is load-bearing. A bare `null` for both reads as a safe refusal,
+   * but several callers legitimately treat a miss as *keep looking* or *exclude
+   * nothing* — so collapsing the two trades one silent wrong answer for quieter ones:
+   * `resolvePersonSubject` falls through to its token-subset scan and can bind the
+   * name to a THIRD person; the kind chains fall from an ambiguous organization into
+   * the person namespace; the DataStore subject filter turns it into a sentinel id,
+   * which is right for `$eq` (matches nothing) and inverts under `$neq`/`$nin`, where
+   * "not equal to a thing that does not exist" matches EVERY row. An ambiguous alias
+   * is not a miss — it is a question this store cannot answer, and each caller has to
+   * say what it does about that.
+   *
+   * NO `aliases LIKE` PREFILTER, deliberately. SQLite folds case for ASCII only —
+   * `lower('MÜLLER')` is `'mÜller'` and `'MÜLLER' = 'müller' COLLATE NOCASE` is false —
+   * while the JS post-filter folds full Unicode. A prefilter therefore drops rows the
+   * post-filter would have matched, so a second subject differing only in the case of
+   * a non-ASCII character never reaches the count and the lookup returns a confident
+   * single hit. On a German-first product that is the common case, not an edge, and it
+   * would defeat the very guarantee this function exists to make. Folding in SQL does
+   * NOT fix it (same ASCII-only `lower()`); scanning the kind+owner range and folding
+   * in JS does, with no side condition. It costs nothing: `EXPLAIN QUERY PLAN` is
+   * `SEARCH subjects USING INDEX idx_subjects_kind` either way — the LIKE was a row
+   * filter, never an index lookup — and projecting `id, aliases` instead of `SELECT *`
+   * leaves the embedding BLOBs on disk, so this reads LESS than the version it replaces.
+   *
+   * KNOWN LIMIT, pre-existing and symmetric: `toLowerCase()` does not normalise, so an
+   * NFD "ü" and an NFC "ü" neither match nor register as ambiguous. Unlike the
+   * ASCII-folding gap above this cannot produce a confident wrong hit — it is a missed
+   * match on both sides — so it is out of this change's scope.
+   */
+  findByAliasResolved(
+    alias: string,
+    kind: string,
+    ownerUserId = DEFAULT_OWNER,
+  ): { row: SubjectRow | null; ambiguous: boolean } {
     const lower = alias.toLowerCase();
-    const hits = rows.filter(r => this._parseAliases(r.aliases).some(a => a.toLowerCase() === lower));
-    // AMBIGUOUS → refuse, never guess. Aliases carry no unique index and this
-    // scan has no ORDER BY, so returning the first hit meant two distinct
-    // subjects sharing an alias were silently collapsed by row order — on the
-    // WRITE path a cross-entity fold with no trace, and on the read paths
-    // (recall scope, retrieval, the merge tool's duplicate lookup) an arbitrary
-    // subject's memories answering for another's. Declining is the same rule
-    // `resolvePersonSubject` already applies to an ambiguous subset: the caller
-    // then mints or reports nothing, which is recoverable. A wrong hit is not.
-    return hits.length === 1 ? hits[0]! : null;
+    const candidates = this.db.prepare(
+      'SELECT id, aliases FROM subjects WHERE kind = ? AND owner_user_id = ? AND archived_at IS NULL',
+    ).all(kind, ownerUserId) as Array<{ id: string; aliases: string }>;
+    const hits = candidates.filter(c => this._parseAliases(c.aliases).some(a => a.toLowerCase() === lower));
+    if (hits.length !== 1) return { row: null, ambiguous: hits.length > 1 };
+    return { row: this.getSubject(hits[0]!.id), ambiguous: false };
+  }
+
+  /**
+   * Row when exactly one subject carries the alias, else null — for the callers where
+   * an ambiguous alias and an unknown one genuinely warrant the same answer (a read
+   * filter returning no rows, a lookup that reports "not found"). Anything that would
+   * KEEP LOOKING or INVERT on a null must use {@link findByAliasResolved} instead.
+   */
+  findByAlias(alias: string, kind: string, ownerUserId = DEFAULT_OWNER): SubjectRow | null {
+    return this.findByAliasResolved(alias, kind, ownerUserId).row;
   }
 
   // ── Self-person + assignee resolution (S4a task-cutover) ──────
@@ -804,8 +869,19 @@ export class SubjectStore {
     const surfaceForms = [name, ...(opts?.aliases ?? [])];
     const canonical = this.findCanonical(name, 'person', owner);
     if (canonical) { this._mergeAliases(canonical, surfaceForms); return { id: canonical.id, created: false, resolved: 'canonical' }; }
-    const alias = this.findByAlias(name, 'person', owner);
-    if (alias) { this._mergeAliases(alias, surfaceForms); return { id: alias.id, created: false, resolved: 'alias' }; }
+    const aliasHit = this.findByAliasResolved(name, 'person', owner);
+    if (aliasHit.row) { this._mergeAliases(aliasHit.row, surfaceForms); return { id: aliasHit.row.id, created: false, resolved: 'alias' }; }
+    // AMBIGUOUS alias → mint immediately, do NOT continue. The steps below (normalized
+    // fallback, token-equal fold, subset scan) are progressively LOOSER matchers, so
+    // falling through on "two people already carry this alias" can bind the name to a
+    // THIRD person who carried neither — the pre-change behaviour at least picked one
+    // of the two real candidates. A fail-closed that routes into a looser matcher is
+    // not fail-closed. Minting is the rule this resolver already applies to an
+    // ambiguous token subset, and for the same reason: a fresh row fragments (visible,
+    // and foldable later via `subjects_merge`), a wrong hit silently corrupts.
+    if (aliasHit.ambiguous) {
+      return { id: this.createSubject({ kind: 'person', name, aliases: opts?.aliases, ownerUserId: owner }), created: true, resolved: 'created' };
+    }
     // Normalized fallback (mirrors findOrCreate): a punctuation/collapsed-whitespace variant
     // of an already-stored clean name converges — token-equal forms differ only by trailing
     // "." or doubled spaces, which findCanonical misses and the subset scan (STRICT superset)

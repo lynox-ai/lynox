@@ -411,10 +411,22 @@ export const memoryFocusTool: ToolEntry<FocusInput> = {
     }
     const subjects = agent.toolContext.subjectStore;
     if (!subjects) return 'Subject lookup is not available for this agent.';
-    const hit = subjects.findCanonical(name, 'organization')
-      ?? subjects.findByAlias(name, 'organization')
+    // Ambiguity ends the org→person chain instead of falling through into the person
+    // namespace, and — unlike the silent read paths — it is worth SAYING: the caller is
+    // an agent that can ask for the full name, so a refusal it can act on beats a
+    // "not found" that is untrue and beats a confident focus on the wrong subject.
+    const orgCanonical = subjects.findCanonical(name, 'organization');
+    const orgAlias = orgCanonical ? null : subjects.findByAliasResolved(name, 'organization');
+    const personAlias = orgCanonical || orgAlias?.row || subjects.findCanonical(name, 'person')
+      ? null
+      : subjects.findByAliasResolved(name, 'person');
+    if (orgAlias?.ambiguous || personAlias?.ambiguous) {
+      return `"${clip(name)}" matches more than one subject. Use the full name to say which one.`;
+    }
+    const hit = orgCanonical
+      ?? orgAlias?.row
       ?? subjects.findCanonical(name, 'person')
-      ?? subjects.findByAlias(name, 'person');
+      ?? personAlias?.row;
     if (!hit) return `No known subject named "${clip(name)}". Use the exact client/company/project name (or \`remember\` a fact about it first).`;
     ks.setFocusOverride(subjects.resolveActiveSubject(hit.id));
     return `Focus set to ${clip(name)} for this session.`;

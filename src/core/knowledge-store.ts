@@ -682,8 +682,15 @@ export class KnowledgeStore {
   private _resolveRecallScope(query: string, subjectName: string | undefined): string[] | null {
     const explicit = subjectName?.trim();
     if (explicit) {
-      const hit = this.subjects.findCanonical(explicit, 'organization')
-        ?? this.subjects.findByAlias(explicit, 'organization')
+      // The org→person chain must STOP on an ambiguous organization rather than continue:
+      // falling through would answer an organization-scoped query out of the person
+      // namespace — a wrong-scope read, and one the caller cannot see happened.
+      // Ambiguity ends the chain with the same empty scope as an unknown name.
+      const orgCanonical = this.subjects.findCanonical(explicit, 'organization');
+      const orgAlias = orgCanonical ? null : this.subjects.findByAliasResolved(explicit, 'organization');
+      if (orgAlias?.ambiguous) return [];
+      const hit = orgCanonical
+        ?? orgAlias?.row
         ?? this.subjects.findCanonical(explicit, 'person')
         ?? this.subjects.findByAlias(explicit, 'person');
       // Named an explicit subject we don't know → return an EMPTY scope, NOT a global scan.

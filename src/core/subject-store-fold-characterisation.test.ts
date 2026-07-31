@@ -69,6 +69,27 @@
  * alias were collapsed by row order. That is not blunt, it is wrong, and it does
  * not rest on a frequency assumption — every fold writes aliases, so the
  * constellation builds itself. It refuses on ambiguity now.
+ *
+ * The refusal took two attempts, and the first one is worth keeping in view here
+ * because both failures are the kind a reading of the code does not catch:
+ *
+ *   · It did not fire in German. The count was taken over rows an
+ *     `aliases LIKE` prefilter had already reduced, and SQLite folds case for
+ *     ASCII only, so a second subject differing in the case of an umlaut never
+ *     reached the count — the guard reported "unambiguous" and answered
+ *     confidently. Folding in SQL would NOT have fixed it either: that `lower()`
+ *     is the same ASCII-only one. Pinned by the non-ASCII pair below; an
+ *     all-ASCII fixture passes against the broken version.
+ *   · Refusing is only half a decision. A bare `null` meant "no match" to every
+ *     caller, and several legitimately treat that as KEEP LOOKING — so the
+ *     refusal fell into wider matchers and produced new silent wrong answers
+ *     (a third person via the subset scan; a person answering an organization
+ *     scope; an exclusion filter that quietly stopped excluding). Ambiguity is
+ *     now its own answer, and each call site says what it does about it.
+ *
+ * Which is why the fixtures here are German pairs rather than the tidier ASCII
+ * ones: on this product the umlaut case is the normal case, and a test suite
+ * that only ever asks in ASCII will keep passing while the guarantee is void.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -76,7 +97,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { SubjectStore } from './subject-store.js';
+import { SubjectStore, makeSubjectColumnBridge } from './subject-store.js';
 
 describe('subject folding, per resolver', () => {
   const tmpDirs: string[] = [];
@@ -170,6 +191,41 @@ describe('subject folding, per resolver', () => {
       store.findOrCreate({ kind: 'organization', name: 'Nordberg AG', aliases: ['Nordberg'] });
       expect(store.findOrCreate({ kind: 'organization', name: 'Meridian' }).id).toBe(a.id);
     });
+
+    it('stops widening after an ambiguous alias — the normalised fallback does not run', () => {
+      // The stage after the alias lookup matches the NORMALISED query against
+      // stored raw names, so letting an ambiguous alias fall into it hands the
+      // name to a third subject that merely normalises the same way. Ambiguity
+      // is not a miss, and every step below it is wider than the one that
+      // already declined to answer.
+      const store = makeStore();
+      store.findOrCreate({ kind: 'organization', name: 'Nordberg AG', aliases: ['Meridian AG.'] });
+      store.findOrCreate({ kind: 'organization', name: 'Ostwald AG', aliases: ['Meridian AG.'] });
+      const clean = store.findOrCreate({ kind: 'organization', name: 'Meridian AG' });
+      const minted = store.findOrCreate({ kind: 'organization', name: 'Meridian AG.' });
+      expect(minted.id).not.toBe(clean.id);
+      expect(minted.created).toBe(true);
+    });
+
+    it('sees the ambiguity when the shared alias differs in a NON-ASCII case', () => {
+      // The case that defeated the first version of the refusal, and the reason
+      // this file now pins a German pair rather than an ASCII one. SQLite folds
+      // case for ASCII only — `lower('MÜLLER')` is `'mÜller'` — so an
+      // `aliases LIKE '%"müller"%'` prefilter matched the "Müller" row and
+      // dropped the "MÜLLER" one. Exactly one candidate survived to be counted,
+      // the guard reported "unambiguous", and the lookup answered with whichever
+      // row the prefilter happened to keep. The count has to be taken over rows
+      // the SQL layer did not pre-judge; folding IN SQL does not fix this,
+      // because that `lower()` is the same ASCII-only one.
+      const store = makeStore();
+      const a = store.findOrCreate({ kind: 'organization', name: 'Müller Bau AG', aliases: ['Müller'] });
+      const b = store.findOrCreate({ kind: 'organization', name: 'Müller Handel AG', aliases: ['MÜLLER'] });
+      expect(b.id).not.toBe(a.id);
+      const third = store.findOrCreate({ kind: 'organization', name: 'müller' });
+      expect(third.created).toBe(true);
+      expect(third.id).not.toBe(a.id);
+      expect(third.id).not.toBe(b.id);
+    });
   });
 
   describe('resolvePersonSubject — persons from EXTRACTION', () => {
@@ -207,6 +263,28 @@ describe('subject folding, per resolver', () => {
       // that never runs: delete the scan and this line fails while the three
       // above still pass.
       expect(store.resolvePersonSubject('Byron').id).toBe(b.id);
+    });
+
+    it('an ambiguous ALIAS mints — it does not fall through to the looser subset scan', () => {
+      // The steps after the alias lookup are progressively wider matchers, so
+      // treating "two people already carry this alias" as a plain miss let the
+      // name bind to a THIRD person who carried neither — worse than the
+      // behaviour being fixed, which at least picked one of the two candidates.
+      // "Ada Lovelace" below is that third person: her token set is a strict
+      // superset of "Ada", so the subset scan resolves to her the moment the
+      // alias refusal is allowed to fall through.
+      const store = makeStore();
+      const a = store.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Ada'] });
+      const b = store.findOrCreate({ kind: 'person', name: 'Bernd Meier', aliases: ['Ada'] });
+      const third = store.findOrCreate({ kind: 'person', name: 'Ada Lovelace' });
+      const resolved = store.resolvePersonSubject('Ada');
+      expect(resolved.id).not.toBe(third.id);
+      expect(resolved.id).not.toBe(a.id);
+      expect(resolved.id).not.toBe(b.id);
+      expect(resolved.created).toBe(true);
+      // The subset scan still runs for a name the alias stage did not refuse —
+      // otherwise the four lines above would also pass with the scan deleted.
+      expect(store.resolvePersonSubject('Lovelace').id).toBe(third.id);
     });
 
     it('⚠️ folds the FIRST exact homonym — two different people become one', () => {
@@ -257,6 +335,31 @@ describe('subject folding, per resolver', () => {
       const p = store.resolvePersonSubject('Thomas Müller');
       store.resolvePersonSubject('Thomas Müller');
       expect(JSON.parse(store.getSubject(p.id)!.aliases)).toEqual(['Thomas Müller']);
+    });
+  });
+
+  describe('the DataStore subject-column bridge', () => {
+    it('resolves an unambiguous name and reports an unknown one as null', () => {
+      const store = makeStore();
+      const bridge = makeSubjectColumnBridge(store);
+      const a = store.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Anna'] });
+      expect(bridge.find('Anna', 'person')).toBe(a.id);
+      expect(bridge.find('Nobody At All', 'person')).toBeNull();
+    });
+
+    it('THROWS on an ambiguous name instead of returning null', () => {
+      // Null is not a safe default here, and this is the one call site where the
+      // two meanings of "no row" point in OPPOSITE directions. The caller maps
+      // null to a sentinel id: under `$eq`/`$in` that matches nothing, which is
+      // right for a name nobody carries, but under `$neq`/`$nin` it reads "not
+      // equal to a thing that does not exist" and matches EVERY row — the
+      // caller's exclusion silently stops excluding. Which subject was meant is
+      // a question the bridge cannot answer, so it says so.
+      const store = makeStore();
+      const bridge = makeSubjectColumnBridge(store);
+      store.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Meier'] });
+      store.findOrCreate({ kind: 'person', name: 'Bernd Meier', aliases: ['Meier'] });
+      expect(() => bridge.find('Meier', 'person')).toThrow(/more than one/);
     });
   });
 

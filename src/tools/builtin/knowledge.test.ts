@@ -361,6 +361,21 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
     expect(out).toMatch(/no known subject/i);
   });
 
+  it('memory_focus says AMBIGUOUS rather than focusing the wrong subject', async () => {
+    // The org→person chain must not fall through on an ambiguous organization —
+    // that would focus the session on a PERSON of the same name. And unlike the
+    // silent read paths, this caller is an agent that can ask for the full name,
+    // so the refusal is worth saying: "not found" would be untrue here.
+    const { agent } = make();
+    const subjects = agent.toolContext.subjectStore!;
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'person', name: 'Meridian' });
+    const out = await memoryFocusTool.handler({ subject: 'Meridian' }, agent);
+    expect(out).toMatch(/more than one/i);
+    expect(out).not.toMatch(/focus set/i);
+  });
+
   it('archive_search masks secret-shaped archive content (S1 discipline)', async () => {
     const { agent } = make();
     (agent.toolContext as { knowledgeLayer: unknown }).knowledgeLayer = {
