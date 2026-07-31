@@ -44,6 +44,7 @@ import { ONBOARDING_BASICS, onboardingBasicQuestion, isOnboardingBasicKey } from
 import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onboarding-promotion.js';
 import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding-domain.js';
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
+import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
@@ -3622,6 +3623,23 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { pendingCount: store.pendingCount() });
     });
 
+    // Capture funnel rates (DEF-dk-capture-observability) — the READ half of the
+    // capture telemetry. The counters have shipped since v2.9.0 but nothing ever read
+    // the sink, so "capture is dead" could not be answered with a number, and the row
+    // itself says the measurement must precede any capture-mechanism change.
+    //
+    // Deliberately NOT gated on `getKnowledgeStore()`: the most interesting reading is
+    // an instance where capture produced nothing, and a store that failed to wire is one
+    // of the ways that happens. Gating the report on the subsystem it reports on would
+    // hide exactly the case worth seeing. The sink itself is DK-flag-gated at WRITE time,
+    // so a DK-off instance simply reports an empty window.
+    //
+    // Counts, rates and model ids only — never an entry id, thread id or fact text
+    // (capture-telemetry S5, narrowed further by aggregation).
+    this.addStatic('user', 'GET /api/knowledge/capture-report', async (_req, res) => {
+      jsonResponse(res, 200, await buildCaptureReport());
+    });
+
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/knowledge/queue/:id/review', async (_req, res, params, body) => {
       const store = engine.getKnowledgeStore();
       if (!requireService(res, store, 'Durable memory')) return;
@@ -3644,12 +3662,26 @@ export class LynoxHTTPApi {
         // propose_shown at write time. approve/edit_approve = propose_confirmed; reject =
         // propose_ignored (dismissed:true = an active discard, per capture-telemetry S5).
         // Entry-id only — never the fact text.
+        //
+        // Attribution comes off the REVIEWED ENTRY, not off the request. Both fields used to
+        // be hard-coded `undefined` here while `capture-telemetry.ts` says of `model` that
+        // "the whole point is per-model rate" — so the human half of the funnel could never
+        // join the model half, and a per-model confirm rate was silently unbuildable.
+        // The entry is the right source and the request is NOT: the model that PROPOSED the
+        // fact is the one whose capture quality the rate is about, and it can differ from
+        // whatever model the instance happens to run now, days later, when a human clicks.
+        // Reading the current config here would have produced a plausible, wrong attribution
+        // — worse than the `undefined` it replaced.
+        const proposedByModel = entry.sourceRunId !== null
+          ? engine.getRunHistory()?.getRun(entry.sourceRunId)?.model_id
+          : undefined;
         void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
           ts: Date.now(),
           event: action === 'reject' ? 'propose_ignored' : 'propose_confirmed',
-          thread: undefined,
-          model: undefined,
-          untrusted: false,
+          thread: entry.sourceThreadId ?? undefined,
+          // Empty string = a run row predating provider/model recording; not an attribution.
+          model: proposedByModel !== undefined && proposedByModel !== '' ? proposedByModel : undefined,
+          untrusted: entry.sourceUntrusted,
           entryId: params['id']!,
           ...(action === 'reject' ? { dismissed: true } : {}),
         });

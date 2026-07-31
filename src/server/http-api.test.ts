@@ -3722,6 +3722,46 @@ describe('LynoxHTTPApi', () => {
         expect(ignored!.entry['dismissed']).toBe(true); // reject = an active discard
       });
     });
+
+    it('review attributes the confirm to the PROPOSING run\'s model + thread, off the entry', async () => {
+      await withStores(async (_ps, ks) => {
+        mockGetUserConfig.mockReturnValue({ durable_memory_enabled: true });
+        mockHistoryGetRun.mockReturnValue({ id: 'run-proposed', model_id: 'ministral-14b-2512' });
+        const e = ks.write({
+          text: 'ACME moved to Basel', sourceChannel: 'agent', sourceUntrusted: true,
+          sourceThreadId: 'thread-proposed', sourceRunId: 'run-proposed', kind: 'fact',
+        });
+        captureTelemetryCalls.length = 0;
+        expect((await jsonFetch(`/api/knowledge/queue/${e.id}/review`, { method: 'POST', body: JSON.stringify({ action: 'approve' }) })).status).toBe(200);
+        const c = captureTelemetryCalls.find((x) => x.entry['event'] === 'propose_confirmed');
+        // Both were hard-coded `undefined` before, which made a per-model confirm rate
+        // unbuildable while the sink's own type calls that rate "the whole point".
+        expect(c!.entry['model']).toBe('ministral-14b-2512');
+        expect(c!.entry['thread']).toBe('thread-proposed');
+        // The proposal came off an untrusted turn — the confirm event must say so, not
+        // report a flat `false` that erases why the chip was queued in the first place.
+        expect(c!.entry['untrusted']).toBe(true);
+      });
+    });
+
+    it('review reports NO model rather than a plausible wrong one when the run is unknown', async () => {
+      await withStores(async (_ps, ks) => {
+        mockGetUserConfig.mockReturnValue({ durable_memory_enabled: true, model: 'claude-sonnet-5' });
+        mockHistoryGetRun.mockReturnValue(undefined); // run row aged out of history
+        const e = ks.write({
+          text: 'ACME hired a CFO', sourceChannel: 'agent', sourceUntrusted: true,
+          sourceThreadId: 'thread-x', sourceRunId: 'run-gone', kind: 'fact',
+        });
+        captureTelemetryCalls.length = 0;
+        await jsonFetch(`/api/knowledge/queue/${e.id}/review`, { method: 'POST', body: JSON.stringify({ action: 'approve' }) });
+        const c = captureTelemetryCalls.find((x) => x.entry['event'] === 'propose_confirmed');
+        // The tempting fallback — "use whatever model runs now" — would silently credit a
+        // capture to a model that never made it, days later. An absent attribution is a
+        // fact about the data; a wrong one is a fact about nothing. Thread still resolves.
+        expect(c!.entry['model']).toBeUndefined();
+        expect(c!.entry['thread']).toBe('thread-x');
+      });
+    });
   });
 
   describe('thread debug-export (comprehensive)', () => {

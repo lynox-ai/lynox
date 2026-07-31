@@ -1,4 +1,4 @@
-import { appendFile, rename, stat } from 'node:fs/promises';
+import { appendFile, readFile, rename, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -108,4 +108,66 @@ export function appendBoundedJsonl(fileName: string, entry: unknown): Promise<vo
   // Store a non-rejecting tail so the chain can't accumulate an unhandled rejection.
   chains.set(file, next.catch(() => {}));
   return next;
+}
+
+/** What one `readBoundedJsonl` call recovered — and what it could NOT. */
+export interface BoundedJsonlRead<T> {
+  /** Parsed records, oldest generation first, in file order. */
+  readonly entries: readonly T[];
+  /**
+   * Lines that were present but did not parse as JSON. A reader that silently drops
+   * these reports a rate over a denominator it quietly shrank — the one failure mode
+   * a telemetry aggregate cannot afford, because it has no symptom. Counted, never hidden.
+   */
+  readonly unparsableLines: number;
+  /** Which generations existed and were read (`<name>.1` first when present). */
+  readonly generationsRead: number;
+}
+
+/**
+ * Read back the full retained window of a bounded sink — the missing half of
+ * `appendBoundedJsonl`. Globs the two retained generations exactly as the retention
+ * model above describes: `<name>.1` (older, if it exists) then the live `<name>`.
+ *
+ * Best-effort in the same sense as the append side: a missing or unreadable file
+ * yields an empty read rather than throwing, because every caller is a diagnostic
+ * surface and a telemetry read must never fail the thing it reports on. It does NOT
+ * swallow *partial* damage though — a line that fails to parse is counted in
+ * `unparsableLines` so the caller can say how complete its own numbers are.
+ *
+ * No validation of the record shape happens here: the sink is schema-per-file and the
+ * caller owns the type. `T` is an unchecked assertion, so callers that aggregate on a
+ * field must tolerate it being absent.
+ */
+export async function readBoundedJsonl<T>(fileName: string): Promise<BoundedJsonlRead<T>> {
+  let file: string;
+  try {
+    file = path.join(dataDir(), fileName);
+  } catch {
+    return { entries: [], unparsableLines: 0, generationsRead: 0 };
+  }
+  const entries: T[] = [];
+  let unparsableLines = 0;
+  let generationsRead = 0;
+  // Oldest first: `.1` is the rotated-out generation, the live file is newer.
+  for (const candidate of [`${file}.1`, file]) {
+    let raw: string;
+    try {
+      raw = await readFile(candidate, 'utf8');
+    } catch {
+      continue; // ENOENT for `.1` is the normal case, not an error
+    }
+    generationsRead++;
+    for (const line of raw.split('\n')) {
+      if (line.trim().length === 0) continue;
+      try {
+        entries.push(JSON.parse(line) as T);
+      } catch {
+        // A torn last line is expected mid-append; anything else is real damage.
+        // Either way the caller learns the count rather than a quietly short list.
+        unparsableLines++;
+      }
+    }
+  }
+  return { entries, unparsableLines, generationsRead };
 }

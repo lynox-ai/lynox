@@ -1,0 +1,192 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import { buildCaptureReport } from './capture-telemetry-report.js';
+import { readBoundedJsonl, appendBoundedJsonl } from './bounded-jsonl-log.js';
+import { CAPTURE_TELEMETRY_LOG_FILE, type CaptureTelemetryEntry } from './capture-telemetry.js';
+
+/**
+ * Real disk, real files — the sink's whole contract is a rotation + parse story, and a
+ * mocked fs would test the mock. `memory/fb_realworld_harness.md`: the substrate IS the
+ * thing under test here.
+ */
+let dir: string;
+let prevDataDir: string | undefined;
+
+beforeEach(async () => {
+  dir = await mkdtemp(path.join(tmpdir(), 'lynox-capture-report-'));
+  prevDataDir = process.env['LYNOX_DATA_DIR'];
+  process.env['LYNOX_DATA_DIR'] = dir;
+});
+
+afterEach(async () => {
+  if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
+  else process.env['LYNOX_DATA_DIR'] = prevDataDir;
+  await rm(dir, { recursive: true, force: true });
+});
+
+/** Write raw lines to a sink generation, bypassing the append path. */
+async function seed(lines: string[], generation: '' | '.1' = ''): Promise<void> {
+  await writeFile(path.join(dir, CAPTURE_TELEMETRY_LOG_FILE + generation), lines.join('\n') + '\n', 'utf8');
+}
+
+function entry(e: Partial<CaptureTelemetryEntry> & Pick<CaptureTelemetryEntry, 'event'>): string {
+  return JSON.stringify({ ts: 1000, thread: 't1', model: 'ministral-14b-2512', untrusted: false, ...e });
+}
+
+describe('readBoundedJsonl', () => {
+  it('returns an empty read for a sink that was never written (not a throw)', async () => {
+    const read = await readBoundedJsonl(CAPTURE_TELEMETRY_LOG_FILE);
+    expect(read.entries).toEqual([]);
+    expect(read.generationsRead).toBe(0);
+  });
+
+  it('reads BOTH retained generations, rotated-out one first', async () => {
+    await seed([entry({ event: 'capture_eligible', ts: 1 })], '.1');
+    await seed([entry({ event: 'capture_eligible', ts: 2 })]);
+    const read = await readBoundedJsonl<CaptureTelemetryEntry>(CAPTURE_TELEMETRY_LOG_FILE);
+    expect(read.generationsRead).toBe(2);
+    // Order matters: a reader that only globs the live file silently loses the older
+    // half of the retained window and reports a rate over the wrong span.
+    expect(read.entries.map(e => e.ts)).toEqual([1, 2]);
+  });
+
+  it('COUNTS unparsable lines instead of silently shrinking the window', async () => {
+    await seed([entry({ event: 'capture_eligible' }), '{not json', entry({ event: 'remember_invoked' })]);
+    const read = await readBoundedJsonl<CaptureTelemetryEntry>(CAPTURE_TELEMETRY_LOG_FILE);
+    expect(read.entries).toHaveLength(2);
+    expect(read.unparsableLines).toBe(1);
+  });
+
+  it('round-trips what appendBoundedJsonl wrote', async () => {
+    await appendBoundedJsonl(CAPTURE_TELEMETRY_LOG_FILE, { ts: 7, event: 'capture_eligible' });
+    const read = await readBoundedJsonl<CaptureTelemetryEntry>(CAPTURE_TELEMETRY_LOG_FILE);
+    expect(read.entries).toEqual([{ ts: 7, event: 'capture_eligible' }]);
+  });
+});
+
+describe('buildCaptureReport', () => {
+  it('reports an EMPTY window as unmeasurable (null), not as a fire-rate of zero', async () => {
+    const r = await buildCaptureReport();
+    // The distinction the row exists for: "capture is dead" (0) and "capture was never
+    // measurable" (null) are different findings, and conflating them is how the original
+    // anecdote survived. A 0 here would assert a measurement that did not happen.
+    expect(r.fireRate).toBeNull();
+    expect(r.totalEvents).toBe(0);
+    expect(r.windowStart).toBeNull();
+  });
+
+  it('derives the headline fire-rate from the two ends of the ratio', async () => {
+    await seed([
+      ...Array.from({ length: 4 }, () => entry({ event: 'capture_eligible' })),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.fireRate).toBeCloseTo(0.25);
+    expect(r.events.capture_eligible).toBe(4);
+    expect(r.events.remember_invoked).toBe(1);
+    expect(r.outcomes).toEqual({ active: 1 });
+  });
+
+  it('splits the fire-rate PER MODEL — the split the sink calls "the whole point"', async () => {
+    await seed([
+      entry({ event: 'capture_eligible', model: 'sonnet' }),
+      entry({ event: 'capture_eligible', model: 'sonnet' }),
+      entry({ event: 'remember_invoked', model: 'sonnet', outcome: 'active' }),
+      entry({ event: 'capture_eligible', model: 'ministral-14b-2512' }),
+    ]);
+    const r = await buildCaptureReport();
+    const sonnet = r.byModel.find(m => m.model === 'sonnet');
+    const ministral = r.byModel.find(m => m.model === 'ministral-14b-2512');
+    expect(sonnet).toMatchObject({ eligible: 2, remembered: 1, fireRate: 0.5 });
+    // A model that never captured must read 0, not null: it HAS a denominator.
+    expect(ministral).toMatchObject({ eligible: 1, remembered: 0, fireRate: 0 });
+    // Busiest first, so the model carrying the fleet leads the table.
+    expect(r.byModel[0]!.model).toBe('sonnet');
+  });
+
+  it('derives confirm + ignore rates off the propose denominator', async () => {
+    await seed([
+      entry({ event: 'propose_shown' }), entry({ event: 'propose_shown' }),
+      entry({ event: 'propose_shown' }), entry({ event: 'propose_shown' }),
+      entry({ event: 'propose_confirmed' }),
+      entry({ event: 'propose_ignored', dismissed: true }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.confirmRate).toBeCloseTo(0.25);
+    expect(r.ignoreRate).toBeCloseTo(0.25);
+  });
+
+  it('DECLARES its blind spots: events it could not attribute, and damaged lines', async () => {
+    await seed([
+      entry({ event: 'capture_eligible', model: undefined, thread: undefined }),
+      entry({ event: 'capture_eligible' }),
+      '{{ broken',
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.blindness.eventsWithoutModel).toBe(1);
+    expect(r.blindness.eventsWithoutThread).toBe(1);
+    expect(r.blindness.unparsableLines).toBe(1);
+    // The unattributed event still counts in the headline — it just cannot join a per-model
+    // row. Dropping it from `capture_eligible` would inflate the fire-rate instead.
+    expect(r.events.capture_eligible).toBe(2);
+    expect(r.byModel).toHaveLength(1);
+  });
+
+  it('flags a TRUNCATED window so totals are read as a floor, not a census', async () => {
+    await seed([entry({ event: 'capture_eligible', ts: 1 })], '.1');
+    await seed([entry({ event: 'capture_eligible', ts: 2 })]);
+    const r = await buildCaptureReport();
+    expect(r.blindness.windowTruncated).toBe(true);
+    expect(r.windowStart).toBe(1);
+    expect(r.windowEnd).toBe(2);
+  });
+
+  it('reports the true window bounds even when timestamps are not in file order', async () => {
+    // The sink is append-only, so file order is USUALLY chronological — which is exactly
+    // why "first line = window start" survives every ordered fixture and then misreports
+    // the one window that matters. Concurrent fire-and-forget writers serialize on the
+    // append chain, not on `Date.now()`, so a later line CAN carry an earlier stamp.
+    await seed([
+      entry({ event: 'capture_eligible', ts: 5000 }),
+      entry({ event: 'capture_eligible', ts: 1000 }),
+      entry({ event: 'capture_eligible', ts: 9000 }),
+      entry({ event: 'capture_eligible', ts: 3000 }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.windowStart).toBe(1000);
+    expect(r.windowEnd).toBe(9000);
+  });
+
+  it('does not let an unknown event type dilute the rates', async () => {
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      JSON.stringify({ ts: 2, event: 'some_future_event', model: 'sonnet', untrusted: false }),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+    ]);
+    const r = await buildCaptureReport();
+    // 1/1, not 1/2 — an event this build does not know is not a capture-eligible turn.
+    expect(r.fireRate).toBe(1);
+    expect(r.totalEvents).toBe(2);
+  });
+
+  it('counts untrusted-ingesting eligible turns (the routing half of the funnel)', async () => {
+    await seed([
+      entry({ event: 'capture_eligible', untrusted: true }),
+      entry({ event: 'capture_eligible', untrusted: false }),
+      // untrusted on a NON-eligible event must not leak into the eligible tally
+      entry({ event: 'propose_shown', untrusted: true }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.untrustedEligible).toBe(1);
+  });
+
+  it('emits NO entry-id, thread-id or fact text — the report aggregates, it does not echo', async () => {
+    await seed([entry({ event: 'propose_confirmed', entryId: 'ke_secret_handle', thread: 'thread_abc' })]);
+    const serialized = JSON.stringify(await buildCaptureReport());
+    expect(serialized).not.toContain('ke_secret_handle');
+    expect(serialized).not.toContain('thread_abc');
+  });
+});
