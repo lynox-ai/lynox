@@ -30,7 +30,7 @@ import type { DataStoreBridge } from './datastore-bridge.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
 import type { EngineDb } from './engine-db.js';
-import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS } from './subject-store.js';
+import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS, isAmbiguousResolution } from './subject-store.js';
 import type { SubjectRow } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import type { RelationshipRow } from './relationship-store.js';
@@ -801,11 +801,20 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         // Persons route through the subset resolver: a new surface form that is an
         // unambiguous token-subset of exactly one existing person folds in as an alias
         // ("Ada" → the existing "Dr. Ada Lovelace") instead of minting a duplicate.
-        const { id: subjectId } = kind === 'engagement'
+        const resolution = kind === 'engagement'
           ? subjects.findOrCreateEngagement(e.canonicalName, this._engagementParent(subjects, threadAnchorSubjectId), { aliases: e.aliases })
           : kind === 'person'
             ? subjects.resolvePersonSubject(e.canonicalName, { aliases: e.aliases })
             : subjects.findOrCreate({ kind, name: e.canonicalName, aliases: e.aliases });
+        // Several subjects already answer to this name, so it identifies nothing. This
+        // mirror is ADDITIVE (the legacy store stays authoritative), so skipping the link
+        // costs a graph edge, not the fact — while binding it to a guess would put one
+        // entity's facts on another's record, silently and permanently.
+        if (isAmbiguousResolution(resolution)) {
+          channels.subjectAmbiguous.publish({ kind, candidateCount: resolution.candidateIds.length });
+          continue;
+        }
+        const subjectId = resolution.id;
         entityToSubject.set(e.id, subjectId);
         subjectIds.push(subjectId);
         // primary = the first person/organization the memory concerns; else the
@@ -989,11 +998,23 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         // above) so extraction converges with set_thread_context, not a fresh row.
         // Person subset-resolver (see the twin above) so "Ada" folds into an existing
         // "Dr. Ada Lovelace" as an alias rather than a duplicate person row.
-        const { id: subjectId } = kind === 'engagement'
+        const resolution = kind === 'engagement'
           ? subjects.findOrCreateEngagement(e.name, this._engagementParent(subjects, threadAnchorSubjectId), { aliases: e.aliases })
           : kind === 'person'
             ? subjects.resolvePersonSubject(e.name, { aliases: e.aliases })
             : subjects.findOrCreate({ kind, name: e.name, aliases: e.aliases });
+        // Same decision as the twin above, but NOT the same cost, and the difference
+        // matters: this path is the AUTHORITATIVE persistence (no legacy entity write
+        // runs beside it), so a skipped entity is not merely an unwritten edge — that
+        // entity does not enter the graph at all. It is still the right call: the
+        // alternative is attaching it to one of several subjects that answer to the
+        // name, which corrupts a real record instead of omitting one. The memory itself
+        // is unaffected and the skip is counted.
+        if (isAmbiguousResolution(resolution)) {
+          channels.subjectAmbiguous.publish({ kind, candidateCount: resolution.candidateIds.length });
+          continue;
+        }
+        const subjectId = resolution.id;
         nameToSubject.set(e.name.toLowerCase(), subjectId);
         subjectIds.push(subjectId);
         resolvedEntities.push({

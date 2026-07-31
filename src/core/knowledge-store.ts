@@ -140,7 +140,11 @@ export class KnowledgeStore {
       if (status === 'active') {
         // H1: the deliberate authored recording IS the salience signal — findOrCreate, not
         // find-only. Decoupled from the extraction *channel*, not from findOrCreate itself.
-        subjectId = this.subjects.findOrCreate({ kind: params.subjectKind ?? 'organization', name }).id;
+        // An unidentifying name routes to the SAME place a pending entry does: keep the
+        // text as a hint and leave the link unmade. The write is not lost and nothing is
+        // bound to a guess; whoever resolves the hint later has the full name to work with.
+        const r = this.subjects.findOrCreate({ kind: params.subjectKind ?? 'organization', name });
+        if (r.ambiguous) { subjectId = null; subjectHint = name; } else { subjectId = r.id; }
       } else {
         // Pending-entry hygiene (acceptance §2): link by hint; findOrCreate on approval only,
         // so a rejected queue entry never leaves an empty minted subject behind.
@@ -511,7 +515,10 @@ export class KnowledgeStore {
     let subjectId: string | null = row.subject_id;
     const hint = row.subject_hint?.trim();
     if (!subjectId && hint) {
-      subjectId = this.subjects.findOrCreate({ kind: 'organization', name: hint }).id;
+      // Approval path: an unidentifying hint stays a hint rather than becoming a wrong
+      // link — the entry still activates, it simply keeps no subject edge.
+      const r = this.subjects.findOrCreate({ kind: 'organization', name: hint });
+      subjectId = r.ambiguous ? null : r.id;
     }
 
     // Only rewrite the ciphertext when the reviewer actually EDITED the text — a plain approve
@@ -682,10 +689,21 @@ export class KnowledgeStore {
   private _resolveRecallScope(query: string, subjectName: string | undefined): string[] | null {
     const explicit = subjectName?.trim();
     if (explicit) {
-      const hit = this.subjects.findCanonical(explicit, 'organization')
-        ?? this.subjects.findByAlias(explicit, 'organization')
-        ?? this.subjects.findCanonical(explicit, 'person')
-        ?? this.subjects.findByAlias(explicit, 'person');
+      // An ambiguous ORGANIZATION alias must not fall THROUGH to the person namespace —
+      // answering an org-scoped query out of it is a wrong-scope read the caller cannot
+      // see. But it must not PRE-EMPT a certain answer either: `subjectName` carries no
+      // kind, so the org-first order is a heuristic, not an assertion about which
+      // namespace was meant, and a person who canonically bears the name is a
+      // higher-confidence hit than a name two organizations merely share. So the chain
+      // keeps its original order and ambiguity only stops it where it used to CONTINUE:
+      // after the canonical stages, before the person-alias stage.
+      const orgCanonical = this.subjects.findCanonical(explicit, 'organization');
+      const orgAlias = orgCanonical ? null : this.subjects.findByAliasResolved(explicit, 'organization');
+      const certain = orgCanonical
+        ?? orgAlias?.row
+        ?? this.subjects.findCanonical(explicit, 'person');
+      if (!certain && orgAlias?.ambiguous) return [];
+      const hit = certain ?? this.subjects.findByAlias(explicit, 'person');
       // Named an explicit subject we don't know → return an EMPTY scope, NOT a global scan.
       // A scoped query that fell back to global would surface OTHER clients' facts — the exact
       // cross-client bleed the substrate exists to prevent (§1). No match ⇒ no results.

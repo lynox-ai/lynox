@@ -1,5 +1,6 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { logErrorChain } from '../../core/utils.js';
+import { describeAmbiguity } from '../../core/subject-store.js';
 
 // Foundation Rework v2 — Context-Hierarchy Scoping, Slice A2.
 //
@@ -66,7 +67,11 @@ export const setThreadContextTool: ToolEntry<SetThreadContextInput> = {
       let customerId: string | null = null;
       if (customer) {
         // Organizations ARE name-deduped → idempotent by name.
-        customerId = subjects.findOrCreate({ kind: 'organization', name: customer }).id;
+        // Setting a thread's customer is an explicit user act, so an unidentifying name
+        // is worth saying out loud rather than binding to whichever one came first.
+        const r = subjects.findOrCreate({ kind: 'organization', name: customer });
+        if (r.ambiguous) return describeAmbiguity(subjects, customer, r.candidateIds);
+        customerId = r.id;
       }
 
       let anchorId: string;

@@ -145,6 +145,41 @@ describe('KnowledgeStore (Durable Knowledge Substrate — DK.1)', () => {
     expect(hits.some(h => h.text.includes('net-30'))).toBe(true);
   });
 
+  it('an AMBIGUOUS organization scope does not fall through to the person ALIAS arm', () => {
+    // The explicit-subject lookup is a chain: organization canonical → organization
+    // alias → person canonical → person alias. An ambiguous organization alias used to
+    // read as "no organization" and drop into the person arm, so a query scoped to a
+    // company answered out of a person's facts — a wrong-scope read the caller cannot
+    // see happened. Ambiguity ends the chain rather than continuing into the next
+    // namespace: no answer beats an answer from the wrong one.
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
+    // A person reachable ONLY by alias — the arm the ambiguous org must not fall into.
+    // (A person canonically NAMED "Meridian" is a different case; see the next test.)
+    subjects.findOrCreate({ kind: 'person', name: 'Zorin Marek', aliases: ['Meridian'] });
+    ks.write({ text: 'Zorin owes a personal favour', subjectName: 'Zorin Marek', subjectKind: 'person', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(subjects.findByAlias('Meridian', 'person')?.name).toBe('Zorin Marek');
+    // Anchors the assertion: the fact IS recallable, so an empty result below means the
+    // scope refused rather than the store being empty.
+    expect(ks.recall({ query: 'personal favour' }).some(h => h.text.includes('favour'))).toBe(true);
+    expect(ks.recall({ query: 'personal favour', subjectName: 'Meridian' })).toEqual([]);
+  });
+
+  it('but an ambiguous alias does NOT suppress a CANONICAL hit in the other namespace', () => {
+    // Precedence, not just direction. `subjectName` carries no kind, so the org-first
+    // order is a heuristic — a person who canonically BEARS the name is a
+    // higher-confidence match than a name two organizations merely share as an alias.
+    // Refusing before the canonical stages let alias-tier ambiguity in one namespace
+    // erase certainty in the other; a first version of this fix did exactly that.
+    const { ks, subjects } = make();
+    ks.write({ text: 'Meridian prefers morning calls', subjectName: 'Meridian', subjectKind: 'person', sourceChannel: 'agent', sourceUntrusted: false });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
+    expect(subjects.findCanonical('Meridian', 'person')).not.toBeNull();
+    expect(ks.recall({ query: 'morning calls', subjectName: 'Meridian' }).some(h => h.text.includes('morning calls'))).toBe(true);
+  });
+
   // ── Focus derivation (H2-gated) ──
 
   it('focus is H2-gated: a ghost subject with no active entries renders nothing', () => {

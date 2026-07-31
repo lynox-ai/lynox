@@ -12,7 +12,7 @@
 
 import type { DataStore } from './data-store.js';
 import type { EngineDb } from './engine-db.js';
-import { SubjectStore } from './subject-store.js';
+import { SubjectStore, ambiguityError } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 
 // ── Types ──
@@ -258,14 +258,22 @@ export class CRM {
     const subjects = this.subjectStore!;
     const relationships = this.relationshipStore!;
     engine.getDb().transaction(() => {
-      const { id: personId } = subjects.findOrCreate({ kind: 'person', name });
+      // A contact whose name several people answer to cannot be filed against one of them
+      // by guess. Both callers of this mirror SWALLOW the throw and log it (the contact
+      // itself is still saved — only the graph mirror is skipped), so the message must
+      // carry no names: those log lines promise data minimisation. The transaction rolls
+      // back, leaving no half-linked contact behind.
+      const person = subjects.findOrCreate({ kind: 'person', name });
+      if (person.ambiguous) throw ambiguityError('person', person.candidateIds);
+      const personId = person.id;
       if (c.email || c.phone || c.type) {
         subjects.setPersonDetail(personId, { email: c.email, phone: c.phone, type: c.type });
       }
       const company = c.company?.trim();
       if (company) {
-        const { id: orgId } = subjects.findOrCreate({ kind: 'organization', name: company });
-        relationships.createRelationship({ fromSubjectId: personId, toSubjectId: orgId, kind: 'works_for' });
+        const org = subjects.findOrCreate({ kind: 'organization', name: company });
+        if (org.ambiguous) throw ambiguityError('organization', org.candidateIds);
+        relationships.createRelationship({ fromSubjectId: personId, toSubjectId: org.id, kind: 'works_for' });
       }
     })();
   }

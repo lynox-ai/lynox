@@ -361,6 +361,54 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
     expect(out).toMatch(/no known subject/i);
   });
 
+  it('memory_focus says AMBIGUOUS rather than focusing the wrong subject', async () => {
+    // The org→person chain must not fall through on an ambiguous organization — that
+    // would focus the session on a person who merely shares the alias. And unlike the
+    // silent read paths, this caller is an agent that can ask for the full name, so the
+    // refusal is worth saying: "not found" would be untrue here.
+    const { agent } = make();
+    const subjects = agent.toolContext.subjectStore!;
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'person', name: 'Zorin Marek', aliases: ['Meridian'] });
+    const out = await memoryFocusTool.handler({ subject: 'Meridian' }, agent);
+    expect(out).toMatch(/more than one/i);
+    expect(out).not.toMatch(/focus set/i);
+  });
+
+  it('memory_focus reports ambiguity from the PERSON alias arm too', async () => {
+    // The org arm and the person arm are separate branches. Every earlier fixture made
+    // the ORG alias the ambiguous one, so the person-alias check never ran — deleting it
+    // passed the whole suite. Here no organization carries the name at all, so the chain
+    // reaches the person alias stage and only that branch can produce the refusal.
+    const { agent } = make();
+    const subjects = agent.toolContext.subjectStore!;
+    subjects.findOrCreate({ kind: 'person', name: 'Zorin Marek', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'person', name: 'Anna Roth', aliases: ['Meridian'] });
+    expect(subjects.findCanonical('Meridian', 'organization')).toBeNull();
+    expect(subjects.findCanonical('Meridian', 'person')).toBeNull();
+    expect(subjects.findByAliasResolved('Meridian', 'organization').ambiguous).toBe(false);
+    const out = await memoryFocusTool.handler({ subject: 'Meridian' }, agent);
+    expect(out).toMatch(/more than one/i);
+  });
+
+  it('memory_focus still focuses a CANONICAL match despite an ambiguous alias elsewhere', async () => {
+    // Same precedence rule as the recall scope, and the fixture has to reach the
+    // ambiguity stage to prove it: the CANONICAL hit must sit in the person arm, which
+    // the chain consults AFTER the org alias. An org-canonical fixture short-circuits
+    // stage one and the assertion passes either way — the first version of this test did
+    // exactly that and survived the mutation it was written to catch.
+    const { agent, ks } = make();
+    const subjects = agent.toolContext.subjectStore!;
+    ks.write({ text: 'Meridian has an active retainer', subjectName: 'Meridian', subjectKind: 'person', sourceChannel: 'agent', sourceUntrusted: false });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
+    expect(subjects.findCanonical('Meridian', 'organization')).toBeNull();   // stage one misses
+    expect(subjects.findCanonical('Meridian', 'person')).not.toBeNull();     // certainty is downstream
+    const out = await memoryFocusTool.handler({ subject: 'Meridian' }, agent);
+    expect(out).toMatch(/focus set/i);
+  });
+
   it('archive_search masks secret-shaped archive content (S1 discipline)', async () => {
     const { agent } = make();
     (agent.toolContext as { knowledgeLayer: unknown }).knowledgeLayer = {
