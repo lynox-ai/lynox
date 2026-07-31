@@ -73,17 +73,6 @@ export function ambiguityError(kind: string, candidateIds: readonly string[]): E
 }
 
 /**
- * The sentence shown when a human or an agent is being asked to disambiguate. This one
- * NAMES the candidates, because that is the point: a bare "ambiguous" leaves the asker
- * guessing which two things collided. Use it where the text is DISPLAYED, never on a path
- * that logs — see {@link ambiguityError}.
- *
- * Names are KG-extracted from untrusted content, so each is stripped of Unicode
- * format/invisible characters and whitespace-collapsed before display — the same
- * treatment the merge tool's approval prompt applies, and for the same reason: this text
- * is read by a model and a human, and a crafted name must not be able to inject into it.
- */
-/**
  * Narrows any of the three resolvers' returns to the ambiguous arm. A shared guard rather
  * than an inline `'ambiguous' in r` at each call site, because the three return DIFFERENT
  * shapes (`findOrCreateEngagement` has no ambiguous arm at all — an engagement's identity
@@ -95,6 +84,17 @@ export function isAmbiguousResolution(r: unknown): r is { ambiguous: true; candi
     && 'ambiguous' in r && (r as { ambiguous: unknown }).ambiguous === true;
 }
 
+/**
+ * The sentence shown when a human or an agent is being asked to disambiguate. This one
+ * NAMES the candidates, because that is the point: a bare "ambiguous" leaves the asker
+ * guessing which two things collided. Use it where the text is DISPLAYED, never on a path
+ * that logs — see {@link ambiguityError}.
+ *
+ * Names are KG-extracted from untrusted content, so each is stripped of Unicode
+ * format/invisible characters and whitespace-collapsed before display — the same
+ * treatment the merge tool's approval prompt applies, and for the same reason: this text
+ * is read by a model and a human, and a crafted name must not be able to inject into it.
+ */
 export function describeAmbiguity(store: SubjectStore, name: string, candidateIds: readonly string[]): string {
   const clip = (n: string): string => n.replace(/\p{Cf}/gu, '').replace(/\s+/gu, ' ').trim().slice(0, 60);
   const names = candidateIds

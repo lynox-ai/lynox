@@ -7,6 +7,7 @@ import { DataStore } from './data-store.js';
 import type { SubjectColumnBridge } from './subject-store.js';
 import { SubjectStore, makeSubjectColumnBridge } from './subject-store.js';
 import { EngineDb } from './engine-db.js';
+import { channels } from './observability.js';
 import type { MemoryScopeRef } from '../types/index.js';
 
 const scope: MemoryScopeRef = { type: 'context', id: 'test-proj' };
@@ -1322,10 +1323,24 @@ describe('DataStore', () => {
       subjects.findOrCreate({ kind: 'person', name: 'Bernd Meier', aliases: ['Meier'] });
       seedAppointments(ds);
 
-      const res = ds.insertRecords({
-        collection: 'appointments',
-        records: [{ note: 'ambiguous patient', patient: 'Meier' }],
-      });
+      // The skip must also be COUNTED — the comment claims it is not silent, and without
+      // this assertion deleting the publish leaves the whole suite green.
+      const counted: Array<{ kind: string; candidateCount: number }> = [];
+      const onAmbiguous = (msg: unknown): void => {
+        counted.push(msg as { kind: string; candidateCount: number });
+      };
+      channels.subjectAmbiguous.subscribe(onAmbiguous);
+
+      let res;
+      try {
+        res = ds.insertRecords({
+          collection: 'appointments',
+          records: [{ note: 'ambiguous patient', patient: 'Meier' }],
+        });
+      } finally {
+        channels.subjectAmbiguous.unsubscribe(onAmbiguous);
+      }
+      expect(counted).toEqual([{ kind: 'person', candidateCount: 2 }]);
       expect(res.inserted).toBe(1);
       const row = ds.queryRecords({ collection: 'appointments' })
         .rows.find(r => r['note'] === 'ambiguous patient');

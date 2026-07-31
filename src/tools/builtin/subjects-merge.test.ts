@@ -109,9 +109,11 @@ describe('subjects_merge tool (PR-C3)', () => {
   it('merges ORGANIZATIONS when told the kind, and is UNREACHABLE for them without it', async () => {
     // The tool resolved `person` only, while `organization` is the durable-knowledge
     // write path's DEFAULT kind and the bulk of a real graph — so the one user-reachable
-    // way to fix a duplicate could not name most of what needed fixing. Both halves are
-    // asserted: with the kind it merges, and WITHOUT it the same call fails. Only the
-    // second half can fail if `kind` is ignored and hardcoded back to 'person'.
+    // way to fix a duplicate could not name most of what needed fixing.
+    // Both halves are asserted, and they catch DIFFERENT regressions: hardcoding `kind`
+    // back to 'person' is caught by the without-kind half below (it would stop erroring),
+    // while the with-kind half catches a silent cross-kind fallback — a resolver that
+    // ignores the kind and finds the person 'Ada' when asked for an organization.
     const id = (r: { ambiguous: boolean } & Record<string, unknown>): string => {
       if (r.ambiguous) throw new Error('fixture should not be ambiguous');
       return r['id'] as string;

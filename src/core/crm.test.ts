@@ -188,6 +188,35 @@ describe('CRM', () => {
       // and the contact itself was still saved — only the graph edge was skipped
       expect(graphCrm.listContacts().some(c => c.name === 'Meier')).toBe(true);
     });
+
+    it('holds the same promise for the COMPANY branch, not just the person one', () => {
+      // The mirror resolves two names: the contact and its company. Both go through the
+      // same log, so both need the name-free error — and asserting only the person branch
+      // left the company one revertible with the whole suite green.
+      const engineDb = new EngineDb(join(tmpDir, 'engine-org.db'), '');
+      const graphCrm = new CRM(ds, { engineDb, subjectGraphEnabled: true });
+      graphCrm.ensureSchema();
+      const subjects = new SubjectStore(engineDb);
+      subjects.findOrCreate({ kind: 'organization', name: 'Nordwerk Bau AG', aliases: ['Nordwerk'] });
+      subjects.findOrCreate({ kind: 'organization', name: 'Nordwerk Handel AG', aliases: ['Nordwerk'] });
+
+      const written: string[] = [];
+      const orig = process.stderr.write.bind(process.stderr);
+      process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+        written.push(String(chunk)); return true;
+      }) as typeof process.stderr.write;
+      try {
+        // an UNambiguous person, so only the company lookup can be the one that fails
+        graphCrm.upsertContact({ name: 'Rita Fuchs', company: 'Nordwerk', email: 'rita@example.test' });
+      } finally {
+        process.stderr.write = orig;
+        engineDb.close();
+      }
+
+      const log = written.join('');
+      expect(log).toContain('mirror failed');
+      expect(log).not.toContain('Nordwerk');
+    });
   });
 
   describe('interactions', () => {
