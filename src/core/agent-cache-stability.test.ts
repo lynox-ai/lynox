@@ -165,13 +165,22 @@ describe('prompt-cache stability', () => {
   });
 
   /**
-   * The detector used to be gated on `!isCustomProxy`, which silenced it for
-   * every openai-compatible provider on the premise that they "never report
+   * The detector used to be gated on `!isCustomProxy`, silencing it for every
+   * openai-compatible provider on the premise that they "never report
    * cache_read". A real Mistral thread disproved that (117,088 cache-read
-   * tokens on one turn, 20,528 on another), so the gate now rides the
-   * provider's cache MECHANISM — with a much shorter grace window for the
-   * automatic-prefix providers, whose TTL is undocumented and demonstrably
-   * far below Anthropic's hour.
+   * tokens on one turn, 20,528 on another).
+   *
+   * But the obvious inverse — "trust the registered cache mechanism" — is wrong
+   * in the OTHER direction, and that is the trap these tests exist to hold shut.
+   * `custom` is registered `automatic-prefix`, yet the engine strips its
+   * `cache_control` (Anthropic-wire) and withholds `prompt_cache_key`
+   * (openai-wire only), so it reports zero cache reads BY CONSTRUCTION. A
+   * mechanism-gated detector would warn such a user on every tool-loop
+   * iteration, seconds apart, forever — precisely the "cry wolf on an entire
+   * provider class" the original gate was defending against.
+   *
+   * So the load-bearing gate is OBSERVATION (`sawCacheRead`), and the mechanism
+   * only selects the grace WINDOW, which is a TTL question.
    */
   describe('cache-mechanism grace windows (Agent.cacheGraceMsFor)', () => {
     it('gives explicit-breakpoint providers the 1h-TTL window', () => {
@@ -184,30 +193,55 @@ describe('prompt-cache stability', () => {
       expect(prefix).toBeLessThan(Agent.cacheGraceMsFor('explicit-breakpoint'));
     });
 
-    it('gives an unknown proxy (`none`) a zero window, which suppresses the detector', () => {
+    it('gives a `none` mechanism a zero window', () => {
       expect(Agent.cacheGraceMsFor('none')).toBe(0);
     });
   });
 
   describe('full warn decision (Agent.shouldWarnCacheMiss)', () => {
     const BIG = 20_000;
-    const base = { prevPrompt: BIG, realInput: BIG, cacheRead: 100, model: 'm1' } as const;
+    /** A blatant miss: big warm prompt, almost nothing read back. */
+    const miss = { prevPrompt: BIG, realInput: BIG, cacheRead: 100, gapMs: 60_000 } as const;
 
     it('WARNS on an automatic-prefix provider — the case the old gate silenced', () => {
       expect(Agent.shouldWarnCacheMiss({
-        ...base, gapMs: 60_000, mechanism: 'automatic-prefix', prevModel: 'm1',
+        ...miss, mechanism: 'automatic-prefix', sawCacheRead: true,
       })).toBe(true);
     });
 
     it('warns on an explicit-breakpoint provider (unchanged behaviour)', () => {
       expect(Agent.shouldWarnCacheMiss({
-        ...base, gapMs: 60_000, mechanism: 'explicit-breakpoint', prevModel: 'm1',
+        ...miss, mechanism: 'explicit-breakpoint', sawCacheRead: true,
       })).toBe(true);
     });
 
-    it('stays silent for a `none`-mechanism provider even on a blatant miss', () => {
+    /**
+     * The regression guard for the `custom` provider. It is registered
+     * `automatic-prefix`, so mechanism alone would arm the detector — but it
+     * can never produce a cache read, so every call looks like a total miss.
+     */
+    it('stays SILENT on a provider that has never produced a cache read', () => {
       expect(Agent.shouldWarnCacheMiss({
-        ...base, gapMs: 1_000, mechanism: 'none', prevModel: 'm1',
+        ...miss, mechanism: 'automatic-prefix', sawCacheRead: false,
+      })).toBe(false);
+    });
+
+    it('stays silent on a never-caching provider even inside a tool loop '
+      + '(seconds apart, zero cache) — the every-iteration false positive', () => {
+      expect(Agent.shouldWarnCacheMiss({
+        prevPrompt: BIG, realInput: BIG, cacheRead: 0, gapMs: 3_000,
+        mechanism: 'automatic-prefix', sawCacheRead: false,
+      })).toBe(false);
+      // ...and the SAME call on an endpoint that has cached before IS a break.
+      expect(Agent.shouldWarnCacheMiss({
+        prevPrompt: BIG, realInput: BIG, cacheRead: 0, gapMs: 3_000,
+        mechanism: 'automatic-prefix', sawCacheRead: true,
+      })).toBe(true);
+    });
+
+    it('stays silent for a `none` mechanism even on a blatant miss', () => {
+      expect(Agent.shouldWarnCacheMiss({
+        ...miss, gapMs: 1_000, mechanism: 'none', sawCacheRead: true,
       })).toBe(false);
     });
 
@@ -216,7 +250,7 @@ describe('prompt-cache stability', () => {
       // is `-5000 < 0` → true, so the mechanism check has to reject first.
       // An NTP correction mid-run is the realistic way to produce this.
       expect(Agent.shouldWarnCacheMiss({
-        ...base, gapMs: -5_000, mechanism: 'none', prevModel: 'm1',
+        ...miss, gapMs: -5_000, mechanism: 'none', sawCacheRead: true,
       })).toBe(false);
     });
 
@@ -224,28 +258,17 @@ describe('prompt-cache stability', () => {
       + 'explicit-breakpoint provider still would', () => {
       const gapMs = 30 * 60 * 1000; // inside the 1h breakpoint grace, past the 5min prefix one
       expect(Agent.shouldWarnCacheMiss({
-        ...base, gapMs, mechanism: 'automatic-prefix', prevModel: 'm1',
+        ...miss, gapMs, mechanism: 'automatic-prefix', sawCacheRead: true,
       })).toBe(false);
       expect(Agent.shouldWarnCacheMiss({
-        ...base, gapMs, mechanism: 'explicit-breakpoint', prevModel: 'm1',
+        ...miss, gapMs, mechanism: 'explicit-breakpoint', sawCacheRead: true,
       })).toBe(true);
     });
 
-    it('does NOT warn on the first call after a model switch (DEF-0069 false positive)', () => {
+    it('does NOT warn on the very first call of a session (no prior prompt)', () => {
       expect(Agent.shouldWarnCacheMiss({
-        ...base, gapMs: 60_000, mechanism: 'explicit-breakpoint', prevModel: 'm0',
-      })).toBe(false);
-    });
-
-    it('warns again once the switched-to model has settled (prevModel caught up)', () => {
-      expect(Agent.shouldWarnCacheMiss({
-        ...base, gapMs: 60_000, mechanism: 'explicit-breakpoint', prevModel: 'm1',
-      })).toBe(true);
-    });
-
-    it('does NOT warn on the very first call of a session (no prior model)', () => {
-      expect(Agent.shouldWarnCacheMiss({
-        ...base, prevPrompt: 0, gapMs: Infinity, mechanism: 'explicit-breakpoint', prevModel: undefined,
+        ...miss, prevPrompt: 0, gapMs: Infinity,
+        mechanism: 'explicit-breakpoint', sawCacheRead: true,
       })).toBe(false);
     });
   });
