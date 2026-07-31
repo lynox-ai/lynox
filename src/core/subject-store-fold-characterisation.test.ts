@@ -207,6 +207,37 @@ describe('subject folding, per resolver', () => {
       expect(minted.created).toBe(true);
     });
 
+    it('the placeholder does NOT take the ambiguous name — it stays free', () => {
+      // The security round's central finding. A row named after the ambiguous name wins
+      // `findCanonical`, which precedes the alias stage in every chain, so the short name
+      // would resolve to the placeholder from then on — permanently, silently, and
+      // plantable: the second carrier that makes a name ambiguous can come from extracted
+      // content. Measured before the fix: after the placeholder existed, a recall scoped
+      // to the bare name returned ONLY the placeholder's facts and the real subject's were
+      // unreachable under that name.
+      const store = makeStore();
+      const real = store.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
+      store.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
+      const placeholder = store.findOrCreate({ kind: 'organization', name: 'Meridian' });
+      expect(placeholder.created).toBe(true);
+      expect(placeholder.id).not.toBe(real.id);
+      // The name is still nobody's canonical — that is the whole point.
+      expect(store.findCanonical('Meridian', 'organization')).toBeNull();
+      // And it did not become a third carrier of the alias either.
+      expect(JSON.parse(store.getSubject(placeholder.id)!.aliases)).toEqual([]);
+    });
+
+    it('repeat mentions of the same ambiguous name collapse onto ONE placeholder', () => {
+      // Otherwise every mention mints a row and the ambiguity becomes a growth vector.
+      const store = makeStore();
+      store.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
+      store.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
+      const first = store.findOrCreate({ kind: 'organization', name: 'Meridian' });
+      const second = store.findOrCreate({ kind: 'organization', name: 'Meridian' });
+      expect(second.id).toBe(first.id);
+      expect(second.created).toBe(false);
+    });
+
     it('sees the ambiguity when the shared alias differs in a NON-ASCII case', () => {
       // The case that defeated the first version of the refusal, and the reason
       // this file now pins a German pair rather than an ASCII one. SQLite folds
@@ -339,27 +370,27 @@ describe('subject folding, per resolver', () => {
   });
 
   describe('the DataStore subject-column bridge', () => {
-    it('resolves an unambiguous name and reports an unknown one as null', () => {
+    it('returns one id for an unambiguous name and none for an unknown one', () => {
       const store = makeStore();
       const bridge = makeSubjectColumnBridge(store);
       const a = store.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Anna'] });
-      expect(bridge.find('Anna', 'person')).toBe(a.id);
-      expect(bridge.find('Nobody At All', 'person')).toBeNull();
+      expect(bridge.findAll('Anna', 'person')).toEqual([a.id]);
+      expect(bridge.findAll('Nobody At All', 'person')).toEqual([]);
     });
 
-    it('THROWS on an ambiguous name instead of returning null', () => {
-      // Null is not a safe default here, and this is the one call site where the
-      // two meanings of "no row" point in OPPOSITE directions. The caller maps
-      // null to a sentinel id: under `$eq`/`$in` that matches nothing, which is
-      // right for a name nobody carries, but under `$neq`/`$nin` it reads "not
-      // equal to a thing that does not exist" and matches EVERY row — the
-      // caller's exclusion silently stops excluding. Which subject was meant is
-      // a question the bridge cannot answer, so it says so.
+    it('returns EVERY candidate for a shared name — the caller decides the polarity', () => {
+      // A single id cannot express a shared name, and every single-value encoding
+      // of it is wrong in one polarity. Collapsing to null let the caller substitute
+      // a sentinel that matches nothing: right under `$eq`, but under `$neq`/`$nin`
+      // it reads "not equal to a thing that does not exist" and matches EVERY row,
+      // so an exclusion silently stopped excluding. Refusing outright was the first
+      // fix and was worse in the other direction — it also fired for the polarity
+      // that was already correct. The set is the only faithful answer.
       const store = makeStore();
       const bridge = makeSubjectColumnBridge(store);
-      store.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Meier'] });
-      store.findOrCreate({ kind: 'person', name: 'Bernd Meier', aliases: ['Meier'] });
-      expect(() => bridge.find('Meier', 'person')).toThrow(/more than one/);
+      const a = store.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Meier'] });
+      const b = store.findOrCreate({ kind: 'person', name: 'Bernd Meier', aliases: ['Meier'] });
+      expect(bridge.findAll('Meier', 'person').slice().sort()).toEqual([a.id, b.id].sort());
     });
   });
 

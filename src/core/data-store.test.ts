@@ -22,6 +22,7 @@ function makeTmpDb(): string {
 function makeStubBridge(): { bridge: SubjectColumnBridge; calls: Array<{ name: string; kind: string }> } {
   const idByKey = new Map<string, string>();
   const nameById = new Map<string, string>();
+  const sharedByKey = new Map<string, string[]>();
   const calls: Array<{ name: string; kind: string }> = [];
   let counter = 0;
   const keyOf = (name: string, kind: string): string => `${kind}::${name.toLowerCase()}`;
@@ -33,10 +34,19 @@ function makeStubBridge(): { bridge: SubjectColumnBridge; calls: Array<{ name: s
       if (id === undefined) { counter += 1; id = `subj-${String(counter)}`; idByKey.set(key, id); nameById.set(id, name); }
       return id;
     },
-    find(name, kind) { return idByKey.get(keyOf(name, kind)) ?? null; },
+    findAll(name, kind) {
+      const shared = sharedByKey.get(keyOf(name, kind));
+      if (shared) return shared;                       // a name several subjects carry
+      const id = idByKey.get(keyOf(name, kind));
+      return id === undefined ? [] : [id];
+    },
     name(id) { return nameById.get(id) ?? null; },
   };
-  return { bridge, calls };
+  /** Make `name` resolve to SEVERAL subjects, the way a shared alias does. */
+  const shareName = (name: string, kind: string, ids: string[]): void => {
+    sharedByKey.set(keyOf(name, kind), ids);
+  };
+  return { bridge, calls, shareName };
 }
 
 describe('DataStore', () => {
@@ -1085,7 +1095,7 @@ describe('DataStore', () => {
     it('stores null (not the raw name) when the resolver is present but returns null', () => {
       // A resolve FAILURE (distinct from flag-off) must keep the column id-pure —
       // never mix a raw name into a UUID column.
-      ds.setSubjectBridge({ resolve: () => null, find: () => null, name: () => null });
+      ds.setSubjectBridge({ resolve: () => null, findAll: () => [], name: () => null });
       ds.createCollection({
         name: 'leads',
         scope,
@@ -1248,6 +1258,52 @@ describe('DataStore', () => {
       expect(rows[0]!['patient']).toBe('Ben Roth');
     });
 
+    it('a SHARED name excludes every candidate under $neq', () => {
+      // The defect this replaced: an unresolvable name became a sentinel id, and
+      // "not equal to a thing that does not exist" matches EVERY row — the caller's
+      // exclusion silently stopped excluding. Now the name resolves to the candidate
+      // SET and the exclusion covers all of them.
+      const { bridge, shareName } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+      const anna = bridge.findAll('Anna Meier', 'person')[0]!;
+      const ben = bridge.findAll('Ben Roth', 'person')[0]!;
+      shareName('Meier', 'person', [anna, ben]);
+
+      const { rows } = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: { $neq: 'Meier' } },
+        subjectsByName: true,
+      });
+      expect(rows).toHaveLength(0);
+    });
+
+    it('a SHARED name matches any candidate under $eq, and does not fail an $or', () => {
+      // The over-correction this replaced: refusing outright fired for the polarity
+      // that was already correct, and inside an $or one shared name failed the whole
+      // query — killing a legitimate sibling branch that used to return rows.
+      const { bridge, shareName } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+      const anna = bridge.findAll('Anna Meier', 'person')[0]!;
+      const ben = bridge.findAll('Ben Roth', 'person')[0]!;
+      shareName('Meier', 'person', [anna, ben]);
+
+      const eq = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: 'Meier' },
+        subjectsByName: true,
+      });
+      expect(eq.rows).toHaveLength(3);            // both patients' rows
+
+      const or = ds.queryRecords({
+        collection: 'appointments',
+        filter: { $or: [{ patient: 'Meier' }, { note: 'nothing matches this' }] },
+        subjectsByName: true,
+      });
+      expect(or.rows).toHaveLength(3);            // the shared branch still contributes
+    });
+
     it('filters linked/unlinked rows via $is_null on a subject column', () => {
       const { bridge } = makeStubBridge();
       ds.setSubjectBridge(bridge);
@@ -1287,7 +1343,7 @@ describe('DataStore', () => {
     it('shows the raw id when the subject name can no longer be resolved (stale)', () => {
       // resolve+find work, but name() is null → the subject was purged. The id is
       // shown (never dropped) rather than a blank or a crash.
-      const bridge: SubjectColumnBridge = { resolve: () => 'subj-x', find: () => 'subj-x', name: () => null };
+      const bridge: SubjectColumnBridge = { resolve: () => 'subj-x', findAll: () => ['subj-x'], name: () => null };
       ds.setSubjectBridge(bridge);
       ds.createCollection({
         name: 'orders',

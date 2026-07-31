@@ -1034,28 +1034,60 @@ export class DataStore {
   private _resolveSubjectOperand(colName: string, value: unknown, kind: string): unknown {
     const bridge = this._subjectBridge;
     if (!bridge) return value;
-    const toId = (name: unknown): unknown => {
-      if (typeof name !== 'string') return name;
+    /**
+     * A name → its candidate ids. `null` means "not a name, pass through untouched".
+     * An empty result keeps {@link UNRESOLVABLE_SUBJECT}, whose polarity behaviour is
+     * CORRECT for a genuinely absent name: nothing equals it, and everything differs
+     * from it. Only a SHARED name needed a better answer than one id could carry.
+     */
+    const idsFor = (name: unknown): string[] | null => {
+      if (typeof name !== 'string') return null;
       const trimmed = name.trim();
-      if (trimmed === '') return UNRESOLVABLE_SUBJECT;
-      return bridge.find(trimmed, kind) ?? UNRESOLVABLE_SUBJECT;
+      if (trimmed === '') return [UNRESOLVABLE_SUBJECT];
+      const ids = bridge.findAll(trimmed, kind);
+      return ids.length === 0 ? [UNRESOLVABLE_SUBJECT] : ids;
     };
-    // implicit-eq by name
-    if (typeof value === 'string') return toId(value);
+    // implicit-eq by name → "is any of the subjects this name could mean"
+    if (typeof value === 'string') {
+      const ids = idsFor(value)!;
+      return ids.length === 1 ? ids[0]! : { $in: ids };
+    }
     // null (is-null) / arrays / non-operator scalars pass through unchanged
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
-    // operator object
+    // operator object. Clauses inside ONE operator object are AND-joined, so a widened
+    // `$eq` must INTERSECT with any sibling `$in`, and a widened `$neq` must UNION into
+    // any sibling `$nin` — order-independent either way.
     const out: Record<string, unknown> = {};
+    const narrowIn = (ids: unknown[]): void => {
+      const prev = out['$in'];
+      out['$in'] = Array.isArray(prev) ? prev.filter(p => ids.includes(p)) : ids;
+    };
+    const widenNin = (ids: unknown[]): void => {
+      const prev = out['$nin'];
+      out['$nin'] = Array.isArray(prev) ? [...new Set([...(prev as unknown[]), ...ids])] : ids;
+    };
     for (const [op, opVal] of Object.entries(value as Record<string, unknown>)) {
       switch (op) {
         case '$eq':
-        case '$neq':
-          out[op] = opVal === null ? opVal : toId(opVal);
+        case '$neq': {
+          if (opVal === null) { out[op] = opVal; break; }
+          const ids = idsFor(opVal);
+          if (ids === null) { out[op] = opVal; break; }
+          // One candidate keeps the caller's operator verbatim; several become the
+          // set form, which is the only faithful reading of a shared name.
+          if (ids.length === 1) { out[op] = ids[0]!; break; }
+          if (op === '$eq') narrowIn(ids); else widenNin(ids);
           break;
+        }
         case '$in':
-        case '$nin':
-          out[op] = Array.isArray(opVal) ? opVal.map(toId) : opVal;
+        case '$nin': {
+          if (!Array.isArray(opVal)) { out[op] = opVal; break; }
+          // `?? [v]` keeps a non-string element verbatim, as the previous per-element
+          // mapping did — dropping it would silently shrink the caller's list.
+          const ids: unknown[] = opVal.flatMap((v: unknown) => idsFor(v) ?? [v]);
+          if (op === '$in') narrowIn(ids); else widenNin(ids);
           break;
+        }
         case '$is_null':
           out[op] = opVal;
           break;

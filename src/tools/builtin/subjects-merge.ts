@@ -15,9 +15,25 @@ import { pv } from '../../core/prompt-value.js';
 // the shared merge runner's ledger (the same `~/.lynox/sweeps/` + `subject-sweep --rollback`
 // path the operator sweep uses).
 
+/**
+ * The kinds this tool can fold. Deliberately the name-deduped set: those are the kinds
+ * whose identity IS their name, so two rows of the same kind sharing one are the
+ * duplicate this tool exists to resolve. Anything else (an engagement, an `other`) has
+ * composite or no name-identity and must not be merged by name.
+ *
+ * It was `person`-only until the second security round showed why that is not a safe
+ * default: a shared alias makes the write path mint a row named after the alias, and the
+ * kind it mints most is `organization` (the durable-knowledge write path's default) —
+ * exactly the kind the only user-reachable merge surface could not name. The recovery
+ * that justifies minting has to cover the kinds that actually get minted.
+ */
+const MERGEABLE_KINDS = ['person', 'organization', 'product', 'service'] as const;
+type MergeableKind = typeof MERGEABLE_KINDS[number];
+
 interface SubjectsMergeInput {
   duplicate: string;
   canonical: string;
+  kind?: string | undefined;
 }
 
 export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
@@ -31,15 +47,16 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
   definition: {
     name: 'subjects_merge',
     description:
-      'Merge two person entries that are the SAME real person into one (e.g. a bare first name "Ada" ' +
-      'and the fuller "Dr. Ada Lovelace"), moving all their notes, tasks and mentions onto the kept entry. ' +
-      'Use ONLY when confident they are one person. Pass the shorter/duplicate name as `duplicate` and the ' +
-      'fuller/correct name as `canonical`. You will be asked to confirm; the merge is reversible.',
+      'Merge two entries that are the SAME real thing into one (e.g. "Ada" and "Dr. Ada Lovelace"), ' +
+      'moving all their notes, tasks and mentions onto the kept entry. Use ONLY when confident they ' +
+      'are one. Pass the shorter/duplicate name as `duplicate`, the fuller one as `canonical`, and ' +
+      '`kind` if they are not people. You will be asked to confirm.',
     input_schema: {
       type: 'object' as const,
       properties: {
-        duplicate: { type: 'string', description: 'The duplicate person to fold away (kept as an alias of the canonical).' },
-        canonical: { type: 'string', description: 'The correct / fuller person entry to keep.' },
+        duplicate: { type: 'string', description: 'The duplicate to fold away (kept as an alias of the canonical).' },
+        canonical: { type: 'string', description: 'The correct / fuller entry to keep.' },
+        kind: { type: 'string' as const, enum: [...MERGEABLE_KINDS], description: 'Defaults to person.' },
       },
       required: ['duplicate', 'canonical'],
     },
@@ -50,21 +67,29 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
 
     const dupName = input.duplicate?.trim();
     const canonName = input.canonical?.trim();
-    if (!dupName || !canonName) return 'Error: pass both `duplicate` and `canonical` person names.';
+    if (!dupName || !canonName) return 'Error: pass both `duplicate` and `canonical` names.';
 
-    // Resolve each name to a single active person subject (canonical name → alias).
-    const dup = subjects.findCanonical(dupName, 'person') ?? subjects.findByAlias(dupName, 'person');
-    if (!dup) return `Error: no person named "${dupName}" found in the knowledge graph.`;
-    const canon = subjects.findCanonical(canonName, 'person') ?? subjects.findByAlias(canonName, 'person');
-    if (!canon) return `Error: no person named "${canonName}" found in the knowledge graph.`;
-    if (dup.id === canon.id) return `"${dupName}" and "${canonName}" are already the same person — nothing to merge.`;
+    const rawKind = input.kind?.trim() || 'person';
+    if (!(MERGEABLE_KINDS as readonly string[]).includes(rawKind)) {
+      return `Error: \`kind\` must be one of ${MERGEABLE_KINDS.join(', ')}.`;
+    }
+    const kind = rawKind as MergeableKind;
+
+    // Resolve each name to a single active subject of that kind (canonical name → alias).
+    // A SHARED name resolves to nothing here on purpose: which of several was meant is a
+    // question this tool must not answer by guessing, least of all before a repoint.
+    const dup = subjects.findCanonical(dupName, kind) ?? subjects.findByAlias(dupName, kind);
+    if (!dup) return `Error: no ${kind} named "${dupName}" found in the knowledge graph.`;
+    const canon = subjects.findCanonical(canonName, kind) ?? subjects.findByAlias(canonName, kind);
+    if (!canon) return `Error: no ${kind} named "${canonName}" found in the knowledge graph.`;
+    if (dup.id === canon.id) return `"${dupName}" and "${canonName}" are already the same ${kind} — nothing to merge.`;
 
     // A graph-wide repoint is not auto-safe: HARD-refuse in autonomous mode independent of a
     // wired promptUser. The worker loop wires promptUser to a notification, so relying on the
     // requiresConfirmation/[BLOCKED] path alone would let an injected instruction surface a
     // rubber-stampable "Merge X into Y?" — so we fail closed here (both autonomous and no-channel).
     if (agent.autonomy === 'autonomous' || !agent.promptUser) {
-      return 'Error: merging people needs interactive confirmation and cannot run autonomously.';
+      return 'Error: merging entries needs interactive confirmation and cannot run autonomously.';
     }
     // Subject names are KG-extracted from untrusted content, so a crafted name could inject
     // newlines/instructions or bidi/zero-width spoofing into the very approval text that

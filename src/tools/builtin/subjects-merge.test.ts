@@ -106,6 +106,40 @@ describe('subjects_merge tool (PR-C3)', () => {
     expect(subjectsMergeTool.destructive).toEqual({ mode: 'data' });
   });
 
+  it('merges ORGANIZATIONS when told the kind — the recovery path for the kind minted most', async () => {
+    // This tool resolved `person` only, which made the placeholder that an ambiguous
+    // name collapses onto unreachable for every other kind — and `organization` is the
+    // durable-knowledge write path's DEFAULT kind. The recovery that justifies
+    // collecting mentions on a placeholder has to cover the kinds actually collected.
+    const a = subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
+    const b = subjects.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
+    const placeholder = subjects.findOrCreate({ kind: 'organization', name: 'Meridian' });
+    expect(placeholder.created).toBe(true);
+    const agent = makeAgent('Merge');
+    const res = await subjectsMergeTool.handler(
+      { duplicate: 'Meridian (unresolved)', canonical: 'Meridian Bau AG', kind: 'organization' }, agent);
+    expect(res).not.toMatch(/^Error/);
+    expect(subjects.getSubject(placeholder.id)!.merged_into).toBe(a.id);
+    expect(subjects.getSubject(b.id)!.merged_into).toBeNull();   // untouched
+  });
+
+  it('refuses a kind it must not merge by name', async () => {
+    // `engagement` identity is provider×client×period, not the name; merging two by
+    // name would fold distinct pieces of work that merely share a title.
+    const agent = makeAgent('Merge');
+    const res = await subjectsMergeTool.handler(
+      { duplicate: 'A', canonical: 'B', kind: 'engagement' }, agent);
+    expect(res).toMatch(/`kind` must be one of/);
+    expect(agent.promptUser).not.toHaveBeenCalled();
+  });
+
+  it('still defaults to person when no kind is given', async () => {
+    const agent = makeAgent('Merge');
+    const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);
+    expect(res).not.toMatch(/^Error/);
+    expect(subjects.getSubject(dupId)!.merged_into).toBe(canonId);
+  });
+
   it('hard-refuses in autonomous mode even WITH a wired promptUser (no rubber-stamp notification)', async () => {
     // The worker loop runs autonomous AND wires promptUser to a notification, so the
     // requiresConfirmation/[BLOCKED] path alone would escalate a rubber-stampable "Merge X into
