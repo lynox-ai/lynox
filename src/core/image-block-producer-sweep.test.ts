@@ -68,6 +68,15 @@ const ALLOWED_PRODUCERS: readonly string[] = [
 /** Every quoting form of an image-block discriminant we can match statically. */
 const IMAGE_BLOCK = /(?:type\s*:\s*|\?\s*)(['"`])image\1/;
 
+/**
+ * The tree walk + match happens ONCE per process, deliberately.
+ *
+ * The first version recomputed it per assert. That reads ~320 files under
+ * coverage instrumentation while the rest of the suite runs in parallel, and it
+ * pushed a neighbouring test that boots a real Engine past its 10s budget on the
+ * CI runner — green locally, a hard timeout in CI. A guard is not allowed to
+ * cost other tests their headroom.
+ */
 function sourceFiles(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -80,12 +89,21 @@ function sourceFiles(dir: string): string[] {
   return out;
 }
 
+let scanned: { files: string[]; producers: string[] } | null = null;
+function scanOnce(): { files: string[]; producers: string[] } {
+  if (scanned) return scanned;
+  const files = sourceFiles(SRC_DIR);
+  const producers = files
+    .filter((f) => IMAGE_BLOCK.test(readFileSync(f, 'utf-8')))
+    .map((f) => relative(SRC_DIR, f).split(sep).join('/'))
+    .sort();
+  scanned = { files, producers };
+  return scanned;
+}
+
 describe('image-block producers (untrusted-channel invariant)', () => {
   it('the ONLY producer of an image content block is the user upload path', () => {
-    const producers = sourceFiles(SRC_DIR)
-      .filter((f) => IMAGE_BLOCK.test(readFileSync(f, 'utf-8')))
-      .map((f) => relative(SRC_DIR, f).split(sep).join('/'))
-      .sort();
+    const { producers } = scanOnce();
 
     expect(
       producers,
@@ -104,7 +122,7 @@ describe('image-block producers (untrusted-channel invariant)', () => {
     // above would still pass against an empty allowlist. This one fails then.
     const upload = join(SRC_DIR, 'server', 'http-api.ts');
     expect(IMAGE_BLOCK.test(readFileSync(upload, 'utf-8'))).toBe(true);
-    expect(sourceFiles(SRC_DIR).length).toBeGreaterThan(100);
+    expect(scanOnce().files.length).toBeGreaterThan(100);
   });
 
   // The sweep above can only ever be as good as its matcher, and the real
