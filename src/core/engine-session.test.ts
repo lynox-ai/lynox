@@ -318,6 +318,9 @@ vi.mock('./project.js', () => ({
 const mockInsertRun = vi.fn().mockReturnValue('run-123');
 const mockInsertPromptSnapshot = vi.fn();
 const mockInsertWireSnapshot = vi.fn();
+/** Sub-agent spend rollup (session.ts run-end). Defaults to 0 = the turn
+ *  delegated nothing; individual tests override it. */
+const mockGetDescendantCostUsd = vi.fn().mockReturnValue(0);
 
 vi.mock('./run-history.js', () => ({
   RunHistory: vi.fn().mockImplementation(function () {
@@ -343,6 +346,8 @@ vi.mock('./run-history.js', () => ({
     this.getCompactionEventsBySession = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.insertToolCall = vi.fn();
+    // @ts-expect-error mock constructor — sub-agent spend rollup (session.ts run-end).
+    this.getDescendantCostUsd = mockGetDescendantCostUsd;
     // @ts-expect-error mock constructor
     this.getEmbeddings = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
@@ -714,6 +719,40 @@ describe('Engine + Session (Orchestrator)', () => {
         costUsd: expect.any(Number),
         model: 'claude-sonnet-4-6',
       });
+    });
+
+    /**
+     * The WIRING for the sub-agent cost rollup. The pieces either side of it are
+     * unit-tested (the SQL in run-history.test.ts, the projection in
+     * render-projection.test.ts, the formatter in chat-cost-footer.test.ts), but
+     * without these two the whole feature could be deleted from `Session.run`
+     * with every one of those still green — the run-end read is best-effort and
+     * swallows its own errors, so a missing call is indistinguishable from a
+     * turn that delegated nothing.
+     */
+    it('rolls sub-agent spend into the run usage, keyed on the CURRENT run id', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetDescendantCostUsd.mockClear().mockReturnValue(0.0698);
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('delegate something');
+
+      // Asked RunHistory for THIS run's descendants — not a stale or empty id.
+      expect(mockGetDescendantCostUsd).toHaveBeenCalledWith('run-123');
+      // ...and the answer reached the payload the `done` event echoes.
+      expect(session.getLastRunUsage()?.spawnCostUsd).toBe(0.0698);
+    });
+
+    it('omits spawnCostUsd entirely when the turn delegated nothing', async () => {
+      // Absent, not 0: the footer keys "did this turn delegate?" off presence,
+      // and a stored 0 would put an empty split in the tooltip.
+      const { session } = await createEngineAndSession();
+      mockGetDescendantCostUsd.mockClear().mockReturnValue(0);
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('no delegation here');
+
+      expect(session.getLastRunUsage()).not.toHaveProperty('spawnCostUsd');
     });
   });
 

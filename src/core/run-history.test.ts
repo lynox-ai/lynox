@@ -2709,20 +2709,22 @@ describe('RunHistory', () => {
   describe('getDescendantCostUsd', () => {
     it('sums every descendant, at any depth, but never the run itself', () => {
       const h = createHistory();
+      // Cost and a terminal status are written together by every real writer
+      // (spawn.ts / session.ts), and the aggregate excludes `running` rows.
       const parent = h.insertRun({ taskText: 'parent', modelTier: 'balanced', modelId: 'mistral-medium-2604' });
-      h.updateRun(parent, { costUsd: 0.3834 });
+      h.updateRun(parent, { costUsd: 0.3834, status: 'completed' });
 
       const child = h.insertRun({
         taskText: 'deep review', modelTier: 'deep', modelId: 'glm-5p2',
         spawnParentId: parent, spawnDepth: 1,
       });
-      h.updateRun(child, { costUsd: 0.0698 });
+      h.updateRun(child, { costUsd: 0.0698, status: 'completed' });
 
       const grandchild = h.insertRun({
         taskText: 'nested', modelTier: 'fast', modelId: 'ministral-8b-2512',
         spawnParentId: child, spawnDepth: 2,
       });
-      h.updateRun(grandchild, { costUsd: 0.01 });
+      h.updateRun(grandchild, { costUsd: 0.01, status: 'completed' });
 
       expect(h.getDescendantCostUsd(parent)).toBeCloseTo(0.0798, 6);
       // The child's own subtree, and a leaf with nothing under it.
@@ -2734,8 +2736,44 @@ describe('RunHistory', () => {
     it('returns 0 for a run that delegated nothing', () => {
       const h = createHistory();
       const solo = h.insertRun({ taskText: 'solo', modelTier: 'balanced', modelId: 'claude-sonnet-4-6' });
-      h.updateRun(solo, { costUsd: 0.12 });
+      h.updateRun(solo, { costUsd: 0.12, status: 'completed' });
       expect(h.getDescendantCostUsd(solo)).toBe(0);
+      h.close();
+    });
+
+    /**
+     * The house invariant for every spend aggregate in this file, stated at
+     * `getThreadTotals`: a `pipeline_step` must NEVER move one, and an in-flight
+     * row is not spend yet. Neither is reachable from today's writers, but this
+     * is the fifth aggregate over `cost_usd` and the first four all carry the
+     * guards — an aggregate that quietly omits them is one writer away from
+     * moving money.
+     */
+    it('excludes pipeline_step and still-running descendants, like every other spend aggregate', () => {
+      const h = createHistory();
+      const parent = h.insertRun({ taskText: 'parent', modelTier: 'balanced', modelId: 'm' });
+
+      const done = h.insertRun({
+        taskText: 'settled child', modelTier: 'deep', modelId: 'm',
+        spawnParentId: parent, spawnDepth: 1,
+      });
+      h.updateRun(done, { costUsd: 0.07, status: 'completed' });
+
+      // Still running: cost written but no terminal status.
+      const inflight = h.insertRun({
+        taskText: 'in flight', modelTier: 'fast', modelId: 'm',
+        spawnParentId: parent, spawnDepth: 1,
+      });
+      h.updateRun(inflight, { costUsd: 0.05 });
+
+      const step = h.insertRun({
+        taskText: 'pipeline step', modelTier: 'fast', modelId: 'm',
+        spawnParentId: parent, spawnDepth: 1, runType: 'pipeline_step',
+      });
+      h.updateRun(step, { costUsd: 0.11, status: 'completed' });
+
+      // Only the settled, non-pipeline child counts — not 0.23.
+      expect(h.getDescendantCostUsd(parent)).toBeCloseTo(0.07, 6);
       h.close();
     });
 
@@ -2743,7 +2781,7 @@ describe('RunHistory', () => {
       const h = createHistory();
       const parent = h.insertRun({ taskText: 'p', modelTier: 'balanced', modelId: 'm' });
       const unrelated = h.insertRun({ taskText: 'other turn', modelTier: 'balanced', modelId: 'm' });
-      h.updateRun(unrelated, { costUsd: 9.99 });
+      h.updateRun(unrelated, { costUsd: 9.99, status: 'completed' });
       expect(h.getDescendantCostUsd(parent)).toBe(0);
       h.close();
     });

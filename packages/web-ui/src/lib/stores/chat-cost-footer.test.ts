@@ -260,9 +260,30 @@ describe('sub-agent cost rollup in the footer', () => {
 		expect(costPart?.text).toBe('$0.45');
 	});
 
-	it('names the split in the tooltip so the main-run figure stays recoverable', () => {
+	it('names the parts in the tooltip so the main-run figure stays recoverable', () => {
 		const costPart = formatUsageMetaParts(withSpawn, true)[0];
-		expect(costPart?.title).toBe('$0.38 + $0.07 sub-agents');
+		expect(costPart?.title).toBe('main $0.38 · sub-agents $0.07');
+	});
+
+	/**
+	 * `formatCost` switches from 2 to 4 decimals below $0.01, so phrasing the
+	 * tooltip as "a + b" produced arithmetic that visibly does not check out
+	 * whenever the sub-agent spend is sub-cent — the common case for `fast`-tier
+	 * children. Labelled parts state the same two numbers without claiming they
+	 * add up to the headline at the displayed precision.
+	 */
+	it('does not render a sum that fails to add up when sub-agent spend is sub-cent', () => {
+		const subCent: UsageInfo = {
+			tokensIn: 1000, tokensOut: 10, cacheRead: 0, cacheWrite: 0,
+			costUsd: 0.375, spawnCostUsd: 0.005,
+		};
+		const costPart = formatUsageMetaParts(subCent, true)[0];
+		// Headline rounds to the same $0.38 as the main run alone...
+		expect(costPart?.text).toBe('$0.38');
+		// ...so the tooltip must not read as "$0.38 + $0.0050", which invites a
+		// subtraction that yields the wrong main-run figure.
+		expect(costPart?.title).toBe('main $0.38 · sub-agents $0.0050');
+		expect(costPart?.title).not.toContain('+');
 	});
 
 	it('leaves a non-delegating turn exactly as before — no sum, no tooltip', () => {

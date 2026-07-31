@@ -136,13 +136,20 @@ export function formatUsageMetaParts(u: UsageInfo, includeCost: boolean): UsageM
 		// A delegated turn costs what the main run cost PLUS what its sub-agents
 		// spent, and the two live in separate run rows. Show the sum — that is the
 		// number the question "what did this answer cost?" asks for — and name the
-		// split in the tooltip so the main-run figure stays recoverable. Showing
+		// parts in the tooltip so the main-run figure stays recoverable. Showing
 		// only `costUsd` understated a measured deep review by 18%.
+		//
+		// The tooltip lists the parts, it does not render them as a SUM. `formatCost`
+		// switches from 2 to 4 decimals below $0.01, so an "a + b" phrasing reads as
+		// arithmetic that does not check out whenever the sub-agent spend is
+		// sub-cent (the common case for `fast`-tier children): `$0.38 + $0.0050`
+		// against a headline of `$0.38`. Labelled parts carry the same information
+		// without inviting the subtraction.
 		const spawn = u.spawnCostUsd ?? 0;
 		parts.push(spawn > 0
 			? {
 				text: formatCost(u.costUsd + spawn),
-				title: `${formatCost(u.costUsd)} + ${formatCost(spawn)} sub-agents`,
+				title: `main ${formatCost(u.costUsd)} · sub-agents ${formatCost(spawn)}`,
 			}
 			: { text: formatCost(u.costUsd) });
 		// Phase E: surface third-party API cost (DataForSEO etc.) next to the LLM
