@@ -18,6 +18,19 @@ import type { PromptText } from '../../types/index.js';
  * promptUser and fails closed with no interactive channel; it shares the merge
  * runner's ledger (hermetic here via setDataDir into a tmp dir).
  */
+/**
+ * Every string `subjects_merge` shows a model or a user, pinned as one value.
+ * Regenerate deliberately, never by pasting a failure diff:
+ *   LYNOX_EMIT_SURFACE=/tmp/s.txt npx vitest run src/tools/builtin/subjects-merge.test.ts
+ * and read the module header before you accept the new wording.
+ */
+const EXPECTED_SURFACE = [
+  "{\"name\":\"subjects_merge\",\"description\":\"Merge two person entries that are the SAME real person into one (e.g. a bare first name \\\"Ada\\\" and the fuller \\\"Dr. Ada Lovelace\\\"), moving all their notes, tasks and mentions onto the kept entry. Use ONLY when confident they are one person. Pass the shorter/duplicate name as `duplicate` and the fuller/correct name as `canonical`. You will be asked to confirm. Undoing needs a command-line rollback from a ledger file that is not in any backup.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"duplicate\":{\"type\":\"string\",\"description\":\"The duplicate person to fold away (kept as an alias of the canonical).\"},\"canonical\":{\"type\":\"string\",\"description\":\"The correct / fuller person entry to keep.\"}},\"required\":[\"duplicate\",\"canonical\"]}}",
+  "Never tell the user a merge is reversible, undoable or can be rolled back from chat. It cannot: the rollback is a command-line step against a ledger file under ~/.lynox/sweeps/, and that file is in no backup and in neither migration list, so a restore or a tenant migration ends the possibility silently. Say what the result message says.",
+  "Merge \"\u0001\" into \"\u0001\"? Every note, task and mention of \"\u0001\" moves to \"\u0001\", and \"\u0001\" is archived. Undoing it needs a command-line rollback \u2014 not something you can do from chat.",
+  "Merged \"Ada\" into \"Dr. Ada Lovelace\" \u2014 one person now. An operator can reverse this from <LEDGER> \u2014 that file is not included in backups, so keep it if this may need undoing.",
+].join('\n<<<>>>\n');
+
 describe('subjects_merge tool (PR-C3)', () => {
   const tmpDirs: string[] = [];
   let dir: string;
@@ -58,34 +71,47 @@ describe('subjects_merge tool (PR-C3)', () => {
   // `backup.ts`'s three lists and in neither the migration export set nor the
   // import whitelist — so a migration or a restore silently makes every past
   // merge unreversible.
-  // The tool DESCRIPTION is the third promise, and it is the one the model reads.
-  // `subjects_merge` is in LAZY_DEFERRED_TOOLS, so this text is how the model
-  // discovers the tool and how it frames the action to the user BEFORE the consent
-  // dialog is ever rendered. The first version of this fix changed the prompt and the
-  // result and left this line saying "the merge is reversible" — which would have
-  // shipped the assistant promising an undo one sentence before the system denies it.
-  it('does not promise reversibility in the text the MODEL reads', () => {
-    const desc = subjectsMergeTool.definition.description;
-    // MUTATION THIS KILLS: restoring "the merge is reversible" to the description.
-    // Killed by this assert (`subjects-merge.test.ts`, the `not.toMatch(/is reversible/i)`
-    // below). Nothing else in this file reads `definition.description` at all — the
-    // prompt and result tests above are blind to it, which is exactly how the original
-    // claim survived a change whose whole purpose was to remove it.
-    // EXACT equality, and that is the third attempt at this assert. A negative on one
-    // phrasing let "merges ARE reversible" through (plural escapes a substring). A
-    // denylist of roots then let "Fully recoverable afterwards — just ask me." through,
-    // because a denylist is only ever as wide as the synonyms someone thought of.
-    //
-    // You cannot pin "this prose does not promise an undo" with a pattern. So pin the
-    // prose: any edit to this string has to be a deliberate edit HERE too, which is the
-    // review step the previous two versions were trying to simulate and could not.
-    const EXPECTED = 'Merge two person entries that are the SAME real person into one '
-      + '(e.g. a bare first name "Ada" and the fuller "Dr. Ada Lovelace"), moving all their '
-      + 'notes, tasks and mentions onto the kept entry. Use ONLY when confident they are one '
-      + 'person. Pass the shorter/duplicate name as `duplicate` and the fuller/correct name as '
-      + '`canonical`. You will be asked to confirm. Undoing needs a command-line rollback from '
-      + 'a ledger file that is not in any backup.';
-    expect(desc).toBe(EXPECTED);
+  // ── ONE pin over EVERY string this tool puts in front of a model or a user ──
+  //
+  // Four review rounds each found the same defect one field over: the description,
+  // then detailedGuidance, then the schema property descriptions, then the runtime
+  // strings. Every round I pinned the field that had just been caught and left the
+  // others on patterns — and a pattern is only ever as wide as the synonyms someone
+  // thought of ("merges ARE reversible" escaped a substring; "fully recoverable"
+  // escaped a root denylist).
+  //
+  // Enumerating fields loses because the set of fields is what I keep getting wrong.
+  // So pin the SURFACE: every model-visible and user-visible string, together, by
+  // equality. A new string anywhere in this tool changes the snapshot, which is the
+  // point — adding one has to be a deliberate edit here.
+  it('pins every model- and user-visible string as one surface', async () => {
+    const agent = makeAgent('Merge');
+    const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);
+    const arg = (agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    const segs = (arg as { segments: Array<{ kind: string; text: string }> }).segments;
+    const ledger = readdirSync(join(dir, 'sweeps')).find((f) => f.startsWith('merge-'))!;
+
+    const surface = [
+      // name + description + the whole input_schema, i.e. the cached wire definition
+      JSON.stringify(subjectsMergeTool.definition),
+      // the on-use instruction — pinned by CONTENT, not merely by existence: the
+      // round-3 fix pinned that it exists, and inverting it to "Reassure the user
+      // that a merge is fully reversible" then left the whole suite green.
+      subjectsMergeTool.detailedGuidance,
+      // the consent prompt's literal wording (frames only; the values are the two
+      // KG-derived names and are asserted separately as values, below)
+      segs.filter((sg) => sg.kind === 'frame').map((sg) => sg.text).join('\u0001'),
+      // the result, with the one genuinely variable part replaced
+      res.replace(join(dir, 'sweeps', ledger), '<LEDGER>'),
+    ].join('\n<<<>>>\n');
+
+    expect(surface, [
+      'A string this tool shows a model or a user changed.',
+      'That is allowed — but not silently: this tool promised users an undo it did not have,',
+      'in THREE separate strings, and four review rounds each caught one more.',
+      'If the new wording still avoids promising an undo from chat, update EXPECTED_SURFACE.',
+      'If it promises one, it is wrong — see the module header.',
+    ].join(' ')).toBe(EXPECTED_SURFACE);
   });
 
   it('names the real undo route instead of claiming reversibility', async () => {
