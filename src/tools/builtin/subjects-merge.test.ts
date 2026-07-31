@@ -71,17 +71,21 @@ describe('subjects_merge tool (PR-C3)', () => {
     // below). Nothing else in this file reads `definition.description` at all — the
     // prompt and result tests above are blind to it, which is exactly how the original
     // claim survived a change whose whole purpose was to remove it.
-    // A negative assert on ONE phrasing is not a pin. The first version was
-    // `not.toMatch(/is reversible/i)` and a delta round put "merges ARE reversible"
-    // straight back into this string with all 9112 tests green — plural escapes a
-    // substring, and so do "undoable", "can be rolled back", "not permanent".
+    // EXACT equality, and that is the third attempt at this assert. A negative on one
+    // phrasing let "merges ARE reversible" through (plural escapes a substring). A
+    // denylist of roots then let "Fully recoverable afterwards — just ask me." through,
+    // because a denylist is only ever as wide as the synonyms someone thought of.
     //
-    // So: name the one clause that is allowed to use this vocabulary, and forbid the
-    // vocabulary everywhere else in the string. A rewrite of the sanctioned sentence
-    // fails the toContain; a reintroduction anywhere else fails the negative.
-    const SANCTIONED = 'Undoing needs a command-line rollback from a ledger file that is not in any backup.';
-    expect(desc).toContain(SANCTIONED);
-    expect(desc.replace(SANCTIONED, '')).not.toMatch(/revers|undo|roll ?back|permanent/i);
+    // You cannot pin "this prose does not promise an undo" with a pattern. So pin the
+    // prose: any edit to this string has to be a deliberate edit HERE too, which is the
+    // review step the previous two versions were trying to simulate and could not.
+    const EXPECTED = 'Merge two person entries that are the SAME real person into one '
+      + '(e.g. a bare first name "Ada" and the fuller "Dr. Ada Lovelace"), moving all their '
+      + 'notes, tasks and mentions onto the kept entry. Use ONLY when confident they are one '
+      + 'person. Pass the shorter/duplicate name as `duplicate` and the fuller/correct name as '
+      + '`canonical`. You will be asked to confirm. Undoing needs a command-line rollback from '
+      + 'a ledger file that is not in any backup.';
+    expect(desc).toBe(EXPECTED);
   });
 
   it('names the real undo route instead of claiming reversibility', async () => {
@@ -98,8 +102,12 @@ describe('subjects_merge tool (PR-C3)', () => {
     // The brand alone is not the boundary: a 4-line wrapper returning one all-`frame`
     // segment passes `isPromptText` and puts KG-derived names back into markdown frame,
     // which is exactly what `pv` exists to prevent. Pin the KIND.
-    expect((arg as { segments: Array<{ kind: string; text: string }> }).segments)
-      .toContainEqual({ kind: 'value', text: 'Dr. Ada Lovelace' });
+    // BOTH names are KG-extracted from untrusted content (the handler says so), so both
+    // must be values. The first version pinned only the canonical one, and wrapping the
+    // duplicate in an all-`frame` fragment passed.
+    const segs = (arg as { segments: Array<{ kind: string; text: string }> }).segments;
+    expect(segs).toContainEqual({ kind: 'value', text: 'Dr. Ada Lovelace' });
+    expect(segs).toContainEqual({ kind: 'value', text: 'Ada' });
     const prompt = flattenPrompt(arg as Parameters<typeof flattenPrompt>[0]);
     // The wording is tier-neutral on purpose. "You cannot undo this yourself" was the
     // first attempt and is FALSE for a self-hoster: `subject-sweep --rollback` ships in
@@ -119,7 +127,7 @@ describe('subjects_merge tool (PR-C3)', () => {
 
     // The first version of this test asserted `/sweeps[/\\]merge-/` — the SHAPE of a
     // path. An adversarial pass replaced the interpolation with the hardcoded, never-
-    // written `~/.lynox/sweeps/merge-latest.json` and all 14 tests stayed green. The
+    // written `~/.lynox/sweeps/merge-latest.json` and the whole suite stayed green. The
     // whole point of the change is handing over the REAL address, and shape-matching
     // does not pin it: the obvious "tidy-up" refactor (reconstructing the path from
     // `getLynoxDir()`) would ship a nonexistent file to the user with CI green.
