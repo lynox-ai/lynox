@@ -3738,10 +3738,101 @@ describe('LynoxHTTPApi', () => {
         // unbuildable while the sink's own type calls that rate "the whole point".
         expect(c!.entry['model']).toBe('ministral-14b-2512');
         expect(c!.entry['thread']).toBe('thread-proposed');
+        // The lookup must use the ENTRY's run id. Without this the mock answers for any
+        // argument, so passing the wrong id — or none — would still read as correct.
+        expect(mockHistoryGetRun).toHaveBeenCalledWith('run-proposed');
         // The proposal came off an untrusted turn — the confirm event must say so, not
         // report a flat `false` that erases why the chip was queued in the first place.
         expect(c!.entry['untrusted']).toBe(true);
       });
+    });
+
+    it('a trusted-origin write never reaches the review queue — so the confirm event\'s untrusted flag is structurally always true', async () => {
+      await withStores(async (_ps, ks) => {
+        // Documents WHY the assertion above cannot be paired with an `untrusted:false`
+        // case: `write()` routes on the same signal, so a trusted write lands `active` and
+        // is not reviewable at all. Reading the flag off the entry is still right — the
+        // previous hard-coded `false` was constant AND wrong, this is constant and true —
+        // but the constancy is a property of the queue, not something a test can vary.
+        mockGetUserConfig.mockReturnValue({ durable_memory_enabled: true });
+        const e = ks.write({
+          text: 'ACME renewed the lease', sourceChannel: 'user', sourceUntrusted: false,
+          sourceThreadId: 'thread-trusted', sourceRunId: 'r', kind: 'fact',
+        });
+        expect(e.status).toBe('active');
+        const res = await jsonFetch(`/api/knowledge/queue/${e.id}/review`, { method: 'POST', body: JSON.stringify({ action: 'approve' }) });
+        expect(res.status).toBe(404);
+      });
+    });
+
+    it('review reports NO model when the run row predates model recording', async () => {
+      await withStores(async (_ps, ks) => {
+        mockGetUserConfig.mockReturnValue({ durable_memory_enabled: true });
+        // Old run rows carry `model_id: ''` (the column default), which is an absence of
+        // attribution, not an attribution to a model named "".
+        mockHistoryGetRun.mockReturnValue({ id: 'r-old', model_id: '' });
+        const e = ks.write({
+          text: 'ACME opened a branch', sourceChannel: 'agent', sourceUntrusted: true,
+          sourceThreadId: 'thread-old', sourceRunId: 'r-old', kind: 'fact',
+        });
+        captureTelemetryCalls.length = 0;
+        await jsonFetch(`/api/knowledge/queue/${e.id}/review`, { method: 'POST', body: JSON.stringify({ action: 'approve' }) });
+        const c = captureTelemetryCalls.find((x) => x.entry['event'] === 'propose_confirmed');
+        expect(c!.entry['model']).toBeUndefined();
+      });
+    });
+
+    it('review still succeeds when the history lookup throws — telemetry cannot undo the write', async () => {
+      await withStores(async (_ps, ks) => {
+        mockGetUserConfig.mockReturnValue({ durable_memory_enabled: true });
+        mockHistoryGetRun.mockImplementation(() => { throw new Error('database is locked'); });
+        const e = ks.write({
+          text: 'ACME changed auditors', sourceChannel: 'agent', sourceUntrusted: true,
+          sourceThreadId: 'thread-boom', sourceRunId: 'r-boom', kind: 'fact',
+        });
+        try {
+          // `reviewEntry` has already committed at this point. A throw escaping into the
+          // route's catch would answer 400 for a review that SUCCEEDED, and the client's
+          // retry would then 404 because the entry is no longer queued.
+          const res = await jsonFetch(`/api/knowledge/queue/${e.id}/review`, { method: 'POST', body: JSON.stringify({ action: 'approve' }) });
+          expect(res.status).toBe(200);
+        } finally {
+          mockHistoryGetRun.mockReset();
+          mockHistoryGetRun.mockReturnValue({ id: 'run-1', task_text: 'test' });
+        }
+      });
+    });
+
+    it('GET /api/knowledge/capture-report returns the aggregate, and requires auth', async () => {
+      // The route had no test at all: a path typo, the wrong auth tier or a missing await
+      // would all have shipped silently.
+      expect((await fetch(`${baseUrl}/api/knowledge/capture-report`, { headers: { Authorization: 'Bearer wrong-token' } })).status).toBe(401);
+
+      // Pin the data dir: the report reads the PROCESS data dir, so without this the
+      // assertions below run against whatever sink the developer's own `~/.lynox` holds
+      // (it found 446 real events on the first run). Green on a fresh CI box, red on a
+      // used laptop, is the worst of both.
+      const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const prev = process.env['LYNOX_DATA_DIR'];
+      const dir = await mkdtemp(join(tmpdir(), 'lynox-capreport-http-'));
+      process.env['LYNOX_DATA_DIR'] = dir;
+      try {
+        await writeFile(join(dir, 'capture-telemetry.jsonl'),
+          JSON.stringify({ ts: 1, event: 'capture_eligible', model: 'sonnet', untrusted: false }) + '\n' +
+          JSON.stringify({ ts: 2, event: 'remember_invoked', model: 'sonnet', untrusted: false, outcome: 'active' }) + '\n', 'utf8');
+        const res = await jsonFetch('/api/knowledge/capture-report');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        expect(body['events']).toMatchObject({ capture_eligible: 1, remember_invoked: 1 });
+        expect(body['fireRate']).toBe(1);
+        expect(body['byModel']).toEqual([{ model: 'sonnet', eligible: 1, remembered: 1, fireRate: 1 }]);
+        expect(body['blindness']).toMatchObject({ unparsableLines: 0, unreadableGenerations: 0, modelsOmitted: 0 });
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_DATA_DIR']; else process.env['LYNOX_DATA_DIR'] = prev;
+        await rm(dir, { recursive: true, force: true });
+      }
     });
 
     it('review reports NO model rather than a plausible wrong one when the run is unknown', async () => {

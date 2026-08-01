@@ -143,6 +143,13 @@ const SPEAK_MAX_TEXT_CHARS = 10_000;
 const SPEAK_USD_PER_CHAR = 0.016 / 1000;
 /** Usage Dashboard summary cache: 30 s per (period, windowStart). Long enough to dedupe tab re-opens, short enough to feel live. */
 const USAGE_SUMMARY_TTL_MS = 30_000;
+/**
+ * TTL for the capture report. It is a full rescan of the retained telemetry window —
+ * measured ~370 ms at the default 2 × 32 MiB cap and linear beyond it — on the same event
+ * loop that serves chat SSE. The underlying rates move over days, so a stale-by-30s answer
+ * costs nothing and an uncached one lets a single authenticated client spend cores.
+ */
+const CAPTURE_REPORT_TTL_MS = 30_000;
 const ALLOWED_ORIGINS = (process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(',').filter(Boolean);
 const ALLOWED_IPS = (process.env['LYNOX_ALLOWED_IPS'] ?? '').split(',').filter(Boolean);
 const TLS_CERT = process.env['LYNOX_TLS_CERT'] ?? '';
@@ -690,6 +697,12 @@ export class LynoxHTTPApi {
   // keeps repeated SQLite scans off the hot path without stale-data risk, since
   // the period window itself rolls forward and evicts old entries.
   private readonly _usageSummaryCache = new Map<string, { summary: import('../core/run-history.js').UsageSummary; expiresAt: number }>();
+  /**
+   * Cached capture report. Holds the in-flight PROMISE, not the value, so N concurrent
+   * callers share one scan instead of starting N — the dogpile is the expensive case here,
+   * since each miss is a full re-read of the sink.
+   */
+  private _captureReportCache: { report: Promise<import('../core/capture-telemetry-report.js').CaptureReport>; expiresAt: number } | null = null;
   /** Test-only: drop cached usage summaries between tests so 30s TTL doesn't bleed mocks across cases. */
   public _clearUsageCache(): void { this._usageSummaryCache.clear(); }
   private pushChannel: import('../integrations/push/web-push-channel.js').WebPushNotificationChannel | null = null;
@@ -3637,7 +3650,18 @@ export class LynoxHTTPApi {
     // Counts, rates and model ids only — never an entry id, thread id or fact text
     // (capture-telemetry S5, narrowed further by aggregation).
     this.addStatic('user', 'GET /api/knowledge/capture-report', async (_req, res) => {
-      jsonResponse(res, 200, await buildCaptureReport());
+      const now = Date.now();
+      let cached = this._captureReportCache;
+      if (cached === null || cached.expiresAt <= now) {
+        // Store the promise before awaiting so a concurrent caller joins this scan.
+        const report = buildCaptureReport();
+        cached = { report, expiresAt: now + CAPTURE_REPORT_TTL_MS };
+        this._captureReportCache = cached;
+        // A rejected scan must not stay cached for the full TTL, or one transient FS
+        // error would answer 500 for 30s after the condition cleared.
+        report.catch(() => { if (this._captureReportCache === cached) this._captureReportCache = null; });
+      }
+      jsonResponse(res, 200, await cached.report);
     });
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/knowledge/queue/:id/review', async (_req, res, params, body) => {
@@ -3672,15 +3696,28 @@ export class LynoxHTTPApi {
         // whatever model the instance happens to run now, days later, when a human clicks.
         // Reading the current config here would have produced a plausible, wrong attribution
         // — worse than the `undefined` it replaced.
-        const proposedByModel = entry.sourceRunId !== null
-          ? engine.getRunHistory()?.getRun(entry.sourceRunId)?.model_id
-          : undefined;
+        // In its own try: `reviewEntry` above has already COMMITTED. A throw from the
+        // history lookup would otherwise land in the outer catch and answer 400 for a
+        // review that succeeded — and the client's retry then 404s, because the entry is
+        // no longer queued. Telemetry may never invalidate the write it describes.
+        let proposedByModel: string | undefined;
+        try {
+          proposedByModel = entry.sourceRunId !== null
+            ? engine.getRunHistory()?.getRun(entry.sourceRunId)?.model_id
+            : undefined;
+        } catch {
+          proposedByModel = undefined;
+        }
         void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
           ts: Date.now(),
           event: action === 'reject' ? 'propose_ignored' : 'propose_confirmed',
           thread: entry.sourceThreadId ?? undefined,
           // Empty string = a run row predating provider/model recording; not an attribution.
           model: proposedByModel !== undefined && proposedByModel !== '' ? proposedByModel : undefined,
+          // Structurally always true today — `write()` routes on the same signal, so only
+          // untrusted writes ever land in this queue. Read off the entry anyway: the value
+          // it replaced was equally constant and WRONG, and if the routing rule ever widens
+          // this stays correct instead of quietly lying.
           untrusted: entry.sourceUntrusted,
           entryId: params['id']!,
           ...(action === 'reject' ? { dismissed: true } : {}),

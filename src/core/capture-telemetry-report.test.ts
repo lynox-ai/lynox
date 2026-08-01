@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -136,11 +136,13 @@ describe('buildCaptureReport', () => {
   });
 
   it('splits the fire-rate PER MODEL — the split the sink calls "the whole point"', async () => {
+    // The QUIET model is seeded FIRST on purpose: with the busy one first, insertion order
+    // already matches the intended order and dropping the sort entirely would still pass.
     await seed([
+      entry({ event: 'capture_eligible', model: 'ministral-14b-2512' }),
       entry({ event: 'capture_eligible', model: 'sonnet' }),
       entry({ event: 'capture_eligible', model: 'sonnet' }),
       entry({ event: 'remember_invoked', model: 'sonnet', outcome: 'active' }),
-      entry({ event: 'capture_eligible', model: 'ministral-14b-2512' }),
     ]);
     const r = await buildCaptureReport();
     const sonnet = r.byModel.find(m => m.model === 'sonnet');
@@ -165,18 +167,21 @@ describe('buildCaptureReport', () => {
   });
 
   it('DECLARES its blind spots: events it could not attribute, and damaged lines', async () => {
+    // The two "without" counters are deliberately driven by SEPARATE entries — one entry
+    // missing both fields lets an implementation that swaps them pass.
     await seed([
-      entry({ event: 'capture_eligible', model: undefined, thread: undefined }),
-      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_eligible', model: undefined }),
+      entry({ event: 'capture_eligible', thread: undefined }),
+      entry({ event: 'capture_eligible', thread: undefined }),
       '{{ broken',
     ]);
     const r = await buildCaptureReport();
     expect(r.blindness.eventsWithoutModel).toBe(1);
-    expect(r.blindness.eventsWithoutThread).toBe(1);
+    expect(r.blindness.eventsWithoutThread).toBe(2);
     expect(r.blindness.unparsableLines).toBe(1);
     // The unattributed event still counts in the headline — it just cannot join a per-model
     // row. Dropping it from `capture_eligible` would inflate the fire-rate instead.
-    expect(r.events.capture_eligible).toBe(2);
+    expect(r.events.capture_eligible).toBe(3);
     expect(r.byModel).toHaveLength(1);
   });
 
@@ -187,6 +192,50 @@ describe('buildCaptureReport', () => {
     expect(r.blindness.windowTruncated).toBe(true);
     expect(r.windowStart).toBe(1);
     expect(r.windowEnd).toBe(2);
+  });
+
+  it('does NOT flag truncation on a single-generation window', async () => {
+    // The pair matters: asserting only the `true` case lets a constant `true` pass, which
+    // would tell every operator their window is short when it is complete.
+    await seed([entry({ event: 'capture_eligible', ts: 1 })]);
+    const r = await buildCaptureReport();
+    expect(r.blindness.windowTruncated).toBe(false);
+  });
+
+  it('reports an unreadable generation as blindness instead of failing the request', async () => {
+    // The report sits on an HTTP route. A sink it cannot open (permissions, a directory in
+    // the way, a rotation mid-scan) must degrade to "I could not read this", never to a 500
+    // — while still refusing to present the surviving numbers as a complete window.
+    await mkdir(path.join(dir, CAPTURE_TELEMETRY_LOG_FILE));
+    const r = await buildCaptureReport();
+    expect(r.blindness.unreadableGenerations).toBe(1);
+    expect(r.fireRate).toBeNull();
+  });
+
+  it('caps the per-model table and says how many rows it dropped', async () => {
+    // 60 distinct models > the 50-row cap. `model` reaches the sink from user-settable
+    // config, so an uncapped table is a response-size hole, and a silently short one would
+    // read as "these are all the models".
+    await seed(Array.from({ length: 60 }, (_, i) => entry({ event: 'capture_eligible', model: `m${String(i).padStart(3, '0')}` })));
+    const r = await buildCaptureReport();
+    expect(r.byModel).toHaveLength(50);
+    expect(r.blindness.modelsOmitted).toBe(10);
+  });
+
+  it('does not let an out-of-enum outcome or a prototype key corrupt the counts', async () => {
+    await seed([
+      JSON.stringify({ ts: 1, event: 'toString', model: 'sonnet', untrusted: false }),
+      JSON.stringify({ ts: 2, event: 'remember_invoked', model: 'sonnet', untrusted: false, outcome: 'constructor' }),
+      entry({ event: 'capture_eligible', ts: 3 }),
+    ]);
+    const r = await buildCaptureReport();
+    // `'toString' in events` is TRUE on a plain object — the prototype chain, not the data.
+    // Incrementing that key yields NaN, which serializes to null and poisons the report.
+    expect(JSON.stringify(r.events)).not.toContain('toString');
+    expect(r.totalEvents).toBe(2);
+    // An unknown outcome must not become a key either.
+    expect(r.outcomes).toEqual({});
+    expect(Object.values(r.events).every(v => Number.isInteger(v))).toBe(true);
   });
 
   it('reports the true window bounds even when timestamps are not in file order', async () => {
