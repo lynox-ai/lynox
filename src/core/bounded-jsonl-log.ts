@@ -1,6 +1,8 @@
-import { appendFile, readFile, rename, stat } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { appendFile, rename, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 
 /**
  * Bounded append-only JSONL telemetry sink — the shared retention primitive for the
@@ -110,10 +112,10 @@ export function appendBoundedJsonl(fileName: string, entry: unknown): Promise<vo
   return next;
 }
 
-/** What one `readBoundedJsonl` call recovered — and what it could NOT. */
-export interface BoundedJsonlRead<T> {
-  /** Parsed records, oldest generation first, in file order. */
-  readonly entries: readonly T[];
+/** What one `scanBoundedJsonl` pass saw — and what it could NOT read. */
+export interface BoundedJsonlScan {
+  /** Records handed to the visitor. */
+  readonly entriesSeen: number;
   /**
    * Lines that were present but did not parse as JSON. A reader that silently drops
    * these reports a rate over a denominator it quietly shrank — the one failure mode
@@ -125,49 +127,69 @@ export interface BoundedJsonlRead<T> {
 }
 
 /**
- * Read back the full retained window of a bounded sink — the missing half of
- * `appendBoundedJsonl`. Globs the two retained generations exactly as the retention
- * model above describes: `<name>.1` (older, if it exists) then the live `<name>`.
+ * Stream the full retained window of a bounded sink through a visitor — the missing
+ * half of `appendBoundedJsonl`. Globs the two retained generations exactly as the
+ * retention model above describes: `<name>.1` (older, if it exists) then the live
+ * `<name>`, so the visitor sees records in chronological file order.
  *
- * Best-effort in the same sense as the append side: a missing or unreadable file
- * yields an empty read rather than throwing, because every caller is a diagnostic
- * surface and a telemetry read must never fail the thing it reports on. It does NOT
- * swallow *partial* damage though — a line that fails to parse is counted in
- * `unparsableLines` so the caller can say how complete its own numbers are.
+ * STREAMING is the point, not an optimisation. These sinks are bounded but not small:
+ * the default cap already allows 2 × 32 MiB retained, and an operator may raise it to
+ * 2 × 2 GiB. Slurping a generation into a string (and again into a split array) would
+ * put a multi-hundred-MiB allocation behind whatever diagnostic surface calls this —
+ * on an HTTP endpoint, a repeatable one. A line-at-a-time visitor keeps the read O(1)
+ * in memory regardless of how the cap is configured, which is what makes it safe to
+ * expose the aggregate over the API at all.
+ *
+ * Best-effort in the same sense as the append side: a missing or unreadable file is
+ * skipped rather than thrown, because every caller is a diagnostic surface and a
+ * telemetry read must never fail the thing it reports on. It does NOT swallow *partial*
+ * damage — an unparsable line is counted so the caller can state how complete its
+ * numbers are. A visitor that throws aborts the scan; callers keep visitors total.
  *
  * No validation of the record shape happens here: the sink is schema-per-file and the
  * caller owns the type. `T` is an unchecked assertion, so callers that aggregate on a
  * field must tolerate it being absent.
  */
-export async function readBoundedJsonl<T>(fileName: string): Promise<BoundedJsonlRead<T>> {
+export async function scanBoundedJsonl<T>(fileName: string, visit: (entry: T) => void): Promise<BoundedJsonlScan> {
   let file: string;
   try {
     file = path.join(dataDir(), fileName);
   } catch {
-    return { entries: [], unparsableLines: 0, generationsRead: 0 };
+    return { entriesSeen: 0, unparsableLines: 0, generationsRead: 0 };
   }
-  const entries: T[] = [];
+  let entriesSeen = 0;
   let unparsableLines = 0;
   let generationsRead = 0;
   // Oldest first: `.1` is the rotated-out generation, the live file is newer.
   for (const candidate of [`${file}.1`, file]) {
-    let raw: string;
     try {
-      raw = await readFile(candidate, 'utf8');
+      await stat(candidate);
     } catch {
       continue; // ENOENT for `.1` is the normal case, not an error
     }
     generationsRead++;
-    for (const line of raw.split('\n')) {
-      if (line.trim().length === 0) continue;
-      try {
-        entries.push(JSON.parse(line) as T);
-      } catch {
-        // A torn last line is expected mid-append; anything else is real damage.
-        // Either way the caller learns the count rather than a quietly short list.
-        unparsableLines++;
+    const stream = createReadStream(candidate, { encoding: 'utf8' });
+    // `crlfDelay: Infinity` so a CRLF-written line is one record, not a torn one.
+    const lines = createInterface({ input: stream, crlfDelay: Infinity });
+    try {
+      for await (const line of lines) {
+        if (line.trim().length === 0) continue;
+        let parsed: T;
+        try {
+          parsed = JSON.parse(line) as T;
+        } catch {
+          // A torn last line is expected mid-append; anything else is real damage.
+          // Either way the caller learns the count rather than a quietly short list.
+          unparsableLines++;
+          continue;
+        }
+        entriesSeen++;
+        visit(parsed);
       }
+    } finally {
+      lines.close();
+      stream.destroy();
     }
   }
-  return { entries, unparsableLines, generationsRead };
+  return { entriesSeen, unparsableLines, generationsRead };
 }

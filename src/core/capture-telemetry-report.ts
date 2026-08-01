@@ -1,4 +1,4 @@
-import { readBoundedJsonl } from './bounded-jsonl-log.js';
+import { scanBoundedJsonl } from './bounded-jsonl-log.js';
 import { CAPTURE_TELEMETRY_LOG_FILE, type CaptureEvent, type CaptureOutcome, type CaptureTelemetryEntry } from './capture-telemetry.js';
 
 /**
@@ -107,8 +107,6 @@ function rate(numerator: number, denominator: number): number | null {
  * when there is nothing to diagnose is worse than one that says "nothing recorded".
  */
 export async function buildCaptureReport(): Promise<CaptureReport> {
-  const read = await readBoundedJsonl<Partial<CaptureTelemetryEntry>>(CAPTURE_TELEMETRY_LOG_FILE);
-
   const events = Object.fromEntries(ALL_EVENTS.map(e => [e, 0])) as Record<CaptureEvent, number>;
   const outcomes: Partial<Record<CaptureOutcome, number>> = {};
   const perModel = new Map<string, { eligible: number; remembered: number }>();
@@ -119,11 +117,11 @@ export async function buildCaptureReport(): Promise<CaptureReport> {
   let eventsWithoutThread = 0;
   let untrustedEligible = 0;
 
-  for (const entry of read.entries) {
+  const scan = await scanBoundedJsonl<Partial<CaptureTelemetryEntry>>(CAPTURE_TELEMETRY_LOG_FILE, (entry) => {
     const event = entry.event;
     // A record without a known event contributes to nothing — count it as damage rather
     // than letting it inflate `totalEvents` and dilute every rate derived from it.
-    if (event === undefined || !(event in events)) continue;
+    if (event === undefined || !(event in events)) return;
     events[event]++;
     totalEvents++;
 
@@ -144,7 +142,7 @@ export async function buildCaptureReport(): Promise<CaptureReport> {
       else bucket.remembered++;
       perModel.set(entry.model, bucket);
     }
-  }
+  });
 
   const byModel: CaptureModelRate[] = [...perModel.entries()]
     .map(([model, b]) => ({ model, eligible: b.eligible, remembered: b.remembered, fireRate: rate(b.remembered, b.eligible) }))
@@ -162,10 +160,10 @@ export async function buildCaptureReport(): Promise<CaptureReport> {
     byModel,
     untrustedEligible,
     blindness: {
-      unparsableLines: read.unparsableLines,
+      unparsableLines: scan.unparsableLines,
       eventsWithoutModel,
       eventsWithoutThread,
-      windowTruncated: read.generationsRead > 1,
+      windowTruncated: scan.generationsRead > 1,
     },
   };
 }

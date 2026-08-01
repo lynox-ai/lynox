@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { buildCaptureReport } from './capture-telemetry-report.js';
-import { readBoundedJsonl, appendBoundedJsonl } from './bounded-jsonl-log.js';
+import { scanBoundedJsonl, appendBoundedJsonl } from './bounded-jsonl-log.js';
 import { CAPTURE_TELEMETRY_LOG_FILE, type CaptureTelemetryEntry } from './capture-telemetry.js';
 
 /**
@@ -36,34 +36,79 @@ function entry(e: Partial<CaptureTelemetryEntry> & Pick<CaptureTelemetryEntry, '
   return JSON.stringify({ ts: 1000, thread: 't1', model: 'ministral-14b-2512', untrusted: false, ...e });
 }
 
-describe('readBoundedJsonl', () => {
-  it('returns an empty read for a sink that was never written (not a throw)', async () => {
-    const read = await readBoundedJsonl(CAPTURE_TELEMETRY_LOG_FILE);
-    expect(read.entries).toEqual([]);
-    expect(read.generationsRead).toBe(0);
+/** Collect a scan into an array — convenience for the assertions below, never in prod code. */
+async function collect(): Promise<{ entries: CaptureTelemetryEntry[]; scan: Awaited<ReturnType<typeof scanBoundedJsonl>> }> {
+  const entries: CaptureTelemetryEntry[] = [];
+  const scan = await scanBoundedJsonl<CaptureTelemetryEntry>(CAPTURE_TELEMETRY_LOG_FILE, e => { entries.push(e); });
+  return { entries, scan };
+}
+
+describe('scanBoundedJsonl', () => {
+  it('returns an empty scan for a sink that was never written (not a throw)', async () => {
+    const { entries, scan } = await collect();
+    expect(entries).toEqual([]);
+    expect(scan.generationsRead).toBe(0);
+    expect(scan.entriesSeen).toBe(0);
   });
 
   it('reads BOTH retained generations, rotated-out one first', async () => {
     await seed([entry({ event: 'capture_eligible', ts: 1 })], '.1');
     await seed([entry({ event: 'capture_eligible', ts: 2 })]);
-    const read = await readBoundedJsonl<CaptureTelemetryEntry>(CAPTURE_TELEMETRY_LOG_FILE);
-    expect(read.generationsRead).toBe(2);
+    const { entries, scan } = await collect();
+    expect(scan.generationsRead).toBe(2);
     // Order matters: a reader that only globs the live file silently loses the older
     // half of the retained window and reports a rate over the wrong span.
-    expect(read.entries.map(e => e.ts)).toEqual([1, 2]);
+    expect(entries.map(e => e.ts)).toEqual([1, 2]);
   });
 
   it('COUNTS unparsable lines instead of silently shrinking the window', async () => {
     await seed([entry({ event: 'capture_eligible' }), '{not json', entry({ event: 'remember_invoked' })]);
-    const read = await readBoundedJsonl<CaptureTelemetryEntry>(CAPTURE_TELEMETRY_LOG_FILE);
-    expect(read.entries).toHaveLength(2);
-    expect(read.unparsableLines).toBe(1);
+    const { entries, scan } = await collect();
+    expect(entries).toHaveLength(2);
+    expect(scan.entriesSeen).toBe(2);
+    expect(scan.unparsableLines).toBe(1);
   });
 
   it('round-trips what appendBoundedJsonl wrote', async () => {
     await appendBoundedJsonl(CAPTURE_TELEMETRY_LOG_FILE, { ts: 7, event: 'capture_eligible' });
-    const read = await readBoundedJsonl<CaptureTelemetryEntry>(CAPTURE_TELEMETRY_LOG_FILE);
-    expect(read.entries).toEqual([{ ts: 7, event: 'capture_eligible' }]);
+    const { entries } = await collect();
+    expect(entries).toEqual([{ ts: 7, event: 'capture_eligible' }]);
+  });
+
+  it('reads a CRLF-written sink without tearing the model attribution', async () => {
+    // Characterisation, not a guard for `crlfDelay`: readline already splits \r\n at this
+    // size, and removing that option does NOT fail this test (verified by mutation). The
+    // option earns its place only for a \r and \n landing in different 64 KiB chunks,
+    // which a fixture this small cannot produce. What this DOES pin is the consequence
+    // that would matter — a stray \r riding into `model` and splitting the per-model
+    // table into ghost rows.
+    await writeFile(
+      path.join(dir, CAPTURE_TELEMETRY_LOG_FILE),
+      entry({ event: 'capture_eligible', model: 'sonnet' }) + '\r\n' + entry({ event: 'remember_invoked', model: 'sonnet' }) + '\r\n',
+      'utf8',
+    );
+    const { entries, scan } = await collect();
+    expect(scan.unparsableLines).toBe(0);
+    expect(entries.map(e => e.model)).toEqual(['sonnet', 'sonnet']);
+  });
+
+  it('skips a blank line mid-file instead of booking it as damage', async () => {
+    // A trailing newline never reaches the visitor (readline drops it), so only an
+    // INTERIOR blank line exercises the guard — and without it every such line would
+    // inflate `unparsableLines`, i.e. the report would claim damage it did not have.
+    await seed([entry({ event: 'capture_eligible' }), '', entry({ event: 'remember_invoked' })]);
+    const { entries, scan } = await collect();
+    expect(entries).toHaveLength(2);
+    expect(scan.unparsableLines).toBe(0);
+  });
+
+  it('propagates a throwing visitor rather than reporting a silently short scan', async () => {
+    await seed([entry({ event: 'capture_eligible' }), entry({ event: 'capture_eligible' })]);
+    // A swallowed visitor error would return a scan whose counts look complete while
+    // the caller's aggregation stopped halfway — a wrong number with no symptom, which
+    // is the exact failure this whole module exists to remove.
+    await expect(scanBoundedJsonl(CAPTURE_TELEMETRY_LOG_FILE, () => { throw new Error('visitor blew up'); }))
+      .rejects.toThrow('visitor blew up');
   });
 });
 
