@@ -210,6 +210,43 @@ describe('gate-record — which gates a diff requires', () => {
     expect(evaluate({ body: record(), head: HEAD, files: ['src/core/prompts.ts'] }).ok).toBe(true);
   });
 
+  it('demands the `legal` gate for the subprocessor list — despite it being markdown', () => {
+    // This is the one binding text in the PUBLIC repo, and it is a .md file, so the
+    // docs-only exemption would have waved through exactly the document the managed DPA
+    // points customers at. Legal paths are matched before that filter.
+    const gates = requiredGates(['SUBPROCESSORS.md']);
+    expect(gates).not.toBeNull();
+    expect([...gates].sort()).toEqual(['legal']);
+  });
+
+  it('leaves other markdown exempt — the scope is one file, not "all docs"', () => {
+    expect(requiredGates(['README.md'])).toBeNull();
+    expect(requiredGates(['docs/src/content/docs/setup/remote-access.md'])).toBeNull();
+  });
+
+  it('takes a sign-off with a date for the legal text, and refuses one without', () => {
+    const ok = evaluate({
+      body: record({ gates: 'legal', approved: 'rafael 2026-08-01', delta: '', mutations: '' }),
+      head: HEAD, files: ['SUBPROCESSORS.md'],
+    });
+    expect(ok.ok, JSON.stringify(ok.errors)).toBe(true);
+
+    const missing = evaluate({
+      body: record({ gates: 'legal', delta: '', mutations: '' }),
+      head: HEAD, files: ['SUBPROCESSORS.md'],
+    });
+    expect(missing.ok).toBe(false);
+    // Matched on text unique to the MISSING branch — both errors mention `approved:`.
+    expect(missing.errors.join(' ')).toContain('needs an `approved:` line');
+
+    const undated = evaluate({
+      body: record({ gates: 'legal', approved: 'rafael', delta: '', mutations: '' }),
+      head: HEAD, files: ['SUBPROCESSORS.md'],
+    });
+    expect(undated.ok).toBe(false);
+    expect(undated.errors.join(' ')).toContain('ISO date');
+  });
+
   it('characterises what the path map CANNOT see', () => {
     // Not an endorsement — a record of the floor's shape, so the next person
     // does not mistake a green check for "no security review needed".
