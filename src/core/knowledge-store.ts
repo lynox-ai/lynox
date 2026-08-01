@@ -584,6 +584,53 @@ export class KnowledgeStore {
     return this.getEntry(entry.id)!;
   }
 
+  // ── Erasure ──
+  //
+  // Until these existed the store had NO delete path of any kind: `retireEntry` above
+  // sets `status = 'superseded'` and its own docstring says the entry is never deleted,
+  // and there was no `DELETE FROM knowledge_entries` anywhere in the codebase. A store
+  // whose strongest removal is a status flag cannot answer an erasure request, and the
+  // published retention text described a purge that had no implementation on this side.
+
+  // There is deliberately NO periodic purge of `superseded` rows here, and this store is
+  // therefore NOT symmetric with the legacy one (`AgentMemoryDb.gc` really does
+  // `DELETE FROM memories WHERE is_active = 0`). Retirement is an audit record by design:
+  // `memory_retire` tells the user the entry "is marked superseded, never deleted"
+  // (`tools/builtin/knowledge.ts`), and `KnowledgeStatus` says `rejected`/`superseded` are
+  // "kept (auditable), not deleted" (`types/memory.ts`). A sweep would quietly break both.
+  // Erasure is served by the targeted deletes below, which is the shape a data-subject
+  // request actually arrives in — retire-then-wait could never answer one anyway.
+
+  /**
+   * Hard-delete one entry by exact id, whatever its status. The targeted erasure a
+   * single data-subject request needs — retire-then-wait cannot answer one, because
+   * retirement leaves the text in place.
+   *
+   * Not reachable from an agent tool by design: erasure is a human act. Returns whether
+   * a row was removed.
+   */
+  deleteEntry(id: string): boolean {
+    return this.db.prepare('DELETE FROM knowledge_entries WHERE id = ?').run(id).changes > 0;
+  }
+
+  /**
+   * Hard-delete every entry attached to a subject, whatever its status.
+   *
+   * `subject_id` is the only handle that gathers "everything this store holds about one
+   * person" — the shape an erasure request actually arrives in. Entries that were never
+   * resolved to a subject carry a plaintext `subject_hint` instead and are NOT reached
+   * by this; they need {@link deleteEntry}. Returns the number of rows removed.
+   *
+   * Follows merges first, like every other subject read in this file. A merge repoints
+   * `knowledge_entries.subject_id` onto the canonical (`subject-store.ts` REPOINT_TARGETS),
+   * so a request keyed on the merged-away id would otherwise delete nothing and report
+   * success — the worst possible answer for an erasure request.
+   */
+  deleteBySubject(subjectId: string): number {
+    const canonical = this.subjects.resolveActiveSubject(subjectId);
+    return this.db.prepare('DELETE FROM knowledge_entries WHERE subject_id = ?').run(canonical).changes;
+  }
+
   // ── Focus derivation (H2-gated) ──
 
   private _renderFocus(turnText: string, threadAnchorSubjectId: string | null, focusOverrideSubjectId: string | null): string | null {

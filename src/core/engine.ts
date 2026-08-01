@@ -105,7 +105,7 @@ import { DataStore } from './data-store.js';
 import { PluginManager } from './plugins.js';
 import { isFeatureEnabled } from './features.js';
 import type { MemoryScopeRef } from '../types/index.js';
-import { runMemoryGc, runGraphGc } from './memory-gc.js';
+import { runMemoryGc, runGraphGc, runStartupReap } from './memory-gc.js';
 import { NotificationRouter } from './notification-router.js';
 import { escalateToUser as runEscalation, type EscalateOpts } from './escalation.js';
 import { WorkerLoop } from './worker-loop.js';
@@ -697,7 +697,31 @@ export class Engine {
     await this._initCoreTools();
     await this._initIntegrations();
     await this._initPipelineAndBackup();
+    this._scheduleStartupReap();
     return this;
+  }
+
+  /**
+   * Reap deactivated/retired rows once per process start, in addition to the
+   * every-{@link AUTO_GC_INTERVAL}-runs trigger in {@link incrementRunCount}.
+   *
+   * That trigger is `runCount % 50`, and `runCount` is an in-memory field that resets
+   * to 0 on every restart. An instance that does fewer than fifty runs between restarts
+   * therefore never reaps anything — measured on a production instance: 288 rows sat
+   * deactivated in `agent-memory.db` (28% of the table) with the file untouched for
+   * nine days. Making a restart itself a trigger closes the hole exactly where it
+   * opened: the counter resets on restart, so the restart has to do the work.
+   *
+   * Reap only — deliberately NOT `runGraphGc`, which also runs cross-scope memory
+   * CONSOLIDATION. Merging a user's memories is not something a reboot should do
+   * silently; that stays on the run-count path where it is today.
+   */
+  private _scheduleStartupReap(): void {
+    void runStartupReap(this.knowledgeLayer).then(({ error }) => {
+      // Reported rather than swallowed. A maintenance step whose failure is invisible is
+      // exactly how the original gap survived unnoticed for as long as it did.
+      if (error !== null) process.stderr.write(`[lynox] startup reap failed: ${String(error)}\n`);
+    });
   }
 
   /** Debug logging, LLM provider SDK, Bugsink error reporting. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */

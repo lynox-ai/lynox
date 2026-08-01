@@ -670,4 +670,87 @@ describe('KnowledgeStore write-path dedup — subject-null resolution (completes
     expect(ks.hasActiveFactWithPrefix('Role: ')).toBe(false);         // absent
     expect(ks.hasActiveFactWithPrefix('company: ')).toBe(false);      // exact, case-sensitive prefix
   });
+
+  // ── Erasure ──
+  // Before these existed the store had no delete path at all: `retireEntry` sets a
+  // status flag and its docstring says the entry is never deleted. The published
+  // retention text promised a purge with nothing behind it on this side.
+
+  it('a retired entry is KEPT — `memory_retire` promises "never deleted" and nothing may sweep it', () => {
+    // Guards the absence of a purge. The legacy store hard-deletes its deactivated rows on
+    // the maintenance cycle; this store deliberately does not, because `memory_retire` tells
+    // the user the entry stays on record and `KnowledgeStatus` calls superseded auditable.
+    // A future "symmetry" sweep would break both promises silently — this test is what stops it.
+    const { ks } = make();
+    const retired = ks.write({ text: 'ACME renews in March', sourceChannel: 'ui', sourceUntrusted: false });
+    ks.retireEntry(retired.id, 'user_asserted');
+
+    const stored = ks.getEntry(retired.id);
+    expect(stored).not.toBeNull();
+    expect(stored!.status).toBe('superseded'); // hidden from recall, still on record
+    expect(ks.recall({ query: 'ACME' }).some(e => e.id === retired.id)).toBe(false);
+  });
+
+  it('deleteEntry removes an ACTIVE entry — retire-then-purge cannot answer an erasure request', () => {
+    const { ks } = make();
+    const entry = ks.write({ text: 'Jana Reber lives in Bern', sourceChannel: 'ui', sourceUntrusted: false });
+    expect(entry.status).toBe('active');
+
+    expect(ks.deleteEntry(entry.id)).toBe(true);
+
+    expect(ks.getEntry(entry.id)).toBeNull();
+    expect(ks.deleteEntry(entry.id)).toBe(false); // second call reports nothing removed
+  });
+
+  it('deleteBySubject removes every entry for one subject, whatever its status, and nothing else', () => {
+    const { ks, subjects } = make();
+    const target = ks.write({ text: 'Jana Reber lives in Bern', subjectName: 'Jana Reber', sourceChannel: 'ui', sourceUntrusted: false });
+    const alsoTarget = ks.write({ text: 'Jana Reber prefers email', subjectName: 'Jana Reber', sourceChannel: 'ui', sourceUntrusted: false });
+    const other = ks.write({ text: 'ACME pays by invoice', subjectName: 'ACME', sourceChannel: 'ui', sourceUntrusted: false });
+    ks.retireEntry(alsoTarget.id, 'user_asserted'); // a retired row must be erased too
+    const subjectId = target.subjectId;
+    expect(subjectId).not.toBeNull();
+    expect(alsoTarget.subjectId).toBe(subjectId); // both entries resolved to the same subject
+
+    expect(ks.deleteBySubject(subjectId!)).toBe(2);
+
+    expect(ks.getEntry(target.id)).toBeNull();
+    expect(ks.getEntry(alsoTarget.id)).toBeNull();
+    expect(ks.getEntry(other.id)).not.toBeNull(); // the neighbouring subject is untouched
+  });
+
+  it('deleteBySubject does NOT reach an entry that was never resolved to a subject', () => {
+    // The honest limit, asserted so it cannot regress into a false promise: an entry
+    // whose subject never resolved carries a plaintext `subject_hint` instead of a
+    // `subject_id`, so a subject-scoped erasure misses it. That is why `deleteEntry`
+    // exists alongside this, and why the erasure procedure has to name both.
+    const { ks } = make();
+    const hinted = ks.write({ text: 'Jana Reber lives in Bern', sourceChannel: 'ui', sourceUntrusted: false });
+    expect(hinted.subjectId).toBeNull();
+    const anchored = ks.write({ text: 'ACME pays by invoice', subjectName: 'ACME', sourceChannel: 'ui', sourceUntrusted: false });
+    expect(anchored.subjectId).not.toBeNull();
+
+    expect(ks.deleteBySubject(anchored.subjectId!)).toBe(1);
+    expect(ks.getEntry(anchored.id)).toBeNull();
+    expect(ks.getEntry(hinted.id)).not.toBeNull(); // reachable only via deleteEntry
+  });
+
+  it('deleteBySubject follows a MERGE — an erasure keyed on the merged-away id still erases', () => {
+    // A merge repoints knowledge_entries.subject_id onto the canonical (subject-store
+    // REPOINT_TARGETS). Without resolving first, an erasure request that arrives with the
+    // duplicate's id deletes zero rows and returns 0 — reporting success while the data
+    // stays. Every other subject read in this file resolves; this one has to as well.
+    const { ks, subjects } = make();
+    const dup = subjects.findOrCreate({ kind: 'organization', name: 'ACME Ltd' }).id;
+    const canonical = subjects.findOrCreate({ kind: 'organization', name: 'ACME' }).id;
+    const entry = ks.write({ text: 'ACME pays by invoice', subjectName: 'ACME Ltd', sourceChannel: 'ui', sourceUntrusted: false });
+    expect(entry.subjectId).toBe(dup);
+
+    subjects.mergeSubjects(dup, canonical);
+
+    // The caller still holds the OLD id — the realistic case, since that is what an
+    // export or an earlier request handed them.
+    expect(ks.deleteBySubject(dup)).toBe(1);
+    expect(ks.getEntry(entry.id)).toBeNull();
+  });
 });

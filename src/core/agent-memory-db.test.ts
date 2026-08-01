@@ -664,4 +664,62 @@ describe('AgentMemoryDb', () => {
       expect(() => db.listAllActiveMemories(10 ** 9)).not.toThrow();
     });
   });
+
+  describe('entityIsDormant', () => {
+    // `entities` has no is_active of its own. Deleting a memory deactivates the memory and
+    // leaves the entity row untouched, so without this predicate the query side keeps
+    // resolving the entity — and its NAME reaches the model — long after the memory it came
+    // from was deleted.
+
+    function seed(text: string): { memoryId: string; entityId: string } {
+      const memoryId = db.createMemory({
+        text, namespace: 'knowledge', scopeType: 'global', scopeId: 'global', embedding: [1, 0, 0],
+      });
+      const entityId = db.createEntity({
+        canonicalName: 'Jana Reber', entityType: 'person', scopeType: 'global', scopeId: 'global',
+      });
+      db.createMention(memoryId, entityId);
+      return { memoryId, entityId };
+    }
+
+    it('is not dormant while a mentioning memory is active', () => {
+      const { entityId } = seed('Jana Reber lives in Bern');
+      expect(db.entityIsDormant(entityId)).toBe(false);
+    });
+
+    it('becomes dormant once the only mentioning memory is deactivated', () => {
+      const { entityId } = seed('Jana Reber lives in Bern');
+      db.deactivateMemoriesByPattern('Jana Reber');
+      // The entity row itself survives — that is the whole point: it is still findable by
+      // name, which is why the query side needs this predicate rather than a lookup.
+      expect(db.getEntity(entityId)).not.toBeNull();
+      expect(db.entityIsDormant(entityId)).toBe(true);
+    });
+
+    it('stays live while ANY other mentioning memory is still active', () => {
+      const { memoryId, entityId } = seed('Jana Reber lives in Bern');
+      const second = db.createMemory({
+        text: 'Jana Reber prefers email', namespace: 'knowledge',
+        scopeType: 'global', scopeId: 'global', embedding: [0, 1, 0],
+      });
+      db.createMention(second, entityId);
+      db.deactivateMemoriesByPattern('lives in Bern');
+      expect(memoryId).not.toBe(second);
+      expect(db.entityIsDormant(entityId)).toBe(false);
+    });
+
+    it('an entity that NEVER had a mention is NOT dormant — DataStore collections are exactly that', () => {
+      // The regression this guards: `DataStoreBridge.registerCollection` creates one entity
+      // per collection and never calls createMention. Treating mention-less as dead would
+      // silently drop every DataStore hint from the context graph.
+      const collection = db.createEntity({
+        canonicalName: 'invoices', entityType: 'collection', scopeType: 'global', scopeId: 'global',
+      });
+      expect(db.entityIsDormant(collection)).toBe(false);
+    });
+
+    it('an unknown id is not dormant — absence is not death', () => {
+      expect(db.entityIsDormant('no-such-entity')).toBe(false);
+    });
+  });
 });
