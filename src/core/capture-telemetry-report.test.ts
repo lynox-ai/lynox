@@ -222,6 +222,74 @@ describe('buildCaptureReport', () => {
     expect(r.blindness.modelsOmitted).toBe(10);
   });
 
+  describe('a poisoned sink (the file is NOT on the permission-guard protected list)', () => {
+    it('rejects a non-string model instead of crashing on it', async () => {
+      // `{length: n}` satisfies the length CHECK but not `.slice` — the endpoint answered
+      // 500, and because a throw clears the response cache, it answered 500 uncached for
+      // every subsequent request.
+      await seed([
+        JSON.stringify({ ts: 1, event: 'capture_eligible', model: { length: 999 }, untrusted: false }),
+        entry({ event: 'capture_eligible', model: 'sonnet' }),
+      ]);
+      const r = await buildCaptureReport();
+      expect(r.byModel).toEqual([{ model: 'sonnet', eligible: 1, remembered: 0, fireRate: 0 }]);
+      // The record still COUNTS — its event is valid, only the attribution is unusable.
+      // Booking it as malformed would understate the denominator; the right bucket is
+      // "an event I could not attribute to a model".
+      expect(r.events.capture_eligible).toBe(2);
+      expect(r.blindness.eventsWithoutModel).toBe(1);
+      expect(r.blindness.malformedRecords).toBe(0);
+    });
+
+    it('cannot have the model length cap defeated by an array', async () => {
+      // An array's `.length` is its element count, so a 2-element array of huge strings
+      // reads as "length 2" and skipped the 128-char clamp entirely — 10 MB of response
+      // was produced this way.
+      await seed([JSON.stringify({ ts: 1, event: 'capture_eligible', model: ['X'.repeat(500), 'i'], untrusted: false })]);
+      const r = await buildCaptureReport();
+      expect(r.byModel).toEqual([]);
+      expect(JSON.stringify(r).length).toBeLessThan(1000);
+    });
+
+    it('clamps an over-long STRING model rather than dropping it', async () => {
+      // The legitimate case must survive the guard that kills the hostile one: a long but
+      // real model id is truncated, not discarded, or a config typo erases a whole row.
+      await seed([entry({ event: 'capture_eligible', model: 'm'.repeat(400) })]);
+      const r = await buildCaptureReport();
+      expect(r.byModel[0]!.model).toHaveLength(128);
+      expect(r.blindness.malformedRecords).toBe(0);
+    });
+
+    it('does not let a non-finite timestamp fake an empty window', async () => {
+      // `1e999` parses to Infinity, which serializes to null — and this module's own
+      // interface documents a null window as "the sink is empty", while the counts say
+      // otherwise. A report contradicting itself is worse than one reporting nothing.
+      // Written RAW, not via JSON.stringify: stringify emits Infinity as `null`, so the
+      // hostile value never reaches the parser and the test proves nothing. Only a
+      // hand-written `1e999` in the file reproduces it.
+      await seed([
+        '{"ts":1e999,"event":"capture_eligible","model":"m","untrusted":false}',
+        entry({ event: 'capture_eligible', ts: 5, model: 'm' }),
+      ]);
+      const r = await buildCaptureReport();
+      expect(r.windowEnd).toBe(5);
+      expect(Number.isFinite(r.windowEnd)).toBe(true);
+      expect(r.blindness.malformedRecords).toBe(0); // the record is usable, only its ts is not
+    });
+
+    it('counts a wholly malformed record as blindness rather than as an event', async () => {
+      await seed([
+        JSON.stringify({ ts: 1, event: 'capture_eligible', model: 'm', untrusted: false }),
+        JSON.stringify(['not', 'an', 'object']),
+        JSON.stringify({ ts: 2, event: 12345, model: 'm' }),
+        JSON.stringify(null),
+      ]);
+      const r = await buildCaptureReport();
+      expect(r.totalEvents).toBe(1);
+      expect(r.blindness.malformedRecords).toBe(3);
+    });
+  });
+
   it('does not let an out-of-enum outcome or a prototype key corrupt the counts', async () => {
     await seed([
       JSON.stringify({ ts: 1, event: 'toString', model: 'sonnet', untrusted: false }),

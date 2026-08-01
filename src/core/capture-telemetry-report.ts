@@ -1,5 +1,5 @@
 import { scanBoundedJsonl } from './bounded-jsonl-log.js';
-import { CAPTURE_TELEMETRY_LOG_FILE, type CaptureEvent, type CaptureOutcome, type CaptureTelemetryEntry } from './capture-telemetry.js';
+import { CAPTURE_TELEMETRY_LOG_FILE, type CaptureEvent, type CaptureOutcome } from './capture-telemetry.js';
 
 /**
  * The READ half of the durable-knowledge capture telemetry (DEF-dk-capture-observability).
@@ -38,6 +38,12 @@ export interface CaptureModelRate {
 export interface CaptureReportBlindness {
   /** Lines present in the sink that did not parse — excluded from every count below. */
   readonly unparsableLines: number;
+  /**
+   * Records that parsed as JSON but did not carry a usable event shape — also excluded.
+   * Non-zero on a healthy instance means something other than the engine is writing to
+   * the sink, which is worth knowing before quoting any rate from it.
+   */
+  readonly malformedRecords: number;
   /**
    * Retained generations that existed but could not be read. Non-zero means the window
    * below is missing a span of unknown size, so every rate is over an unknown subset —
@@ -114,9 +120,72 @@ const ALL_EVENTS: readonly CaptureEvent[] = [
   'onboarding_abandoned',
 ];
 
+/** Prototype-free zero map — doubles as the membership test for a known event name. */
+const EVENT_ZEROES: Readonly<Record<string, number>> = Object.freeze(
+  Object.assign(Object.create(null) as Record<string, number>, Object.fromEntries(ALL_EVENTS.map(e => [e, 0]))),
+);
+
 /** A rate that refuses to divide by zero — null means "not measurable", not "zero". */
 function rate(numerator: number, denominator: number): number | null {
   return denominator > 0 ? numerator / denominator : null;
+}
+
+/** A sink record narrowed to the fields this report reads, with every type CHECKED. */
+interface ValidatedEntry {
+  readonly event: CaptureEvent;
+  /** Finite epoch ms, or null when absent/unusable. */
+  readonly ts: number | null;
+  /** A non-empty string, already length-clamped, or null. */
+  readonly model: string | null;
+  readonly hasThread: boolean;
+  readonly untrusted: boolean;
+  readonly outcome: CaptureOutcome | null;
+}
+
+/**
+ * Narrow one parsed sink line to what the aggregation may use, or reject it.
+ *
+ * `JSON.parse` returns `any`-shaped data and the sink's element type is an unchecked
+ * assertion, so every field here is attacker-shaped in the literal sense: the file lives
+ * under the data dir and is NOT on the permission-guard's protected-path list, so an
+ * agent tool reaches it. Treating a parsed value as its declared type is what turns that
+ * into three distinct defects, all measured on this code before this function existed:
+ *  - `model` as an object with a `length` property → `.slice` is not a function → the
+ *    endpoint answers 500, and (because a throw clears the response cache) it answers 500
+ *    for every subsequent request, uncached.
+ *  - `model` as an ARRAY → `.length` is the element count, so the 128-char clamp never
+ *    fires and the value is emitted verbatim; a 10 MB response was produced this way.
+ *  - `ts` as `1e999` → `Infinity` → serializes to `null`, which this module's own
+ *    interface documents as "the sink is empty" while the counts say otherwise.
+ * Validating at the boundary fixes the class, not the three instances.
+ *
+ * Two of the guards below are belt-and-braces and say so: removing the `typeof raw` check
+ * or replacing the `typeof event` check with a `String()` coercion changes NO observable
+ * behaviour for anything `JSON.parse` can produce (a non-object's `['event']` is already
+ * `undefined`, and a parsed value never carries a custom `toString`). They stay because
+ * they make the narrowing total and cost nothing — but no test pins them, and inventing
+ * one that appears to would be worse than saying this.
+ */
+function validateEntry(raw: unknown): ValidatedEntry | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const event = r['event'];
+  // `Object.hasOwn`, not `in`: `in` walks the prototype chain, so `event:"toString"`
+  // would pass and `events["toString"]++` would write NaN — which serializes as null.
+  if (typeof event !== 'string' || !Object.hasOwn(EVENT_ZEROES, event)) return null;
+  const ts = r['ts'];
+  const model = r['model'];
+  const outcome = r['outcome'];
+  return {
+    event: event as CaptureEvent,
+    ts: typeof ts === 'number' && Number.isFinite(ts) ? ts : null,
+    model: typeof model === 'string' && model !== ''
+      ? (model.length > MAX_MODEL_KEY_CHARS ? model.slice(0, MAX_MODEL_KEY_CHARS) : model)
+      : null,
+    hasThread: typeof r['thread'] === 'string' && r['thread'] !== '',
+    untrusted: r['untrusted'] === true,
+    outcome: typeof outcome === 'string' && KNOWN_OUTCOMES.has(outcome) ? outcome as CaptureOutcome : null,
+  };
 }
 
 /**
@@ -138,38 +207,35 @@ export async function buildCaptureReport(): Promise<CaptureReport> {
   let eventsWithoutThread = 0;
   let untrustedEligible = 0;
 
-  const scan = await scanBoundedJsonl<Partial<CaptureTelemetryEntry>>(CAPTURE_TELEMETRY_LOG_FILE, (entry) => {
-    const event = entry.event;
-    // A record without a known event contributes to nothing — dropping it keeps it from
-    // inflating `totalEvents` and diluting every rate derived from it.
-    // `Object.hasOwn`, not `in`: `in` walks the prototype chain, so an entry with
-    // `event:"toString"` passes the guard and `events["toString"]++` writes NaN — which
-    // serializes as `null` and silently corrupts the counts.
-    if (event === undefined || !Object.hasOwn(events, event)) return;
+  let malformedRecords = 0;
+
+  const scan = await scanBoundedJsonl<unknown>(CAPTURE_TELEMETRY_LOG_FILE, (raw) => {
+    // Validate at the boundary. A record that does not narrow contributes to nothing —
+    // counting it would inflate `totalEvents` and dilute every rate derived from it — but
+    // it IS counted as malformed, so a poisoned sink shows up as blindness rather than as
+    // a quietly different number.
+    const entry = validateEntry(raw);
+    if (entry === null) { malformedRecords++; return; }
+    const { event } = entry;
     events[event]++;
     totalEvents++;
 
-    if (typeof entry.ts === 'number') {
+    if (entry.ts !== null) {
       if (windowStart === null || entry.ts < windowStart) windowStart = entry.ts;
       if (windowEnd === null || entry.ts > windowEnd) windowEnd = entry.ts;
     }
-    if (entry.model === undefined || entry.model === '') eventsWithoutModel++;
-    if (entry.thread === undefined || entry.thread === '') eventsWithoutThread++;
+    if (entry.model === null) eventsWithoutModel++;
+    if (!entry.hasThread) eventsWithoutThread++;
 
-    if (event === 'capture_eligible' && entry.untrusted === true) untrustedEligible++;
-    if (event === 'remember_invoked' && entry.outcome !== undefined && KNOWN_OUTCOMES.has(entry.outcome)) {
+    if (event === 'capture_eligible' && entry.untrusted) untrustedEligible++;
+    if (event === 'remember_invoked' && entry.outcome !== null) {
       outcomes[entry.outcome] = (outcomes[entry.outcome] ?? 0) + 1;
     }
-    if (entry.model !== undefined && entry.model !== '' && (event === 'capture_eligible' || event === 'remember_invoked')) {
-      // Bound the key: `model` reaches the sink from config (`openai_model_id` is
-      // free-form and user-settable), and this Map is the one part of the aggregation
-      // that is NOT O(1) in the window — an unbounded key would make the scan's memory
-      // guarantee a per-record one.
-      const key = entry.model.length > MAX_MODEL_KEY_CHARS ? entry.model.slice(0, MAX_MODEL_KEY_CHARS) : entry.model;
-      const bucket = perModel.get(key) ?? { eligible: 0, remembered: 0 };
+    if (entry.model !== null && (event === 'capture_eligible' || event === 'remember_invoked')) {
+      const bucket = perModel.get(entry.model) ?? { eligible: 0, remembered: 0 };
       if (event === 'capture_eligible') bucket.eligible++;
       else bucket.remembered++;
-      perModel.set(key, bucket);
+      perModel.set(entry.model, bucket);
     }
   });
 
@@ -197,6 +263,7 @@ export async function buildCaptureReport(): Promise<CaptureReport> {
     untrustedEligible,
     blindness: {
       unparsableLines: scan.unparsableLines,
+      malformedRecords,
       unreadableGenerations: scan.unreadableGenerations,
       modelsOmitted,
       eventsWithoutModel,

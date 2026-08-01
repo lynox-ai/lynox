@@ -3649,17 +3649,31 @@ export class LynoxHTTPApi {
     //
     // Counts, rates and model ids only — never an entry id, thread id or fact text
     // (capture-telemetry S5, narrowed further by aggregation).
-    this.addStatic('user', 'GET /api/knowledge/capture-report', async (_req, res) => {
-      const now = Date.now();
+    //
+    // ADMIN scope, matching `GET /api/security/events/aggregate` — its structural twin, a
+    // content-free instance-wide counter aggregate. This is operator diagnostics with no
+    // UI consumer, so the tenant-facing `user` scope would widen who can read it without
+    // giving anyone a feature. `user` routes accept an admin token too, so scoping down
+    // costs the operator nothing.
+    this.addStatic('admin', 'GET /api/knowledge/capture-report', async (_req, res) => {
       let cached = this._captureReportCache;
-      if (cached === null || cached.expiresAt <= now) {
+      if (cached === null || cached.expiresAt <= Date.now()) {
         // Store the promise before awaiting so a concurrent caller joins this scan.
-        const report = buildCaptureReport();
-        cached = { report, expiresAt: now + CAPTURE_REPORT_TTL_MS };
-        this._captureReportCache = cached;
-        // A rejected scan must not stay cached for the full TTL, or one transient FS
-        // error would answer 500 for 30s after the condition cleared.
-        report.catch(() => { if (this._captureReportCache === cached) this._captureReportCache = null; });
+        // `expiresAt` starts at Infinity and is set to a real deadline only once the scan
+        // SETTLES. Stamping `start + TTL` instead would mean a scan slower than the TTL is
+        // already expired when it resolves — every caller then starts its own, which is the
+        // dogpile this cache exists to prevent, arriving exactly at the sink size where it
+        // hurts most (measured: 9 concurrent scans once scan time exceeded the TTL).
+        const entry: { report: Promise<import('../core/capture-telemetry-report.js').CaptureReport>; expiresAt: number } =
+          { report: buildCaptureReport(), expiresAt: Number.POSITIVE_INFINITY };
+        cached = entry;
+        this._captureReportCache = entry;
+        void entry.report.then(
+          () => { entry.expiresAt = Date.now() + CAPTURE_REPORT_TTL_MS; },
+          // A rejected scan must not stay cached, or one transient FS error would answer
+          // 500 until the TTL elapsed.
+          () => { if (this._captureReportCache === entry) this._captureReportCache = null; },
+        );
       }
       jsonResponse(res, 200, await cached.report);
     });
