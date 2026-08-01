@@ -330,6 +330,39 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
     expect(ks.getEntry(id)?.status).toBe('active');
   });
 
+  it('memory_retire refuses a higher-trust entry WITHOUT ever asking the human', async () => {
+    // The refusal test above passes whether the gate runs before or after the prompt —
+    // it only reads the message. This one pins the ORDER: the user must never be asked
+    // to authorise a retire the gate is going to refuse anyway. A confirm that cannot
+    // change the outcome trains people to click through prompts, and it lets a
+    // prompt-injected agent manufacture a pointless confirmation.
+    const tmp = mkdtempSync(join(tmpdir(), 'lynox-retire-order-'));
+    tmpDirs.push(tmp);
+    const edb = new EngineDb(join(tmp, 'engine.db'), '');
+    const ks = new KnowledgeStore(edb, new SubjectStore(edb));
+    const ctx = createToolContext({} as never);
+    ctx.knowledgeStore = ks;
+    let prompts = 0;
+    const agent = {
+      toolContext: ctx,
+      sawUntrustedData: false, sawExternalContentTool: false, conversationSawUntrusted: false,
+      autonomy: 'supervised',
+      promptUser: async (): Promise<string> => { prompts++; return 'Retire'; },
+    } as unknown as IAgent;
+
+    const id = ks.write({ text: 'User-confirmed terms', sourceChannel: 'ui', sourceUntrusted: false }).id;
+    const out = await memoryRetireTool.handler({ id }, agent);
+    expect(out).toMatch(/Refused/);
+    expect(prompts).toBe(0);
+    expect(ks.getEntry(id)?.status).toBe('active');
+
+    // The control: an entry the gate DOES allow still goes through the prompt, so the
+    // early return cannot be satisfied by refusing everything.
+    const ok = ks.write({ text: 'ACME uses the old portal', sourceChannel: 'agent', sourceUntrusted: false }).id;
+    expect(await memoryRetireTool.handler({ id: ok }, agent)).toMatch(/retired/i);
+    expect(prompts).toBe(1);
+  });
+
   it('memory_retire cancels cleanly', async () => {
     const { agent, ks } = make({ promptAnswer: 'Cancel' });
     const id = activeFact(ks);

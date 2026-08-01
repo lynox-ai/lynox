@@ -75,7 +75,18 @@ export function deriveProvenanceTier(ev: ProvenanceEvidence): ProvenanceKind {
  * scalar `provenanceRank === N`, which would silently cement the inversion).
  */
 export function provenanceRank(kind: ProvenanceKind): number {
-  return (ALL_PROVENANCE_KINDS.length - 1) - ALL_PROVENANCE_KINDS.indexOf(kind);
+  const index = ALL_PROVENANCE_KINDS.indexOf(kind);
+  // FAIL CLOSED on a value this build does not know. `indexOf` answers -1, and the
+  // reversal above turns -1 into `length` — a rank ABOVE `user_asserted`, so an
+  // unrecognised tier would outrank every real one and `canSupersede(<unknown>,
+  // 'user_asserted')` returned true: the one direction this gate must never take.
+  // The tier is read back from a TEXT column, so "unknown" is not hypothetical — a
+  // migration, a hand-edited row, or a future build's new tier name all produce one,
+  // and the current fleet simply has none yet (checked: every stored value is in the
+  // enum). An unknown tier is untrusted BY DEFINITION: we cannot place what we cannot
+  // name, so it sorts below everything nameable.
+  if (index === -1) return -1;
+  return (ALL_PROVENANCE_KINDS.length - 1) - index;
 }
 
 /**
