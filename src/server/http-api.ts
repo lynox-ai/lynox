@@ -44,6 +44,7 @@ import { ONBOARDING_BASICS, onboardingBasicQuestion, isOnboardingBasicKey } from
 import { promoteOnboardingBasics, type OnboardingBasicAnswer } from '../core/onboarding-promotion.js';
 import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding-domain.js';
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
+import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
@@ -142,6 +143,13 @@ const SPEAK_MAX_TEXT_CHARS = 10_000;
 const SPEAK_USD_PER_CHAR = 0.016 / 1000;
 /** Usage Dashboard summary cache: 30 s per (period, windowStart). Long enough to dedupe tab re-opens, short enough to feel live. */
 const USAGE_SUMMARY_TTL_MS = 30_000;
+/**
+ * TTL for the capture report. It is a full rescan of the retained telemetry window —
+ * measured ~370 ms at the default 2 × 32 MiB cap and linear beyond it — on the same event
+ * loop that serves chat SSE. The underlying rates move over days, so a stale-by-30s answer
+ * costs nothing and an uncached one lets a single authenticated client spend cores.
+ */
+const CAPTURE_REPORT_TTL_MS = 30_000;
 const ALLOWED_ORIGINS = (process.env['LYNOX_ALLOWED_ORIGINS'] ?? '').split(',').filter(Boolean);
 const ALLOWED_IPS = (process.env['LYNOX_ALLOWED_IPS'] ?? '').split(',').filter(Boolean);
 const TLS_CERT = process.env['LYNOX_TLS_CERT'] ?? '';
@@ -689,6 +697,12 @@ export class LynoxHTTPApi {
   // keeps repeated SQLite scans off the hot path without stale-data risk, since
   // the period window itself rolls forward and evicts old entries.
   private readonly _usageSummaryCache = new Map<string, { summary: import('../core/run-history.js').UsageSummary; expiresAt: number }>();
+  /**
+   * Cached capture report. Holds the in-flight PROMISE, not the value, so N concurrent
+   * callers share one scan instead of starting N — the dogpile is the expensive case here,
+   * since each miss is a full re-read of the sink.
+   */
+  private _captureReportCache: { report: Promise<import('../core/capture-telemetry-report.js').CaptureReport>; expiresAt: number } | null = null;
   /** Test-only: drop cached usage summaries between tests so 30s TTL doesn't bleed mocks across cases. */
   public _clearUsageCache(): void { this._usageSummaryCache.clear(); }
   private pushChannel: import('../integrations/push/web-push-channel.js').WebPushNotificationChannel | null = null;
@@ -3622,6 +3636,48 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { pendingCount: store.pendingCount() });
     });
 
+    // Capture funnel rates (DEF-dk-capture-observability) — the READ half of the
+    // capture telemetry. The counters have shipped since v2.9.0 but nothing ever read
+    // the sink, so "capture is dead" could not be answered with a number, and the row
+    // itself says the measurement must precede any capture-mechanism change.
+    //
+    // Deliberately NOT gated on `getKnowledgeStore()`: the most interesting reading is
+    // an instance where capture produced nothing, and a store that failed to wire is one
+    // of the ways that happens. Gating the report on the subsystem it reports on would
+    // hide exactly the case worth seeing. The sink itself is DK-flag-gated at WRITE time,
+    // so a DK-off instance simply reports an empty window.
+    //
+    // Counts, rates and model ids only — never an entry id, thread id or fact text
+    // (capture-telemetry S5, narrowed further by aggregation).
+    //
+    // ADMIN scope, matching `GET /api/security/events/aggregate` — its structural twin, a
+    // content-free instance-wide counter aggregate. This is operator diagnostics with no
+    // UI consumer, so the tenant-facing `user` scope would widen who can read it without
+    // giving anyone a feature. `user` routes accept an admin token too, so scoping down
+    // costs the operator nothing.
+    this.addStatic('admin', 'GET /api/knowledge/capture-report', async (_req, res) => {
+      let cached = this._captureReportCache;
+      if (cached === null || cached.expiresAt <= Date.now()) {
+        // Store the promise before awaiting so a concurrent caller joins this scan.
+        // `expiresAt` starts at Infinity and is set to a real deadline only once the scan
+        // SETTLES. Stamping `start + TTL` instead would mean a scan slower than the TTL is
+        // already expired when it resolves — every caller then starts its own, which is the
+        // dogpile this cache exists to prevent, arriving exactly at the sink size where it
+        // hurts most (measured: 9 concurrent scans once scan time exceeded the TTL).
+        const entry: { report: Promise<import('../core/capture-telemetry-report.js').CaptureReport>; expiresAt: number } =
+          { report: buildCaptureReport(), expiresAt: Number.POSITIVE_INFINITY };
+        cached = entry;
+        this._captureReportCache = entry;
+        void entry.report.then(
+          () => { entry.expiresAt = Date.now() + CAPTURE_REPORT_TTL_MS; },
+          // A rejected scan must not stay cached, or one transient FS error would answer
+          // 500 until the TTL elapsed.
+          () => { if (this._captureReportCache === entry) this._captureReportCache = null; },
+        );
+      }
+      jsonResponse(res, 200, await cached.report);
+    });
+
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/knowledge/queue/:id/review', async (_req, res, params, body) => {
       const store = engine.getKnowledgeStore();
       if (!requireService(res, store, 'Durable memory')) return;
@@ -3644,12 +3700,39 @@ export class LynoxHTTPApi {
         // propose_shown at write time. approve/edit_approve = propose_confirmed; reject =
         // propose_ignored (dismissed:true = an active discard, per capture-telemetry S5).
         // Entry-id only — never the fact text.
+        //
+        // Attribution comes off the REVIEWED ENTRY, not off the request. Both fields used to
+        // be hard-coded `undefined` here while `capture-telemetry.ts` says of `model` that
+        // "the whole point is per-model rate" — so the human half of the funnel could never
+        // join the model half, and a per-model confirm rate was silently unbuildable.
+        // The entry is the right source and the request is NOT: the model that PROPOSED the
+        // fact is the one whose capture quality the rate is about, and it can differ from
+        // whatever model the instance happens to run now, days later, when a human clicks.
+        // Reading the current config here would have produced a plausible, wrong attribution
+        // — worse than the `undefined` it replaced.
+        // In its own try: `reviewEntry` above has already COMMITTED. A throw from the
+        // history lookup would otherwise land in the outer catch and answer 400 for a
+        // review that succeeded — and the client's retry then 404s, because the entry is
+        // no longer queued. Telemetry may never invalidate the write it describes.
+        let proposedByModel: string | undefined;
+        try {
+          proposedByModel = entry.sourceRunId !== null
+            ? engine.getRunHistory()?.getRun(entry.sourceRunId)?.model_id
+            : undefined;
+        } catch {
+          proposedByModel = undefined;
+        }
         void appendCaptureTelemetry(engine.getUserConfig().durable_memory_enabled === true, {
           ts: Date.now(),
           event: action === 'reject' ? 'propose_ignored' : 'propose_confirmed',
-          thread: undefined,
-          model: undefined,
-          untrusted: false,
+          thread: entry.sourceThreadId ?? undefined,
+          // Empty string = a run row predating provider/model recording; not an attribution.
+          model: proposedByModel !== undefined && proposedByModel !== '' ? proposedByModel : undefined,
+          // Structurally always true today — `write()` routes on the same signal, so only
+          // untrusted writes ever land in this queue. Read off the entry anyway: the value
+          // it replaced was equally constant and WRONG, and if the routing rule ever widens
+          // this stays correct instead of quietly lying.
+          untrusted: entry.sourceUntrusted,
           entryId: params['id']!,
           ...(action === 'reject' ? { dismissed: true } : {}),
         });
