@@ -7,6 +7,7 @@ import { appendCaptureTelemetry } from '../../core/capture-telemetry.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { appendUntrustedCauseLog } from '../../core/untrusted-cause-log.js';
 import { pv } from '../../core/prompt-value.js';
+import { canSupersede } from '../../core/provenance.js';
 
 /**
  * Durable Knowledge Substrate tools (DK.1). The always-on capture/read surface that
@@ -362,6 +363,17 @@ export const memoryRetireTool: ToolEntry<RetireInput> = {
     }
     if (!entry) return 'No active entry with this id. Use `recall` to find the entry and pass its [id] prefix.';
 
+    // Gate BEFORE the prompt, not after. The agent channel acts at `agent_inferred`
+    // trust, so `retireEntry` below refuses anything the user asserted or a tool
+    // verified — but that refusal used to arrive AFTER the human had already been asked
+    // and had already clicked "Retire". Asking someone to authorise an action that is
+    // going to be refused either way teaches them the prompt is decorative, and it hands
+    // a prompt-injected agent a way to make the user click a confirm that never applies.
+    // The gate is the same one either way; only its position changes.
+    if (!canSupersede('agent_inferred', entry.sourceType)) {
+      return `Refused: this entry is recorded at a higher trust level (${entry.sourceType}) than I can retire. Retire it yourself in the memory view if it is genuinely wrong.`;
+    }
+
     const reason = input.reason ? ` Reason: ${clip(input.reason)}.` : '';
     const answer = await agent.promptUser(
       pv`Retire this memory entry? "${clip(entry.text)}"${reason} It stays on record as superseded and stops surfacing. This needs a new \`remember\` if a corrected fact should replace it.`,
@@ -370,8 +382,8 @@ export const memoryRetireTool: ToolEntry<RetireInput> = {
     if (answer !== 'Retire') return 'Cancelled — the entry stays active.';
 
     try {
-      // The agent channel acts at agent_inferred trust — canSupersede refuses
-      // retiring user_asserted / tool_verified facts (those need the human).
+      // The store re-checks the same gate — the pre-prompt check above is for the
+      // human's benefit, this one is the actual boundary. Both must stay.
       ks.retireEntry(entry.id, 'agent_inferred');
       return 'Retired. Record the corrected fact with `remember` if there is one.';
     } catch (err) {
