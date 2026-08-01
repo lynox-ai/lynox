@@ -90,6 +90,34 @@ export function provenanceRank(kind: ProvenanceKind): number {
 }
 
 /**
+ * Two consequences of the `-1` sentinel that are deliberate, because they follow from
+ * the arithmetic rather than from a decision, and arithmetic is a poor place to leave
+ * a trust rule implicit:
+ *
+ *  - **Unknown vs unknown supersedes** (`-1 >= -1`). Two unrecognised tiers rank equal
+ *    and the equal-trust rule is newest-wins, so one may retire the other. This is not a
+ *    trust loss (neither is trusted) and it is what keeps an unknown row CORRECTABLE
+ *    rather than wedged. Reachable: `agent-memory-db.ts` compares two DB-sourced tiers.
+ *  - **A dedup hit against an unknown row now RAISES it.** `knowledge-layer.ts` decides
+ *    `tier-raise` vs `confirm` on `rank(incoming) > rank(existing)`; with the old
+ *    fail-open sentinel no known tier could beat an unknown row, so it stayed unknown
+ *    forever. Now any nameable tier raises it — supersede-not-mutate, so reversible.
+ *    That is a repair path the fail-open version did not have.
+ *  - **Even `external_unverified` may now supersede an unknown row** (`0 >= -1`, where
+ *    it was `0 >= 4` = false). Stated because it is the one direction that WIDENS: the
+ *    injection-seeded tier can act on an unknown row where it previously could not. The
+ *    alternative — letting only a high tier correct an unknown row — buys little (an
+ *    unknown row is untrusted either way) and costs the total order a special case, so
+ *    the simple ordering wins. Revisit if unknown tiers ever become routine rather than
+ *    the zero-occurrence case measured here.
+ *
+ * The same sentinel also fixes the KEEPER SORT, which is the half of this that bites
+ * without any retire at all: consolidation sorts a cluster by rank descending
+ * (`agent-memory-db.ts`), so a rank above `user_asserted` made an unknown row the
+ * survivor and dropped the user's own duplicate. Both halves are one ordering bug.
+ */
+
+/**
  * The trust gate primitive: may a write of tier `newTier` retire (supersede) an
  * existing row of tier `existingTier`? True iff the incoming write is of
  * EQUAL-OR-HIGHER trust. A strictly lower-trust write may never retire a

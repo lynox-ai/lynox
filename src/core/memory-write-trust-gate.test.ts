@@ -76,6 +76,24 @@ describe('P0 — provenanceRank / canSupersede (trust total order)', () => {
     for (const known of ALL_PROVENANCE_KINDS) {
       expect(canSupersede(known, unknown)).toBe(true);
     }
+    // Two unknowns rank EQUAL, and the equal-trust rule is newest-wins, so one may
+    // retire the other. Neither is trusted, so this loses no trust — and it is what
+    // keeps a pair of unknown rows correctable instead of frozen against each other.
+    // Reachable: `agent-memory-db.ts` compares two DB-sourced tiers, so both sides can
+    // be unknown at once. Asserted rather than left to fall out of `-1 >= -1`.
+    expect(canSupersede(unknown, 'another_unknown_tier' as ProvenanceKind)).toBe(true);
+  });
+
+  it('a dedup hit against an UNKNOWN-tier row raises it instead of confirming it', () => {
+    // `knowledge-layer` picks `tier-raise` over `confirm` on `rank(incoming) >
+    // rank(existing)`. Under the old fail-open sentinel an unknown row outranked every
+    // real tier, so nothing could ever raise it and it stayed unknown forever. The
+    // fail-closed sentinel turns that into a repair path — a second consequence of the
+    // same change, and one worth pinning because nothing else in the diff mentions it.
+    const unknown = 'tier_from_a_future_build' as ProvenanceKind;
+    for (const known of ALL_PROVENANCE_KINDS) {
+      expect(provenanceRank(known) > provenanceRank(unknown)).toBe(true);
+    }
   });
 
   it('the rank is a strict total order following the array position (highest-first → reverse)', () => {
