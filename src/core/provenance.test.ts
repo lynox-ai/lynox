@@ -3,6 +3,22 @@ import { deriveProvenanceTier } from './provenance.js';
 import { ALL_PROVENANCE_KINDS } from '../types/memory.js';
 
 describe('deriveProvenanceTier (§3, first-match-wins, resolves downward)', () => {
+  it('rule 0: a human review approval outranks untrusted AND every channel', () => {
+    // The ONE thing allowed above rule 1, and the ordering is the point: an approval is a human
+    // being shown this exact text and vouching for it, which is a different act from a human
+    // WRITE on a turn that happened to have attacker text in context. Untestable structurally:
+    // it is only sound because nothing agent-reachable can set `reviewApproved` — see the field's
+    // docstring. If this ever fires on agent-settable evidence it is an injection escalation
+    // from the floor to the top tier in one step.
+    for (const ch of ['user', 'ui', 'agent', 'upload', undefined, 'weird']) {
+      expect(deriveProvenanceTier({ sourceChannel: ch, sourceUntrusted: true, reviewApproved: true }))
+        .toBe('user_asserted');
+    }
+    // Absent or false changes nothing — rule 1 still wins.
+    expect(deriveProvenanceTier({ sourceChannel: 'agent', sourceUntrusted: true, reviewApproved: false }))
+      .toBe('external_unverified');
+  });
+
   it('rule 1: sourceUntrusted outranks EVERY channel', () => {
     for (const ch of ['user', 'ui', 'agent', 'upload', undefined, 'weird']) {
       expect(deriveProvenanceTier({ sourceChannel: ch, sourceUntrusted: true }))

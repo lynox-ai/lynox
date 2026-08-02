@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
-import { KnowledgeStore, BlockOverLimitError, BlockEditError, MAX_KNOWLEDGE_ENTRY_CHARS } from './knowledge-store.js';
+import { KnowledgeStore, BlockOverLimitError, BlockEditError, MAX_KNOWLEDGE_ENTRY_CHARS, knowledgeEvidence } from './knowledge-store.js';
+import { deriveProvenanceTier } from './provenance.js';
 import { channels } from './observability.js';
 import { MEMORY_BLOCK_CHAR_LIMITS } from '../types/memory.js';
 
@@ -311,6 +312,64 @@ describe('KnowledgeStore review queue (DK.2)', () => {
     expect(subjects.findCanonical('ACME', 'organization')).not.toBeNull(); // minted ON approval
     // Now agent-readable via recall.
     expect(ks.recall({ query: 'ACME IBAN', subjectName: 'ACME' }).length).toBe(1);
+  });
+
+  it('an approved entry RE-DERIVES its stored tier from its own persisted evidence', () => {
+    // `DEF-dk-trust-gate-consistency` (d). `deriveProvenanceTier`'s contract is that the tier is
+    // a pure function of the stored evidence — which is what makes a derivation bug a
+    // recomputation instead of a migration. Approve used to hardcode `user_asserted` while
+    // leaving `source_untrusted` set, so re-deriving the very same row produced
+    // `external_unverified`: the two ENDS of the ordering, from one row's own columns.
+    const { ks } = make();
+    const id = queueOne(ks);
+    const queued = ks.getEntry(id)!;
+    expect(queued.sourceType).toBe('external_unverified');
+    expect(deriveProvenanceTier(knowledgeEvidence(queued))).toBe(queued.sourceType);
+
+    const approved = ks.reviewEntry(id, 'approve')!;
+    expect(approved.sourceType).toBe('user_asserted');
+    // The invariant, driven through the SAME mapping the write side uses — so a hardcoded tier
+    // the evidence cannot reproduce fails here rather than agreeing with a second definition.
+    expect(deriveProvenanceTier(knowledgeEvidence(approved))).toBe(approved.sourceType);
+  });
+
+  it('a never-queued entry re-derives too — the invariant is not approval-only', () => {
+    // Covers the CHANNEL leg of the shared mapping, which the approved/rejected cases cannot:
+    // there rule 0 or rule 1 answers first and the channel never decides. A trusted `ui` write
+    // is the case where it does, so dropping the channel from `knowledgeEvidence` shows up here
+    // and nowhere else.
+    const { ks } = make();
+    const id = ks.write({ text: 'ACME renews in March.', subjectName: 'ACME', sourceChannel: 'ui', sourceUntrusted: false }).id;
+    const e = ks.getEntry(id)!;
+    expect(e.status).toBe('active');
+    expect(e.sourceType).toBe('user_asserted');
+    expect(e.reviewAction).toBeNull();
+    expect(deriveProvenanceTier(knowledgeEvidence(e))).toBe(e.sourceType);
+  });
+
+  it('approval does NOT erase the untrusted evidence it was reviewed out of', () => {
+    // The rejected alternative fix was to clear `source_untrusted` on approve. It destroys a
+    // fact — the turn really did read untrusted content — to make a derivation come out right,
+    // which inverts the write-once-evidence invariant. It also would not have worked: with rule
+    // 1 silenced the CHANNEL decides, and this entry's `agent` channel re-derives to
+    // `agent_inferred`, not `user_asserted`. Both are pinned here.
+    const { ks } = make();
+    const approved = ks.reviewEntry(queueOne(ks), 'approve')!;
+    expect(approved.sourceUntrusted).toBe(true);
+    expect(approved.sourceChannel).toBe('agent');
+    expect(deriveProvenanceTier({ sourceChannel: 'agent', sourceUntrusted: false })).toBe('agent_inferred');
+  });
+
+  it('edit_approve re-derives the same way; reject vouches for nothing', () => {
+    const { ks } = make();
+    const edited = ks.reviewEntry(queueOne(ks, 'acme ibaan (typo)'), 'edit_approve', 'ACME pays via IBAN CHXX.')!;
+    expect(deriveProvenanceTier(knowledgeEvidence(edited))).toBe('user_asserted');
+
+    // `reject` is an audit action, not a vouching one: the tier must stay at the floor, or
+    // rejecting an injected entry would raise it to the tier the whole guard exists to protect.
+    const rejected = ks.reviewEntry(queueOne(ks), 'reject')!;
+    expect(rejected.sourceType).toBe('external_unverified');
+    expect(deriveProvenanceTier(knowledgeEvidence(rejected))).toBe('external_unverified');
   });
 
   it('approval NEVER inherits a pin (H6 stays a deliberate act)', () => {
