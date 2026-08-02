@@ -35,6 +35,7 @@ import type { SubjectRow } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import type { RelationshipRow } from './relationship-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
+import type { TierDivergenceReport } from './memory-graph-store.js';
 import { ThreadStore } from './thread-store.js';
 import { channels } from './observability.js';
 import { deriveProvenanceTier, provenanceRank, canSupersede } from './provenance.js';
@@ -54,16 +55,13 @@ const DEDUP_THRESHOLD = 0.95;
 const TIER_RAISE_REFUSED = Symbol('tier-raise-refused');
 
 /**
- * One engine.db/agent-memory.db tier disagreement observed by a supersession mirror —
- * {@link MemoryGraphStore.markSuperseded}'s comparison plus the row it concerns. Collected
- * DURING the mirror transaction and emitted after it returns, for the reason the legacy
- * backstop's refusals are: the sink is a fire-and-forget async append, so emitting inline
- * would record a divergence for a transaction that can still roll back (`_mirrorTierRaise`
- * catches and swallows) and re-record it on the retry.
+ * One tier disagreement a supersession mirror observed — {@link TierDivergenceReport} plus the
+ * row it concerns. Collected DURING the mirror transaction and emitted after it returns, for
+ * the reason the legacy backstop's refusals are: the sink is a fire-and-forget async append, so
+ * emitting inline would record a divergence for a transaction that can still roll back (both
+ * mirrors catch and swallow their own failures) and re-record it on the retry.
  */
-interface MirrorTierDivergence {
-  readonly newTier: ProvenanceKind;
-  readonly stubTier: ProvenanceKind;
+interface MirrorTierDivergence extends TierDivergenceReport {
   readonly existingId: string;
 }
 
@@ -1811,9 +1809,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
-   * Report every tier disagreement an engine.db supersession mirror saw — the runtime
+   * Report the tier disagreements a supersession mirror COMPARED AND SAW — the runtime
    * observable `DEF-dk-trust-gate-consistency` (a) was missing, where the mirror refused with
    * a bare `return` and told no one.
+   *
+   * "Compared" is the limit, and it is narrower than "every mirror": the consolidation mirror
+   * in {@link consolidateMemories} passes no `newTier` at all, so it runs no comparison and
+   * can report nothing. Its keeper-sort ranks tiers inside agent-memory.db, which is exactly
+   * the store a stub can drift from — so that path is a known blind spot, not a covered one
+   * (`DEF-mirror-consolidation-tier-blind`).
    *
    * Reporting is ALL this does. The retire went through (see
    * {@link MemoryGraphStore.markSuperseded} for why a mirror cannot be a gate), so unlike

@@ -60,10 +60,16 @@ export type WriteDecision =
    * neither. (`DEF-dk-trust-gate-consistency` (a).)
    *
    * `existingTier` is the ENGINE.DB stub's tier — the value this check actually compared,
-   * the same convention every other variant follows. The legacy side needs no field: the
-   * mirror is only reached after agent-memory.db ALLOWED the retire, so "legacy ranked the
-   * old row at or below `newTier`" is carried by the variant itself; the exact value is one
-   * lookup by `existingId` away when debugging a specific row.
+   * the same convention every other variant follows. The legacy side gets no field of its
+   * own: the mirror is only reached once agent-memory.db did not refuse, and the exact value
+   * is one lookup by `existingId` away when debugging a row. Read that as "did not refuse",
+   * not "ranked and allowed" — `supersedMemory`'s guard needs both rows, so a retire whose
+   * legacy row is already hard-deleted reaches the mirror having ranked nothing.
+   *
+   * Alone among the variants this one cannot appear under shadow-only measurement: the tier
+   * is passed to the mirror only when `memory_write_trust_gate` is ON. That is deliberate —
+   * with the gate off a low-tier retire is the configured policy, so there is no disagreement
+   * to record, only a policy someone chose.
    */
   | 'mirror-tier-diverged';
 

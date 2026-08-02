@@ -98,7 +98,7 @@ describe('Dual-store tier disagreement — refused on the authoritative store, r
     return { layer, engine };
   }
 
-  /** Active stubs in the test scope — the thing recall would return under the cutover. */
+  /** Every active stub in engine.db — the thing recall would return under the cutover. */
   const activeStubs = (engine: EngineDb): string[] =>
     (engine.getDb().prepare('SELECT id FROM memories WHERE is_active = 1 ORDER BY id')
       .all() as Array<{ id: string }>).map(r => r.id);
@@ -369,8 +369,8 @@ describe('Dual-store tier disagreement — refused on the authoritative store, r
     expect(diverged).toHaveLength(1);
     expect(diverged[0]!.existingId).toBe(truth.memoryId);
     expect(diverged[0]!.newTier).toBe('agent_inferred');
-    // The ENGINE.DB tier — what this check compared. The legacy side is implied by the variant
-    // (the mirror is only reached once agent-memory.db allowed) and is on the `supersede` line.
+    // The ENGINE.DB tier — what this check compared. The legacy side is not a field: the mirror
+    // is only reached once agent-memory.db did not refuse, and it is on the `supersede` line.
     expect(diverged[0]!.existingTier).toBe('user_asserted');
     expect(diverged[0]!.enforced).toBe(true);
     expect(JSON.stringify(diverged[0])).not.toContain('Hydra');
@@ -405,6 +405,7 @@ describe('Dual-store tier disagreement — refused on the authoritative store, r
     expect(diverged[0]!.existingId).toBe(truth.memoryId);
     expect(diverged[0]!.newTier).toBe('agent_inferred');
     expect(diverged[0]!.existingTier).toBe('user_asserted');
+    expect(JSON.stringify(diverged[0])).not.toContain('Ada Lovelace');
   });
 
   it('mirror, read cutover ON: a tier that changes inside the EXTRACTION WINDOW is reported', async () => {
@@ -434,6 +435,28 @@ describe('Dual-store tier disagreement — refused on the authoritative store, r
     // together are what makes the disagreement readable.
     expect((await decisionsOnce('supersede')).find(d => d.decision === 'supersede')!.existingTier)
       .toBe('agent_inferred');
+    expect(JSON.stringify(diverged[0])).not.toContain('Lynx');
+  });
+
+  it('mirror, read cutover ON: that mirror rolls back without reporting either', async () => {
+    // The third mirror. Its emit sits in a DIFFERENT function from the two above
+    // (`_writeSubjectsFromExtraction`, the cutover twin), so moving THAT one to the point of
+    // discovery is a distinct defect the other two rollback tests cannot see — it survived
+    // them until this test existed.
+    const { layer, engine } = newLayer();
+    const truth = await layer.store('Grus budget is 30000', NS, scope, { sourceChannel: 'agent' });
+
+    vi.mocked(extractEntities).mockImplementationOnce(async () => {
+      divergeEngineTier(engine, truth.memoryId, 'user_asserted');
+      return { entities: [], relations: [] };
+    });
+    // Aborts the mirror transaction after the supersession loop has already reported.
+    vi.spyOn(MemoryGraphStore.prototype, 'upsertStub').mockImplementation(() => { throw new Error('mirror down'); });
+    await layer.store('Grus budget is 45000', NS, scope, { sourceChannel: 'agent' });
+    expect(new MemoryGraphStore(engine).getStub(truth.memoryId)!.is_active).toBe(1);
+
+    await layer.close();
+    expect((await decisionsOnce('supersede')).filter(d => d.decision === 'mirror-tier-diverged')).toEqual([]);
   });
 
   it('mirror: a divergence is NOT reported when the mirror transaction rolls back', async () => {
