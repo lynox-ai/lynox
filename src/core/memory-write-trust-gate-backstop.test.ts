@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { KnowledgeLayer } from './knowledge-layer.js';
+import { extractEntities } from './entity-extractor.js';
 import { EngineDb } from './engine-db.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
 import { MEMORY_WRITE_DECISION_LOG_FILE } from './memory-write-decision-log.js';
@@ -12,7 +13,10 @@ import type { ExtractionResult } from './entity-extractor.js';
 import type { MemoryScopeRef } from '../types/index.js';
 
 /**
- * Memory Foundation Wave 2 — the write-trust BACKSTOP's refusal must be CONSULTED.
+ * Memory Foundation Wave 2 — what each store does when the two disagree about a row's tier.
+ * Both halves of `DEF-dk-trust-gate-consistency` live here because they are one condition seen
+ * from two sides: (b) agent-memory.db REFUSES and its answer must be consulted; (a) engine.db
+ * cannot refuse — it is a mirror of a store that already committed — so it REPORTS instead.
  *
  * `AgentMemoryDb.supersedMemory` returns `false` when it refuses a lower-trust retire.
  * Both production call sites used to discard that answer and carry on writing the
@@ -49,7 +53,7 @@ class ConstantEmbedder implements EmbeddingProvider {
   async embed(): Promise<number[]> { return [1, 0, 0, 0, 0, 0, 0, 0]; }
 }
 
-describe('Backstop — a refused retire is consulted, not discarded', () => {
+describe('Dual-store tier disagreement — refused on the authoritative store, reported on the mirror', () => {
   const scope: MemoryScopeRef = { type: 'context', id: 'orion' };
   const dirs: string[] = [];
   const engines: EngineDb[] = [];
@@ -74,18 +78,30 @@ describe('Backstop — a refused retire is consulted, not discarded', () => {
     layers.length = 0; engines.length = 0; dirs.length = 0;
   });
 
-  /** Mirror ON + read cutover ON + shadow ON + trust gate ENFORCING. */
-  function newLayer(): { layer: KnowledgeLayer; engine: EngineDb } {
+  /**
+   * Mirror ON + shadow ON + trust gate ENFORCING; read cutover ON unless `reads: false`.
+   *
+   * The cutover is a REAL axis here, not a knob: with reads ON the decision and the engine.db
+   * mirror read the same row, so they cannot disagree at all — every mirror divergence below
+   * needs either reads OFF (the configuration every tenant runs today) or a change landing
+   * inside the extraction window.
+   */
+  function newLayer(opts?: { reads?: boolean }): { layer: KnowledgeLayer; engine: EngineDb } {
     const engine = new EngineDb(join(dir, 'engine.db'), 'vault-key-backstop');
     engines.push(engine);
     const layer = new KnowledgeLayer(
       join(dir, 'mem.db'), new ConstantEmbedder(), undefined, undefined, engine,
-      /* subjectGraph */ true, /* memoryGraphReads */ true, /* scoringV2 */ false,
+      /* subjectGraph */ true, /* memoryGraphReads */ opts?.reads ?? true, /* scoringV2 */ false,
       /* shadow */ true, /* trust gate */ true,
     );
     layers.push(layer);
     return { layer, engine };
   }
+
+  /** Every active stub in engine.db — the thing recall would return under the cutover. */
+  const activeStubs = (engine: EngineDb): string[] =>
+    (engine.getDb().prepare('SELECT id FROM memories WHERE is_active = 1 ORDER BY id')
+      .all() as Array<{ id: string }>).map(r => r.id);
 
   /**
    * Push engine.db's copy of one row's tier BELOW its legacy copy. This is the divergence
@@ -322,6 +338,178 @@ describe('Backstop — a refused retire is consulted, not discarded', () => {
     // the sink is demonstrably flushed and the absence below is a measurement, not silence.
     const decisions = await decisionsOnce('supersede');
     expect(decisions.filter(d => d.decision === 'backstop-refused')).toEqual([]);
+  });
+
+  it('mirror, contradiction path: the tier disagreement is REPORTED and the stub still retires', async () => {
+    // Reads OFF — every tenant today. The decision and the legacy backstop both read
+    // agent-memory.db; only the engine.db mirror reads the stub. That asymmetry is the whole
+    // reachability condition for a mirror divergence.
+    const { layer, engine } = newLayer({ reads: false });
+    const truth = await layer.store('Hydra budget is 30000', NS, scope, { sourceChannel: 'agent' });
+    expect(layer.getDb().getMemory(truth.memoryId)!.source_type).toBe('agent_inferred');
+
+    // Push the STUB's tier ABOVE its legacy twin — the opposite direction from the backstop
+    // tests, and the only one that reaches the mirror: legacy must ALLOW (or the resolution is
+    // demoted before the mirror ever sees it) while engine.db would refuse.
+    divergeEngineTier(engine, truth.memoryId, 'user_asserted');
+
+    const res = await layer.store('Hydra budget is 45000', NS, scope, { sourceChannel: 'agent' });
+
+    // The authoritative store retired the row and wrote the edge — the mirror cannot undo that.
+    expect(res.contradictions.find(c => c.existingMemoryId === truth.memoryId)?.resolution).toBe('superseded');
+    expect(layer.getDb().getMemory(truth.memoryId)!.is_active).toBe(0);
+    expect(layer.getDb().listAllSupersedes().filter(s => s.old_memory_id === truth.memoryId)).toHaveLength(1);
+    // ...so the mirror follows it. Refusing here left the row retired on one store and active
+    // on the other, and which one recall believed was decided by the read-cutover flag.
+    expect(new MemoryGraphStore(engine).getStub(truth.memoryId)!.is_active).toBe(0);
+
+    await layer.close();
+    const diverged = (await decisionsOnce('mirror-tier-diverged'))
+      .filter(d => d.decision === 'mirror-tier-diverged');
+    expect(diverged).toHaveLength(1);
+    expect(diverged[0]!.existingId).toBe(truth.memoryId);
+    expect(diverged[0]!.newTier).toBe('agent_inferred');
+    // The ENGINE.DB tier — what this check compared. The legacy side is not a field: the mirror
+    // is only reached once agent-memory.db did not refuse, and it is on the `supersede` line.
+    expect(diverged[0]!.existingTier).toBe('user_asserted');
+    expect(diverged[0]!.enforced).toBe(true);
+    expect(JSON.stringify(diverged[0])).not.toContain('Hydra');
+  });
+
+  it('mirror, tier-raise path: without the report BOTH stubs stayed active in engine.db', async () => {
+    const { layer, engine } = newLayer({ reads: false });
+    // `sourceUntrusted` outranks the channel (provenance rule 1) → external_unverified, the
+    // bottom tier. Needed because the raise wants an incoming tier STRICTLY between the legacy
+    // tier and the diverged stub tier, and there is no room above user_asserted.
+    const truth = await layer.store('Hydra lead is Ada Lovelace', NS, scope, { sourceChannel: 'agent', sourceUntrusted: true });
+    expect(layer.getDb().getMemory(truth.memoryId)!.source_type).toBe('external_unverified');
+    divergeEngineTier(engine, truth.memoryId, 'user_asserted');
+
+    // agent_inferred (1) outranks the legacy external_unverified (0) → a real raise, allowed by
+    // the legacy backstop; the mirror compares against the stub's user_asserted (3).
+    const res = await layer.store('Hydra lead is Ada Lovelace', NS, scope, { sourceChannel: 'agent' });
+    expect(res.stored).toBe(true);
+    expect(res.deduplicated).toBe(true);
+    expect(res.memoryId).not.toBe(truth.memoryId);
+
+    // THE regression this closes: the refusal skipped the retire but not the `upsertStub` that
+    // follows it in the same transaction, so engine.db ended up holding the old row AND the
+    // raised one, both active — a duplicate handed straight to recall, in the one function
+    // whose stated job is that recall "sees the RAISED row and not the retired one".
+    expect(activeStubs(engine)).toEqual([res.memoryId]);
+
+    await layer.close();
+    const diverged = (await decisionsOnce('mirror-tier-diverged'))
+      .filter(d => d.decision === 'mirror-tier-diverged');
+    expect(diverged).toHaveLength(1);
+    expect(diverged[0]!.existingId).toBe(truth.memoryId);
+    expect(diverged[0]!.newTier).toBe('agent_inferred');
+    expect(diverged[0]!.existingTier).toBe('user_asserted');
+    expect(JSON.stringify(diverged[0])).not.toContain('Ada Lovelace');
+  });
+
+  it('mirror, read cutover ON: a tier that changes inside the EXTRACTION WINDOW is reported', async () => {
+    // With reads on, the decision and the mirror read the same row — but not at the same time:
+    // the decision is taken before the extractor is awaited (an LLM call), the mirror runs
+    // after. Anything that moves the tier in between splits them. Reproduced by moving it from
+    // inside the mocked extractor, which is exactly where the real gap is.
+    const { layer, engine } = newLayer();
+    const truth = await layer.store('Lynx budget is 30000', NS, scope, { sourceChannel: 'agent' });
+
+    vi.mocked(extractEntities).mockImplementationOnce(async () => {
+      divergeEngineTier(engine, truth.memoryId, 'user_asserted');
+      return { entities: [], relations: [] };
+    });
+    await layer.store('Lynx budget is 45000', NS, scope, { sourceChannel: 'agent' });
+
+    expect(layer.getDb().getMemory(truth.memoryId)!.is_active).toBe(0);
+    expect(new MemoryGraphStore(engine).getStub(truth.memoryId)!.is_active).toBe(0);
+
+    await layer.close();
+    const diverged = (await decisionsOnce('mirror-tier-diverged'))
+      .filter(d => d.decision === 'mirror-tier-diverged');
+    expect(diverged).toHaveLength(1);
+    expect(diverged[0]!.existingId).toBe(truth.memoryId);
+    expect(diverged[0]!.existingTier).toBe('user_asserted');
+    // The decision line still carries what recall reported BEFORE the window — the two lines
+    // together are what makes the disagreement readable.
+    expect((await decisionsOnce('supersede')).find(d => d.decision === 'supersede')!.existingTier)
+      .toBe('agent_inferred');
+    expect(JSON.stringify(diverged[0])).not.toContain('Lynx');
+  });
+
+  it('mirror, read cutover ON: that mirror rolls back without reporting either', async () => {
+    // The third mirror. Its emit sits in a DIFFERENT function from the two above
+    // (`_writeSubjectsFromExtraction`, the cutover twin), so moving THAT one to the point of
+    // discovery is a distinct defect the other two rollback tests cannot see — it survived
+    // them until this test existed.
+    const { layer, engine } = newLayer();
+    const truth = await layer.store('Grus budget is 30000', NS, scope, { sourceChannel: 'agent' });
+
+    vi.mocked(extractEntities).mockImplementationOnce(async () => {
+      divergeEngineTier(engine, truth.memoryId, 'user_asserted');
+      return { entities: [], relations: [] };
+    });
+    // Aborts the mirror transaction after the supersession loop has already reported.
+    vi.spyOn(MemoryGraphStore.prototype, 'upsertStub').mockImplementation(() => { throw new Error('mirror down'); });
+    await layer.store('Grus budget is 45000', NS, scope, { sourceChannel: 'agent' });
+    expect(new MemoryGraphStore(engine).getStub(truth.memoryId)!.is_active).toBe(1);
+
+    await layer.close();
+    expect((await decisionsOnce('supersede')).filter(d => d.decision === 'mirror-tier-diverged')).toEqual([]);
+  });
+
+  it('mirror: a divergence is NOT reported when the mirror transaction rolls back', async () => {
+    // Same reason the backstop's refusals are collected rather than emitted inline: the sink
+    // is a fire-and-forget append, and `_mirrorTierRaise` swallows its own failures, so an
+    // inline emit would count a divergence for a mirror that left no trace of it.
+    const { layer, engine } = newLayer({ reads: false });
+    const truth = await layer.store('Pavo lead is Ada Lovelace', NS, scope, { sourceChannel: 'agent', sourceUntrusted: true });
+    divergeEngineTier(engine, truth.memoryId, 'user_asserted');
+
+    // The raise's own transaction aborts AFTER markSuperseded reported the divergence. The
+    // legacy raise has already committed, so this is the isolated-mirror-failure path.
+    vi.spyOn(MemoryGraphStore.prototype, 'upsertStub').mockImplementation(() => { throw new Error('mirror down'); });
+    const res = await layer.store('Pavo lead is Ada Lovelace', NS, scope, { sourceChannel: 'agent' });
+    expect(res.stored).toBe(true);
+    // Rolled back whole: the old stub is neither retired nor replaced.
+    expect(new MemoryGraphStore(engine).getStub(truth.memoryId)!.is_active).toBe(1);
+
+    await layer.close();
+    expect((await decisionsOnce('tier-raise')).filter(d => d.decision === 'mirror-tier-diverged')).toEqual([]);
+  });
+
+  it('mirror, contradiction path: a divergence is NOT reported when that mirror rolls back either', async () => {
+    // The twin of the test above, on the other mirror. Its transaction continues past the
+    // supersession loop (the stub write, subjects, relationships, links), and the caller
+    // swallows a mirror failure — so an emit placed at the point of DISCOVERY would count a
+    // divergence for a mirror whose retire was rolled back, on the far more common path.
+    //
+    // The throw has to land on `upsertStub`, not on a graph-link step: these memories are
+    // deliberately subject-less, so the link steps are skipped and a spy there never fires —
+    // a rollback fixture that never rolls back, passing for the wrong reason.
+    const { layer, engine } = newLayer({ reads: false });
+    const truth = await layer.store('Tucana budget is 30000', NS, scope, { sourceChannel: 'agent' });
+    divergeEngineTier(engine, truth.memoryId, 'user_asserted');
+
+    vi.spyOn(MemoryGraphStore.prototype, 'upsertStub').mockImplementation(() => { throw new Error('mirror down'); });
+    await layer.store('Tucana budget is 45000', NS, scope, { sourceChannel: 'agent' });
+    expect(new MemoryGraphStore(engine).getStub(truth.memoryId)!.is_active).toBe(1);
+
+    await layer.close();
+    expect((await decisionsOnce('supersede')).filter(d => d.decision === 'mirror-tier-diverged')).toEqual([]);
+  });
+
+  it('mirror: agreeing stores report NOTHING (the reachability condition is real, not decorative)', async () => {
+    const { layer, engine } = newLayer({ reads: false });
+    const truth = await layer.store('Corvus budget is 30000', NS, scope, { sourceChannel: 'agent' });
+    await layer.store('Corvus budget is 45000', NS, scope, { sourceChannel: 'agent' });
+    expect(new MemoryGraphStore(engine).getStub(truth.memoryId)!.is_active).toBe(0);
+
+    await layer.close();
+    // `supersede` is the positive control: the sink is demonstrably flushed, so the absence
+    // below is a measurement and not an unwritten file.
+    expect((await decisionsOnce('supersede')).filter(d => d.decision === 'mirror-tier-diverged')).toEqual([]);
   });
 
   it('a REAL failure inside the raise still propagates — the rollback catch is not a swallow', async () => {

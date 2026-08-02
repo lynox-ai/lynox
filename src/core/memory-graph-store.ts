@@ -75,6 +75,23 @@ interface EngineMemoryRaw {
 }
 
 /**
+ * The write-trust comparison {@link MemoryGraphStore.markSuperseded} made when the engine.db
+ * stub's tier and the incoming tier disagreed. A REPORT of a retire that happened, never a
+ * refusal — see that method for why a mirror cannot refuse. Named rather than inlined so the
+ * call sites read as "collect a report", not "check a success flag": the sibling retire on the
+ * authoritative store returns `false` for the opposite meaning.
+ *
+ * Carries `newTier` back out even though the caller passed it in, so reporting needs no second
+ * lookup and no re-narrowing of an optional the store already proved present.
+ */
+export interface TierDivergenceReport {
+  /** The DERIVED tier of the incoming write, as handed to `markSuperseded`. */
+  readonly newTier: ProvenanceKind;
+  /** What the engine.db stub held — the value this check actually compared. */
+  readonly stubTier: ProvenanceKind;
+}
+
+/**
  * MemoryGraphStore — the S1b memory-provenance layer over engine.db: a
  * lightweight `memories` STUB + the `memory_subjects` mention junction + the
  * derived `subject_cooccurrences` counts. It anchors the subject-graph to the
@@ -241,26 +258,72 @@ export class MemoryGraphStore {
    * first stored before the flag was on), so it can never reference a missing
    * row. The `supersedes` provenance junction is intentionally NOT mirrored in
    * S1b (its FK needs both stubs present); S2 recomputes it authoritatively.
+   *
+   * With `opts.newTier` it also COMPARES the write-trust order (Memory Foundation Wave 2)
+   * and returns a {@link TierDivergenceReport} when the two disagree — `null` when they
+   * agree, when no tier was passed (flag off, or the consolidation mirror whose keeper-sort
+   * already guarantees keeper ≥ victim), or when the old row has no stub to compare. The
+   * retire is applied EITHER WAY; a non-null return means the retire HAPPENED and something
+   * about it is worth recording. Deliberately not a `boolean`: `AgentMemoryDb.supersedMemory`
+   * returns `false` for "nothing happened", and a second supersede method in the same
+   * subsystem where a falsy value meant the opposite would be a trap worth avoiding.
+   *
+   * WHY THIS IS NOT A GATE (`DEF-dk-trust-gate-consistency` (a)). It reads as one — the
+   * shape is `supersedMemory`'s backstop, one store over — but it cannot be:
+   *
+   *  1. It can never catch a downgrade, only a drift. A production caller reaches this line
+   *     only after agent-memory.db DID NOT REFUSE the same retire: the contradiction mirrors
+   *     run on a `contradictions` array the legacy path has already demoted to `coexist` on
+   *     refusal, and `_mirrorTierRaise` is unreachable when `_raiseTier`'s transaction rolled
+   *     back. "Did not refuse" is weaker than "ranked and allowed", and the gap is real:
+   *     `supersedMemory`'s guard needs BOTH rows (`existing && incoming`), so a retire whose
+   *     legacy row was hard-deleted passes it without ranking anything. That case wants the
+   *     retire even more — the stub is an orphan of a row that no longer exists.
+   *
+   *  2. Refusing made things strictly worse. The legacy retire has already COMMITTED by the
+   *     time we get here, so a refusal cannot prevent the loss — it can only leave the row
+   *     retired on one store and active on the other, which is the RF4 divergence trap
+   *     `KnowledgeLayer` demotes contradictions to avoid. Whether the retire then "happened"
+   *     would be decided by the read-cutover flag (recall reads engine.db under it, legacy
+   *     without it), i.e. a trust outcome settled by an unrelated flag. On the tier-raise
+   *     path it was worse still: the old stub stayed active while `upsertStub` inserted the
+   *     raised row, so recall returned BOTH — the exact duplicate `_mirrorTierRaise` exists
+   *     to prevent.
+   *
+   * HOW THE TIERS CAN DIVERGE. No UPDATE path rewrites `source_type` on either store
+   * (agent-memory.db has none; the `upsertStub` ON CONFLICT list omits it, so a re-upsert
+   * preserves it) and the S5a backfill copies it verbatim — so a divergence is not produced
+   * by ordinary writes. But a stub created WITHOUT an explicit tier takes this file's
+   * `'agent_inferred'` INSERT default rather than its legacy row's real tier, which invents
+   * a tier for a row that already has one: `DEF-mirror-stub-tier-default-invents-provenance`.
+   * Expect that to be the first thing this report counts.
+   *
+   * WHEN TO FLIP IT BACK: at the S5b'-d legacy DROP engine.db becomes authoritative and this
+   * check becomes the PRIMARY gate — it must refuse again, and its callers must handle that
+   * the way `KnowledgeLayer` handles `supersedMemory`'s refusal today (demote the resolution
+   * / roll the raise back whole), not merely log it. That is prose plus a register line
+   * (`DEF-mirror-gate-at-legacy-drop`), which is weaker than a mechanism — the one mechanism
+   * that exists is `memory-write-trust-gate.test.ts`'s "REPORTS a tier disagreement and
+   * retires anyway", which fails the moment the policy flips and points back here.
    */
-  markSuperseded(memoryId: string, supersededById: string, opts?: { newTier?: ProvenanceKind | undefined }): void {
-    // Memory Foundation Wave 2 — the write-trust gate BACKSTOP (defense-in-depth).
-    // Unlike the legacy store, this mirror fires BEFORE the new memory's stub exists
-    // (upsertStub runs after markSuperseded in the store() mirror) and holds only the
-    // engine.db handle — so it CANNOT DB-look-up the incoming tier. The caller passes it
-    // as `opts.newTier` (like the resolution). We look up the OLD stub's tier (it exists —
-    // it's the row being retired) and REFUSE a strictly-lower-trust retire. An UNDEFINED
-    // `newTier` (flag off, OR the consolidation mirror whose keeper-sort already guarantees
-    // keeper ≥ victim) skips the backstop → byte-identical / a safe no-op. If the old stub
-    // is absent the UPDATE no-ops anyway (nothing to protect).
+  markSuperseded(
+    memoryId: string,
+    supersededById: string,
+    opts?: { newTier?: ProvenanceKind | undefined },
+  ): TierDivergenceReport | null {
+    let diverged: TierDivergenceReport | null = null;
     if (opts?.newTier !== undefined) {
       const old = this.db.prepare('SELECT source_type FROM memories WHERE id = ?')
         .get(memoryId) as { source_type: string } | undefined;
-      if (old && !canSupersede(opts.newTier, old.source_type as ProvenanceKind)) return;
+      if (old && !canSupersede(opts.newTier, old.source_type as ProvenanceKind)) {
+        diverged = { newTier: opts.newTier, stubTier: old.source_type as ProvenanceKind };
+      }
     }
     this.db.prepare(`
       UPDATE memories SET is_active = 0, superseded_by = ?, updated_at = datetime('now')
       WHERE id = ?
     `).run(supersededById, memoryId);
+    return diverged;
   }
 
   /**

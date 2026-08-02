@@ -35,6 +35,7 @@ import type { SubjectRow } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import type { RelationshipRow } from './relationship-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
+import type { TierDivergenceReport } from './memory-graph-store.js';
 import { ThreadStore } from './thread-store.js';
 import { channels } from './observability.js';
 import { deriveProvenanceTier, provenanceRank, canSupersede } from './provenance.js';
@@ -52,6 +53,17 @@ const DEDUP_THRESHOLD = 0.95;
  * be impossible to confuse with a real failure escaping the transaction body.
  */
 const TIER_RAISE_REFUSED = Symbol('tier-raise-refused');
+
+/**
+ * One tier disagreement a supersession mirror observed — {@link TierDivergenceReport} plus the
+ * row it concerns. Collected DURING the mirror transaction and emitted after it returns, for
+ * the reason the legacy backstop's refusals are: the sink is a fire-and-forget async append, so
+ * emitting inline would record a divergence for a transaction that can still roll back (both
+ * mirrors catch and swallow their own failures) and re-record it on the retry.
+ */
+interface MirrorTierDivergence extends TierDivergenceReport {
+  readonly existingId: string;
+}
 
 /**
  * Unified Knowledge Layer — the primary API for storing and retrieving knowledge.
@@ -818,6 +830,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const subjects = this.subjectStore!;
     const relationships = this.relationshipStore!;
     const memoryGraph = this.memoryGraphStore!;
+    const diverged: MirrorTierDivergence[] = [];
 
     this.engineDb!.getDb().transaction(() => {
       // 1. Supersession mirror FIRST. It only flips OLD memories' stubs and is
@@ -828,7 +841,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       //    when the old memory has no stub; superseded_by is a soft column (no
       //    FK), so it may point at this memory even if it gets no stub of its own.
       for (const c of contradictions) {
-        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (c.resolution !== 'superseded') continue;
+        const report = memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (report) diverged.push({ ...report, existingId: c.existingMemoryId });
       }
 
       // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Build an
@@ -921,6 +936,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       memoryGraph.linkSubjects(memoryId, new Set(subjectIds));
       memoryGraph.bumpCooccurrences(subjectIds);
     })();
+    this._emitMirrorDivergences(diverged, namespace);
   }
 
   /**
@@ -1023,11 +1039,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const resolvedEntities: EntityRecord[] = [];
     const resolvedRelations: RelationRecord[] = [];
     const stamp = createdAt ?? new Date().toISOString();
+    const diverged: MirrorTierDivergence[] = [];
 
     this.engineDb!.getDb().transaction(() => {
       // 1. Supersession mirror FIRST (flips OLD stubs; independent of this memory's subjects).
       for (const c of contradictions) {
-        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (c.resolution !== 'superseded') continue;
+        const report = memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (report) diverged.push({ ...report, existingId: c.existingMemoryId });
       }
 
       // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Name-keyed so
@@ -1116,6 +1135,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       memoryGraph.linkSubjects(memoryId, new Set(subjectIds));
       memoryGraph.bumpCooccurrences(subjectIds);
     })();
+    this._emitMirrorDivergences(diverged, namespace);
 
     return { resolvedEntities, resolvedRelations };
   }
@@ -1789,6 +1809,30 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * Report the tier disagreements a supersession mirror COMPARED AND SAW — the runtime
+   * observable `DEF-dk-trust-gate-consistency` (a) was missing, where the mirror refused with
+   * a bare `return` and told no one.
+   *
+   * "Compared" is the limit, and it is narrower than "every mirror": the consolidation mirror
+   * in {@link consolidateMemories} passes no `newTier` at all, so it runs no comparison and
+   * can report nothing. Its keeper-sort ranks tiers inside agent-memory.db, which is exactly
+   * the store a stub can drift from — so that path is a known blind spot, not a covered one
+   * (`DEF-mirror-consolidation-tier-blind`).
+   *
+   * Reporting is ALL this does. The retire went through (see
+   * {@link MemoryGraphStore.markSuperseded} for why a mirror cannot be a gate), so unlike
+   * {@link _emitBackstopRefusal} there is no write here that was stopped — which is exactly
+   * why the two get different decision names. Takes the tiers from the store's own return
+   * rather than re-reading the stub: the read would happen after the retire and after the
+   * transaction, so it could only ever agree with itself.
+   */
+  private _emitMirrorDivergences(diverged: readonly MirrorTierDivergence[], namespace: MemoryNamespace): void {
+    for (const d of diverged) {
+      this._emitWriteDecision('mirror-tier-diverged', d.newTier, d.stubTier, d.existingId, namespace);
+    }
+  }
+
+  /**
    * P1b — raise a deduped row's trust tier via SUPERSEDE-NOT-MUTATE. Stores the fresh
    * higher-trust row (write-once evidence intact), retires the old lower-trust one
    * (`canSupersede(new, old)` holds → the backstop passes), and carries forward the old
@@ -1881,11 +1925,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   ): void {
     if (!this.subjectGraphEnabled || !this.memoryGraphStore) return;
     const memoryGraph = this.memoryGraphStore;
+    const diverged: MirrorTierDivergence[] = [];
     try {
       const oldSubject = memoryGraph.getStub(candidate.id)?.subject_id ?? null;
       const oldMentions = memoryGraph.getLinkedSubjectIds(candidate.id);
       this.engineDb!.getDb().transaction(() => {
-        memoryGraph.markSuperseded(candidate.id, newId, { newTier: derivedTier });
+        const report = memoryGraph.markSuperseded(candidate.id, newId, { newTier: derivedTier });
+        if (report) diverged.push({ ...report, existingId: candidate.id });
         memoryGraph.upsertStub({
           id: newId, text, namespace, scopeType: scope.type, scopeId: scope.id,
           subjectId: oldSubject,
@@ -1901,6 +1947,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         });
         if (oldMentions.length > 0) memoryGraph.linkSubjects(newId, oldMentions);
       })();
+      this._emitMirrorDivergences(diverged, namespace);
     } catch (err: unknown) {
       process.stderr.write(
         `[lynox:subject-graph] tier-raise mirror failed for ${newId}: ${err instanceof Error ? err.message : String(err)}\n`,
