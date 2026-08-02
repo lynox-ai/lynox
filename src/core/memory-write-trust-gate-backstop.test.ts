@@ -111,8 +111,8 @@ describe('Backstop — a refused retire is consulted, not discarded', () => {
    *
    * It doubles as the POSITIVE CONTROL for the absence assertion: a test that expects NO
    * refusal must first wait for a decision it does expect, or an unflushed sink reads as
-   * proof of absence. Same rule as any absence measurement against a surface you do not
-   * control ([[fb_eval_preflight]]).
+   * proof of absence. Any measurement whose result is "nothing is there" needs a companion
+   * that proves the instrument would have seen something.
    */
   const decisionsOnce = async (want: string): Promise<Array<Record<string, unknown>>> => {
     for (let i = 0; i < 60; i++) {
