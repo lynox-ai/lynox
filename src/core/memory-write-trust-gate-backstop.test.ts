@@ -259,6 +259,71 @@ describe('Backstop — a refused retire is consulted, not discarded', () => {
     expect(stubAfter.confidence).toBe(stubBefore.confidence);
   });
 
+  it('an unreadable row is reported as NOTHING, never as a fabricated tier', async () => {
+    // `existingTier` must be the tier the backstop compared. If that row cannot be read
+    // there is no honest value to put there — every `ProvenanceKind` asserts a trust level,
+    // so any placeholder invents one, and a sink whose whole job is to count disagreements
+    // is worse for containing invented ones than for missing a line.
+    const { layer, engine } = newLayer();
+    const truth = await layer.store('Cygnus owner is Ada', NS, scope, { sourceChannel: 'ui' });
+    divergeEngineTier(engine, truth.memoryId, 'external_unverified');
+
+    const db = layer.getDb();
+    const realGetMemory = db.getMemory.bind(db);
+    vi.spyOn(db, 'getMemory').mockImplementation(
+      (id: string) => (id === truth.memoryId ? null : realGetMemory(id)),
+    );
+
+    // The refusal itself is untouched — `supersedMemory` reads the tiers with its own
+    // statements, so only the REPORTING loses its input.
+    const res = await layer.store('Cygnus owner is Ada', NS, scope, { sourceChannel: 'agent' });
+    expect(res.stored).toBe(false);
+    expect(res.memoryId).toBe(truth.memoryId);
+
+    await layer.close();
+    const decisions = await decisionsOnce('tier-raise');
+    expect(decisions.filter(d => d.decision === 'backstop-refused')).toEqual([]);
+  });
+
+  it('a refusal is NOT reported when the transaction that found it rolls back', async () => {
+    // The sink is a fire-and-forget append: emitting from inside the transaction records a
+    // refusal for a write that a later contradiction can still roll back, and records it
+    // again on the retry — inflating the very rate the sink exists to establish. Refusals
+    // are therefore collected and emitted only after the transaction commits.
+    //
+    // Reaching a rollback AFTER a refusal needs TWO `superseded` contradictions in one
+    // write, and the retire is what normally prevents two contradicting facts from both
+    // staying active — so the retire is neutralised while the fixture is built. What is
+    // under test here is WHERE the emit sits, not the refusal logic (covered above).
+    const { layer, engine } = newLayer();
+    const db = layer.getDb();
+    let refuseOnce = false;                                   // explicit, not mockReset — that
+    vi.spyOn(db, 'supersedMemory').mockImplementation(() => {  // restores the real impl in vitest 4
+      if (refuseOnce) { refuseOnce = false; return false; }
+      return true;                                            // report success, retire nothing
+    });
+    const first = await layer.store('Draco budget is 100', NS, scope, { sourceChannel: 'agent' });
+    await layer.store('Draco budget is 200', NS, scope, { sourceChannel: 'agent' });
+    // The engine.db MIRROR is not stubbed, so it retired the first row's stub even though the
+    // stubbed retire left the legacy row active — and recall reads engine.db under the
+    // cutover. Revive the stub, or the third write sees one candidate instead of two. (That
+    // the fixture trips over this at all is the divergence this PR is about, from the other
+    // side: one store retired, the other not.)
+    engine.getDb().prepare('UPDATE memories SET is_active = 1 WHERE id = ?').run(first.memoryId);
+
+    refuseOnce = true;                                        // refuse the first, accept the second
+    vi.spyOn(db, 'createSupersedes').mockImplementation(() => { throw new Error('rollback'); });
+
+    await expect(layer.store('Draco budget is 300', NS, scope, { sourceChannel: 'agent' }))
+      .rejects.toThrow('rollback');
+
+    await layer.close();
+    // `supersede` is the positive control: the pre-transaction decision loop emitted it, so
+    // the sink is demonstrably flushed and the absence below is a measurement, not silence.
+    const decisions = await decisionsOnce('supersede');
+    expect(decisions.filter(d => d.decision === 'backstop-refused')).toEqual([]);
+  });
+
   it('a REAL failure inside the raise still propagates — the rollback catch is not a swallow', async () => {
     // The refusal aborts the raise transaction by throwing a sentinel, so `_raiseTier` has
     // to catch. A catch that returns `null` for ANY error would turn a genuine write failure
