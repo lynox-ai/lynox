@@ -3,6 +3,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import type { SearchProvider, SearchResult } from './search-provider.js';
 import { extractContent } from './content-extractor.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { rerankSearchResults } from './search-reranker.js';
 
@@ -192,7 +193,10 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
             ? wrapped + '\n' + API_SETUP_AGENT_REMINDER
             : wrapped;
         } catch (err: unknown) {
-          return `Search failed: ${getErrorMessage(err)}`;
+          // Returned, not thrown, so the agent reads it and adapts — unchanged.
+          // Wrapped so the run ledger stops recording it as a success.
+          const message = `Search failed: ${getErrorMessage(err)}`;
+          throw new ToolSoftFailure(message, message.slice(0, 200));
         }
       }
 
@@ -209,7 +213,11 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
             ? wrapped + '\n' + API_SETUP_AGENT_REMINDER
             : wrapped;
         } catch (err: unknown) {
-          return `Failed to read URL: ${getErrorMessage(err)}`;
+          // The single biggest source of the false green: ~35 of 63 reads in one
+          // real thread 404'd on guessed repository paths, every one recorded as
+          // a success. Payload to the agent is unchanged.
+          const message = `Failed to read URL: ${getErrorMessage(err)}`;
+          throw new ToolSoftFailure(message, message.slice(0, 200));
         }
       }
 

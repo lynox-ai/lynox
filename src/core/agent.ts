@@ -54,6 +54,7 @@ import { randomBytes } from 'node:crypto';
 import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
 import { scanToolResult, RepeatCallGuard } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
+import { isToolSoftFailure } from './tool-soft-failure.js';
 import { buildWireSnapshot, writeWireSnapshot, captureRawWireBody, extractWireFields, isWireSinkEnabled, isRawWireSinkEnabled } from './wire-capture.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
@@ -3129,17 +3130,32 @@ export class Agent implements IAgent {
       // tool_use_id, keeping the tool_use/tool_result pair valid so the loop
       // self-recovers instead of hanging. Exempt tools (see TOOL_TIMEOUT_EXEMPT)
       // block or delegate legitimately and are awaited unbounded.
-      const result = Agent.TOOL_TIMEOUT_EXEMPT.has(tc.name)
-        ? await rawResult
-        : await Promise.race([
-            rawResult,
-            new Promise<never>((_, reject) => {
-              toolTimer = setTimeout(
-                () => reject(new Error(`Tool "${tc.name}" timed out after ${Math.round(Agent.TOOL_TIMEOUT_MS / 1000)}s`)),
-                Agent.TOOL_TIMEOUT_MS,
-              );
-            }),
-          ]);
+      // A `ToolSoftFailure` means "completed, but did not succeed" — the tool
+      // has a result the agent SHOULD read (a 404 body, a non-zero exit's
+      // stderr) but the ledger must not record it as a success. Unwrapped here,
+      // BEFORE the masking/scanning/truncation below, so the payload takes the
+      // ordinary result path and what the model sees is byte-identical to what
+      // the tool used to return. Only `softFailureReason` diverges, and it
+      // reaches nothing but `toolEnd`. See tool-soft-failure.ts.
+      let softFailureReason: string | null = null;
+      let result: string;
+      try {
+        result = Agent.TOOL_TIMEOUT_EXEMPT.has(tc.name)
+          ? await rawResult
+          : await Promise.race([
+              rawResult,
+              new Promise<never>((_, reject) => {
+                toolTimer = setTimeout(
+                  () => reject(new Error(`Tool "${tc.name}" timed out after ${Math.round(Agent.TOOL_TIMEOUT_MS / 1000)}s`)),
+                  Agent.TOOL_TIMEOUT_MS,
+                );
+              }),
+            ]);
+      } catch (err: unknown) {
+        if (!isToolSoftFailure(err)) throw err;
+        result = err.agentVisibleResult;
+        softFailureReason = err.reason;
+      }
 
       let masked = this.secretStore ? this.secretStore.maskSecrets(result) : result;
       // Extra guard: if ask_user response looks like a secret, mask it pattern-based
@@ -3204,8 +3220,27 @@ export class Agent implements IAgent {
       // diagnostics only (Bugsink breadcrumbs, the debug subscriber) — it no
       // longer writes history, so its process-global reach stops being a
       // correctness problem. `threadId` remains on it for those consumers.
-      this._recordToolCall(tc.name, safeInput, '', duration, false);
-      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: true, input: safeInput, threadId: this.currentThreadId });
+      //
+      // A soft failure is recorded EXACTLY like a thrown one: reason into
+      // `outputJson`, `isError` true. That is what `run-history-analytics`
+      // counts (`output_json != ''` → `error_count`) and what the debug export
+      // renders — an empty `outputJson` is indistinguishable from a successful
+      // silent call, which is the entire defect.
+      //
+      // ⚠ This sink is the ledger; `toolEnd` is NOT. When this change was first
+      // written (2026-08-02) history came from the channel, and the fix touched
+      // only the channel. The write path moved since. Re-applying the original
+      // patch here would have merged cleanly and recorded nothing — the reason
+      // it targets both, and the reason the mutation below aims at THIS line.
+      const softMasked = softFailureReason !== null && this.secretStore
+        ? this.secretStore.maskSecrets(softFailureReason)
+        : softFailureReason;
+      this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null);
+      channels.toolEnd.publish(
+        softMasked === null
+          ? { name: tc.name, agent: this.name, duration, success: true, input: safeInput, threadId: this.currentThreadId }
+          : { name: tc.name, agent: this.name, duration, success: false, error: softMasked, input: safeInput, threadId: this.currentThreadId },
+      );
 
       if (this.onStream) {
         await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name });

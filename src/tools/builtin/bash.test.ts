@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execSync } from 'node:child_process';
 import { bashTool, buildSafeEnv } from './bash.js';
+import { isToolSoftFailure } from '../../core/tool-soft-failure.js';
 
 vi.mock('node:child_process', () => ({
   execSync: vi.fn(),
@@ -40,34 +41,61 @@ describe('bashTool', () => {
     }));
   });
 
-  it('returns combined stdout+stderr on failure with both', async () => {
+  // A non-zero exit now leaves as a `ToolSoftFailure` rather than a plain
+  // return, so the run ledger stops counting it as a success. The payload the
+  // AGENT reads is unchanged — that is what these still assert, via
+  // `agentVisibleResult`. `agentSeesOnFailure` fails loudly if the handler ever
+  // goes back to returning, so this cannot silently regress into a no-op.
+  async function agentSeesOnFailure(command: string): Promise<string> {
+    try {
+      const returned = await bashTool.handler({ command }, {} as never);
+      throw new Error(`expected a ToolSoftFailure, got a plain return: ${returned}`);
+    } catch (err: unknown) {
+      if (!isToolSoftFailure(err)) throw err;
+      return err.agentVisibleResult;
+    }
+  }
+
+  it('gives the agent combined stdout+stderr on failure with both', async () => {
     const err = Object.assign(new Error('cmd failed'), {
       stdout: 'partial output',
       stderr: 'error details',
     });
     mockedExecSync.mockImplementation(() => { throw err; });
-    const result = await bashTool.handler({ command: 'bad-cmd' }, {} as never);
-    expect(result).toBe('partial output\nerror details');
+    expect(await agentSeesOnFailure('bad-cmd')).toBe('partial output\nerror details');
   });
 
-  it('returns only stderr on failure when stdout is empty', async () => {
+  it('gives the agent only stderr on failure when stdout is empty', async () => {
     const err = Object.assign(new Error('cmd failed'), {
       stdout: '',
       stderr: 'only error',
     });
     mockedExecSync.mockImplementation(() => { throw err; });
-    const result = await bashTool.handler({ command: 'fail' }, {} as never);
-    expect(result).toBe('only error');
+    expect(await agentSeesOnFailure('fail')).toBe('only error');
   });
 
-  it('returns "Command failed" when both stdout and stderr are empty', async () => {
+  it('gives the agent "Command failed" when both stdout and stderr are empty', async () => {
     const err = Object.assign(new Error('cmd failed'), {
       stdout: '',
       stderr: '',
     });
     mockedExecSync.mockImplementation(() => { throw err; });
-    const result = await bashTool.handler({ command: 'empty-fail' }, {} as never);
-    expect(result).toBe('Command failed: empty-fail');
+    expect(await agentSeesOnFailure('empty-fail')).toBe('Command failed: empty-fail');
+  });
+
+  it('reports the exit code to the ledger, not to the agent', async () => {
+    const err = Object.assign(new Error('cmd failed'), {
+      stdout: '', stderr: 'boom', status: 127,
+    });
+    mockedExecSync.mockImplementation(() => { throw err; });
+    try {
+      await bashTool.handler({ command: 'missing-binary' }, {} as never);
+      expect.unreachable('should have thrown');
+    } catch (e: unknown) {
+      if (!isToolSoftFailure(e)) throw e;
+      expect(e.reason).toBe('bash exited 127');
+      expect(e.agentVisibleResult).toBe('boom');
+    }
   });
 
   it('wraps non-standard error with cause', async () => {
