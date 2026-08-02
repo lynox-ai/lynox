@@ -140,6 +140,15 @@ interface OpenAIStreamChunk {
       // use an array of content parts. Narrowing happens at the read site
       // via `extractDeltaText` to keep the leak guard at one boundary.
       content?: unknown;
+      /**
+       * Reasoning channel of an OpenAI-compat reasoning model. NOT in the
+       * OpenAI spec — a de-facto convention: `reasoning_content` (DeepSeek,
+       * GLM/Zhipu, Qwen, and Fireworks' hosting of them) and `reasoning`
+       * (OpenRouter's normalisation). Typed `unknown` for the same reason as
+       * `content`: it is read through `extractDeltaText`, never coerced.
+       */
+      reasoning_content?: unknown;
+      reasoning?: unknown;
       tool_calls?: Array<{
         index: number;
         id?: string | undefined;
@@ -403,6 +412,9 @@ async function* translateStream(
   let buffer = '';
   let blockIndex = 0;
   let activeTextBlock = false;
+  // Reasoning-channel block (see the `reasoning_content` handling below).
+  // Mutually exclusive with `activeTextBlock` — each owns `blockIndex` while open.
+  let activeThinkingBlock = false;
   // Track tool call indices → block indices
   const toolBlockMap = new Map<number, number>();
   let totalInputTokens = 0;
@@ -460,8 +472,60 @@ async function* translateStream(
         // hallucinates runaway bracket tails (`}] }] }] }]`) trying to
         // "close" the malformed prefix it sees in its own prior turn.
         // Regression for issue #37 (Mistral spawn-bracket leak).
+        // Reasoning channel. A reasoning model puts the bulk of its output
+        // here and leaves `delta.content` empty until it is done — measured on
+        // `accounts/fireworks/models/glm-5p2` (2026-08-02): a plain answer
+        // billed 891 completion tokens and split 3242 chars of
+        // `reasoning_content` against 492 chars of `content`, and a
+        // tool-calling turn emitted 27 reasoning chunks with `content` empty
+        // throughout. Dropping the channel cost three things: the user paid for
+        // ~87% of the tokens with nothing to show, the stream produced NO
+        // events for the whole reasoning phase (so the UI sat on a dead
+        // spinner and `lastEventAt` went stale on exactly the slow turns), and
+        // a sub-agent's run record showed 8.7k output tokens against 186
+        // characters of result.
+        //
+        // Mapped to an Anthropic `thinking` block, which the rest of the
+        // pipeline already handles: `stream.ts` turns `thinking_delta` into a
+        // `thinking` event, and `agent.ts` strips thinking blocks out of the
+        // message history before the next request — so nothing here can be
+        // echoed back to a provider that would reject it. `translateMessages`
+        // is allow-list based (text + tool_use only) and would drop it anyway.
+        const reasoningPart = extractDeltaText(
+          choice.delta.reasoning_content ?? choice.delta.reasoning,
+        );
+        if (reasoningPart) {
+          // A thinking block cannot interleave with a text block, and reasoning
+          // always precedes content on this wire. Close an open text block
+          // first so the two never share an index.
+          if (activeTextBlock) {
+            yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
+            blockIndex++;
+            activeTextBlock = false;
+          }
+          if (!activeThinkingBlock) {
+            activeThinkingBlock = true;
+            yield {
+              type: 'content_block_start',
+              index: blockIndex,
+              content_block: { type: 'thinking', thinking: '', signature: '' },
+            } as unknown as BetaRawContentBlockStartEvent as BetaRawMessageStreamEvent;
+          }
+          yield {
+            type: 'content_block_delta',
+            index: blockIndex,
+            delta: { type: 'thinking_delta', thinking: reasoningPart },
+          } as unknown as BetaRawContentBlockDeltaEvent as BetaRawMessageStreamEvent;
+        }
+
         const textPart = extractDeltaText(choice.delta.content);
         if (textPart) {
+          // Reasoning is finished the moment real content starts.
+          if (activeThinkingBlock) {
+            yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
+            blockIndex++;
+            activeThinkingBlock = false;
+          }
           if (!activeTextBlock) {
             activeTextBlock = true;
             yield {
@@ -486,6 +550,15 @@ async function* translateStream(
                 yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
                 blockIndex++;
                 activeTextBlock = false;
+              }
+              // Same for the reasoning block: on this wire a tool call is the
+              // common terminator of the reasoning phase (`delta.content` stays
+              // empty for the whole turn), so without this the thinking block
+              // would still be open and share `blockIndex` with the tool_use.
+              if (activeThinkingBlock) {
+                yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
+                blockIndex++;
+                activeThinkingBlock = false;
               }
               // Start new tool_use block
               toolBlockMap.set(tc.index, blockIndex);
@@ -525,6 +598,13 @@ async function* translateStream(
             yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
             blockIndex++;
             activeTextBlock = false;
+          }
+          // A reasoning-only turn (model spent the whole budget thinking and
+          // emitted no content) ends here with the thinking block still open.
+          if (activeThinkingBlock) {
+            yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
+            blockIndex++;
+            activeThinkingBlock = false;
           }
           for (const [, bi] of toolBlockMap) {
             yield { type: 'content_block_stop', index: bi } as BetaRawMessageStreamEvent;
