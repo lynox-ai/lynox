@@ -2500,6 +2500,18 @@ export function newChat() {
 	sessionTier = null;
 	pendingModel = null; // no stickiness — the next new chat starts at default_tier
 	contextBudget = null;
+	// The compaction offer belongs to the thread we just left, exactly like
+	// `runInterrupted` above. It is a ONE-SHOT engine event (`compaction_offer`)
+	// and was only ever cleared by `context_compacted` or a manual `compactNow` —
+	// so once any thread crossed the prepare threshold, the offer bar rendered on
+	// every subsequent new chat until a page reload, because its render condition
+	// is `compactionOffer !== null` and nothing on the new-chat path reset it.
+	compactionOffer = null;
+	// Same class as `compactionOffer`: `retryStatus` renders UNGATED in ChatView
+	// (`{#if retryStatus}`) and was only cleared at the top of `_executeRun`, so a
+	// thread left mid-retry showed "attempt 2/3" / "busy" on the fresh chat until
+	// the next send.
+	retryStatus = null;
 	runStartedAt = null;
 	runPromptCount = 0;
 	clearContext();
@@ -2792,6 +2804,11 @@ export async function resumeThread(threadId: string): Promise<void> {
 		}
 	}
 	contextBudget = null;
+	// Same reason as in `newChat()`: these are the LEFT thread's state. Without
+	// them, switching into a thread that never compacted still showed its bar,
+	// and a retry banner followed the user across threads.
+	compactionOffer = null;
+	retryStatus = null;
 	runStartedAt = null;
 	runPromptCount = 0;
 	runInterrupted = null;
