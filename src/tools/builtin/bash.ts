@@ -4,6 +4,7 @@ import type { IsolationConfig } from '../../types/security.js';
 import { getWorkspaceCwd } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES, DEFAULT_BASH_TIMEOUT_MS } from '../../core/constants.js';
 import { assertBashEgressAllowed } from './bash-egress.js';
+import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 
 interface BashInput {
   command: string;
@@ -170,7 +171,19 @@ export const bashTool: ToolEntry<BashInput> = {
         const stderr = String((err as { stderr: unknown }).stderr);
         const stdout = String((err as { stdout: unknown }).stdout || '');
         const combined = [stdout, stderr].filter(Boolean).join('\n');
-        return combined || `Command failed: ${input.command}`;
+        // The agent still reads the output verbatim and adapts — that behaviour
+        // is deliberate and unchanged. But a non-zero exit is a FAILURE, and
+        // returning it plainly recorded it in the run ledger as a success:
+        // `toolEnd` publishes `success: true` for anything a handler returns.
+        // One real thread logged 123 tool calls and exactly 1 error while a long
+        // run of `wget` calls was failing. `status` is the exit code when
+        // execSync provides it.
+        const status = (err as { status?: unknown }).status;
+        const code = typeof status === 'number' ? String(status) : 'non-zero';
+        throw new ToolSoftFailure(
+          combined || `Command failed: ${input.command}`,
+          `bash exited ${code}`,
+        );
       }
       const cause = err instanceof Error ? err : new Error(String(err));
       throw new Error(`bash: ${cause.message}`, { cause });

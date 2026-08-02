@@ -2010,6 +2010,88 @@ describe('Agent', () => {
     });
   });
 
+  /**
+   * A tool that completed without succeeding. `toolEnd` used to publish
+   * `success: true` for anything a handler RETURNED, so `web_research`'s
+   * "Failed to read URL: HTTP 404" and `bash`'s non-zero-exit output were both
+   * booked as successes. Measured on one real thread: 123 tool calls, exactly 1
+   * counted as an error, while ~35 of its 63 web reads had 404'd.
+   *
+   * The contract is two-sided and BOTH sides need a test — recording the failure
+   * would be worthless if it changed what the model reads, and leaving the
+   * payload alone would be worthless if the ledger stayed green.
+   */
+  describe('ToolSoftFailure — completed but not successful', () => {
+    it('books it as a failure in the ledger, with the tool-supplied reason', async () => {
+      const { channels } = await import('./observability.js');
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      const tool = makeTool('soft_tool', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('Failed to read URL: HTTP 404 Not Found', 'HTTP 404'),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ts1', name: 'soft_tool', input: { url: 'https://x/y' } }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+      await agent.send('go');
+
+      const calls = vi.mocked(channels.toolEnd.publish).mock.calls;
+      const call = calls.find(c => (c[0] as { name: string }).name === 'soft_tool');
+      expect(call).toBeDefined();
+      const data = call![0] as { success: boolean; error?: string };
+      expect(data.success).toBe(false);
+      expect(data.error).toBe('HTTP 404');
+    });
+
+    it('hands the model the payload verbatim, and not as an error', async () => {
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      const payload = 'Failed to read URL: HTTP 404 Not Found';
+      const tool = makeTool('soft_tool2', vi.fn().mockRejectedValue(
+        new ToolSoftFailure(payload, 'HTTP 404'),
+      ));
+
+      const streamed: Array<{ type: string; result?: string; isError?: boolean }> = [];
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ts2', name: 'soft_tool2', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        onStream: async (e) => { streamed.push(e as { type: string; result?: string; isError?: boolean }); },
+      });
+      await agent.send('go');
+
+      const toolResult = streamed.find(e => e.type === 'tool_result');
+      expect(toolResult).toBeDefined();
+      expect(toolResult!.result).toBe(payload);
+      // NOT is_error: the agent loop must behave exactly as it did when the tool
+      // returned this string, or this stops being an observability fix.
+      expect(toolResult!.isError).toBeUndefined();
+    });
+
+    it('leaves an ordinary throw on the hard-error path', async () => {
+      const { channels } = await import('./observability.js');
+      const tool = makeTool('hard_tool', vi.fn().mockRejectedValue(new Error('boom')));
+
+      const streamed: Array<{ type: string; isError?: boolean }> = [];
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ts3', name: 'hard_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        onStream: async (e) => { streamed.push(e as { type: string; isError?: boolean }); },
+      });
+      await agent.send('go');
+
+      const call = vi.mocked(channels.toolEnd.publish).mock.calls
+        .find(c => (c[0] as { name: string }).name === 'hard_tool');
+      expect((call![0] as { success: boolean }).success).toBe(false);
+      expect(streamed.find(e => e.type === 'tool_result')?.isError).toBe(true);
+    });
+  });
+
   describe('ABSOLUTE_MAX_ITERATIONS', () => {
     it('terminates loop at 500 iterations with error event', async () => {
       const tool = makeTool('loop_tool');
