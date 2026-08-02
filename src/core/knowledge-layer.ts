@@ -842,8 +842,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       //    FK), so it may point at this memory even if it gets no stub of its own.
       for (const c of contradictions) {
         if (c.resolution !== 'superseded') continue;
-        const d = memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
-        if (d) diverged.push({ ...d, existingId: c.existingMemoryId });
+        const report = memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (report) diverged.push({ ...report, existingId: c.existingMemoryId });
       }
 
       // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Build an
@@ -1045,8 +1045,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       // 1. Supersession mirror FIRST (flips OLD stubs; independent of this memory's subjects).
       for (const c of contradictions) {
         if (c.resolution !== 'superseded') continue;
-        const d = memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
-        if (d) diverged.push({ ...d, existingId: c.existingMemoryId });
+        const report = memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (report) diverged.push({ ...report, existingId: c.existingMemoryId });
       }
 
       // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Name-keyed so
@@ -1930,8 +1930,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       const oldSubject = memoryGraph.getStub(candidate.id)?.subject_id ?? null;
       const oldMentions = memoryGraph.getLinkedSubjectIds(candidate.id);
       this.engineDb!.getDb().transaction(() => {
-        const d = memoryGraph.markSuperseded(candidate.id, newId, { newTier: derivedTier });
-        if (d) diverged.push({ ...d, existingId: candidate.id });
+        const report = memoryGraph.markSuperseded(candidate.id, newId, { newTier: derivedTier });
+        if (report) diverged.push({ ...report, existingId: candidate.id });
         memoryGraph.upsertStub({
           id: newId, text, namespace, scopeType: scope.type, scopeId: scope.id,
           subjectId: oldSubject,

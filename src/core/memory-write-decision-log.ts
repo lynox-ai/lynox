@@ -66,10 +66,10 @@ export type WriteDecision =
    * not "ranked and allowed" — `supersedMemory`'s guard needs both rows, so a retire whose
    * legacy row is already hard-deleted reaches the mirror having ranked nothing.
    *
-   * Alone among the variants this one cannot appear under shadow-only measurement: the tier
-   * is passed to the mirror only when `memory_write_trust_gate` is ON. That is deliberate —
-   * with the gate off a low-tier retire is the configured policy, so there is no disagreement
-   * to record, only a policy someone chose.
+   * Like `backstop-refused`, this cannot appear under shadow-only measurement: the tier is
+   * passed to the mirror only when `memory_write_trust_gate` is ON. That is deliberate — with
+   * the gate off a low-tier retire is the configured policy, so there is no disagreement to
+   * record, only a policy someone chose.
    */
   | 'mirror-tier-diverged';
 

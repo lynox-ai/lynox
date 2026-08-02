@@ -75,6 +75,23 @@ interface EngineMemoryRaw {
 }
 
 /**
+ * The write-trust comparison {@link MemoryGraphStore.markSuperseded} made when the engine.db
+ * stub's tier and the incoming tier disagreed. A REPORT of a retire that happened, never a
+ * refusal — see that method for why a mirror cannot refuse. Named rather than inlined so the
+ * call sites read as "collect a report", not "check a success flag": the sibling retire on the
+ * authoritative store returns `false` for the opposite meaning.
+ *
+ * Carries `newTier` back out even though the caller passed it in, so reporting needs no second
+ * lookup and no re-narrowing of an optional the store already proved present.
+ */
+export interface TierDivergenceReport {
+  /** The DERIVED tier of the incoming write, as handed to `markSuperseded`. */
+  readonly newTier: ProvenanceKind;
+  /** What the engine.db stub held — the value this check actually compared. */
+  readonly stubTier: ProvenanceKind;
+}
+
+/**
  * MemoryGraphStore — the S1b memory-provenance layer over engine.db: a
  * lightweight `memories` STUB + the `memory_subjects` mention junction + the
  * derived `subject_cooccurrences` counts. It anchors the subject-graph to the
@@ -94,23 +111,6 @@ interface EngineMemoryRaw {
  * Written ADDITIVELY behind `subject_graph_enabled`; nothing reads engine.db
  * memories until the read-migration (S1d) + the memory sprint (S5).
  */
-/**
- * The write-trust comparison {@link MemoryGraphStore.markSuperseded} made when the engine.db
- * stub's tier and the incoming tier disagreed. A REPORT of a retire that happened, never a
- * refusal — see that method for why a mirror cannot refuse. Named rather than inlined so the
- * call sites read as "collect a report", not "check a success flag": the sibling retire on the
- * authoritative store returns `false` for the opposite meaning.
- *
- * Carries `newTier` back out even though the caller passed it in, so reporting needs no second
- * lookup and no re-narrowing of an optional the store already proved present.
- */
-export interface TierDivergenceReport {
-  /** The DERIVED tier of the incoming write, as handed to `markSuperseded`. */
-  readonly newTier: ProvenanceKind;
-  /** What the engine.db stub held — the value this check actually compared. */
-  readonly stubTier: ProvenanceKind;
-}
-
 export class MemoryGraphStore {
   private readonly db: Database.Database;
 
