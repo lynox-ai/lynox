@@ -349,12 +349,21 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
         if (this.memoryWriteTrustGate && wouldRaise) {
           const raisedId = this._raiseTier(candidate, trimmedText, namespace, scope, derivedTier, embeddingModel, embedding, options);
-          // `null` = the backstop refused the retire and the raise was rolled back whole
-          // (see `_raiseTier`). Fall through, which lands on the plain dedup no-op below —
-          // the stored fact stands unchanged, i.e. the same outcome as `wouldRaise === false`.
           if (raisedId !== null) {
             return { memoryId: raisedId, entities: [], relations: [], contradictions: [], stored: true, deduplicated: true };
           }
+          // `null` = the backstop refused the retire and the raise rolled back whole (see
+          // `_raiseTier`). Return here rather than falling through to the no-op-confirm
+          // below: a refusal is NOT the same event as `wouldRaise === false`. That branch
+          // means "an equal-or-lower re-assert of a row we agree about"; this one means the
+          // two stores DISAGREE about the row's tier and the authoritative one says this
+          // write ranks strictly below it. Confirming would let a write the backstop just
+          // judged unentitled to retire the row still raise that row's confidence (+0.05,
+          // capped at 1.0) and confirmation_count on every repeat — in both stores, since
+          // `_mirrorConfidence` follows. Recall ranking reads both, so that is a foothold
+          // on what gets recalled, handed to the one write we decided not to trust. Nothing
+          // happens instead, which is what a refusal should mean.
+          return { memoryId: candidate.id, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true };
         }
 
         // Wave 0 (memory_scoring_v2): a dedup hit is a PLAIN no-op — no confirm.
@@ -401,6 +410,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
 
     // 4+5. Create memory + supersede contradicted (atomic transaction)
+    // Refusals are COLLECTED here and reported after the transaction returns: the sink is a
+    // fire-and-forget async append, so emitting inside would record a refusal for a write
+    // that a later contradiction in the same loop could still roll back — and re-record it
+    // on the retry, inflating the very rate this measurement exists to establish.
+    const refusedIds: string[] = [];
     const memoryId = this.db.transaction(() => {
       const id = this.db.createMemory({
         text: trimmedText, namespace, scopeType: scope.type, scopeId: scope.id,
@@ -430,7 +444,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           // the read cutover.
           if (!this.db.supersedMemory(c.existingMemoryId, id, { trustGate: this.memoryWriteTrustGate })) {
             c.resolution = 'coexist';
-            this._emitWriteDecision('backstop-refused', derivedTier, c.existingSourceType ?? derivedTier, c.existingMemoryId, namespace);
+            refusedIds.push(c.existingMemoryId);
             continue;
           }
           this.db.createSupersedes(id, c.existingMemoryId, 'contradiction');
@@ -438,6 +452,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       }
       return id;
     });
+    for (const refusedId of refusedIds) this._emitBackstopRefusal(derivedTier, refusedId, namespace);
 
     // Wave 1.3b: write-side tier telemetry — one JSONL line per STORED row (post-dedup),
     // gated on the measurement flag. Lets the write distribution be tracked over time
@@ -1751,6 +1766,29 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * Report that `AgentMemoryDb.supersedMemory` REFUSED a retire the caller's own decision
+   * had already cleared — the observable of a legacy/engine.db tier disagreement.
+   *
+   * `existingTier` is deliberately the tier the BACKSTOP compared (read from
+   * agent-memory.db), not the one the decision used. The decision's side is already on
+   * record: a refusal is by construction preceded by this write's `supersede`/`tier-raise`
+   * line for the same `existingId`, and that line carries the recall row's tier. Emitting
+   * the same side twice would log the disagreement as an agreement, which is what the first
+   * cut of this did. Reading it back is one indexed lookup on a path that only runs when the
+   * two stores have already disagreed.
+   *
+   * Emits nothing if the row cannot be read: the backstop's own guard needs BOTH rows to
+   * exist before it can refuse, so an unreadable row means something else changed underneath
+   * us, and a fabricated tier is worse than a missing line in a sink whose only job is to
+   * count. There is no honest placeholder — every `ProvenanceKind` asserts a trust level.
+   */
+  private _emitBackstopRefusal(newTier: ProvenanceKind, existingId: string, namespace: MemoryNamespace): void {
+    const authoritative = this.db.getMemory(existingId)?.source_type;
+    if (authoritative === undefined) return;
+    this._emitWriteDecision('backstop-refused', newTier, authoritative as ProvenanceKind, existingId, namespace);
+  }
+
+  /**
    * P1b — raise a deduped row's trust tier via SUPERSEDE-NOT-MUTATE. Stores the fresh
    * higher-trust row (write-once evidence intact), retires the old lower-trust one
    * (`canSupersede(new, old)` holds → the backstop passes), and carries forward the old
@@ -1812,7 +1850,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       });
     } catch (err: unknown) {
       if (err !== TIER_RAISE_REFUSED) throw err;
-      this._emitWriteDecision('backstop-refused', derivedTier, candidate.source_type as ProvenanceKind, candidate.id, namespace);
+      this._emitBackstopRefusal(derivedTier, candidate.id, namespace);
       return null;
     }
     this._mirrorTierRaise(candidate, newId, text, namespace, scope, derivedTier, embeddingModel, embedding, options);

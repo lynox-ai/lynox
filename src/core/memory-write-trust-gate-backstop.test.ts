@@ -65,6 +65,7 @@ describe('Backstop — a refused retire is consulted, not discarded', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();          // the spy below is per-test; do not let it outlive its test
     if (prevDataDir === undefined) delete process.env['LYNOX_DATA_DIR'];
     else process.env['LYNOX_DATA_DIR'] = prevDataDir;
     for (const l of layers) await l.close().catch(() => {});
@@ -99,16 +100,31 @@ describe('Backstop — a refused retire is consulted, not discarded', () => {
     expect(changed).toBe(1);
   }
 
-  const readDecisions = async (): Promise<Array<Record<string, unknown>>> => {
-    for (let i = 0; i < 40; i++) {
+  /**
+   * Poll until a line matching `want` exists, THEN return the whole sink.
+   *
+   * The exit condition is the point. The appends are fire-and-forget and serialized per
+   * file, and every one of these writes emits at least two decisions — so "the file is
+   * non-empty" is reached while the line under test is still queued, and returning there
+   * turns a real assertion into a coin flip. Proved rather than reasoned: a 30 ms delay per
+   * append made both refusal tests fail on `expected [] to have a length of 1`.
+   *
+   * It doubles as the POSITIVE CONTROL for the absence assertion: a test that expects NO
+   * refusal must first wait for a decision it does expect, or an unflushed sink reads as
+   * proof of absence. Same rule as any absence measurement against a surface you do not
+   * control ([[fb_eval_preflight]]).
+   */
+  const decisionsOnce = async (want: string): Promise<Array<Record<string, unknown>>> => {
+    for (let i = 0; i < 60; i++) {
       try {
         const raw = await readFile(join(dir, MEMORY_WRITE_DECISION_LOG_FILE), 'utf8');
-        const lines = raw.trim().split('\n').filter(Boolean);
-        if (lines.length > 0) return lines.map(l => JSON.parse(l) as Record<string, unknown>);
+        const lines = raw.trim().split('\n').filter(Boolean)
+          .map(l => JSON.parse(l) as Record<string, unknown>);
+        if (lines.some(d => d.decision === want)) return lines;
       } catch { /* not yet flushed */ }
       await new Promise(r => setTimeout(r, 25));
     }
-    return [];
+    throw new Error(`decision '${want}' never appeared in the sink`);
   };
 
   it('contradiction path: a refused retire demotes the resolution to coexist — no edge, no mirror', async () => {
@@ -139,11 +155,16 @@ describe('Backstop — a refused retire is consulted, not discarded', () => {
     expect(new MemoryGraphStore(engine).getStub(truth.memoryId)!.is_active).toBe(1);
 
     await layer.close();
-    const refused = (await readDecisions()).filter(d => d.decision === 'backstop-refused');
+    const decisions = await decisionsOnce('backstop-refused');
+    const refused = decisions.filter(d => d.decision === 'backstop-refused');
     expect(refused).toHaveLength(1);
     expect(refused[0]!.existingId).toBe(truth.memoryId);
     expect(refused[0]!.newTier).toBe('agent_inferred');
-    expect(refused[0]!.existingTier).toBe('external_unverified');   // the recall row's tier, not the write's
+    // The AUTHORITATIVE tier — the one the backstop compared, from agent-memory.db. Not the
+    // recall row's `external_unverified` (which the preceding `supersede` line carries) and
+    // not an echo of `newTier`: reporting either would log the disagreement as an agreement.
+    expect(refused[0]!.existingTier).toBe('user_asserted');
+    expect(decisions.find(d => d.decision === 'supersede')!.existingTier).toBe('external_unverified');
     expect(refused[0]!.enforced).toBe(true);
     // PII discipline holds for the new variant too — the emit site sits next to the text.
     expect(JSON.stringify(refused[0])).not.toContain('Orion');
@@ -178,12 +199,14 @@ describe('Backstop — a refused retire is consulted, not discarded', () => {
     expect(new MemoryGraphStore(engine).getStub(truth.memoryId)!.is_active).toBe(1);
 
     await layer.close();
-    const refused = (await readDecisions()).filter(d => d.decision === 'backstop-refused');
+    const decisions = await decisionsOnce('backstop-refused');
+    const refused = decisions.filter(d => d.decision === 'backstop-refused');
     expect(refused).toHaveLength(1);
     expect(refused[0]!.existingId).toBe(truth.memoryId);
-    // The tier the DECISION saw — the engine.db side of the disagreement, which is the
-    // half a reader cannot reconstruct from the legacy store afterwards.
-    expect(refused[0]!.existingTier).toBe('external_unverified');
+    // The backstop's own side (agent-memory.db); the `tier-raise` line before it carries the
+    // recall row's. Together the two lines are the two halves of the disagreement.
+    expect(refused[0]!.existingTier).toBe('user_asserted');
+    expect(decisions.find(d => d.decision === 'tier-raise')!.existingTier).toBe('external_unverified');
     expect(JSON.stringify(refused[0])).not.toContain('Ada Lovelace');
   });
 
@@ -203,7 +226,37 @@ describe('Backstop — a refused retire is consulted, not discarded', () => {
     expect(new MemoryGraphStore(engine).getStub(stored.memoryId)!.is_active).toBe(0);
 
     await layer.close();
-    expect((await readDecisions()).filter(d => d.decision === 'backstop-refused')).toEqual([]);
+    // Wait for a decision we DO expect before claiming the absence of one we do not — an
+    // unflushed sink is empty, and an empty sink proves nothing.
+    expect((await decisionsOnce('tier-raise')).filter(d => d.decision === 'backstop-refused')).toEqual([]);
+  });
+
+  it('a refused write does NOT get to confirm the row it was refused from retiring', async () => {
+    // The refusal path must not share the `wouldRaise === false` no-op-CONFIRM branch. That
+    // branch means "an equal-or-lower re-assert of a row we agree about"; a refusal means the
+    // authoritative store ranks this write strictly BELOW the row. Confirming anyway hands a
+    // write we decided not to trust a +0.05 confidence bump and a +1 confirmation on every
+    // repeat — in both stores — and recall ranking reads both. Live by default:
+    // `memory_scoring_v2` is unset, so the confirm branch is the one that runs.
+    const { layer, engine } = newLayer();
+    const truth = await layer.store('Perseus deadline is March', NS, scope, { sourceChannel: 'ui' });
+    const before = layer.getDb().getMemory(truth.memoryId)!;
+    const stubBefore = new MemoryGraphStore(engine).getStub(truth.memoryId)!;
+    divergeEngineTier(engine, truth.memoryId, 'external_unverified');
+
+    // Five repeats — the shape an injected re-assert would take. Each is refused.
+    for (let i = 0; i < 5; i++) {
+      await layer.store('Perseus deadline is March', NS, scope, { sourceChannel: 'agent' });
+    }
+
+    const after = layer.getDb().getMemory(truth.memoryId)!;
+    expect(after.confirmation_count).toBe(before.confirmation_count);
+    expect(after.confidence).toBe(before.confidence);
+    // ...and the mirror was not driven either — an amplification that only reached engine.db
+    // would still move recall ranking under the read cutover.
+    const stubAfter = new MemoryGraphStore(engine).getStub(truth.memoryId)!;
+    expect(stubAfter.confirmation_count).toBe(stubBefore.confirmation_count);
+    expect(stubAfter.confidence).toBe(stubBefore.confidence);
   });
 
   it('a REAL failure inside the raise still propagates — the rollback catch is not a swallow', async () => {

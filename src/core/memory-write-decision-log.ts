@@ -42,9 +42,15 @@ export type WriteDecision =
    * had already cleared. That is only possible when the two disagree about a row's tier —
    * and they can, because they read it from different places: the decision above takes it
    * from the recall row (engine.db under the S5b read cutover), the backstop looks it up in
-   * agent-memory.db. This line is the only observable of that divergence; without it the
-   * refusal is silent and its rate cannot be counted. `existingTier` carries the tier the
-   * DECISION saw, so a pair of lines for one write shows both sides of the disagreement.
+   * agent-memory.db. At runtime this line is the only trace of that divergence (the engine.db
+   * mirror's own backstop refuses with a bare `return` on a `void` method and reports
+   * nothing — `DEF-dk-trust-gate-consistency` (a)); without it the refusal is silent and its
+   * rate cannot be counted.
+   *
+   * `existingTier` here is the tier the BACKSTOP compared — the authoritative agent-memory.db
+   * value. The decision's side comes from the `supersede`/`tier-raise` line that precedes it
+   * for the same `existingId`, so the two lines together are the two sides. Carrying the
+   * decision's tier on BOTH would record the disagreement as an agreement.
    */
   | 'backstop-refused';
 
