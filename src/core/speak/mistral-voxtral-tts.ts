@@ -11,11 +11,21 @@
  *   data: {"type":"speech.audio.delta","audio_data":"<base64_chunk>"}
  *
  * Endpoint rejects `language` outright (422 extra_forbidden) — re-verified
- * 2026-07-26 against the live API, still true on the pinned v26.03 model: the
- * voice catalog is EN-only (en_us + en_gb, 30 voices), so DE text is spoken
- * with an English voice by default. Do not attempt to pass `language`. (v26.03
- * is "multilingual" only in the sense of cross-lingual cloning — an EN voice
- * pronouncing DE text better — NOT selectable de_* voices or a language param.)
+ * 2026-08-02 against the live API, still true on the pinned v26.03 model. Do
+ * not attempt to pass `language`.
+ *
+ * The catalog is NOT EN-only, which this comment claimed until 2026-08-02. All
+ * 30 voices, enumerated via `offset`/`limit` (see VOICES_BASE_URL): 8 `en_us`,
+ * 16 `en_gb`, **6 `fr_fr`** (`fr_marie_*`). Still no German voice.
+ *
+ * "Multilingual" in Mistral's docs (English, French, Spanish, Portuguese,
+ * Italian, Dutch, German, Hindi, Arabic) means cross-lingual voice cloning —
+ * and the model really does articulate German correctly: the same German
+ * sentence (umlauts + a compound noun) synthesised with `en_paul_neutral` and
+ * with `fr_marie_neutral`, then transcribed back, returned identical to the
+ * source both times. What a German listener hears as an accent is SPEAKER
+ * IDENTITY, not mispronunciation. Removing it needs a German voice in the
+ * catalog — or a non-Voxtral path for non-English text.
  *
  * No usage or rate-limit headers are exposed. Character counting for per-tenant
  * cost attribution happens facade-side. EU-hosted (Mistral La Plateforme, Paris).
@@ -40,16 +50,37 @@ export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-2603';
 
 /**
  * Default voice — English, reads DE text with a light English accent. Rafael
- * approved on the Phase 0 p300/p3000 DE samples. `de_*` are NOT available:
- * re-checked 2026-07-26 against the live catalog (30 voices, all en_us/en_gb).
- * The live fetch below will surface `de_*` in the Settings picker automatically
- * the moment Mistral ships them — nothing to do here until then.
+ * approved on the Phase 0 p300/p3000 DE samples. `de_*` are still NOT available:
+ * re-checked 2026-08-02 against the live catalog (30 voices — 8 en_us, 16 en_gb,
+ * 6 fr_fr; no German).
+ *
+ * ⚠️ "The live fetch below will surface `de_*` automatically the moment Mistral
+ * ships them — nothing to do here until then" used to stand here and is FALSE.
+ * The fetch paginates with `page`, which this endpoint ignores, so it only ever
+ * sees the first 10 slugs — a German voice would land past that and stay
+ * invisible. There IS something to do first, and it is the pagination fix (see
+ * VOICES_BASE_URL). The same false promise sat on FALLBACK_VOICES below.
  */
 export const DEFAULT_VOICE = 'en_paul_neutral';
 
 const API_URL = 'https://api.mistral.ai/v1/audio/speech';
 // Mistral caps `page_size` at 10 regardless of what we request — confirmed
-// 2026-04-21 against the live API. We paginate explicitly to fetch all voices.
+// 2026-04-21 against the live API.
+//
+// ⚠️ "We paginate explicitly to fetch all voices" used to stand here and is
+// FALSE. Measured 2026-08-02 against the live API: the `page` parameter is
+// IGNORED. Pages 0, 1 and 7 return byte-identical items and `page_size=200`
+// also returns 10, while the response still reports `total: 30,
+// total_pages: 3` (and echoes `page: 1` whatever you send). The loop below
+// therefore fetches the same first 10 voices three times; the dedup-by-id
+// keeps the result honest, so the picker shows 10 of 30 rather than
+// duplicates — but 20 voices are unreachable, INCLUDING the six French
+// `fr_marie_*` ones. `offset`/`limit` is what actually paginates this
+// endpoint and returns all 30.
+//
+// Not fixed here deliberately — see `DEF-tts-language-voice-selection` in the
+// deferred register. Fixing it is a precondition for any future non-English
+// voice being visible at all, since it would land past offset 10.
 const VOICES_BASE_URL = 'https://api.mistral.ai/v1/audio/voices';
 // Hard page ceiling so a buggy `total_pages` response can't spin forever.
 // 30 voices × 10/page = 3 pages today; 100 pages would be 1000 voices.
@@ -57,10 +88,16 @@ const VOICES_MAX_PAGES = 100;
 
 /**
  * Fallback voice catalog for the Settings picker when the live `/v1/audio/voices`
- * call is unreachable. A representative EN subset (live catalog is 30 EN voices
- * as of 2026-07-26); safe to stay out-of-date because the live fetch overwrites
- * this in the UI the moment Mistral is reachable. `de_*` slugs will appear
- * automatically once the catalog ships them — do not add hardcoded DE entries here.
+ * call is unreachable. A representative EN subset; safe to stay out-of-date
+ * because the live fetch overwrites this in the UI the moment Mistral is
+ * reachable. Still do not add hardcoded DE entries — there is no German voice to
+ * add (live catalog 2026-08-02: 8 en_us, 16 en_gb, 6 fr_fr).
+ *
+ * ⚠️ "`de_*` slugs will appear automatically once the catalog ships them" used
+ * to stand here and is FALSE for the same reason as on DEFAULT_VOICE: the live
+ * fetch paginates with `page`, which the endpoint ignores, so it sees only the
+ * first 10 slugs. Note this list is also EN-only while six `fr_marie_*` voices
+ * exist — the fallback mirrors what the broken fetch can see, not the catalog.
  */
 const FALLBACK_VOICES: ReadonlyArray<VoiceInfo> = [
   { id: 'en_paul_neutral',    language: 'en', description: 'Paul — neutral' },
