@@ -350,9 +350,10 @@ describe('KnowledgeStore review queue (DK.2)', () => {
   it('approval does NOT erase the untrusted evidence it was reviewed out of', () => {
     // The rejected alternative fix was to clear `source_untrusted` on approve. It destroys a
     // fact — the turn really did read untrusted content — to make a derivation come out right,
-    // which inverts the write-once-evidence invariant. It also would not have worked: with rule
-    // 1 silenced the CHANNEL decides, and this entry's `agent` channel re-derives to
-    // `agent_inferred`, not `user_asserted`. Both are pinned here.
+    // which inverts the write-once-evidence invariant. And for an agent-channel entry it would
+    // not even have worked: with rule 1 silenced the CHANNEL decides, so this row re-derives to
+    // `agent_inferred`, not `user_asserted`. (A `ui`-channel entry would have landed on
+    // `user_asserted` by luck — which is the weaker reason to reject that fix, not the reason.)
     const { ks } = make();
     const approved = ks.reviewEntry(queueOne(ks), 'approve')!;
     expect(approved.sourceUntrusted).toBe(true);

@@ -126,10 +126,14 @@ export class KnowledgeStore {
     if (params.text.length > MAX_KNOWLEDGE_ENTRY_CHARS) {
       throw new Error(`knowledge entry text is ${params.text.length} chars, over the ${MAX_KNOWLEDGE_ENTRY_CHARS}-char store limit.`);
     }
-    const tier = deriveProvenanceTier({
-      sourceChannel: params.sourceChannel,
-      sourceUntrusted: params.sourceUntrusted,
-    });
+    // Through the shared mapper like every other derivation site: a fresh write has no review
+    // action yet, and saying so explicitly is what keeps this path from becoming a second,
+    // slightly-different definition of the same evidence.
+    const tier = deriveProvenanceTier(knowledgeEvidence({
+      sourceChannel: params.sourceChannel ?? null,
+      sourceUntrusted: params.sourceUntrusted === true,
+      reviewAction: null,
+    }));
     // Rule 1 of provenance.ts already maps sourceUntrusted → external_unverified; the routing
     // gate keys off the SAME signal, so an untrusted write is queued, never trusted-written.
     const status: KnowledgeStatus = params.sourceUntrusted === true ? 'pending_review' : 'active';

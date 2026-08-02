@@ -31,11 +31,14 @@ export interface ProvenanceEvidence {
    * A human reviewer was shown this exact text in the review queue and accepted it
    * (`review_action` ∈ `approve` | `edit_approve`). Outranks everything — see rule 0.
    *
-   * ⚠️ SECURITY PRECONDITION: this must never be settable by the agent. It is written only by
-   * `KnowledgeStore.reviewEntry`, whose sole production caller is the `user`-scoped HTTP route
-   * `POST /api/knowledge/queue/:id/review`; no builtin tool reaches it. If that ever changes,
-   * rule 0 becomes an injection escalation from `external_unverified` straight to
-   * `user_asserted` and must be re-derived from something the agent cannot assert.
+   * ⚠️ SECURITY PRECONDITION, stated as what it is rather than as a guarantee: rule 0 is only
+   * sound while the review action is genuinely a human act. Within this module the only
+   * producer is `KnowledgeStore.reviewEntry` via the `user`-scoped review route — but whether
+   * that route is reachable by anything else is a property of the DEPLOYMENT (its auth
+   * configuration, its autonomy mode, which tools are exposed), and nothing here enforces it.
+   * An earlier draft of this comment asserted the absolute; it was wrong. Treat a reachable
+   * approve path as an escalation from `external_unverified` to `user_asserted` in one step,
+   * and re-derive from something the agent cannot assert if the boundary has to move.
    */
   reviewApproved?: boolean | undefined;
 }
