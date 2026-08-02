@@ -45,6 +45,15 @@ import { appendMemoryWriteDecisionLog, type WriteDecision } from './memory-write
 const DEDUP_THRESHOLD = 0.95;
 
 /**
+ * Rollback sentinel for {@link KnowledgeLayer._raiseTier}. A better-sqlite3 transaction can
+ * only be aborted by throwing, and a tier-raise whose retire is refused must abort WHOLE (see
+ * `_raiseTier`) — so the refusal throws this and `_raiseTier` catches it. A unique object
+ * rather than an `Error` subclass: it is never reported, never matched by message, and must
+ * be impossible to confuse with a real failure escaping the transaction body.
+ */
+const TIER_RAISE_REFUSED = Symbol('tier-raise-refused');
+
+/**
  * Unified Knowledge Layer — the primary API for storing and retrieving knowledge.
  *
  * Integrates: AgentMemoryDb (SQLite) + EntityResolver + RetrievalEngine +
@@ -340,7 +349,12 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
         if (this.memoryWriteTrustGate && wouldRaise) {
           const raisedId = this._raiseTier(candidate, trimmedText, namespace, scope, derivedTier, embeddingModel, embedding, options);
-          return { memoryId: raisedId, entities: [], relations: [], contradictions: [], stored: true, deduplicated: true };
+          // `null` = the backstop refused the retire and the raise was rolled back whole
+          // (see `_raiseTier`). Fall through, which lands on the plain dedup no-op below —
+          // the stored fact stands unchanged, i.e. the same outcome as `wouldRaise === false`.
+          if (raisedId !== null) {
+            return { memoryId: raisedId, entities: [], relations: [], contradictions: [], stored: true, deduplicated: true };
+          }
         }
 
         // Wave 0 (memory_scoring_v2): a dedup hit is a PLAIN no-op — no confirm.
@@ -401,7 +415,24 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           // Backstop (defense-in-depth): the demotion above already prevents a blocked
           // pair from reaching here; this refuses a direct trust-downgrade too. Gated →
           // flag off passes trustGate:false → byte-identical.
-          this.db.supersedMemory(c.existingMemoryId, id, { trustGate: this.memoryWriteTrustGate });
+          //
+          // Its answer is CONSULTED, not discarded. The demotion above and this backstop
+          // do not read the existing row's tier from the same place — the demotion takes
+          // `c.existingSourceType` from the recall row (engine.db under the S5b read
+          // cutover, `_dedupRecall`), this looks it up in agent-memory.db — so the two can
+          // disagree and the backstop is the one holding the authoritative tier. On refusal
+          // the resolution is demoted here exactly as it would have been above: writing the
+          // supersedes edge anyway would claim a retire that did not happen, and leaving
+          // `resolution: 'superseded'` in the array would send both engine.db mirrors
+          // (`_persist*`, keyed on this SAME by-reference array) on to `markSuperseded` the
+          // old stub — the RF4 divergence trap the demotion comment above describes, one
+          // level down: retired on engine.db, active on legacy, the truth invisible under
+          // the read cutover.
+          if (!this.db.supersedMemory(c.existingMemoryId, id, { trustGate: this.memoryWriteTrustGate })) {
+            c.resolution = 'coexist';
+            this._emitWriteDecision('backstop-refused', derivedTier, c.existingSourceType ?? derivedTier, c.existingMemoryId, namespace);
+            continue;
+          }
           this.db.createSupersedes(id, c.existingMemoryId, 'contradiction');
         }
       }
@@ -1728,7 +1759,22 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * the retired row). Reversible pre-GC (un-retire the tombstone until `gc()` reaps it — the
    * same soft-delete semantics as every supersede here); NO evidence overwrite → the
    * Wave-1 re-derivable-tier invariant holds. Done inline (not via `store()` recursion, which
-   * would re-enter dedup and re-find the same ≥0.95 row). Returns the fresh row's id.
+   * would re-enter dedup and re-find the same ≥0.95 row).
+   *
+   * Returns the fresh row's id, or **null when the backstop refused the retire** — in which
+   * case NOTHING happened: the transaction is rolled back, no row, no edge, no confirmation
+   * transfer, no mirror. The caller then takes the plain dedup no-op path, which is the same
+   * outcome as `wouldRaise === false`.
+   *
+   * The refusal is REACHABLE, and the parenthetical above ("`canSupersede(new, old)` holds →
+   * the backstop passes") is exactly why it must be handled rather than assumed away: the
+   * caller computes `wouldRaise` from `candidate.source_type` as the RECALL returned it —
+   * engine.db under the S5b read cutover — while the backstop reads the tier of the same id
+   * from agent-memory.db. When the two stores disagree about a row's tier, so do the two
+   * checks. Half-applying the raise then leaves two active rows of one fact, a supersedes
+   * edge claiming a retire that never ran, the old row's confirmations copied onto a row that
+   * did not replace it, and `_mirrorTierRaise` retiring the engine.db stub whose legacy twin
+   * is still active. All-or-nothing is the only shape with no wrong intermediate state.
    */
   private _raiseTier(
     candidate: ScoredMemoryRow,
@@ -1745,20 +1791,30 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       sourceUntrusted?: boolean | undefined;
       sourceToolName?: string | undefined;
     } | undefined,
-  ): string {
-    const newId = this.db.transaction(() => {
-      const id = this.db.createMemory({
-        text, namespace, scopeType: scope.type, scopeId: scope.id,
-        sourceRunId: options?.sourceRunId, sourceThreadId: options?.sourceThreadId,
-        sourceType: derivedTier, sourceToolName: options?.sourceToolName,
-        sourceChannel: options?.sourceChannel, sourceUntrusted: options?.sourceUntrusted,
-        embeddingModel, provider: this.embeddingProvider.name, embedding,
+  ): string | null {
+    let newId: string;
+    try {
+      newId = this.db.transaction(() => {
+        const id = this.db.createMemory({
+          text, namespace, scopeType: scope.type, scopeId: scope.id,
+          sourceRunId: options?.sourceRunId, sourceThreadId: options?.sourceThreadId,
+          sourceType: derivedTier, sourceToolName: options?.sourceToolName,
+          sourceChannel: options?.sourceChannel, sourceUntrusted: options?.sourceUntrusted,
+          embeddingModel, provider: this.embeddingProvider.name, embedding,
+        });
+        // The new row must exist BEFORE this call: the backstop looks both tiers up by id and
+        // short-circuits (`existing && incoming`) when either row is missing, so retiring
+        // first would make it silently pass. Order is load-bearing, not stylistic.
+        if (!this.db.supersedMemory(candidate.id, id, { trustGate: true })) throw TIER_RAISE_REFUSED;
+        this.db.createSupersedes(id, candidate.id, 'tier-raise');
+        this.db.addConfirmations(id, candidate.confirmation_count);
+        return id;
       });
-      this.db.supersedMemory(candidate.id, id, { trustGate: true });
-      this.db.createSupersedes(id, candidate.id, 'tier-raise');
-      this.db.addConfirmations(id, candidate.confirmation_count);
-      return id;
-    });
+    } catch (err: unknown) {
+      if (err !== TIER_RAISE_REFUSED) throw err;
+      this._emitWriteDecision('backstop-refused', derivedTier, candidate.source_type as ProvenanceKind, candidate.id, namespace);
+      return null;
+    }
     this._mirrorTierRaise(candidate, newId, text, namespace, scope, derivedTier, embeddingModel, embedding, options);
     return newId;
   }

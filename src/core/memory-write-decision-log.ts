@@ -36,7 +36,17 @@ export type WriteDecision =
   /** P1b: a dedup hit with no trust change → the plain no-op-confirm path. */
   | 'confirm'
   /** P1b: a dedup hit whose incoming write strictly outranks the stored row → tier-raise. */
-  | 'tier-raise';
+  | 'tier-raise'
+  /**
+   * The `AgentMemoryDb.supersedMemory` BACKSTOP refused a retire that the decision above
+   * had already cleared. That is only possible when the two disagree about a row's tier —
+   * and they can, because they read it from different places: the decision above takes it
+   * from the recall row (engine.db under the S5b read cutover), the backstop looks it up in
+   * agent-memory.db. This line is the only observable of that divergence; without it the
+   * refusal is silent and its rate cannot be counted. `existingTier` carries the tier the
+   * DECISION saw, so a pair of lines for one write shows both sides of the disagreement.
+   */
+  | 'backstop-refused';
 
 /** One persisted line: a single write-trust decision. Text-free by construction. */
 export interface MemoryWriteDecisionEntry {
