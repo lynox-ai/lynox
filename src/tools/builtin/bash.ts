@@ -3,6 +3,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { IsolationConfig } from '../../types/security.js';
 import { getWorkspaceCwd } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES, DEFAULT_BASH_TIMEOUT_MS } from '../../core/constants.js';
+import { assertBashEgressAllowed } from './bash-egress.js';
 
 interface BashInput {
   command: string;
@@ -145,6 +146,13 @@ export const bashTool: ToolEntry<BashInput> = {
   // NOTE: execSync is intentional — this is a bash tool requiring shell features.
   // Input comes from the LLM agent, not untrusted external users.
   handler: async (input: BashInput, agent: IAgent): Promise<string> => {
+    // Egress policy. `bash` was the one agent surface `network_policy` did not
+    // reach, which made `deny-all` ("air-gapped isolation") void — see
+    // bash-egress.ts for what this does and, more importantly, what it does not.
+    // Throws rather than returning a string: a refusal is not a command result,
+    // and the catch below would otherwise fold it into normal output.
+    assertBashEgressAllowed(input.command, agent.toolContext);
+
     const safeEnv = buildSafeEnv(agent.isolation);
 
     try {
