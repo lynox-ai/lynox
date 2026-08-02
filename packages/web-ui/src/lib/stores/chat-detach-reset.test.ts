@@ -42,9 +42,18 @@ const THREAD_SCOPED = [
 ] as const;
 
 /**
- * Cleared by `newChat` only. `resumeThread` does not clear these — it ASSIGNS
- * them from the resumed thread's own session data further down, so clearing
- * them in the detach block would be immediately overwritten noise.
+ * Cleared by `newChat` only — but for two different reasons, and an earlier
+ * version of this comment got one of them wrong:
+ *
+ *  - `sessionModel` / `sessionTier` — `resumeThread` ASSIGNS these from the
+ *    resumed thread's session data further down, so clearing them in the detach
+ *    block would be overwritten noise. Note the assignment sits on the SUCCESS
+ *    path, after two awaits: if `POST /sessions` fails, the previous thread's
+ *    tier keeps rendering beside the new transcript. Pre-existing, minor, and
+ *    the reason "immediately overwritten" is not quite true.
+ *  - `pendingModel` — `resumeThread` never touches it at all. It is the
+ *    composer's next-new-chat pick, which no resume path reads (`ensureSession`
+ *    sends only `{threadId}`), so leaving it is harmless rather than corrected.
  */
 const NEW_CHAT_ONLY = ['sessionModel', 'sessionTier', 'pendingModel'] as const;
 
@@ -56,7 +65,12 @@ const NEW_CHAT_ONLY = ['sessionModel', 'sessionTier', 'pendingModel'] as const;
  *    thread-scoped, so the gate closes on detach.
  *  - `chatErrorDetail` — rendered only inside `{#if chatError}`; `chatError` is
  *    thread-scoped.
- *  - `contextWindow` — re-assigned from the server response on both paths.
+ *  - `contextWindow` — re-assigned from the server response on RESUME; on
+ *    `newChat` it survives until the first send assigns it via `ensureSession`.
+ *    No in-repo consequence (ChatView derives it and never renders it), but it
+ *    IS a barrel export, so a host app that renders it shows the previous
+ *    thread's window in that gap. Recorded rather than smoothed over — the
+ *    earlier claim of "both paths" was wrong.
  *  - `completedTextBlockGen`, `secretPromptGeneration`, `mailConnectGeneration` —
  *    monotonic generation counters; consumers compare deltas, never absolute values.
  *  - `authError`, `isOffline`, `managedTier` — genuinely app-global.
@@ -98,9 +112,33 @@ function resumeDetachBlock(): string {
 	return SRC.slice(start, end);
 }
 
-/** True iff `block` contains a top-level assignment to `name`. */
+/**
+ * True iff `block` RE-SEATS `name` unconditionally, at the function's top level.
+ *
+ * "Re-seats", not "clears" — the distinction matters and a first version of this
+ * guard got it wrong. `newChat` clears (`messages = []`), while `resumeThread`
+ * re-assigns to the incoming thread's data (`messages = localMessages`,
+ * `sessionId = threadId`, `messageQueue = loadPersistedQueue(threadId)`). Both
+ * satisfy the invariant, which is that the field cannot carry over from the
+ * thread being left. A matcher that demanded a null-shaped value rejected the
+ * correct code.
+ *
+ * Two constraints, both earned by mutants that survived `^\s*NAME\s*=`:
+ *
+ *  1. **Exactly one tab.** `\s*` matched any depth, so
+ *     `if (sessionId !== threadId) { compactionOffer = null; }` passed — the bug
+ *     reintroduced behind a condition, guard silent. Statements in both detach
+ *     blocks sit at one tab; anything nested sits deeper.
+ *  2. **Not a self-assignment.** `compactionOffer = compactionOffer;` passed and
+ *     re-seats nothing.
+ *
+ * This proves an unconditional top-level re-seat exists. It does NOT prove the
+ * function is condition-free elsewhere — a source-level guard cannot, and the
+ * docstring should not imply otherwise.
+ */
 function clears(block: string, name: string): boolean {
-	return new RegExp(`^\\s*${name}\\s*=\\s*`, 'm').test(block);
+	const m = new RegExp(`^\\t${name} = (.+?);`, 'm').exec(block);
+	return m !== null && m[1]?.trim() !== name;
 }
 
 describe('chat store — thread-detach reset', () => {
