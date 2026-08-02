@@ -6,10 +6,12 @@ describe('deriveProvenanceTier (§3, first-match-wins, resolves downward)', () =
   it('rule 0: a human review approval outranks untrusted AND every channel', () => {
     // The ONE thing allowed above rule 1, and the ordering is the point: an approval is a human
     // being shown this exact text and vouching for it, which is a different act from a human
-    // WRITE on a turn that happened to have attacker text in context. Untestable structurally:
-    // it is only sound because nothing agent-reachable can set `reviewApproved` — see the field's
-    // docstring. If this ever fires on agent-settable evidence it is an injection escalation
-    // from the floor to the top tier in one step.
+    // WRITE on a turn that happened to have attacker text in context.
+    //
+    // What this test CANNOT establish is that the approval was human — that depends on how the
+    // deployment is configured, not on anything asserted here (see the field's docstring). Read
+    // this as: wherever `reviewApproved` can be set, the floor-to-top-tier escalation is
+    // available in one step. That is the price of the rule, stated rather than assumed away.
     for (const ch of ['user', 'ui', 'agent', 'upload', undefined, 'weird']) {
       expect(deriveProvenanceTier({ sourceChannel: ch, sourceUntrusted: true, reviewApproved: true }))
         .toBe('user_asserted');

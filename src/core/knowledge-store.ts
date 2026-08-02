@@ -857,9 +857,9 @@ export class KnowledgeStore {
 // ── Types + module helpers ──
 
 /**
- * A stored knowledge entry's PERSISTED evidence, in the shape {@link deriveProvenanceTier}
- * consumes. The one place that maps stored columns → evidence, used by the approve path when it
- * derives the tier to store AND by anything re-deriving it afterwards.
+ * A knowledge entry's evidence, in the shape {@link deriveProvenanceTier} consumes. The one
+ * place that maps those columns → evidence: the fresh write, the approve path when it derives
+ * the tier to store, and anything re-deriving it afterwards.
  *
  * Shared on purpose: if the write side and the read side each assembled their own evidence, the
  * invariant "a stored tier is reproducible from its own stored columns" would hold only as long
