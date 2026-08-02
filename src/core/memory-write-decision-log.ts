@@ -42,17 +42,30 @@ export type WriteDecision =
    * had already cleared. That is only possible when the two disagree about a row's tier —
    * and they can, because they read it from different places: the decision above takes it
    * from the recall row (engine.db under the S5b read cutover), the backstop looks it up in
-   * agent-memory.db. At runtime this line is the only trace of that divergence (the engine.db
-   * mirror's own backstop refuses with a bare `return` on a `void` method and reports
-   * nothing — `DEF-dk-trust-gate-consistency` (a)); without it the refusal is silent and its
-   * rate cannot be counted.
+   * agent-memory.db. Without this line the refusal is silent and its rate cannot be counted.
    *
    * `existingTier` here is the tier the BACKSTOP compared — the authoritative agent-memory.db
    * value. The decision's side comes from the `supersede`/`tier-raise` line that precedes it
    * for the same `existingId`, so the two lines together are the two sides. Carrying the
    * decision's tier on BOTH would record the disagreement as an agreement.
    */
-  | 'backstop-refused';
+  | 'backstop-refused'
+  /**
+   * The engine.db MIRROR (`MemoryGraphStore.markSuperseded`) found the stub's tier and the
+   * incoming tier in disagreement. The retire was applied anyway — see that method for why a
+   * mirror cannot be a gate — so this line is a pure DIVERGENCE report, not a blocked write.
+   *
+   * Kept distinct from `backstop-refused` on purpose: there the write was STOPPED, here it
+   * went through. One counter over both would mix a refusal rate with a drift rate and mean
+   * neither. (`DEF-dk-trust-gate-consistency` (a).)
+   *
+   * `existingTier` is the ENGINE.DB stub's tier — the value this check actually compared,
+   * the same convention every other variant follows. The legacy side needs no field: the
+   * mirror is only reached after agent-memory.db ALLOWED the retire, so "legacy ranked the
+   * old row at or below `newTier`" is carried by the variant itself; the exact value is one
+   * lookup by `existingId` away when debugging a specific row.
+   */
+  | 'mirror-tier-diverged';
 
 /** One persisted line: a single write-trust decision. Text-free by construction. */
 export interface MemoryWriteDecisionEntry {

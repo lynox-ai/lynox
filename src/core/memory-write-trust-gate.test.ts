@@ -253,21 +253,29 @@ describe('Backstops — direct retire primitives (both stores)', () => {
     db.close();
   });
 
-  it('MemoryGraphStore.markSuperseded refuses a downgrade when passed a lower newTier', () => {
+  it('MemoryGraphStore.markSuperseded REPORTS a tier disagreement and retires anyway', () => {
     const engine = new EngineDb(join(dir, 'engine.db'), 'vault-key-bs');
     const mgs = new MemoryGraphStore(engine);
     const emb = Buffer.alloc(8 * 8);
     mgs.upsertStub({ id: 'truth', text: 't', namespace: NS, scopeType: 'context', scopeId: 's', sourceType: 'user_asserted', embedding: emb });
-    // A lower-trust supersede is refused (newTier below the stored tier).
-    mgs.markSuperseded('truth', 'incoming', { newTier: 'agent_inferred' });
-    expect(mgs.getStub('truth')!.is_active).toBe(1);
-    // An equal-or-higher newTier retires it.
-    mgs.markSuperseded('truth', 'incoming', { newTier: 'user_asserted' });
+    // A lower incoming tier than the stub holds: the two stores disagree about this row
+    // (agent-memory.db already allowed the retire, or the mirror would not be running).
+    // Reported with BOTH compared tiers — and the retire still lands, because refusing here
+    // could only split the two stores, never undo the legacy retire that already committed.
+    expect(mgs.markSuperseded('truth', 'incoming', { newTier: 'agent_inferred' }))
+      .toEqual({ newTier: 'agent_inferred', stubTier: 'user_asserted' });
     expect(mgs.getStub('truth')!.is_active).toBe(0);
-    // Undefined newTier (consolidation mirror / flag off) → unconditional legacy retire.
+    // Agreement (equal-or-higher incoming tier) → nothing to report, same retire.
     mgs.upsertStub({ id: 'truth2', text: 't2', namespace: NS, scopeType: 'context', scopeId: 's', sourceType: 'user_asserted', embedding: emb });
-    mgs.markSuperseded('truth2', 'incoming2');
+    expect(mgs.markSuperseded('truth2', 'incoming', { newTier: 'user_asserted' })).toBeNull();
     expect(mgs.getStub('truth2')!.is_active).toBe(0);
+    // Undefined newTier (consolidation mirror / flag off) → no comparison at all.
+    mgs.upsertStub({ id: 'truth3', text: 't3', namespace: NS, scopeType: 'context', scopeId: 's', sourceType: 'user_asserted', embedding: emb });
+    expect(mgs.markSuperseded('truth3', 'incoming3')).toBeNull();
+    expect(mgs.getStub('truth3')!.is_active).toBe(0);
+    // No stub to compare → no report; the UPDATE no-ops on a missing row as before.
+    expect(mgs.markSuperseded('ghost', 'incoming', { newTier: 'external_unverified' })).toBeNull();
+    expect(mgs.getStub('ghost')).toBeNull();
     engine.close();
   });
 
