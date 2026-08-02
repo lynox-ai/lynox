@@ -1036,6 +1036,47 @@ describe('OpenAIAdapter', () => {
       expect(thinkingDeltas(events)).toEqual(['via openrouter']);
     });
 
+    it('keeps the channel when a proxy sends an EMPTY reasoning_content beside `reasoning`', async () => {
+      // `?? ` would pick the empty string and lose the channel. Not observed at
+      // any provider — insurance on a field two vendors spell differently.
+      const events = await runStream([
+        { id: 'r-8', choices: [{ index: 0, delta: { reasoning_content: '', reasoning: 'über den proxy' }, finish_reason: null }] },
+        { id: 'r-8', choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] },
+      ]);
+      expect(thinkingDeltas(events)).toEqual(['über den proxy']);
+    });
+
+    it('keeps block indices disjoint when reasoning arrives BETWEEN two content deltas', async () => {
+      // glm-5p2 does reasoning-then-content, so this ordering is not observed
+      // there — but the code handles it (the text-block close above the
+      // reasoning branch exists for nothing else), so it needs a test. A shared
+      // index here would make StreamProcessor append text onto the thinking
+      // block.
+      const events = await runStream([
+        { id: 'r-9', choices: [{ index: 0, delta: { content: 'Die Rechnung ' }, finish_reason: null }] },
+        { id: 'r-9', choices: [{ index: 0, delta: { reasoning_content: 'Moment.' }, finish_reason: null }] },
+        { id: 'r-9', choices: [{ index: 0, delta: { content: 'betraegt 1200 Euro.' }, finish_reason: 'stop' }] },
+      ]);
+
+      const starts = events.filter(e => e.type === 'content_block_start')
+        .map(e => (e as { index: number; content_block: { type: string } }));
+      expect(starts.map(s => s.content_block.type)).toEqual(['text', 'thinking', 'text']);
+      expect(starts.map(s => s.index)).toEqual([0, 1, 2]);
+      expect(events.filter(e => e.type === 'content_block_stop')).toHaveLength(3);
+
+      // The user-visible text must survive the split intact. (The next request's
+      // history does NOT — `translateMessages` joins text parts with a newline
+      // and plants one mid-sentence. Pre-existing, tracked separately; asserted
+      // here only so the split itself is not blamed for it later.)
+      const processor = new StreamProcessor(async () => { /* no-op */ }, 'test-agent');
+      const result = await processor.process(
+        (async function* () { for (const e of events) yield e; })(),
+      );
+      const text = result.content.filter(b => b.type === 'text')
+        .map(b => (b as { text: string }).text).join('');
+      expect(text).toBe('Die Rechnung betraegt 1200 Euro.');
+    });
+
     it('leaves a non-reasoning provider byte-identical (no thinking block)', async () => {
       const events = await runStream([
         { id: 'r-6', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hallo' }, finish_reason: null }] },

@@ -478,12 +478,18 @@ async function* translateStream(
         // billed 891 completion tokens and split 3242 chars of
         // `reasoning_content` against 492 chars of `content`, and a
         // tool-calling turn emitted 27 reasoning chunks with `content` empty
-        // throughout. Dropping the channel cost three things: the user paid for
-        // ~87% of the tokens with nothing to show, the stream produced NO
-        // events for the whole reasoning phase (so the UI sat on a dead
-        // spinner and `lastEventAt` went stale on exactly the slow turns), and
-        // a sub-agent's run record showed 8.7k output tokens against 186
-        // characters of result.
+        // throughout. Dropping the channel cost two things: the user paid for
+        // ~87% of the tokens with nothing to show, and a sub-agent's run record
+        // showed 8.7k output tokens against 186 characters of result.
+        //
+        // An earlier version of this comment also claimed `lastEventAt` went
+        // stale on the slow turns. That is WRONG and the review caught it: both
+        // `lastEventAt`s are heartbeat-driven, not event-driven — the server
+        // bumps its copy on a 10 s interval and the client bumps on the
+        // `heartbeat` SSE event, so model silence cannot age either one. What IS
+        // true is that the web UI renders no activity during the reasoning
+        // phase; the CLI is unaffected either way (`showThinking` defaults off
+        // and its spinner does not stop on `thinking`).
         //
         // Mapped to an Anthropic `thinking` block, which the rest of the
         // pipeline already handles: `stream.ts` turns `thinking_delta` into a
@@ -491,8 +497,13 @@ async function* translateStream(
         // message history before the next request — so nothing here can be
         // echoed back to a provider that would reject it. `translateMessages`
         // is allow-list based (text + tool_use only) and would drop it anyway.
+        // `||`, not `??`: a normalising proxy that populates BOTH keys and
+        // leaves `reasoning_content` as the empty string would lose the channel
+        // entirely under `??` (`'' ?? x` is `''`). No provider is known to do
+        // that — this is cheap insurance on a field two vendors already spell
+        // differently, not a fix for an observed break.
         const reasoningPart = extractDeltaText(
-          choice.delta.reasoning_content ?? choice.delta.reasoning,
+          choice.delta.reasoning_content || choice.delta.reasoning,
         );
         if (reasoningPart) {
           // A thinking block cannot interleave with a text block, and reasoning
