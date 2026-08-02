@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import type { SubjectStore, SubjectKind, SubjectRow } from './subject-store.js';
 import { canSupersede, deriveProvenanceTier, provenanceRank } from './provenance.js';
+import type { ProvenanceEvidence } from './provenance.js';
 import { subjectsDisagree } from './contradiction-detector.js';
 import { maskSecretPatterns, matchesSecretPattern, matchesSecretPatternStrict } from './secret-store.js';
 import type { ProvenanceKind } from '../types/memory.js';
@@ -125,10 +126,14 @@ export class KnowledgeStore {
     if (params.text.length > MAX_KNOWLEDGE_ENTRY_CHARS) {
       throw new Error(`knowledge entry text is ${params.text.length} chars, over the ${MAX_KNOWLEDGE_ENTRY_CHARS}-char store limit.`);
     }
-    const tier = deriveProvenanceTier({
-      sourceChannel: params.sourceChannel,
-      sourceUntrusted: params.sourceUntrusted,
-    });
+    // Through the shared mapper like every other derivation site: a fresh write has no review
+    // action yet, and saying so explicitly is what keeps this path from becoming a second,
+    // slightly-different definition of the same evidence.
+    const tier = deriveProvenanceTier(knowledgeEvidence({
+      sourceChannel: params.sourceChannel ?? null,
+      sourceUntrusted: params.sourceUntrusted === true,
+      reviewAction: null,
+    }));
     // Rule 1 of provenance.ts already maps sourceUntrusted → external_unverified; the routing
     // gate keys off the SAME signal, so an untrusted write is queued, never trusted-written.
     const status: KnowledgeStatus = params.sourceUntrusted === true ? 'pending_review' : 'active';
@@ -524,21 +529,33 @@ export class KnowledgeStore {
     // Only rewrite the ciphertext when the reviewer actually EDITED the text — a plain approve
     // leaves it unchanged, and re-encrypting produces a fresh (IV-randomised) ciphertext for no
     // reason. edit_approve → write the new text; approve → keep the stored ciphertext.
+    // DERIVE the approved tier rather than assert it. The two are the same value today (rule 0
+    // returns `user_asserted`), so this is not about the result — it is about there being ONE
+    // source for it. A hardcoded `'user_asserted'` here is a second, silent definition of the
+    // tier that the evidence columns cannot reproduce, which is exactly the invariant
+    // `deriveProvenanceTier` documents: the tier is a pure function of persisted evidence, so a
+    // derivation change is a recomputation and never a migration. Running it through the
+    // function keeps stored and re-derived in step by construction, including if rule 0 moves.
+    const approvedTier = deriveProvenanceTier(knowledgeEvidence({
+      sourceChannel: row.source_channel,
+      sourceUntrusted: row.source_untrusted === 1,
+      reviewAction: action,
+    }));
     if (action === 'edit_approve') {
       this.db.prepare(`
         UPDATE knowledge_entries
-        SET status = 'active', source_type = 'user_asserted', text = ?, subject_id = ?, subject_hint = NULL,
+        SET status = 'active', source_type = ?, text = ?, subject_id = ?, subject_hint = NULL,
             reviewed_at = datetime('now'), review_action = ?, updated_at = datetime('now')
         WHERE id = ?
-      `).run(this.engine.enc(text), subjectId, action, id);
+      `).run(approvedTier, this.engine.enc(text), subjectId, action, id);
       return this.getEntry(id);
     }
     this.db.prepare(`
       UPDATE knowledge_entries
-      SET status = 'active', source_type = 'user_asserted', subject_id = ?, subject_hint = NULL,
+      SET status = 'active', source_type = ?, subject_id = ?, subject_hint = NULL,
           reviewed_at = datetime('now'), review_action = ?, updated_at = datetime('now')
       WHERE id = ?
-    `).run(subjectId, action, id);
+    `).run(approvedTier, subjectId, action, id);
     return this.getEntry(id);
   }
 
@@ -838,6 +855,29 @@ export class KnowledgeStore {
 }
 
 // ── Types + module helpers ──
+
+/**
+ * A knowledge entry's evidence, in the shape {@link deriveProvenanceTier} consumes. The one
+ * place that maps those columns → evidence: the fresh write, the approve path when it derives
+ * the tier to store, and anything re-deriving it afterwards.
+ *
+ * Shared on purpose: if the write side and the read side each assembled their own evidence, the
+ * invariant "a stored tier is reproducible from its own stored columns" would hold only as long
+ * as two mappings agreed, and nothing would notice when they stopped. `review_action` is the
+ * audit column the review UPDATE already writes — rule 0 reads a value that was persisted
+ * anyway, which is why closing (d) needed no new column.
+ */
+export function knowledgeEvidence(
+  e: { sourceChannel: string | null; sourceUntrusted: boolean; reviewAction: string | null },
+): ProvenanceEvidence {
+  return {
+    sourceChannel: e.sourceChannel ?? undefined,
+    sourceUntrusted: e.sourceUntrusted,
+    // `reject` is deliberately absent: a rejected entry is not vouched for, and its status keeps
+    // it out of recall anyway. Only the two accepting actions count as a human vouching.
+    reviewApproved: e.reviewAction === 'approve' || e.reviewAction === 'edit_approve',
+  };
+}
 
 export interface KnowledgeWriteParams {
   text: string;
