@@ -1648,6 +1648,13 @@
 	const ctxModel = $derived(getSessionModel());
 	const ctxBudget = $derived(getContextBudget());
 	const compactionOffer = $derived(getCompactionOffer());
+	/**
+	 * The percentage the compaction offer is actually judged on: the engine's
+	 * cost-aware budget figure, not raw window fill. `usagePercent` is the
+	 * fallback for an engine too old to send `budgetPercent`. See the offer bar
+	 * below for why the difference is load-bearing.
+	 */
+	const offerPct = $derived(ctxBudget?.budgetPercent ?? ctxBudget?.usagePercent);
 	const ctxWindow = $derived(getContextWindow());
 	const compacting = $derived(getIsCompacting());
 
@@ -3364,8 +3371,19 @@
 	     window, so a "%" here contradicts the footer's window meter on a
 	     large-window model (e.g. Sonnet 5's 1M) — the copy carries the reason
 	     (keep replies fast + low-cost), the footer stays the honest window gauge. -->
-	{#if compactionOffer !== null || (ctxBudget && ctxBudget.usagePercent >= 80)}
-		{@const rawPct = compactionOffer ?? ctxBudget?.usagePercent ?? 80}
+	<!-- The fallback arm reads `budgetPercent` — the SAME cost-aware figure the
+	     engine fires the offer on (`session.ts` `_compactionUsagePercent`, put on
+	     the wire beside every context_budget event) — and falls back to
+	     `usagePercent` only when the engine is too old to send it. Using the raw
+	     window fill here contradicted the comment above and made the arm dead on
+	     any large window: the offer fires at 150k occupancy, so on Mistral's 262k
+	     window that is 57 % fill and `usagePercent >= 80` (209k) is never reached.
+	     That did not matter while `compactionOffer` persisted across threads —
+	     the bug it masked surfaced the moment that leak was fixed, because the
+	     engine's `_compactionOffered` is a per-Session one-shot latch that
+	     survives a thread switch and will not re-emit. -->
+	{#if compactionOffer !== null || (offerPct !== undefined && offerPct >= 80)}
+		{@const rawPct = compactionOffer ?? offerPct ?? 80}
 		{@const nearNet = rawPct >= 88}
 		<div
 			class="border-t {nearNet ? 'border-warning/30 bg-warning/10 text-warning/90' : 'border-border bg-bg-subtle text-text-subtle'} px-4 py-1.5 text-xs"
