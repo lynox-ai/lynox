@@ -50,10 +50,16 @@ export const VOXTRAL_TTS_MODEL = 'voxtral-mini-tts-2603';
 
 /**
  * Default voice — English, reads DE text with a light English accent. Rafael
- * approved on the Phase 0 p300/p3000 DE samples. `de_*` are NOT available:
- * re-checked 2026-07-26 against the live catalog (30 voices, all en_us/en_gb).
- * The live fetch below will surface `de_*` in the Settings picker automatically
- * the moment Mistral ships them — nothing to do here until then.
+ * approved on the Phase 0 p300/p3000 DE samples. `de_*` are still NOT available:
+ * re-checked 2026-08-02 against the live catalog (30 voices — 8 en_us, 16 en_gb,
+ * 6 fr_fr; no German).
+ *
+ * ⚠️ "The live fetch below will surface `de_*` automatically the moment Mistral
+ * ships them — nothing to do here until then" used to stand here and is FALSE.
+ * The fetch paginates with `page`, which this endpoint ignores, so it only ever
+ * sees the first 10 slugs — a German voice would land past that and stay
+ * invisible. There IS something to do first, and it is the pagination fix (see
+ * VOICES_BASE_URL). The same false promise sat on FALLBACK_VOICES below.
  */
 export const DEFAULT_VOICE = 'en_paul_neutral';
 
@@ -82,10 +88,16 @@ const VOICES_MAX_PAGES = 100;
 
 /**
  * Fallback voice catalog for the Settings picker when the live `/v1/audio/voices`
- * call is unreachable. A representative EN subset (live catalog is 30 EN voices
- * as of 2026-07-26); safe to stay out-of-date because the live fetch overwrites
- * this in the UI the moment Mistral is reachable. `de_*` slugs will appear
- * automatically once the catalog ships them — do not add hardcoded DE entries here.
+ * call is unreachable. A representative EN subset; safe to stay out-of-date
+ * because the live fetch overwrites this in the UI the moment Mistral is
+ * reachable. Still do not add hardcoded DE entries — there is no German voice to
+ * add (live catalog 2026-08-02: 8 en_us, 16 en_gb, 6 fr_fr).
+ *
+ * ⚠️ "`de_*` slugs will appear automatically once the catalog ships them" used
+ * to stand here and is FALSE for the same reason as on DEFAULT_VOICE: the live
+ * fetch paginates with `page`, which the endpoint ignores, so it sees only the
+ * first 10 slugs. Note this list is also EN-only while six `fr_marie_*` voices
+ * exist — the fallback mirrors what the broken fetch can see, not the catalog.
  */
 const FALLBACK_VOICES: ReadonlyArray<VoiceInfo> = [
   { id: 'en_paul_neutral',    language: 'en', description: 'Paul — neutral' },
