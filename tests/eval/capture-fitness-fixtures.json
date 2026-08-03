@@ -1,0 +1,66 @@
+{
+  "readme": "Capture fitness: does the model record a durable fact when one is present, and stay quiet when none is? Each case runs as ONE turn against a live engine. Shapes are the axis that matters — real users almost never dictate 'for the record', so a model that only fires on S1 captures nothing in practice.",
+  "sourceFile": "branchennews.txt",
+  "shapes": [
+    {
+      "id": "S1-dictated",
+      "expect": "capture",
+      "why": "The explicit control. If this fails the wiring is broken, not the model.",
+      "cases": [
+        "Lies bitte {FILE} und fass mir in zwei Saetzen zusammen, was davon fuer uns relevant ist. Und fuers Protokoll: unser Kunde Meridian ist zum 1. September auf den Jahresvertrag umgestiegen, neue Ansprechpartnerin ist Frau Keller.",
+        "Schau kurz in {FILE}. Bitte merk dir ausserdem: die Firma Talbach zahlt ab Q4 quartalsweise statt monatlich.",
+        "Lies {FILE}. Fuer die Akten: Ansprechpartner bei Orion ist ab sofort Herr Vogt, nicht mehr Frau Reiss."
+      ]
+    },
+    {
+      "id": "S2-incidental",
+      "expect": "capture",
+      "why": "The fact arrives in a subordinate clause while the ASK is something else. This is how operators actually mention things.",
+      "cases": [
+        "Lies {FILE} und sag mir in zwei Saetzen, ob das fuer uns relevant ist. Meridian laeuft uebrigens jetzt auf dem Jahresvertrag.",
+        "Kannst du mir {FILE} zusammenfassen? Talbach hat uebrigens den Rahmenvertrag um zwei Jahre verlaengert.",
+        "Wirf einen Blick in {FILE}. Nebenbei: bei Orion ist Herr Vogt jetzt unser Hauptkontakt."
+      ]
+    },
+    {
+      "id": "S3-decision",
+      "expect": "capture",
+      "why": "A decision the operator makes ABOUT THEIR OWN work, derived from research. The DK prompt names this as the one durable output of a research turn.",
+      "cases": [
+        "Lies {FILE}. Auf der Basis entscheide ich: wir gehen bei der Preisrunde im Herbst NICHT mit, wir bleiben bei unserer Liste.",
+        "Schau dir {FILE} an. Wir haben entschieden: das Thema Konsolidierung verfolgen wir dieses Jahr nicht weiter.",
+        "Lies {FILE} und dann halten wir fest: unsere Positionierung bleibt Premium, wir ziehen preislich nicht nach."
+      ]
+    },
+    {
+      "id": "S4-briefing",
+      "expect": "capture",
+      "why": "The user DESCRIBES a client. The DK prompt calls this out by name ('this includes briefings and summaries').",
+      "cases": [
+        "Kurzes Briefing zu einem Kunden: Nordfeld GmbH, Maschinenbau, seit 2023 bei uns, Managed-Tarif, Ansprechpartnerin Frau Dr. Amrein, zahlt jaehrlich im Voraus.",
+        "Damit du im Bild bist: Kunde Seewald ist eine Anwaltskanzlei, acht Personen, nutzt uns fuer Mandatsablage, Rechnung geht an die Buchhaltung von Herrn Kunz.",
+        "Zum Projekt Aurora: Auftraggeber ist die Stadtwerke Lindau, Laufzeit bis Maerz, technische Ansprechpartnerin ist Frau Bregenz."
+      ]
+    },
+    {
+      "id": "N1-research-only",
+      "expect": "silent",
+      "why": "Pure third-party content. Capturing here is the failure the DK prompt's suppression rule exists to prevent.",
+      "cases": [
+        "Lies {FILE} und fass es mir in zwei Saetzen zusammen.",
+        "Was steht in {FILE}? Kurz halten bitte.",
+        "Gib mir die Kernaussage aus {FILE}."
+      ]
+    },
+    {
+      "id": "N2-transient",
+      "expect": "silent",
+      "why": "Transient status and one-off computation — explicitly named as never-durable.",
+      "cases": [
+        "Ich habe gerade die Datei hochgeladen, sag mir wenn du sie siehst: {FILE}",
+        "Rechne mir kurz aus: wenn 47 Eintraege in 11 Tagen entstehen, wie viele pro Tag sind das?",
+        "Lies {FILE} und sag mir nur ob das Wort Preisliste vorkommt."
+      ]
+    }
+  ]
+}
