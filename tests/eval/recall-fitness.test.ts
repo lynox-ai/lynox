@@ -1,0 +1,153 @@
+/**
+ * Recall fitness — does a fact that WAS recorded come back when it is needed?
+ *
+ * WHY THIS EXISTS. The capture-fitness eval (`capture-fitness-runner.mjs`) measures the write
+ * half and stops there. It cannot see the failure this file measures: an entry that landed
+ * `active`, is not pinned, and is therefore absent from every turn's automatic context. The
+ * canary's "memory feels empty" is compatible with a store that has the fact — so the write
+ * number alone was never enough to answer it.
+ *
+ * WHAT IT SEPARATES, and why the split is the whole point. DK has TWO recall surfaces:
+ *   - the AUTOMATIC block (`renderBlocks`) — assembled by the engine every turn, no model
+ *     decision involved. `session.ts:851`.
+ *   - the TOOL (`recall`) — reached only if the model decides to call it.
+ * The same eval that measured capture also measured that this model class initiates a memory
+ * tool on a minority of the turns where it should. Anything that only the TOOL can reach is
+ * therefore reachable in principle and missing in practice, and a number that merges the two
+ * surfaces hides exactly that.
+ *
+ * NO MODEL RUNS HERE, deliberately. Both surfaces are pure store functions over a real
+ * `engine.db`, so this is deterministic, free, and CI-able — unlike the capture eval, which
+ * needs a live engine and a provider key. What it therefore cannot tell you: whether the model
+ * USES what the automatic block handed it, or whether it calls the tool. Those stay with the
+ * live-engine eval.
+ */
+import { describe, it, expect, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { EngineDb } from '../../src/core/engine-db.js';
+import { SubjectStore } from '../../src/core/subject-store.js';
+import { KnowledgeStore } from '../../src/core/knowledge-store.js';
+
+/** One recorded fact plus the way an operator would actually ask for it back. */
+interface RecallCase {
+  readonly id: string;
+  /** The fact, as the model would `remember` it. */
+  readonly text: string;
+  /** The `subject` the model passes — a full legal name, which is what it reads off a briefing. */
+  readonly subject: string;
+  /** `pin: true` is documented as "only for the few facts you want in EVERY future turn". */
+  readonly pinned: boolean;
+  /** How the operator refers to the subject when they ask. Short form is the realistic case. */
+  readonly query: string;
+  /** A distinctive token of the fact — its presence in the rendered block is the hit test. */
+  readonly needle: string;
+}
+
+const CASES: readonly RecallCase[] = [
+  {
+    id: 'short-name-pinned',
+    text: 'Nordfeld GmbH ist Maschinenbau-Kunde seit 2023, Managed-Tarif, zahlt jährlich im Voraus. Ansprechpartnerin: Dr. Amrein.',
+    subject: 'Nordfeld GmbH', pinned: true,
+    query: 'Was weisst du über den Kunden Nordfeld? Wer ist dort meine Ansprechpartnerin?',
+    needle: 'Amrein',
+  },
+  {
+    id: 'full-name-pinned',
+    text: 'Nordfeld GmbH ist Maschinenbau-Kunde seit 2023, Managed-Tarif, zahlt jährlich im Voraus. Ansprechpartnerin: Dr. Amrein.',
+    subject: 'Nordfeld GmbH', pinned: true,
+    query: 'Erzähl mir was über Nordfeld GmbH.',
+    needle: 'Amrein',
+  },
+  {
+    id: 'full-name-unpinned',
+    text: 'Projekt Aurora: Auftraggeber Stadtwerke Lindau, Laufzeit bis März, technische Ansprechpartnerin Frau Bregenz.',
+    subject: 'Aurora', pinned: false,
+    query: 'Wie ist der Stand bei Aurora?',
+    needle: 'Bregenz',
+  },
+  {
+    id: 'no-subject-named',
+    text: 'Seewald ist eine Anwaltskanzlei mit acht Personen, nutzt uns für die Mandatsablage.',
+    subject: 'Seewald', pinned: true,
+    query: 'Was läuft aktuell bei unseren Kunden?',
+    needle: 'Mandatsablage',
+  },
+];
+
+describe('recall fitness — the automatic surface vs the tool surface', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  function seeded(): KnowledgeStore {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-recall-fitness-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const ks = new KnowledgeStore(engine, new SubjectStore(engine));
+    for (const c of CASES) {
+      // The real write path, on the provenance a clean conversational turn produces:
+      // channel `agent` (a model-authored `remember`), not untrusted → lands `active`.
+      ks.write({ text: c.text, subjectName: c.subject, sourceChannel: 'agent', sourceUntrusted: false, pin: c.pinned });
+    }
+    return ks;
+  }
+
+  it('reports both surfaces per case', () => {
+    const ks = seeded();
+    const rows = CASES.map(c => {
+      const block = ks.renderBlocks({ turnText: c.query });
+      const hits = ks.recall({ query: c.query, limit: 8 });
+      return {
+        id: c.id,
+        auto: block.includes(c.needle),
+        tool: hits.some(h => h.text.includes(c.needle)),
+      };
+    });
+    const auto = rows.filter(r => r.auto).length;
+    const tool = rows.filter(r => r.tool).length;
+
+    const lines = rows.map(r => `  ${r.id.padEnd(22)} auto ${r.auto ? 'HIT ' : 'miss'}   tool ${r.tool ? 'HIT' : 'miss'}`);
+    console.log(
+      `\n=== recall fitness ===\n${lines.join('\n')}\n`
+      + `  ${'—'.repeat(46)}\n`
+      + `  automatic (every turn, no model decision)  ${auto}/${rows.length}\n`
+      + `  tool (only if the model calls recall)      ${tool}/${rows.length}\n`,
+    );
+
+    // The tool surface is the one the architecture leans on, so it is the one held to an
+    // invariant: every recorded fact must be reachable by a query that names it.
+    expect(tool).toBe(rows.length);
+    // The automatic surface is NOT asserted at a rate — it is deliberately narrow (pinned
+    // entries of a subject named in the turn), and pinning that down as a number would freeze
+    // today's gap into a passing test. The console split above is the signal.
+  });
+
+  it('the automatic block renders a pinned fact when the subject is named EXACTLY', () => {
+    const ks = seeded();
+    const block = ks.renderBlocks({ turnText: 'Erzähl mir was über Nordfeld GmbH.' });
+    expect(block).toContain('Nordfeld GmbH');
+    expect(block).toContain('Amrein');
+  });
+
+  it('the automatic block misses the SAME pinned fact under the short name', () => {
+    // Not an approval — a pin. `_mentions` substring-matches the canonical name, and nothing
+    // registers "Nordfeld" as an alias of "Nordfeld GmbH", so the form an operator actually
+    // types resolves no subject at all. This test exists so that closing the gap has to come
+    // here and say so, rather than the gap staying invisible.
+    const ks = seeded();
+    const block = ks.renderBlocks({ turnText: 'Was weisst du über den Kunden Nordfeld?' });
+    expect(block).not.toContain('Amrein');
+    // …while the tool surface does find it — the fact is present, only the automatic path misses.
+    expect(ks.recall({ query: 'Was weisst du über den Kunden Nordfeld?' }).some(h => h.text.includes('Amrein'))).toBe(true);
+  });
+
+  it('the automatic block skips an UNPINNED fact even when its subject is named exactly', () => {
+    const ks = seeded();
+    const block = ks.renderBlocks({ turnText: 'Wie ist der Stand bei Aurora?' });
+    // The subject card renders — so the miss is not a resolution failure…
+    expect(block).toContain('Aurora');
+    // …the card carries only pinned entries (`_renderSubjectCard`), and this one is not pinned.
+    expect(block).not.toContain('Bregenz');
+  });
+});
