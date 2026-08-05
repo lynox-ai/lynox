@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import type { SubjectStore, SubjectKind, SubjectRow } from './subject-store.js';
+import { organisationShortForm } from './subject-store.js';
 import { canSupersede, deriveProvenanceTier, provenanceRank } from './provenance.js';
 import type { ProvenanceEvidence } from './provenance.js';
 import { subjectsDisagree } from './contradiction-detector.js';
@@ -684,11 +685,24 @@ export class KnowledgeStore {
     if (candidates.size === 0) return [];
 
     const hay = turnText.toLowerCase();
+    const rows = [...candidates].map(id => this.subjects.getSubject(id)).filter(
+      (s): s is SubjectRow => s !== null && !s.archived_at,
+    );
+    // Legal-form-insensitive matching, so a turn saying "Nordfeld" reaches "Nordfeld GmbH".
+    // Scoped to short forms that are UNIQUE among the candidates: if two of the operator's
+    // clients differ only in legal form, "Nordfeld" names neither of them, and rendering both
+    // cards would put one client's facts in front of a question about the other. The full name
+    // still matches either — only the abbreviation is withheld.
+    const shortCount = new Map<string, number>();
+    for (const s of rows) {
+      const short = organisationShortForm(s.name)?.toLowerCase();
+      if (short) shortCount.set(short, (shortCount.get(short) ?? 0) + 1);
+    }
     const matched = new Map<string, string>(); // id → updated_at (for ordering)
-    for (const id of candidates) {
-      const subj = this.subjects.getSubject(id);
-      if (!subj || subj.archived_at) continue;
-      if (this._mentions(hay, subj)) matched.set(id, subj.updated_at);
+    for (const subj of rows) {
+      const short = organisationShortForm(subj.name);
+      const extra = short && shortCount.get(short.toLowerCase()) === 1 ? [short] : [];
+      if (this._mentions(hay, subj, extra)) matched.set(subj.id, subj.updated_at);
     }
     // ∪ the explicit thread anchor + session override — but ONLY if they too carry active
     // entries (H2), so an anchored ghost still renders nothing.
@@ -702,9 +716,10 @@ export class KnowledgeStore {
     return [...matched.entries()].sort((a, b) => b[1].localeCompare(a[1])).map(([id]) => id);
   }
 
-  /** Whole-ish match of a subject's name or any alias in the (already-lowercased) turn text. */
-  private _mentions(hayLower: string, subj: SubjectRow): boolean {
-    const names = [subj.name, ...this._aliases(subj.aliases)];
+  /** Whole-ish match of a subject's name, any alias, or a caller-vetted extra surface form
+   *  (the unique-short-form case) in the (already-lowercased) turn text. */
+  private _mentions(hayLower: string, subj: SubjectRow, extraForms: readonly string[] = []): boolean {
+    const names = [subj.name, ...this._aliases(subj.aliases), ...extraForms];
     for (const n of names) {
       const needle = n.trim().toLowerCase();
       if (needle.length < 2) continue;
@@ -767,7 +782,14 @@ export class KnowledgeStore {
         ?? orgAlias?.row
         ?? this.subjects.findCanonical(explicit, 'person');
       if (!certain && orgAlias?.ambiguous) return [];
-      const hit = certain ?? this.subjects.findByAlias(explicit, 'person');
+      // Last, and only for a name nothing above recognised: legal-form-insensitive matching, so
+      // `Nordfeld` reaches `Nordfeld GmbH`. It runs AFTER every exact stage on purpose — it is
+      // the widest matcher here, and ahead of them it could beat an exact hit on another row.
+      // Ambiguity stops the chain exactly as the alias stage does: two clients differing only in
+      // legal form are the pair this must never pick between.
+      const shortForm = certain ? null : this.subjects.findByShortFormResolved(explicit, 'organization');
+      if (!certain && shortForm?.ambiguous) return [];
+      const hit = certain ?? shortForm?.row ?? this.subjects.findByAlias(explicit, 'person');
       // Named an explicit subject we don't know → return an EMPTY scope, NOT a global scan.
       // A scoped query that fell back to global would surface OTHER clients' facts — the exact
       // cross-client bleed the substrate exists to prevent (§1). No match ⇒ no results.

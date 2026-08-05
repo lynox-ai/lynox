@@ -226,6 +226,47 @@ const NAME_DEDUP_KINDS: ReadonlySet<string> = new Set(NAME_DEDUPED_SUBJECT_KINDS
 const ENGAGEMENT_LEADING_GENERIC_RE = /^(?:projekt|project|projet)[\s:]+/iu;
 
 /**
+ * Trailing legal form of an organisation name — the ORG analog of
+ * {@link ENGAGEMENT_LEADING_GENERIC_RE}, and the reason "Aurora" resolved while "Nordfeld"
+ * did not: the engagement kind has had this since the start and the organisation kind never
+ * got it.
+ *
+ * Deliberately reaches past the home market ({@link ../../docs} — the product is not CH/DE
+ * scoped): DACH, Romance, Benelux, Nordic, UK/US, and the Anglo compound forms. Not
+ * exhaustive and cannot be — an unknown form simply means the short name does not resolve,
+ * which is today's behaviour for every name, so a gap here is never a REGRESSION.
+ *
+ * `&` and `.` are allowed INSIDE a token so `S.p.A.` / `S.à r.l.` match as one unit; the
+ * leading `[\s,]` requires a real token boundary, so `AGRA` does not end in `AG`.
+ */
+const ORG_LEGAL_FORM_RE = new RegExp(
+  '[\\s,]+(?:'
+  + 'gmbh(?:\\s*&\\s*co\\.?\\s*kg)?|mbh|ag|kgaa|kg|ohg|ug|e\\.?\\s?k\\.?|gbr|se|eg'   // DACH
+  + '|s\\.?a\\.?s|s\\.?a\\.?r\\.?l|s\\.?à\\s?r\\.?l|s\\.?a|s\\.?l|s\\.?r\\.?l|s\\.?p\\.?a'  // FR/ES/IT
+  + '|b\\.?v|n\\.?v|v\\.?o\\.?f'                                                      // NL/BE
+  + '|a\\/s|aps|ab|as|oyj|oy|hf'                                                      // Nordics
+  + '|pty\\s+ltd|ltd|limited|llc|llp|l\\.?p|plc|inc|incorporated|corp|corporation|co'  // UK/US
+  + ')\\.?$',
+  'iu',
+);
+
+/**
+ * The organisation name without its trailing legal form, or `null` when there is nothing to
+ * strip — so a caller can tell "there is a shorter form" from "this IS the short form" without
+ * comparing strings.
+ *
+ * Returns `null` rather than `''` when the name is ONLY a legal form ("GmbH"): an empty short
+ * form would compare equal to every other empty short form and make every such subject a
+ * mutual match. Pure + deterministic.
+ */
+export function organisationShortForm(name: string): string | null {
+  const trimmed = name.trim().replace(/\s+/g, ' ');
+  const stripped = trimmed.replace(ORG_LEGAL_FORM_RE, '').trim();
+  if (stripped === trimmed || stripped.length === 0) return null;
+  return stripped;
+}
+
+/**
  * Canonicalize a subject name for dedup matching: trim, collapse internal
  * whitespace, strip trailing punctuation. For `engagement`, additionally strip a
  * leading generic project word so "Projekt Orion" and "Orion" resolve to the same
@@ -654,6 +695,44 @@ export class SubjectStore {
    */
   findByAlias(alias: string, kind: string, ownerUserId = DEFAULT_OWNER): SubjectRow | null {
     return this.findByAliasResolved(alias, kind, ownerUserId).row;
+  }
+
+  /**
+   * Resolve a name against subjects whose LEGAL FORM differs — "Nordfeld" → "Nordfeld GmbH",
+   * and symmetrically "Nordfeld GmbH" → a subject stored as "Nordfeld". Compares
+   * {@link organisationShortForm} on both sides, so it is direction-free.
+   *
+   * A LAST resort, and the callers must keep it last: it is a strictly wider matcher than
+   * canonical-name and alias lookup, so running it earlier would let "Nordfeld" beat an exact
+   * "Nordfeld" hit on a different row. Same split return as {@link findByAliasResolved}, for
+   * the same reason and with more force — two clients whose names differ ONLY in legal form
+   * are exactly the pair you must never silently pick between, so AMBIGUOUS is an answer here,
+   * not a failure to find one.
+   *
+   * Scans the kind+owner range and folds in JS rather than filtering in SQL — same Unicode
+   * reason as {@link findByAliasResolved}, same cost.
+   */
+  findByShortFormResolved(
+    name: string,
+    kind: string,
+    ownerUserId = DEFAULT_OWNER,
+  ): { row: SubjectRow | null; ambiguous: boolean; ids: string[] } {
+    const target = (organisationShortForm(name) ?? name.trim().replace(/\s+/g, ' ')).toLowerCase();
+    if (target.length === 0) return { row: null, ambiguous: false, ids: [] };
+    const candidates = this.db.prepare(
+      'SELECT id, name FROM subjects WHERE kind = ? AND owner_user_id = ? AND archived_at IS NULL',
+    ).all(kind, ownerUserId) as Array<{ id: string; name: string }>;
+    const hits = candidates.filter(c => {
+      const short = organisationShortForm(c.name);
+      // Only rows that HAVE a short form participate on the stored side when the caller's name
+      // already is one — otherwise "Nordfeld" would match a row literally named "Nordfeld"
+      // that canonical lookup has already declined, which means it was archived or in another
+      // owner scope. Comparing both short forms keeps the relation symmetric and reflexive.
+      return (short ?? c.name.trim().replace(/\s+/g, ' ')).toLowerCase() === target;
+    });
+    const ids = hits.map(h => h.id);
+    if (hits.length !== 1) return { row: null, ambiguous: hits.length > 1, ids };
+    return { row: this.getSubject(hits[0]!.id), ambiguous: false, ids };
   }
 
   // ── Self-person + assignee resolution (S4a task-cutover) ──────

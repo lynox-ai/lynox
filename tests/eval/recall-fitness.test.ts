@@ -80,21 +80,22 @@ describe('recall fitness — the automatic surface vs the tool surface', () => {
   const tmpDirs: string[] = [];
   afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-  function seeded(): KnowledgeStore {
+  function seeded(): { ks: KnowledgeStore; subjects: SubjectStore } {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-recall-fitness-'));
     tmpDirs.push(dir);
     const engine = new EngineDb(join(dir, 'engine.db'), '');
-    const ks = new KnowledgeStore(engine, new SubjectStore(engine));
+    const subjects = new SubjectStore(engine);
+    const ks = new KnowledgeStore(engine, subjects);
     for (const c of CASES) {
       // The real write path, on the provenance a clean conversational turn produces:
       // channel `agent` (a model-authored `remember`), not untrusted → lands `active`.
       ks.write({ text: c.text, subjectName: c.subject, sourceChannel: 'agent', sourceUntrusted: false, pin: c.pinned });
     }
-    return ks;
+    return { ks, subjects };
   }
 
   it('reports both surfaces per case', () => {
-    const ks = seeded();
+    const { ks } = seeded();
     const rows = CASES.map(c => {
       const block = ks.renderBlocks({ turnText: c.query });
       const hits = ks.recall({ query: c.query, limit: 8 });
@@ -124,26 +125,89 @@ describe('recall fitness — the automatic surface vs the tool surface', () => {
   });
 
   it('the automatic block renders a pinned fact when the subject is named EXACTLY', () => {
-    const ks = seeded();
+    const { ks } = seeded();
     const block = ks.renderBlocks({ turnText: 'Erzähl mir was über Nordfeld GmbH.' });
     expect(block).toContain('Nordfeld GmbH');
     expect(block).toContain('Amrein');
   });
 
-  it('the automatic block misses the SAME pinned fact under the short name', () => {
-    // Not an approval — a pin. `_mentions` substring-matches the canonical name, and nothing
-    // registers "Nordfeld" as an alias of "Nordfeld GmbH", so the form an operator actually
-    // types resolves no subject at all. This test exists so that closing the gap has to come
-    // here and say so, rather than the gap staying invisible.
-    const ks = seeded();
+  it('the automatic block reaches the pinned fact under the SHORT name', () => {
+    const { ks } = seeded();
+    const block = ks.renderBlocks({ turnText: 'Was weisst du über den Kunden Nordfeld?' });
+    expect(block).toContain('Amrein');
+  });
+
+  it('the recall TOOL finds the fact when the model passes the short name as `subject`', () => {
+    // The live failure, 2026-08-05: Sonnet called recall({subject: "Nordfeld"}) — the argument
+    // the DK prompt tells it to pass — and the store answered "no matching durable knowledge"
+    // on a store that held the fact. Passing the subject was strictly worse than omitting it.
+    const { ks } = seeded();
+    const q = 'Nordfeld Kunde Ansprechpartnerin';
+    expect(ks.recall({ query: q, subjectName: 'Nordfeld' }).some(h => h.text.includes('Amrein'))).toBe(true);
+    // …and the exact form keeps working, i.e. the wide matcher did not displace the exact one.
+    expect(ks.recall({ query: q, subjectName: 'Nordfeld GmbH' }).some(h => h.text.includes('Amrein'))).toBe(true);
+  });
+
+  it('does not run the short-form scan when an exact name already resolved', () => {
+    // A cost claim, not a behaviour one — which is why it needs its own assert. The short-form
+    // lookup scans the whole kind+owner range and folds in JS (the same deliberate non-indexed
+    // scan `findByAliasResolved` documents as 1.2-3.2x slower, growing with subject count).
+    // Running it after an exact hit changes no answer, so no output-shaped test can see it.
+    const { ks, subjects } = seeded();
+    let calls = 0;
+    const real = subjects.findByShortFormResolved.bind(subjects);
+    subjects.findByShortFormResolved = (...args: Parameters<typeof real>) => { calls++; return real(...args); };
+    expect(ks.recall({ query: 'Ansprechpartnerin', subjectName: 'Nordfeld GmbH' }).length).toBeGreaterThan(0);
+    expect(calls).toBe(0);
+    ks.recall({ query: 'Ansprechpartnerin', subjectName: 'Nordfeld' });
+    expect(calls).toBe(1);
+  });
+
+  it('a short name shared by two clients resolves to NEITHER, on both surfaces', () => {
+    // The direction that makes the fix dangerous if it is built as a plain widening: the
+    // operator has two clients whose names differ only in legal form. "Nordfeld" names neither,
+    // and answering out of either one puts one client's facts under the other client's name.
+    const { ks } = seeded();
+    ks.write({
+      text: 'Nordfeld AG ist ein Zulieferer, Zahlungsziel 60 Tage.',
+      subjectName: 'Nordfeld AG', sourceChannel: 'agent', sourceUntrusted: false, pin: true,
+    });
     const block = ks.renderBlocks({ turnText: 'Was weisst du über den Kunden Nordfeld?' });
     expect(block).not.toContain('Amrein');
-    // …while the tool surface does find it — the fact is present, only the automatic path misses.
-    expect(ks.recall({ query: 'Was weisst du über den Kunden Nordfeld?' }).some(h => h.text.includes('Amrein'))).toBe(true);
+    expect(block).not.toContain('Zahlungsziel');
+    expect(ks.recall({ query: 'Nordfeld', subjectName: 'Nordfeld' })).toHaveLength(0);
+    // The full name still reaches its own client — only the abbreviation is withheld.
+    const exact = ks.renderBlocks({ turnText: 'Was weisst du über Nordfeld GmbH?' });
+    expect(exact).toContain('Amrein');
+    expect(exact).not.toContain('Zahlungsziel');
+  });
+
+  it('an ambiguous short form does not fall THROUGH into the person namespace', () => {
+    // The failure the ambiguity guard in `_resolveRecallScope` exists for, and the only shape
+    // under which it is observable — the stages ahead of it already answer the simpler ones.
+    // A canonical person of that name deliberately WINS (an existing, documented preference),
+    // so the guard only bites when the person match is by ALIAS, which runs after this stage:
+    // two orgs sharing a short form plus a person aliased to it. Without the guard, an
+    // organisation-scoped question is answered out of a person's entries.
+    const { ks, subjects } = seeded();
+    ks.write({
+      text: 'Nordfeld AG ist ein Zulieferer, Zahlungsziel 60 Tage.',
+      subjectName: 'Nordfeld AG', sourceChannel: 'agent', sourceUntrusted: false,
+    });
+    const advisor = subjects.createSubject({
+      kind: 'person', name: 'Konrad Steiner', aliases: ['Konrad Steiner', 'Nordfeld'],
+    });
+    ks.write({
+      text: 'Konrad Steiner ist unser Steuerberater, erreichbar dienstags.',
+      subjectName: 'Konrad Steiner', subjectKind: 'person',
+      sourceChannel: 'agent', sourceUntrusted: false,
+    });
+    expect(subjects.findByAlias('Nordfeld', 'person')?.id).toBe(advisor);
+    expect(ks.recall({ query: 'Nordfeld', subjectName: 'Nordfeld' })).toHaveLength(0);
   });
 
   it('the automatic block skips an UNPINNED fact even when its subject is named exactly', () => {
-    const ks = seeded();
+    const { ks } = seeded();
     const block = ks.renderBlocks({ turnText: 'Wie ist der Stand bei Aurora?' });
     // The subject card renders — so the miss is not a resolution failure…
     expect(block).toContain('Aurora');
