@@ -254,51 +254,105 @@ const ORG_LEGAL_FORM_BASE =
   + '|b\\.?v|n\\.?v|v\\.?o\\.?f'                                                    // NL/BE
   + '|a\\/s|aps|ab|as|oyj|oy|hf'                                                    // Nordics
   + '|pty\\s+ltd|ltd|limited|llc|llp|l\\.?p|plc|inc|incorporated|corp|corporation|co'; // UK/US
+
+/**
+ * The subset of {@link ORG_LEGAL_FORM_BASE} that is not also an ordinary word, for the ONE use
+ * that reads free prose rather than a name: {@link continuesWithLegalForm}.
+ *
+ * `ab` `as` `se` `eg` `co` `hf` `oy` `sa` `sl` `lp` `e.k.` are real legal forms AND everyday
+ * words — German "ab", English "as", French "sa", "co-working". Matching them in running text
+ * made a turn like *"Der Vertrag mit Nordfeld ab Januar"* decline the abbreviation, so a stored
+ * client stopped resolving in ordinary sentences.
+ *
+ * The residual, stated rather than hidden: a turn naming a DIFFERENT entity with one of the
+ * excluded forms ("Nordfeld Oy") can still render the stored "Nordfeld GmbH" card. That is the
+ * automatic surface only — the `recall` path compares the caller's own form and refuses
+ * ({@link findByShortFormResolved}) — and one wrong card in the operator's own focus block is
+ * the cheaper error than a client that stops resolving mid-sentence.
+ */
+const ORG_LEGAL_FORM_UNAMBIGUOUS =
+  'gmbh|mbh|ag|kgaa|kg|ohg|ug|gbr'
+  + '|s\\.?a\\.?s|s\\.?a\\.?r\\.?l|s\\.?à\\s?r\\.?l|s\\.?r\\.?l|s\\.?p\\.?a'
+  + '|b\\.?v|n\\.?v|v\\.?o\\.?f|a\\/s|aps|oyj'
+  + '|pty\\s+ltd|ltd|limited|llc|llp|plc|inc|incorporated|corp|corporation';
+
 const ORG_LEGAL_FORM_RE = new RegExp(
-  `\\s+(?:${ORG_LEGAL_FORM_BASE})(?:\\s*&\\s*co\\.?\\s*(?:kg|ohg))?\\.?$`,
+  `\\s+((?:${ORG_LEGAL_FORM_BASE})(?:\\s*&\\s*co\\.?\\s*(?:kg|ohg))?\\.?)$`,
+  'iu',
+);
+const ORG_LEGAL_FORM_HEAD_RE = new RegExp(
+  `^\\s+(?:${ORG_LEGAL_FORM_UNAMBIGUOUS})(?:\\s*&\\s*co\\.?\\s*(?:kg|ohg))?\\.?(?![\\p{L}\\p{N}])`,
   'iu',
 );
 
-/** Defensive bound on the name handed to {@link organisationShortForm}. `input.subject` on the
+/** Defensive bound on the name handed to {@link splitOrganisationName}. `input.subject` on the
  *  `recall` tool has no schema maxLength, and a stored subject name is model-authored too. */
 const MAX_SHORT_FORM_INPUT = 200;
 
+/** An organisation name split into the part that identifies it and the legal form that follows. */
+export interface OrganisationNameParts {
+  /** The name without its legal form — "Nordfeld GmbH" → "Nordfeld". */
+  readonly short: string;
+  /** The legal form as written, folded for comparison: lowercased, punctuation and spaces
+   *  removed, and abbreviations resolved to their long form, so `S.p.A.`/`SpA`/`s.p.a` and
+   *  `Ltd`/`Limited` each compare equal. */
+  readonly form: string;
+}
+
+/** Abbreviation → long form, for the few legal forms that are routinely written both ways.
+ *  Punctuation folding alone does not join these (`ltd` vs `limited` are different strings),
+ *  and they name the SAME entity type, so refusing across them refuses a company its own name. */
+const ORG_LEGAL_FORM_SYNONYMS: Readonly<Record<string, string>> = {
+  ltd: 'limited', inc: 'incorporated', corp: 'corporation', ptyltd: 'limited',
+};
+
 /**
- * The organisation name without its trailing legal form, or `null` when there is nothing to
- * strip — so a caller can tell "there is a shorter form" from "this IS the short form" without
- * comparing strings.
+ * Split an organisation name into its identifying part and its legal form, or `null` when the
+ * name carries no recognised form.
  *
- * `null` rather than a degenerate residue in three cases, and each one is a real match-everything
- * hazard rather than tidiness: an EMPTY result would compare equal to every other empty result;
- * a residue with no letter or digit (`'- GmbH'` → `'-'`, `'& GmbH'` → `'&'`) is punctuation that
- * names nothing; and an over-long input is refused rather than scanned. Pure + deterministic.
+ * The folded `form` is why this returns a pair rather than just the short name. Comparing only
+ * short names lets `Nordfeld AG` answer out of `Nordfeld GmbH` — two companies. Refusing every
+ * caller who wrote a legal form at all (the first attempt at fixing that) instead refused
+ * `Meridian SpA` against a stored `Meridian S.p.A.` — one company, spelled two ways. Callers
+ * need both halves to tell those apart.
+ *
+ * `null` rather than a degenerate result in three cases, each a real match-everything hazard:
+ * an EMPTY short form would compare equal to every other empty one; a short form with no letter
+ * or digit left in it (`'- GmbH'`, `'& GmbH'`) names nothing; and an over-long input is refused
+ * rather than scanned. Trailing connector punctuation is dropped too, so `Kanzlei Weber & Co`
+ * yields `Kanzlei Weber` and not a dangling `&`. Pure + deterministic.
  */
-export function organisationShortForm(name: string): string | null {
+export function splitOrganisationName(name: string): OrganisationNameParts | null {
   if (name.length > MAX_SHORT_FORM_INPUT) return null;
   const trimmed = name.trim().replace(/\s+/g, ' ');
-  const stripped = trimmed.replace(ORG_LEGAL_FORM_RE, '').trim();
-  if (stripped === trimmed) return null;
-  if (!/[\p{L}\p{N}]/u.test(stripped)) return null;
-  return stripped;
+  const m = ORG_LEGAL_FORM_RE.exec(trimmed);
+  if (!m) return null;
+  const short = trimmed.slice(0, m.index).replace(/[\s&,\-–—/]+$/u, '').trim();
+  if (!/[\p{L}\p{N}]/u.test(short)) return null;
+  const folded = m[1]!.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  return { short, form: ORG_LEGAL_FORM_SYNONYMS[folded] ?? folded };
+}
+
+/** The identifying part of an organisation name, or `null` when it carries no legal form.
+ *  Thin reader over {@link splitOrganisationName} for callers that do not compare forms. */
+export function organisationShortForm(name: string): string | null {
+  return splitOrganisationName(name)?.short ?? null;
 }
 
 /**
- * True when `text` continues with a legal form right after `at + length` — i.e. the occurrence
- * that was found is the head of a FULL company name, not the abbreviation.
+ * True when `text` continues with an UNAMBIGUOUS legal form right after `endIndex` — i.e. the
+ * occurrence that was found is the head of a full company name, not the abbreviation.
  *
  * Used by the focus-block scan so a short form declines on a turn that named a different legal
  * entity: with "Nordfeld GmbH" stored, a turn saying "Nordfeld AG" must render nothing. The
- * subject's own full name still matches directly, so nothing is lost by declining here — and the
- * store-side refusal alone could not cover this, because the focus scan matches against the TURN
- * TEXT rather than against a name the caller supplied.
+ * subject's own full name still matches directly, so nothing legitimate is lost by declining —
+ * and the store-side refusal cannot cover this, because the focus scan matches against the TURN
+ * TEXT rather than against a name a caller supplied. See {@link ORG_LEGAL_FORM_UNAMBIGUOUS} for
+ * why it deliberately recognises fewer forms here than when parsing a name.
  */
 export function continuesWithLegalForm(textLower: string, endIndex: number): boolean {
   return ORG_LEGAL_FORM_HEAD_RE.test(textLower.slice(endIndex));
 }
-const ORG_LEGAL_FORM_HEAD_RE = new RegExp(
-  `^\\s+(?:${ORG_LEGAL_FORM_BASE})(?:\\s*&\\s*co\\.?\\s*(?:kg|ohg))?\\.?(?![\\p{L}\\p{N}])`,
-  'iu',
-);
 
 /**
  * Canonicalize a subject name for dedup matching: trim, collapse internal
@@ -753,22 +807,48 @@ export class SubjectStore {
    * Scans the kind+owner range and folds in JS rather than filtering in SQL — same Unicode
    * reason as {@link findByAliasResolved}, same cost.
    */
+  /**
+   * How many organisations share each short form, in ONE owner scope — the collision map the
+   * focus-block scan needs to decide whether an abbreviation names anybody unambiguously.
+   *
+   * It lives here, next to {@link findByShortFormResolved}, because the two must agree on scope
+   * or the two recall surfaces disagree about who "Nordfeld" is. They already did once: the
+   * caller wrote its own query and omitted `owner_user_id`, so a same-named subject in ANOTHER
+   * owner's scope silenced the focus block while `recall` still answered.
+   */
+  shortFormCollisionCounts(ownerUserId = DEFAULT_OWNER): Map<string, number> {
+    const counts = new Map<string, number>();
+    const rows = this.db.prepare(
+      "SELECT name FROM subjects WHERE kind = 'organization' AND owner_user_id = ? AND archived_at IS NULL",
+    ).all(ownerUserId) as Array<{ name: string }>;
+    for (const { name } of rows) {
+      const short = splitOrganisationName(name)?.short.toLowerCase();
+      if (short) counts.set(short, (counts.get(short) ?? 0) + 1);
+    }
+    return counts;
+  }
+
   findByShortFormResolved(
     name: string,
     kind: string,
     ownerUserId = DEFAULT_OWNER,
   ): { row: SubjectRow | null; ambiguous: boolean; ids: string[] } {
-    // The caller named a legal form → they distinguished the entity themselves; an exact stage
-    // has already declined, and widening from here would cross to a DIFFERENT company.
-    if (organisationShortForm(name) !== null) return { row: null, ambiguous: false, ids: [] };
-    const target = name.trim().replace(/\s+/g, ' ').toLowerCase();
+    const asked = splitOrganisationName(name);
+    // The caller who wrote a legal form is taken at their word: it may match a stored one spelled
+    // differently (`Meridian SpA` → `Meridian S.p.A.`), but never a DIFFERENT one (`Nordfeld AG`
+    // must not reach `Nordfeld GmbH`). A caller who wrote none matches any stored form.
+    const target = (asked?.short ?? name.trim().replace(/\s+/g, ' ')).toLowerCase();
     if (target.length === 0) return { row: null, ambiguous: false, ids: [] };
     const candidates = this.db.prepare(
       'SELECT id, name FROM subjects WHERE kind = ? AND owner_user_id = ? AND archived_at IS NULL',
     ).all(kind, ownerUserId) as Array<{ id: string; name: string }>;
-    // Only rows that HAVE a short form participate: a stored name equal to the caller's verbatim
+    // Only rows that HAVE a legal form participate: a stored name equal to the caller's verbatim
     // was already offered to `findCanonical`, and its declining means archived or another owner.
-    const hits = candidates.filter(c => organisationShortForm(c.name)?.toLowerCase() === target);
+    const hits = candidates.filter(c => {
+      const stored = splitOrganisationName(c.name);
+      if (!stored || stored.short.toLowerCase() !== target) return false;
+      return asked === null || asked.form === stored.form;
+    });
     const ids = hits.map(h => h.id);
     if (hits.length !== 1) return { row: null, ambiguous: hits.length > 1, ids };
     return { row: this.getSubject(hits[0]!.id), ambiguous: false, ids };

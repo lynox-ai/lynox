@@ -694,22 +694,17 @@ export class KnowledgeStore {
     //  - ORGANISATIONS ONLY. `organisationShortForm` is a company-name rule; applied to every
     //    kind it turned the product "iPhone SE" into the surface form "iPhone", which then fired
     //    on a turn about "200 iPhone 15 Pro".
-    //  - Counted over ALL non-archived subjects of the kind, not just the ones with active
-    //    entries. Scoped to the entry-carrying set, a colliding "Nordfeld AG" with no entries yet
-    //    was invisible, so the block used the abbreviation while `recall` — which counts over the
-    //    whole store — correctly refused. Two surfaces disagreeing about who "Nordfeld" is, is
-    //    worse than either answer.
+    //  - Counted over ALL non-archived organisations in the owner scope, not just the ones with
+    //    active entries. Scoped to the entry-carrying set, a colliding "Nordfeld AG" with no
+    //    entries yet was invisible, so the block used the abbreviation while `recall` — which
+    //    counts over the whole store — correctly refused. The count is asked of the SubjectStore
+    //    rather than written here, because a second copy of the query is exactly how the two
+    //    surfaces disagreed the first time (the local copy had no `owner_user_id` filter).
     //
     // If two of the operator's clients differ only in legal form, "Nordfeld" names neither, and
     // rendering both cards puts one client's facts in front of a question about the other. The
     // full name still matches either — only the abbreviation is withheld.
-    const shortCount = new Map<string, number>();
-    for (const { name } of this.db.prepare(
-      "SELECT name FROM subjects WHERE kind = 'organization' AND archived_at IS NULL",
-    ).all() as Array<{ name: string }>) {
-      const short = organisationShortForm(name)?.toLowerCase();
-      if (short) shortCount.set(short, (shortCount.get(short) ?? 0) + 1);
-    }
+    const shortCount = this.subjects.shortFormCollisionCounts();
     const matched = new Map<string, string>(); // id → updated_at (for ordering)
     for (const subj of rows) {
       const short = subj.kind === 'organization' ? organisationShortForm(subj.name) : null;

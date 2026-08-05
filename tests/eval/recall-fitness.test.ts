@@ -187,6 +187,42 @@ describe('recall fitness — the automatic surface vs the tool surface', () => {
     expect(hits.some(h => h.text.includes('Amrein'))).toBe(false);
   });
 
+  it('the short form still resolves inside an ordinary sentence', () => {
+    // The regression the first fix round introduced and no test caught: `ab` and `as` are legal
+    // forms in the parser's list AND everyday words, so the focus scan declined the abbreviation
+    // on any sentence continuing with one — a stored client stopped resolving mid-sentence.
+    const { ks } = seeded();
+    for (const turn of [
+      'Der Vertrag mit Nordfeld ab Januar läuft weiter.',
+      'Tell me about Nordfeld as a client.',
+      'Nordfeld co-working: brauchen wir das?',
+    ]) expect(ks.renderBlocks({ turnText: turn })).toContain('Amrein');
+  });
+
+  it('an ambiguous organisation short form still loses to an exact person alias', () => {
+    // Left uncovered when the ordering change deleted the test that used to assert the OLD
+    // answer here. The answer changed on purpose — exact beats fuzzy — so it needs an assert
+    // saying which one is intended, not the absence of one.
+    const { ks, subjects } = seeded();
+    ks.write({ text: 'Nordfeld AG ist Zulieferer.', subjectName: 'Nordfeld AG', sourceChannel: 'agent', sourceUntrusted: false });
+    subjects.createSubject({ kind: 'person', name: 'Konrad Steiner', aliases: ['Konrad Steiner', 'Nordfeld'] });
+    ks.write({
+      text: 'Konrad Steiner ist unser Steuerberater.', subjectName: 'Konrad Steiner',
+      subjectKind: 'person', sourceChannel: 'agent', sourceUntrusted: false,
+    });
+    const hits = ks.recall({ query: 'x', subjectName: 'Nordfeld' });
+    expect(hits.map(h => h.text)).toEqual(['Konrad Steiner ist unser Steuerberater.']);
+  });
+
+  it('a same-named subject in ANOTHER owner scope does not silence the block', () => {
+    // Both surfaces must scope collisions identically. A local copy of the count query without
+    // an owner filter made the focus block withhold the abbreviation while `recall` answered.
+    const { ks, subjects } = seeded();
+    subjects.createSubject({ kind: 'organization', name: 'Nordfeld AG', ownerUserId: 'other-user' });
+    expect(ks.renderBlocks({ turnText: 'Was weisst du über den Kunden Nordfeld?' })).toContain('Amrein');
+    expect(ks.recall({ query: 'Ansprechpartnerin', subjectName: 'Nordfeld' }).some(h => h.text.includes('Amrein'))).toBe(true);
+  });
+
   it('a colliding subject with NO entries still withholds the abbreviation', () => {
     // The two surfaces must agree on who "Nordfeld" is. Counting collisions only over subjects
     // that carry active entries made an entry-less "Nordfeld AG" invisible to the focus block

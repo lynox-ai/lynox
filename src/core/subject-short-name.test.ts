@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { SubjectStore, organisationShortForm } from './subject-store.js';
+import { SubjectStore, organisationShortForm, splitOrganisationName, continuesWithLegalForm } from './subject-store.js';
 
 describe('organisationShortForm', () => {
   it('strips a trailing legal form', () => {
@@ -69,6 +69,33 @@ describe('organisationShortForm', () => {
     // '-' or '&' name nothing, and as a surface form they would match ordinary prose.
     expect(organisationShortForm('- GmbH')).toBeNull();
     expect(organisationShortForm('& GmbH')).toBeNull();
+    // …and a trailing connector is dropped rather than kept: 'Kanzlei Weber &' is not a name.
+    expect(organisationShortForm('Kanzlei Weber & Co')).toBe('Kanzlei Weber');
+  });
+
+  it('folds the legal form so spellings compare equal', () => {
+    expect(splitOrganisationName('Meridian S.p.A.')?.form).toBe('spa');
+    expect(splitOrganisationName('Meridian SpA')?.form).toBe('spa');
+    expect(splitOrganisationName('Nordfeld GmbH')?.form).toBe('gmbh');
+    expect(splitOrganisationName('Nordfeld')).toBeNull();
+    // Abbreviation and long form name the same entity type; punctuation folding alone does not
+    // join them, so refusing across them would refuse a company its own name.
+    expect(splitOrganisationName('Talbach Ltd')?.form).toBe(splitOrganisationName('Talbach Limited')?.form);
+    expect(splitOrganisationName('Orion Inc.')?.form).toBe(splitOrganisationName('Orion Incorporated')?.form);
+    expect(splitOrganisationName('Orion Corp')?.form).toBe(splitOrganisationName('Orion Corporation')?.form);
+    // …and they still do not collapse into a DIFFERENT form.
+    expect(splitOrganisationName('Orion Ltd')?.form).not.toBe(splitOrganisationName('Orion GmbH')?.form);
+  });
+
+  it('does not read an ordinary word in prose as a legal form', () => {
+    // The regression the first fix round introduced. `ab` `as` `se` `co` are legal forms AND
+    // everyday words, so matching them in running text made a stored client stop resolving in
+    // ordinary sentences. The head-check recognises fewer forms than the name parser for this.
+    for (const tail of [' ab Januar.', ' as a client.', ' co-working?', ' se paie.', ' eg offen?'])
+      expect(continuesWithLegalForm(tail, 0)).toBe(false);
+    // …while the unambiguous ones still decline, which is what the check exists for.
+    for (const tail of [' AG?', ' GmbH läuft', ' Ltd.', ' S.p.A.'])
+      expect(continuesWithLegalForm(tail.toLowerCase(), 0)).toBe(true);
   });
 
   it('does not backtrack on a hostile name', () => {
@@ -126,6 +153,33 @@ describe('SubjectStore.findByShortFormResolved', () => {
     }
     // A caller who named NO legal form still resolves — that is the whole point of the stage.
     expect(s.findByShortFormResolved('Nordfeld', 'organization').row).not.toBeNull();
+  });
+
+  it('accepts the SAME legal form spelled differently', () => {
+    // The over-correction the first fix round shipped: refusing every caller who wrote a legal
+    // form at all also refused "Meridian SpA" against a stored "Meridian S.p.A." — one company,
+    // two spellings. The forms are compared folded, so only a genuinely DIFFERENT one refuses.
+    const s = make();
+    s.createSubject({ kind: 'organization', name: 'Meridian S.p.A.' });
+    s.createSubject({ kind: 'organization', name: 'Bregenz B.V.' });
+    for (const asked of ['Meridian SpA', 'Meridian S.p.A', 'Meridian s.p.a.']) {
+      expect(s.findByShortFormResolved(asked, 'organization').row?.name).toBe('Meridian S.p.A.');
+    }
+    expect(s.findByShortFormResolved('Bregenz BV', 'organization').row?.name).toBe('Bregenz B.V.');
+    s.createSubject({ kind: 'organization', name: 'Talbach Limited' });
+    expect(s.findByShortFormResolved('Talbach Ltd', 'organization').row?.name).toBe('Talbach Limited');
+    // …and a different form still refuses, which is the property the folding must not dissolve.
+    expect(s.findByShortFormResolved('Meridian GmbH', 'organization').row).toBeNull();
+  });
+
+  it('counts collisions in ONE owner scope, the same one the lookup uses', () => {
+    const s = make();
+    s.createSubject({ kind: 'organization', name: 'Nordfeld GmbH' });
+    s.createSubject({ kind: 'organization', name: 'Nordfeld AG', ownerUserId: 'other-user' });
+    expect(s.shortFormCollisionCounts().get('nordfeld')).toBe(1);
+    expect(s.shortFormCollisionCounts('other-user').get('nordfeld')).toBe(1);
+    // Both surfaces therefore agree that "Nordfeld" names the GmbH in the default scope.
+    expect(s.findByShortFormResolved('Nordfeld', 'organization').row?.name).toBe('Nordfeld GmbH');
   });
 
   it('ignores archived subjects', () => {
