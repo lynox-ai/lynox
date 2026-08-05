@@ -58,6 +58,29 @@ describe('organisationShortForm', () => {
     // …and the boundary must not swallow a hyphen either — "Nord-AG" is one token to a reader.
     expect(organisationShortForm('Ferienhaus-AG')).toBeNull();
   });
+
+  it('strips a compound tail from ANY base form, not just GmbH', () => {
+    expect(organisationShortForm('Nordfeld AG & Co. KG')).toBe('Nordfeld');
+    expect(organisationShortForm('Nordfeld GmbH & Co. KG')).toBe('Nordfeld');
+    expect(organisationShortForm('M\u00fcller AG & Co. OHG')).toBe('M\u00fcller');
+  });
+
+  it('rejects a residue that is punctuation rather than a name', () => {
+    // '-' or '&' name nothing, and as a surface form they would match ordinary prose.
+    expect(organisationShortForm('- GmbH')).toBeNull();
+    expect(organisationShortForm('& GmbH')).toBeNull();
+  });
+
+  it('does not backtrack on a hostile name', () => {
+    // `recall`'s `subject` argument carries no schema maxLength and a stored subject name is
+    // model-authored, so both sides of this are attacker-shaped. With a `[\\s,]+` boundary the
+    // alternation retried at every comma: 'Acme' + ', '.repeat(20000) cost over a second, on a
+    // function the focus block calls per subject per turn.
+    const started = Date.now();
+    expect(organisationShortForm('Acme' + ', '.repeat(20000))).toBeNull();
+    expect(organisationShortForm('Acme' + ' '.repeat(50000) + 'GmbH')).toBeNull();
+    expect(Date.now() - started).toBeLessThan(100);
+  });
 });
 
 describe('SubjectStore.findByShortFormResolved', () => {
@@ -90,11 +113,19 @@ describe('SubjectStore.findByShortFormResolved', () => {
     expect(hit.ids).toHaveLength(2);
   });
 
-  it('matches the caller\'s own legal form against the stored one', () => {
-    // Symmetry: the stored name may be the SHORT one and the query the long one.
+  it('REFUSES a caller who supplied a different legal form', () => {
+    // The blocker this test used to assert the opposite of. It read as a tidy symmetry — strip
+    // both sides, match either direction — and it answers one company's question out of another
+    // company's entries: `Nordfeld GmbH` and `Nordfeld AG` are two legal entities, and stripping
+    // the caller's side throws away the only token that separates them. The ambiguity guard
+    // cannot save it, because with ONE such subject stored there is nothing ambiguous.
     const s = make();
-    const id = s.createSubject({ kind: 'organization', name: 'Nordfeld' });
-    expect(s.findByShortFormResolved('Nordfeld GmbH', 'organization').row?.id).toBe(id);
+    s.createSubject({ kind: 'organization', name: 'Nordfeld GmbH' });
+    for (const asked of ['Nordfeld AG', 'Nordfeld Inc', 'Nordfeld S.p.A.', 'Nordfeld Ltd']) {
+      expect(s.findByShortFormResolved(asked, 'organization').row).toBeNull();
+    }
+    // A caller who named NO legal form still resolves — that is the whole point of the stage.
+    expect(s.findByShortFormResolved('Nordfeld', 'organization').row).not.toBeNull();
   });
 
   it('ignores archived subjects', () => {

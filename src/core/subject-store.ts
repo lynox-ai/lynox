@@ -237,34 +237,68 @@ const ENGAGEMENT_LEADING_GENERIC_RE = /^(?:projekt|project|projet)[\s:]+/iu;
  * which is today's behaviour for every name, so a gap here is never a REGRESSION.
  *
  * `&` and `.` are allowed INSIDE a token so `S.p.A.` / `S.à r.l.` match as one unit; the
- * leading `[\s,]` requires a real token boundary, so `AGRA` does not end in `AG`.
+ * leading `\s+` requires a real token boundary, so `Cisco` does not end in `Co`.
+ *
+ * The boundary is `\s+` and NOT `[\s,]+`. A comma is not collapsed by the `\s+`→`' '` pass, so
+ * a name ending in thousands of commas made the alternation retry at every one of them —
+ * `'Acme' + ', '.repeat(20000)` cost 1011 ms, on a function the focus block calls per subject
+ * per turn. Whitespace cannot do that because it is collapsed to a single space first.
+ *
+ * The `& Co. KG`-style tail attaches to ANY base form, not just `GmbH`: `AG & Co. KG` and
+ * `Stiftung & Co. KG` are both real, and covering only the GmbH case left `Nordfeld AG & Co. KG`
+ * stripping to `Nordfeld AG & Co.`.
  */
-const ORG_LEGAL_FORM_RE = new RegExp(
-  '[\\s,]+(?:'
-  + 'gmbh(?:\\s*&\\s*co\\.?\\s*kg)?|mbh|ag|kgaa|kg|ohg|ug|e\\.?\\s?k\\.?|gbr|se|eg'   // DACH
+const ORG_LEGAL_FORM_BASE =
+  'gmbh|mbh|ag|kgaa|kg|ohg|ug|e\\.?\\s?k\\.?|gbr|se|eg'                             // DACH
   + '|s\\.?a\\.?s|s\\.?a\\.?r\\.?l|s\\.?à\\s?r\\.?l|s\\.?a|s\\.?l|s\\.?r\\.?l|s\\.?p\\.?a'  // FR/ES/IT
-  + '|b\\.?v|n\\.?v|v\\.?o\\.?f'                                                      // NL/BE
-  + '|a\\/s|aps|ab|as|oyj|oy|hf'                                                      // Nordics
-  + '|pty\\s+ltd|ltd|limited|llc|llp|l\\.?p|plc|inc|incorporated|corp|corporation|co'  // UK/US
-  + ')\\.?$',
+  + '|b\\.?v|n\\.?v|v\\.?o\\.?f'                                                    // NL/BE
+  + '|a\\/s|aps|ab|as|oyj|oy|hf'                                                    // Nordics
+  + '|pty\\s+ltd|ltd|limited|llc|llp|l\\.?p|plc|inc|incorporated|corp|corporation|co'; // UK/US
+const ORG_LEGAL_FORM_RE = new RegExp(
+  `\\s+(?:${ORG_LEGAL_FORM_BASE})(?:\\s*&\\s*co\\.?\\s*(?:kg|ohg))?\\.?$`,
   'iu',
 );
+
+/** Defensive bound on the name handed to {@link organisationShortForm}. `input.subject` on the
+ *  `recall` tool has no schema maxLength, and a stored subject name is model-authored too. */
+const MAX_SHORT_FORM_INPUT = 200;
 
 /**
  * The organisation name without its trailing legal form, or `null` when there is nothing to
  * strip — so a caller can tell "there is a shorter form" from "this IS the short form" without
  * comparing strings.
  *
- * Returns `null` rather than `''` when the name is ONLY a legal form ("GmbH"): an empty short
- * form would compare equal to every other empty short form and make every such subject a
- * mutual match. Pure + deterministic.
+ * `null` rather than a degenerate residue in three cases, and each one is a real match-everything
+ * hazard rather than tidiness: an EMPTY result would compare equal to every other empty result;
+ * a residue with no letter or digit (`'- GmbH'` → `'-'`, `'& GmbH'` → `'&'`) is punctuation that
+ * names nothing; and an over-long input is refused rather than scanned. Pure + deterministic.
  */
 export function organisationShortForm(name: string): string | null {
+  if (name.length > MAX_SHORT_FORM_INPUT) return null;
   const trimmed = name.trim().replace(/\s+/g, ' ');
   const stripped = trimmed.replace(ORG_LEGAL_FORM_RE, '').trim();
-  if (stripped === trimmed || stripped.length === 0) return null;
+  if (stripped === trimmed) return null;
+  if (!/[\p{L}\p{N}]/u.test(stripped)) return null;
   return stripped;
 }
+
+/**
+ * True when `text` continues with a legal form right after `at + length` — i.e. the occurrence
+ * that was found is the head of a FULL company name, not the abbreviation.
+ *
+ * Used by the focus-block scan so a short form declines on a turn that named a different legal
+ * entity: with "Nordfeld GmbH" stored, a turn saying "Nordfeld AG" must render nothing. The
+ * subject's own full name still matches directly, so nothing is lost by declining here — and the
+ * store-side refusal alone could not cover this, because the focus scan matches against the TURN
+ * TEXT rather than against a name the caller supplied.
+ */
+export function continuesWithLegalForm(textLower: string, endIndex: number): boolean {
+  return ORG_LEGAL_FORM_HEAD_RE.test(textLower.slice(endIndex));
+}
+const ORG_LEGAL_FORM_HEAD_RE = new RegExp(
+  `^\\s+(?:${ORG_LEGAL_FORM_BASE})(?:\\s*&\\s*co\\.?\\s*(?:kg|ohg))?\\.?(?![\\p{L}\\p{N}])`,
+  'iu',
+);
 
 /**
  * Canonicalize a subject name for dedup matching: trim, collapse internal
@@ -698,9 +732,16 @@ export class SubjectStore {
   }
 
   /**
-   * Resolve a name against subjects whose LEGAL FORM differs — "Nordfeld" → "Nordfeld GmbH",
-   * and symmetrically "Nordfeld GmbH" → a subject stored as "Nordfeld". Compares
-   * {@link organisationShortForm} on both sides, so it is direction-free.
+   * Resolve a name that OMITS a legal form against subjects that carry one — "Nordfeld" →
+   * "Nordfeld GmbH". **One direction only, and that asymmetry is the load-bearing part.**
+   *
+   * The first version stripped BOTH sides, which reads as a tidy symmetry and is a cross-client
+   * bleed: `Nordfeld GmbH` and `Nordfeld AG` are two different legal entities, and stripping the
+   * caller's side discards the single token that tells them apart. A caller asking about
+   * `Nordfeld AG` was answered out of `Nordfeld GmbH`'s entries — with ONE such subject in the
+   * store there is nothing for the ambiguity guard below to catch. So: a caller who supplies a
+   * legal form is taken at their word and gets no match here; only a caller who supplied none
+   * reaches a stored name that has one.
    *
    * A LAST resort, and the callers must keep it last: it is a strictly wider matcher than
    * canonical-name and alias lookup, so running it earlier would let "Nordfeld" beat an exact
@@ -717,19 +758,17 @@ export class SubjectStore {
     kind: string,
     ownerUserId = DEFAULT_OWNER,
   ): { row: SubjectRow | null; ambiguous: boolean; ids: string[] } {
-    const target = (organisationShortForm(name) ?? name.trim().replace(/\s+/g, ' ')).toLowerCase();
+    // The caller named a legal form → they distinguished the entity themselves; an exact stage
+    // has already declined, and widening from here would cross to a DIFFERENT company.
+    if (organisationShortForm(name) !== null) return { row: null, ambiguous: false, ids: [] };
+    const target = name.trim().replace(/\s+/g, ' ').toLowerCase();
     if (target.length === 0) return { row: null, ambiguous: false, ids: [] };
     const candidates = this.db.prepare(
       'SELECT id, name FROM subjects WHERE kind = ? AND owner_user_id = ? AND archived_at IS NULL',
     ).all(kind, ownerUserId) as Array<{ id: string; name: string }>;
-    const hits = candidates.filter(c => {
-      const short = organisationShortForm(c.name);
-      // Only rows that HAVE a short form participate on the stored side when the caller's name
-      // already is one — otherwise "Nordfeld" would match a row literally named "Nordfeld"
-      // that canonical lookup has already declined, which means it was archived or in another
-      // owner scope. Comparing both short forms keeps the relation symmetric and reflexive.
-      return (short ?? c.name.trim().replace(/\s+/g, ' ')).toLowerCase() === target;
-    });
+    // Only rows that HAVE a short form participate: a stored name equal to the caller's verbatim
+    // was already offered to `findCanonical`, and its declining means archived or another owner.
+    const hits = candidates.filter(c => organisationShortForm(c.name)?.toLowerCase() === target);
     const ids = hits.map(h => h.id);
     if (hits.length !== 1) return { row: null, ambiguous: hits.length > 1, ids };
     return { row: this.getSubject(hits[0]!.id), ambiguous: false, ids };

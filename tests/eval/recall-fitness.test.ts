@@ -163,6 +163,51 @@ describe('recall fitness — the automatic surface vs the tool surface', () => {
     expect(calls).toBe(1);
   });
 
+  it('a DIFFERENT legal form is not answered out of the one we have', () => {
+    // Reproduced against the first version of this fix: the store held only "Nordfeld GmbH",
+    // and both surfaces answered a question that explicitly said "Nordfeld AG" out of it.
+    const { ks } = seeded();
+    expect(ks.recall({ query: 'Ansprechpartnerin', subjectName: 'Nordfeld AG' })).toHaveLength(0);
+    expect(ks.recall({ query: 'Ansprechpartnerin', subjectName: 'Nordfeld Inc' })).toHaveLength(0);
+    expect(ks.renderBlocks({ turnText: 'Was weisst du über Nordfeld AG?' })).not.toContain('Amrein');
+  });
+
+  it('an EXACT person alias beats the fuzzy organisation match', () => {
+    // Ordering, and the direction that exposes it: the short-form stage must run after the
+    // person-alias stage, not before. Ahead of it, a person aliased "Nordfeld" lost to the org
+    // "Nordfeld GmbH" — a fuzzy match beating an exact one.
+    const { ks, subjects } = seeded();
+    subjects.createSubject({ kind: 'person', name: 'Konrad Steiner', aliases: ['Konrad Steiner', 'Nordfeld'] });
+    ks.write({
+      text: 'Konrad Steiner ist unser Steuerberater, erreichbar dienstags.',
+      subjectName: 'Konrad Steiner', subjectKind: 'person', sourceChannel: 'agent', sourceUntrusted: false,
+    });
+    const hits = ks.recall({ query: 'Steuerberater', subjectName: 'Nordfeld' });
+    expect(hits.some(h => h.text.includes('Steuerberater'))).toBe(true);
+    expect(hits.some(h => h.text.includes('Amrein'))).toBe(false);
+  });
+
+  it('a colliding subject with NO entries still withholds the abbreviation', () => {
+    // The two surfaces must agree on who "Nordfeld" is. Counting collisions only over subjects
+    // that carry active entries made an entry-less "Nordfeld AG" invisible to the focus block
+    // while `recall` — which counts over the whole store — refused.
+    const { ks, subjects } = seeded();
+    subjects.createSubject({ kind: 'organization', name: 'Nordfeld AG' });
+    expect(ks.renderBlocks({ turnText: 'Was weisst du über den Kunden Nordfeld?' })).not.toContain('Amrein');
+    expect(ks.recall({ query: 'Ansprechpartnerin', subjectName: 'Nordfeld' })).toHaveLength(0);
+  });
+
+  it('the short form is an ORGANISATION rule and does not leak to other kinds', () => {
+    // `organisationShortForm` applied to every kind turned the product "iPhone SE" into the
+    // surface form "iPhone", which then fired on a turn about a different product entirely.
+    const { ks } = seeded();
+    ks.write({
+      text: 'iPhone SE ist das Ersatzgerät im Aussendienst.', subjectName: 'iPhone SE',
+      subjectKind: 'product', sourceChannel: 'agent', sourceUntrusted: false, pin: true,
+    });
+    expect(ks.renderBlocks({ turnText: 'Wir bestellen 200 iPhone 15 Pro.' })).not.toContain('Ersatzgerät');
+  });
+
   it('a short name shared by two clients resolves to NEITHER, on both surfaces', () => {
     // The direction that makes the fix dangerous if it is built as a plain widening: the
     // operator has two clients whose names differ only in legal form. "Nordfeld" names neither,
@@ -180,30 +225,6 @@ describe('recall fitness — the automatic surface vs the tool surface', () => {
     const exact = ks.renderBlocks({ turnText: 'Was weisst du über Nordfeld GmbH?' });
     expect(exact).toContain('Amrein');
     expect(exact).not.toContain('Zahlungsziel');
-  });
-
-  it('an ambiguous short form does not fall THROUGH into the person namespace', () => {
-    // The failure the ambiguity guard in `_resolveRecallScope` exists for, and the only shape
-    // under which it is observable — the stages ahead of it already answer the simpler ones.
-    // A canonical person of that name deliberately WINS (an existing, documented preference),
-    // so the guard only bites when the person match is by ALIAS, which runs after this stage:
-    // two orgs sharing a short form plus a person aliased to it. Without the guard, an
-    // organisation-scoped question is answered out of a person's entries.
-    const { ks, subjects } = seeded();
-    ks.write({
-      text: 'Nordfeld AG ist ein Zulieferer, Zahlungsziel 60 Tage.',
-      subjectName: 'Nordfeld AG', sourceChannel: 'agent', sourceUntrusted: false,
-    });
-    const advisor = subjects.createSubject({
-      kind: 'person', name: 'Konrad Steiner', aliases: ['Konrad Steiner', 'Nordfeld'],
-    });
-    ks.write({
-      text: 'Konrad Steiner ist unser Steuerberater, erreichbar dienstags.',
-      subjectName: 'Konrad Steiner', subjectKind: 'person',
-      sourceChannel: 'agent', sourceUntrusted: false,
-    });
-    expect(subjects.findByAlias('Nordfeld', 'person')?.id).toBe(advisor);
-    expect(ks.recall({ query: 'Nordfeld', subjectName: 'Nordfeld' })).toHaveLength(0);
   });
 
   it('the automatic block skips an UNPINNED fact even when its subject is named exactly', () => {

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import type { SubjectStore, SubjectKind, SubjectRow } from './subject-store.js';
-import { organisationShortForm } from './subject-store.js';
+import { continuesWithLegalForm, organisationShortForm } from './subject-store.js';
 import { canSupersede, deriveProvenanceTier, provenanceRank } from './provenance.js';
 import type { ProvenanceEvidence } from './provenance.js';
 import { subjectsDisagree } from './contradiction-detector.js';
@@ -689,18 +689,30 @@ export class KnowledgeStore {
       (s): s is SubjectRow => s !== null && !s.archived_at,
     );
     // Legal-form-insensitive matching, so a turn saying "Nordfeld" reaches "Nordfeld GmbH".
-    // Scoped to short forms that are UNIQUE among the candidates: if two of the operator's
-    // clients differ only in legal form, "Nordfeld" names neither of them, and rendering both
-    // cards would put one client's facts in front of a question about the other. The full name
-    // still matches either — only the abbreviation is withheld.
+    // Two scoping rules, and both were learned by getting them wrong first:
+    //
+    //  - ORGANISATIONS ONLY. `organisationShortForm` is a company-name rule; applied to every
+    //    kind it turned the product "iPhone SE" into the surface form "iPhone", which then fired
+    //    on a turn about "200 iPhone 15 Pro".
+    //  - Counted over ALL non-archived subjects of the kind, not just the ones with active
+    //    entries. Scoped to the entry-carrying set, a colliding "Nordfeld AG" with no entries yet
+    //    was invisible, so the block used the abbreviation while `recall` — which counts over the
+    //    whole store — correctly refused. Two surfaces disagreeing about who "Nordfeld" is, is
+    //    worse than either answer.
+    //
+    // If two of the operator's clients differ only in legal form, "Nordfeld" names neither, and
+    // rendering both cards puts one client's facts in front of a question about the other. The
+    // full name still matches either — only the abbreviation is withheld.
     const shortCount = new Map<string, number>();
-    for (const s of rows) {
-      const short = organisationShortForm(s.name)?.toLowerCase();
+    for (const { name } of this.db.prepare(
+      "SELECT name FROM subjects WHERE kind = 'organization' AND archived_at IS NULL",
+    ).all() as Array<{ name: string }>) {
+      const short = organisationShortForm(name)?.toLowerCase();
       if (short) shortCount.set(short, (shortCount.get(short) ?? 0) + 1);
     }
     const matched = new Map<string, string>(); // id → updated_at (for ordering)
     for (const subj of rows) {
-      const short = organisationShortForm(subj.name);
+      const short = subj.kind === 'organization' ? organisationShortForm(subj.name) : null;
       const extra = short && shortCount.get(short.toLowerCase()) === 1 ? [short] : [];
       if (this._mentions(hay, subj, extra)) matched.set(subj.id, subj.updated_at);
     }
@@ -719,6 +731,7 @@ export class KnowledgeStore {
   /** Whole-ish match of a subject's name, any alias, or a caller-vetted extra surface form
    *  (the unique-short-form case) in the (already-lowercased) turn text. */
   private _mentions(hayLower: string, subj: SubjectRow, extraForms: readonly string[] = []): boolean {
+    const extra = new Set(extraForms.map(f => f.trim().toLowerCase()));
     const names = [subj.name, ...this._aliases(subj.aliases), ...extraForms];
     for (const n of names) {
       const needle = n.trim().toLowerCase();
@@ -731,7 +744,12 @@ export class KnowledgeStore {
         if (at === -1) break;
         const before = at === 0 ? '' : hayLower[at - 1]!;
         const after = at + needle.length >= hayLower.length ? '' : hayLower[at + needle.length]!;
-        if (!isAlnum(before) && !isAlnum(after)) return true;
+        // An ABBREVIATION declines when the turn spelled out a legal form after it: with
+        // "Nordfeld GmbH" stored, a turn about "Nordfeld AG" named a different company, and this
+        // scan reads the turn text — so the store-side refusal cannot see it. The subject's own
+        // full name is in `names` and matches on its own, so nothing legitimate is lost.
+        const spelledOut = extra.has(needle) && continuesWithLegalForm(hayLower, at + needle.length);
+        if (!isAlnum(before) && !isAlnum(after) && !spelledOut) return true;
         from = at + needle.length;
       }
     }
@@ -783,13 +801,20 @@ export class KnowledgeStore {
         ?? this.subjects.findCanonical(explicit, 'person');
       if (!certain && orgAlias?.ambiguous) return [];
       // Last, and only for a name nothing above recognised: legal-form-insensitive matching, so
-      // `Nordfeld` reaches `Nordfeld GmbH`. It runs AFTER every exact stage on purpose — it is
-      // the widest matcher here, and ahead of them it could beat an exact hit on another row.
+      // `Nordfeld` reaches `Nordfeld GmbH`. It is the widest matcher here, so it runs after EVERY
+      // exact one — including the person-alias stage, which an earlier version of this placed it
+      // ahead of. That ordering let a fuzzy org match beat an exact person alias: with a person
+      // aliased `Nordfeld` AND an org `Nordfeld GmbH`, the question was answered out of the org.
       // Ambiguity stops the chain exactly as the alias stage does: two clients differing only in
       // legal form are the pair this must never pick between.
-      const shortForm = certain ? null : this.subjects.findByShortFormResolved(explicit, 'organization');
-      if (!certain && shortForm?.ambiguous) return [];
-      const hit = certain ?? shortForm?.row ?? this.subjects.findByAlias(explicit, 'person');
+      const exact = certain ?? this.subjects.findByAlias(explicit, 'person');
+      const shortForm = exact ? null : this.subjects.findByShortFormResolved(explicit, 'organization');
+      // No explicit `ambiguous` branch, and its absence is deliberate: this is the LAST stage, so
+      // an ambiguous result carries a null row and falls into the `!hit` refusal below on its own.
+      // An earlier version ran ahead of the person-alias stage and DID need one there — moving it
+      // last is what made the guard redundant, and keeping an unreachable branch would have been
+      // a line no test could kill.
+      const hit = exact ?? shortForm?.row;
       // Named an explicit subject we don't know → return an EMPTY scope, NOT a global scan.
       // A scoped query that fell back to global would surface OTHER clients' facts — the exact
       // cross-client bleed the substrate exists to prevent (§1). No match ⇒ no results.
