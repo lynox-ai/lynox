@@ -17,22 +17,45 @@
  * plausible-looking implementation quietly gets someone's calendar wrong — RRULE against a
  * timezone, minus EXDATE, plus RECURRENCE-ID overrides. A model reading raw ICS will answer
  * confidently and sometimes wrongly, which is worse than not answering.
+ *
+ * TIME IS KEPT AS THE FEED STATES IT, and this is the single most important decision in the
+ * file. An earlier version normalised everything to a UTC instant, which is correct for a
+ * timestamp and WRONG for a calendar: an all-day event on the 14th became 2026-08-13T22:00Z in
+ * a Europe/Zurich process and got reported to the operator as the 13th. A calendar entry is
+ * not an instant — it is a wall time plus, sometimes, a zone. That distinction survives to the
+ * caller here, and {@link CalendarEvent.sortKey} carries the absolute instant separately for
+ * the one thing it is good for: ordering.
  */
 import ICAL from 'ical.js';
 
-/** One occurrence, already resolved to an absolute instant. */
+/** One occurrence of an appointment. */
 export interface CalendarEvent {
   /** Event title. Empty string when the feed omits SUMMARY (valid, and common for busy-blocks). */
   readonly summary: string;
-  /** Start as an ISO-8601 instant (UTC). */
+  /**
+   * Start as the feed states it: `YYYY-MM-DD` for an all-day event, `YYYY-MM-DDTHH:MM:SS`
+   * otherwise — with a trailing `Z` only when the feed itself said UTC. Read together with
+   * {@link timezone}: `14:00` + `Europe/Zurich` is what the operator has written in their
+   * calendar, and is what they should be told.
+   */
   readonly start: string;
-  /** End as an ISO-8601 instant (UTC). */
+  /** End, same form as {@link start}. For an all-day event this is the EXCLUSIVE end date. */
   readonly end: string;
-  /** True for a DATE-valued (all-day) event — the times carry no meaningful clock. */
+  /**
+   * IANA zone the wall time belongs to, or undefined when the feed gave none. Undefined means
+   * RFC 5545 "floating" — the appointment happens at that clock time wherever the reader is,
+   * which is a real and different thing from "we do not know the zone".
+   */
+  readonly timezone?: string | undefined;
+  /** True for a DATE-valued (all-day) event — {@link start} carries no clock at all. */
   readonly allDay: boolean;
   readonly location?: string | undefined;
-  /** True when this occurrence came from a recurrence rule rather than a standalone event. */
-  readonly recurring: boolean;
+  /**
+   * Absolute instant in epoch milliseconds, for ORDERING ONLY — never display it. For a
+   * floating or all-day event it is resolved against the process zone, which makes it a
+   * stable sort key and a meaningless timestamp.
+   */
+  readonly sortKey: number;
 }
 
 export interface ParseIcsOptions {
@@ -45,8 +68,10 @@ export interface ParseIcsOptions {
 }
 
 export interface ParseIcsResult {
+  /** Occurrences overlapping the window, in chronological order. */
   readonly events: CalendarEvent[];
-  /** True when the cap cut the list short — the caller should say so rather than imply completeness. */
+  /** True when the cap or the work budget cut the list short — the caller must say so rather
+   *  than imply completeness. */
   readonly truncated: boolean;
   /** Components that could not be read. Reported, not thrown: one broken VEVENT in a year of
    *  calendar should not lose the other 300. */
@@ -57,29 +82,56 @@ export interface ParseIcsResult {
 export const DEFAULT_MAX_EVENTS = 200;
 
 /**
- * Per-series iteration ceiling.
+ * Total recurrence-iterator steps allowed for the WHOLE document, shared across every series.
  *
- * A recurrence iterator walks occurrences one at a time from DTSTART, so a rule that started
+ * A per-series ceiling does not bound this work, and the difference is not academic. A
+ * recurrence iterator walks occurrences one at a time from DTSTART, so a rule that started
  * years ago costs one step per interval before it reaches the window — and `FREQ=SECONDLY`
- * with no UNTIL is a valid rule that never terminates. The window bound alone does not save
- * us: it stops the loop only once the iterator ARRIVES there. This does.
+ * with no UNTIL is a valid rule that never terminates. Such a series yields ZERO events, so
+ * the output cap never trips either. Measured on this machine: ~33 ms per exhausted series, at
+ * ~102 bytes of ICS per series — a feed inside the 5 MB fetch ceiling holds ~51,000 of them,
+ * which is ~28 MINUTES of synchronous expansion with the event loop held shut. One budget for
+ * the document bounds it at roughly 165 ms regardless of how the feed is shaped.
  */
-const MAX_ITERATIONS_PER_SERIES = 10_000;
+const MAX_TOTAL_ITERATIONS = 50_000;
 
 /**
- * Parse an ICS document and return the occurrences that fall inside a window.
+ * Ceiling on VEVENT components, applied to the TEXT before it is parsed.
+ *
+ * This is the limit that actually bounds a hostile feed, and it took two measurements that each
+ * contradicted the previous fix to land on it:
+ *
+ *  1. The iteration budget above bounds expansion — and expansion was never where the time
+ *     went. A 5 MB feed of `FREQ=SECONDLY` series still took 302 seconds.
+ *  2. Capping how many components we CONSTRUCT dropped that to 29 seconds, no further, because
+ *     `new ICAL.Event()` costs O(components in the enclosing VCALENDAR) — it scans the parent
+ *     for RECURRENCE-ID overrides. Constructing 5,000 events inside a 57,614-component document
+ *     measured 23 SECONDS; the same 5,000 in a document of their own take ~500 ms. The cost is
+ *     set by the document around them, not by how many we build.
+ *
+ * So the cap has to shrink the DOCUMENT, which means cutting the text before `ICAL.parse` ever
+ * sees it. 5,000 events is generous for a personal calendar; past it the read is honestly
+ * reported as incomplete.
+ */
+const MAX_COMPONENTS = 5000;
+
+/**
+ * Parse an ICS document and return the occurrences overlapping a window.
  *
  * Pure: no network, no clock beyond the caller's window. Everything hard about this format —
- * recurrence, exceptions, timezones — is resolved here so the caller receives plain instants.
+ * recurrence, exceptions, timezones — is resolved here so the caller receives plain fields.
  */
 export function parseIcsEvents(ics: string, opts: ParseIcsOptions): ParseIcsResult {
   const max = opts.maxEvents ?? DEFAULT_MAX_EVENTS;
-  const comp = new ICAL.Component(ICAL.parse(ics));
+  const capped = capComponents(ics);
+  const comp = new ICAL.Component(ICAL.parse(capped.ics));
 
   // No VTIMEZONE registration here, deliberately. ical.js ships with no timezones registered
   // — a size trade-off by its authors, with `ical.timezones.js` as the add-on — but it
-  // resolves a `TZID` against the ENCLOSING VCALENDAR, and a feed that uses a zone is required
-  // to define it. So a self-contained feed needs neither the add-on nor a registration pass.
+  // resolves a `TZID` against the ENCLOSING VCALENDAR, and a feed that uses a zone normally
+  // defines it. A feed that references an UNDEFINED TZID degrades to floating rather than
+  // failing; the zone then reads as undefined, which is reported honestly instead of being
+  // presented as a zone we do not actually have.
   //
   // Verified by mutation rather than assumed: removing an explicit registration loop changed
   // nothing, under a Europe/Zurich process timezone AND under UTC. Both runs were needed —
@@ -90,14 +142,15 @@ export function parseIcsEvents(ics: string, opts: ParseIcsOptions): ParseIcsResu
   const to = ICAL.Time.fromJSDate(opts.to, true);
   const events: CalendarEvent[] = [];
   let skipped = 0;
-  let truncated = false;
+  let truncated = capped.capped;
+  let budget = MAX_TOTAL_ITERATIONS;
 
   // TWO passes, because a moved instance of a series is its OWN `VEVENT` in the file: it
   // shares the master's UID and carries a RECURRENCE-ID naming the occurrence it replaces.
   // Walking the components naively yields the moved appointment twice — once from the rule,
   // once as a standalone event — which is how a calendar starts claiming meetings that do not
-  // exist. So: relate every exception to its master first, and let `getOccurrenceDetails`
-  // substitute it during expansion.
+  // exist. So: separate them first, and let `getOccurrenceDetails` substitute the override
+  // during expansion.
   const masters: ICAL.Event[] = [];
   const exceptions: ICAL.Event[] = [];
   for (const ve of comp.getAllSubcomponents('vevent')) {
@@ -111,71 +164,108 @@ export function parseIcsEvents(ics: string, opts: ParseIcsOptions): ParseIcsResu
   // Only the ORPHANS need handling. ical.js relates an exception to its master itself when
   // both sit in the same VCALENDAR — verified by mutation: dropping an explicit
   // `relateException` call changed nothing, and the moved instance still reported its new
-  // time. What IS load-bearing is the separation above: an exception is its own VEVENT, so a
-  // naive walk emits the moved appointment twice, once from the rule and once standalone.
+  // time. What IS load-bearing is the separation above.
   //
   // An exception whose master is missing — a truncated export, or a series that ended before
   // the window — is still a real appointment. Dropping it would hide a meeting.
-  const orphanExceptions = exceptions.filter(
-    ex => !masters.some(m => m.uid === ex.uid && m.isRecurring()),
-  );
+  const recurringUids = new Set(masters.filter(m => m.isRecurring()).map(m => m.uid));
+  const orphanExceptions = exceptions.filter(ex => !recurringUids.has(ex.uid));
 
   for (const ev of [...masters, ...orphanExceptions]) {
-    if (events.length >= max) { truncated = true; break; }
     try {
-      // A cancelled occurrence is still IN the feed; showing it as an appointment would be a
-      // lie in the one direction that costs the operator a wasted trip.
-      if (String(ev.component.getFirstPropertyValue('status') ?? '').toUpperCase() === 'CANCELLED') continue;
+      if (isCancelled(ev.component)) continue;
 
       if (!ev.isRecurring()) {
-        if (withinWindow(ev.startDate, from, to)) {
-          events.push(toEvent(ev, ev.startDate, ev.endDate, false));
+        if (overlapsWindow(ev.startDate, ev.endDate, from, to)) {
+          events.push(toEvent(ev.startDate, ev.endDate, ev.summary, ev.location));
         }
         continue;
       }
 
       const it = ev.iterator();
-      let steps = 0;
       for (;;) {
-        if (steps++ >= MAX_ITERATIONS_PER_SERIES) { truncated = true; break; }
+        if (budget-- <= 0) { truncated = true; break; }
         const next = it.next();
         if (!next) break;                 // the rule ended (UNTIL / COUNT)
         if (next.compare(to) >= 0) break; // past the window — occurrences are ascending
-        if (next.compare(from) < 0) continue;
-        if (events.length >= max) { truncated = true; break; }
         // `getOccurrenceDetails` applies RECURRENCE-ID overrides: a single moved or edited
-        // instance of a series carries its own time and summary, and reporting the rule's
-        // version instead would put the operator in the wrong place.
+        // instance carries its own time, title and location, and reporting the rule's version
+        // instead would put the operator in the wrong place.
         const details = ev.getOccurrenceDetails(next);
-        events.push(toEvent(ev, details.startDate, details.endDate, true, details.item.summary));
+        // A single occurrence can be cancelled by an override while the series runs on.
+        // Showing it as an appointment costs the operator a wasted trip.
+        if (isCancelled(details.item.component)) continue;
+        if (!overlapsWindow(details.startDate, details.endDate, from, to)) continue;
+        events.push(toEvent(details.startDate, details.endDate, details.item.summary, details.item.location));
       }
     } catch {
       skipped++;
     }
   }
 
-  events.sort((a, b) => a.start.localeCompare(b.start));
+  // Sort BEFORE capping. Capping during expansion cuts in feed order, which is arbitrary — the
+  // result is a list with holes in it while the caller tells the operator to "narrow the window
+  // to see the rest". A chronological prefix is the only truncation that statement is true of.
+  events.sort((a, b) => a.sortKey - b.sortKey);
+  if (events.length > max) {
+    events.length = max;
+    truncated = true;
+  }
   return { events, truncated, skipped };
 }
 
-function withinWindow(start: ICAL.Time, from: ICAL.Time, to: ICAL.Time): boolean {
-  return start.compare(from) >= 0 && start.compare(to) < 0;
+/**
+ * Cut the document to {@link MAX_COMPONENTS} events, on the text, before parsing.
+ *
+ * Textual rather than structural because the cost being bounded is set by the size of the
+ * parsed document itself (see {@link MAX_COMPONENTS}) — dropping components after the parse
+ * would leave that cost fully paid. `BEGIN:VEVENT` is unambiguous at a line start: RFC 5545
+ * folds long lines by indenting the continuation, so a folded line can never begin with it.
+ * The header, and with it any VTIMEZONE the remaining events resolve against, is kept.
+ */
+function capComponents(ics: string): { ics: string; capped: boolean } {
+  let idx = -1;
+  for (let n = 0; n <= MAX_COMPONENTS; n++) {
+    const next = ics.indexOf('BEGIN:VEVENT', idx + 1);
+    if (next < 0) return { ics, capped: false };
+    idx = next;
+  }
+  return { ics: `${ics.slice(0, idx)}END:VCALENDAR\r\n`, capped: true };
+}
+
+function isCancelled(component: ICAL.Component): boolean {
+  return String(component.getFirstPropertyValue('status') ?? '').toUpperCase() === 'CANCELLED';
+}
+
+/**
+ * Overlap, not containment.
+ *
+ * Filtering on the start alone hides exactly the appointments that matter most for "am I free
+ * on Tuesday": a week of holiday that began last Friday starts before the window and is
+ * invisible, though it covers every day in it.
+ */
+function overlapsWindow(start: ICAL.Time, end: ICAL.Time, from: ICAL.Time, to: ICAL.Time): boolean {
+  return end.compare(from) > 0 && start.compare(to) < 0;
 }
 
 function toEvent(
-  ev: ICAL.Event,
   start: ICAL.Time,
   end: ICAL.Time,
-  recurring: boolean,
-  summaryOverride?: string | undefined,
+  summary: string | null,
+  location: string | null,
 ): CalendarEvent {
-  const location = ev.location ?? '';
+  // `toString()` renders the wall time as the feed wrote it; `zone.tzid` names the zone it
+  // belongs to. 'floating' is ical.js's marker for "the feed gave no zone" and is not an IANA
+  // name, so it is reported as absent rather than passed off as a zone.
+  const tzid = start.zone?.tzid;
+  const timezone = tzid && tzid !== 'floating' ? tzid : undefined;
   return {
-    summary: summaryOverride ?? ev.summary ?? '',
-    start: start.toJSDate().toISOString(),
-    end: end.toJSDate().toISOString(),
+    summary: summary ?? '',
+    start: start.toString(),
+    end: end.toString(),
+    ...(timezone ? { timezone } : {}),
     allDay: start.isDate === true,
     ...(location ? { location } : {}),
-    recurring,
+    sortKey: start.toJSDate().getTime(),
   };
 }

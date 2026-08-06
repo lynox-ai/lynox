@@ -259,10 +259,12 @@ function measureStaticPrefixTokens(): number {
 // an implemented auth path instead of a schema value that silently 401s. The PROSE
 // explaining it deliberately went to `detailedGuidance` (paid on use) rather than the
 // cached description, so what lands here is only the two property declarations.
-// 2026-08-07: +199 for `calendar_read`. A new always-on tool is the one kind of growth
-// this budget exists to make deliberate — it ships in every turn's prefix for the whole
-// fleet. (Superseded two commits later: the tool moves behind a flag and this drops back.)
-const STATIC_PREFIX_BUDGET = 23560;
+// 2026-08-07: +148 for `calendar_read`, down from +199 once the how-to-read-it prose
+// (zones, floating times, "it cannot book anything") moved to on-use `detailedGuidance`,
+// which the prefix does not carry — a single-action tool has one too, and assuming
+// otherwise cost 51 tokens for nothing. (Superseded by the next commit: the tool moves
+// behind a flag and this drops back out of the prefix entirely.)
+const STATIC_PREFIX_BUDGET = 23510;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated

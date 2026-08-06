@@ -10,10 +10,18 @@
  * Read-only by construction: an ICS feed has no write side. That is not a limitation dressed
  * up as a feature — it is why this works at all without OAuth, a Google Cloud project, and the
  * unresettable 100-user cap that comes with an unverified app on a sensitive scope.
+ *
+ * The RESULT is untrusted content, and this is not a formality. Anyone who can send the
+ * operator a calendar invitation can choose the SUMMARY and LOCATION text that this tool reads
+ * back into the model's context — an injection channel that needs no compromise of anything,
+ * only the operator's address. So the listing is wrapped like any other external content, and
+ * `calendar_read` is named in `Agent.EXTERNAL_CONTENT_TOOLS` so a turn that touched a calendar
+ * counts as untrusted for durable-knowledge purposes.
  */
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { parseIcsEvents, DEFAULT_MAX_EVENTS, type CalendarEvent } from '../../integrations/calendar/ics.js';
 import { fetchIcsFeed } from '../../integrations/calendar/fetch.js';
+import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { getErrorMessage } from '../../core/utils.js';
 
 /** Vault-name prefix for a calendar feed. The label after it is what the operator sees. */
@@ -41,13 +49,46 @@ function configuredFeeds(agent: IAgent): string[] {
     .sort();
 }
 
-function parseBound(value: string | undefined, fallback: Date): Date | null {
+/**
+ * Read a window bound.
+ *
+ * A bare `to` date means the operator's whole day. Reading it as midnight drops that day's
+ * appointments while the answer still says "between … and the 31st", so a date-only end bound
+ * is advanced to the following midnight. The start bound stays at midnight, which is the same
+ * intent read from the other end.
+ */
+function parseBound(value: string | undefined, fallback: Date, endOfDay: boolean): Date | null {
   if (value === undefined || value.trim() === '') return fallback;
-  // A bare date means the operator's whole day, not midnight UTC — but the engine has no
-  // business guessing their zone here, so a date-only bound is read as UTC midnight and the
-  // window is generous enough that the distinction does not move an appointment out of view.
-  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(value.trim()) ? `${value.trim()}T00:00:00Z` : value);
-  return Number.isNaN(d.getTime()) ? null : d;
+  const raw = value.trim();
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(raw);
+  const d = new Date(dateOnly ? `${raw}T00:00:00Z` : raw);
+  if (Number.isNaN(d.getTime())) return null;
+  return dateOnly && endOfDay ? new Date(d.getTime() + 86_400_000) : d;
+}
+
+/**
+ * Render one appointment the way the operator wrote it.
+ *
+ * The times are the feed's own wall times, with the zone named — NOT normalised to UTC. An
+ * operator in Zurich has "14:00" in their calendar and should be told 14:00; being told 12:00 UTC
+ * is a correct timestamp and a wrong answer.
+ */
+function renderWhen(e: CalendarEvent): string {
+  if (e.allDay) {
+    // DTEND is exclusive for a DATE-valued event: a one-day event ends the following day, and
+    // saying "14.–15." for a single day's holiday would be wrong in the direction that costs a
+    // missed appointment.
+    const lastDay = new Date(`${e.end}T00:00:00Z`);
+    lastDay.setUTCDate(lastDay.getUTCDate() - 1);
+    const last = lastDay.toISOString().slice(0, 10);
+    return last > e.start ? `${e.start}–${last} (all day)` : `${e.start} (all day)`;
+  }
+  const zone = e.timezone ? ` ${e.timezone}` : '';
+  const startDay = e.start.slice(0, 10);
+  const endDay = e.end.slice(0, 10);
+  // Naming the end date when it differs stops "22:00–02:00" from reading as a backwards range.
+  const end = endDay === startDay ? e.end.slice(11, 16) : `${endDay} ${e.end.slice(11, 16)}`;
+  return `${startDay} ${e.start.slice(11, 16)}–${end}${zone}`;
 }
 
 export const calendarReadTool: ToolEntry<CalendarReadInput> = {
@@ -55,9 +96,7 @@ export const calendarReadTool: ToolEntry<CalendarReadInput> = {
     name: 'calendar_read',
     description:
       'Read the operator\'s appointments from their connected calendar for a time window. '
-      + 'Use when the answer depends on what is actually scheduled — availability, conflicts, '
-      + 'what is coming up, whether a proposed time is free. Read-only: it cannot create or '
-      + 'move appointments. Defaults to the next 7 days.',
+      + 'Read-only. Defaults to the next 7 days.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -68,6 +107,13 @@ export const calendarReadTool: ToolEntry<CalendarReadInput> = {
       required: [],
     },
   },
+  detailedGuidance:
+    'Times come back as the operator wrote them, with the zone named (e.g. "14:00–15:00 Europe/Zurich") — '
+    + 'repeat them in that zone rather than converting. A time with no zone is RFC 5545 "floating": '
+    + 'it means that clock time locally. All-day entries carry a date and no clock.\n'
+    + 'It cannot create, move or delete anything — an ICS feed has no write side. If asked to book '
+    + 'something, read the calendar to find a free slot and tell the operator; do not claim to have booked it.\n'
+    + 'A "could not read" note means the answer is incomplete: do not turn it into "nothing scheduled".',
   handler: async (input: CalendarReadInput, agent: IAgent): Promise<string> => {
     const store = agent.secretStore;
     const labels = configuredFeeds(agent);
@@ -86,9 +132,9 @@ export const calendarReadTool: ToolEntry<CalendarReadInput> = {
     }
 
     const now = new Date();
-    const from = parseBound(input.from, now);
+    const from = parseBound(input.from, now, false);
     if (!from) return `Could not read "${input.from ?? ''}" as a date.`;
-    const to = parseBound(input.to, new Date(from.getTime() + DEFAULT_WINDOW_DAYS * 86_400_000));
+    const to = parseBound(input.to, new Date(from.getTime() + DEFAULT_WINDOW_DAYS * 86_400_000), true);
     if (!to) return `Could not read "${input.to ?? ''}" as a date.`;
     if (to.getTime() <= from.getTime()) return 'The window ends before it starts.';
     const days = (to.getTime() - from.getTime()) / 86_400_000;
@@ -96,46 +142,58 @@ export const calendarReadTool: ToolEntry<CalendarReadInput> = {
       return `That window is ${String(Math.round(days))} days. Ask for at most ${String(MAX_WINDOW_DAYS)} at a time.`;
     }
 
+    // Concurrently: each feed costs up to a 20 s timeout, and reading two calendars is a normal
+    // setup. `allSettled` because one unreachable feed must not lose the other's appointments —
+    // that is the same reason the failures are reported instead of thrown.
+    const results = await Promise.allSettled(selected.map(async label => {
+      const url = store.resolve(`${CALENDAR_FEED_PREFIX}${label}`);
+      if (!url) throw new Error('no address stored');
+      const feed = await fetchIcsFeed(url, agent.toolContext);
+      const parsed = parseIcsEvents(feed.ics, { from, to, maxEvents: DEFAULT_MAX_EVENTS });
+      return { label, feed, parsed };
+    }));
+
     const all: Array<CalendarEvent & { calendar: string }> = [];
     const failed: string[] = [];
     let truncated = false;
-    for (const label of selected) {
-      try {
-        const url = store.resolve(`${CALENDAR_FEED_PREFIX}${label}`);
-        if (!url) { failed.push(label); continue; }
-        const feed = await fetchIcsFeed(url, agent.toolContext);
-        const parsed = parseIcsEvents(feed.ics, { from, to, maxEvents: DEFAULT_MAX_EVENTS });
-        if (feed.truncated || parsed.truncated) truncated = true;
-        for (const e of parsed.events) all.push({ ...e, calendar: label });
-      } catch (err) {
+    let skipped = 0;
+    for (const [i, r] of results.entries()) {
+      const label = selected[i] ?? '';
+      if (r.status === 'rejected') {
         // Named, not swallowed: "I could not reach your calendar" is a different answer from
-        // "you have nothing on", and only one of them is safe to act on. The message from
-        // `fetchIcsFeed` never carries the address.
-        failed.push(`${label} (${getErrorMessage(err)})`);
+        // "you have nothing on", and only one of them is safe to act on. Every message out of
+        // `fetchIcsFeed` is one of its own and carries no address.
+        failed.push(`${label} (${getErrorMessage(r.reason)})`);
+        continue;
       }
+      if (r.value.feed.truncated || r.value.parsed.truncated) truncated = true;
+      skipped += r.value.parsed.skipped;
+      for (const e of r.value.parsed.events) all.push({ ...e, calendar: label });
     }
 
-    all.sort((a, b) => a.start.localeCompare(b.start));
+    all.sort((a, b) => a.sortKey - b.sortKey);
     const lines = all.map(e => {
-      const when = e.allDay
-        ? `${e.start.slice(0, 10)} (all day)`
-        : `${e.start.slice(0, 16).replace('T', ' ')}–${e.end.slice(11, 16)} UTC`;
       const where = e.location ? ` @ ${e.location}` : '';
       const which = selected.length > 1 ? ` [${e.calendar}]` : '';
-      return `- ${when} ${e.summary || '(no title)'}${where}${which}`;
+      return `- ${renderWhen(e)} ${e.summary || '(no title)'}${where}${which}`;
     });
 
+    const window = `${from.toISOString().slice(0, 10)} and ${to.toISOString().slice(0, 10)}`;
     const header = all.length === 0
-      ? `No appointments between ${from.toISOString().slice(0, 10)} and ${to.toISOString().slice(0, 10)}.`
-      : `${String(all.length)} appointment${all.length === 1 ? '' : 's'} between ${from.toISOString().slice(0, 10)} and ${to.toISOString().slice(0, 10)}:`;
+      ? `No appointments between ${window}.`
+      : `${String(all.length)} appointment${all.length === 1 ? '' : 's'} between ${window}:`;
 
     const notes: string[] = [];
-    // Both of these change what the answer MEANS, so they travel with it rather than being
-    // dropped: an unreachable calendar makes "nothing on" unsafe to rely on, and a truncated
-    // list is not a complete one.
+    // All three change what the answer MEANS, so they travel with it rather than being dropped:
+    // an unreachable calendar makes "nothing on" unsafe to rely on, and neither a truncated list
+    // nor one with unreadable entries is a complete one.
     if (truncated) notes.push('The list was cut short — ask for a narrower window to see the rest.');
-    if (failed.length > 0) notes.push(`Could not read: ${failed.join(', ')}. Times below may be incomplete.`);
+    if (skipped > 0) notes.push(`${String(skipped)} entr${skipped === 1 ? 'y' : 'ies'} could not be read and ${skipped === 1 ? 'is' : 'are'} missing from this list.`);
+    if (failed.length > 0) notes.push(`Could not read: ${failed.join(', ')}. The list above is incomplete.`);
 
-    return [header, ...lines, ...(notes.length ? ['', ...notes] : [])].join('\n');
+    const listing = [header, ...lines, ...(notes.length ? ['', ...notes] : [])].join('\n');
+    // Titles and locations are written by whoever sent the invitation. Same treatment the
+    // Google Calendar tool gives the same data.
+    return wrapUntrustedData(listing, 'calendar:ics');
   },
 };

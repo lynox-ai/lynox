@@ -624,6 +624,11 @@ export class Agent implements IAgent {
     'bash', 'http_request', 'read_file', 'batch_files', 'media_process', 'api_setup',
     'web_research', 'mail_read', 'mail_search', 'mail_triage',
     'google_docs', 'google_drive', 'google_sheets',
+    // `calendar_read` returns SUMMARY/LOCATION text chosen by whoever sent the invitation —
+    // an ingest channel that needs no compromise, only the operator's address. It wraps its
+    // result, so the marker signal covers it too; this is here because the two signals fail
+    // differently and a calendar is precisely where a "meeting note" reads as a durable fact.
+    'calendar_read',
     // `import_workflow` ingests an attacker-authored SHARED workflow block THIS turn and echoes
     // its name/goal/step text back into context (its consent render) — a direct-ingest source
     // that sets no wrap marker, so without it here a clean-classified `import_workflow →

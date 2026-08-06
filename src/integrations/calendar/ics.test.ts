@@ -5,6 +5,11 @@ import { parseIcsEvents } from './ics.js';
  * The cases here are the ones a hand-rolled parser gets quietly wrong. Each is written as a
  * calendar someone could actually have, not as a protocol curiosity — a wrong answer about a
  * person's Tuesday is the failure this module exists to prevent.
+ *
+ * Every assertion on `start`/`end` is a WALL TIME, which makes this file independent of the
+ * process timezone by construction. That is not incidental: the previous version asserted UTC
+ * instants, and its all-day test passed only because it never looked at the date. It does now,
+ * and an implementation that normalises to an instant fails it under every zone including UTC.
  */
 
 const TZ = `BEGIN:VTIMEZONE
@@ -33,9 +38,7 @@ function cal(...events: string[]): string {
 const AUG = { from: new Date('2026-08-01T00:00:00Z'), to: new Date('2026-09-01T00:00:00Z') };
 
 describe('parseIcsEvents', () => {
-  it('reads a single appointment with its local time resolved to the right instant', () => {
-    // 14:00 in Zurich in August is CEST (+2) → 12:00 UTC. Getting this wrong by an hour is
-    // the single most common calendar bug there is.
+  it('reads a single appointment as the wall time and zone the feed states', () => {
     const r = parseIcsEvents(cal(
       `BEGIN:VEVENT
 DTSTART;TZID=Europe/Zurich:20260812T140000
@@ -47,18 +50,19 @@ END:VEVENT`,
     expect(r.events).toHaveLength(1);
     expect(r.events[0]).toMatchObject({
       summary: 'Termin Roland',
-      start: '2026-08-12T12:00:00.000Z',
-      end: '2026-08-13T00:00:00.000Z'.slice(0, 0) + '2026-08-12T13:00:00.000Z',
+      start: '2026-08-12T14:00:00',
+      end: '2026-08-12T15:00:00',
+      timezone: 'Europe/Zurich',
       location: 'St. Gallen',
-      recurring: false,
       allDay: false,
     });
   });
 
-  it('resolves the SAME local time differently across the DST boundary', () => {
+  it('resolves the SAME local time to a different instant across the DST boundary', () => {
     // 09:00 Zurich is 07:00 UTC in summer and 08:00 UTC in winter. A parser that pins one
     // offset per feed is wrong for half the year — and looks perfectly right in a test that
-    // only ever asks about one season.
+    // only ever asks about one season. The wall time is 09:00 in both, so this asserts on
+    // `sortKey`, which is where the resolved instant now lives.
     const ics = cal(
       `BEGIN:VEVENT
 DTSTART;TZID=Europe/Zurich:20260810T090000
@@ -69,8 +73,58 @@ END:VEVENT`,
     );
     const summer = parseIcsEvents(ics, { from: new Date('2026-08-10T00:00:00Z'), to: new Date('2026-08-11T00:00:00Z') });
     const winter = parseIcsEvents(ics, { from: new Date('2026-12-10T00:00:00Z'), to: new Date('2026-12-11T00:00:00Z') });
-    expect(summer.events[0]?.start).toBe('2026-08-10T07:00:00.000Z');
-    expect(winter.events[0]?.start).toBe('2026-12-10T08:00:00.000Z');
+    expect(summer.events[0]?.start).toBe('2026-08-10T09:00:00');
+    expect(winter.events[0]?.start).toBe('2026-12-10T09:00:00');
+    expect(new Date(summer.events[0]?.sortKey ?? 0).toISOString()).toBe('2026-08-10T07:00:00.000Z');
+    expect(new Date(winter.events[0]?.sortKey ?? 0).toISOString()).toBe('2026-12-10T08:00:00.000Z');
+  });
+
+  it('gives an all-day event the date the feed wrote, in any process timezone', () => {
+    // THE regression this file exists for. Resolving a DATE-valued event to an instant and
+    // formatting it back lands on the PREVIOUS day everywhere east of Greenwich: a holiday on
+    // the 14th was reported to a Zurich operator as the 13th. A date is not an instant.
+    const r = parseIcsEvents(cal(
+      `BEGIN:VEVENT
+DTSTART;VALUE=DATE:20260814
+DTEND;VALUE=DATE:20260815
+SUMMARY:Ferientag
+END:VEVENT`,
+    ), AUG);
+    expect(r.events[0]).toMatchObject({
+      summary: 'Ferientag',
+      start: '2026-08-14',
+      end: '2026-08-15',
+      allDay: true,
+    });
+    expect(r.events[0]?.timezone).toBeUndefined();
+  });
+
+  it('reports a floating time as having no zone rather than inventing one', () => {
+    // RFC 5545 floating: the appointment happens at that clock time wherever the reader is.
+    // Reporting a zone we do not have would be a confident wrong answer.
+    const r = parseIcsEvents(cal(
+      `BEGIN:VEVENT
+DTSTART:20260812T090000
+DTEND:20260812T100000
+SUMMARY:Ohne Zone
+END:VEVENT`,
+    ), AUG);
+    expect(r.events[0]?.start).toBe('2026-08-12T09:00:00');
+    expect(r.events[0]?.timezone).toBeUndefined();
+  });
+
+  it('shows a multi-day event that STARTED before the window', () => {
+    // Filtering on the start alone hides exactly what matters for "am I free on Tuesday": a
+    // week of holiday that began last Friday covers every day in the window and starts outside
+    // it. The failure direction is the expensive one — the operator is told they are free.
+    const r = parseIcsEvents(cal(
+      `BEGIN:VEVENT
+DTSTART;VALUE=DATE:20260728
+DTEND;VALUE=DATE:20260810
+SUMMARY:Ferien Roland
+END:VEVENT`,
+    ), { from: new Date('2026-08-03T00:00:00Z'), to: new Date('2026-08-04T00:00:00Z') });
+    expect(r.events.map(e => e.summary)).toEqual(['Ferien Roland']);
   });
 
   it('expands a weekly series and honours EXDATE', () => {
@@ -88,7 +142,6 @@ END:VEVENT`,
     const days = r.events.map(e => e.start.slice(0, 10));
     expect(days).toEqual(['2026-08-03', '2026-08-10', '2026-08-24', '2026-08-31']);
     expect(days).not.toContain('2026-08-17');
-    expect(r.events.every(e => e.recurring)).toBe(true);
   });
 
   it('stops a series at its UNTIL instead of running to the window edge', () => {
@@ -121,11 +174,15 @@ RECURRENCE-ID;TZID=Europe/Zurich:20260810T090000
 DTSTART;TZID=Europe/Zurich:20260810T160000
 DTEND;TZID=Europe/Zurich:20260810T163000
 SUMMARY:Wochenstart (verschoben)
+LOCATION:Anderer Raum
 END:VEVENT`,
     ), { from: new Date('2026-08-10T00:00:00Z'), to: new Date('2026-08-11T00:00:00Z') });
     expect(r.events).toHaveLength(1);
-    expect(r.events[0]?.start).toBe('2026-08-10T14:00:00.000Z'); // 16:00 CEST, not 09:00
+    expect(r.events[0]?.start).toBe('2026-08-10T16:00:00'); // 16:00, not the rule's 09:00
     expect(r.events[0]?.summary).toBe('Wochenstart (verschoben)');
+    // The override carries its own location too — reading it from the master would send the
+    // operator to the room the meeting was moved OUT of.
+    expect(r.events[0]?.location).toBe('Anderer Raum');
   });
 
   it('keeps a moved instance whose SERIES is not in the feed', () => {
@@ -142,7 +199,7 @@ SUMMARY:Einzeln verschoben, Serie fehlt
 END:VEVENT`,
     ), AUG);
     expect(r.events).toHaveLength(1);
-    expect(r.events[0]?.start).toBe('2026-08-10T14:00:00.000Z');
+    expect(r.events[0]?.start).toBe('2026-08-10T16:00:00');
     expect(r.events[0]?.summary).toBe('Einzeln verschoben, Serie fehlt');
   });
 
@@ -159,16 +216,31 @@ END:VEVENT`,
     expect(r.events).toHaveLength(0);
   });
 
-  it('marks an all-day event as such rather than inventing a clock time', () => {
+  it('leaves out a single occurrence cancelled while the series runs on', () => {
+    // Cancelling one week of a standing meeting produces an override with STATUS:CANCELLED.
+    // Reading STATUS from the master only keeps the series clean and still lists the week that
+    // was called off.
     const r = parseIcsEvents(cal(
       `BEGIN:VEVENT
-DTSTART;VALUE=DATE:20260814
-DTEND;VALUE=DATE:20260815
-SUMMARY:Ferientag
+UID:series-2
+DTSTART;TZID=Europe/Zurich:20260803T090000
+DTEND;TZID=Europe/Zurich:20260803T093000
+RRULE:FREQ=WEEKLY;BYDAY=MO
+SUMMARY:Wochenstart
+END:VEVENT
+BEGIN:VEVENT
+UID:series-2
+RECURRENCE-ID;TZID=Europe/Zurich:20260810T090000
+DTSTART;TZID=Europe/Zurich:20260810T090000
+DTEND;TZID=Europe/Zurich:20260810T093000
+STATUS:CANCELLED
+SUMMARY:Wochenstart
 END:VEVENT`,
     ), AUG);
-    expect(r.events[0]?.allDay).toBe(true);
-    expect(r.events[0]?.summary).toBe('Ferientag');
+    const days = r.events.map(e => e.start.slice(0, 10));
+    expect(days).toContain('2026-08-03');
+    expect(days).not.toContain('2026-08-10');
+    expect(days).toContain('2026-08-17');
   });
 
   it('excludes what falls outside the window on both sides', () => {
@@ -227,6 +299,26 @@ END:VEVENT`,
     expect(r.events.map(e => e.summary)).toEqual(['Frueher', 'Spaeter']);
   });
 
+  it('caps to the EARLIEST events, not to whatever the feed listed first', () => {
+    // Capping during expansion cuts in feed order, which is arbitrary: the result is a list
+    // with holes while the caller tells the operator to "narrow the window to see the rest".
+    // A chronological prefix is the only truncation that statement is true of.
+    const r = parseIcsEvents(cal(
+      `BEGIN:VEVENT
+DTSTART;TZID=Europe/Zurich:20260828T100000
+DTEND;TZID=Europe/Zurich:20260828T110000
+SUMMARY:Ende August
+END:VEVENT
+BEGIN:VEVENT
+DTSTART;TZID=Europe/Zurich:20260803T100000
+DTEND;TZID=Europe/Zurich:20260803T110000
+SUMMARY:Anfang August
+END:VEVENT`,
+    ), { ...AUG, maxEvents: 1 });
+    expect(r.events.map(e => e.summary)).toEqual(['Anfang August']);
+    expect(r.truncated).toBe(true);
+  });
+
   it('caps the result and SAYS it did, instead of implying completeness', () => {
     const r = parseIcsEvents(cal(
       `BEGIN:VEVENT
@@ -254,6 +346,34 @@ END:VEVENT`,
     ), { ...AUG, maxEvents: 10 });
     expect(r.truncated).toBe(true);
     expect(r.events.length).toBeLessThanOrEqual(10);
+  });
+
+  it('finishes on a feed packed with pathological series, and says it was cut', () => {
+    // The shape a hostile feed actually has: not one expensive series but thousands of them,
+    // each yielding nothing, so the output cap never trips. Without a budget shared across
+    // series this runs for minutes with the event loop held shut.
+    const series = Array.from({ length: 3000 }, (_, i) =>
+      `BEGIN:VEVENT\nUID:s${String(i)}@t\nDTSTART:20200101T000000Z\nRRULE:FREQ=SECONDLY\nSUMMARY:s${String(i)}\nEND:VEVENT`);
+    const started = Date.now();
+    const r = parseIcsEvents(cal(...series), { ...AUG, maxEvents: 10 });
+    expect(r.truncated).toBe(true);
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
+  it('stops reading a document with more events than the ceiling', () => {
+    // A SEPARATE limit from the iteration budget, and it needs its own case: plain events with
+    // no recurrence at all never touch the budget, so a test built from pathological series
+    // passes with the component cap deleted. Measured, this is the limit that matters —
+    // `new ICAL.Event()` costs O(components in the enclosing calendar), so 57,000 of them
+    // inside the 5 MB fetch ceiling is minutes of synchronous work no expansion budget bounds.
+    //
+    // `maxEvents` is raised past the feed size deliberately: leaving it at the default would
+    // make the output cap alone produce `truncated`, and the case would prove nothing.
+    const many = Array.from({ length: 6000 }, (_, i) =>
+      `BEGIN:VEVENT\nUID:p${String(i)}@t\nDTSTART:20260812T${String(Math.floor(i / 60) % 24).padStart(2, '0')}${String(i % 60).padStart(2, '0')}00Z\nDTEND:20260812T235900Z\nSUMMARY:p${String(i)}\nEND:VEVENT`);
+    const r = parseIcsEvents(cal(...many), { ...AUG, maxEvents: 6000 });
+    expect(r.truncated).toBe(true);
+    expect(r.events.length).toBeLessThan(6000);
   });
 
   it('keeps the rest of the calendar when one event is broken', () => {
@@ -284,6 +404,7 @@ SUMMARY:UTC-Termin
 END:VEVENT`,
       'END:VCALENDAR',
     ].join('\n'), AUG);
-    expect(r.events[0]?.start).toBe('2026-08-12T12:00:00.000Z');
+    expect(r.events[0]?.start).toBe('2026-08-12T12:00:00Z');
+    expect(r.events[0]?.timezone).toBe('UTC');
   });
 });
