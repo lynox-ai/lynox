@@ -460,13 +460,25 @@ export class KnowledgeStore {
    *  masked), so a re-onboarding whose key already has an active fact skips. A bounded
    *  scan over active rows — onboarding runs once and the active set is small. */
   hasActiveFactWithPrefix(prefix: string): boolean {
+    return this.findActiveFactWithPrefix(prefix) !== null;
+  }
+
+  /**
+   * The ACTIVE entry whose decrypted text begins with `prefix`, with its trust tier —
+   * or null. The tier travels WITH the text because the callers that put this text on a
+   * higher-privilege surface have to make a trust decision, and re-deriving it from the
+   * text is impossible: an entry can reach `active` by being written on a clean turn OR
+   * by being approved out of the review queue, and only the row knows which.
+   */
+  findActiveFactWithPrefix(prefix: string): { text: string; sourceType: ProvenanceKind } | null {
     const rows = this.db.prepare(
-      "SELECT text FROM knowledge_entries WHERE status = 'active'",
-    ).all() as { text: string }[];
+      "SELECT text, source_type FROM knowledge_entries WHERE status = 'active'",
+    ).all() as { text: string; source_type: string }[];
     for (const r of rows) {
-      if (this.engine.dec(r.text).startsWith(prefix)) return true;
+      const text = this.engine.dec(r.text);
+      if (text.startsWith(prefix)) return { text, sourceType: r.source_type as ProvenanceKind };
     }
-    return false;
+    return null;
   }
 
   /** The always-loaded blocks (profile + playbook) for the read-surface, decrypted AND

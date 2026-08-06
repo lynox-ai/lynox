@@ -76,11 +76,21 @@ export interface PromoteOnboardingResult {
  * `profile` is documented as operator identity plus durable preferences and loads into
  * every turn. Company and role ARE operator identity, so this is the block's own job.
  *
- * Three bounds, each load-bearing:
+ * It is seeded from BOTH paths — a fresh write, and a dedup SKIP. The skip path is the one
+ * that reaches production: a tenant who onboarded before this existed has the entries and
+ * an empty block, and a re-run without it returns `{skipped: n, profileSeeded: 0}` with the
+ * block still empty. On skip the line comes from the STORED fact, never the incoming
+ * answer — AC-1.6 says the original stands, so the block agrees with the entry rather than
+ * with whatever was typed this time.
+ *
+ * Bounds, each load-bearing:
  *  - **Only `active` answers.** A `pending_review` answer is one the taint latch judged
  *    possibly-relayed attacker text; it must never reach a surface that loads into every
  *    turn. This mirrors `memory_block_edit`'s hard untrusted-refuse (H5) rather than its
- *    softer queueing sibling.
+ *    softer queueing sibling. On the skip path the same bar is applied to the STORED
+ *    entry's tier: an entry can reach `active` by being APPROVED out of the review queue,
+ *    and once-untrusted text does not belong here either (the pin invariant, H6, draws the
+ *    line in the same place).
  *  - **Append-only, prefix-deduped.** An existing line with the same engine-fixed label
  *    prefix wins — a re-onboarding never overwrites what the operator or the agent
  *    already wrote there, and never duplicates a line.
@@ -100,20 +110,44 @@ function seedProfileBlock(
   lines: ReadonlyArray<{ prefix: string; text: string }>,
 ): number {
   if (lines.length === 0) return 0;
-  const current = knowledgeStore.getBlock('profile')?.content ?? '';
-  const existing = current.split('\n').map(l => l.trim());
-  const additions = lines
-    .filter(l => !existing.some(e => e.startsWith(l.prefix)))
-    .map(l => l.text);
-  if (additions.length === 0) return 0;
-  const next = current ? `${current}\n${additions.join('\n')}` : additions.join('\n');
   try {
-    knowledgeStore.setBlockContent('profile', next);
-  } catch {
-    // BlockOverLimitError — the entries above are committed; do not fail the promotion.
+    const current = knowledgeStore.getBlock('profile')?.content ?? '';
+    // A line already present under the same label wins. The comparison is anchored at the
+    // START of an existing line, not merely contained in it: a line like
+    // "Ask about Company: before invoicing" mentions the label without BEING it, and must
+    // not suppress the seed.
+    const existing = current.split('\n').map(l => l.trim());
+    let next = current;
+    let added = 0;
+    for (const line of lines) {
+      if (existing.some(e => e.startsWith(line.prefix))) continue;
+      // Bound each seeded line well under the block's own limit. Without this a single
+      // long answer could fill the block to its edge and leave no room for any later
+      // `memory_block_edit` — and the operator has no other way to repair it, since the
+      // block's HTTP surface is read-only. An over-long value stays in its entry, where
+      // the verbatim guarantee lives; it just does not become a standing line.
+      if (line.text.length > MAX_PROFILE_SEED_LINE_CHARS) continue;
+      const candidate = next ? `${next}\n${line.text}` : line.text;
+      // Grown ONE line at a time, so a block that has room for the first but not the
+      // second keeps the first instead of silently dropping both.
+      try {
+        knowledgeStore.setBlockContent('profile', candidate);
+      } catch {
+        break;
+      }
+      next = candidate;
+      added++;
+    }
+    return added;
+  } catch (err: unknown) {
+    // Best-effort by design: the durable entries are already committed, so a failure here
+    // must not turn a successful promotion into a 500. Reported rather than swallowed —
+    // a silent catch here would hide a real defect behind a plausible zero.
+    process.stderr.write(
+      `[lynox:onboarding] profile seed failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
     return 0;
   }
-  return additions.length;
 }
 
 const CATALOG = new Map(ONBOARDING_BASICS.map(basic => [basic.key, basic] as const));
@@ -129,6 +163,14 @@ const ONBOARDING_SKIP_MARKER = '__dismissed__';
  *  complete — dedup skips the committed ones, the oversized one re-throws. A business-fact
  *  basic fits easily; a multi-KB paste is not a basic. */
 const MAX_ONBOARDING_ANSWER_CHARS = 2000;
+
+/** Bound for ONE seeded `profile` line. Far under the block's own limit on purpose: the
+ *  answer cap above equals that limit, so a single long answer could otherwise fill the
+ *  block to its edge and leave no room for any later `memory_block_edit` — which is the
+ *  block's ONLY writer (its HTTP surface is read-only), so the operator would have no way
+ *  to repair it. A company name or a role fits easily; a longer value stays in its entry,
+ *  where the verbatim guarantee lives. */
+const MAX_PROFILE_SEED_LINE_CHARS = 200;
 
 export function promoteOnboardingBasics(
   answers: readonly OnboardingBasicAnswer[],
@@ -172,8 +214,25 @@ export function promoteOnboardingBasics(
     // pre-existing active fact with this prefix (even a lower-trust agent_inferred one)
     // suppresses the write — accepted per AC-1.6 ("skip already-known"); a deliberate upgrade
     // is a chat correction, never a silent re-onboard overwrite.
-    if (deps.knowledgeStore.hasActiveFactWithPrefix(prefix)) {
+    //
+    // The ENTRY is skipped — but the block is still seeded from the STORED fact. This is
+    // the case that actually matters in production: a tenant who onboarded before the block
+    // was seeded at all has the entries and an empty block, and would otherwise never be
+    // reached. Measured before fixing: a re-run on exactly that state returned
+    // `{skipped: 2, profileSeeded: 0}` with the block still empty — the one instance this
+    // whole change cites as its motivation.
+    //
+    // Seeded from the STORED text, not from the incoming answer: AC-1.6 says the original
+    // stands, so the block must agree with the entry rather than with whatever was typed
+    // this time. And only when the stored entry is not `external_unverified` — an entry can
+    // reach `active` by being APPROVED out of the review queue, and once-untrusted text does
+    // not belong on a surface that loads into every turn. Same bar as the pin invariant (H6).
+    const known = deps.knowledgeStore.findActiveFactWithPrefix(prefix);
+    if (known) {
       skipped++;
+      if (known.sourceType !== 'external_unverified') {
+        activeLines.push({ prefix, text: collapseToSingleLine(known.text) });
+      }
       continue;
     }
 

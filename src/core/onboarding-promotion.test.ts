@@ -201,6 +201,12 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
       const block = ks.renderBlocks({ turnText: 'Guten Morgen, was steht heute an?' });
       expect(block).toContain('Nordberg AG');
       expect(block).toContain('Marketing lead');
+      // Pinned to the PROFILE block by name: seeding `playbook` instead would still render
+      // both strings into the turn, so a containment check alone does not say which
+      // surface was written.
+      expect(ks.readSurfaceBlocks().profile.split('\n').sort())
+        .toEqual(['Company: Nordberg AG', 'Role: Marketing lead']);
+      expect(ks.readSurfaceBlocks().playbook).toBe('');
     });
 
     it('SECURITY: a TAINTED answer never reaches the block — queued only', () => {
@@ -251,6 +257,79 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
       const profile = ks.readSurfaceBlocks().profile;
       expect(profile.split('\n')).toHaveLength(1);
       expect(profile).not.toMatch(/[\u2028\u2029]/u);
+    });
+
+    it('THE CASE THAT MATTERS: an ALREADY-onboarded tenant with an empty block gets seeded', () => {
+      // The production state this whole change was motivated by: the entries exist (they
+      // were promoted before the block was ever seeded) and the block is empty. Without
+      // seeding from the SKIP path this returns {skipped: 2, profileSeeded: 0} and the
+      // operator's identity stays invisible in every turn — measured, before the fix.
+      const { ks } = makeKs();
+      promoteOnboardingBasics(
+        [{ key: 'company', answer: 'Acme GmbH' }, { key: 'role', answer: 'Inhaber' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: 't0' },
+      );
+      ks.setBlockContent('profile', ''); // the pre-existing tenant: entries yes, block no
+      const r = promoteOnboardingBasics(
+        [{ key: 'company', answer: 'Acme GmbH' }, { key: 'role', answer: 'Inhaber' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: 't1' },
+      );
+      expect(r.skipped).toBe(2);        // the entries are untouched (AC-1.6)
+      expect(r.profileSeeded).toBe(2);  // …and the block is repaired
+      expect(ks.renderBlocks({ turnText: 'Guten Morgen' })).toContain('Acme GmbH');
+    });
+
+    it('the skip path seeds the STORED fact, not the newly typed answer (AC-1.6: the original stands)', () => {
+      const { ks } = makeKs();
+      promoteOnboardingBasics([{ key: 'company', answer: 'Acme GmbH' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: 't0' });
+      ks.setBlockContent('profile', '');
+      promoteOnboardingBasics([{ key: 'company', answer: 'Something Else AG' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: 't1' });
+      expect(ks.readSurfaceBlocks().profile).toBe('Company: Acme GmbH');
+    });
+
+    it('an APPROVED entry seeds — the review IS the trust act, and it raises the tier', () => {
+      // Worth pinning because the opposite is the intuitive guess. An entry that arrived
+      // untrusted and was approved out of the queue is re-tiered to `user_asserted`
+      // (knowledge-store `reviewEntry`), so it is no longer external_unverified and it does
+      // reach the block. That is the system's own trust model — the human confirming the
+      // text is what makes it the operator's. The tier check in the seed path is therefore
+      // a BACKSTOP with no current producer, not a live filter; it is kept so a future
+      // writer that lands external_unverified + active cannot silently gain this surface.
+      const { ks } = makeKs();
+      ks.write({ text: 'Company: Relayed Corp', sourceChannel: 'upload', sourceUntrusted: true });
+      const pending = ks.listPending();
+      expect(pending).toHaveLength(1);
+      expect(pending[0]!.sourceType).toBe('external_unverified');
+      ks.reviewEntry(pending[0]!.id, 'approve');
+      const r = promoteOnboardingBasics([{ key: 'company', answer: 'Acme GmbH' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: 't1' });
+      expect(r.skipped).toBe(1);
+      expect(r.profileSeeded).toBe(1);
+      expect(ks.readSurfaceBlocks().profile).toBe('Company: Relayed Corp');
+    });
+
+    it('a block line that MENTIONS the label mid-line does not suppress the seed', () => {
+      // `startsWith` on the existing line, not `includes`: "Ask about Company: before
+      // invoicing" names the label without being it.
+      const { ks } = makeKs();
+      ks.setBlockContent('profile', 'Ask about Company: before invoicing');
+      const r = promoteOnboardingBasics([{ key: 'company', answer: 'Acme GmbH' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD });
+      expect(r.profileSeeded).toBe(1);
+      expect(ks.readSurfaceBlocks().profile).toContain('Company: Acme GmbH');
+    });
+
+    it('an over-long answer is not seeded, and does not stop the next line from being', () => {
+      const { ks } = makeKs();
+      const r = promoteOnboardingBasics(
+        [{ key: 'company', answer: 'Werkstatt '.repeat(30) }, { key: 'role', answer: 'Inhaber' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
+      );
+      expect(r.promoted).toBe(2);      // both entries land — the cap is the BLOCK's, not the entry's
+      expect(r.profileSeeded).toBe(1); // only the short one becomes a standing line
+      expect(ks.readSurfaceBlocks().profile).toBe('Role: Inhaber');
     });
 
     it('is append-only: pre-existing operator lines survive and are never duplicated', () => {
