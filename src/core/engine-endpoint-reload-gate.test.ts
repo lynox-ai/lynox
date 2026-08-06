@@ -104,6 +104,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactHistoryTool: { name: 'artifact_history' },
   artifactRestoreTool: { name: 'artifact_restore' },
   recallToolResultTool: { name: 'recall_tool_result' },
+  calendarReadTool: { definition: { name: 'calendar_read' }, handler: vi.fn() },
+  CALENDAR_FEED_PREFIX: 'CALENDAR_FEED_',
   suggestFollowUpsTool: { name: 'suggest_follow_ups' },
 }));
 

@@ -82,6 +82,7 @@ import {
   artifactHistoryTool,
   artifactRestoreTool,
   recallToolResultTool,
+  calendarReadTool,
   setThreadContextTool,
   subjectsMergeTool,
   mediaProcessTool,
@@ -1303,6 +1304,7 @@ export class Engine {
       .register(taskListTool)
       .register(planTaskTool)
       .register(recallToolResultTool)
+      .register(calendarReadTool)
       .register(suggestFollowUpsTool)
       .register(mediaProcessTool);
 
