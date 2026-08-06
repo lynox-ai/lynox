@@ -9,6 +9,7 @@ import type { LynoxHooks } from '../core/engine.js';
 // Mocked below (vi.mock '../core/config.js') — imported so the model-blocklist
 // gate tests can override its return value per-test.
 import { loadConfig } from '../core/config.js';
+import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
 
 // === Mock dependencies ===
 
@@ -1223,6 +1224,53 @@ describe('LynoxHTTPApi', () => {
       const body = await res.json() as { error: string };
       expect(body.error).toMatch(/Unsupported image type/);
       expect(body.error).toMatch(/JPEG, PNG, GIF, or WebP/);
+    });
+
+    it('writes the document archive only when the durable substrate is OFF', async () => {
+      // The WIRING test, not the unit test. `ingestDocumentText` owns the decision and is
+      // unit-tested; what is only checkable here is that the route hands it the RIGHT
+      // answer. Mutating the call site to pass the inverted predicate leaves every unit
+      // test green — this is the one that dies. (The recurring failure shape: a green
+      // suite over a dead wire, because every test handed the value in directly.)
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const orig = {
+        kl: engineRef['getKnowledgeLayer'],
+        ks: engineRef['getKnowledgeStore'],
+        scopes: engineRef['getActiveScopes'],
+      };
+      const stored: string[] = [];
+      engineRef['getKnowledgeLayer'] = (): unknown => ({
+        store: (text: string): Promise<unknown> => { stored.push(text); return Promise.resolve({}); },
+      });
+      engineRef['getActiveScopes'] = (): unknown => [{ type: 'context', id: 'ws-1' }];
+
+      const pdf = buildPdf('Nordfeld GmbH Zahlungsziel 30 Tage').toString('base64');
+      const upload = (name: string): Promise<Response> => jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'lies das', files: [{ name, type: 'application/pdf', data: pdf }] }),
+      });
+
+      try {
+        // DK ON first, DK OFF second — deliberately in that order. The ingest is
+        // fire-and-forget, so "nothing was written" cannot be asserted by waiting a
+        // while and hoping; ordering turns it into a POSITIVE assertion instead. The
+        // first request completes before the second is issued, so if the DK-ON upload
+        // had written anything it would already be in `stored` by the time the DK-OFF
+        // writes land — and the filename says which upload each chunk came from.
+        engineRef['getKnowledgeStore'] = (): unknown => ({});
+        expect((await upload('dk-on.pdf')).status).toBe(200);
+
+        engineRef['getKnowledgeStore'] = (): unknown => null;
+        expect((await upload('dk-off.pdf')).status).toBe(200);
+
+        await vi.waitFor(() => { expect(stored.length).toBeGreaterThan(0); });
+        expect(stored.every(t => t.startsWith('[Document: dk-off.pdf]'))).toBe(true);
+        expect(stored.some(t => t.includes('dk-on.pdf'))).toBe(false);
+      } finally {
+        engineRef['getKnowledgeLayer'] = orig.kl;
+        engineRef['getKnowledgeStore'] = orig.ks;
+        engineRef['getActiveScopes'] = orig.scopes;
+      }
     });
 
     it('sanitizes newlines from filename to prevent prompt-injection in [File: ...] header', async () => {

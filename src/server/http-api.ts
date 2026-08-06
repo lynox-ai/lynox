@@ -2231,7 +2231,15 @@ export class LynoxHTTPApi {
                 // is auto-recalled on later turns. Never awaited — embedding /
                 // entity-extraction must not delay the chat turn; a failure just
                 // means the document isn't recalled (its text was already inlined).
+                //
+                // Under the durable substrate the archive is not written at all
+                // (`ingestDocumentText` returns 0) — the presence of the KnowledgeStore
+                // is the runtime answer to "is DK actually active here", which is the
+                // right predicate: it is null when the flag is off AND when the wiring
+                // failed, and in the failed case preserving the legacy write is the
+                // safe direction (the document's text is not silently dropped).
                 const kl = this.engine?.getKnowledgeLayer();
+                const durableStore = this.engine?.getKnowledgeStore();
                 const docScope = pickDocumentScope(this.engine?.getActiveScopes() ?? []);
                 if (kl && docScope) {
                   void ingestDocumentText(kl, {
@@ -2239,6 +2247,7 @@ export class LynoxHTTPApi {
                     fileName: safeName,
                     scope: docScope,
                     threadId: session.sessionId,
+                    durableKnowledgeActive: durableStore !== null && durableStore !== undefined,
                   }).catch(() => { /* best-effort */ });
                 }
                 continue;
