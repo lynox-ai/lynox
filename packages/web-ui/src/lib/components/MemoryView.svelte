@@ -59,7 +59,11 @@
 	// Retire, not delete: the entry is superseded, not erased. Hard erasure stays with the
 	// legacy pattern path (GDPR Art. 17) below, which is a different, louder promise.
 	async function retireEntry(entry: DkEntry) {
-		if (!confirm(t('knowledge.active.retire_confirm').replace('{text}', entry.text))) return;
+		// Replaced via a FUNCTION, not a string: `$&` / `$'` in a replacement string are
+		// substitution patterns, and a fact containing one corrupts the very text the user is
+		// being asked to confirm — `$'` silently truncates it. Entry text is model- and
+		// user-authored, so it reaches here.
+		if (!confirm(t('knowledge.active.retire_confirm').replace('{text}', () => entry.text))) return;
 		dkRetiringId = entry.id;
 		dkError = '';
 		try {
@@ -176,7 +180,9 @@
 		// Hard erase by substring (GDPR Art. 17). This is the ONLY user path that reaches
 		// content with no visible notebook line — e.g. rows ingested from documents — which
 		// the per-entry delete button (bound to rendered lines) cannot target.
-		if (!confirm(t('memory.erase_pattern_confirm').replace('{pattern}', pattern))) return;
+		// Same substitution-pattern hazard as in `retireEntry` — the pattern is typed by the
+		// user and lands in a confirmation dialog, which has to be faithful.
+		if (!confirm(t('memory.erase_pattern_confirm').replace('{pattern}', () => pattern))) return;
 		saving = true;
 		error = '';
 		try {
