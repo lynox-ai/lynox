@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getApiBase } from '../config.svelte.js';
-	import { t } from '../i18n.svelte.js';
+	import { t, tf } from '../i18n.svelte.js';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 
 	// DK-UX: when durable memory is on, "Wissen" browses the ACTIVE knowledge_entries +
@@ -59,23 +59,30 @@
 	// Retire, not delete: the entry is superseded, not erased. Hard erasure stays with the
 	// legacy pattern path (GDPR Art. 17) below, which is a different, louder promise.
 	async function retireEntry(entry: DkEntry) {
-		// Replaced via a FUNCTION, not a string: `$&` / `$'` in a replacement string are
-		// substitution patterns, and a fact containing one corrupts the very text the user is
-		// being asked to confirm — `$'` silently truncates it. Entry text is model- and
-		// user-authored, so it reaches here.
-		if (!confirm(t('knowledge.active.retire_confirm').replace('{text}', () => entry.text))) return;
+		// `tf`, not `t(...).replace(...)`: entry text is model- and user-authored, and a `$&`
+		// or `$'` in it rewrites the very message the user is agreeing to (see `tf`).
+		if (!confirm(tf('knowledge.active.retire_confirm', { text: entry.text }))) return;
 		dkRetiringId = entry.id;
 		dkError = '';
 		try {
 			const res = await fetch(`${getApiBase()}/knowledge/entries/${encodeURIComponent(entry.id)}/retire`, {
 				method: 'POST'
 			});
+			// A 404 is not a failure the user can act on — it means the entry is already gone
+			// and this list is stale. That happens without any adversary: the agent retires it
+			// via `memory_retire`, or a second tab did, and this view loads once and never
+			// refreshes. Telling them to try again would be advice that can never succeed, next
+			// to a row that stays on screen. Reload instead; the row disappears and they see why.
+			if (res.status === 404) { await loadDurable(); return; }
 			if (!res.ok) throw new Error();
 			await loadDurable();
 		} catch {
 			dkError = t('knowledge.active.retire_failed');
+		} finally {
+			// Guarded: a reload may have replaced the list while this was in flight, and an
+			// unconditional clear would release a button belonging to a different request.
+			if (dkRetiringId === entry.id) dkRetiringId = null;
 		}
-		dkRetiringId = null;
 	}
 
 	async function loadDurable() {
@@ -180,9 +187,9 @@
 		// Hard erase by substring (GDPR Art. 17). This is the ONLY user path that reaches
 		// content with no visible notebook line — e.g. rows ingested from documents — which
 		// the per-entry delete button (bound to rendered lines) cannot target.
-		// Same substitution-pattern hazard as in `retireEntry` — the pattern is typed by the
-		// user and lands in a confirmation dialog, which has to be faithful.
-		if (!confirm(t('memory.erase_pattern_confirm').replace('{pattern}', () => pattern))) return;
+		// Same hazard as in `retireEntry`: the pattern is typed by the user and lands in a
+		// confirmation dialog, which has to be faithful.
+		if (!confirm(tf('memory.erase_pattern_confirm', { pattern }))) return;
 		saving = true;
 		error = '';
 		try {
@@ -276,7 +283,7 @@
 							<span>{entry.kind}</span>
 							<button
 								type="button"
-								class="ml-auto text-text-subtle hover:text-danger disabled:opacity-40 disabled:hover:text-text-subtle transition-colors"
+								class="ml-auto -my-1 px-2 py-1 rounded-[var(--radius-sm)] text-text-subtle hover:text-danger hover:bg-danger/10 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-text-subtle disabled:hover:bg-transparent transition-colors"
 								disabled={dkRetiringId !== null}
 								onclick={() => void retireEntry(entry)}
 							>{dkRetiringId === entry.id ? t('knowledge.active.retiring') : t('knowledge.active.retire')}</button>

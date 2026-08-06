@@ -1,3 +1,5 @@
+import { fillTemplate } from './i18n-fill.js';
+
 export type Locale = 'de' | 'en';
 
 let current = $state<Locale>('de');
@@ -123,11 +125,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'knowledge.active.playbook': { de: 'Playbook', en: 'Playbook' },
 	'knowledge.active.empty': { de: 'Noch nichts gemerkt. Sobald lynox etwas über dich lernt, erscheint es hier.', en: 'Nothing remembered yet. As lynox learns about you, it shows up here.' },
 	'knowledge.active.pinned': { de: 'angeheftet', en: 'pinned' },
-	'knowledge.active.edit_hint': { de: 'Etwas ändern? Sag es lynox im Chat. Einen falschen Eintrag entfernst du direkt hier.', en: 'Want to change something? Tell lynox in chat. To drop a wrong entry, use the button on it.' },
+	'knowledge.active.edit_hint': { de: 'Etwas ändern? Sag es lynox im Chat. Einen falschen Eintrag entfernst du direkt hier.', en: 'Want to change something? Tell lynox in chat. To remove a wrong entry, use the button on it.' },
 	'knowledge.active.retire': { de: 'entfernen', en: 'remove' },
 	'knowledge.active.retiring': { de: 'wird entfernt...', en: 'removing...' },
-	'knowledge.active.retire_confirm': { de: 'Diesen Eintrag entfernen? lynox nutzt ihn danach nicht mehr.\n\n{text}', en: 'Drop this entry? lynox will stop using it.\n\n{text}' },
-	'knowledge.active.retire_failed': { de: 'Der Eintrag konnte nicht entfernt werden. Bitte erneut versuchen.', en: 'That entry could not be dropped. Please try again.' },
+	'knowledge.active.retire_confirm': { de: 'Diesen Eintrag entfernen? lynox nutzt ihn danach nicht mehr.\n\n{text}', en: 'Remove this entry? lynox will stop using it.\n\n{text}' },
+	'knowledge.active.retire_failed': { de: 'Der Eintrag konnte nicht entfernt werden. Bitte erneut versuchen.', en: 'That entry could not be removed. Please try again.' },
 	// PRD-IA-V2 P3-PR-H: `insights` folded as sub-tab under `graph`. Key kept
 	// (powers the sub-tab label). `graph_overview` labels the default graph
 	// view inside the `graph` top-tab.
@@ -2070,4 +2072,10 @@ export function initLocale(): void {
 
 export function t(key: string): string {
 	return translations[key]?.[current] ?? key;
+}
+
+/** Translate `key`, then fill its `{placeholder}` slots substitution-safely. See
+ *  {@link fillTemplate} for why the naive `t(key).replace('{x}', value)` is a hazard. */
+export function tf(key: string, vars: Record<string, string>): string {
+	return fillTemplate(t(key), vars);
 }
