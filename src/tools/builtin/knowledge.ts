@@ -206,7 +206,23 @@ export const recallTool: ToolEntry<RecallInput> = {
     if (!query) return 'Pass a `query` describing what to recall.';
 
     const entries = ks.recall({ query, subjectName: input.subject });
-    if (entries.length === 0) return 'No matching durable knowledge found.';
+    // The recall-time nudge (DK plan package 1). Queued entries about this subject are named
+    // by COUNT, never by text: a queued write happened on a turn that handled content the
+    // operator did not author, and its wording must not reach model context before a human
+    // has looked at it. Its existence may — and that is the point. The model learns something
+    // is waiting exactly when the subject comes up, which is the cheapest moment for the
+    // person to judge it. Write-time asks scale with how much gets READ; this scales with
+    // usefulness, and it is the only emptying path for captures made on background runs,
+    // which have no chip by construction.
+    const waiting = input.subject ? ks.pendingCountForSubjectHint(input.subject) : 0;
+    const waitingLine = waiting > 0
+      ? `\n\n(${String(waiting)} further ${waiting === 1 ? 'fact' : 'facts'} about this subject ${waiting === 1 ? 'is' : 'are'} waiting for the user's approval and cannot be shown until then. If it matters here, tell them so they can review it — do not guess at the content.)`
+      : '';
+    if (entries.length === 0) {
+      return waiting > 0
+        ? `No matching durable knowledge found.${waitingLine}`
+        : 'No matching durable knowledge found.';
+    }
     // H7: mask secrets in the tool RESULT too — recall returns decrypted text into model
     // context, so it must run the SAME two masking layers as the always-loaded block render
     // (knowledge-store.renderBlocks), else recall would be a strictly weaker surface: a
@@ -218,7 +234,7 @@ export const recallTool: ToolEntry<RecallInput> = {
         // agent has no way to reference an entry it wants retired.
         return `- [${e.id.slice(0, 8)}] ${maskSecretPatterns(tenantMasked)}${tierTag(e.sourceType)}`;
       })
-      .join('\n');
+      .join('\n') + waitingLine;
   },
 };
 
