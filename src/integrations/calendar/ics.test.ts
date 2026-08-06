@@ -408,6 +408,83 @@ END:VEVENT`,
     expect(r.events.length).toBeLessThan(6000);
   });
 
+  it('is not fooled into cutting mid-value by the boundary literal inside a DESCRIPTION', () => {
+    // Attacker-triggerable denial of the whole feature, and it needs only one invitation. An
+    // unanchored search for the component boundary matches inside a property VALUE, so a
+    // DESCRIPTION repeating the literal past the ceiling drops the cut into the middle of that
+    // value — the document no longer parses and the operator's ENTIRE calendar reads as
+    // unavailable. Not "some entries missing": all of them.
+    const payload = Array.from({ length: 5001 }, () => 'BEGIN:VEVENT').join(' ');
+    const r = parseIcsEvents(cal(
+      `BEGIN:VEVENT
+UID:echt@t
+DTSTART:20260812T120000Z
+DTEND:20260812T130000Z
+SUMMARY:Echter Termin
+DESCRIPTION:${payload}
+END:VEVENT`,
+    ), AUG);
+    expect(r.events.map(e => e.summary)).toEqual(['Echter Termin']);
+    expect(r.truncated).toBe(false);
+  });
+
+  it('does not treat a FOLDED continuation line as a component boundary', () => {
+    // RFC 5545 folds a long line by indenting the continuation. A payload that lands at the
+    // start of such a line is still inside the value it belongs to.
+    const r = parseIcsEvents([
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN',
+      'BEGIN:VEVENT', 'UID:f@t', 'DTSTART:20260812T120000Z', 'DTEND:20260812T130000Z',
+      'SUMMARY:Gefaltet', 'DESCRIPTION:erste Zeile', ' BEGIN:VEVENT getarnt',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n'), AUG);
+    expect(r.events.map(e => e.summary)).toEqual(['Gefaltet']);
+  });
+
+  it('cuts a CRLF feed cleanly', () => {
+    // Real feeds use CRLF. Slicing at the boundary without accounting for it leaves a stray
+    // carriage return where the closing line is appended.
+    const ev = (i: number) =>
+      `BEGIN:VEVENT\r\nUID:e${String(i)}@t\r\nDTSTART:20260812T120000Z\r\nDTEND:20260812T130000Z\r\nSUMMARY:E${String(i)}\r\nEND:VEVENT`;
+    const ics = `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n${Array.from({ length: 6000 }, (_, i) => ev(i)).join('\r\n')}\r\nEND:VCALENDAR`;
+    const r = parseIcsEvents(ics, { ...AUG, maxEvents: 6000 });
+    expect(r.events).toHaveLength(5000);
+    expect(r.truncated).toBe(true);
+  });
+
+  it('keeps a VTIMEZONE that sits AFTER the events when it cuts', () => {
+    // RFC 5545 fixes no order between components. Cutting the tail away takes the zone
+    // definition with it, and every kept event silently degrades to a floating time — a wrong
+    // clock with no error, which is worse than a visible failure.
+    const many = Array.from({ length: 6000 }, (_, i) =>
+      `BEGIN:VEVENT\nUID:z${String(i)}@t\nDTSTART;TZID=Europe/Zurich:20260812T140000\nDTEND;TZID=Europe/Zurich:20260812T150000\nSUMMARY:Z${String(i)}\nEND:VEVENT`);
+    const r = parseIcsEvents([
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//test//EN',
+      ...many, TZ, 'END:VCALENDAR',
+    ].join('\n'), { ...AUG, maxEvents: 6000 });
+    expect(r.truncated).toBe(true);
+    expect(r.events[0]?.timezone).toBe('Europe/Zurich');
+    expect(r.events[0]?.start).toBe('2026-08-12T14:00:00');
+  });
+
+  it('reads an event whose TZID the feed never defines, without inventing a zone', () => {
+    // A producer that references a zone it does not embed is common enough to matter. ical.js
+    // degrades such a time to floating; reporting the named-but-undefined zone would attach a
+    // confident offset the feed never established.
+    const r = parseIcsEvents([
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//t//EN',
+      `BEGIN:VEVENT
+UID:undefzone@t
+DTSTART;TZID=Mars/Olympus:20260812T140000
+DTEND;TZID=Mars/Olympus:20260812T150000
+SUMMARY:Unbekannte Zone
+END:VEVENT`,
+      'END:VCALENDAR',
+    ].join('\n'), AUG);
+    expect(r.events[0]?.summary).toBe('Unbekannte Zone');
+    expect(r.events[0]?.start).toBe('2026-08-12T14:00:00');
+    expect(r.events[0]?.timezone).toBeUndefined();
+  });
+
   it('keeps the rest of the calendar when one event is broken', () => {
     // One malformed VEVENT in a year of calendar must not lose the other 300.
     const r = parseIcsEvents(cal(

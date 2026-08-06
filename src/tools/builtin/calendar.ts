@@ -75,6 +75,13 @@ function parseBound(value: string | undefined, fallback: Date, endOfDay: boolean
  */
 function renderWhen(e: CalendarEvent): string {
   if (e.allDay) {
+    // Not every all-day event has a DATE-valued end. `DTSTART;VALUE=DATE` with a timestamped
+    // DTEND violates RFC 5545 §3.8.2.2 and ical.js accepts it anyway, which made this branch
+    // build `2026-08-15T10:00:00ZT00:00:00Z` — an Invalid Date whose `toISOString()` throws.
+    // Nothing in the handler catches it, so one malformed entry in one feed took down the whole
+    // call including every healthy calendar in it. A shape that cannot be reasoned about gets
+    // the start date and no invented span.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(e.end)) return `${e.start} (all day)`;
     // DTEND is exclusive for a DATE-valued event: a one-day event ends the following day, and
     // saying "14.–15." for a single day's holiday would be wrong in the direction that costs a
     // missed appointment.
@@ -137,6 +144,9 @@ export const calendarReadTool: ToolEntry<CalendarReadInput> = {
     const to = parseBound(input.to, new Date(from.getTime() + DEFAULT_WINDOW_DAYS * 86_400_000), true);
     if (!to) return `Could not read "${input.to ?? ''}" as a date.`;
     if (to.getTime() <= from.getTime()) return 'The window ends before it starts.';
+    // Counts the days the window COVERS, which is why advancing a date-only end by a day also
+    // moves this: `from: 2026-08-01, to: 2026-11-01` now genuinely covers 93 days, including
+    // the whole 1st of November, and is refused for that reason rather than by accident.
     const days = (to.getTime() - from.getTime()) / 86_400_000;
     if (days > MAX_WINDOW_DAYS) {
       return `That window is ${String(Math.round(days))} days. Ask for at most ${String(MAX_WINDOW_DAYS)} at a time.`;
@@ -178,7 +188,11 @@ export const calendarReadTool: ToolEntry<CalendarReadInput> = {
       return `- ${renderWhen(e)} ${e.summary || '(no title)'}${where}${which}`;
     });
 
-    const window = `${from.toISOString().slice(0, 10)} and ${to.toISOString().slice(0, 10)}`;
+    // The window is half-open, so its exclusive end is the day AFTER the last one covered.
+    // Naming that day tells the model the 1st is included when a 09:00 meeting on the 1st was
+    // filtered out — an overstatement in the "you are free" direction.
+    const lastCovered = new Date(to.getTime() - 1).toISOString().slice(0, 10);
+    const window = `${from.toISOString().slice(0, 10)} and ${lastCovered}`;
     const header = all.length === 0
       ? `No appointments between ${window}.`
       : `${String(all.length)} appointment${all.length === 1 ? '' : 's'} between ${window}:`;

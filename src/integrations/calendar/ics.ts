@@ -89,9 +89,12 @@ export const DEFAULT_MAX_EVENTS = 200;
  * years ago costs one step per interval before it reaches the window — and `FREQ=SECONDLY`
  * with no UNTIL is a valid rule that never terminates. Such a series yields ZERO events, so
  * the output cap never trips either. Measured on this machine: ~33 ms per exhausted series, at
- * ~102 bytes of ICS per series — a feed inside the 5 MB fetch ceiling holds ~51,000 of them,
- * which is ~28 MINUTES of synchronous expansion with the event loop held shut. One budget for
- * the document bounds it at roughly 165 ms regardless of how the feed is shaped.
+ * ~102 bytes of ICS per series.
+ *
+ * One budget for the document bounds ITERATOR STEPS at roughly 165 ms — and that is the whole
+ * of what it bounds. It is not the limit that makes a hostile feed safe: with this budget in
+ * place a 5 MB feed still took 302 seconds, because the time was going somewhere else
+ * entirely. See {@link MAX_COMPONENTS}, which is the one that does.
  */
 const MAX_TOTAL_ITERATIONS = 50_000;
 
@@ -219,18 +222,55 @@ export function parseIcsEvents(ics: string, opts: ParseIcsOptions): ParseIcsResu
  *
  * Textual rather than structural because the cost being bounded is set by the size of the
  * parsed document itself (see {@link MAX_COMPONENTS}) — dropping components after the parse
- * would leave that cost fully paid. `BEGIN:VEVENT` is unambiguous at a line start: RFC 5545
- * folds long lines by indenting the continuation, so a folded line can never begin with it.
- * The header, and with it any VTIMEZONE the remaining events resolve against, is kept.
+ * would leave that cost fully paid. The header, and with it any VTIMEZONE the remaining events
+ * resolve against, is kept.
+ *
+ * The LINE ANCHOR is load-bearing, not tidiness. A plain substring search matches
+ * `BEGIN:VEVENT` inside a property VALUE, and an attacker only needs to send the operator one
+ * invitation whose DESCRIPTION repeats the literal 5,001 times: the cut then lands in the
+ * middle of that value, `ICAL.parse` throws on the malformed document, and the operator's
+ * ENTIRE calendar reads as unavailable. Verified — it threw "component began but did not end"
+ * before this was anchored. RFC 5545 folds a long line by indenting the continuation with a
+ * space or tab, so a line that begins in column zero with `BEGIN:VEVENT` is always a real
+ * component boundary and a folded payload never is.
  */
 function capComponents(ics: string): { ics: string; capped: boolean } {
-  let idx = -1;
-  for (let n = 0; n <= MAX_COMPONENTS; n++) {
-    const next = ics.indexOf('BEGIN:VEVENT', idx + 1);
-    if (next < 0) return { ics, capped: false };
-    idx = next;
+  const boundary = /^BEGIN:VEVENT/gm;
+  for (let seen = 0; ; seen++) {
+    const match = boundary.exec(ics);
+    if (!match) return { ics, capped: false };
+    if (seen === MAX_COMPONENTS) {
+      const head = ics.slice(0, match.index);
+      // Carry any VTIMEZONE that sits AFTER the events. RFC 5545 fixes no order, and dropping
+      // one turns every zoned time in the kept events into a floating one — a silently wrong
+      // clock rather than a visible failure, which is the worse of the two.
+      const zones = collectTimezones(ics.slice(match.index));
+      return { ics: `${head}\r\n${zones}END:VCALENDAR\r\n`, capped: true };
+    }
   }
-  return { ics: `${ics.slice(0, idx)}END:VCALENDAR\r\n`, capped: true };
+}
+
+/**
+ * Pull the VTIMEZONE blocks out of the part being discarded.
+ *
+ * Scanned with indexOf rather than a lazy regex on purpose: `/BEGIN:VTIMEZONE[\s\S]*?END:.../g`
+ * over a 5 MB tail is quadratic when the openings have no matching close, which is a document
+ * an attacker can simply write. The count is capped for the same reason — no real calendar
+ * defines more zones than there are zones.
+ */
+function collectTimezones(tail: string): string {
+  const MAX_ZONES = 100;
+  const out: string[] = [];
+  let at = 0;
+  while (out.length < MAX_ZONES) {
+    const start = tail.indexOf('\nBEGIN:VTIMEZONE', at);
+    if (start < 0) break;
+    const end = tail.indexOf('\nEND:VTIMEZONE', start);
+    if (end < 0) break;
+    out.push(tail.slice(start + 1, end + '\nEND:VTIMEZONE'.length).replace(/\r$/, ''));
+    at = end + 1;
+  }
+  return out.length > 0 ? `${out.join('\r\n')}\r\n` : '';
 }
 
 function isCancelled(component: ICAL.Component): boolean {

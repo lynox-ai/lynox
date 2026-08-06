@@ -69,7 +69,16 @@ export async function fetchIcsFeed(url: string, ctx?: ToolContext | undefined): 
     throw new Error(`calendar feed responded ${String(response.status)}`);
   }
 
-  const { text, truncated } = await readBodyLimited(response, MAX_ICS_BYTES);
+  let text: string;
+  let truncated: boolean;
+  try {
+    ({ text, truncated } = await readBodyLimited(response, MAX_ICS_BYTES));
+  } catch {
+    // Reading the body is a second chance to fail — a socket dropped mid-stream, a decode
+    // error — and it sits after the headers arrived, so leaving it outside the guard made the
+    // "every error is one of ours" claim above false for exactly the errors nobody tests.
+    throw new Error('the calendar feed could not be read');
+  }
   // A reset or wrong address commonly returns an HTML error page with a 200. Failing on the
   // content rather than the status keeps the operator from being told "0 appointments" when
   // the truth is "this link no longer works".
@@ -89,7 +98,12 @@ export async function fetchIcsFeed(url: string, ctx?: ToolContext | undefined): 
  * still true ones.
  */
 function repairTruncated(text: string): string {
-  const lastComplete = text.lastIndexOf('END:VEVENT');
+  // Anchored to a line start, for the same reason the component cap is: a plain search finds
+  // `END:VEVENT` inside a SUMMARY or DESCRIPTION, and cutting there leaves the event that
+  // contains it unterminated — reproducing precisely the parse failure this function exists to
+  // prevent. RFC 5545 folds continuation lines with a leading space, so a payload can never
+  // occupy column zero.
+  const lastComplete = text.lastIndexOf('\nEND:VEVENT');
   if (lastComplete < 0) return 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n';
-  return `${text.slice(0, lastComplete + 'END:VEVENT'.length)}\r\nEND:VCALENDAR\r\n`;
+  return `${text.slice(0, lastComplete + '\nEND:VEVENT'.length)}\r\nEND:VCALENDAR\r\n`;
 }

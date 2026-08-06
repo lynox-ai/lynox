@@ -381,6 +381,65 @@ END:VEVENT`,
     expect(out).toContain(inAWeek.toISOString().slice(0, 10));
   });
 
+  it('survives an all-day entry whose end carries a clock', async () => {
+    // `DTSTART;VALUE=DATE` with a timestamped DTEND breaks RFC 5545 §3.8.2.2 and ical.js takes
+    // it anyway. Rendering built an unparseable date string from it, and `toISOString()` throws
+    // on those — outside every try in the handler, so ONE malformed entry in ONE feed took down
+    // the whole call, healthy calendars included.
+    vi.mocked(fetchIcsFeed).mockResolvedValue({
+      ics: TZ_ICS(
+        `BEGIN:VEVENT
+UID:krumm@t
+DTSTART;VALUE=DATE:20260814
+DTEND:20260815T100000Z
+SUMMARY:Krummer Eintrag
+END:VEVENT`,
+        `BEGIN:VEVENT
+UID:ok@t
+DTSTART:20260812T120000Z
+DTEND:20260812T130000Z
+SUMMARY:Gesunder Termin
+END:VEVENT`,
+      ),
+      truncated: false,
+    });
+    const out = await calendarReadTool.handler(
+      { from: '2026-08-01', to: '2026-08-31' },
+      agentWith({ [`${CALENDAR_FEED_PREFIX}MAIN`]: 'https://calendar.example/x.ics' }),
+    );
+    expect(out).toContain('Gesunder Termin');
+    expect(out).toContain('Krummer Eintrag');
+  });
+
+  it('names the last day it actually covered, not the exclusive end', async () => {
+    // The window is half-open. Naming its exclusive end tells the model the 1st is covered when
+    // a meeting on the 1st was filtered out — an overstatement in the "you are free" direction,
+    // which is the one that costs a double booking.
+    vi.mocked(fetchIcsFeed).mockResolvedValue({ ics: TZ_ICS(), truncated: false });
+    const out = await calendarReadTool.handler(
+      { from: '2026-08-01', to: '2026-08-31' },
+      agentWith({ [`${CALENDAR_FEED_PREFIX}MAIN`]: 'https://calendar.example/x.ics' }),
+    );
+    expect(out).toContain('between 2026-08-01 and 2026-08-31');
+    expect(out).not.toContain('2026-09-01');
+  });
+
+  it('allows a window of exactly the maximum length and refuses one day more', async () => {
+    // Both sides, because the length check counts COVERED days and a date-only end now covers
+    // its whole last day — the boundary moved by one when that was fixed, and only a pair of
+    // cases pins where it landed.
+    vi.mocked(fetchIcsFeed).mockResolvedValue({ ics: TZ_ICS(), truncated: false });
+    const feed = agentWith({ [`${CALENDAR_FEED_PREFIX}MAIN`]: 'https://calendar.example/x.ics' });
+    const ok = await calendarReadTool.handler({ from: '2026-01-01', to: '2026-04-02' }, feed);
+    expect(ok).not.toMatch(/at most/);
+    expect(fetchIcsFeed).toHaveBeenCalled();
+
+    vi.mocked(fetchIcsFeed).mockClear();
+    const tooLong = await calendarReadTool.handler({ from: '2026-01-01', to: '2026-04-03' }, feed);
+    expect(tooLong).toMatch(/93 days.*at most 92/);
+    expect(fetchIcsFeed).not.toHaveBeenCalled();
+  });
+
   it('reports a stored-but-unresolvable feed as unreadable, not as an empty calendar', async () => {
     const out = await calendarReadTool.handler(
       { from: '2026-08-01', to: '2026-08-31' },

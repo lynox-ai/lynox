@@ -107,6 +107,40 @@ SUMM`;
     expect(parsed.events.map(e => e.summary)).toEqual(['Termin']);
   });
 
+  it('is not fooled by the terminator literal inside an event title', async () => {
+    // Same class as the component cap: an unanchored search finds `END:VEVENT` inside a
+    // SUMMARY, and cutting there leaves the event containing it unterminated — reproducing
+    // exactly the parse failure the repair exists to prevent, on attacker-chosen text.
+    const cut = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//test//EN
+BEGIN:VEVENT
+UID:a@t
+DTSTART:20260812T120000Z
+DTEND:20260812T130000Z
+SUMMARY:Termin
+END:VEVENT
+BEGIN:VEVENT
+UID:b@t
+DTSTART:20260813T120000Z
+DTEND:20260813T130000Z
+SUMMARY:Wie man END:VEVENT schreibt
+DESCR`;
+    readBodyLimited.mockResolvedValue({ text: cut, truncated: true });
+    const r = await fetchIcsFeed(SECRET_URL);
+    const parsed = parseIcsEvents(r.ics, { from: new Date('2026-08-01T00:00:00Z'), to: new Date('2026-09-01T00:00:00Z') });
+    expect(parsed.events.map(e => e.summary)).toEqual(['Termin']);
+  });
+
+  it('translates a failure while READING the body, not only while opening it', async () => {
+    // A socket dropped mid-stream fails after the headers arrived. Leaving that path outside
+    // the guard made the "every error is one of ours" claim false for exactly the errors
+    // nobody writes a test for.
+    readBodyLimited.mockRejectedValue(new Error('socket hang up on calendar.example.com'));
+    await expect(fetchIcsFeed(SECRET_URL)).rejects.toThrow(/could not be read/);
+    await expect(fetchIcsFeed(SECRET_URL)).rejects.not.toThrow(/calendar\.example\.com/);
+  });
+
   it('yields a parseable empty calendar when the cut left no complete event', async () => {
     readBodyLimited.mockResolvedValue({ text: 'BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nDTSTA', truncated: true });
     const r = await fetchIcsFeed(SECRET_URL);
