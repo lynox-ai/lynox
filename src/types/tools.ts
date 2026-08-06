@@ -4,6 +4,7 @@ import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/message
 
 import type { IAgent } from './agent.js';
 import type { CostSnapshot } from './modes.js';
+import type { UntrustedCause } from '../core/untrusted-signals.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
@@ -156,8 +157,14 @@ export type StreamEvent =
   // NOT a tool-result and never folded into model context — it renders in the web-ui from
   // the SSE side-channel only. `text` carries the raw (possibly-injected) wording for the
   // untrusted review chip; that is exactly why it stays strictly client-bound.
+  // `cause` says WHY a write was routed to review, in the engine's own vocabulary
+  // (`describeTurnUntrusted`). Only meaningful for `pending_review`. Without it the chip can
+  // only say "from external content", which is true of every queued write and therefore tells
+  // the person nothing they can judge — and a confirmation nobody can judge is a reflex, which
+  // is worse than no gate because it looks like a control.
   | { type: 'knowledge_write'; id: string; subject?: string | undefined; kind?: string | undefined;
-      status: 'active' | 'pending_review'; text: string; agent: string };
+      status: 'active' | 'pending_review'; text: string; agent: string;
+      cause?: UntrustedCause | undefined };
 
 export type StreamHandler = (event: StreamEvent) => void | Promise<void>;
 

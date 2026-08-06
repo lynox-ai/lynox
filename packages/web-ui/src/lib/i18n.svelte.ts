@@ -947,6 +947,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.knowledge.thread_pending_open': { de: 'ansehen', en: 'review' },
 	'chat.knowledge.review_tag': { de: 'prüfen', en: 'review' },
 	'chat.knowledge.review_hint': { de: 'aus externem Inhalt', en: 'from external content' },
+	// The reason a write was queued, in words the person can act on. "from external content" is
+	// true of every queued write and therefore says nothing; these say WHICH thing made it so —
+	// and the third one matters most, because it is the case where nothing external happened on
+	// THIS turn at all and the person would otherwise be baffled.
+	'chat.knowledge.cause.marker': { de: 'der Durchlauf hat fremde Inhalte verarbeitet', en: 'this turn processed third-party content' },
+	'chat.knowledge.cause.external_tool': { de: 'in diesem Durchlauf wurde etwas Externes gelesen', en: 'something external was read in this turn' },
+	'chat.knowledge.cause.conversation': { de: 'früher in dieser Unterhaltung wurde etwas Externes gelesen', en: 'something external was read earlier in this conversation' },
 	'chat.knowledge.review_keep': { de: 'behalten', en: 'keep' },
 	'chat.knowledge.review_edit': { de: 'bearbeiten', en: 'edit' },
 	'chat.knowledge.review_discard': { de: 'verwerfen', en: 'discard' },

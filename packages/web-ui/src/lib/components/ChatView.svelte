@@ -74,6 +74,8 @@
 	import { taskPreview } from '../stores/follow-ups.js';
 	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
 	import { formatCost } from '../format.js';
+	import { knowledgeCauseKey } from '../stores/knowledge-chip.js';
+
 
 	// Read through a derived so the banner tracks the store's rune rather than a snapshot
 	// taken at mount — the count changes on thread switch and after a review.
@@ -2761,16 +2763,21 @@
 							<div class="flex flex-col gap-1 mt-2">
 								{#each msg.knowledgeWrites as kw (kw.id)}
 									{#if kw.status === 'active'}
-										<div class="flex items-center gap-2 text-[11px] text-text-muted">
-											<span class="inline-flex items-center gap-1 rounded-full bg-accent/10 text-accent-text px-2 py-0.5">
+										<div class="flex items-start gap-2 text-[11px] text-text-muted">
+											<span class="shrink-0 inline-flex items-center gap-1 rounded-full bg-accent/10 text-accent-text px-2 py-0.5">
 												<span aria-hidden="true">✓</span>
 												{kw.subject ? t('chat.knowledge.saved_to').replace('{subject}', kw.subject) : t('chat.knowledge.saved')}
 											</span>
+											<!-- The fact itself. Without it this chip offers an undo for something the
+											     person cannot read — and "undo what?" is not a decision anyone can make.
+											     Plain text, never markdown: same discipline as the review chip below,
+											     since the wording is model-authored. -->
+											<span class="min-w-0 flex-1 text-text-subtle break-words">{kw.text}</span>
 											{#if kw.resolved === 'undone'}
-												<span class="text-text-subtle">· {t('chat.knowledge.undone')}</span>
+												<span class="shrink-0 text-text-subtle">· {t('chat.knowledge.undone')}</span>
 											{:else}
 												<button
-													class="text-text-subtle hover:text-text underline underline-offset-2"
+													class="shrink-0 text-text-subtle hover:text-text underline underline-offset-2"
 													onclick={() => retireKnowledge(msgIdx, kw.id)}
 												>{t('chat.knowledge.undo')}</button>
 											{/if}
@@ -2784,7 +2791,11 @@
 											<div class="flex items-center gap-2 text-[10px] font-mono text-text-muted">
 												<span class="rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 px-1.5">{t('chat.knowledge.review_tag')}</span>
 												{#if kw.subject}<span>→ {kw.subject}</span>{/if}
-												<span class="text-text-subtle">{t('chat.knowledge.review_hint')}</span>
+												<!-- WHY it is here. The generic "from external content" is true of every
+												     queued write, so it gives the person nothing to judge. The sticky case
+												     matters most: nothing external happened on THIS turn, and without
+												     saying so the chip looks like a bug. -->
+												<span class="text-text-subtle">{t(knowledgeCauseKey(kw.cause))}</span>
 											</div>
 											{#if kw.resolved}
 												<p class="text-text-subtle">{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}</p>
