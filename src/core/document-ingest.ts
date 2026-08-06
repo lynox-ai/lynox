@@ -90,11 +90,41 @@ export function pickDocumentScope(scopes: ReadonlyArray<MemoryScopeRef>): Memory
  * `external_unverified` (untrusted uploaded content) so the recall path applies
  * its injection guard, and `document_upload` so the document's memories are
  * attributable. Best-effort: the caller fires this without awaiting.
+ *
+ * `durableKnowledgeActive` is REQUIRED rather than optional so the compiler
+ * enumerates every caller: the answer decides whether this writes at all, and a
+ * caller that forgot to pass it would silently keep the legacy write alive.
+ * When it is true the archive is NOT written — see the guard below for why.
  */
 export async function ingestDocumentText(
 	sink: DocumentMemorySink,
-	params: { text: string; fileName: string; scope: MemoryScopeRef; threadId: string },
+	params: {
+		text: string;
+		fileName: string;
+		scope: MemoryScopeRef;
+		threadId: string;
+		durableKnowledgeActive: boolean;
+	},
 ): Promise<number> {
+	// Under the durable substrate this path is the LAST writer into the legacy
+	// agent-memory store, and writing there buys nothing: `recall` and the
+	// always-loaded block both read `knowledge_entries` and never see it, so the
+	// chunks would be reachable only through `archive_search` — a tool whose own
+	// description tells the model it holds facts "collected BEFORE the durable-memory
+	// cutover". A document uploaded a minute ago does not belong there.
+	//
+	// Nor do the chunks belong in `knowledge_entries`: that store ranks by raw token
+	// overlap, so 2000-char excerpts would outrank every one-sentence fact and eat the
+	// recall budget. A document is SOURCE MATERIAL, not a durable fact.
+	//
+	// So under DK nothing is persisted here. The extracted text is still inlined into
+	// the turn by the caller — the model reads it and records what is durable via
+	// `remember`, which routes an upload-bearing turn to the review queue, where the
+	// operator confirms it. That is the intended shape: the human decides what a
+	// document contributes to durable knowledge. Keeping the archive un-written also
+	// makes `archive_search`'s "before the cutover" description true again.
+	if (params.durableKnowledgeActive) return 0;
+
 	const chunks = chunkDocumentText(params.text);
 	let stored = 0;
 	for (const chunk of chunks) {
