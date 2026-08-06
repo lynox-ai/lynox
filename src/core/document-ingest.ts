@@ -117,12 +117,25 @@ export async function ingestDocumentText(
 	// overlap, so 2000-char excerpts would outrank every one-sentence fact and eat the
 	// recall budget. A document is SOURCE MATERIAL, not a durable fact.
 	//
-	// So under DK nothing is persisted here. The extracted text is still inlined into
-	// the turn by the caller — the model reads it and records what is durable via
-	// `remember`, which routes an upload-bearing turn to the review queue, where the
-	// operator confirms it. That is the intended shape: the human decides what a
-	// document contributes to durable knowledge. Keeping the archive un-written also
-	// makes `archive_search`'s "before the cutover" description true again.
+	// So under DK nothing is persisted here. The extracted text is still inlined into the
+	// turn by the caller and rides the thread's own history, so the document stays
+	// available for the rest of that conversation; what the model judges durable it
+	// records via `remember`. Keeping the archive un-written also makes
+	// `archive_search`'s "before the cutover" description true again.
+	//
+	// The trade, stated rather than implied: cross-THREAD reachability of the raw text
+	// goes away. It was only ever reachable through `archive_search` anyway, and the
+	// automatic recall path was already dead under DK (`session.ts` skips
+	// `knowledgeLayer.retrieve`) — but a document whose facts the model does not record
+	// leaves no durable trace, and measured capture is low. That is the accepted cost of
+	// treating a document as source material rather than as durable knowledge.
+	//
+	// NOT claimed here, because it is not true: that an upload routes the turn's writes
+	// to the review queue. `deriveTurnUntrusted` is seated only from TOOL signals (a
+	// wrapped tool result, an external-content tool at dispatch, or the rehydration scan
+	// for those two); an HTTP-attached document sets none of them. That gap predates this
+	// change and is tracked separately — do not read this branch as if a trust gate had
+	// replaced the tier the archive copy used to carry.
 	if (params.durableKnowledgeActive) return 0;
 
 	const chunks = chunkDocumentText(params.text);
