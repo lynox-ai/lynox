@@ -243,9 +243,18 @@ function isCancelled(component: ICAL.Component): boolean {
  * Filtering on the start alone hides exactly the appointments that matter most for "am I free
  * on Tuesday": a week of holiday that began last Friday starts before the window and is
  * invisible, though it covers every day in it.
+ *
+ * The zero-length case is not a curiosity, and moving to overlap broke it before this line
+ * existed. A VEVENT with no DTEND and no DURATION gets `endDate == startDate` from ical.js, and
+ * that is the shape of every reminder and marker in a real calendar. Requiring `end > from`
+ * drops such an entry when it falls exactly ON the window start — which is where it usually
+ * falls, because "what is on today" starts the window at midnight. A point in time overlaps a
+ * window it sits at the edge of.
  */
 function overlapsWindow(start: ICAL.Time, end: ICAL.Time, from: ICAL.Time, to: ICAL.Time): boolean {
-  return end.compare(from) > 0 && start.compare(to) < 0;
+  const zeroLength = start.compare(end) === 0;
+  const endsAfterStart = zeroLength ? end.compare(from) >= 0 : end.compare(from) > 0;
+  return endsAfterStart && start.compare(to) < 0;
 }
 
 function toEvent(

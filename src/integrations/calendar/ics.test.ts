@@ -127,6 +127,38 @@ END:VEVENT`,
     expect(r.events.map(e => e.summary)).toEqual(['Ferien Roland']);
   });
 
+  it('keeps a zero-length entry sitting exactly on the window start', () => {
+    // A VEVENT with no DTEND and no DURATION — every reminder and marker in a real calendar —
+    // gets `endDate == startDate`. Moving from a start-filter to an overlap-filter fixed the
+    // multi-day case and broke this one in the same stroke: `end > from` drops a point in time
+    // at the edge, and the edge is exactly where it lands, because "what is on today" starts
+    // the window at midnight.
+    const r = parseIcsEvents(cal(
+      `BEGIN:VEVENT
+UID:marker@t
+DTSTART:20260814T090000Z
+SUMMARY:Marker ohne Dauer
+END:VEVENT`,
+    ), { from: new Date('2026-08-14T09:00:00Z'), to: new Date('2026-08-15T00:00:00Z') });
+    expect(r.events.map(e => e.summary)).toEqual(['Marker ohne Dauer']);
+  });
+
+  it('drops an appointment that ENDED exactly at the window start', () => {
+    // The other direction of the same edge, and the reason the zero-length case gets a special
+    // branch instead of relaxing the comparison for everything: a meeting that ran 08:00–09:00
+    // is over when the window opens at 09:00. Making the bound inclusive for all events would
+    // resurrect it, and "what is on now" would open with a meeting that already happened.
+    const r = parseIcsEvents(cal(
+      `BEGIN:VEVENT
+UID:vorbei@t
+DTSTART:20260814T080000Z
+DTEND:20260814T090000Z
+SUMMARY:Schon vorbei
+END:VEVENT`,
+    ), { from: new Date('2026-08-14T09:00:00Z'), to: new Date('2026-08-15T00:00:00Z') });
+    expect(r.events).toHaveLength(0);
+  });
+
   it('expands a weekly series and honours EXDATE', () => {
     // The cancelled instance is the point: a series minus one week is what a real calendar
     // looks like, and listing the skipped week is how someone ends up at an empty room.
