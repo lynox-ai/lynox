@@ -101,9 +101,13 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     // the person nothing to judge — and a confirmation nobody can judge is a reflex. Each
     // signal must arrive distinctly, especially `conversation`: nothing external happened
     // on THIS turn, and without saying so the chip reads as a malfunction.
+    // The sticky latch is CO-SET whenever the marker or an external-content tool fires on a
+    // real Agent (`agent.ts` arms both at each site), so a fixture that sets only one of the
+    // first two is a state production cannot reach — and it would leave the ORDERING, which is
+    // what actually decides the wording, untested. Each case below is a reachable state.
     const cases = [
-      [{ sawUntrustedData: true }, 'marker'],
-      [{ sawExternalContentTool: true }, 'external-tool'],
+      [{ sawUntrustedData: true, conversationSawUntrusted: true }, 'marker'],
+      [{ sawExternalContentTool: true, conversationSawUntrusted: true }, 'external-tool'],
       [{ conversationSawUntrusted: true }, 'conversation'],
     ] as const;
     for (const [signals, expected] of cases) {

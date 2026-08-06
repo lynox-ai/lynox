@@ -4,11 +4,18 @@ import { fileURLToPath } from 'node:url';
 import { knowledgeCauseKey } from './knowledge-chip.js';
 
 describe('knowledgeCauseKey', () => {
-	it('maps each engine cause to its own wording', () => {
-		// Distinct keys, not just "returns a string": the whole point is that the person
-		// learns WHICH thing queued the write.
-		const keys = ['marker', 'external-tool', 'conversation'].map(knowledgeCauseKey);
-		expect(new Set(keys).size).toBe(3);
+	// The LITERAL pairs, not "three distinct keys": a swapped implementation passed a
+	// distinctness count, which is a tautology dressed as coverage.
+	it.each([
+		['marker', 'chat.knowledge.cause.this_step'],
+		['external-tool', 'chat.knowledge.cause.this_step'],
+		['conversation', 'chat.knowledge.cause.earlier'],
+	])('maps %s → %s', (cause, key) => {
+		expect(knowledgeCauseKey(cause)).toBe(key);
+	});
+
+	it('separates THIS step from an EARLIER one — the only split the person can act on', () => {
+		expect(knowledgeCauseKey('marker')).not.toBe(knowledgeCauseKey('conversation'));
 	});
 
 	it('falls back to the generic line for an absent or unknown cause', () => {
@@ -18,18 +25,20 @@ describe('knowledgeCauseKey', () => {
 		}
 	});
 
-	it('every key it can return is actually declared in i18n', () => {
-		// The failure this guards is SILENT: `t()` falls back to echoing the key, so a typo
-		// renders "chat.knowledge.cause.marker" at the user instead of a sentence. Checked by
-		// reading the source rather than importing it — `i18n.svelte.ts` holds the locale in a
-		// rune, so a test cannot import it, and an unassertable mapping is one that drifts.
-		const src = readFileSync(
-			fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)),
-			'utf-8',
-		);
+	it('every key it can return is declared in BOTH locales, non-empty', () => {
+		// The failure this guards is SILENT: `t()` falls back to echoing the key, so a typo —
+		// or a `de`-only entry — renders "chat.knowledge.cause.earlier" at the user instead of
+		// a sentence. Checked by reading the source rather than importing it: `i18n.svelte.ts`
+		// holds the locale in a rune, so a test cannot import it.
+		const src = readFileSync(fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)), 'utf-8');
 		for (const c of ['marker', 'external-tool', 'conversation', undefined]) {
 			const key = knowledgeCauseKey(c);
-			expect(src, `missing i18n declaration for ${key}`).toContain(`'${key}': {`);
+			// Both locales, each with at least one character between the quotes — a bare
+			// `toContain("'key': {")` passes for `{ de: 'x' }` with no `en`, and for `{ de: '' }`.
+			const decl = new RegExp(
+				`'${key.replace(/\./g, '\\.')}':\\s*\\{[^}]*\\bde:\\s*'[^']+'[^}]*\\ben:\\s*'[^']+'[^}]*\\}`,
+			);
+			expect(decl.test(src), `missing or incomplete i18n declaration for ${key}`).toBe(true);
 		}
 	});
 });

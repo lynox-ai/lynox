@@ -2771,8 +2771,12 @@
 											<!-- The fact itself. Without it this chip offers an undo for something the
 											     person cannot read — and "undo what?" is not a decision anyone can make.
 											     Plain text, never markdown: same discipline as the review chip below,
-											     since the wording is model-authored. -->
-											<span class="min-w-0 flex-1 text-text-subtle break-words">{kw.text}</span>
+											     since the wording is model-authored.
+											     No `flex-1`: it would push "undo" to the far edge of the column on a short
+											     fact, away from the thing it undoes. Clamped, because an entry may be up
+											     to MAX_KNOWLEDGE_ENTRY_CHARS and this is an 11px confirmation line, not a
+											     reader — the full text lives in the Wissen view. -->
+											<span class="min-w-0 text-text-subtle break-words line-clamp-2">{kw.text}</span>
 											{#if kw.resolved === 'undone'}
 												<span class="shrink-0 text-text-subtle">· {t('chat.knowledge.undone')}</span>
 											{:else}

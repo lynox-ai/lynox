@@ -23,9 +23,12 @@ export type KnowledgeWriteCause = 'marker' | 'external-tool' | 'conversation' | 
  */
 export function knowledgeCauseKey(cause: string | undefined): string {
 	switch (cause) {
-		case 'marker': return 'chat.knowledge.cause.marker';
-		case 'external-tool': return 'chat.knowledge.cause.external_tool';
-		case 'conversation': return 'chat.knowledge.cause.conversation';
+		// `marker` and `external-tool` collapse deliberately: they differ in how the engine
+		// noticed, not in anything the person can act on. The split that matters is this step
+		// versus an earlier one.
+		case 'marker':
+		case 'external-tool': return 'chat.knowledge.cause.this_step';
+		case 'conversation': return 'chat.knowledge.cause.earlier';
 		default: return 'chat.knowledge.review_hint';
 	}
 }
