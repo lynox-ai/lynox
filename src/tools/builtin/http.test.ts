@@ -1918,6 +1918,97 @@ describe('httpRequestTool', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
+    it('SECURITY: refuses an INFRASTRUCTURE secret as a credential key', async () => {
+      // The bound the oauth2 sibling gets for free — its key is DERIVED from the profile id,
+      // so no caller can point it at an arbitrary vault entry. These key names come from the
+      // profile, which a prompt-injected agent can author. `resolveSecretRefs` (the path the
+      // model normally uses) refuses infra secrets for exactly this reason; calling
+      // `resolve()` directly would otherwise walk around that control and put a mail/OAuth
+      // credential on the wire to whatever host the profile names.
+      const store = await storeWith({
+        type: 'basic', basic_format: 'user_pass_split',
+        username_key: 'MAIL_ACCOUNT_1', password_key: 'WOO_CS',
+      });
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+        agentWith(store, { MAIL_ACCOUNT_1: 'imap-blob', WOO_CS: 'cs' }));
+      expect(result).toMatch(/infrastructure secret/i);
+      expect(fetchMock).not.toHaveBeenCalled(); // nothing left the machine
+    });
+
+    it('SECURITY: an EMPTY vault value is refused, not shipped as a half-credential', async () => {
+      // `=== null` would let '' through and send `Basic base64("ck:")` — which reads to the
+      // operator as "wrong password" rather than "secret never got stored".
+      const store = await storeWith({
+        type: 'basic', basic_format: 'user_pass_split',
+        username_key: 'WOO_CK', password_key: 'WOO_CS',
+      });
+      mockDnsPublic();
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+        agentWith(store, { WOO_CK: 'ck', WOO_CS: '' }));
+      expect(result).toContain('WOO_CS');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('SECURITY: refuses to attach over plain HTTP', async () => {
+      // `getByHostname` keys on hostname alone, so the same profile matches an http:// URL.
+      // Unlike a rotatable access_token this is a password the operator typed once.
+      const store = await storeWith({
+        type: 'basic', basic_format: 'user_pass_split',
+        username_key: 'WOO_CK', password_key: 'WOO_CS',
+      });
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+      const result = await handler({ url: 'http://shop.example.com/wp-json/wc/v3/products' },
+        agentWith(store, { WOO_CK: 'ck', WOO_CS: 'cs' }));
+      expect(result).toMatch(/non-HTTPS/i);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('does NOT attach for a bare basic profile with no basic_format', async () => {
+      // `!== 'pre_encoded_b64'` instead of `=== 'user_pass_split'` would capture this one too.
+      const store = await storeWith({ type: 'basic', vault_keys: ['WOO_CK', 'WOO_CS'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+        agentWith(store, { WOO_CK: 'ck', WOO_CS: 'cs' }));
+      expect(sentAuthHeader()).toBeUndefined();
+    });
+
+    it('the acceptance is HOST-bound — one for another host does not cover this one', async () => {
+      const store = await storeWith(
+        { type: 'basic', basic_format: 'user_pass_split', username_key: 'WOO_CK', password_key: 'WOO_CS' },
+        { accepted: true, hosts: ['other.example.com'], accepted_at: '2026-08-06T10:00:00.000Z' },
+      );
+      mockDnsPublic();
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+        agentWith(store, { WOO_CK: 'ck', WOO_CS: 'cs' }));
+      expect(result).toMatch(/non-vetted sub-processor/i);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('only ONE missing key is named when only one is missing', async () => {
+      // Guards the `user ? null : userKey` selection — an inverted pair would name the key
+      // that IS present and send the operator looking in the wrong place.
+      const store = await storeWith({
+        type: 'basic', basic_format: 'user_pass_split',
+        username_key: 'WOO_CK', password_key: 'WOO_CS',
+      });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn());
+      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+        agentWith(store, { WOO_CS: 'cs' }));
+      expect(result).toContain('WOO_CK');
+      expect(result).not.toContain('WOO_CS');
+    });
+
     it('leaves pre_encoded_b64 alone — that path is still the model\'s to set', async () => {
       // The pair matters: without it, attaching unconditionally for every `basic` profile
       // would also pass, and would break the pre-encoded flow that works today.

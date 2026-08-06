@@ -25,6 +25,7 @@ import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
+import { isInfraSecret } from '../../core/secret-store.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -84,6 +85,9 @@ interface ApiSetupInput {
 const REQUIRED_FIELDS: Array<keyof ApiProfile> = ['id', 'name', 'base_url', 'description'];
 const VALID_AUTH_TYPES = new Set(['none', 'basic', 'bearer', 'header', 'query', 'oauth2']);
 const VALID_BASIC_FORMATS = new Set(['user_pass_split', 'pre_encoded_b64']);
+/** Vault key names are UPPER_SNAKE_CASE. Mirrors the bootstrap input schema, applied on the
+ *  create/update path too — that schema only ever guarded the Haiku draft. */
+const VAULT_KEY_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 // `graphql` accepted 2026-05-18 as alias for `reduce` with GraphQL-shaped
 // include paths (e.g. "data.products.edges[*].node"). The reducer treats
@@ -117,6 +121,25 @@ function validateProfile(profile: ApiProfile): string | null {
     }
     if (profile.auth.basic_format !== undefined && !VALID_BASIC_FORMATS.has(profile.auth.basic_format)) {
       return `Invalid auth.basic_format "${profile.auth.basic_format}": must be user_pass_split or pre_encoded_b64`;
+    }
+    // The two keys a `user_pass_split` profile hands the engine at call time. Validated
+    // HERE as well as at the attach, so a bad profile fails loudly at setup — when the
+    // operator is present and can fix it — instead of at the first request. Both halves
+    // matter: the SHAPE (a vault key name), and the refusal to name an infrastructure
+    // secret. The latter is the one that matters: these names come from the profile, which
+    // a prompt-injected agent can author, and `resolve()` — unlike `resolveSecretRefs` —
+    // has no infra filter of its own.
+    for (const [field, key] of [
+      ['auth.username_key', profile.auth.username_key],
+      ['auth.password_key', profile.auth.password_key],
+    ] as const) {
+      if (key === undefined) continue;
+      if (!VAULT_KEY_PATTERN.test(key)) {
+        return `Invalid ${field} "${key}": must be an UPPER_SNAKE_CASE vault key name`;
+      }
+      if (isInfraSecret(key)) {
+        return `Invalid ${field} "${key}": that is an infrastructure secret managed by the platform. It is never attached to an outbound request — use a credential the user supplied for this API.`;
+      }
     }
     if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0)) {
       return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';

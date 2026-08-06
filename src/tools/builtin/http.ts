@@ -9,6 +9,7 @@ import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, asse
 import type { EgressSurface } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
 import { isAllowlistedEndpoint, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
+import { isInfraSecret } from '../../core/secret-store.js';
 import {
   extractHtmlText,
   isHtmlContentType,
@@ -548,17 +549,38 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
           ) {
             return `Error: api_profile "${basicProfile.id}" maps to a non-vetted sub-processor (${reqHostnameForAuth}) with no recorded acceptance — refusing to attach the stored credentials to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.`;
           }
+          // HTTPS only. Unlike the oauth2 sibling's rotatable access_token, this is a
+          // long-lived password the operator typed once; putting it on the wire in clear
+          // is not a degraded mode worth having. `getByHostname` keys on hostname alone,
+          // so without this an `http://` URL to the same host would do exactly that.
+          if (!input.url.toLowerCase().startsWith('https://')) {
+            return `Error: api_profile "${basicProfile.id}" uses stored credentials — refusing to attach them over a non-HTTPS URL. Use https://.`;
+          }
           // Explicit keys win; otherwise the first two `vault_keys` IN ORDER (username, password).
           const userKey = basicProfile.auth.username_key ?? basicProfile.auth.vault_keys?.[0];
           const passKey = basicProfile.auth.password_key ?? basicProfile.auth.vault_keys?.[1];
           if (!userKey || !passKey) {
             return `Error: api_profile "${basicProfile.id}" is basic/user_pass_split but does not name two vault keys. Set auth.username_key and auth.password_key (or list both in auth.vault_keys, username first) via api_setup({ action: "update", ... }).`;
           }
+          // THE bound this branch needs and the oauth2 sibling gets for free. That one derives
+          // its key from the profile id (`${id}_ACCESS_TOKEN`), so no caller can point it at an
+          // arbitrary vault entry. These key names come from the PROFILE, which a prompt-injected
+          // agent can author — so without this, `username_key: 'MAIL_ACCOUNT_1'` would hand an
+          // infrastructure credential to whatever host the profile names. `resolveSecretRefs`
+          // (the path the model normally uses) refuses infra secrets for exactly this reason;
+          // calling `resolve()` directly would otherwise walk around that control.
+          const infra = [userKey, passKey].filter(k => isInfraSecret(k));
+          if (infra.length > 0) {
+            return `Error: api_profile "${basicProfile.id}" names infrastructure secret(s) ${infra.join(' + ')} as its credentials. Those belong to the platform and are never attached to an outbound request. Use a credential the user supplied for this API.`;
+          }
           const user = agent.secretStore.resolve(userKey);
           const pass = agent.secretStore.resolve(passKey);
-          if (user === null || pass === null) {
-            const missing = [user === null ? userKey : null, pass === null ? passKey : null].filter(Boolean).join(' + ');
-            return `Error: api_profile "${basicProfile.id}" is basic/user_pass_split but the vault has no value for ${missing}. Ask the user for the credential with ask_secret, then retry.`;
+          // Truthiness, not a null check: an EMPTY vault value would otherwise ship
+          // `Basic base64("ck:")` — a silent half-credential that reads as an auth failure
+          // rather than as a missing secret. The oauth2 sibling checks truthiness too.
+          if (!user || !pass) {
+            const missing = [user ? null : userKey, pass ? null : passKey].filter(Boolean).join(' + ');
+            return `Error: api_profile "${basicProfile.id}" is basic/user_pass_split but the vault has no usable value for ${missing}. Ask the user for the credential with ask_secret, then retry.`;
           }
           for (const k of Object.keys(headers)) {
             if (k.toLowerCase() === 'authorization') delete headers[k];
