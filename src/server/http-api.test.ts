@@ -10,6 +10,7 @@ import type { LynoxHooks } from '../core/engine.js';
 // gate tests can override its return value per-test.
 import { loadConfig } from '../core/config.js';
 import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
+import { containsUntrustedMarker } from '../core/data-boundary.js';
 
 // === Mock dependencies ===
 
@@ -1224,6 +1225,31 @@ describe('LynoxHTTPApi', () => {
       const body = await res.json() as { error: string };
       expect(body.error).toMatch(/Unsupported image type/);
       expect(body.error).toMatch(/JPEG, PNG, GIF, or WebP/);
+    });
+
+    it('an uploaded document reaches the model WRAPPED as untrusted content', async () => {
+      // The wiring half. `Agent.send` seats the run marker from the wrapped marker in the
+      // user content — but only if the route puts one there. Dropping the wrap here leaves
+      // every agent-side test green while an upload-bearing turn reads as perfectly clean,
+      // so a `remember` on it lands active and pinnable instead of in the review queue.
+      const pdf = buildPdf('Nordfeld GmbH Zahlungsziel 30 Tage').toString('base64');
+      mockSessionRun.mockResolvedValueOnce('ok');
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({
+          task: 'Was steht da drin?',
+          files: [{ name: 'vertrag.pdf', type: 'application/pdf', data: pdf }],
+        }),
+      });
+      expect(res.status).toBe(200);
+      const taskArg = mockSessionRun.mock.calls[0]?.[0] as Array<{ type: string; text?: string }> | undefined;
+      const fileBlock = taskArg?.find(b => b.type === 'text' && b.text?.includes('vertrag.pdf'));
+      expect(fileBlock).toBeDefined();
+      // Asserted through the same predicate the engine uses, not a hand-written string —
+      // a test that hard-codes the marker's spelling passes a wrap that no longer matches.
+      expect(containsUntrustedMarker(fileBlock!.text!)).toBe(true);
+      // …and the document's own text really is inside the wrapper, not merely beside it.
+      expect(fileBlock!.text).toContain('Zahlungsziel 30 Tage');
     });
 
     it('writes the document archive only when the durable substrate is OFF', async () => {
