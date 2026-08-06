@@ -529,6 +529,42 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             return `Error: api_profile "${oauthProfile.id}" is oauth2 but the vault has no access_token under "${tokenKey}". Mint one first with: api_setup({ action: "fetch_token", id: "${oauthProfile.id}" }). Requires client_id + client_secret already stored under the keys configured in auth.oauth.`;
           }
         }
+
+        // Engine-managed Basic auth for a `user_pass_split` profile — for the same reason
+        // the oauth2 branch exists, but a harder one: the model CANNOT do this itself. Basic
+        // auth is `base64(user:pass)`, and the model never holds either half — it sees only
+        // `secret:NAME` references, resolved after it has already composed the header. You
+        // cannot Base64-encode a value you do not have. Before this, `user_pass_split` was a
+        // schema value with no implementation anywhere in the request path: an agent would
+        // pick it, compose something plausible, and get a 401 with no diagnosable cause.
+        //
+        // The same egress gate as above applies, and for the same reason — the engine is about
+        // to attach a credential, so the host must be vetted or explicitly accepted.
+        const basicProfile = toolContext.apiStore.getByHostname(reqHostnameForAuth);
+        if (basicProfile?.auth?.type === 'basic' && basicProfile.auth.basic_format === 'user_pass_split') {
+          if (
+            !isAllowlistedEndpoint(input.url) &&
+            !isEndpointAcked(basicProfile.custom_endpoint_ack, input.url)
+          ) {
+            return `Error: api_profile "${basicProfile.id}" maps to a non-vetted sub-processor (${reqHostnameForAuth}) with no recorded acceptance — refusing to attach the stored credentials to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.`;
+          }
+          // Explicit keys win; otherwise the first two `vault_keys` IN ORDER (username, password).
+          const userKey = basicProfile.auth.username_key ?? basicProfile.auth.vault_keys?.[0];
+          const passKey = basicProfile.auth.password_key ?? basicProfile.auth.vault_keys?.[1];
+          if (!userKey || !passKey) {
+            return `Error: api_profile "${basicProfile.id}" is basic/user_pass_split but does not name two vault keys. Set auth.username_key and auth.password_key (or list both in auth.vault_keys, username first) via api_setup({ action: "update", ... }).`;
+          }
+          const user = agent.secretStore.resolve(userKey);
+          const pass = agent.secretStore.resolve(passKey);
+          if (user === null || pass === null) {
+            const missing = [user === null ? userKey : null, pass === null ? passKey : null].filter(Boolean).join(' + ');
+            return `Error: api_profile "${basicProfile.id}" is basic/user_pass_split but the vault has no value for ${missing}. Ask the user for the credential with ask_secret, then retry.`;
+          }
+          for (const k of Object.keys(headers)) {
+            if (k.toLowerCase() === 'authorization') delete headers[k];
+          }
+          headers['Authorization'] = `Basic ${Buffer.from(`${user}:${pass}`, 'utf-8').toString('base64')}`;
+        }
       } catch {
         // Invalid URL — caught by assertHostPolicy below
       }

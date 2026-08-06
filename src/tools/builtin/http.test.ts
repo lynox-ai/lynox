@@ -1775,6 +1775,163 @@ describe('httpRequestTool', () => {
     });
   });
 
+  // `user_pass_split` was a schema value with NO implementation anywhere in the request
+  // path — `git grep` found it only in the type, the validator and the tool description.
+  // An agent would pick it (it is the honest description of WooCommerce-style auth), compose
+  // something plausible, and get a 401 with no diagnosable cause. It cannot do better: Basic
+  // auth is base64(user:pass) and the model never holds either half, only `secret:NAME`
+  // references resolved after it has composed the header.
+  describe('Basic auth, engine-managed (user_pass_split)', () => {
+    const ACK = { accepted: true, hosts: ['shop.example.com'], accepted_at: '2026-08-06T10:00:00.000Z' };
+
+    // `null` — NOT `undefined` — is the "no acceptance" sentinel: passing `undefined`
+    // explicitly triggers the default parameter, which silently gave the profile an
+    // acceptance and made the security test below pass for the wrong reason.
+    async function storeWith(auth: Record<string, unknown>, ack: unknown = ACK): Promise<unknown> {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'woo',
+        name: 'WooCommerce',
+        base_url: 'https://shop.example.com/wp-json/wc/v3',
+        description: 'Shop',
+        auth: auth as never,
+        ...(ack === null ? {} : { custom_endpoint_ack: ack as never }),
+      });
+      return store;
+    }
+
+    function agentWith(store: unknown, secrets: Record<string, string>): never {
+      return {
+        toolContext: { apiStore: store },
+        secretStore: { resolve: (k: string) => secrets[k] ?? null },
+        sessionCounters: testCounters,
+      } as never;
+    }
+
+    function sentAuthHeader(): string | undefined {
+      const h = Object.fromEntries(
+        Object.entries(lastPinnedInputs[0]!.headers).map(([k, v]) => [k.toLowerCase(), v]),
+      );
+      return h['authorization'] as string | undefined;
+    }
+
+    it('THE POINT: builds the Basic header from the two vault keys', async () => {
+      const store = await storeWith({
+        type: 'basic', basic_format: 'user_pass_split',
+        username_key: 'WOO_CK', password_key: 'WOO_CS',
+      });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } })));
+      const result = await handler(
+        { url: 'https://shop.example.com/wp-json/wc/v3/products?per_page=1' },
+        agentWith(store, { WOO_CK: 'ck_abc', WOO_CS: 'cs_xyz' }),
+      );
+      expect(result).toContain('HTTP 200');
+      // Asserted as the literal wire value, not "starts with Basic": the whole defect was
+      // that nobody encoded anything.
+      expect(sentAuthHeader()).toBe(`Basic ${Buffer.from('ck_abc:cs_xyz', 'utf-8').toString('base64')}`);
+    });
+
+    it('falls back to vault_keys in order when no explicit key names are set', async () => {
+      const store = await storeWith({
+        type: 'basic', basic_format: 'user_pass_split',
+        vault_keys: ['WOO_CK', 'WOO_CS'],
+      });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' }, agentWith(store, { WOO_CK: 'u', WOO_CS: 'p' }));
+      expect(sentAuthHeader()).toBe(`Basic ${Buffer.from('u:p', 'utf-8').toString('base64')}`);
+    });
+
+    it('explicit key names WIN over vault_keys order', async () => {
+      // Otherwise a profile carrying both would silently authenticate as the wrong identity.
+      const store = await storeWith({
+        type: 'basic', basic_format: 'user_pass_split',
+        username_key: 'RIGHT_U', password_key: 'RIGHT_P',
+        vault_keys: ['WRONG_U', 'WRONG_P'],
+      });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+        agentWith(store, { RIGHT_U: 'good', RIGHT_P: 'pw', WRONG_U: 'bad', WRONG_P: 'bad' }));
+      expect(sentAuthHeader()).toBe(`Basic ${Buffer.from('good:pw', 'utf-8').toString('base64')}`);
+    });
+
+    it('OVERRIDES an Authorization the model set itself — engine owns this auth', async () => {
+      const store = await storeWith({
+        type: 'basic', basic_format: 'user_pass_split',
+        username_key: 'WOO_CK', password_key: 'WOO_CS',
+      });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      // Lower-case on purpose: HTTP header names are case-insensitive and a model may emit
+      // either form. A plain assignment to `Authorization` would leave a second, differently
+      // cased entry standing beside it — which is why the override strips by lower-cased
+      // comparison rather than just writing the canonical key.
+      await handler(
+        { url: 'https://shop.example.com/wp-json/wc/v3/products', headers: { authorization: 'Basic bm9uc2Vuc2U=' } },
+        agentWith(store, { WOO_CK: 'ck', WOO_CS: 'cs' }),
+      );
+      const sentKeys = Object.keys(lastPinnedInputs[0]!.headers).filter(k => k.toLowerCase() === 'authorization');
+      expect(sentKeys).toHaveLength(1);
+      expect(sentAuthHeader()).toBe(`Basic ${Buffer.from('ck:cs', 'utf-8').toString('base64')}`);
+    });
+
+    it('SECURITY: refuses to attach credentials to a non-vetted host with no acceptance', async () => {
+      // Same gate as the oauth2 branch, and for the same reason: the engine is about to hand
+      // a stored credential to a host nobody vetted.
+      const store = await storeWith(
+        { type: 'basic', basic_format: 'user_pass_split', username_key: 'WOO_CK', password_key: 'WOO_CS' },
+        null,
+      );
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+        agentWith(store, { WOO_CK: 'ck', WOO_CS: 'cs' }));
+      expect(result).toMatch(/non-vetted sub-processor/i);
+      expect(fetchMock).not.toHaveBeenCalled(); // nothing left the machine
+    });
+
+    it('names the missing vault key instead of failing with a bare 401', async () => {
+      const store = await storeWith({
+        type: 'basic', basic_format: 'user_pass_split',
+        username_key: 'WOO_CK', password_key: 'WOO_CS',
+      });
+      mockDnsPublic();
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+        agentWith(store, { WOO_CK: 'ck' }));
+      expect(result).toContain('WOO_CS');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('says so when the profile names no keys at all', async () => {
+      const store = await storeWith({ type: 'basic', basic_format: 'user_pass_split' });
+      mockDnsPublic();
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' }, agentWith(store, {}));
+      expect(result).toMatch(/does not name two vault keys/i);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('leaves pre_encoded_b64 alone — that path is still the model\'s to set', async () => {
+      // The pair matters: without it, attaching unconditionally for every `basic` profile
+      // would also pass, and would break the pre-encoded flow that works today.
+      const store = await storeWith({ type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: ['WOO_B64'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler(
+        { url: 'https://shop.example.com/wp-json/wc/v3/products', headers: { Authorization: 'Basic bW9kZWxzZXQ=' } },
+        agentWith(store, { WOO_B64: 'bW9kZWxzZXQ=' }),
+      );
+      expect(sentAuthHeader()).toBe('Basic bW9kZWxzZXQ=');
+    });
+  });
+
   // Staging 2026-05-18 (lynox-chat-2026-05-18 (2).md):
   // fetch_token successfully minted a fresh token and wrote it to
   // SHOPIFY_SEO_ACCESS_TOKEN, but the agent's subsequent http_request kept

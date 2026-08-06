@@ -254,7 +254,12 @@ function measureStaticPrefixTokens(): number {
 // 2026-07-18: +214 for the Session-Start task-proactivity rewrite (prompts.ts) —
 // the guardrail against the agent autonomously sending mail / mutating tasks from
 // a briefing nudge. Cached (paid once per session); the safety fix justifies it.
-const STATIC_PREFIX_BUDGET = 23350;
+// 2026-08-06: +4 (measured 23354) for `auth.username_key` / `auth.password_key` on
+// api_setup's input schema — the two fields that make `basic_format: 'user_pass_split'`
+// an implemented auth path instead of a schema value that silently 401s. The PROSE
+// explaining it deliberately went to `detailedGuidance` (paid on use) rather than the
+// cached description, so what lands here is only the two property declarations.
+const STATIC_PREFIX_BUDGET = 23360;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
