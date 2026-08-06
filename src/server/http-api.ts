@@ -2239,6 +2239,7 @@ export class LynoxHTTPApi {
                 // failed, and in the failed case preserving the legacy write is the
                 // safe direction (the document's text is not silently dropped).
                 const kl = this.engine?.getKnowledgeLayer();
+                const durableStore = this.engine?.getKnowledgeStore();
                 const docScope = pickDocumentScope(this.engine?.getActiveScopes() ?? []);
                 if (kl && docScope) {
                   void ingestDocumentText(kl, {
@@ -2246,7 +2247,7 @@ export class LynoxHTTPApi {
                     fileName: safeName,
                     scope: docScope,
                     threadId: session.sessionId,
-                    durableKnowledgeActive: this.engine?.getKnowledgeStore() != null,
+                    durableKnowledgeActive: durableStore !== null && durableStore !== undefined,
                   }).catch(() => { /* best-effort */ });
                 }
                 continue;
