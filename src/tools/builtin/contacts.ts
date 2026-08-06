@@ -19,6 +19,7 @@
 import type { ToolEntry } from '../../types/index.js';
 import type { ContactData, ContactRecord } from '../../core/crm.js';
 import { getErrorMessage } from '../../core/utils.js';
+import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
 
 // CRM accessed via agent.toolContext.crm
 
@@ -66,7 +67,20 @@ export const contactsSaveTool: ToolEntry<ContactsSaveInput> = {
     if (!name) return 'contacts_save error: "name" is required.';
 
     try {
-      const data: ContactData = { name, source: 'manual' };
+      // What actually happened, not `'manual'`. That value said the person entered this
+      // contact themselves, which was never true on this path — the AGENT writes here, and
+      // `source` is a consulted field (`purgeKnowledgeGraphContacts` filters on it), so a
+      // false value is worse than an empty one. It matters most for lead research, where the
+      // contact comes off a page the agent read rather than out of a conversation the
+      // operator had: `agent_external` is the row you look at twice.
+      //
+      // Recorded, NOT gated. Unlike a durable knowledge write there is no review queue here,
+      // and inventing one would be a schema change; what this buys is that a wrong row can be
+      // FOUND and removed, which is the repair the CRM was missing entirely.
+      const data: ContactData = {
+        name,
+        source: deriveTurnUntrusted(agent) ? 'agent_external' : 'agent',
+      };
       if (input.email !== undefined) data.email = input.email;
       if (input.phone !== undefined) data.phone = input.phone;
       if (input.company !== undefined) data.company = input.company;

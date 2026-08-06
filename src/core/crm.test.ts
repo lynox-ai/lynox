@@ -156,6 +156,42 @@ describe('CRM', () => {
     });
   });
 
+  describe('deleteContact', () => {
+    it('THE POINT: a wrong contact can be removed at all', () => {
+      // Before this the CRM had NO removal path. `contacts_save` upserts on email, so a wrong
+      // row could only be overwritten — and only if it has one.
+      crm.upsertContact({ name: 'Wrong Person', email: 'wrong@example.com', source: 'agent' });
+      const [row] = crm.listContacts();
+      expect(row?._id).toBeDefined();
+      expect(crm.deleteContact(row!._id!)).toBe(true);
+      expect(crm.listContacts()).toHaveLength(0);
+    });
+
+    it('removes ONLY the named row', () => {
+      // A filter that matched more than the id would take the neighbours with it.
+      crm.upsertContact({ name: 'Keep Me', email: 'keep@example.com', source: 'agent' });
+      crm.upsertContact({ name: 'Drop Me', email: 'drop@example.com', source: 'agent' });
+      const drop = crm.listContacts().find(c => c.name === 'Drop Me')!;
+      crm.deleteContact(drop._id!);
+      const left = crm.listContacts();
+      expect(left).toHaveLength(1);
+      expect(left[0]?.name).toBe('Keep Me');
+    });
+
+    it('reports false for an id that is not there, instead of pretending', () => {
+      expect(crm.deleteContact(999_999)).toBe(false);
+    });
+
+    it('removes an EMAIL-LESS contact — the case re-saving could never repair', () => {
+      // A NULL email never collides, so every re-save inserted another row. Lead research
+      // produces exactly these.
+      crm.upsertContact({ name: 'Researched Lead', company: 'Some Clinic', source: 'agent_external' });
+      const row = crm.listContacts()[0]!;
+      expect(crm.deleteContact(row._id!)).toBe(true);
+      expect(crm.listContacts()).toHaveLength(0);
+    });
+  });
+
   describe('subject-graph mirror', () => {
     it('logs an ambiguous-name failure WITHOUT the contact name (data minimisation)', () => {
       // The mirror's catch writes `err.message` to stderr under an explicit promise that

@@ -6754,6 +6754,22 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { contacts });
     });
 
+    // Removal — the CRM had no path of any kind. `contacts_save` upserts on email, so a wrong
+    // contact could only be overwritten, and only if it HAS an email: a NULL email never
+    // collides, so every re-save inserted another row. A contact the agent researched off a
+    // page has no email as often as not, which made "save it again" a duplicate rather than a
+    // repair. 'user' scope = owner-authenticated; the model has NO tool path here, deliberately
+    // — removing a person's record is the operator's act, not an agent's.
+    this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/crm/contacts/:id', async (_req, res, params) => {
+      const crm = engine.getCRM();
+      if (!requireService(res, crm, 'Contacts')) return;
+      const id = Number(params['id']);
+      if (!Number.isInteger(id) || id <= 0) { errorResponse(res, 400, 'Invalid contact id'); return; }
+      const removed = crm.deleteContact(id);
+      if (!removed) { errorResponse(res, 404, 'No contact with this id'); return; }
+      jsonResponse(res, 200, { removed: true });
+    }));
+
     this.addStatic('user', 'GET /api/crm/deals', async (req, res) => {
       const crm = engine.getCRM();
       if (!crm) { jsonResponse(res, 200, { deals: [] }); return; }
