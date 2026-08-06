@@ -56,6 +56,56 @@ export interface PromoteOnboardingResult {
   readonly skipped: number;
   /** Refused — the answer looked like a secret/credential (never stored). */
   readonly rejected: number;
+  /** Lines added to the always-loaded `profile` block (see {@link seedProfileBlock}). */
+  readonly profileSeeded: number;
+}
+
+/**
+ * Seed the always-loaded `profile` block from the basics that landed ACTIVE.
+ *
+ * Why this is not redundant with the entries written above. A knowledge entry is only
+ * reachable two ways: the model calls `recall`, or the turn names its subject AND the
+ * entry is pinned. Onboarding writes neither pinned nor, for a subject-less basic like
+ * the operator's role, subject-linked — so a walk through the real flow ends with the
+ * operator's own company and role invisible to every turn's automatic context. Measured
+ * on a fresh engine (2026-08-06): after onboarding, `renderBlocks` returns an EMPTY card
+ * header for a turn naming the company exactly, and nothing at all for "who am I?".
+ * That is also the live state of the first tenant's instance — 8 entries, 0 pinned.
+ *
+ * `profile` is documented as operator identity plus durable preferences and loads into
+ * every turn. Company and role ARE operator identity, so this is the block's own job.
+ *
+ * Three bounds, each load-bearing:
+ *  - **Only `active` answers.** A `pending_review` answer is one the taint latch judged
+ *    possibly-relayed attacker text; it must never reach a surface that loads into every
+ *    turn. This mirrors `memory_block_edit`'s hard untrusted-refuse (H5) rather than its
+ *    softer queueing sibling.
+ *  - **Append-only, prefix-deduped.** An existing line with the same engine-fixed label
+ *    prefix wins — a re-onboarding never overwrites what the operator or the agent
+ *    already wrote there, and never duplicates a line.
+ *  - **Over-limit is survivable.** `setBlockContent` throws loudly past the char bound;
+ *    the entries are already committed at that point, so the throw is caught and reported
+ *    as zero seeded rather than turning a successful promotion into a 500.
+ */
+function seedProfileBlock(
+  knowledgeStore: KnowledgeStore,
+  lines: ReadonlyArray<{ prefix: string; text: string }>,
+): number {
+  if (lines.length === 0) return 0;
+  const current = knowledgeStore.getBlock('profile')?.content ?? '';
+  const existing = current.split('\n').map(l => l.trim());
+  const additions = lines
+    .filter(l => !existing.some(e => e.startsWith(l.prefix)))
+    .map(l => l.text);
+  if (additions.length === 0) return 0;
+  const next = current ? `${current}\n${additions.join('\n')}` : additions.join('\n');
+  try {
+    knowledgeStore.setBlockContent('profile', next);
+  } catch {
+    // BlockOverLimitError — the entries above are committed; do not fail the promotion.
+    return 0;
+  }
+  return additions.length;
 }
 
 const CATALOG = new Map(ONBOARDING_BASICS.map(basic => [basic.key, basic] as const));
@@ -80,6 +130,8 @@ export function promoteOnboardingBasics(
   let queued = 0;
   let skipped = 0;
   let rejected = 0;
+  /** Collected for {@link seedProfileBlock} — ACTIVE landings only. */
+  const activeLines: Array<{ prefix: string; text: string }> = [];
 
   for (const { key, answer } of answers) {
     const basic = CATALOG.get(key);
@@ -128,9 +180,12 @@ export function promoteOnboardingBasics(
       ...(basic.subjectKind ? { subjectName: value, subjectKind: basic.subjectKind } : {}),
     });
 
-    if (result.status === 'active') promoted++;
-    else queued++;
+    if (result.status === 'active') {
+      promoted++;
+      activeLines.push({ prefix, text: `${prefix}${value}` });
+    } else queued++;
   }
 
-  return { promoted, queued, skipped, rejected };
+  const profileSeeded = seedProfileBlock(deps.knowledgeStore, activeLines);
+  return { promoted, queued, skipped, rejected, profileSeeded };
 }

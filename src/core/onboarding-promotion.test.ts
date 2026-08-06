@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
 import { KnowledgeStore } from './knowledge-store.js';
+import { MEMORY_BLOCK_CHAR_LIMITS } from '../types/memory.js';
 import { promoteOnboardingBasics, type OnboardingBasicAnswer } from './onboarding-promotion.js';
 import type { OnboardingBasicKey } from './onboarding-catalog.js';
 
@@ -32,7 +33,7 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
       [{ key: 'company', answer: 'Acme GmbH' }],
       { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
     );
-    expect(r).toEqual({ promoted: 1, queued: 0, skipped: 0, rejected: 0 });
+    expect(r).toEqual({ promoted: 1, queued: 0, skipped: 0, rejected: 0, profileSeeded: 1 });
     const active = ks.listActive();
     expect(active).toHaveLength(1);
     expect(active[0]!.text).toBe('Company: Acme GmbH'); // engine label + VERBATIM answer
@@ -71,7 +72,7 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
       [{ key: 'company', answer: 'Acme GmbH' }],
       { knowledgeStore: ks, sawUntrusted: true, threadId: THREAD },
     );
-    expect(r).toEqual({ promoted: 0, queued: 1, skipped: 0, rejected: 0 });
+    expect(r).toEqual({ promoted: 0, queued: 1, skipped: 0, rejected: 0, profileSeeded: 0 });
     expect(ks.listActive()).toHaveLength(0);      // nothing trusted-written
     expect(ks.pendingCount()).toBe(1);            // it landed in the review queue
     // and the queued row still carries the onboarding thread (AC-1.10 holds on both paths)
@@ -83,7 +84,7 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
     promoteOnboardingBasics([{ key: 'company', answer: 'Acme' }], { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD });
     // Re-onboarding with a corrected value — same key. Skipped (key-match, NOT value/semantic).
     const r2 = promoteOnboardingBasics([{ key: 'company', answer: 'Acme AG' }], { knowledgeStore: ks, sawUntrusted: false, threadId: 'thread-2' });
-    expect(r2).toEqual({ promoted: 0, queued: 0, skipped: 1, rejected: 0 });
+    expect(r2).toEqual({ promoted: 0, queued: 0, skipped: 1, rejected: 0, profileSeeded: 0 });
     const active = ks.listActive();
     expect(active).toHaveLength(1);
     expect(active[0]!.text).toBe('Company: Acme'); // the original stands; corrections go via chat (§3/D11)
@@ -96,7 +97,7 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
       [{ key: 'company', answer: 'Acme' }, { key: 'role', answer: 'CEO' }],
       { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
     );
-    expect(r2).toEqual({ promoted: 1, queued: 0, skipped: 1, rejected: 0 });
+    expect(r2).toEqual({ promoted: 1, queued: 0, skipped: 1, rejected: 0, profileSeeded: 1 });
     expect(ks.listActive().map(e => e.text).sort()).toEqual(['Company: Acme', 'Role: CEO']);
   });
 
@@ -106,7 +107,7 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
       [{ key: 'company', answer: '   ' }, { key: 'role', answer: '' }],
       { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
     );
-    expect(r).toEqual({ promoted: 0, queued: 0, skipped: 0, rejected: 0 });
+    expect(r).toEqual({ promoted: 0, queued: 0, skipped: 0, rejected: 0, profileSeeded: 0 });
     expect(ks.listActive()).toHaveLength(0);
   });
 
@@ -117,7 +118,7 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
       [{ key: 'company', answer: 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }],
       { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
     );
-    expect(r).toEqual({ promoted: 0, queued: 0, skipped: 0, rejected: 1 });
+    expect(r).toEqual({ promoted: 0, queued: 0, skipped: 0, rejected: 1, profileSeeded: 0 });
     expect(ks.listActive()).toHaveLength(0);
   });
 
@@ -127,7 +128,7 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
       [{ key: 'payment_iban' as OnboardingBasicKey, answer: 'CH93 0000' }],
       { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
     );
-    expect(r).toEqual({ promoted: 0, queued: 0, skipped: 0, rejected: 0 });
+    expect(r).toEqual({ promoted: 0, queued: 0, skipped: 0, rejected: 0, profileSeeded: 0 });
     expect(ks.listActive()).toHaveLength(0);
   });
 
@@ -137,7 +138,7 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
       [{ key: 'company', answer: '__dismissed__' }, { key: 'role', answer: 'CEO' }],
       { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
     );
-    expect(r).toEqual({ promoted: 1, queued: 0, skipped: 0, rejected: 0 });
+    expect(r).toEqual({ promoted: 1, queued: 0, skipped: 0, rejected: 0, profileSeeded: 1 });
     expect(ks.listActive().map(e => e.text)).toEqual(['Role: CEO']); // no "Company: __dismissed__"
   });
 
@@ -152,7 +153,7 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
       [{ key: 'company', answer: huge }, { key: 'role', answer: 'CEO' }],
       { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
     );
-    expect(r).toEqual({ promoted: 1, queued: 0, skipped: 0, rejected: 1 });
+    expect(r).toEqual({ promoted: 1, queued: 0, skipped: 0, rejected: 1, profileSeeded: 1 });
     expect(ks.listActive().map(e => e.text)).toEqual(['Role: CEO']);
   });
 
@@ -164,7 +165,7 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
       [{ key: 'company', answer: bareToken }],
       { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
     );
-    expect(r).toEqual({ promoted: 0, queued: 0, skipped: 0, rejected: 1 });
+    expect(r).toEqual({ promoted: 0, queued: 0, skipped: 0, rejected: 1, profileSeeded: 0 });
     expect(ks.listActive()).toHaveLength(0);
   });
 
@@ -183,7 +184,76 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
     const ks2 = new KnowledgeStore(e2, new SubjectStore(e2));
     const r2 = promoteOnboardingBasics([{ key: 'company', answer: 'Acme' }],
       { knowledgeStore: ks2, sawUntrusted: false, threadId: 'thread-after-restart' });
-    expect(r2).toEqual({ promoted: 0, queued: 0, skipped: 1, rejected: 0 }); // deduped from disk
+    expect(r2).toEqual({ promoted: 0, queued: 0, skipped: 1, rejected: 0, profileSeeded: 0 }); // deduped from disk
     expect(ks2.listActive()).toHaveLength(1);
+  });
+  describe('the always-loaded profile block (the reason this module writes twice)', () => {
+    it('THE POINT: after onboarding the operator\'s identity is in EVERY turn, not only in recall', () => {
+      // Without the seed, a walk through the real flow ends here: the entries exist, the
+      // block is empty, and `renderBlocks` returns nothing for a turn that does not name
+      // the company — so the assistant does not know who it is talking to unless the model
+      // decides to call `recall`. This asserts the user-visible consequence, not the field.
+      const { ks } = makeKs();
+      promoteOnboardingBasics(
+        [{ key: 'company', answer: 'Nordberg AG' }, { key: 'role', answer: 'Marketing lead' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
+      );
+      const block = ks.renderBlocks({ turnText: 'Guten Morgen, was steht heute an?' });
+      expect(block).toContain('Nordberg AG');
+      expect(block).toContain('Marketing lead');
+    });
+
+    it('SECURITY: a TAINTED answer never reaches the block — queued only', () => {
+      // The block loads into every turn, so it gets `memory_block_edit`'s HARD refuse (H5),
+      // not the softer queue-it treatment an entry gets. A relayed-attacker answer sitting
+      // in the always-loaded context would be a standing instruction.
+      const { ks } = makeKs();
+      const r = promoteOnboardingBasics(
+        [{ key: 'company', answer: 'Acme GmbH' }],
+        { knowledgeStore: ks, sawUntrusted: true, threadId: THREAD },
+      );
+      expect(r.queued).toBe(1);
+      expect(r.profileSeeded).toBe(0);
+      expect(ks.readSurfaceBlocks().profile).toBe('');
+      expect(ks.renderBlocks({ turnText: 'egal was' })).toBe('');
+    });
+
+    it('is append-only: pre-existing operator lines survive and are never duplicated', () => {
+      const { ks } = makeKs();
+      ks.setBlockContent('profile', 'Preferred language: German');
+      promoteOnboardingBasics(
+        [{ key: 'company', answer: 'Nordberg AG' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
+      );
+      const after = ks.readSurfaceBlocks().profile;
+      expect(after).toContain('Preferred language: German');
+      expect(after).toContain('Company: Nordberg AG');
+      expect(after.split('\n')).toHaveLength(2);
+    });
+
+    it('a line the operator already wrote under the same label WINS over the seed', () => {
+      // A re-onboarding must not overwrite a correction the operator made in the block.
+      const { ks } = makeKs();
+      ks.setBlockContent('profile', 'Company: Nordberg Holding AG (renamed 2026)');
+      const r = promoteOnboardingBasics(
+        [{ key: 'company', answer: 'Nordberg AG' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
+      );
+      expect(r.profileSeeded).toBe(0);
+      expect(ks.readSurfaceBlocks().profile).toBe('Company: Nordberg Holding AG (renamed 2026)');
+    });
+
+    it('an over-limit block does NOT fail the promotion — the entries are already committed', () => {
+      const { ks } = makeKs();
+      const limit = ks.getBlock('profile')?.charLimit ?? MEMORY_BLOCK_CHAR_LIMITS.profile;
+      ks.setBlockContent('profile', 'x'.repeat(limit - 2));
+      const r = promoteOnboardingBasics(
+        [{ key: 'company', answer: 'Nordberg AG' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
+      );
+      expect(r.promoted).toBe(1);        // the durable entry landed
+      expect(r.profileSeeded).toBe(0);   // the block did not, and nothing threw
+      expect(ks.listActive()).toHaveLength(1);
+    });
   });
 });
