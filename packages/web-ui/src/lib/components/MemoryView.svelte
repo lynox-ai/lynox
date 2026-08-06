@@ -4,8 +4,10 @@
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 
 	// DK-UX: when durable memory is on, "Wissen" browses the ACTIVE knowledge_entries +
-	// profile/playbook blocks (read-only — changes go via chat) instead of the legacy
-	// memory-file namespaces. Default false → the legacy UI below renders unchanged.
+	// profile/playbook blocks instead of the legacy memory-file namespaces. Editing still
+	// goes through chat; REMOVING does not, because the chat path is shut exactly when a
+	// user notices a wrong fact (see `retireEntry`). Default false → the legacy UI below
+	// renders unchanged.
 	const { hasDurableMemory = false }: { hasDurableMemory?: boolean } = $props();
 
 	const namespaces = ['knowledge', 'methods', 'status', 'learnings'] as const;
@@ -45,6 +47,32 @@
 	let dkPlaybook = $state('');
 	let dkLoading = $state(false);
 	let dkError = $state('');
+	let dkRetiringId = $state<string | null>(null);
+
+	// A wrong fact has to be removable HERE, not only through chat. `memory_retire` refuses
+	// on a turn that read external content — and the taint is conversation-sticky, so once
+	// any tool has run, the chat path stays shut for the rest of that conversation. Which is
+	// exactly when a user notices a wrong fact: while working. Without this the only recourse
+	// is opening a fresh thread and remembering the wording, and a read-only Wissen view that
+	// shows a wrong fact you cannot touch is worse than one that never showed it.
+	//
+	// Retire, not delete: the entry is superseded, not erased. Hard erasure stays with the
+	// legacy pattern path (GDPR Art. 17) below, which is a different, louder promise.
+	async function retireEntry(entry: DkEntry) {
+		if (!confirm(t('knowledge.active.retire_confirm').replace('{text}', entry.text))) return;
+		dkRetiringId = entry.id;
+		dkError = '';
+		try {
+			const res = await fetch(`${getApiBase()}/knowledge/entries/${encodeURIComponent(entry.id)}/retire`, {
+				method: 'POST'
+			});
+			if (!res.ok) throw new Error();
+			await loadDurable();
+		} catch {
+			dkError = t('knowledge.active.retire_failed');
+		}
+		dkRetiringId = null;
+	}
 
 	async function loadDurable() {
 		dkLoading = true;
@@ -196,7 +224,8 @@
 
 <div class="p-6 max-w-4xl mx-auto">
 {#if hasDurableMemory}
-	<!-- DK-UX read-surface: active durable knowledge, read-only. Changes go via chat. -->
+	<!-- DK-UX read-surface: active durable knowledge. Edits go via chat; a wrong entry can
+	     be dropped here, because the chat path refuses on a turn that read external content. -->
 	<div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 mb-2">
 		<h1 class="text-xl font-light tracking-tight">{t('memory.title')}</h1>
 		<span class="shrink-0 text-xs font-mono text-text-subtle">{dkEntries.length}&nbsp;{t('knowledge.active.count_label')}</span>
@@ -239,6 +268,12 @@
 							{#if entry.pinned}<span class="rounded-full bg-accent/15 text-accent-text px-1.5">{t('knowledge.active.pinned')}</span>{/if}
 							{#if entry.subjectName}<span>→ {entry.subjectName}</span>{/if}
 							<span>{entry.kind}</span>
+							<button
+								type="button"
+								class="ml-auto text-text-subtle hover:text-danger disabled:opacity-40 disabled:hover:text-text-subtle transition-colors"
+								disabled={dkRetiringId !== null}
+								onclick={() => void retireEntry(entry)}
+							>{dkRetiringId === entry.id ? t('knowledge.active.retiring') : t('knowledge.active.retire')}</button>
 						</div>
 						<p class="text-sm text-text whitespace-pre-wrap leading-relaxed">{entry.text}</p>
 					</div>
