@@ -7,6 +7,7 @@ import type { ProvenanceEvidence } from './provenance.js';
 import { subjectsDisagree } from './contradiction-detector.js';
 import { maskSecretPatterns, matchesSecretPattern, matchesSecretPatternStrict } from './secret-store.js';
 import type { ProvenanceKind } from '../types/memory.js';
+import { collapseToSingleLine } from './sanitize.js';
 import type { SecretStoreLike } from '../types/security.js';
 import {
   type KnowledgeEntry,
@@ -610,7 +611,39 @@ export class KnowledgeStore {
       SET status = 'superseded', superseded_by = ?, pinned = 0, updated_at = datetime('now')
       WHERE id = ?
     `).run(supersededBy ?? null, entry.id);
+    this._dropSeededProfileLine(entry.text);
     return this.getEntry(entry.id)!;
+  }
+
+  /**
+   * Drop a retired entry's line from the `profile` block, if the block still carries it
+   * verbatim.
+   *
+   * The onboarding promotion seeds that block from an entry, so a fact can live in two
+   * places at once — and retirement only ever touched one of them. Measured: retire the
+   * entry, and it leaves the active list while the block keeps loading it into every turn.
+   * The user's removal appears to work and does not. That is worse than no removal button,
+   * because it teaches that the control works.
+   *
+   * Only an EXACT match of the seeded form is dropped. If the operator has since edited
+   * that line, it is theirs and it stays — retiring the entry it grew from is not a mandate
+   * to rewrite their words. Best-effort: a block failure must not undo the retire, which is
+   * already committed above.
+   */
+  private _dropSeededProfileLine(entryText: string): void {
+    try {
+      const block = this.getBlock('profile');
+      if (!block || !block.content) return;
+      const seeded = collapseToSingleLine(entryText);
+      if (!seeded) return;
+      const kept = block.content.split('\n').filter(l => l.trim() !== seeded);
+      if (kept.length === block.content.split('\n').length) return;
+      this.setBlockContent('profile', kept.join('\n').trim());
+    } catch (err: unknown) {
+      process.stderr.write(
+        `[lynox:knowledge] could not drop the retired line from the profile block: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
   }
 
   // ── Erasure ──

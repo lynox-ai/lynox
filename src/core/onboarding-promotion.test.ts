@@ -375,6 +375,31 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
       }
     });
 
+    it('retiring a seeded entry removes its line from the block too', () => {
+      // Otherwise removal is theatre: the entry leaves the active list and the block keeps
+      // loading it into every turn. Measured against a live engine before the fix — the
+      // user clicks remove, sees it go, and the assistant keeps using it.
+      const { ks } = makeKs();
+      promoteOnboardingBasics(
+        [{ key: 'company', answer: 'Nordberg AG' }, { key: 'role', answer: 'Marketing lead' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
+      );
+      const company = ks.listActive().find(e => e.text.startsWith('Company: '))!;
+      ks.retireEntry(company.id, 'user_asserted');
+      expect(ks.readSurfaceBlocks().profile).toBe('Role: Marketing lead');
+      expect(ks.renderBlocks({ turnText: 'Guten Morgen' })).not.toContain('Nordberg AG');
+    });
+
+    it('an operator-EDITED line survives the retire — it is their wording now', () => {
+      const { ks } = makeKs();
+      promoteOnboardingBasics([{ key: 'company', answer: 'Nordberg AG' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD });
+      ks.setBlockContent('profile', 'Company: Nordberg AG (Hauptsitz Winterthur)');
+      const company = ks.listActive().find(e => e.text.startsWith('Company: '))!;
+      ks.retireEntry(company.id, 'user_asserted');
+      expect(ks.readSurfaceBlocks().profile).toBe('Company: Nordberg AG (Hauptsitz Winterthur)');
+    });
+
     it('a block line that MENTIONS the label mid-line does not suppress the seed', () => {
       // `startsWith` on the existing line, not `includes`: "Ask about Company: before
       // invoicing" names the label without being it.
