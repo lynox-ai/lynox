@@ -87,16 +87,17 @@ export interface PromoteOnboardingResult {
  *  - **Only `active` answers.** A `pending_review` answer is one the taint latch judged
  *    possibly-relayed attacker text; it must never reach a surface that loads into every
  *    turn. This mirrors `memory_block_edit`'s hard untrusted-refuse (H5) rather than its
- *    softer queueing sibling. On the skip path the same bar is applied to the STORED
- *    entry's tier: an entry can reach `active` by being APPROVED out of the review queue,
- *    and once-untrusted text does not belong here either (the pin invariant, H6, draws the
- *    line in the same place).
+ *    softer queueing sibling. On the skip path the bar is HIGHER — the stored entry must be
+ *    `user_asserted`. `agent_inferred` (the model's own reading) and `external_unverified`
+ *    (an `upload`-channel write) both reach `active` without the operator asserting
+ *    anything, and both were measured reaching this path.
  *  - **Append-only, prefix-deduped.** An existing line with the same engine-fixed label
  *    prefix wins — a re-onboarding never overwrites what the operator or the agent
  *    already wrote there, and never duplicates a line.
- *  - **Over-limit is survivable.** `setBlockContent` throws loudly past the char bound;
- *    the entries are already committed at that point, so the throw is caught and reported
- *    as zero seeded rather than turning a successful promotion into a 500.
+ *  - **Over-limit is survivable.** `setBlockContent` throws loudly past the char bound.
+ *    The entries are already committed by then, so a throw must not turn a successful
+ *    promotion into a 500: seeding stops at that line, reports on stderr, and returns the
+ *    honest partial count.
  *
  * The seeded text is reduced to ONE line (`collapseToSingleLine`). The entry above keeps
  * the answer VERBATIM, which is its specified guarantee (AC-1.3a); the block does not get
@@ -111,28 +112,36 @@ function seedProfileBlock(
 ): number {
   if (lines.length === 0) return 0;
   try {
-    const current = knowledgeStore.getBlock('profile')?.content ?? '';
-    // A line already present under the same label wins. The comparison is anchored at the
-    // START of an existing line, not merely contained in it: a line like
-    // "Ask about Company: before invoicing" mentions the label without BEING it, and must
-    // not suppress the seed.
-    const existing = current.split('\n').map(l => l.trim());
-    let next = current;
+    let next = knowledgeStore.getBlock('profile')?.content ?? '';
     let added = 0;
     for (const line of lines) {
-      if (existing.some(e => e.startsWith(line.prefix))) continue;
-      // Bound each seeded line well under the block's own limit. Without this a single
-      // long answer could fill the block to its edge and leave no room for any later
-      // `memory_block_edit` — and the operator has no other way to repair it, since the
-      // block's HTTP surface is read-only. An over-long value stays in its entry, where
-      // the verbatim guarantee lives; it just does not become a standing line.
+      // Checked against the block AS IT NOW STANDS, not against a snapshot taken before
+      // the loop: `next` grows as lines are added, and two inputs can carry the same
+      // label — a caller passing the same key twice yields one written entry and one
+      // dedup-skip, both seeding the same prefix. Against a stale snapshot that wrote the
+      // line twice (measured), which is exactly what the docstring promises never happens.
+      //
+      // The match is anchored at the START of an existing line, not merely contained in
+      // it: "Ask about Company: before invoicing" mentions the label without BEING it and
+      // must not suppress the seed.
+      if (next.split('\n').some(e => e.trim().startsWith(line.prefix))) continue;
+      // Bound each seeded LINE (prefix included) well under the block's own limit. The
+      // answer cap equals that limit, so without this one long answer could fill the block
+      // to its edge; the operator can still repair it via `memory_block_edit`, but a block
+      // that leaves no room for the next edit is a bad state to hand them. An over-long
+      // value stays in its entry, where the verbatim guarantee lives.
       if (line.text.length > MAX_PROFILE_SEED_LINE_CHARS) continue;
       const candidate = next ? `${next}\n${line.text}` : line.text;
-      // Grown ONE line at a time, so a block that has room for the first but not the
-      // second keeps the first instead of silently dropping both.
+      // Written ONE line at a time, so a block with room for the first but not the second
+      // keeps the first instead of dropping both. A refusal here ends the seeding and is
+      // reported — the durable entries are already committed, so it must not throw, but a
+      // silent stop would hide it behind a plausible partial count.
       try {
         knowledgeStore.setBlockContent('profile', candidate);
-      } catch {
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:onboarding] profile seed stopped after ${String(added)} line(s): ${err instanceof Error ? err.message : String(err)}\n`,
+        );
         break;
       }
       next = candidate;
@@ -230,7 +239,15 @@ export function promoteOnboardingBasics(
     const known = deps.knowledgeStore.findActiveFactWithPrefix(prefix);
     if (known) {
       skipped++;
-      if (known.sourceType !== 'external_unverified') {
+      // Only a `user_asserted` stored fact earns the always-loaded block, and the bar is
+      // deliberately HIGHER than the one the entry itself had to clear. Two states reach
+      // `active` without the operator ever having asserted them: an `agent_inferred` fact
+      // the model wrote from its own reading, and an `external_unverified` one written on
+      // the `upload` channel without the untrusted flag. Both were measured reaching this
+      // path. Seeding either would put text the operator never typed into every future
+      // turn — and worse, it would DISPLACE their typed answer, since the stored fact wins
+      // the dedup. `remember`-written facts stay where they belong, in recall.
+      if (known.sourceType === 'user_asserted') {
         activeLines.push({ prefix, text: collapseToSingleLine(known.text) });
       }
       continue;

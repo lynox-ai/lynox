@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -292,11 +292,10 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
     it('an APPROVED entry seeds — the review IS the trust act, and it raises the tier', () => {
       // Worth pinning because the opposite is the intuitive guess. An entry that arrived
       // untrusted and was approved out of the queue is re-tiered to `user_asserted`
-      // (knowledge-store `reviewEntry`), so it is no longer external_unverified and it does
+      // (knowledge-store `reviewEntry`), so it clears the `user_asserted` bar and does
       // reach the block. That is the system's own trust model — the human confirming the
-      // text is what makes it the operator's. The tier check in the seed path is therefore
-      // a BACKSTOP with no current producer, not a live filter; it is kept so a future
-      // writer that lands external_unverified + active cannot silently gain this surface.
+      // text is what makes it the operator's. Pinning it matters because the bar is
+      // otherwise strict enough to look like it would reject this too.
       const { ks } = makeKs();
       ks.write({ text: 'Company: Relayed Corp', sourceChannel: 'upload', sourceUntrusted: true });
       const pending = ks.listPending();
@@ -308,6 +307,72 @@ describe('promoteOnboardingBasics — §6.1 engine promotion boundary', () => {
       expect(r.skipped).toBe(1);
       expect(r.profileSeeded).toBe(1);
       expect(ks.readSurfaceBlocks().profile).toBe('Company: Relayed Corp');
+    });
+
+    it('SECURITY: an agent_inferred fact is NOT seeded — and does not displace the typed answer', () => {
+      // The model can write "Company: …" from its own reading. It reaches `active`, so it
+      // dedups the operator's onboarding answer — and if it also seeded the block, text the
+      // operator never typed would sit in every future turn IN PLACE OF theirs. Measured
+      // before the bar was raised: profileSeeded 1, profile "Company: Model Guess Ltd".
+      const { ks } = makeKs();
+      ks.write({ text: 'Company: Model Guess Ltd', sourceChannel: 'agent' });
+      expect(ks.listActive()[0]!.sourceType).toBe('agent_inferred');
+      const r = promoteOnboardingBasics([{ key: 'company', answer: 'Acme GmbH' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: 't1' });
+      expect(r.skipped).toBe(1);
+      expect(r.profileSeeded).toBe(0);
+      expect(ks.readSurfaceBlocks().profile).toBe('');
+    });
+
+    it('SECURITY: an external_unverified fact that reached ACTIVE is NOT seeded', () => {
+      // Producible today, not hypothetical: the `upload` channel derives
+      // external_unverified from the channel alone, and without the untrusted flag the row
+      // lands `active` rather than in the queue.
+      const { ks } = makeKs();
+      const w = ks.write({ text: 'Company: Upload Corp', sourceChannel: 'upload' });
+      expect(w.status).toBe('active');
+      expect(w.tier).toBe('external_unverified');
+      const r = promoteOnboardingBasics([{ key: 'company', answer: 'Acme GmbH' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: 't1' });
+      expect(r.skipped).toBe(1);
+      expect(r.profileSeeded).toBe(0);
+      expect(ks.readSurfaceBlocks().profile).toBe('');
+    });
+
+    it('the same key twice in one call does not produce a duplicate line', () => {
+      // One answer is written and one hits the dedup skip; both carry the same label, so a
+      // membership test against a pre-loop snapshot writes the line twice (measured).
+      const { ks } = makeKs();
+      const r = promoteOnboardingBasics(
+        [{ key: 'company', answer: 'Acme GmbH' }, { key: 'company', answer: 'Acme GmbH' }],
+        { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
+      );
+      expect(r.profileSeeded).toBe(1);
+      expect(ks.readSurfaceBlocks().profile).toBe('Company: Acme GmbH');
+    });
+
+    it('a refusal mid-seed is REPORTED, not swallowed behind a plausible partial count', () => {
+      // The claim in the code is that seeding stops loudly. Without an assert the stderr
+      // line is decorative: removing it leaves every other test green.
+      const { ks } = makeKs();
+      const limit = MEMORY_BLOCK_CHAR_LIMITS.profile;
+      ks.setBlockContent('profile', 'x'.repeat(limit - 20));
+      const errs: string[] = [];
+      const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+        errs.push(String(chunk));
+        return true;
+      });
+      try {
+        const r = promoteOnboardingBasics(
+          [{ key: 'company', answer: 'Nordberg AG' }, { key: 'role', answer: 'Marketing lead' }],
+          { knowledgeStore: ks, sawUntrusted: false, threadId: THREAD },
+        );
+        expect(r.promoted).toBe(2);       // the durable entries landed
+        expect(r.profileSeeded).toBe(0);  // the block had no room
+        expect(errs.join('')).toContain('[lynox:onboarding] profile seed stopped');
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     it('a block line that MENTIONS the label mid-line does not suppress the seed', () => {
