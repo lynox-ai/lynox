@@ -39,6 +39,9 @@ const THREAD_SCOPED = [
 	'pendingSecretPrompt', 'pendingMailConnect', 'pendingChangeset', 'changesetLoading',
 	'skipExtraction', 'chatError', 'runInterrupted', 'messageQueue', 'runStartedAt',
 	'runPromptCount', 'contextBudget', 'compactionOffer', 'retryStatus',
+	// A count of what is waiting in the PREVIOUS conversation is exactly the wrong thing to
+	// leave on screen; `resumeThread` re-fetches it for the new one.
+	'threadPending',
 ] as const;
 
 /**

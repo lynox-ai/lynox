@@ -2231,6 +2231,9 @@ export async function reviewKnowledge(
 		}
 		if (editedText !== undefined) chip.text = editedText;
 		chip.resolved = action === 'reject' ? 'discarded' : 'kept';
+		// One fewer waiting in this thread — the banner must not keep claiming otherwise
+		// after the person has just dealt with it.
+		void refreshThreadPendingCount();
 	} catch (e) {
 		addToast(e instanceof Error ? e.message : t('chat.knowledge.review_failed'), 'error', 4000);
 	}
@@ -2507,6 +2510,9 @@ export function newChat() {
 	// every subsequent new chat until a page reload, because its render condition
 	// is `compactionOffer !== null` and nothing on the new-chat path reset it.
 	compactionOffer = null;
+	// Thread-scoped: a count of what is waiting in the PREVIOUS conversation is exactly
+	// the wrong thing to leave on screen. Re-fetched by `resumeThread` for the new one.
+	threadPending = 0;
 	// Same class as `compactionOffer`: `retryStatus` renders UNGATED in ChatView
 	// (`{#if retryStatus}`) and was only cleared at the top of `_executeRun`, so a
 	// thread left mid-retry showed "attempt 2/3" / "busy" on the fresh chat until
@@ -2516,6 +2522,40 @@ export function newChat() {
 	runPromptCount = 0;
 	clearContext();
 	persistChatNow();
+}
+
+/**
+ * How many durable-knowledge writes from THIS thread are still waiting for review.
+ *
+ * The inline chip is client-only by design — the raw wording of a queued write must never be
+ * re-injected on a resume — so a reload loses it and the entries go invisible in the place
+ * they were made. The global queue badge answers "there is something, somewhere"; after
+ * coming back to one conversation the question is "is anything from HERE waiting", and that
+ * is a different one.
+ *
+ * Count only. The wording stays server-side until a human has reviewed it, which is the whole
+ * reason those entries are queued.
+ */
+let threadPending = $state(0);
+
+export function getThreadPendingCount(): number {
+	return threadPending;
+}
+
+export async function refreshThreadPendingCount(): Promise<void> {
+	const sid = sessionId;
+	if (!sid) { threadPending = 0; return; }
+	try {
+		const res = await fetch(`${getApiBase()}/knowledge/queue/count?thread=${encodeURIComponent(sid)}`);
+		if (!res.ok) { threadPending = 0; return; }
+		const body = (await res.json()) as { pendingCount?: number };
+		// Guarded against a stale response landing after a thread switch: the fetch above may
+		// resolve when the user is already elsewhere, and a count from the previous
+		// conversation is exactly the wrong thing to show.
+		if (sessionId === sid) threadPending = typeof body.pendingCount === 'number' ? body.pendingCount : 0;
+	} catch {
+		threadPending = 0;
+	}
 }
 
 export function getSessionId() {
@@ -2808,6 +2848,9 @@ export async function resumeThread(threadId: string): Promise<void> {
 	// them, switching into a thread that never compacted still showed its bar,
 	// and a retry banner followed the user across threads.
 	compactionOffer = null;
+	// Thread-scoped: a count of what is waiting in the PREVIOUS conversation is exactly
+	// the wrong thing to leave on screen. Re-fetched by `resumeThread` for the new one.
+	threadPending = 0;
 	retryStatus = null;
 	runStartedAt = null;
 	runPromptCount = 0;
@@ -2979,6 +3022,9 @@ export async function resumeThread(threadId: string): Promise<void> {
 			persistChatNow();
 			setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
 		}
+		// The chip that announced any queued write in this thread is client-only and did not
+		// survive the reload, so ask the server what is still waiting HERE.
+		void refreshThreadPendingCount();
 	} catch (err: unknown) {
 		// Silently ignore abort errors from superseded requests
 		if (err instanceof DOMException && err.name === 'AbortError') return;

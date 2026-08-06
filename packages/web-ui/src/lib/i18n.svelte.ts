@@ -940,6 +940,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.knowledge.undone': { de: 'rückgängig gemacht', en: 'undone' },
 	'chat.knowledge.undo_failed': { de: 'Konnte nicht rückgängig gemacht werden.', en: 'Couldn’t undo that.' },
 	// DK-UX untrusted-capture review chip (turn read external content → keep/edit/discard).
+	// The per-thread reminder after a reload: the inline chip is client-only and did not
+	// survive it, and the global queue badge answers "somewhere", not "here".
+	'chat.knowledge.thread_pending_one': { de: '1 Fakt aus diesem Gespräch wartet auf dich', en: '1 fact from this conversation is waiting for you' },
+	'chat.knowledge.thread_pending_many': { de: '{count} Fakten aus diesem Gespräch warten auf dich', en: '{count} facts from this conversation are waiting for you' },
+	'chat.knowledge.thread_pending_open': { de: 'ansehen', en: 'review' },
 	'chat.knowledge.review_tag': { de: 'prüfen', en: 'review' },
 	'chat.knowledge.review_hint': { de: 'aus externem Inhalt', en: 'from external content' },
 	'chat.knowledge.review_keep': { de: 'behalten', en: 'keep' },

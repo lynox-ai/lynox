@@ -59,6 +59,7 @@
 		retryInterruptedRun,
 		dismissInterruptedRun,
 		retireKnowledge,
+		getThreadPendingCount,
 		reviewKnowledge,
 		type FileAttachment,
 		type UsageInfo,
@@ -73,6 +74,10 @@
 	import { taskPreview } from '../stores/follow-ups.js';
 	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
 	import { formatCost } from '../format.js';
+
+	// Read through a derived so the banner tracks the store's rune rather than a snapshot
+	// taken at mount — the count changes on thread switch and after a review.
+	const threadPending = $derived(getThreadPendingCount());
 	import { scrollFade } from '../utils/scroll-fade.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
@@ -3592,6 +3597,27 @@
 				{/if}
 			{/if}
 		</div>
+		<!-- Waiting facts FROM THIS THREAD. The inline chips above are client-only by design —
+		     the raw wording of a queued write must not be re-injected on a resume — so a reload
+		     loses them and the entries go invisible in the place they were made. The global
+		     queue badge answers "there is something, somewhere"; coming back to one
+		     conversation, the question is whether anything from HERE is waiting.
+		     Count only: the wording stays server-side until a human has reviewed it, which is
+		     the entire reason those entries are queued. -->
+		{#if threadPending > 0}
+			<div class="mt-1.5 max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto px-3 flex items-center justify-center gap-2 text-[11px]">
+				<span class="rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 px-2 py-0.5">
+					{threadPending === 1
+						? t('chat.knowledge.thread_pending_one')
+						: t('chat.knowledge.thread_pending_many').replace('{count}', () => String(threadPending))}
+				</span>
+				<button
+					type="button"
+					class="text-text-subtle hover:text-text underline underline-offset-2"
+					onclick={() => void goto('/app/intelligence?tab=queue')}
+				>{t('chat.knowledge.thread_pending_open')}</button>
+			</div>
+		{/if}
 		<!-- EU AI Act Art. 50 §1: persistent "interacting with AI" disclosure
 		     (the per-message AI badge is the primary signal; this reinforces it +
 		     carries the §8 output caveat). Yields the hint slot to the transient

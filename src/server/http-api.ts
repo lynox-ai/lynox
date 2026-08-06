@@ -3670,11 +3670,18 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { entries: store.listPending(limit), pendingCount: store.pendingCount() });
     });
 
-    // Cheap badge poll (the Intelligence-Hub tab pill).
-    this.addStatic('user', 'GET /api/knowledge/queue/count', async (_req, res) => {
+    // Cheap badge poll (the Intelligence-Hub tab pill). `?thread=` narrows it to one
+    // conversation — the chat surface asks "is anything from HERE waiting", which the global
+    // number cannot answer. Count only; the wording of a queued entry stays server-side until
+    // a human has reviewed it.
+    this.addStatic('user', 'GET /api/knowledge/queue/count', async (req, res) => {
       const store = engine.getKnowledgeStore();
       if (!requireService(res, store, 'Durable memory')) return;
-      jsonResponse(res, 200, { pendingCount: store.pendingCount() });
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      const thread = url.searchParams.get('thread');
+      jsonResponse(res, 200, {
+        pendingCount: thread ? store.pendingCountForThread(thread) : store.pendingCount(),
+      });
     });
 
     // Capture funnel rates (DEF-dk-capture-observability) — the READ half of the

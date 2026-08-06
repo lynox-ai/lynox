@@ -834,3 +834,41 @@ describe('KnowledgeStore write-path dedup — subject-null resolution (completes
     expect(ks.getEntry(entry.id)).toBeNull();
   });
 });
+
+describe('pendingCountForThread', () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+  function mk(): KnowledgeStore {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-thread-'));
+    dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    return new KnowledgeStore(engine, new SubjectStore(engine));
+  }
+
+  it('counts ONLY this thread — the whole point of asking per-thread', () => {
+    // A global number already exists (`pendingCount`). This one answers "is anything from
+    // HERE waiting", which is the question someone has after coming back to one conversation.
+    const ks = mk();
+    ks.write({ text: 'from thread A', sourceChannel: 'upload', sourceUntrusted: true, sourceThreadId: 'A' });
+    ks.write({ text: 'also from thread A', sourceChannel: 'upload', sourceUntrusted: true, sourceThreadId: 'A' });
+    ks.write({ text: 'from thread B', sourceChannel: 'upload', sourceUntrusted: true, sourceThreadId: 'B' });
+    expect(ks.pendingCountForThread('A')).toBe(2);
+    expect(ks.pendingCountForThread('B')).toBe(1);
+    expect(ks.pendingCount()).toBe(3);
+  });
+
+  it('counts only what is WAITING — an approved fact is no longer a reason to nag', () => {
+    const ks = mk();
+    ks.write({ text: 'queued', sourceChannel: 'upload', sourceUntrusted: true, sourceThreadId: 'A' });
+    ks.write({ text: 'already trusted', sourceChannel: 'ui', sourceThreadId: 'A' });
+    expect(ks.pendingCountForThread('A')).toBe(1);
+  });
+
+  it('returns 0 for an unknown or empty thread instead of falling back to the global count', () => {
+    const ks = mk();
+    ks.write({ text: 'queued', sourceChannel: 'upload', sourceUntrusted: true, sourceThreadId: 'A' });
+    expect(ks.pendingCountForThread('nope')).toBe(0);
+    expect(ks.pendingCountForThread('')).toBe(0);
+    expect(ks.pendingCountForThread('   ')).toBe(0);
+  });
+});
