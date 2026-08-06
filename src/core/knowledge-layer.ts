@@ -30,7 +30,7 @@ import type { DataStoreBridge } from './datastore-bridge.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
 import type { EngineDb } from './engine-db.js';
-import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS, isAmbiguousResolution } from './subject-store.js';
+import { backfillOrganisationShortAliases, SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS, isAmbiguousResolution } from './subject-store.js';
 import type { SubjectRow } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import type { RelationshipRow } from './relationship-store.js';
@@ -192,6 +192,21 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       this.retrievalEngine.setMemoryGraphReads(
         this.memoryGraphStore, this.subjectStore, this.memoryReadsActive,
       );
+      // Organisations created before the short-form rule existed carry no short alias, and
+      // nothing else would ever reach them: the alias is written at creation, and
+      // `findOrCreate` only touches a row it is asked about — so a client nobody mentions
+      // again would stay unreachable by the name an operator actually types. Idempotent (a
+      // row that already has the alias is skipped), and after the first boot it is a single
+      // scan with zero writes, so it needs no marker table to stay cheap.
+      //
+      // Wired HERE rather than exported and left for a caller: this arc has twice shipped a
+      // mechanism that worked and was reachable from nowhere.
+      try {
+        const filled = backfillOrganisationShortAliases(this.subjectStore);
+        if (filled > 0) console.log(`[lynox] subject aliases: added a short form to ${filled} organisation(s)`);
+      } catch {
+        // Best-effort self-heal: a failure here must never stop the engine from booting.
+      }
     } else {
       this.subjectStore = null;
       this.relationshipStore = null;

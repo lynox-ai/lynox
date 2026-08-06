@@ -710,6 +710,23 @@ const MIGRATIONS: string[] = [
        OR EXISTS (SELECT 1 FROM subjects)
        OR EXISTS (SELECT 1 FROM knowledge_entries)
        OR EXISTS (SELECT 1 FROM memories));`,
+
+  // v12 (short-form recall): a SECOND alias column, deliberately not a widening of the first.
+  //
+  // `aliases` are surface forms a CALLER supplied, and `findOrCreate` folds on them — that is
+  // how "Ada" resolves into "Dr. Ada Lovelace". The short form of an organisation name is
+  // DERIVED ("Nordfeld GmbH" → "Nordfeld"), and letting a derivation fold would have this
+  // resolver decide at write time that two companies are one, then attach every later fact to
+  // the winner. That is precisely the identity-invention `findOrCreate` refuses for an
+  // ambiguous alias, so the two kinds of alias cannot share a column: once merged into one
+  // list the distinction is unrecoverable, and a string comparison cannot get it back (a
+  // caller who genuinely passes `aliases: ['Meridian']` for "Meridian AG" is indistinguishable
+  // from the derived form — there is a test asserting that fold, and it is right).
+  //
+  // Read surfaces consult BOTH; `findOrCreate` consults only `aliases`. Nullable-free with a
+  // '[]' default so every existing row is immediately valid, and the boot backfill fills it.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (12);
+   ALTER TABLE subjects ADD COLUMN derived_aliases TEXT NOT NULL DEFAULT '[]';`,
 ];
 
 /**

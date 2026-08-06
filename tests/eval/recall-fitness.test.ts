@@ -130,15 +130,15 @@ describe('recall fitness — the automatic surface vs the tool surface', () => {
     expect(block).toContain('Amrein');
   });
 
-  it('the automatic block misses the SAME pinned fact under the short name', () => {
-    // Not an approval — a pin. `_mentions` substring-matches the canonical name, and nothing
-    // registers "Nordfeld" as an alias of "Nordfeld GmbH", so the form an operator actually
-    // types resolves no subject at all. This test exists so that closing the gap has to come
-    // here and say so, rather than the gap staying invisible.
+  it('the automatic block reaches the pinned fact under the SHORT name', () => {
+    // This test used to pin the GAP — it asserted the miss, so that closing it would have to
+    // come here and say so. That is what happened: the short form is now a derived alias
+    // (engine.db v12), the focus scan reads it through `surfaceForms`, and the fact renders
+    // without the operator having to type "Nordfeld GmbH".
     const ks = seeded();
     const block = ks.renderBlocks({ turnText: 'Was weisst du über den Kunden Nordfeld?' });
-    expect(block).not.toContain('Amrein');
-    // …while the tool surface does find it — the fact is present, only the automatic path misses.
+    expect(block).toContain('Amrein');
+    // The tool surface, which already worked, still does.
     expect(ks.recall({ query: 'Was weisst du über den Kunden Nordfeld?' }).some(h => h.text.includes('Amrein'))).toBe(true);
   });
 

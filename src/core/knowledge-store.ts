@@ -704,7 +704,7 @@ export class KnowledgeStore {
 
   /** Whole-ish match of a subject's name or any alias in the (already-lowercased) turn text. */
   private _mentions(hayLower: string, subj: SubjectRow): boolean {
-    const names = [subj.name, ...this._aliases(subj.aliases)];
+    const names = this.subjects.surfaceForms(subj);
     for (const n of names) {
       const needle = n.trim().toLowerCase();
       if (needle.length < 2) continue;
@@ -762,7 +762,13 @@ export class KnowledgeStore {
       // keeps its original order and ambiguity only stops it where it used to CONTINUE:
       // after the canonical stages, before the person-alias stage.
       const orgCanonical = this.subjects.findCanonical(explicit, 'organization');
-      const orgAlias = orgCanonical ? null : this.subjects.findByAliasResolved(explicit, 'organization');
+      // `includeDerived` — this is a READ. The caller named a subject and wants its entries, so
+      // the short form of an organisation name ("Nordfeld" for "Nordfeld GmbH") counts here,
+      // while `findOrCreate` deliberately cannot see it. A short form shared by two clients
+      // lands on the ambiguous branch below, exactly as a shared caller-supplied alias does.
+      const orgAlias = orgCanonical
+        ? null
+        : this.subjects.findByAliasResolved(explicit, 'organization', undefined, { includeDerived: true });
       const certain = orgCanonical
         ?? orgAlias?.row
         ?? this.subjects.findCanonical(explicit, 'person');

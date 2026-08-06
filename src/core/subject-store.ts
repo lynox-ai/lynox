@@ -226,6 +226,55 @@ const NAME_DEDUP_KINDS: ReadonlySet<string> = new Set(NAME_DEDUPED_SUBJECT_KINDS
 const ENGAGEMENT_LEADING_GENERIC_RE = /^(?:projekt|project|projet)[\s:]+/iu;
 
 /**
+ * Trailing legal form of an organisation name — the ORG analog of
+ * {@link ENGAGEMENT_LEADING_GENERIC_RE}, and the reason "Aurora" resolves while "Nordfeld"
+ * did not: the engagement kind has stripped its generic prefix since the start and the
+ * organisation kind never got the equivalent.
+ *
+ * Deliberately reaches past the home market: DACH, Romance, Benelux, Nordic, UK/US, and the
+ * `& Co. KG` tail, which attaches to ANY base form (`AG & Co. KG` is as real as the GmbH one).
+ * Not exhaustive and cannot be — an unknown form simply means no short alias is registered,
+ * which is today's behaviour for every name, so a gap here is never a REGRESSION.
+ *
+ * The boundary is `\s+`, not `[\s,]+`. A comma survives the `\s+`→`' '` collapse, so a name
+ * ending in many commas made the alternation retry at each one; whitespace cannot, because it
+ * is collapsed first.
+ */
+const ORG_LEGAL_FORM_RE = new RegExp(
+  '\\s+(?:'
+  + 'gmbh|mbh|ag|kgaa|kg|ohg|ug|e\\.?\\s?k\\.?|gbr|se|eg'                             // DACH
+  + '|s\\.?a\\.?s|s\\.?a\\.?r\\.?l|s\\.?à\\s?r\\.?l|s\\.?a|s\\.?l|s\\.?r\\.?l|s\\.?p\\.?a'  // FR/ES/IT
+  + '|b\\.?v|n\\.?v|v\\.?o\\.?f'                                                     // NL/BE
+  + '|a\\/s|aps|ab|as|oyj|oy|hf'                                                     // Nordics
+  + '|pty\\s+ltd|ltd|limited|llc|llp|l\\.?p|plc|inc|incorporated|corp|corporation|co'   // UK/US
+  + ')(?:\\s*&\\s*co\\.?\\s*(?:kg|ohg))?\\.?$',
+  'iu',
+);
+
+/** Defensive bound on the name handed to {@link organisationShortForm}: a subject name is
+ *  model-authored, and this runs per subject on the focus-block path. */
+const MAX_SHORT_FORM_INPUT = 200;
+
+/**
+ * An organisation name without its trailing legal form, or `null` when there is nothing to
+ * strip — so a caller can tell "there is a shorter form" from "this IS the short form".
+ *
+ * `null` rather than a degenerate residue in three cases, each a real match-everything hazard:
+ * an EMPTY result would equal every other empty one; a residue with no letter or digit
+ * (`'- GmbH'` → `'-'`) names nothing; and an over-long input is refused rather than scanned.
+ * A trailing connector is dropped too, so `Kanzlei Weber & Co` yields `Kanzlei Weber` and not
+ * a dangling `&`. Pure + deterministic.
+ */
+export function organisationShortForm(name: string): string | null {
+  if (name.length > MAX_SHORT_FORM_INPUT) return null;
+  const trimmed = name.trim().replace(/\s+/g, ' ');
+  const stripped = trimmed.replace(ORG_LEGAL_FORM_RE, '').replace(/[\s&,\-–—/]+$/u, '').trim();
+  if (stripped === trimmed) return null;
+  if (!/[\p{L}\p{N}]/u.test(stripped)) return null;
+  return stripped;
+}
+
+/**
  * Canonicalize a subject name for dedup matching: trim, collapse internal
  * whitespace, strip trailing punctuation. For `engagement`, additionally strip a
  * leading generic project word so "Projekt Orion" and "Orion" resolve to the same
@@ -245,7 +294,8 @@ export interface SubjectRow {
   id: string;
   kind: string;
   name: string;
-  aliases: string;          // JSON array
+  aliases: string;          // JSON array — CALLER-supplied surface forms; findOrCreate folds on these
+  derived_aliases: string;  // JSON array — DERIVED forms (v12); read surfaces only, never identity
   is_self: number;
   parent_id: string | null;
   status: string | null;
@@ -467,6 +517,13 @@ export class SubjectStore {
       // reproducing the original defect later and in bulk. Both invented an answer to a
       // question the store cannot answer. The caller gets the candidates instead.
       if (aliasHit?.ambiguous) return { ambiguous: true, candidateIds: aliasHit.ids };
+      // NOTE the lookup above is `findByAliasResolved`, which reads `aliases` ONLY. A derived
+      // short form lives in `derived_aliases` (v12) and is invisible here on purpose: letting a
+      // derivation fold would have this resolver decide at write time that two companies are
+      // one, then attach every later fact to the winner — the identity-invention it refuses one
+      // branch above. The separation is a column rather than a string comparison because a
+      // caller who genuinely passes `aliases: ['Meridian']` for "Meridian AG" is otherwise
+      // indistinguishable from the derived form.
       const existing = canonical
         ?? aliasHit?.row
         ?? (normalized !== params.name ? this.findCanonical(normalized, params.kind, owner) : null);
@@ -546,6 +603,44 @@ export class SubjectStore {
   }
 
   /** Raw insert (no dedup) — callers should prefer {@link findOrCreate}. */
+  /** Case-insensitive de-dupe preserving first-seen order — an alias list is compared with
+   *  `toLowerCase()`, so a case-variant duplicate is dead weight that also skews the
+   *  ambiguity COUNT if it ever lands on two rows. */
+  private static _dedupe(values: readonly string[]): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const v of values) {
+      const key = v.trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(v.trim());
+    }
+    return out;
+  }
+
+  /**
+   * Add the short-form alias to every non-archived organisation that lacks one. The engine
+   * half of {@link backfillOrganisationShortAliases}; see there for why it is needed at all.
+   * Returns the number of rows changed.
+   */
+  addShortFormAliasesToExistingOrganisations(): number {
+    const rows = this.db.prepare(
+      "SELECT id, name, aliases, derived_aliases FROM subjects WHERE kind = 'organization' AND archived_at IS NULL",
+    ).all() as Array<{ id: string; name: string; aliases: string; derived_aliases: string }>;
+    let changed = 0;
+    const update = this.db.prepare("UPDATE subjects SET derived_aliases = ?, updated_at = datetime('now') WHERE id = ?");
+    for (const row of rows) {
+      const short = organisationShortForm(row.name);
+      if (!short) continue;
+      // Already reachable by that string — through either column — so there is nothing to add.
+      const known = [...this._parseAliases(row.aliases), ...this._parseAliases(row.derived_aliases)];
+      if (known.some(a => a.toLowerCase() === short.toLowerCase())) continue;
+      update.run(JSON.stringify([short]), row.id);
+      changed++;
+    }
+    return changed;
+  }
+
   createSubject(params: {
     id?: string | undefined;
     kind: SubjectKind;
@@ -558,12 +653,24 @@ export class SubjectStore {
     embedding?: Buffer | undefined;
   }): string {
     const id = params.id ?? randomUUID();
-    const aliases = params.aliases ?? [params.name];
+    // The short form rides along as an ALIAS, never as the canonical name: the legal form is
+    // part of a company's identity and has to keep rendering. Registered HERE rather than in
+    // `findOrCreate` so every creation path gets it — the extraction mirror, the CRM, the
+    // knowledge write — not only the one that happens to call the resolver.
+    //
+    // Everything downstream then comes for free: `findByAliasResolved` resolves it and reports
+    // AMBIGUOUS when two companies share a short form, and `_mentions` already scans aliases,
+    // so the focus block needs no change. A caller naming a DIFFERENT legal form ("Nordfeld AG"
+    // against a stored "Nordfeld GmbH") matches neither the name nor the alias — structurally,
+    // rather than by a guard that has to be kept correct.
+    const short = params.kind === 'organization' ? organisationShortForm(params.name) : null;
+    const aliases = SubjectStore._dedupe(params.aliases ?? [params.name]);
+    const derived = short && !aliases.some(a => a.toLowerCase() === short.toLowerCase()) ? [short] : [];
     this.db.prepare(`
-      INSERT INTO subjects (id, kind, name, aliases, is_self, parent_id, status, owner_user_id, embedding)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO subjects (id, kind, name, aliases, derived_aliases, is_self, parent_id, status, owner_user_id, embedding)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      id, params.kind, params.name, JSON.stringify(aliases),
+      id, params.kind, params.name, JSON.stringify(aliases), JSON.stringify(derived),
       params.isSelf ? 1 : 0, params.parentId ?? null, params.status ?? null,
       params.ownerUserId ?? DEFAULT_OWNER, params.embedding ?? null,
     );
@@ -635,12 +742,21 @@ export class SubjectStore {
     alias: string,
     kind: string,
     ownerUserId = DEFAULT_OWNER,
+    opts?: { includeDerived?: boolean | undefined },
   ): { row: SubjectRow | null; ambiguous: boolean; ids: string[] } {
     const lower = alias.toLowerCase();
     const candidates = this.db.prepare(
-      'SELECT id, aliases FROM subjects WHERE kind = ? AND owner_user_id = ? AND archived_at IS NULL',
-    ).all(kind, ownerUserId) as Array<{ id: string; aliases: string }>;
-    const hits = candidates.filter(c => this._parseAliases(c.aliases).some(a => a.toLowerCase() === lower));
+      'SELECT id, aliases, derived_aliases FROM subjects WHERE kind = ? AND owner_user_id = ? AND archived_at IS NULL',
+    ).all(kind, ownerUserId) as Array<{ id: string; aliases: string; derived_aliases: string }>;
+    // `includeDerived` is OPT-IN, and the default is what makes the v12 split hold: every
+    // identity-establishing caller (findOrCreate above all) must see caller-supplied aliases
+    // only. A read surface asks for the wider set explicitly, at the one line where it wants it.
+    const hits = candidates.filter(c => {
+      const forms = opts?.includeDerived === true
+        ? [...this._parseAliases(c.aliases), ...this._parseAliases(c.derived_aliases)]
+        : this._parseAliases(c.aliases);
+      return forms.some(a => a.toLowerCase() === lower);
+    });
     const ids = hits.map(h => h.id);
     if (hits.length !== 1) return { row: null, ambiguous: hits.length > 1, ids };
     return { row: this.getSubject(hits[0]!.id), ambiguous: false, ids };
@@ -652,8 +768,18 @@ export class SubjectStore {
    * filter returning no rows, a lookup that reports "not found"). Anything that would
    * KEEP LOOKING or INVERT on a null must use {@link findByAliasResolved} instead.
    */
-  findByAlias(alias: string, kind: string, ownerUserId = DEFAULT_OWNER): SubjectRow | null {
-    return this.findByAliasResolved(alias, kind, ownerUserId).row;
+  findByAlias(alias: string, kind: string, ownerUserId = DEFAULT_OWNER, opts?: { includeDerived?: boolean | undefined }): SubjectRow | null {
+    return this.findByAliasResolved(alias, kind, ownerUserId, opts).row;
+  }
+
+  /** Every surface form a subject answers to, caller-supplied AND derived — for the read
+   *  surfaces that scan turn text (the focus block) rather than resolving a supplied name. */
+  surfaceForms(subj: SubjectRow): string[] {
+    return SubjectStore._dedupe([
+      subj.name,
+      ...this._parseAliases(subj.aliases),
+      ...this._parseAliases(subj.derived_aliases),
+    ]);
   }
 
   // ── Self-person + assignee resolution (S4a task-cutover) ──────
@@ -1272,4 +1398,18 @@ export class SubjectStore {
         .run(JSON.stringify(list), row.id);
     }
   }
+}
+
+/**
+ * Register the short form on organisations created before the rule existed.
+ *
+ * Needed because nothing else would ever reach them: {@link SubjectStore.createSubject} adds
+ * the alias at creation, and `findOrCreate` only touches a row it is asked about — a client
+ * nobody mentions again keeps its un-aliased row forever. Idempotent by construction (an alias
+ * already present is skipped), so it is safe to run on every boot and safe to re-run.
+ *
+ * Returns the number of rows changed, so a caller can log a real number instead of "done".
+ */
+export function backfillOrganisationShortAliases(subjects: SubjectStore): number {
+  return subjects.addShortFormAliasesToExistingOrganisations();
 }
