@@ -19,6 +19,7 @@ import { Engine } from '../core/engine.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
 import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
+import { wrapUntrustedData } from '../core/data-boundary.js';
 import { extractDocumentText, DocumentExtractError } from '../core/document-extract.js';
 import { ingestDocumentText, pickDocumentScope } from '../core/document-ingest.js';
 import { ensureHttpSecret } from '../core/engine-init.js';
@@ -2225,7 +2226,14 @@ export class LynoxHTTPApi {
                 // hygiene the user's own message text and the watch page-text
                 // get — before it is framed to the model AND persisted+recalled.
                 const safeBody = stripUntrustedSeparators(extracted.text);
-                content.push({ type: 'text', text: `[File: ${safeName}]\n${safeBody}` });
+                // WRAPPED, not merely sanitised. An uploaded document is third-party-authored
+                // — the person attached the file, they did not write what is inside it — so it
+                // is the same class of input as a fetched page or a received mail, both of
+                // which are wrapped. Two things follow from the marker, and the second is the
+                // one that was missing: the model sees an explicit content boundary, AND the
+                // turn counts as having handled untrusted content, so a `remember` on it routes
+                // to the review queue instead of landing active and pinnable.
+                content.push({ type: 'text', text: wrapUntrustedData(`[File: ${safeName}]\n${safeBody}`, 'file_upload') });
                 // U1 persist+recall: store the document into the knowledge layer
                 // (best-effort, OFF the request path) so it survives the turn and
                 // is auto-recalled on later turns. Never awaited — embedding /
@@ -2238,17 +2246,32 @@ export class LynoxHTTPApi {
                 // right predicate: it is null when the flag is off AND when the wiring
                 // failed, and in the failed case preserving the legacy write is the
                 // safe direction (the document's text is not silently dropped).
-                const kl = this.engine?.getKnowledgeLayer();
-                const durableStore = this.engine?.getKnowledgeStore();
-                const docScope = pickDocumentScope(this.engine?.getActiveScopes() ?? []);
-                if (kl && docScope) {
-                  void ingestDocumentText(kl, {
-                    text: safeBody,
-                    fileName: safeName,
-                    scope: docScope,
-                    threadId: session.sessionId,
-                    durableKnowledgeActive: durableStore !== null && durableStore !== undefined,
-                  }).catch(() => { /* best-effort */ });
+                //
+                // Guarded SEPARATELY from the extraction above, although it sits inside the
+                // same `try`. That catch degrades to the binary-415 path — which is the right
+                // answer for a document that could not be read, and the wrong one for a
+                // document that was read fine and merely failed to be archived: the user gets
+                // "looks like a binary document" for a perfectly good PDF, and the text is
+                // dropped from a turn it had already survived. Found by a route test whose
+                // engine stub lacked `getActiveScopes`, which is exactly the shape of the
+                // production failure (a method absent or throwing).
+                try {
+                  const kl = this.engine?.getKnowledgeLayer();
+                  const durableStore = this.engine?.getKnowledgeStore();
+                  const docScope = pickDocumentScope(this.engine?.getActiveScopes() ?? []);
+                  if (kl && docScope) {
+                    void ingestDocumentText(kl, {
+                      text: safeBody,
+                      fileName: safeName,
+                      scope: docScope,
+                      threadId: session.sessionId,
+                      durableKnowledgeActive: durableStore !== null && durableStore !== undefined,
+                    }).catch(() => { /* best-effort */ });
+                  }
+                } catch (ingestErr) {
+                  process.stderr.write(
+                    `[lynox:upload] document archive wiring failed for "${safeName}": ${ingestErr instanceof Error ? ingestErr.message : String(ingestErr)}\n`,
+                  );
                 }
                 continue;
               }

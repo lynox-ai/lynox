@@ -860,6 +860,29 @@ export class Agent implements IAgent {
   /** DK.1 F5: does the current context still hold a wrapped-untrusted-data marker? Scans
    *  tool_result / text blocks (where wrapped external content rides) so a rehydrated thread
    *  re-derives its conversation taint. Short-circuits on the first hit; ignores image blocks. */
+  /**
+   * Does ONE message's content carry the wrapped-untrusted marker?
+   *
+   * Separate from {@link _contextHoldsUntrustedMarker}, which scans the whole history: that
+   * one re-derives the STICKY latch and may legitimately fire on an old message, while this
+   * is asked about the message arriving NOW, to seat the run-scoped marker. Conflating them
+   * would let a tainted turn from an hour ago mark today's run as having handled external
+   * content — the same over-claim `restoreConversationTaint` exists to avoid.
+   */
+  private static _contentHoldsUntrustedMarker(content: unknown): boolean {
+    if (typeof content === 'string') return containsUntrustedMarker(content);
+    if (!Array.isArray(content)) return false;
+    for (const block of content) {
+      if (
+        typeof block === 'object' && block !== null
+        && (block as { type?: unknown }).type === 'text'
+        && typeof (block as { text?: unknown }).text === 'string'
+        && containsUntrustedMarker((block as { text: string }).text)
+      ) return true;
+    }
+    return false;
+  }
+
   private _contextHoldsUntrustedMarker(): boolean {
     for (const msg of this.messages) {
       const content = msg.content;
@@ -1248,6 +1271,17 @@ export class Agent implements IAgent {
     this._repeatGuard.reset();
     this._sawUntrustedData = false;
     this._sawFollowUpCall = false;
+    // The USER turn can itself carry untrusted content. An uploaded document's extracted
+    // text is third-party-authored — the person attached the file, they did not write what
+    // is in it — and it arrives as a content block on this message, not as a tool result.
+    // Every other seat for the marker is on the TOOL path (`_executeOne`), and the sticky
+    // latch is only re-derived in `loadMessages`, so without this an upload-bearing turn
+    // reads as perfectly clean: a `remember` on it lands `active` and pinnable instead of in
+    // the review queue. Placed after the reset above, or it would be cleared again.
+    if (Agent._contentHoldsUntrustedMarker(content)) {
+      this._sawUntrustedData = true;
+      this._conversationSawUntrusted = true;
+    }
     // Run-scoped cost ceiling: the managed per-run $ ceiling (and the 200-iteration
     // backstop) is bounded PER RUN, not cumulatively over a session-long thread.
     // Without this reset the guard latches after 200 cumulative model-calls and every

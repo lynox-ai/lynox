@@ -3384,6 +3384,39 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     expect(agent.sawUntrustedData).toBe(false);
   });
 
+  it('a user turn carrying wrapped content arms the run marker — an UPLOAD is untrusted', async () => {
+    // Every other seat for the marker is on the tool path, and the sticky latch is only
+    // re-derived on load. An uploaded document arrives as a content block on the USER
+    // message, so without this the turn reads clean and a `remember` on it lands active and
+    // pinnable instead of in the review queue.
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await agent.send([
+      { type: 'text', text: 'Was steht da drin?' },
+      { type: 'text', text: wrapUntrustedData('[File: vertrag.pdf]\nZahlungsziel 30 Tage', 'file_upload') },
+    ] as unknown[]);
+    expect(agent.sawUntrustedData).toBe(true);
+    expect(agent.conversationSawUntrusted).toBe(true);
+  });
+
+  it('a plain user turn does NOT arm it', async () => {
+    // The pair: arming unconditionally would also pass the test above, and would put every
+    // ordinary message into the review queue.
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await agent.send([{ type: 'text', text: 'Merk dir: Zahlungsziel 30 Tage' }] as unknown[]);
+    expect(agent.sawUntrustedData).toBe(false);
+  });
+
+  it('a plain STRING user turn carrying the marker arms it too', async () => {
+    // `send` accepts both shapes; the block-array branch is the upload path, but a caller
+    // passing a pre-composed string must not slip past.
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await agent.send(wrapUntrustedData('some fetched page text', 'web'));
+    expect(agent.sawUntrustedData).toBe(true);
+  });
+
   it('noteUntrustedData() latches the flag (spawn propagates a shared-Memory child\'s taint here)', () => {
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
     expect(agent.sawUntrustedData).toBe(false);
