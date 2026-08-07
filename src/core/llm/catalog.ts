@@ -671,19 +671,38 @@ export interface ProviderIdentity {
  * base URL. It must therefore share a key with `openai` + `api.mistral.ai`, or
  * one provider would be listed twice under two spellings.
  */
-const NATIVE_IDENTITIES: Readonly<Record<string, ProviderIdentity>> = Object.freeze({
-  anthropic: { key: 'preset:anthropic', label: 'Anthropic' },
-  vertex: { key: 'preset:vertex', label: 'Google Vertex AI' },
-  mistral: { key: 'preset:mistral', label: 'Mistral' },
-});
+// A Map, not an object literal: the lookup key comes from LYNOX_TIER_SET_JSON,
+// and `{}['constructor']` is a truthy Object.prototype member. An object here
+// would answer `'constructor'` / `'__proto__'` / `'toString'` with a garbage
+// identity — `{key: undefined, label: undefined}` — which both blanks the
+// provider name in the response and collapses two different providers onto one
+// dedup key. `resolveCatalogKey` documents the same class of bug (it uses
+// `Object.hasOwn` for it); a Map has no prototype chain to walk at all.
+const NATIVE_IDENTITIES: ReadonlyMap<string, ProviderIdentity> = new Map([
+  ['anthropic', { key: 'preset:anthropic', label: 'Anthropic' }],
+  ['vertex', { key: 'preset:vertex', label: 'Google Vertex AI' }],
+  ['mistral', { key: 'preset:mistral', label: 'Mistral' }],
+]);
 
-/** Host of a base URL, or a bounded form of the raw string when it will not parse. */
+/** Reduce a name to the plain label characters that may reach the UI. */
+function sanitizeLabel(s: string): string {
+  return s.replace(/[^\w .+-]/g, '').trim();
+}
+
+/**
+ * Host of a base URL, or a bounded form of the raw string when it will not parse.
+ * A trailing root dot is normalised away — `api.example.com.` and
+ * `api.example.com` are the same host, and keeping both would list one provider
+ * twice. The scheme is deliberately NOT part of the key: http and https to the
+ * same host are one provider.
+ */
 function endpointHost(apiBaseURL: string | undefined): string {
   if (!apiBaseURL) return '';
+  const strip = (h: string): string => h.replace(/\.(?=$|:)/, '');
   try {
-    return new URL(apiBaseURL).host.toLowerCase();
+    return strip(new URL(apiBaseURL).host.toLowerCase());
   } catch {
-    return apiBaseURL.trim().toLowerCase().slice(0, 64);
+    return strip(apiBaseURL.trim().toLowerCase().slice(0, 64));
   }
 }
 
@@ -714,7 +733,7 @@ export function providerIdentity(
   catalog: LLMCatalog = LLM_CATALOG,
 ): ProviderIdentity {
   const folded = provider.trim().toLowerCase();
-  const native = NATIVE_IDENTITIES[folded];
+  const native = NATIVE_IDENTITIES.get(folded);
   if (native) return native;
 
   // Re-stated as literals rather than narrowed in place: `ProviderKey` is an
@@ -738,9 +757,14 @@ export function providerIdentity(
   // stripped to plain label characters, because this string reaches the UI —
   // unless it impersonates a brand this function otherwise only grants to a
   // verified endpoint.
-  const cleaned = provider.replace(/[^\w .+-]/g, '').trim().slice(0, 24);
-  const impersonates = catalog.some((e) => e.display_name.toLowerCase() === cleaned.toLowerCase())
-    || Object.values(NATIVE_IDENTITIES).some((n) => n.label.toLowerCase() === cleaned.toLowerCase());
+  const cleaned = sanitizeLabel(provider).slice(0, 24);
+  // Compare the SANITISED form on both sides. Comparing against the raw
+  // display_name let every brand containing a stripped character through:
+  // 'Ollama (local)' sanitises to 'Ollama local', which matched nothing and was
+  // printed verbatim — a borrowed brand wearing one less bracket.
+  const folded_clean = cleaned.toLowerCase();
+  const impersonates = catalog.some((e) => sanitizeLabel(e.display_name).toLowerCase() === folded_clean)
+    || [...NATIVE_IDENTITIES.values()].some((n) => sanitizeLabel(n.label).toLowerCase() === folded_clean);
   return {
     key: `provider:${folded}`,
     label: cleaned && !impersonates ? cleaned : 'Unknown provider',

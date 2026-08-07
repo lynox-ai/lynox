@@ -677,6 +677,13 @@ describe('providerIdentity', () => {
     // A key that merely IMPERSONATES a brand — not a registered provider at all —
     // must not print it.
     expect(label('Fireworks AI')).toBe('Unknown provider');
+    // Compared in SANITISED form on both sides. Against the raw display_name,
+    // every brand containing a stripped character walked straight through:
+    // 'Ollama (local)' sanitises to 'Ollama local', matched nothing, and was
+    // printed verbatim — a borrowed brand wearing one less bracket.
+    expect(label('Ollama (local)')).toBe('Unknown provider');
+    expect(label('vLLM (self-hosted)')).toBe('Unknown provider');
+    expect(label('Google Vertex AI (Claude)')).toBe('Unknown provider');
     expect(label('anthropic ')).toBe('Anthropic');
     expect(label('Google Vertex AI')).toBe('Unknown provider');
   });
@@ -694,6 +701,29 @@ describe('providerIdentity', () => {
     expect(key('openai', 'https://proxy-a.internal/v1')).not.toBe(key('openai', 'https://proxy-b.internal/v1'));
     // Same host, different path/scheme spelling → still one provider.
     expect(key('openai', 'https://proxy-a.internal/v1')).toBe(key('openai', 'https://proxy-a.internal/openai/v1'));
+  });
+
+  it('does not answer a PROTOTYPE key with a garbage identity', () => {
+    // The lookup key arrives from LYNOX_TIER_SET_JSON, and `{}['constructor']`
+    // is a truthy Object.prototype member. An object-literal table answered
+    // these with `{key: undefined, label: undefined}` — a blank provider name in
+    // the response, and one shared dedup key collapsing two real providers.
+    for (const hostile of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+      const id = providerIdentity(hostile);
+      // Treated as what it is — an unregistered provider key — not as a table hit.
+      expect(id.key).toBe(`provider:${hostile.toLowerCase()}`);
+      expect(typeof id.label).toBe('string');
+      expect(id.label.length).toBeGreaterThan(0);
+    }
+    // …and two of them still identify as two different providers, rather than
+    // collapsing onto one `undefined` key and silently dropping the second.
+    expect(key('constructor')).not.toBe(key('toString'));
+  });
+
+  it('normalises a trailing root dot into the same endpoint', () => {
+    // `api.example.com.` and `api.example.com` are one host; two keys would list
+    // one provider twice.
+    expect(key('openai', 'https://gw.internal./v1')).toBe(key('openai', 'https://gw.internal/v1'));
   });
 
   it('bounds and sanitises an unregistered provider key', () => {
