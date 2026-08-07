@@ -1194,6 +1194,43 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.channels.notifications_desc': { de: 'Browser-Push für Workflow-Ende, Alerts und Deal-Hinweise', en: 'Browser push for workflow completion, alerts, and deal nudges' },
 	'settings.channels.search': { de: 'Websuche', en: 'Web search' },
 	'settings.channels.search_desc': { de: 'SearXNG-Endpunkt für Webrecherche', en: 'SearXNG endpoint for web research' },
+	'settings.channels.calendar': { de: 'Kalender', en: 'Calendar' },
+	'settings.channels.calendar_desc': { de: 'Termine lesen — aus Google, Outlook, Apple oder einer Buchungssoftware', en: 'Read appointments — from Google, Outlook, Apple, or booking software' },
+	// Each language written natively: the German is not a translation of the English. The
+	// instructions name the menu items as the operator sees them in their own product.
+	'calendar.title': { de: 'Kalender verbinden', en: 'Connect a calendar' },
+	'calendar.intro': {
+		de: 'Damit kennt der Agent deine Termine und kann sagen, wann du frei bist. Nur lesen — er kann nichts eintragen, verschieben oder absagen.',
+		en: 'This lets the agent see your appointments and say when you are free. Read-only — it cannot create, move, or cancel anything.',
+	},
+	'calendar.where_title': { de: 'Wo du die Adresse findest', en: 'Where to find the address' },
+	'calendar.where_google': {
+		de: 'Google Kalender: Einstellungen → den Kalender links auswählen → „Geheime Adresse im iCal-Format".',
+		en: 'Google Calendar: Settings → pick the calendar on the left → "Secret address in iCal format".',
+	},
+	'calendar.where_outlook': {
+		de: 'Outlook / Microsoft 365: Kalender → Freigeben → Veröffentlichen → ICS-Link kopieren.',
+		en: 'Outlook / Microsoft 365: Calendar → Share → Publish → copy the ICS link.',
+	},
+	'calendar.where_apple': {
+		de: 'Apple Kalender: Rechtsklick auf den Kalender → Freigabeeinstellungen → „Öffentlicher Kalender".',
+		en: 'Apple Calendar: right-click the calendar → Sharing Settings → "Public Calendar".',
+	},
+	'calendar.secrecy_note': {
+		de: 'Diese Adresse ist wie ein Passwort: wer sie hat, kann den Kalender lesen. Sie wird verschlüsselt gespeichert und dem Agenten nie gezeigt.',
+		en: 'This address works like a password: anyone holding it can read the calendar. It is stored encrypted and never shown to the agent.',
+	},
+	'calendar.connected': { de: 'Verbundene Kalender', en: 'Connected calendars' },
+	'calendar.add_first': { de: 'Kalender hinzufügen', en: 'Add a calendar' },
+	'calendar.add_another': { de: 'Weiteren Kalender hinzufügen', en: 'Add another calendar' },
+	'calendar.label': { de: 'Name (z. B. MAIN, PRIVAT, BUCHUNGEN)', en: 'Name (e.g. MAIN, PRIVATE, BOOKINGS)' },
+	'calendar.address': { de: 'Geheime iCal-Adresse', en: 'Secret iCal address' },
+	'calendar.connect': { de: 'Verbinden', en: 'Connect' },
+	'calendar.label_required': { de: 'Bitte einen Namen angeben.', en: 'Please give it a name.' },
+	'calendar.https_required': { de: 'Die Adresse muss mit https:// beginnen.', en: 'The address must start with https://.' },
+	'calendar.save_failed': { de: 'Der Kalender konnte nicht gespeichert werden.', en: 'That calendar could not be saved.' },
+	'calendar.load_failed': { de: 'Die verbundenen Kalender konnten nicht geladen werden.', en: 'Connected calendars could not be loaded.' },
+	'common.remove': { de: 'Entfernen', en: 'Remove' },
 	// PRD-IA-V2 P3-PR-G — `settings.tasks` retired; Tasks now lives under
 	// Automation Hub via `hub.automation.tasks`. Key was already unused in
 	// templates (only the definition remained after SettingsIndex never wired

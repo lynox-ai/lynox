@@ -22,6 +22,7 @@
 		{ href: '/app/settings/channels/google', titleKey: 'settings.channels.google', descKey: 'settings.channels.google_desc' },
 		{ href: '/app/settings/channels/notifications', titleKey: 'settings.channels.notifications', descKey: 'settings.channels.notifications_desc' },
 		{ href: '/app/settings/channels/search', titleKey: 'settings.channels.search', descKey: 'settings.channels.search_desc' },
+		{ href: '/app/settings/channels/calendar', titleKey: 'settings.channels.calendar', descKey: 'settings.channels.calendar_desc' },
 	];
 </script>
 
