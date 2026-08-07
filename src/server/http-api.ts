@@ -3678,9 +3678,14 @@ export class LynoxHTTPApi {
       const store = engine.getKnowledgeStore();
       if (!requireService(res, store, 'Durable memory')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      // PRESENCE decides, not truthiness. `?thread=` with an empty value is still a question
+      // about one conversation, and answering it with the global number says "12 facts are
+      // waiting here" about a thread that has none. The store already answers 0 for an empty
+      // id, so asking it is both correct and the only form these two branches differ in —
+      // truthiness collapses them onto the same answer and leaves a line no test can pin.
       const thread = url.searchParams.get('thread');
       jsonResponse(res, 200, {
-        pendingCount: thread ? store.pendingCountForThread(thread) : store.pendingCount(),
+        pendingCount: thread === null ? store.pendingCount() : store.pendingCountForThread(thread),
       });
     });
 
