@@ -59,6 +59,7 @@ import type {
 import { WallClockBudget } from './wall-clock-budget.js';
 import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
+import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 
@@ -7103,6 +7104,34 @@ export class LynoxHTTPApi {
         }
       } else {
         exportData['knowledge_graph'] = { entities: [], relationships: [] };
+      }
+
+      // Durable knowledge store (entries + the always-loaded memory blocks).
+      //
+      // A whole category of personal data was absent from a dump the button calls "all your
+      // data" and the Privacy Policy names explicitly. It was survivable while the substrate
+      // was dormant; pro migration 0048 makes it the default for every newly provisioned
+      // tenant, so from this release the omission is the common case rather than the edge one.
+      //
+      // Pending entries are included: a queued fact is stored personal data whether or not it
+      // was ever approved, and Art. 15 asks what is held, not what is active.
+      const knowledgeStore = engine.getKnowledgeStore();
+      if (knowledgeStore) {
+        const ENTRY_CAP = 500;
+        const active = knowledgeStore.listActive(ENTRY_CAP);
+        const pending = knowledgeStore.listPending(ENTRY_CAP);
+        const blocks: Record<string, string | null> = {};
+        for (const id of ALL_MEMORY_BLOCK_IDS) blocks[id] = knowledgeStore.getBlock(id)?.content ?? null;
+        exportData['durable_knowledge'] = {
+          entries: active,
+          pending_entries: pending,
+          blocks,
+          // In the payload, not only on stderr: an incomplete Art. 15 answer that says so is a
+          // different thing from one that looks complete. The reader is the data subject.
+          truncated: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP,
+        };
+      } else {
+        exportData['durable_knowledge'] = { entries: [], pending_entries: [], blocks: {}, truncated: false };
       }
 
       // CRM contacts + deals

@@ -6430,6 +6430,41 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    it('GET /api/export carries the durable knowledge store — entries, queue and blocks', async () => {
+      // The button says "Download all your data from this instance (GDPR Art. 15/20)" and the
+      // Privacy Policy names the durable knowledge store as a category. The dump did not
+      // contain it. That was survivable while the substrate was dormant; pro migration 0048
+      // makes it the default for every newly provisioned tenant, so the gap became the norm.
+      const listActive = vi.fn(() => [{ id: 'k1', text: 'Nordberg pays monthly', subjectName: 'Nordberg AG' }]);
+      const listPending = vi.fn(() => [{ id: 'k2', text: 'from a web page' }]);
+      await swapEngine({
+        getKnowledgeStore: () => ({
+          listActive, listPending,
+          getBlock: (id: string) => ({ content: `block:${id}`, charLimit: 100 }),
+        }),
+        getKnowledgeLayer: () => null,
+        getCRM: () => null,
+        getDataStore: () => null,
+      }, async () => {
+        const res = await jsonFetch('/api/export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as {
+          durable_knowledge: {
+            entries: Array<{ text: string }>;
+            pending_entries: Array<{ text: string }>;
+            blocks: Record<string, string>;
+            truncated: boolean;
+          };
+        };
+        expect(body.durable_knowledge.entries.map(e => e.text)).toEqual(['Nordberg pays monthly']);
+        // A queued fact is held personal data whether or not it was ever approved — Art. 15
+        // asks what is stored, not what is active.
+        expect(body.durable_knowledge.pending_entries.map(e => e.text)).toEqual(['from a web page']);
+        expect(body.durable_knowledge.blocks).toEqual({ profile: 'block:profile', playbook: 'block:playbook' });
+        expect(body.durable_knowledge.truncated).toBe(false);
+      });
+    });
+
     it('DELETE /api/crm/contacts/:id removes the row and reports it', async () => {
       const deleteContact = vi.fn((id: number) => id === 7);
       await swapEngine({ getCRM: () => ({ deleteContact }) }, async () => {
