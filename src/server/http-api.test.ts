@@ -4641,6 +4641,29 @@ describe('LynoxHTTPApi', () => {
       );
 
       it.each(['managed', 'managed_pro', 'eu', 'starter'])(
+        'PUT /api/secrets/CALENDAR_FEED_MAIN ACCEPTS user-scope in mode=%s',
+        async (mode) => {
+          // Agent-invisible and customer-owned at the same time, which is the case the two
+          // ideas come apart on. The feed URL must stay out of the agent's reach, but support
+          // does not have it and never will — routing it through the infra deny-list answered
+          // "connect my calendar" with "contact support@lynox.ai".
+          vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+          vi.stubEnv('LYNOX_MANAGED_MODE', mode);
+          try {
+            const res = await jsonFetch('/api/secrets/CALENDAR_FEED_MAIN', {
+              method: 'PUT',
+              body: JSON.stringify({ value: 'https://calendar.example/private-abc/basic.ics' }),
+            });
+            expect(res.status).toBe(200);
+            expect(mockSecretSet).toHaveBeenCalledWith('CALENDAR_FEED_MAIN', 'https://calendar.example/private-abc/basic.ics');
+          } finally {
+            vi.unstubAllEnvs();
+            vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          }
+        },
+      );
+
+      it.each(['managed', 'managed_pro', 'eu', 'starter'])(
         'PUT /api/secrets/SMTP_PASSWORD rejects user-scope in mode=%s (admin-only infra)',
         async (mode) => {
           // SMTP_PASSWORD matches `/^SMTP_/` in INFRA_ADMIN_ONLY_PATTERNS —

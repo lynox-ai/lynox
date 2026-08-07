@@ -201,6 +201,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactHistoryTool: { definition: { name: 'artifact_history' }, handler: vi.fn() },
   artifactRestoreTool: { definition: { name: 'artifact_restore' }, handler: vi.fn() },
   recallToolResultTool: { definition: { name: 'recall_tool_result' }, handler: vi.fn() },
+  calendarReadTool: { definition: { name: 'calendar_read' }, handler: vi.fn() },
+  CALENDAR_FEED_PREFIX: 'CALENDAR_FEED_',
   suggestFollowUpsTool: { definition: { name: 'suggest_follow_ups' }, handler: vi.fn() },
   mediaProcessTool: { definition: { name: 'media_process' }, handler: vi.fn() },
 }));
@@ -417,9 +419,10 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool.
-      // 38 builtin always (incl. edit_file + update_workflow_steps + export_workflow + import_workflow + diagnose_workflow_run + media_process + suggest_follow_ups); +1 `web_research`
+      // 39 builtin always (incl. edit_file + update_workflow_steps + export_workflow + import_workflow + diagnose_workflow_run + media_process + suggest_follow_ups); +1 `web_research`
       // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
       // isn't configured; +5 mail tools when vault is available.
+      // `calendar_read` is NOT here: it ships behind `calendar_enabled`, default off.
       expect([41, 46]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
@@ -765,6 +768,32 @@ describe('Engine + Session (Orchestrator)', () => {
       // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
       // isn't configured; +5 mail tools when vault is available.
       expect([41, 46]).toContain(mockRegister.mock.calls.length);
+    });
+
+    it('does NOT register calendar_read while the flag is off', async () => {
+      // Off must be byte-identical, not merely inert: an unregistered tool is absent from the
+      // decision space AND from the prefix every turn pays for. A handler that refuses when
+      // called would satisfy neither.
+      await createEngineAndSession();
+      const names = mockRegister.mock.calls.map(c => (c[0] as { definition?: { name?: string } })?.definition?.name);
+      expect(names).not.toContain('calendar_read');
+    });
+
+    it('registers calendar_read when the flag is on', async () => {
+      // Driven through the config the engine actually reads: the flag lives in the USER config
+      // (`loadConfig()`), not in the runtime `LynoxConfig` the constructor takes. Setting the
+      // latter looked like it worked and tested nothing — the tool stayed unregistered and the
+      // assertion caught it.
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      engine.getUserConfig().calendar_enabled = true;
+      try {
+        await engine.init();   // registration happens here, not in registerPipelineTools()
+        const names = mockRegister.mock.calls.map(c => (c[0] as { definition?: { name?: string } })?.definition?.name);
+        expect(names).toContain('calendar_read');
+      } finally {
+        // loadConfig() memoises a singleton — reset so the flag does not leak into later tests.
+        delete engine.getUserConfig().calendar_enabled;
+      }
     });
 
     it('registerPipelineTools is idempotent after init', async () => {

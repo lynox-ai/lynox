@@ -32,6 +32,13 @@ export const INFRA_SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /^GOOGLE_CLIENT_/,
   /^SMTP_/,
   /^IMAP_/,
+  // A calendar feed URL whose SECRECY is the credential (Google/Outlook/Apple "secret
+  // address"). Same class as the mail credentials above: the engine resolves it inside
+  // `calendar_read`, and the model has no reason to hold it. Keeping it agent-invisible
+  // means a prompt-injected turn cannot put `secret:CALENDAR_FEED_…` into an outbound
+  // request body — the URL alone grants read access to someone's whole calendar, and it
+  // matches none of the vendor-prefixed shapes the egress body scan looks for.
+  /^CALENDAR_FEED_/,
 ];
 
 /** True if `name` is an infrastructure/engine-internal secret (agent-invisible). */

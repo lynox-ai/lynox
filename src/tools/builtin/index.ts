@@ -20,6 +20,7 @@ export { saveWorkflowTool } from './process.js';
 export { apiSetupTool } from './api-setup.js';
 export { artifactSaveTool, artifactListTool, artifactDeleteTool, artifactHistoryTool, artifactRestoreTool } from './artifact.js';
 export { recallToolResultTool } from './recall-tool-result.js';
+export { calendarReadTool, CALENDAR_FEED_PREFIX } from './calendar.js';
 export { suggestFollowUpsTool } from './suggest-follow-ups.js';
 export { setThreadContextTool } from './set-thread-context.js';
 export { subjectsMergeTool } from './subjects-merge.js';

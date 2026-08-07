@@ -3324,6 +3324,21 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     expect(agent.sawExternalContentTool).toBe(true);
   });
 
+  it('sets sawExternalContentTool when calendar_read runs (invitation-authored text)', async () => {
+    // Anyone who can send the operator a calendar invitation chooses the SUMMARY and LOCATION
+    // this tool reads back — an ingest channel needing no compromise, only their address. The
+    // tool wraps its result too, so this is the second of two independent signals; they fail
+    // differently, and a calendar is precisely where "meeting note" reads as a durable fact.
+    const cal = makeTool('calendar_read', vi.fn().mockResolvedValue('- 2026-08-12 14:00–15:00 Termin'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'calendar_read', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [cal] });
+    expect(agent.sawExternalContentTool).toBe(false);
+    await agent.send('what is on this week');
+    expect(agent.sawExternalContentTool).toBe(true);
+  });
+
   it('leaves sawExternalContentTool false for a non-external tool', async () => {
     const benign = makeTool('task_create', vi.fn().mockResolvedValue('task created'));
     mockProcess

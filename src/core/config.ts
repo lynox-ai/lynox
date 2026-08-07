@@ -274,6 +274,17 @@ export function loadConfig(): LynoxUserConfig {
   } else if (durableMemory === 'false' || durableMemory === '0') {
     merged.durable_memory_enabled = false;
   }
+  // Calendar reading (ICS feeds). Per-tenant via env so the CP can turn it off in production
+  // without a release if a real feed behaves worse than staging did — the whole reason it
+  // ships behind a flag. Explicit 'true'/'1' vs 'false'/'0' (no z.coerce). NOT in
+  // PROJECT_SAFE_KEYS: an agent-writable flag would let injected content switch on a tool
+  // that reads externally-authored text into context.
+  const calendarRead = process.env['LYNOX_CALENDAR_ENABLED'];
+  if (calendarRead === 'true' || calendarRead === '1') {
+    merged.calendar_enabled = true;
+  } else if (calendarRead === 'false' || calendarRead === '0') {
+    merged.calendar_enabled = false;
+  }
   // Extended debug capture (operator surface). Lets the CP flip it per-tenant via env
   // (rafael canary first) without editing config.json. Explicit 'true'/'1' vs 'false'/
   // '0' (no z.coerce). NOT in PROJECT_SAFE_KEYS — a project config must not be able to

@@ -252,12 +252,21 @@ const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
  * Everything else passes: SHOPIFY_*, STRIPE_*, DATAFORSEO_*, BREVO_*,
  * HETZNER_*, ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.
  */
-// Single source of truth: `INFRA_SECRET_PATTERNS` / `isInfraSecret` in
-// secret-store.ts. The same set is used there to keep these names out of the
-// agent's session briefing + tool-input secret resolution (exfil guard), so
-// the write deny-list and the agent-invisible set can never drift apart.
+// Mostly `INFRA_SECRET_PATTERNS` / `isInfraSecret` from secret-store.ts, which keeps these
+// names out of the agent's session briefing and out of tool-input secret resolution.
+//
+// The two ideas are NOT the same idea, and equating them shipped a bug: "the agent must not
+// see it" and "the customer may not set it" happened to coincide for every name on that list —
+// LYNOX_*, MANAGED_*, MAIL_ACCOUNT_*, GOOGLE_OAUTH_*, SMTP_*, IMAP_* are all provisioned by
+// someone other than the customer. A calendar feed is the first name where they come apart:
+// its URL must stay agent-invisible (it grants read access to a whole calendar and matches
+// none of the vendor shapes the egress scan looks for), yet the ONLY person who can possibly
+// know it is the operator. Routing it through the infra list would have answered "connect my
+// calendar" with "contact support@lynox.ai" — for a value support does not have.
+const USER_OWNED_INFRA_PATTERNS: ReadonlyArray<RegExp> = [/^CALENDAR_FEED_/];
+
 function isAdminOnlySecret(name: string): boolean {
-  return isInfraSecret(name);
+  return isInfraSecret(name) && !USER_OWNED_INFRA_PATTERNS.some(p => p.test(name));
 }
 
 /**

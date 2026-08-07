@@ -82,6 +82,7 @@ import {
   artifactHistoryTool,
   artifactRestoreTool,
   recallToolResultTool,
+  calendarReadTool,
   setThreadContextTool,
   subjectsMergeTool,
   mediaProcessTool,
@@ -1305,6 +1306,13 @@ export class Engine {
       .register(recallToolResultTool)
       .register(suggestFollowUpsTool)
       .register(mediaProcessTool);
+
+    // Calendar reading, behind `calendar_enabled`. Registering it conditionally rather than
+    // refusing inside the handler is what makes OFF byte-identical: an unregistered tool is
+    // absent from the decision space AND from the always-on prefix every turn pays for.
+    if (this.userConfig.calendar_enabled === true) {
+      this.registry.register(calendarReadTool);
+    }
 
     // Memory tools — the Durable Knowledge Substrate (DK.1) REPLACES the six legacy `memory_*`
     // tools with `remember`/`recall`/`memory_block_edit` when `durable_memory_enabled` is on
