@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.12.0 — 2026-08-07
+
+A memory release. The durable knowledge store stops being an opt-in experiment and becomes the default for newly provisioned managed tenants, which raises a question the earlier phase could postpone: if the agent keeps what it learns, you have to be able to see it, correct it, and delete it. So this release ships the other half — a fact you can drop, a subject you can erase from both stores, a chip that says what it is asking about, and a recall surface that reports what is still waiting by count rather than by adjective. Alongside it, delegation stops being invisible: a sub-agent's activity is attributed to the sub-agent, and a delegated turn says what it cost and how long you waited. Calendar reading arrives as an ICS feed reader and ships **off on every tenant**. Two control-plane migrations, both additive; the engine schema does not move.
+
+### Added
+- **Durable knowledge is the default for new managed tenants.** The per-tenant column's default flips to `true`. Existing rows are untouched, so a tenant switched off by hand stays off, and the operator flip remains the way to change one.
+- **Erasure that reaches both stores.** A subject or entry can be deleted, and the reap that removes its orphans actually runs. A tenant on durable knowledge has data in two databases, and until now only one of them had a delete path. (#1119, #1137, #1142)
+- **The always-loaded profile block is seeded from the onboarding answers**, so what you told the agent on day one is present on every turn instead of waiting to be retrieved. (#1136)
+- **Recall says what is waiting.** A conversation with unconfirmed facts says so, by count — never by wording that implies more or less certainty than the number supports. (#1141, #1143)
+- **Calendar reading from an ICS feed**, with a settings page that says where to find the address. **Off by default and off on every tenant in this release** — with the flag off the tool is not registered at all, so the decision space and the cached prefix are byte-identical to a build without it. (#1144, #1145)
+- **Sub-agent attribution.** A delegated run's activity is shown as the sub-agent's, not the main chat's, and the composer is no longer blocked while one is in flight. The run names the provider and model id it actually used. (#1100, #1098)
+- **A delegated turn reports its cost and its wait.** (#1101, #1111)
+- **Basic and split user/password auth** are implemented paths in API setup rather than options that could be selected and then failed. (#1138)
+- **A capture-fitness evaluation with a labelled denominator** — the measurement that produced the funnel number below. (#1130, #1114)
+
+### Fixed
+- **A wrong fact can be dropped from the Wissen view**, and the knowledge chip says which subject it is asking about instead of showing an unanchored prompt. (#1137, #1139)
+- **An ambiguous alias is refused instead of resolving to whichever row came first.** The lookup now returns either a resolution or the candidate list, so every caller has to decide what to do with an ambiguity rather than inherit a silent pick. (#1108)
+- **The legacy memory archive is no longer written under durable knowledge**, which had been mixing two retention stories in one place. (#1135)
+- **The compaction offer stays with its thread** instead of following the user to the next one, and both of its exits are covered. (#1117, and the thread-scoping fix)
+- **The reasoning channel survives the OpenAI-compat wire** instead of being discarded on the way through.
+- **Follow-up chips are recovered on models that skip the tool call.** (#1099)
+- **The balance mirror clears on an explicit null** rather than freezing at its last value, and a tier disagreement between the mirror and its source is reported instead of hidden. (#1102, #1127)
+- **The cache-miss detector is gated on what was observed on the wire**, not on what the provider config says should be possible. (#1110)
+- **The calendar expander is bounded.** A contracting recurrence rule below `MONTHLY` had no bail-out, so a crafted or merely unlucky feed could search indefinitely; unexpandable rules are now detected up front and skipped, including inside timezone definitions. (#1146)
+- **A helper call is no longer debited twice.** Its cost is added to what a managed tenant is *shown*, and deliberately not to what they are *charged* — the helper already reports its own metered cost under its own run id, and the deduplication is per run id. (#1147)
+
+### Security
+- **An uploaded document is treated as the untrusted content it is.** (#1140)
+- **The wire-capture sinks are refused on a control-plane-provisioned instance**, where the operator is not the only party whose data would land in them. (#1103)
+- **The durable-knowledge trust gate fails closed**, and the write-trust backstop's refusal is consulted rather than discarded. An approved entry derives its tier from evidence that can be re-derived, so an approval cannot silently outrank its own basis. (#1116, #1126, #1128)
+- **One injection channel that detection cannot see is guarded structurally** instead of scanned. (#1113)
+- **The provider key slots are protected from an agent-initiated overwrite.** They are agent-*visible* by design — which is a different question from agent-*writable*. On BYOK an injected write would have destroyed access the operator cannot recover. (#1147)
+- Advisory floors raised past two high-severity findings. (#1134)
+
+### Changed
+- **The merge rule is a check rather than a paragraph.** A pull request now carries a gate record pinned to its head SHA; the check enforces that the record exists and describes the current code, and documents plainly which of its lines it can verify and which are attestations. Binding customer texts additionally require a named human sign-off with a date. (#1104, #1105, #1118)
+- **The durable-knowledge capture rate is a measured number** — 3.4% of carriers on the reference corpus, 4.5% on `mistral-medium` — rather than an assumption. The first denominator this project used was three times too small, because it counted carriers as turns. (#1114)
+- The Fireworks sub-processor scope was corrected to match what the code actually does. (#1109)
+
+### Upgrade and rollback notes
+- **The engine needs nothing on upgrade.** No new tables, no new columns, no schema-version move.
+- **Two control-plane migrations ship**, both additive and idempotent: the durable-knowledge column default flips to `true` (inserts only — existing rows are untouched), and a `calendar_enabled` column is added defaulting to `false`.
+- **Turning durable knowledge back off** is a two-part revert, and it is worth knowing before you need it: the column default has to be set back to `false` *and* the provisioner reverted, because a default is not what an already-provisioned tenant reads. A single tenant is switched with the operator flip plus an env sync. The procedure is written down in the hosting repo's release strategy.
+- **Rolling back to 2.11.0:** nothing to undo by hand. Both new control-plane columns are ignored by the previous build, and durable knowledge written by 2.12.0 is readable by 2.11.0 — what changes is the default a *new* tenant comes up on, not the shape of anyone's data.
+- **The calendar reader is off** and stays off unless a tenant is deliberately flipped on. It is shipped rather than held back because the surface is inert while the flag is false; the open items behind that decision are tracked, not forgotten.
+
 ## 2.11.0 — 2026-07-29
 
 An onboarding and trust release. First run now grounds the agent in the business it is pointed at instead of starting from an empty context: it reads the site, asks the three to five questions that reading made possible, and keeps the answers as durable knowledge rather than chat scrollback. The second theme is confirmation prompts — everything the model writes into one is now rendered as text instead of parsed as markup, so a tool result cannot dress itself up as part of the question you are approving. Claude Opus 5 joins the catalog, and operators get a model blocklist. Engine schema moves to v51 (additive); one control-plane migration ships.
