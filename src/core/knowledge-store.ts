@@ -7,6 +7,7 @@ import type { ProvenanceEvidence } from './provenance.js';
 import { subjectsDisagree } from './contradiction-detector.js';
 import { maskSecretPatterns, matchesSecretPattern, matchesSecretPatternStrict } from './secret-store.js';
 import type { ProvenanceKind } from '../types/memory.js';
+import { collapseToSingleLine } from './sanitize.js';
 import type { SecretStoreLike } from '../types/security.js';
 import {
   type KnowledgeEntry,
@@ -460,13 +461,25 @@ export class KnowledgeStore {
    *  masked), so a re-onboarding whose key already has an active fact skips. A bounded
    *  scan over active rows — onboarding runs once and the active set is small. */
   hasActiveFactWithPrefix(prefix: string): boolean {
+    return this.findActiveFactWithPrefix(prefix) !== null;
+  }
+
+  /**
+   * The ACTIVE entry whose decrypted text begins with `prefix`, with its trust tier —
+   * or null. The tier travels WITH the text because the callers that put this text on a
+   * higher-privilege surface have to make a trust decision, and re-deriving it from the
+   * text is impossible: an entry can reach `active` by being written on a clean turn OR
+   * by being approved out of the review queue, and only the row knows which.
+   */
+  findActiveFactWithPrefix(prefix: string): { text: string; sourceType: ProvenanceKind } | null {
     const rows = this.db.prepare(
-      "SELECT text FROM knowledge_entries WHERE status = 'active'",
-    ).all() as { text: string }[];
+      "SELECT text, source_type FROM knowledge_entries WHERE status = 'active'",
+    ).all() as { text: string; source_type: string }[];
     for (const r of rows) {
-      if (this.engine.dec(r.text).startsWith(prefix)) return true;
+      const text = this.engine.dec(r.text);
+      if (text.startsWith(prefix)) return { text, sourceType: r.source_type as ProvenanceKind };
     }
-    return false;
+    return null;
   }
 
   /** The always-loaded blocks (profile + playbook) for the read-surface, decrypted AND
@@ -598,7 +611,39 @@ export class KnowledgeStore {
       SET status = 'superseded', superseded_by = ?, pinned = 0, updated_at = datetime('now')
       WHERE id = ?
     `).run(supersededBy ?? null, entry.id);
+    this._dropSeededProfileLine(entry.text);
     return this.getEntry(entry.id)!;
+  }
+
+  /**
+   * Drop a retired entry's line from the `profile` block, if the block still carries it
+   * verbatim.
+   *
+   * The onboarding promotion seeds that block from an entry, so a fact can live in two
+   * places at once — and retirement only ever touched one of them. Measured: retire the
+   * entry, and it leaves the active list while the block keeps loading it into every turn.
+   * The user's removal appears to work and does not. That is worse than no removal button,
+   * because it teaches that the control works.
+   *
+   * Only an EXACT match of the seeded form is dropped. If the operator has since edited
+   * that line, it is theirs and it stays — retiring the entry it grew from is not a mandate
+   * to rewrite their words. Best-effort: a block failure must not undo the retire, which is
+   * already committed above.
+   */
+  private _dropSeededProfileLine(entryText: string): void {
+    try {
+      const block = this.getBlock('profile');
+      if (!block || !block.content) return;
+      const seeded = collapseToSingleLine(entryText);
+      if (!seeded) return;
+      const kept = block.content.split('\n').filter(l => l.trim() !== seeded);
+      if (kept.length === block.content.split('\n').length) return;
+      this.setBlockContent('profile', kept.join('\n').trim());
+    } catch (err: unknown) {
+      process.stderr.write(
+        `[lynox:knowledge] could not drop the retired line from the profile block: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
   }
 
   // ── Erasure ──
