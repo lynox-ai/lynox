@@ -18,7 +18,7 @@ import {
 	type SubAgentActivity,
 	type ContentBlock,
 } from './chat-attribution.js';
-import { parseFollowUps, followUpsFromToolInput, computeDeferredTray, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
+import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -259,6 +259,11 @@ interface PersistedChat {
 	 *  user clicked, kept visible + clickable so a second matching suggestion
 	 *  isn't lost when taking the first (rafael 2026-07-17). Plain {label,task}
 	 *  JSON — persisted exactly like `queues`, no payload concern. */
+	/**
+	 * Retired 2026-08-08 with the deferred-follow-ups tray. Kept on the READ
+	 * side of the type so an existing localStorage blob still parses; nothing
+	 * writes it any more, and the entries are inert.
+	 */
 	deferredFollowUps?: Record<string, FollowUpSuggestion[]>;
 }
 
@@ -281,7 +286,6 @@ function readPersistedRoot(): PersistedChat {
 			sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : null,
 			threads: raw.threads ?? {},
 			...(raw.queues ? { queues: raw.queues } : {}),
-			...(raw.deferredFollowUps ? { deferredFollowUps: raw.deferredFollowUps } : {}),
 		};
 	} catch { /* corrupt data */ }
 	return { sessionId: null, threads: {} };
@@ -290,11 +294,6 @@ function readPersistedRoot(): PersistedChat {
 /** Restore a thread's pending send-queue (text-only entries — see PersistedChat.queues). */
 function loadPersistedQueue(threadId: string): QueuedMessage[] {
 	return (readPersistedRoot().queues?.[threadId] ?? []).map((q) => ({ id: q.id, task: q.task }));
-}
-
-/** Restore a thread's deferred-follow-ups tray (see PersistedChat.deferredFollowUps). */
-function loadDeferredFollowUps(threadId: string): FollowUpSuggestion[] {
-	return (readPersistedRoot().deferredFollowUps?.[threadId] ?? []).map((f) => ({ label: f.label, task: f.task }));
 }
 
 function writePersistedRoot(root: PersistedChat): void {
@@ -332,10 +331,9 @@ function dropEmptyUserMessages(list: ChatMessage[]): ChatMessage[] {
  */
 export function dropPersistedThread(threadId: string): void {
 	const root = readPersistedRoot();
-	if (threadId in root.threads || root.queues?.[threadId] || root.deferredFollowUps?.[threadId]) {
+	if (threadId in root.threads || root.queues?.[threadId]) {
 		delete root.threads[threadId];
 		if (root.queues) delete root.queues[threadId];
-		if (root.deferredFollowUps) delete root.deferredFollowUps[threadId];
 		if (root.sessionId === threadId) root.sessionId = null;
 		writePersistedRoot(root);
 	}
@@ -374,9 +372,6 @@ function persistChatNow(): void {
 		if (fileless.length > 0) root.queues[sessionId] = fileless;
 		else if (root.queues[sessionId]) delete root.queues[sessionId];
 		// Persist the deferred-follow-ups tray alongside, same per-thread shape.
-		root.deferredFollowUps = root.deferredFollowUps ?? {};
-		if (deferredFollowUps.length > 0) root.deferredFollowUps[sessionId] = deferredFollowUps.map((f) => ({ label: f.label, task: f.task }));
-		else if (root.deferredFollowUps[sessionId]) delete root.deferredFollowUps[sessionId];
 	}
 	writePersistedRoot(root);
 }
@@ -405,7 +400,6 @@ const persisted = loadPersistedChat();
 let messages = $state<ChatMessage[]>(persisted.messages);
 let sessionId = $state<string | null>(persisted.sessionId);
 // Deferred-follow-ups tray for the current thread (rehydrated on resume/switch).
-let deferredFollowUps = $state<FollowUpSuggestion[]>(persisted.sessionId ? loadDeferredFollowUps(persisted.sessionId) : []);
 let isStreaming = $state(false);
 let streamingActivity = $state<'thinking' | 'tool' | 'writing' | 'idle'>('idle');
 let streamingToolName = $state<string | null>(null);
@@ -2309,49 +2303,21 @@ export function getQueueLength() {
 	return messageQueue.length;
 }
 
-// --- Deferred follow-ups tray -------------------------------------------------
-// When the user clicks one follow-up pill, its un-taken siblings would otherwise
-// vanish with the turn. Instead they land in a per-thread tray that stays pinned
-// above the composer until taken or dismissed — so a second matching suggestion
-// isn't lost, and taking it later runs as a FRESH turn with full accumulated
-// context (not a blind pre-recorded queue). Client-only; no engine/agent state.
-const MAX_DEFERRED_FOLLOW_UPS = 8;
+// --- Follow-ups ------------------------------------------------------------
+// The deferred-follow-ups tray was removed on 2026-08-08. It captured the
+// un-taken siblings of a clicked pill AUTOMATICALLY and pinned them above the
+// composer until dismissed by hand, which is the wrong default in two ways: it
+// decided for the user what was worth keeping, and it then had to guess whether
+// a later, rephrased suggestion was the same one — a string comparison the model
+// defeats every turn. It also cost a permanent row of chips on mobile.
+// The replacement is an explicit signal (pin what you want to keep), designed
+// separately: DEF-followup-pin-explicit.
 
-export function getDeferredFollowUps(): FollowUpSuggestion[] {
-	return deferredFollowUps;
-}
-
-/**
- * Take a follow-up pill from an in-transcript set: run it now AND keep the set's
- * un-taken siblings in the tray (deduped by task, newest-last, capped).
- */
-export function takeFollowUp(clicked: FollowUpSuggestion, set: FollowUpSuggestion[]): void {
-	const next = computeDeferredTray(deferredFollowUps, clicked, set, MAX_DEFERRED_FOLLOW_UPS);
-	if (next !== deferredFollowUps) {
-		deferredFollowUps = next;
-		persistChatNow();
-	}
+/** Run a follow-up pill: send it as a fresh in-context turn. */
+export function takeFollowUp(clicked: FollowUpSuggestion): void {
 	void sendMessage(clicked.task);
 }
 
-/** Run a tray pill: fire it as a fresh in-context turn and remove it from the tray. */
-export function runDeferredFollowUp(fu: FollowUpSuggestion): void {
-	dismissDeferredFollowUp(fu);
-	void sendMessage(fu.task);
-}
-
-/** Dismiss a single tray pill (the × on a chip). */
-export function dismissDeferredFollowUp(fu: FollowUpSuggestion): void {
-	deferredFollowUps = deferredFollowUps.filter((f) => f.task !== fu.task);
-	persistChatNow();
-}
-
-/** Clear the whole tray ("alle ×"). */
-export function clearDeferredFollowUps(): void {
-	if (deferredFollowUps.length === 0) return;
-	deferredFollowUps = [];
-	persistChatNow();
-}
 /** Monotonic counter, bumped each time a streaming text block closes. */
 export function getCompletedTextBlockGen(): number {
 	return completedTextBlockGen;
@@ -2513,7 +2479,6 @@ export function newChat() {
 	// "run interrupted" warning on a chat that never ran anything).
 	runInterrupted = null;
 	messageQueue = [];
-	deferredFollowUps = [];
 	sessionModel = null;
 	sessionTier = null;
 	pendingModel = null; // no stickiness — the next new chat starts at default_tier
@@ -2844,7 +2809,6 @@ export async function resumeThread(threadId: string): Promise<void> {
 	// Restore any pending send-queue for this thread (durable across reload).
 	messageQueue = loadPersistedQueue(threadId);
 	// Restore the deferred-follow-ups tray for this thread (durable across reload).
-	deferredFollowUps = loadDeferredFollowUps(threadId);
 	// Reconcile restored bubbles: a `queued` bubble with no matching live queue
 	// entry (file-bearing — not persisted — or lost before the flush) is marked
 	// `failed` so the user can re-send instead of staring at a pill that will
