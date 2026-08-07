@@ -1654,3 +1654,58 @@ describe('OpenAIAdapter — request idle timeout (DEF-openai-adapter-timeout)', 
     } finally { server.close(); }
   }, 5000);
 });
+
+describe('OpenAIAdapter — the non-streaming call every extraction path uses', () => {
+  /**
+   * `createLLMClient` returns `new OpenAIAdapter(...) as unknown as Anthropic` for every tenant
+   * whose provider maps to the openai wire client — Mistral and OpenAI. The cast makes the
+   * compiler agree with any shape, so a method the adapter simply did not have failed at
+   * RUNTIME and only there: `client.beta.messages.create is not a function`.
+   *
+   * Three callers reach it — `llm-helper.ts` (save_workflow extraction), `process-capture.ts`,
+   * and the inbox classifier — and two of them use the UN-prefixed `client.messages.create`,
+   * which is a different property. Both are covered here for that reason; testing one would
+   * have left half the callers broken while looking green.
+   */
+  function toolCallServer(): Promise<{ port: number; close: () => void }> {
+    return createMockServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(sseChunk({
+        id: 'x-1', choices: [{
+          index: 0,
+          delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_1', function: { name: 'extract', arguments: '{"ok":true}' } }] },
+          finish_reason: null,
+        }],
+      }));
+      res.write(sseChunk({
+        id: 'x-1', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+        usage: { prompt_tokens: 7, completion_tokens: 3 },
+      }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+  }
+
+  it.each([
+    ['beta.messages.create', (a: OpenAIAdapter) => a.beta.messages.create],
+    ['messages.create',      (a: OpenAIAdapter) => a.messages.create],
+  ])('%s returns an assembled message with the fields its callers read', async (_label, pick) => {
+    const server = await toolCallServer();
+    try {
+      const adapter = new OpenAIAdapter({
+        baseURL: `http://localhost:${server.port}`, apiKey: 'test-key', modelId: 'test-model',
+      });
+      const msg = await pick(adapter)({
+        model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+      });
+
+      // Exactly what the three call sites destructure: the content blocks and the usage.
+      expect(msg.stop_reason).toBe('tool_use');
+      expect(msg.content.find(b => b.type === 'tool_use')?.name).toBe('extract');
+      expect(msg.usage.input_tokens).toBe(7);
+      expect(msg.usage.output_tokens).toBe(3);
+    } finally {
+      server.close();
+    }
+  });
+});

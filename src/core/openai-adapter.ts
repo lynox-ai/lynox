@@ -789,7 +789,52 @@ export class OpenAIAdapter {
           },
         };
       },
+      /**
+       * The non-streaming call, which this adapter did not have.
+       *
+       * Three callers use it — `llm-helper.ts` (`save_workflow` extraction),
+       * `process-capture.ts`, and the inbox classifier — all through the `Anthropic` cast in
+       * `createLLMClient`, so the compiler was satisfied and every one of them threw
+       * `client.beta.messages.create is not a function` at RUNTIME on any tenant whose
+       * `wireClient` is `openai` — that is, every Mistral and OpenAI customer. `save_workflow`
+       * answered them with "Workflow extraction failed … call save_workflow again to retry",
+       * a retry prompt for an error that recurs deterministically.
+       *
+       * It is the same request either way; only the delivery differs. Collecting the stream
+       * gives back exactly the fields the three callers read (`content`, `stop_reason`,
+       * `usage`), which is why this belongs in the adapter and not in three call sites.
+       */
+      create: (
+        params: {
+          model: string;
+          max_tokens: number;
+          system?: unknown;
+          messages: unknown[];
+          tools?: Anthropic.Tool[];
+          [key: string]: unknown;
+        },
+        options?: { signal?: AbortSignal | undefined },
+      ) => this.beta.messages.stream(params, options).finalMessage(),
     },
+  };
+
+  /**
+   * The un-prefixed surface. `client.messages.create(...)` is a distinct property from
+   * `client.beta.messages.create(...)`, and callers use both — so an adapter carrying only
+   * the `beta` path still failed for half of them. Delegates rather than duplicating.
+   */
+  messages = {
+    create: (
+      params: {
+        model: string;
+        max_tokens: number;
+        system?: unknown;
+        messages: unknown[];
+        tools?: Anthropic.Tool[];
+        [key: string]: unknown;
+      },
+      options?: { signal?: AbortSignal | undefined },
+    ) => this.beta.messages.create(params, options),
   };
 
   private _stream(
