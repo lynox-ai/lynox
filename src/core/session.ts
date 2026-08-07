@@ -948,12 +948,23 @@ export class Session {
       const tokensOut = this.usage.output_tokens - usageBefore.output_tokens;
       const cacheRead = this.usage.cache_read_input_tokens - usageBefore.cache_read_input_tokens;
       const cacheWrite = this.usage.cache_creation_input_tokens - usageBefore.cache_creation_input_tokens;
+      // `?.()` on the METHOD, not just on `agent`: the field is typed as the Agent class but a
+      // handful of tests and the pipeline path put a partial double there, and `agent?.m()`
+      // guards only a missing agent — a missing METHOD still throws. Found by 22 red tests
+      // rather than by reading, which is the honest reason this note exists.
+      //
+      // In-run helper calls (the follow-up-chip recovery) are billed to the tenant but produce
+      // no tokens in `this.usage`, so the deltas above cannot see them. Left out, the control
+      // plane charges one figure and every number the customer reads is smaller — on roughly
+      // every turn that needs the recovery. Added as dollars, not tokens: they are priced on
+      // the FAST model, and folding them into this run's token counts would bill them at the
+      // run's own `pricePerM`.
       const costUsd = calculateCost(model, {
         input_tokens: tokensIn,
         output_tokens: tokensOut,
         cache_creation_input_tokens: cacheWrite,
         cache_read_input_tokens: cacheRead,
-      });
+      }) + (this.agent?.getHelperCostUsd?.() ?? 0);
 
       // What this run's sub-agents spent, if it delegated. Read from RunHistory
       // rather than tracked in memory: the children are already rows there,

@@ -1432,6 +1432,17 @@ Next steps before calling create:
       if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(outputName)) {
         return `Error: output_secret_name "${outputName}" is not valid UPPER_SNAKE_CASE.`;
       }
+      // The same refusal `validateProfile` makes for `vault_keys` — this path had only the
+      // shape check, so a well-formed name was enough to write over any platform secret.
+      // `secretStore.set` below overwrites without asking, and the agent chooses the name:
+      // one injected `fetch_token` could replace a mail credential or a feed address with an
+      // OAuth token, and the only symptom is the feature quietly failing afterwards.
+      // Worth stating because it is what makes this a gap rather than a gap-by-omission: this
+      // release ADDS entries to `INFRA_SECRET_PATTERNS` and applies them at the sibling site,
+      // so the protected set grew while this door stayed open.
+      if (isInfraSecret(outputName)) {
+        return `Error: output_secret_name "${outputName}" is an infrastructure secret managed by the platform — pick a name for this API's own token.`;
+      }
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
       }

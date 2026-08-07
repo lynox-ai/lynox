@@ -37,6 +37,10 @@
 	const CHANNEL_MANAGED_PREFIXES: ReadonlyArray<string> = [
 		'MAIL_ACCOUNT_',
 		'GOOGLE_OAUTH_',
+		// The calendar page owns these and says so in its own header. Without the prefix here
+		// the feed address showed up in the generic key list too — the exact dual-write both
+		// files promise cannot happen, and the one that races silently.
+		'CALENDAR_FEED_',
 	];
 	function isChannelManaged(name: string): boolean {
 		return CHANNEL_MANAGED_PREFIXES.some((prefix) => name.startsWith(prefix));

@@ -12,6 +12,7 @@ import {
 	SPAWN_EVENT,
 	SPAWN_PROGRESS_EVENT,
 	SPAWN_CHILD_DONE_EVENT,
+	isChildEvent,
 	type ToolCallInfo,
 	type SpawnProgress,
 	type SubAgentActivity,
@@ -1324,6 +1325,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// card, no context flash, not pushed to toolCalls/blocks. The turn ends
 			// server-side (endsTurn), so no further model output follows.
 			if (toolName === 'suggest_follow_ups') {
+				// A CHILD's suggestions are not the main agent's. This short-circuit sat above
+				// `recordToolCall`, which is the one function that routes by attribution — so
+				// it was the single path that falsified the guarantee stated three lines below
+				// it, and a spawned sub-agent's chips replaced the ones the user was looking at.
+				// Dropped rather than rendered elsewhere: a child's follow-ups have no surface.
+				if (isChildEvent(data['subAgentId'], data['subAgent'])) break;
 				const fu = followUpsFromToolInput(toolInput);
 				if (fu.length > 0) msg.followUps = fu;
 				break;

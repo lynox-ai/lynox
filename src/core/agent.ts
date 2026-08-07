@@ -1023,7 +1023,14 @@ export class Agent implements IAgent {
     try {
       const provider = getActiveProvider();
       const fastSnap = resolveTierModel('fast', provider);
-      const client = clientForTierSnapshot(fastSnap, this.client, provider);
+      // The ambient provider must describe the client being passed, not the process default.
+      // `this.client` was built from `config.provider` (see the constructor), so handing
+      // `getActiveProvider()` here makes `changesProvider` compare the snapshot against the
+      // WRONG side: on a hybrid session whose thread runs a different provider than the base,
+      // it reads false, the ambient client is returned, and the fast model-id is sent to a wire
+      // client that has never heard of it. `resolveTierModel` stays base-relative — the tier
+      // catalogue is a process-level thing; only the client identity is per-agent.
+      const client = clientForTierSnapshot(fastSnap, this.client, this.provider);
       const stream = client.beta.messages.stream({
         model: fastSnap.modelId,
         max_tokens: FOLLOW_UP_FALLBACK_MAX_TOKENS,
@@ -1055,6 +1062,7 @@ export class Agent implements IAgent {
         // an Opus run charging Haiku tokens that trips the ceiling ~20x early.
         this.costGuard?.recordExternalCost(usd);
         debitInRunHelperCost(this.toolContext.meteredHost, this.sessionCounters, usd, 'fast');
+        this._helperCostUsd += usd;
       }
 
       const call = response.content.find(
@@ -1109,8 +1117,15 @@ export class Agent implements IAgent {
         role: 'user',
         content: [{ type: 'tool_result', tool_use_id: toolUseId, content: await entry.handler(input, this) }],
       });
-    } catch {
-      // Chips are a convenience; a failed recovery must never fail the turn.
+    } catch (err) {
+      // Chips are a convenience; a failed recovery must never fail the turn — but it must not
+      // be INVISIBLE either. This call is the one model call in the turn that `_callAPI`'s
+      // wire-capture never sees, so a silent catch made "the model had no suggestions" and
+      // "every recovery in production is throwing" the same observation: zero chips. One line
+      // on stderr is what separates them.
+      process.stderr.write(
+        `[lynox:follow-up] recovery failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
     } finally {
       clearTimeout(timer);
     }
@@ -1254,10 +1269,27 @@ export class Agent implements IAgent {
     return { ...composition, cacheReadTokens: this._lastCacheReadTokens };
   }
 
+  /**
+   * Dollars this run spent on IN-RUN HELPER calls — today the follow-up-chip recovery.
+   *
+   * These are billed to the tenant (`debitInRunHelperCost`) but produce no tokens in
+   * `Session.usage`, which is where the run's `costUsd` is derived from. So without this the
+   * control plane charges one number and every surface the customer can see reports a smaller
+   * one, on roughly every turn that needs the recovery. Accumulated here rather than folded
+   * into `usage`, because these tokens are priced on the FAST model and adding them to a run's
+   * own token counts would misprice them at the run's `pricePerM`.
+   */
+  private _helperCostUsd = 0;
+
+  /** {@link _helperCostUsd} for the run that just finished; reset at the start of each `send`. */
+  getHelperCostUsd(): number { return this._helperCostUsd; }
+
   async send(
     userMessage: string | unknown[],
     opts?: { suppressTools?: boolean; userMessagePrePersisted?: boolean },
   ): Promise<string> {
+    // Per RUN, not per session: `Session` reads it once after this returns.
+    this._helperCostUsd = 0;
     const snapshot = this.messages.length;
     // Support multimodal content blocks (e.g. vision: image + text)
     const content = Array.isArray(userMessage)

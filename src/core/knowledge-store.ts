@@ -696,7 +696,20 @@ export class KnowledgeStore {
       SET status = 'superseded', superseded_by = ?, pinned = 0, updated_at = datetime('now')
       WHERE id = ?
     `).run(supersededBy ?? null, entry.id);
-    this._dropSeededProfileLine(entry.text);
+    // ONLY the user-asserted channel may reach into the `profile` block.
+    //
+    // That block loads into every single turn and holds operator identity and durable
+    // preferences, which is why `memory_block_edit` guards it with an untrusted-refuse and a
+    // preview the operator has to confirm. Dropping a line by verbatim text match is a second
+    // write path onto the same surface, and `memory_retire`'s confirmation never mentions the
+    // block at all — so an agent retiring an entry it wrote itself could delete a line the
+    // operator authored, through a dialogue that said nothing about it.
+    //
+    // Text equality is the wrong key for the same reason: two facts can read identically and
+    // come from different places. Provenance is the right one, and `user_asserted` is exactly
+    // the channel that seeded those lines. The UI/HTTP retire path keeps working; the agent's
+    // own `agent_inferred` retire no longer touches the block.
+    if (retiringTier === 'user_asserted') this._dropSeededProfileLine(entry.text);
     return this.getEntry(entry.id)!;
   }
 
@@ -757,7 +770,16 @@ export class KnowledgeStore {
    * a row was removed.
    */
   deleteEntry(id: string): boolean {
-    return this.db.prepare('DELETE FROM knowledge_entries WHERE id = ?').run(id).changes > 0;
+    // Read the text BEFORE the row is gone — erasure has to reach the copy in the
+    // always-loaded `profile` block too. `retireEntry` does this and deletion did not, so an
+    // erasure request removed the entry and left its text loading into every subsequent turn:
+    // the one place the subject's data is guaranteed to keep being read. Unconditional here,
+    // unlike in `retireEntry`: retiring is a routine downgrade where provenance decides who
+    // may touch the block, while a deletion IS the request to be forgotten.
+    const doomed = this.getEntry(id);
+    const gone = this.db.prepare('DELETE FROM knowledge_entries WHERE id = ?').run(id).changes > 0;
+    if (gone && doomed) this._dropSeededProfileLine(doomed.text);
+    return gone;
   }
 
   /**
@@ -775,7 +797,18 @@ export class KnowledgeStore {
    */
   deleteBySubject(subjectId: string): number {
     const canonical = this.subjects.resolveActiveSubject(subjectId);
-    return this.db.prepare('DELETE FROM knowledge_entries WHERE subject_id = ?').run(canonical).changes;
+    // Same reason as {@link deleteEntry}: collect the texts first, because after the DELETE
+    // there is nothing left to match against the always-loaded `profile` block — and that
+    // block is precisely where a surviving copy would keep being read, every turn, after the
+    // subject asked to be erased.
+    const doomed = this.db.prepare(
+      'SELECT text FROM knowledge_entries WHERE subject_id = ?',
+    ).all(canonical) as Array<{ text: string }>;
+    const removed = this.db.prepare('DELETE FROM knowledge_entries WHERE subject_id = ?').run(canonical).changes;
+    if (removed > 0) {
+      for (const row of doomed) this._dropSeededProfileLine(this.engine.dec(row.text));
+    }
+    return removed;
   }
 
   // ── Focus derivation (H2-gated) ──

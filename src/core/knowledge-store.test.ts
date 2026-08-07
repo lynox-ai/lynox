@@ -980,3 +980,55 @@ describe('an ambiguous name is not silently replaced by one the TEXT mentions', 
     expect(nordberg.ambiguous).toBeFalsy();
   });
 });
+
+describe('the always-loaded profile block and who may reach into it', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  function make(): { ks: KnowledgeStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-block-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    return { ks: new KnowledgeStore(engine, new SubjectStore(engine)) };
+  }
+
+  const LINE = 'Operator prefers terse replies';
+
+  /** Put LINE into the profile block, and return an entry whose text matches it verbatim. */
+  function seed(ks: KnowledgeStore, channel: 'agent' | 'user'): string {
+    ks.setBlockContent('profile', LINE);
+    return ks.write({ text: LINE, sourceChannel: channel }).id;
+  }
+
+  it('an AGENT retire does not delete an operator line from the block', () => {
+    // `memory_block_edit` guards this block with an untrusted-refuse and a preview the
+    // operator confirms, because it loads into every single turn. Dropping a line by verbatim
+    // TEXT match was a second way in, and `memory_retire`'s confirmation never mentions the
+    // block — so the agent could retire an entry it wrote itself and take an operator-authored
+    // preference with it, through a dialogue that said nothing about it.
+    const { ks } = make();
+    const id = seed(ks, 'agent');
+    ks.retireEntry(id, 'agent_inferred');
+    expect(ks.getBlock('profile')?.content).toContain(LINE);
+  });
+
+  it('a USER retire still does — that path is the one that seeded the line', () => {
+    // The other direction, and it is what keeps the fix from being a blanket refusal: the
+    // UI/HTTP retire must go on working, or retiring an onboarding answer leaves it in the
+    // block forever.
+    const { ks } = make();
+    const id = seed(ks, 'user');
+    ks.retireEntry(id, 'user_asserted');
+    expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
+  });
+
+  it('ERASURE removes the line whatever wrote it — that is what erasure means', () => {
+    // `deleteEntry`/`deleteBySubject` skipped the block entirely, so an erasure request
+    // deleted the row and left the text loading into every future turn — the one place it
+    // was guaranteed to keep being read.
+    const { ks } = make();
+    const id = seed(ks, 'agent');
+    expect(ks.deleteEntry(id)).toBe(true);
+    expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
+  });
+});
