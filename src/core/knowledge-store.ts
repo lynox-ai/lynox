@@ -410,6 +410,30 @@ export class KnowledgeStore {
     return row.n;
   }
 
+  /**
+   * How many QUEUED entries name this subject — count only, never their text.
+   *
+   * The recall-time nudge (DK plan package 1). A queued entry is not knowledge yet: it was
+   * written on a turn that handled content the operator did not author, so its wording must
+   * not enter model context before a human has looked at it. But its EXISTENCE can, and that
+   * is the whole trick — the model learns there is something waiting exactly when the subject
+   * comes up, which is the moment the person can judge it cheaply. Write-time asks scale with
+   * reads; this scales with usefulness.
+   *
+   * Matched on `subject_hint`, because that is all a queued row has: `findOrCreate` runs on
+   * APPROVAL (a rejected entry must not leave a minted subject behind), so `subject_id` is
+   * null until then. Exact, case-insensitive, trimmed — deliberately not fuzzy. A count that
+   * is sometimes about a different client is worse than no count.
+   */
+  pendingCountForSubjectHint(name: string): number {
+    const needle = name.trim().toLowerCase();
+    if (!needle) return 0;
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM knowledge_entries WHERE status = 'pending_review' AND lower(trim(subject_hint)) = ?",
+    ).get(needle) as { n: number };
+    return row.n;
+  }
+
   /** The review queue (DK.2 UI): queued entries oldest-first, decrypted. */
   listPending(limit = 100): KnowledgeEntry[] {
     const capped = Math.max(1, Math.min(limit, 500));

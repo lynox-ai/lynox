@@ -288,6 +288,26 @@ describe('KnowledgeStore review queue (DK.2)', () => {
     return ks.write({ text, subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: true }).id;
   }
 
+  it('pendingCountForSubjectHint answers 0 for an absent subject, so callers need no guard', () => {
+    // Load-bearing for `knowledge_recall`, which delegates here rather than checking the
+    // subject itself: a caller-side guard on the same condition is a line no test can tell
+    // from its own removal.
+    //
+    // What this pins is the BEHAVIOUR, and two independent things deliver it: the early
+    // return, and the query's exact `= ?`. Measured, and the honest version is less tidy than
+    // it first looked — removing EITHER one alone leaves this green, because the other still
+    // answers 0. It fails only when both go, which is exactly when the count would start
+    // meaning "waiting anywhere" instead of "waiting about this subject".
+    //
+    // So this is a behavioural guard, not a line-level one: it does not defend the early
+    // return, and a comment claiming it did would be describing a test that does not exist.
+    const { ks } = make();
+    queueOne(ks);
+    expect(ks.pendingCountForSubjectHint('')).toBe(0);
+    expect(ks.pendingCountForSubjectHint('   ')).toBe(0);
+    expect(ks.pendingCountForSubjectHint('ACME')).toBe(1);
+  });
+
   it('listPending returns queued entries oldest-first, decrypted', () => {
     const { ks } = make();
     const a = queueOne(ks, 'first fact');

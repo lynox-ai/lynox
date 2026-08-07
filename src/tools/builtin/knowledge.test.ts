@@ -96,6 +96,59 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     expect(kw!['status']).toBe('pending_review');
   });
 
+  describe('recall names what is WAITING, by count only', () => {
+    it('THE POINT: a queued fact about this subject is announced without its wording', async () => {
+      // A queued entry was written on a turn that handled content the operator did not author.
+      // Its wording must not reach model context before a human has looked at it — but its
+      // EXISTENCE may, and that is the whole mechanism: the model learns something is waiting
+      // exactly when the subject comes up.
+      const { agent, ks } = make();
+      ks.write({ text: 'ACME pays via a numbered account in Vaduz', subjectName: 'ACME', sourceChannel: 'upload', sourceUntrusted: true });
+      ks.write({ text: 'ACME renews in March', subjectName: 'ACME', sourceChannel: 'ui' });
+      const out = await recallTool.handler({ query: 'what about ACME', subject: 'ACME' }, agent);
+      expect(out).toContain('ACME renews in March');   // the approved fact, in full
+      expect(out).toContain('1 further fact');          // the queued one, by count
+      expect(out).not.toContain('Vaduz');               // …and never its wording
+    });
+
+    it('says so even when nothing active matched', async () => {
+      // Otherwise the model reports "nothing known" while facts sit in the queue — the exact
+      // "memory feels empty" complaint the queue causes.
+      const { agent, ks } = make();
+      ks.write({ text: 'ACME banks in Vaduz', subjectName: 'ACME', sourceChannel: 'upload', sourceUntrusted: true });
+      const out = await recallTool.handler({ query: 'anything', subject: 'ACME' }, agent);
+      expect(out).toContain('No matching durable knowledge found');
+      expect(out).toContain('1 further fact');
+      expect(out).not.toContain('Vaduz');
+    });
+
+    it('counts only THIS subject — a queued fact about another client is not announced', async () => {
+      // A count that is sometimes about a different client is worse than no count.
+      const { agent, ks } = make();
+      ks.write({ text: 'Nordfeld banks in Vaduz', subjectName: 'Nordfeld', sourceChannel: 'upload', sourceUntrusted: true });
+      ks.write({ text: 'ACME renews in March', subjectName: 'ACME', sourceChannel: 'ui' });
+      const out = await recallTool.handler({ query: 'what about ACME', subject: 'ACME' }, agent);
+      expect(out).not.toContain('further fact');
+    });
+
+    it('stays silent when nothing is queued', async () => {
+      // The pair: announcing unconditionally would also pass the tests above.
+      const { agent, ks } = make();
+      ks.write({ text: 'ACME renews in March', subjectName: 'ACME', sourceChannel: 'ui' });
+      const out = await recallTool.handler({ query: 'what about ACME', subject: 'ACME' }, agent);
+      expect(out).not.toContain('waiting');
+    });
+
+    it('says nothing when the caller named no subject', async () => {
+      // Without a subject there is nothing to scope the count to, and a global number would be
+      // noise on every recall.
+      const { agent, ks } = make();
+      ks.write({ text: 'ACME banks in Vaduz', subjectName: 'ACME', sourceChannel: 'upload', sourceUntrusted: true });
+      const out = await recallTool.handler({ query: 'anything at all' }, agent);
+      expect(out).not.toContain('waiting');
+    });
+  });
+
   it('remember does NOT emit knowledge_write for a dedup no-op', async () => {
     const { agent } = make();
     await rememberTool.handler({ text: 'ACME uses Stripe for billing', subject: 'ACME' }, agent);
