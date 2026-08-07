@@ -938,3 +938,45 @@ describe('an ambiguous subject name on an ACTIVE write', () => {
     expect(res.subjectAmbiguous).toBeUndefined();
   });
 });
+
+describe('an ambiguous name is not silently replaced by one the TEXT mentions', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  it('files nothing against the third party the fact merely names', () => {
+    // The trap, and the first version of this fix walked straight into it: two "Meier"
+    // organizations make the explicit name ambiguous, so no link is made — and the
+    // subject-null derivation below then resolves the ONE known subject the text mentions,
+    // which here is the party the money is owed TO. It also cleared the hint, so the name was
+    // gone, `subjectAmbiguous` was suppressed by the now-set id, and the model was told
+    // "Remembered and linked to the named subject". Wrong client, no signal, unrecoverable.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-amb2-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    const ks = new KnowledgeStore(engine, subjects);
+
+    for (const name of ['Meier Bau AG', 'Meier Transport GmbH']) {
+      subjects.findOrCreate({ kind: 'organization', name, aliases: ['Meier'] });
+      ks.write({ text: `${name} is a client`, subjectName: name, sourceChannel: 'agent' });
+    }
+    const nordberg = subjects.findOrCreate({ kind: 'organization', name: 'Nordberg AG' });
+    ks.write({ text: 'Nordberg AG is a client', subjectName: 'Nordberg AG', sourceChannel: 'agent' });
+
+    // The TEXT must name exactly ONE known subject and must NOT contain the ambiguous name —
+    // otherwise "Meier" itself resolves to two subjects, `mentioned.length` is never 1, and the
+    // derivation block never runs at all. A first version of this test said "Meier owes
+    // Nordberg AG 5000 CHF" and passed under BOTH implementations for exactly that reason: the
+    // fixture, not the assertion, was what made it green.
+    const text = 'Owes Nordberg AG 5000 CHF';
+    const res = ks.write({ text, subjectName: 'Meier', sourceChannel: 'agent' });
+
+    expect(res.subjectId, 'must not be filed against the party merely named in the text').toBeNull();
+    expect(res.subjectAmbiguous).toBe(true);
+    // And it stays recoverable under the name the caller actually used.
+    expect(ks.recall({ query: 'What does Meier owe?', subjectName: 'Meier' }).map(h => h.text)).toContain(text);
+    // The fact must not surface as one of Nordberg's own — that is the wrong-client outcome.
+    expect(ks.recall({ query: 'debts', subjectName: 'Nordberg AG' }).map(h => h.text)).not.toContain(text);
+    expect(nordberg.ambiguous).toBeFalsy();
+  });
+});

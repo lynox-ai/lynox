@@ -1263,8 +1263,15 @@ export class Engine {
         this._toolContext.knowledgeStore = knowledgeStore;
         // memory_focus's manual override resolves subjects via toolContext.subjectStore. The
         // subject_graph block wires it, but the durable substrate is independent of that flag —
-        // so wire it here too (idempotent), or a durable-only tenant's memory_focus set-path is
-        // dead ("subject lookup is not available"). Exactly the planned canary flip's config.
+        // so wire it here too, or a durable-only tenant's memory_focus set-path is dead
+        // ("subject lookup is not available").
+        //
+        // NOT idempotent any more, and the comment used to claim it was: this now runs BEFORE
+        // the subject_graph block, so `_subjectStore` is always null here and a fresh instance
+        // is always built. When both flags are on, the KnowledgeStore holds this instance and
+        // `_toolContext.subjectStore` ends up holding the subject_graph block's. Harmless only
+        // because SubjectStore is a stateless wrapper over the one engine.db handle — if it
+        // ever gains a cache, these two stop being interchangeable and this is where it breaks.
         this._toolContext.subjectStore = this._toolContext.subjectStore ?? subjectStore;
       } catch (err) {
         process.stderr.write(`[lynox] durable-memory wiring failed: ${err instanceof Error ? err.message : String(err)}\n`);

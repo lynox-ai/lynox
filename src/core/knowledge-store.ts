@@ -166,12 +166,18 @@ export class KnowledgeStore {
     // the subject from the text both improves attribution AND lets the dedup below catch the
     // restatement (a cross-turn, subject-null duplicate that neither the subject nor the run
     // clause would otherwise reach). Conservative: only when EXACTLY ONE subject is mentioned.
-    if (status === 'active' && !subjectId) {
+    // NOT when the caller NAMED a subject and that name was ambiguous. Deriving from the text
+    // there is not a better guess, it is a different one: "Meier owes Nordberg AG 5000" with
+    // `subject: 'Meier'` mentions exactly one known subject — Nordberg — so the fact would be
+    // filed against the party it is owed TO. The caller said which subject they meant; that it
+    // resolved to several is a question to ask, not a licence to pick a third.
+    //
+    // An earlier version of this fix did exactly that, and worse: it also cleared the hint, so
+    // the name was gone, `subjectAmbiguous` was suppressed by the now-set id, and the model was
+    // told "Remembered and linked to the named subject". Wrong client, no signal, unrecoverable.
+    if (status === 'active' && !subjectId && !subjectAmbiguous) {
       const mentioned = this._deriveFocusSubjects(params.text, null, null);
-      // A link made here SUPERSEDES an unresolved hint: the row must not carry both, or the
-      // same fact answers to two different subject keys and whoever resolves the queue later
-      // re-attributes a row that is already attributed.
-      if (mentioned.length === 1) { subjectId = mentioned[0]!; subjectHint = null; }
+      if (mentioned.length === 1) subjectId = mentioned[0]!;
     }
 
     // Structural write-path dedup (only for ACTIVE-landing writes). The model, despite the
@@ -493,6 +499,19 @@ export class KnowledgeStore {
    * is a display surface, unlike the review queue ({@link listPending}) which shows raw
    * text for human judgement. `limit` bounds the row count (1..500).
    */
+  /**
+   * The review queue with secrets MASKED — for surfaces that hand the text to a file rather
+   * than to a person deciding about it.
+   *
+   * {@link listPending} deliberately returns raw text, because a reviewer cannot judge what they
+   * cannot see. A GDPR export is the other case: it is a download that sits on a disk and gets
+   * forwarded, and shipping the queue raw beside a MASKED active list means the same fact is
+   * redacted when approved and in the clear while it waits.
+   */
+  listPendingMasked(limit = 100): KnowledgeEntry[] {
+    return this.listPending(limit).map(e => ({ ...e, text: this._maskText(e.text) }));
+  }
+
   listActive(limit = 200): Array<KnowledgeEntry & { subjectName: string | null }> {
     const capped = Math.max(1, Math.min(limit, 500));
     const rows = this.db.prepare(

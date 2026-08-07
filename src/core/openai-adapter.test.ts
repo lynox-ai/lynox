@@ -1709,3 +1709,29 @@ describe('OpenAIAdapter — the non-streaming call every extraction path uses', 
     }
   });
 });
+
+describe('OpenAIAdapter — a truncated stream must not assemble into a plausible message', () => {
+  it('throws instead of returning end_turn with zero usage', async () => {
+    // The upstream ends mid-answer: content arrived, no finish_reason ever did. Before this,
+    // `finalMessage()` returned partial content with `stop_reason: 'end_turn'` and usage 0/0 —
+    // indistinguishable from a short, cheap, successful call. `process-capture.ts` debits from
+    // that usage, so it recorded a real API call as costing nothing and accepted the truncated
+    // extraction as the answer.
+    const server = await createMockServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(sseChunk({ id: 't-1', choices: [{ index: 0, delta: { role: 'assistant', content: 'Half a th' }, finish_reason: null }] }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    try {
+      const adapter = new OpenAIAdapter({
+        baseURL: `http://localhost:${server.port}`, apiKey: 'test-key', modelId: 'test-model',
+      });
+      await expect(adapter.messages.create({
+        model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+      })).rejects.toThrow(/incomplete/);
+    } finally {
+      server.close();
+    }
+  });
+});

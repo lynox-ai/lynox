@@ -649,6 +649,21 @@ describe('a recurrence rule whose date can never exist', () => {
     expect(r.events).toHaveLength(expected);
   });
 
+  it('keeps the plain RDATEs of a refused event even when a PERIOD RDATE sits beside them', () => {
+    // The first version of the rescue duck-typed on `.compare` to skip PERIOD values —
+    // and `ICAL.Period` HAS `compare`, so nothing was skipped: `addDuration` threw, the outer
+    // catch abandoned the whole VEVENT, and the ordinary RDATEs went with it. Measured before
+    // this: 0 events. The rescue was worse than no rescue for this feed.
+    const r = parseIcsEvents(withRule(
+      'RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30\n'
+      + 'RDATE;VALUE=PERIOD:20260805T090000Z/20260805T103000Z\n'
+      + 'RDATE:20260812T090000Z',
+    ), YEAR);
+    // Both survive, and the PERIOD keeps its OWN end rather than inheriting the series duration.
+    expect(r.events.map(e => e.start)).toEqual(['2026-08-05T09:00:00Z', '2026-08-12T09:00:00Z']);
+    expect(r.events[0]?.end).toBe('2026-08-05T10:30:00Z');
+  });
+
   it('keeps the explicit RDATE dates of an event whose RULE is refused', () => {
     // The rule is what cannot be expanded; a fixed date needs no iterator. Dropping the whole
     // VEVENT made a malformed rule swallow real appointments as collateral — measured: this

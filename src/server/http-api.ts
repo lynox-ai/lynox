@@ -7115,23 +7115,37 @@ export class LynoxHTTPApi {
       //
       // Pending entries are included: a queued fact is stored personal data whether or not it
       // was ever approved, and Art. 15 asks what is held, not what is active.
+      const EMPTY_KNOWLEDGE = { entries: [], pending_entries: [], blocks: {}, may_be_incomplete: false };
       const knowledgeStore = engine.getKnowledgeStore();
       if (knowledgeStore) {
-        const ENTRY_CAP = 500;
-        const active = knowledgeStore.listActive(ENTRY_CAP);
-        const pending = knowledgeStore.listPending(ENTRY_CAP);
-        const blocks: Record<string, string | null> = {};
-        for (const id of ALL_MEMORY_BLOCK_IDS) blocks[id] = knowledgeStore.getBlock(id)?.content ?? null;
-        exportData['durable_knowledge'] = {
-          entries: active,
-          pending_entries: pending,
-          blocks,
-          // In the payload, not only on stderr: an incomplete Art. 15 answer that says so is a
-          // different thing from one that looks complete. The reader is the data subject.
-          truncated: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP,
-        };
+        // try/catch like its `knowledge_graph` neighbour, and for the same reason: `listActive`
+        // decrypts every row, so one unreadable row would throw out of a handler with no
+        // wrapper and take the ENTIRE export with it — threads, CRM, everything. A missing
+        // section is a gap; a 500 is no answer at all.
+        try {
+          const ENTRY_CAP = 500;
+          const active = knowledgeStore.listActive(ENTRY_CAP);
+          // Masked, matching the active half. The raw-text queue is for a human deciding about
+          // an entry; this is a file that gets stored and forwarded.
+          const pending = knowledgeStore.listPendingMasked(ENTRY_CAP);
+          const blocks: Record<string, string | null> = {};
+          for (const id of ALL_MEMORY_BLOCK_IDS) blocks[id] = knowledgeStore.getBlock(id)?.content ?? null;
+          exportData['durable_knowledge'] = {
+            entries: active,
+            pending_entries: pending,
+            blocks,
+            // In the payload, not only on stderr: an incomplete Art. 15 answer that says so is
+            // a different thing from one that looks complete. Named `may_be_incomplete` rather
+            // than `truncated` because that is the honest strength of the claim — the store
+            // caps at 500 internally, so hitting exactly 500 is indistinguishable from having
+            // exactly 500, and over-reporting is the right way to be wrong here.
+            may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP,
+          };
+        } catch {
+          exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
+        }
       } else {
-        exportData['durable_knowledge'] = { entries: [], pending_entries: [], blocks: {}, truncated: false };
+        exportData['durable_knowledge'] = EMPTY_KNOWLEDGE;
       }
 
       // CRM contacts + deals

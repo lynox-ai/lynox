@@ -73,8 +73,10 @@ export interface ParseIcsResult {
   /** True when the cap or the work budget cut the list short — the caller must say so rather
    *  than imply completeness. */
   readonly truncated: boolean;
-  /** Components that could not be read. Reported, not thrown: one broken VEVENT in a year of
-   *  calendar should not lose the other 300. */
+  /** Things this read could not take at face value: a component that could not be read, a
+   *  series whose rule was refused, or a timezone whose transition rule was disarmed (counted
+   *  per subcomponent). Reported, not thrown: one broken VEVENT in a year of calendar should
+   *  not lose the other 300. */
   readonly skipped: number;
 }
 
@@ -228,10 +230,26 @@ export function parseIcsEvents(ics: string, opts: ParseIcsOptions): ParseIcsResu
         // hide real appointments as collateral for a malformed rule, so read them directly.
         for (const prop of ev.component.getAllProperties('rdate')) {
           for (const value of prop.getValues()) {
-            const start = value as ICAL.Time;
-            if (typeof start?.compare !== 'function') continue; // PERIOD value, not a plain date
-            const end = start.clone();
-            end.addDuration(ev.duration);
+            // Reading these costs work, so they come out of the same document budget as the
+            // iterator steps — otherwise a feed of 200,000 RDATE values on one refused event
+            // sits entirely outside the only bound this file documents.
+            if (budget-- <= 0) { truncated = true; break; }
+            // An RDATE may be a PERIOD (start/end) rather than a plain date. `ICAL.Period` HAS
+            // a `compare` method, so duck-typing on that filtered nothing: `addDuration` threw,
+            // the outer catch abandoned the WHOLE VEVENT, and the event's other perfectly
+            // ordinary RDATEs went with it. Measured before this: a feed with one PERIOD and
+            // one plain RDATE returned zero events.
+            const period = value as { start?: ICAL.Time; getEnd?: () => ICAL.Time };
+            const isPeriod = typeof period?.getEnd === 'function' && period.start !== undefined;
+            const start = isPeriod ? period.start! : (value as ICAL.Time);
+            if (typeof start?.clone !== 'function') continue; // neither a date nor a period
+            let end: ICAL.Time;
+            if (isPeriod) {
+              end = period.getEnd!();
+            } else {
+              end = start.clone();
+              end.addDuration(ev.duration);
+            }
             if (overlapsWindow(start, end, from, to)) {
               events.push(toEvent(start, end, ev.summary, ev.location));
             }
@@ -314,7 +332,8 @@ function capComponents(parsed: ICAL.Component): { comp: ICAL.Component; capped: 
 
 /**
  * Remove recurrence rules that {@link hasUnexpandableRule} refuses from VTIMEZONE definitions,
- * and report how many zones were touched.
+ * and report how many SUBCOMPONENTS were disarmed — one zone with a bad STANDARD and a bad
+ * DAYLIGHT counts twice, because that is what the loop counts.
  *
  * A DST transition is a recurrence too, and it is expanded by a DIFFERENT code path — resolving
  * a `TZID` runs `Timezone._expandComponent`, not `Event.iterator()`. So the VEVENT guard does

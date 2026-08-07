@@ -6436,10 +6436,14 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       // contain it. That was survivable while the substrate was dormant; pro migration 0048
       // makes it the default for every newly provisioned tenant, so the gap became the norm.
       const listActive = vi.fn(() => [{ id: 'k1', text: 'Nordberg pays monthly', subjectName: 'Nordberg AG' }]);
-      const listPending = vi.fn(() => [{ id: 'k2', text: 'from a web page' }]);
+      const listPendingMasked = vi.fn(() => [{ id: 'k2', text: 'from a web page' }]);
+      // The RAW-text accessor must not be the one the export reaches for: the active half is
+      // masked, so shipping the queue unmasked would redact a fact once approved and hand it
+      // over in the clear while it waits.
+      const listPending = vi.fn(() => { throw new Error('export must use listPendingMasked'); });
       await swapEngine({
         getKnowledgeStore: () => ({
-          listActive, listPending,
+          listActive, listPending, listPendingMasked,
           getBlock: (id: string) => ({ content: `block:${id}`, charLimit: 100 }),
         }),
         getKnowledgeLayer: () => null,
@@ -6453,7 +6457,7 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
             entries: Array<{ text: string }>;
             pending_entries: Array<{ text: string }>;
             blocks: Record<string, string>;
-            truncated: boolean;
+            may_be_incomplete: boolean;
           };
         };
         expect(body.durable_knowledge.entries.map(e => e.text)).toEqual(['Nordberg pays monthly']);
@@ -6461,7 +6465,8 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
         // asks what is stored, not what is active.
         expect(body.durable_knowledge.pending_entries.map(e => e.text)).toEqual(['from a web page']);
         expect(body.durable_knowledge.blocks).toEqual({ profile: 'block:profile', playbook: 'block:playbook' });
-        expect(body.durable_knowledge.truncated).toBe(false);
+        expect(body.durable_knowledge.may_be_incomplete).toBe(false);
+        expect(listPendingMasked).toHaveBeenCalled();
       });
     });
 

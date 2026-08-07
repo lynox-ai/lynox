@@ -746,6 +746,7 @@ export class OpenAIAdapter {
             const content: Array<{ type: string; text?: string; name?: string; input?: unknown; id?: string }> = [];
             const rawInputs = new Map<number, string>();
             let stopReason = 'end_turn';
+            let sawTerminal = false;
             let inputTokens = 0;
             let outputTokens = 0;
             let cacheReadTokens: number | null = null;
@@ -775,6 +776,7 @@ export class OpenAIAdapter {
                   try { block.input = JSON.parse(json); } catch { block.input = {}; }
                 }
               } else if (event.type === 'message_delta') {
+                sawTerminal = true;
                 const e = event as { delta: { stop_reason?: string }; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number | null } };
                 if (e.delta.stop_reason) stopReason = e.delta.stop_reason;
                 if (e.usage?.input_tokens) inputTokens = e.usage.input_tokens;
@@ -785,6 +787,16 @@ export class OpenAIAdapter {
               }
             }
 
+            // `message_delta` is emitted only once a finish_reason arrives, and it carries the
+            // token totals. A stream that ends without one is a TRUNCATED response — but it
+            // assembles into a message that looks entirely ordinary: partial content,
+            // `stop_reason: 'end_turn'`, and usage 0/0. `process-capture.ts` then debits zero
+            // for a real call and records it as a success. Throwing is the right way to be
+            // wrong here: a caller that retries costs one request, a caller that believes a
+            // truncated answer costs a wrong result and an unbilled call.
+            if (!sawTerminal) {
+              throw new Error('upstream stream ended without a finish_reason — response is incomplete');
+            }
             return { content, stop_reason: stopReason, usage: { input_tokens: inputTokens, output_tokens: outputTokens, cache_read_input_tokens: cacheReadTokens } };
           },
         };
@@ -801,8 +813,11 @@ export class OpenAIAdapter {
        * a retry prompt for an error that recurs deterministically.
        *
        * It is the same request either way; only the delivery differs. Collecting the stream
-       * gives back exactly the fields the three callers read (`content`, `stop_reason`,
-       * `usage`), which is why this belongs in the adapter and not in three call sites.
+       * gives back the fields the three callers actually read — `content`, `stop_reason`,
+       * `usage` — which is why this belongs in the adapter and not in three call sites. It is
+       * NOT a full `Anthropic.Message`: `id`, `role`, `model` and `type` are absent, and the
+       * `as unknown as Anthropic` cast at the construction site means nothing enforces that.
+       * A caller reaching for one of those gets `undefined`, not a compile error.
        */
       create: (
         params: {
