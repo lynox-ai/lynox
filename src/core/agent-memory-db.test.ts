@@ -512,6 +512,31 @@ describe('AgentMemoryDb', () => {
       expect(result.orphanEntitiesRemoved).toBeGreaterThanOrEqual(1);
       expect(db.getEntity(e)).toBeNull();
     });
+
+    it('keeps an entity that never had a mention — a DataStore collection is not an orphan', () => {
+      // `DataStoreBridge.registerCollection` creates one entity per collection and
+      // `indexRecords` one per person/organization it extracts from a record; neither calls
+      // `createMention`, because these are derived from structured rows rather than from a
+      // memory. `entityIsDormant` already draws that line — "only an entity that HAD mentions
+      // and has lost them all is dormant" — and gc did not, so it deleted every one of them,
+      // with their has_data_in relations, on EVERY run. `runStartupReap` runs gc at every
+      // process start, so a tenant who connected a data source lost the graph derived from it
+      // at the next restart and got it back only by re-importing.
+      const collection = db.createEntity({ canonicalName: 'invoices', entityType: 'collection', scopeType: 'global', scopeId: 'g' });
+      const extracted = db.createEntity({ canonicalName: 'Nordberg AG', entityType: 'organization', scopeType: 'global', scopeId: 'g' });
+
+      // A superseded memory alongside, so gc has real work to do and cannot pass by doing
+      // nothing at all — the failure mode a "survives gc" test invites.
+      const m1 = db.createMemory({ text: 'active', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [1, 0, 0] });
+      const m2 = db.createMemory({ text: 'stale', namespace: 'knowledge', scopeType: 'global', scopeId: 'g', embedding: [0, 1, 0] });
+      db.supersedMemory(m2, m1);
+
+      const result = db.gc(false);
+      expect(result.supersededRemoved).toBe(1);
+      expect(result.orphanEntitiesRemoved).toBe(0);
+      expect(db.getEntity(collection)).not.toBeNull();
+      expect(db.getEntity(extracted)).not.toBeNull();
+    });
   });
 
   // ── Confidence Evolution ──────────────────────────────────────

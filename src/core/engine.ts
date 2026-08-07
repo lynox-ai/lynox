@@ -1235,6 +1235,48 @@ export class Engine {
       this.knowledgeLayer, this.embeddingProvider, this.runHistory,
       this.context?.id ?? '',
     );
+
+    // Durable Knowledge Substrate (DK.1): construct the KnowledgeStore + expose it to the
+    // remember/recall/memory_block_edit tools. Gated on `durable_memory_enabled` + engine.db
+    // → zero standing surface when off. Independent of `subject_graph_enabled`: the substrate
+    // anchors on subjects, but SubjectStore is a thin per-call wrapper over engine.db, so it
+    // works whether or not the legacy subject-graph mirror is on (a fresh subjects table just
+    // grows deliberate findOrCreate anchors — H1).
+    //
+    // This MUST run before `_initCoreTools` registers the tools, and it is why it lives here
+    // rather than in `_initPipelineAndBackup` where it started. With the wiring two phases
+    // LATER, the registration gate could only ever PREDICT the store from its inputs, and this
+    // try/catch is the gap in any such prediction: whatever makes it fire leaves the six durable
+    // tools registered over a null store — each answering "not enabled" — with the legacy
+    // else-branch skipped, so the tenant has no memory at all and nothing says so.
+    // Today the only genuinely reachable throw is the dynamic `import()` (a broken build); both
+    // constructors just take the open handle. The ordering is not about how likely that is — it
+    // is so the gate reads the store INSTEAD of re-deriving it, and therefore cannot drift from
+    // it again. Two earlier versions of that condition drifted, each in a different direction.
+    if (this.userConfig.durable_memory_enabled === true && this.engineDb) {
+      try {
+        const { SubjectStore } = await import('./subject-store.js');
+        const { KnowledgeStore } = await import('./knowledge-store.js');
+        const subjectStore = this._subjectStore ?? new SubjectStore(this.engineDb);
+        const knowledgeStore = new KnowledgeStore(this.engineDb, subjectStore, this.secretStore ?? null);
+        this._knowledgeStore = knowledgeStore;
+        this._toolContext.knowledgeStore = knowledgeStore;
+        // memory_focus's manual override resolves subjects via toolContext.subjectStore. The
+        // subject_graph block wires it, but the durable substrate is independent of that flag —
+        // so wire it here too, or a durable-only tenant's memory_focus set-path is dead
+        // ("subject lookup is not available").
+        //
+        // NOT idempotent any more, and the comment used to claim it was: this now runs BEFORE
+        // the subject_graph block, so `_subjectStore` is always null here and a fresh instance
+        // is always built. When both flags are on, the KnowledgeStore holds this instance and
+        // `_toolContext.subjectStore` ends up holding the subject_graph block's. Harmless only
+        // because SubjectStore is a stateless wrapper over the one engine.db handle — if it
+        // ever gains a cache, these two stop being interchangeable and this is where it breaks.
+        this._toolContext.subjectStore = this._toolContext.subjectStore ?? subjectStore;
+      } catch (err) {
+        process.stderr.write(`[lynox] durable-memory wiring failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
   }
 
   /** API profile loading, builtin tool registration, TaskManager wiring, DataStore + ArtifactStore. Extracted from `init()` so each phase reads as a discrete bring-up step instead of one 622 LoC method. */
@@ -1318,7 +1360,23 @@ export class Engine {
     // tools with `remember`/`recall`/`memory_block_edit` when `durable_memory_enabled` is on
     // (H9 — no partial swap: the six legacy tools are NOT registered when durable is on, and
     // the new three are NOT registered when it is off, so flag-OFF is byte-identical).
-    if (this.userConfig.durable_memory_enabled === true) {
+    //
+    // The gate is `_knowledgeStore` — the store OBJECT, not the flag and not `engineDb`. That is
+    // deliberate and it is the only version of this condition that cannot drift: `_initKnowledge`
+    // has already run, so the store either exists or it does not, and asking the thing itself
+    // beats re-deriving the two-or-three preconditions that produce it. Every earlier form of
+    // this line predicted the store from an input and each was wrong for a different reason —
+    // the flag alone missed an unopenable engine.db; `&& this.engineDb` missed a KnowledgeStore
+    // constructor that throws. Both landed in the SAME state: six durable tools registered over
+    // a null `toolContext.knowledgeStore`, every one answering "Durable memory is not enabled
+    // for this agent", AND the else-branch skipped, so the six legacy tools were absent too. The
+    // tenant had no memory at all and nothing said so: boot green, /api/health OK, one stderr line.
+    //
+    // That state used to need a deliberate operator flip on a watched instance, which is why it
+    // was carried as dormant. The CP default flipped ON (pro migration 0048), so it is now the
+    // path every newly provisioned tenant takes. Falling back to the legacy tools here is not a
+    // silent downgrade over the alternative — the alternative was silence with nothing working.
+    if (this.userConfig.durable_memory_enabled === true && this._knowledgeStore) {
       this.registry
         .register(rememberTool)
         .register(recallTool)
@@ -1767,29 +1825,6 @@ export class Engine {
       }
     }
 
-    // Durable Knowledge Substrate (DK.1): construct the KnowledgeStore + expose it to the
-    // remember/recall/memory_block_edit tools (registered above under the same flag). Gated on
-    // `durable_memory_enabled` + engine.db → zero standing surface when off. Independent of
-    // `subject_graph_enabled`: the substrate anchors on subjects, but SubjectStore is a thin
-    // per-call wrapper over engine.db, so it works whether or not the legacy subject-graph
-    // mirror is on (a fresh subjects table just grows deliberate findOrCreate anchors — H1).
-    if (this.userConfig.durable_memory_enabled === true && this.engineDb) {
-      try {
-        const { SubjectStore } = await import('./subject-store.js');
-        const { KnowledgeStore } = await import('./knowledge-store.js');
-        const subjectStore = this._subjectStore ?? new SubjectStore(this.engineDb);
-        const knowledgeStore = new KnowledgeStore(this.engineDb, subjectStore, this.secretStore ?? null);
-        this._knowledgeStore = knowledgeStore;
-        this._toolContext.knowledgeStore = knowledgeStore;
-        // memory_focus's manual override resolves subjects via toolContext.subjectStore. The
-        // subject_graph block wires it, but the durable substrate is independent of that flag —
-        // so wire it here too (idempotent), or a durable-only tenant's memory_focus set-path is
-        // dead ("subject lookup is not available"). Exactly the planned canary flip's config.
-        this._toolContext.subjectStore = this._toolContext.subjectStore ?? subjectStore;
-      } catch (err) {
-        process.stderr.write(`[lynox] durable-memory wiring failed: ${err instanceof Error ? err.message : String(err)}\n`);
-      }
-    }
 
     // Initialize backup manager (always available — backup is essential)
     try {

@@ -1369,13 +1369,24 @@ export class AgentMemoryDb {
       'SELECT COUNT(*) as cnt FROM memories WHERE is_active = 0',
     ).get() as { cnt: number }).cnt;
 
+    // An orphan is an entity that HAD mentions and has lost them all — the same definition
+    // {@link entityIsDormant} uses, and for the reason its docstring already gives: an entity
+    // that never had a mention is perfectly legitimate. `DataStoreBridge.registerCollection`
+    // creates one per collection and `indexRecords` one per person/organization it extracts
+    // from a record, and NEITHER calls `createMention`.
+    //
+    // Without the first EXISTS this deletes every one of them, together with their
+    // `has_data_in` relations, on every single run — and `runStartupReap` runs it at every
+    // process start. So a tenant who connected a data source lost the whole graph derived
+    // from it at the next restart, silently, and rebuilt it only by re-importing.
     const orphanRows = this.db.prepare(`
       SELECT e.id FROM entities e
-      WHERE NOT EXISTS (
-        SELECT 1 FROM mentions mn
-        JOIN memories m ON mn.memory_id = m.id
-        WHERE mn.entity_id = e.id AND m.is_active = 1
-      )
+      WHERE EXISTS (SELECT 1 FROM mentions WHERE entity_id = e.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM mentions mn
+          JOIN memories m ON mn.memory_id = m.id
+          WHERE mn.entity_id = e.id AND m.is_active = 1
+        )
     `).all() as Array<{ id: string }>;
 
     if (dryRun) {

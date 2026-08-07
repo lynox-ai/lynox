@@ -59,6 +59,7 @@ import type {
 import { WallClockBudget } from './wall-clock-budget.js';
 import { resolveClientIp } from './client-ip.js';
 import { LynoxUserConfigSchema } from '../types/schemas.js';
+import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
 
@@ -2217,6 +2218,14 @@ export class LynoxHTTPApi {
           }
           if (isImage) {
             content.push({ type: 'image', source: { type: 'base64', media_type: rawType, data: file.data } });
+            // The image itself carries no marker — `_contentHoldsUntrustedMarker` only reads
+            // `type: 'text'` blocks, by construction — so an image upload marked the turn
+            // clean no matter what the picture said. It is also the ONLY upload the web UI
+            // produces itself, which made the taint gate mostly decorative on the real path.
+            // A model reads text out of an image as readily as out of a file; a screenshot of
+            // an instruction is an instruction. Pushing a wrapped companion block re-uses the
+            // existing marker channel rather than adding a second signalling mechanism.
+            content.push({ type: 'text', text: wrapUntrustedData(`[Image: ${safeName}]`, 'file_upload') });
           } else {
             // Non-image files: decode and include as text. Cap the decoded
             // size so a 10 MB base64 can't push ~7.5 MB of arbitrary text
@@ -2296,11 +2305,17 @@ export class LynoxHTTPApi {
               errorResponse(res, 415, `"${safeName}" looks like a binary document (Excel/PowerPoint/…). Inline text extraction for this format isn't supported yet — paste the text, or upload a PDF, Word (.docx), or .txt/.md/.csv.`);
               return;
             }
-            const decoded = buf.toString('utf-8');
+            const decoded = stripUntrustedSeparators(buf.toString('utf-8'));
             const text = decoded.length > MAX_TEXT_FILE_DECODED_CHARS
               ? `${decoded.slice(0, MAX_TEXT_FILE_DECODED_CHARS)}\n[…truncated, ${String(decoded.length - MAX_TEXT_FILE_DECODED_CHARS)} chars omitted]`
               : decoded;
-            content.push({ type: 'text', text: `[File: ${safeName}]\n${text}` });
+            // Same wrap as the PDF/DOCX branch above. It was applied there only, so every
+            // OTHER text format — .txt, .md, .csv, .json, .ics, .eml — reached the model
+            // unmarked, and a turn that read one counted as clean: no untrusted marker means
+            // `_sawUntrustedData` stays false, so a `remember` in that turn writes straight to
+            // active knowledge instead of the review queue. The formats that skipped the gate
+            // were the majority, and the plainest ones.
+            content.push({ type: 'text', text: wrapUntrustedData(`[File: ${safeName}]\n${text}`, 'file_upload') });
           }
         }
         content.push({ type: 'text', text: composedTask });
@@ -4353,9 +4368,16 @@ export class LynoxHTTPApi {
         can_set_custom_endpoints: !isManagedTier,
         can_export_data: true,
         can_delete_account: true,
-        // Dark gates — flip to true when PRD-MCP / PRD-CAL backends land
+        // Dark gate — flip to true when the PRD-MCP backend lands
         has_mcp_support: false,
-        has_calendar: false,
+        // PRD-CAL: true iff `calendar_enabled` actually registered the tool. Read from the
+        // REGISTRY, not from the config field, for the same reason as the two probes below:
+        // the config flag says what was asked for, the registry says what the agent got, and
+        // they part company whenever registration grows a second precondition.
+        // Left hard-coded `false` this reported "no calendar" on an instance where the
+        // calendar WAS on — so the settings page took the operator's ICS URL, stored it in the
+        // vault, showed it as connected, and the agent then said it had no calendar access.
+        has_calendar: engine.getRegistry().find('calendar_read') !== undefined,
         // R2b subject-graph surface: true iff subject_graph_enabled wired the store
         // (fleet OFF today) → the Web UI shows/hides the Subjects tab on this probe.
         has_subject_graph: engine.getSubjectStore() !== null,
@@ -7082,6 +7104,48 @@ export class LynoxHTTPApi {
         }
       } else {
         exportData['knowledge_graph'] = { entities: [], relationships: [] };
+      }
+
+      // Durable knowledge store (entries + the always-loaded memory blocks).
+      //
+      // A whole category of personal data was absent from a dump the button calls "all your
+      // data" and the Privacy Policy names explicitly. It was survivable while the substrate
+      // was dormant; pro migration 0048 makes it the default for every newly provisioned
+      // tenant, so from this release the omission is the common case rather than the edge one.
+      //
+      // Pending entries are included: a queued fact is stored personal data whether or not it
+      // was ever approved, and Art. 15 asks what is held, not what is active.
+      const EMPTY_KNOWLEDGE = { entries: [], pending_entries: [], blocks: {}, may_be_incomplete: false };
+      const knowledgeStore = engine.getKnowledgeStore();
+      if (knowledgeStore) {
+        // try/catch like its `knowledge_graph` neighbour, and for the same reason: `listActive`
+        // decrypts every row, so one unreadable row would throw out of a handler with no
+        // wrapper and take the ENTIRE export with it — threads, CRM, everything. A missing
+        // section is a gap; a 500 is no answer at all.
+        try {
+          const ENTRY_CAP = 500;
+          const active = knowledgeStore.listActive(ENTRY_CAP);
+          // Masked, matching the active half. The raw-text queue is for a human deciding about
+          // an entry; this is a file that gets stored and forwarded.
+          const pending = knowledgeStore.listPendingMasked(ENTRY_CAP);
+          const blocks: Record<string, string | null> = {};
+          for (const id of ALL_MEMORY_BLOCK_IDS) blocks[id] = knowledgeStore.getBlock(id)?.content ?? null;
+          exportData['durable_knowledge'] = {
+            entries: active,
+            pending_entries: pending,
+            blocks,
+            // In the payload, not only on stderr: an incomplete Art. 15 answer that says so is
+            // a different thing from one that looks complete. Named `may_be_incomplete` rather
+            // than `truncated` because that is the honest strength of the claim — the store
+            // caps at 500 internally, so hitting exactly 500 is indistinguishable from having
+            // exactly 500, and over-reporting is the right way to be wrong here.
+            may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP,
+          };
+        } catch {
+          exportData['durable_knowledge'] = { ...EMPTY_KNOWLEDGE, may_be_incomplete: true };
+        }
+      } else {
+        exportData['durable_knowledge'] = EMPTY_KNOWLEDGE;
       }
 
       // CRM contacts + deals

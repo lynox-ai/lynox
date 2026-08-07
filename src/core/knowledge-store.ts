@@ -141,6 +141,7 @@ export class KnowledgeStore {
 
     let subjectId: string | null = null;
     let subjectHint: string | null = null;
+    let subjectAmbiguous = false;
     const name = params.subjectName?.trim();
     if (name) {
       if (status === 'active') {
@@ -150,7 +151,7 @@ export class KnowledgeStore {
         // text as a hint and leave the link unmade. The write is not lost and nothing is
         // bound to a guess; whoever resolves the hint later has the full name to work with.
         const r = this.subjects.findOrCreate({ kind: params.subjectKind ?? 'organization', name });
-        if (r.ambiguous) { subjectId = null; subjectHint = name; } else { subjectId = r.id; }
+        if (r.ambiguous) { subjectId = null; subjectHint = name; subjectAmbiguous = true; } else { subjectId = r.id; }
       } else {
         // Pending-entry hygiene (acceptance §2): link by hint; findOrCreate on approval only,
         // so a rejected queue entry never leaves an empty minted subject behind.
@@ -165,7 +166,16 @@ export class KnowledgeStore {
     // the subject from the text both improves attribution AND lets the dedup below catch the
     // restatement (a cross-turn, subject-null duplicate that neither the subject nor the run
     // clause would otherwise reach). Conservative: only when EXACTLY ONE subject is mentioned.
-    if (status === 'active' && !subjectId) {
+    // NOT when the caller NAMED a subject and that name was ambiguous. Deriving from the text
+    // there is not a better guess, it is a different one: "Meier owes Nordberg AG 5000" with
+    // `subject: 'Meier'` mentions exactly one known subject — Nordberg — so the fact would be
+    // filed against the party it is owed TO. The caller said which subject they meant; that it
+    // resolved to several is a question to ask, not a licence to pick a third.
+    //
+    // An earlier version of this fix did exactly that, and worse: it also cleared the hint, so
+    // the name was gone, `subjectAmbiguous` was suppressed by the now-set id, and the model was
+    // told "Remembered and linked to the named subject". Wrong client, no signal, unrecoverable.
+    if (status === 'active' && !subjectId && !subjectAmbiguous) {
       const mentioned = this._deriveFocusSubjects(params.text, null, null);
       if (mentioned.length === 1) subjectId = mentioned[0]!;
     }
@@ -220,7 +230,7 @@ export class KnowledgeStore {
       params.sourceRunId ?? null,
     );
 
-    return { id, status, tier, subjectId, pinned: pinned === 1 };
+    return { id, status, tier, subjectId, pinned: pinned === 1, ...(subjectAmbiguous && !subjectId ? { subjectAmbiguous: true } : {}) };
   }
 
   /**
@@ -289,6 +299,21 @@ export class KnowledgeStore {
     const rows = scopeIds === null
       ? this._selectActiveGlobal()
       : this._selectActiveForSubjects(scopeIds);
+
+    // An ACTIVE row can carry an unresolved `subject_hint` instead of a link: `write()` refuses
+    // to bind an ambiguous name to a guess and parks the plain name instead. Such a row matches
+    // no `subject_id`, so the scoped read above cannot reach it — and an ambiguous name resolves
+    // to an EMPTY scope, which is exactly the case where the caller asked BY THAT NAME. Two
+    // "Meier" organizations, `remember` a fact about "Meier", then ask about "Meier": the fact
+    // is stored, reported as remembered, and invisible. Union those rows in by hint.
+    //
+    // Not a cross-subject bleed, which is the thing the empty scope exists to prevent: the hint
+    // IS the queried name and the row was never attributed to anyone else, so returning it
+    // cannot surface another client's fact.
+    const seen = new Set(rows.map(r => r.id));
+    for (const row of this._selectActiveByHint(params.subjectName)) {
+      if (!seen.has(row.id)) rows.push(row);
+    }
 
     const queryTokens = new Set(KnowledgeStore.tokenize(params.query));
     const scored = rows.map(row => {
@@ -474,6 +499,19 @@ export class KnowledgeStore {
    * is a display surface, unlike the review queue ({@link listPending}) which shows raw
    * text for human judgement. `limit` bounds the row count (1..500).
    */
+  /**
+   * The review queue with secrets MASKED — for surfaces that hand the text to a file rather
+   * than to a person deciding about it.
+   *
+   * {@link listPending} deliberately returns raw text, because a reviewer cannot judge what they
+   * cannot see. A GDPR export is the other case: it is a download that sits on a disk and gets
+   * forwarded, and shipping the queue raw beside a MASKED active list means the same fact is
+   * redacted when approved and in the clear while it waits.
+   */
+  listPendingMasked(limit = 100): KnowledgeEntry[] {
+    return this.listPending(limit).map(e => ({ ...e, text: this._maskText(e.text) }));
+  }
+
   listActive(limit = 200): Array<KnowledgeEntry & { subjectName: string | null }> {
     const capped = Math.max(1, Math.min(limit, 500));
     const rows = this.db.prepare(
@@ -886,6 +924,17 @@ export class KnowledgeStore {
     ).all(...subjectIds) as KnowledgeRow[];
   }
 
+  /** ACTIVE rows parked on an unresolved `subject_hint` equal to `name`, case- and
+   *  space-insensitively. `subject_id IS NULL` is part of the predicate on purpose: an approved
+   *  pending row keeps neither, and a linked row is already reachable through its subject. */
+  private _selectActiveByHint(name: string | undefined): KnowledgeRow[] {
+    const hint = name?.trim().toLowerCase();
+    if (!hint) return [];
+    return this.db.prepare(
+      "SELECT * FROM knowledge_entries WHERE status = 'active' AND subject_id IS NULL AND lower(trim(subject_hint)) = ?",
+    ).all(hint) as KnowledgeRow[];
+  }
+
   private _selectActiveGlobal(): KnowledgeRow[] {
     // Bounded so a large corpus doesn't rank-scan unboundedly; newest-first pre-cut.
     return this.db.prepare(
@@ -995,6 +1044,11 @@ export interface KnowledgeWriteResult {
   /** True when the write was a near-duplicate of an existing active entry and was NOT inserted;
    *  `id` then points at that existing entry. */
   deduped?: boolean;
+  /** True when a `subjectName` was given but names more than one subject, so no link was made
+   *  and the row is parked on `subject_hint`. Present ONLY on that outcome, so a caller cannot
+   *  confuse it with "no subject was named at all" — the two look identical in `subjectId`, and
+   *  telling the model apart from them is the whole point (it can ask WHICH one). */
+  subjectAmbiguous?: true;
 }
 
 /** The raw v9 `knowledge_entries` row (text still enc()'d). */

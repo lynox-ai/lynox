@@ -73,8 +73,10 @@ export interface ParseIcsResult {
   /** True when the cap or the work budget cut the list short — the caller must say so rather
    *  than imply completeness. */
   readonly truncated: boolean;
-  /** Components that could not be read. Reported, not thrown: one broken VEVENT in a year of
-   *  calendar should not lose the other 300. */
+  /** Things this read could not take at face value: a component that could not be read, a
+   *  series whose rule was refused, or a timezone whose transition rule was disarmed (counted
+   *  per subcomponent). Reported, not thrown: one broken VEVENT in a year of calendar should
+   *  not lose the other 300. */
   readonly skipped: number;
 }
 
@@ -157,7 +159,9 @@ export function parseIcsEvents(ics: string, opts: ParseIcsOptions): ParseIcsResu
   const from = ICAL.Time.fromJSDate(opts.from, true);
   const to = ICAL.Time.fromJSDate(opts.to, true);
   const events: CalendarEvent[] = [];
-  let skipped = 0;
+  // Counted as skipped: a zone whose transition rule was removed no longer describes the feed
+  // exactly, and the caller is told rather than quietly handed a slightly-wrong calendar.
+  let skipped = disarmTimezoneRules(comp);
   let truncated = capped.capped;
   let budget = MAX_TOTAL_ITERATIONS;
 
@@ -194,6 +198,62 @@ export function parseIcsEvents(ics: string, opts: ParseIcsOptions): ParseIcsResu
       if (!ev.isRecurring()) {
         if (overlapsWindow(ev.startDate, ev.endDate, from, to)) {
           events.push(toEvent(ev.startDate, ev.endDate, ev.summary, ev.location));
+        }
+        continue;
+      }
+
+      // Refuse a rule whose date can never exist BEFORE handing it to the iterator. This is
+      // not defence in depth — it is the only defence, because the iteration budget below
+      // cannot reach this case.
+      //
+      // ical.js expands a contracting rule by stepping the calendar forward until the BY*
+      // parts match, and it carries a give-up counter for exactly that search — but only for
+      // MONTHLY and YEARLY (`invalid_count`, 336 and 28). For DAILY and below there is none,
+      // so a rule that can NEVER match spins inside a single `it.next()` and never returns.
+      // The budget below is decremented BETWEEN calls, so it is never read again; nothing is
+      // thrown, so the catch never fires; the loop is synchronous on the one JS thread, so no
+      // timer fires either — not the fetch timeout, not an AbortSignal, nothing. One
+      // appointment permanently takes the tenant's engine down, and a restart only survives
+      // until the next read, because the feed still carries the rule.
+      //
+      // Measured on ical.js 2.2.1: `FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30` never returns from the
+      // FIRST next() (killed at 8s), the same rule as YEARLY returns in 0ms, and as WEEKLY it
+      // throws in the constructor. That spread is the give-up counter, not luck.
+      //
+      // The check is narrow on purpose: only an IMPOSSIBLE day is refused, never a merely rare
+      // one. `BYMONTHDAY=29 BYMONTH=2` is a real leap-day series and still expands — it costs
+      // a bounded scan and returns.
+      if (hasUnexpandableRule(ev.component)) {
+        skipped++;
+        // The RULE is what cannot be expanded — the event's explicit RDATE occurrences are
+        // ordinary fixed dates and need no iterator at all. Dropping the whole VEVENT would
+        // hide real appointments as collateral for a malformed rule, so read them directly.
+        for (const prop of ev.component.getAllProperties('rdate')) {
+          for (const value of prop.getValues()) {
+            // Reading these costs work, so they come out of the same document budget as the
+            // iterator steps — otherwise a feed of 200,000 RDATE values on one refused event
+            // sits entirely outside the only bound this file documents.
+            if (budget-- <= 0) { truncated = true; break; }
+            // An RDATE may be a PERIOD (start/end) rather than a plain date. `ICAL.Period` HAS
+            // a `compare` method, so duck-typing on that filtered nothing: `addDuration` threw,
+            // the outer catch abandoned the WHOLE VEVENT, and the event's other perfectly
+            // ordinary RDATEs went with it. Measured before this: a feed with one PERIOD and
+            // one plain RDATE returned zero events.
+            const period = value as { start?: ICAL.Time; getEnd?: () => ICAL.Time };
+            const isPeriod = typeof period?.getEnd === 'function' && period.start !== undefined;
+            const start = isPeriod ? period.start! : (value as ICAL.Time);
+            if (typeof start?.clone !== 'function') continue; // neither a date nor a period
+            let end: ICAL.Time;
+            if (isPeriod) {
+              end = period.getEnd!();
+            } else {
+              end = start.clone();
+              end.addDuration(ev.duration);
+            }
+            if (overlapsWindow(start, end, from, to)) {
+              events.push(toEvent(start, end, ev.summary, ev.location));
+            }
+          }
         }
         continue;
       }
@@ -270,8 +330,110 @@ function capComponents(parsed: ICAL.Component): { comp: ICAL.Component; capped: 
   return { comp: small, capped: true };
 }
 
+/**
+ * Remove recurrence rules that {@link hasUnexpandableRule} refuses from VTIMEZONE definitions,
+ * and report how many SUBCOMPONENTS were disarmed — one zone with a bad STANDARD and a bad
+ * DAYLIGHT counts twice, because that is what the loop counts.
+ *
+ * A DST transition is a recurrence too, and it is expanded by a DIFFERENT code path — resolving
+ * a `TZID` runs `Timezone._expandComponent`, not `Event.iterator()`. So the VEVENT guard does
+ * not cover it, and a feed whose VTIMEZONE carries `FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30` blocks
+ * the thread for 73 seconds (measured) with the guard fully in place. One invitation, no VEVENT
+ * rule at all, same outcome.
+ *
+ * The rule is STRIPPED rather than the zone dropped, because the zone still carries the part
+ * that matters. `TZOFFSETTO` gives the base offset; only the seasonal transition is lost, so
+ * appointments keep their wall time and at worst shift by the DST hour on one side of a
+ * changeover. Dropping the zone would degrade every event in it to floating, and refusing the
+ * feed would hide the whole calendar — both a bigger loss than a transition rule that was
+ * malformed to begin with.
+ */
+function disarmTimezoneRules(comp: ICAL.Component): number {
+  let disarmed = 0;
+  for (const vtz of comp.getAllSubcomponents('vtimezone')) {
+    for (const sub of vtz.getAllSubcomponents()) {
+      if (!hasUnexpandableRule(sub)) continue;
+      sub.removeAllProperties('rrule');
+      disarmed++;
+    }
+  }
+  return disarmed;
+}
+
 function isCancelled(component: ICAL.Component): boolean {
   return String(component.getFirstPropertyValue('status') ?? '').toUpperCase() === 'CANCELLED';
+}
+
+/** Longest possible month, 1-indexed. February is 29 — a leap-day series is legal. */
+const DAYS_IN_MONTH = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * Frequencies for which ical.js carries NO give-up counter.
+ *
+ * It expands a contracting rule by stepping the calendar forward until the BY* parts match, and
+ * `invalid_count` bounds that search for MONTHLY (336) and YEARLY (28) only. At these
+ * frequencies the search is unbounded, which is what makes a non-matching rule a hang rather
+ * than an empty result. The same rule one step up the ladder is harmless: measured,
+ * `FREQ=MONTHLY;BYMONTHDAY=-1` returns in 2 ms and `FREQ=DAILY;BYMONTHDAY=-1` takes 73 s.
+ */
+const UNBOUNDED_FREQS = new Set(['SECONDLY', 'MINUTELY', 'HOURLY', 'DAILY', 'WEEKLY']);
+
+const nums = (v: unknown): number[] =>
+  (Array.isArray(v) ? v : v === undefined || v === null ? [] : [v])
+    .map(Number)
+    .filter((n) => Number.isFinite(n));
+
+/**
+ * True when ANY of the component's recurrence rules is one ical.js cannot expand in bounded
+ * time — so it must never reach `ev.iterator()`.
+ *
+ * Two families, and the second is why this is not named after the first any more:
+ *
+ * 1. **Arithmetically impossible** — `BYMONTH=2;BYMONTHDAY=30`. February has no 30th, so the
+ *    search runs forever. Checked at every frequency.
+ * 2. **Unboundable by construction** — a {@link UNBOUNDED_FREQS} frequency carrying a part the
+ *    expander has to SEARCH for: a negative BYMONTHDAY/BYSETPOS, a positional BYDAY (`-1FR`),
+ *    or BYWEEKNO/BYYEARDAY, which RFC 5545 does not permit below YEARLY at all. Each measured
+ *    at 60-75 s for a single event; `FREQ=DAILY;BYMONTHDAY=-1` — "the last day of every month"
+ *    — is the one an ordinary exporter can really emit, and it was NOT caught by the
+ *    impossible-date arithmetic, which reads `-1` as a legal day.
+ *
+ * Every rule is checked, not just the first: RFC 5545 allows repeated RRULE lines and ical.js
+ * merges them all (`RecurExpansion` reads `getAllProperties('rrule')`). Reading only the first
+ * left the guard trivially bypassable — a harmless `FREQ=DAILY;COUNT=3` in front of an
+ * impossible rule blocked the thread for 70 s, on a feed the single-rule form skips in 1 ms.
+ *
+ * It stays conservative about REFUSING, because a false refusal silently drops a real
+ * appointment. Verified against the legitimate shapes rather than assumed: `BYMONTHDAY=15`,
+ * `BYMONTHDAY=1,15`, `BYDAY=FR`, `BYDAY=MO;INTERVAL=2`, `BYHOUR=9`, `BYSETPOS=1;BYDAY=MO` on
+ * sub-monthly frequencies all expand in 2-3 ms and all still pass. 29 February passes too — a
+ * real leap-day series costs a bounded scan and returns.
+ */
+function hasUnexpandableRule(component: ICAL.Component): boolean {
+  return component.getAllProperties('rrule').some((prop) => {
+    const recur = prop.getFirstValue() as { freq?: string; parts?: Record<string, unknown> } | null;
+    const parts = recur?.parts;
+    if (!parts) return false;
+
+    // (1) Impossible only when EVERY pinned day fails in EVERY pinned month — one workable pair
+    // is enough for the iterator to terminate. No BYMONTH ⇒ checked against the longest month
+    // there is, so only >31 fails.
+    const days = nums(parts['BYMONTHDAY']);
+    if (days.length > 0) {
+      const months = nums(parts['BYMONTH']);
+      const lengths = months.length > 0 ? months.map((m) => DAYS_IN_MONTH[m] ?? 0) : [31];
+      if (days.every((d) => lengths.every((len) => Math.abs(d) > len || d === 0))) return true;
+    }
+
+    // (2) Only below MONTHLY, where nothing bounds the search.
+    if (!UNBOUNDED_FREQS.has(String(recur?.freq ?? '').toUpperCase())) return false;
+    if (parts['BYWEEKNO'] !== undefined || parts['BYYEARDAY'] !== undefined) return true;
+    if (nums(parts['BYMONTHDAY']).some((n) => n < 0)) return true;
+    if (nums(parts['BYSETPOS']).some((n) => n < 0)) return true;
+    // A positional BYDAY carries an ordinal prefix (`-1FR`, `2MO`); a plain `FR` does not.
+    const byDay = parts['BYDAY'];
+    return (Array.isArray(byDay) ? byDay : []).some((d) => /^[+-]?\d/.test(String(d)));
+  });
 }
 
 /**
