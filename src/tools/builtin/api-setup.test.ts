@@ -785,6 +785,56 @@ describe('api_setup tool', () => {
       expect(result).toContain('Invalid auth.basic_format');
     });
 
+    it('SECURITY: rejects an INFRASTRUCTURE secret as auth.username_key', async () => {
+      // Fails at SETUP, when the operator is present, rather than at the first request.
+      // These key names come from the profile, which a prompt-injected agent can author,
+      // and the attach-time `resolve()` has no infra filter of its own.
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'MAIL_ACCOUNT_1', password_key: 'WOO_CS' },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('infrastructure secret');
+      expect(result).not.toContain('Created API profile');
+    });
+
+    it('rejects a malformed vault key name in auth.password_key', async () => {
+      // The UPPER_SNAKE pattern existed only on the bootstrap input schema — the
+      // create/update path took anything.
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'WOO_CK', password_key: 'not a key' },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('auth.password_key');
+      expect(result).not.toContain('Created API profile');
+    });
+
+    it('accepts an ordinary pair of vault key names', async () => {
+      // The pair matters: refusing everything would also pass the two tests above.
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'WOO_CK', password_key: 'WOO_CS' },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('Created API profile');
+    });
+
     it('rejects non-boolean concurrency.parallel_ok', async () => {
       const agent = createMockAgent(new ApiStore());
       const result = await apiSetupTool.handler(

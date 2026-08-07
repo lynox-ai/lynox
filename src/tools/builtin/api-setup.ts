@@ -25,6 +25,7 @@ import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
+import { isInfraSecret } from '../../core/secret-store.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -84,6 +85,9 @@ interface ApiSetupInput {
 const REQUIRED_FIELDS: Array<keyof ApiProfile> = ['id', 'name', 'base_url', 'description'];
 const VALID_AUTH_TYPES = new Set(['none', 'basic', 'bearer', 'header', 'query', 'oauth2']);
 const VALID_BASIC_FORMATS = new Set(['user_pass_split', 'pre_encoded_b64']);
+/** Vault key names are UPPER_SNAKE_CASE. Mirrors the bootstrap input schema, applied on the
+ *  create/update path too — that schema only ever guarded the Haiku draft. */
+const VAULT_KEY_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 // `graphql` accepted 2026-05-18 as alias for `reduce` with GraphQL-shaped
 // include paths (e.g. "data.products.edges[*].node"). The reducer treats
@@ -117,6 +121,25 @@ function validateProfile(profile: ApiProfile): string | null {
     }
     if (profile.auth.basic_format !== undefined && !VALID_BASIC_FORMATS.has(profile.auth.basic_format)) {
       return `Invalid auth.basic_format "${profile.auth.basic_format}": must be user_pass_split or pre_encoded_b64`;
+    }
+    // The two keys a `user_pass_split` profile hands the engine at call time. Validated
+    // HERE as well as at the attach, so a bad profile fails loudly at setup — when the
+    // operator is present and can fix it — instead of at the first request. Both halves
+    // matter: the SHAPE (a vault key name), and the refusal to name an infrastructure
+    // secret. The latter is the one that matters: these names come from the profile, which
+    // a prompt-injected agent can author, and `resolve()` — unlike `resolveSecretRefs` —
+    // has no infra filter of its own.
+    for (const [field, key] of [
+      ['auth.username_key', profile.auth.username_key],
+      ['auth.password_key', profile.auth.password_key],
+    ] as const) {
+      if (key === undefined) continue;
+      if (!VAULT_KEY_PATTERN.test(key)) {
+        return `Invalid ${field} "${key}": must be an UPPER_SNAKE_CASE vault key name`;
+      }
+      if (isInfraSecret(key)) {
+        return `Invalid ${field} "${key}": that is an infrastructure secret managed by the platform. It is never attached to an outbound request — use a credential the user supplied for this API.`;
+      }
     }
     if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0)) {
       return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';
@@ -344,6 +367,8 @@ const DOCS_EXTRACT_SCHEMA: ExtractSchema = {
         // to dodge the create-action's "no auth specified" warning.
         type: { type: 'string', enum: ['none', 'basic', 'bearer', 'header', 'query', 'oauth2'] as const },
         basic_format: { type: 'string', enum: ['user_pass_split', 'pre_encoded_b64'] as const },
+        username_key: { type: 'string', pattern: '^[A-Z][A-Z0-9_]*$' },
+        password_key: { type: 'string', pattern: '^[A-Z][A-Z0-9_]*$' },
         header_name: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9-]*$' },
         query_param: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_-]*$' },
         instructions: { type: 'string' },
@@ -402,6 +427,8 @@ interface DocsExtracted {
   auth?: {
     type: 'none' | 'basic' | 'bearer' | 'header' | 'query' | 'oauth2';
     basic_format?: 'user_pass_split' | 'pre_encoded_b64';
+    username_key?: string;
+    password_key?: string;
     header_name?: string;
     query_param?: string;
     instructions?: string;
@@ -919,7 +946,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         },
         profile: {
           type: 'object',
-          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: none|basic|bearer|header|query|oauth2 (use "none" for public APIs like HN-Algolia or arXiv), basic_format: user_pass_split|pre_encoded_b64, header_name, query_param, vault_keys[]}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}, concurrency {parallel_ok, max_in_flight, batchable_via_endpoint}, output_volume (small|medium|large|streaming), cost {model: per_call|per_token|per_unit, rate_usd, output_ratio}, provenance {source: openapi|docs_url|manual, source_url, validated_at, schema_version: 2}.',
+          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: none|basic|bearer|header|query|oauth2 (use "none" for public APIs like HN-Algolia or arXiv), basic_format: user_pass_split|pre_encoded_b64, username_key, password_key, header_name, query_param, vault_keys[]}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}, concurrency {parallel_ok, max_in_flight, batchable_via_endpoint}, output_volume (small|medium|large|streaming), cost {model: per_call|per_token|per_unit, rate_usd, output_ratio}, provenance {source: openapi|docs_url|manual, source_url, validated_at, schema_version: 2}.',
         },
         id: {
           type: 'string',
@@ -947,7 +974,8 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
   },
   detailedGuidance:
     'bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). It returns a DRAFT profile — enrich it with extra guidelines/avoid/response_shape from reading the docs, then call `create`.\n' +
-    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled.',
+    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled.' +
+    ' basic + basic_format="user_pass_split": name the two vault keys in `username_key` and `password_key` (or list them in `vault_keys`, username first). The ENGINE combines and Base64-encodes them onto every http_request to this host — do NOT set an Authorization header and do NOT try to encode anything; you never hold the plaintext, only `secret:` references, so you cannot. Use `pre_encoded_b64` only when the credential genuinely arrives already Base64-encoded.',
   handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> => {
     const apisDir = getApisDir();
 
