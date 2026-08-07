@@ -1210,6 +1210,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.channels.search': { de: 'Websuche', en: 'Web search' },
 	'settings.channels.search_desc': { de: 'SearXNG-Endpunkt für Webrecherche', en: 'SearXNG endpoint for web research' },
 	'settings.channels.calendar': { de: 'Kalender', en: 'Calendar' },
+	'settings.channels.unavailable': { de: '· auf dieser Instanz nicht aktiv', en: '· not enabled on this instance' },
+	'settings.channels.calendar_unavailable_desc': {
+		de: 'Der Kalender ist auf dieser Instanz nicht freigeschaltet. Eine hier hinterlegte Adresse wird von nichts gelesen.',
+		en: 'The calendar is not enabled on this instance. An address stored here is not read by anything.',
+	},
 	// Each language written natively — the German is not a translation of the English.
 	'settings.google.claim_confirm': {
 		de: 'Ein Google-Konto wartet darauf, mit dieser Instanz verbunden zu werden. Verbinden?',

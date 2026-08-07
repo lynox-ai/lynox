@@ -969,9 +969,8 @@ export class Session {
       // Dollars rather than tokens: the helper is priced on the FAST model, and folding its
       // tokens into this run's counts would re-price them at the run's own `pricePerM`.
       // `?.()` on the METHOD, not just on `agent`: several tests and the pipeline path put a
-      // partial double there, and `agent?.m()` guards only a missing agent. (Nothing asserts
-      // the ACCOUNTING here — the 22 tests that caught the missing `?.` were checking other
-      // things and merely happened to run this line.)
+      // partial double there, and `agent?.m()` guards only a missing agent. (The accounting itself is
+      // pinned by `engine-session.test.ts` H2b/H2c, in both directions and on both paths.)
       const displayCostUsd = costUsd + (this.agent?.getHelperCostUsd?.() ?? 0);
 
       // What this run's sub-agents spent, if it delegated. Read from RunHistory

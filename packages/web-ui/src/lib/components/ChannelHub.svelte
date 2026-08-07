@@ -41,7 +41,12 @@
 		{ href: '/app/settings/channels/search', titleKey: 'settings.channels.search', descKey: 'settings.channels.search_desc' },
 		{ href: CALENDAR_HREF, titleKey: 'settings.channels.calendar', descKey: 'settings.channels.calendar_desc' },
 	];
-	const visibleChannels = $derived(channels.filter((c) => c.href !== CALENDAR_HREF || hasCalendar));
+	// Shown-but-marked, not hidden. Hiding it would strand anyone who already saved a feed
+	// address: the page holding it would become unreachable, and the value would sit in the
+	// vault with no way to see or remove it. Saying "not enabled on this instance" answers the
+	// original defect — the page took the address and reported success for a tool that is not
+	// registered — without taking away the only door to it.
+	const isUnavailable = (c: ChannelItem): boolean => c.href === CALENDAR_HREF && !hasCalendar;
 </script>
 
 <div class="p-6 max-w-4xl mx-auto space-y-4">
@@ -49,13 +54,20 @@
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels')}</h1>
 
 	<div class="space-y-2">
-		{#each visibleChannels as channel}
+		{#each channels as channel}
 			<a
 				href={channel.href}
 				class="block rounded-[var(--radius-md)] border border-border bg-bg-subtle p-4 hover:border-border-hover transition-colors"
 			>
-				<h2 class="font-medium">{t(channel.titleKey)}</h2>
-				<p class="text-sm text-text-muted mt-1">{t(channel.descKey)}</p>
+				<h2 class="font-medium">
+					{t(channel.titleKey)}
+					{#if isUnavailable(channel)}
+						<span class="ml-2 text-xs font-normal text-text-subtle">{t('settings.channels.unavailable')}</span>
+					{/if}
+				</h2>
+				<p class="text-sm text-text-muted mt-1">
+					{isUnavailable(channel) ? t('settings.channels.calendar_unavailable_desc') : t(channel.descKey)}
+				</p>
 			</a>
 		{/each}
 	</div>

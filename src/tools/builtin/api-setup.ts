@@ -25,7 +25,7 @@ import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
-import { isInfraSecret } from '../../core/secret-store.js';
+import { isInfraSecret, isProtectedSecretWrite } from '../../core/secret-store.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -1440,8 +1440,8 @@ Next steps before calling create:
       // Worth stating because it is what makes this a gap rather than a gap-by-omission: this
       // release ADDS entries to `INFRA_SECRET_PATTERNS` and applies them at the sibling site,
       // so the protected set grew while this door stayed open.
-      if (isInfraSecret(outputName)) {
-        return `Error: output_secret_name "${outputName}" is an infrastructure secret managed by the platform — pick a name for this API's own token.`;
+      if (isProtectedSecretWrite(outputName)) {
+        return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
       }
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
@@ -1454,8 +1454,8 @@ Next steps before calling create:
         // prefix just as easily as a chosen one. Guarding only the caller-supplied name would
         // close the door and leave the window.
         const refreshName = `${input.id.toUpperCase().replace(/-/g, '_')}_REFRESH_TOKEN`;
-        if (isInfraSecret(refreshName)) {
-          return `Token exchange OK, but the refresh token was NOT stored: "${refreshName}" is an infrastructure secret managed by the platform. Rename the api_profile so its derived key does not collide.`;
+        if (isProtectedSecretWrite(refreshName)) {
+          return `Token exchange OK, but the refresh token was NOT stored: "${refreshName}" would overwrite a credential the tenant cannot recover. Rename the api_profile so its derived key does not collide.`;
         }
         secretStore.set(refreshName, parsed.refresh_token);
       }
