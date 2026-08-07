@@ -3670,11 +3670,23 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, { entries: store.listPending(limit), pendingCount: store.pendingCount() });
     });
 
-    // Cheap badge poll (the Intelligence-Hub tab pill).
-    this.addStatic('user', 'GET /api/knowledge/queue/count', async (_req, res) => {
+    // Cheap badge poll (the Intelligence-Hub tab pill). `?thread=` narrows it to one
+    // conversation — the chat surface asks "is anything from HERE waiting", which the global
+    // number cannot answer. Count only; the wording of a queued entry stays server-side until
+    // a human has reviewed it.
+    this.addStatic('user', 'GET /api/knowledge/queue/count', async (req, res) => {
       const store = engine.getKnowledgeStore();
       if (!requireService(res, store, 'Durable memory')) return;
-      jsonResponse(res, 200, { pendingCount: store.pendingCount() });
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      // PRESENCE decides, not truthiness. `?thread=` with an empty value is still a question
+      // about one conversation, and answering it with the global number says "12 facts are
+      // waiting here" about a thread that has none. The store already answers 0 for an empty
+      // id, so asking it is both correct and the only form these two branches differ in —
+      // truthiness collapses them onto the same answer and leaves a line no test can pin.
+      const thread = url.searchParams.get('thread');
+      jsonResponse(res, 200, {
+        pendingCount: thread === null ? store.pendingCount() : store.pendingCountForThread(thread),
+      });
     });
 
     // Capture funnel rates (DEF-dk-capture-observability) — the READ half of the

@@ -3233,6 +3233,53 @@ describe('LynoxHTTPApi', () => {
       return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
     }
 
+    describe('GET /api/knowledge/queue/count', () => {
+      // The route shipped with no test at all, which is why a mutation on its one branch
+      // survived: nothing drove it. These pin the branch itself.
+      function fakeStore(): { pendingCount: ReturnType<typeof vi.fn>; pendingCountForThread: ReturnType<typeof vi.fn> } {
+        return {
+          pendingCount: vi.fn().mockReturnValue(12),
+          pendingCountForThread: vi.fn((id: string) => (id === 't-1' ? 3 : 0)),
+        };
+      }
+
+      it('answers the GLOBAL count when no thread is named', async () => {
+        const store = fakeStore();
+        await swapEngine({ getKnowledgeStore: () => store }, async () => {
+          const res = await jsonFetch('/api/knowledge/queue/count');
+          expect(await res.json()).toEqual({ pendingCount: 12 });
+          expect(store.pendingCountForThread).not.toHaveBeenCalled();
+        });
+      });
+
+      it('answers the THREAD count when one is named', async () => {
+        const store = fakeStore();
+        await swapEngine({ getKnowledgeStore: () => store }, async () => {
+          const res = await jsonFetch('/api/knowledge/queue/count?thread=t-1');
+          expect(await res.json()).toEqual({ pendingCount: 3 });
+          expect(store.pendingCountForThread).toHaveBeenCalledWith('t-1');
+        });
+      });
+
+      it('treats an EMPTY ?thread= as a thread question, not as no question', async () => {
+        // Presence, not truthiness. Under a truthiness check this returned the global 12 —
+        // telling the chat surface that a dozen facts were waiting in a conversation that had
+        // none. It is also the only input the two branches differ on, so it is what makes the
+        // branch testable at all.
+        const store = fakeStore();
+        await swapEngine({ getKnowledgeStore: () => store }, async () => {
+          const res = await jsonFetch('/api/knowledge/queue/count?thread=');
+          expect(await res.json()).toEqual({ pendingCount: 0 });
+          expect(store.pendingCount).not.toHaveBeenCalled();
+        });
+      });
+
+      it('answers 503 when durable memory is off', async () => {
+        const res = await jsonFetch('/api/knowledge/queue/count'); // default mock → null
+        expect(res.status).toBe(503);
+      });
+    });
+
     it('GET /api/subjects → 503 when the subject graph is off (store absent)', async () => {
       const res = await jsonFetch('/api/subjects'); // default mock getSubjectStore() → null
       expect(res.status).toBe(503);

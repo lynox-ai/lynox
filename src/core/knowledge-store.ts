@@ -434,6 +434,29 @@ export class KnowledgeStore {
     return row.n;
   }
 
+  /**
+   * How many queued entries came from THIS thread — count only, never their text.
+   *
+   * The chip that announced them is client-only by design (the raw wording must not be
+   * re-injected on a resume), so a reload loses it and the entries become invisible in the
+   * place they were made. The global queue badge does not fill that gap: it answers "there is
+   * something, somewhere", not "there is something HERE", and those are different questions
+   * for someone who has just come back to one conversation.
+   *
+   * Thread is the granularity the data actually supports. `source_thread_id` is on the row;
+   * the MESSAGE is not — `thread_messages` carries no run id, so re-attaching a chip to its
+   * message would mean guessing from timestamps. A count that is sometimes about the wrong
+   * turn is worse than a count about the thread.
+   */
+  pendingCountForThread(threadId: string): number {
+    const id = threadId.trim();
+    if (!id) return 0;
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM knowledge_entries WHERE status = 'pending_review' AND source_thread_id = ?",
+    ).get(id) as { n: number };
+    return row.n;
+  }
+
   /** The review queue (DK.2 UI): queued entries oldest-first, decrypted. */
   listPending(limit = 100): KnowledgeEntry[] {
     const capped = Math.max(1, Math.min(limit, 500));
