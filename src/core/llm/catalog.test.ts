@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
 import { MODEL_CAPABILITIES, MODEL_MAP, VERTEX_MODEL_MAP, MISTRAL_MODEL_MAP, resolveBalancedModel } from '../../types/models.js';
-import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, vaultSlotForEndpoint, endpointNeedsCredential, providerBrandLabel, mainChatTierLabels, mainChatTierLabelsFromTierSet } from './catalog.js';
+import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, vaultSlotForEndpoint, endpointNeedsCredential, providerIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from './catalog.js';
 import type { TierSet } from '../../types/config.js';
 import type { CatalogProviderEntry } from './catalog.js';
 import { isAllowlistedEndpoint } from './endpoint-allowlist.js';
@@ -630,46 +630,79 @@ describe('resolveCatalogKey', () => {
   });
 });
 
-describe('providerBrandLabel', () => {
-  // The status bar prints one name per provider an instance actually routes to.
-  // Before this existed the name came from two hard-coded slots in http-api, so
-  // a hybrid tenant on Mistral + Fireworks + Anthropic saw exactly one of them.
+describe('providerIdentity', () => {
+  // The status bar prints one name per provider an instance actually routes to,
+  // and must count each provider once. Before this existed the name came from two
+  // hard-coded slots in http-api, so a hybrid tenant on Mistral + Fireworks +
+  // Anthropic saw exactly one of them.
+  const label = (p: string, url?: string): string => providerIdentity(p, url).label;
+  const key = (p: string, url?: string): string => providerIdentity(p, url).key;
+
   it('names a pinned host by its catalog brand', () => {
-    expect(providerBrandLabel('openai', 'https://api.mistral.ai/v1')).toBe('Mistral');
-    expect(providerBrandLabel('openai', 'https://api.fireworks.ai/inference/v1')).toBe('Fireworks AI');
-    expect(providerBrandLabel('openai', 'https://api.groq.com/openai/v1')).toBe('Groq');
-    expect(providerBrandLabel('openai', 'http://localhost:11434/v1')).toBe('Ollama (local)');
+    expect(label('openai', 'https://api.mistral.ai/v1')).toBe('Mistral');
+    expect(label('openai', 'https://api.fireworks.ai/inference/v1')).toBe('Fireworks AI');
+    expect(label('openai', 'https://api.groq.com/openai/v1')).toBe('Groq');
+    expect(label('openai', 'http://localhost:11434/v1')).toBe('Ollama (local)');
   });
 
   it('names the native providers without needing an endpoint', () => {
-    expect(providerBrandLabel('anthropic')).toBe('Anthropic');
-    expect(providerBrandLabel('vertex')).toBe('Google Vertex AI');
-    // The registry's first-class key — it carries the host in its identity.
-    expect(providerBrandLabel('mistral')).toBe('Mistral');
+    expect(label('anthropic')).toBe('Anthropic');
+    expect(label('vertex')).toBe('Google Vertex AI');
+    expect(label('mistral')).toBe('Mistral');
+  });
+
+  it('gives the first-class mistral key the SAME identity as the pinned host', () => {
+    // The registry key and `openai` + api.mistral.ai are one provider. Two keys
+    // here would print "Mistral · Mistral" in the footer.
+    expect(key('mistral')).toBe(key('openai', 'https://api.mistral.ai/v1'));
   });
 
   it('refuses to lend a brand to a host that only LOOKS like one', () => {
-    // The security direction, and the reason the brand may come only from an
-    // entry with a `base_url_default`: the generic openai-compat tile matches
-    // ANY host, so a fall-through must never be allowed to print "Mistral".
-    expect(providerBrandLabel('openai', 'https://api.mistral.ai.attacker.com/v1')).toBe('OpenAI-compatible');
-    expect(providerBrandLabel('openai', 'https://attacker.example.com/?proxy=mistral.ai')).toBe('OpenAI-compatible');
-    expect(providerBrandLabel('openai', 'not-a-url')).toBe('OpenAI-compatible');
+    // The security direction, and the reason a brand may come only from an entry
+    // with a `base_url_default`: the generic openai-compat tile matches ANY host,
+    // so a fall-through must never be allowed to print "Mistral".
+    expect(label('openai', 'https://api.mistral.ai.attacker.com/v1')).toBe('OpenAI-compatible');
+    expect(label('openai', 'https://attacker.example.com/?proxy=mistral.ai')).toBe('OpenAI-compatible');
+    expect(label('openai', 'not-a-url')).toBe('OpenAI-compatible');
+  });
+
+  it('refuses a brand claimed by the PROVIDER KEY itself, in any casing', () => {
+    // `tier_set` can arrive from LYNOX_TIER_SET_JSON. An exact-case ladder let a
+    // single capital letter skip every branch above and fall through to the
+    // raw-key path, which printed the claimed brand verbatim — one keystroke
+    // defeating the endpoint pinning this function exists for.
+    expect(label('Mistral', 'https://evil.example/v1')).toBe('Mistral');
+    expect(key('Mistral', 'https://evil.example/v1')).toBe(key('mistral'));
+    expect(label('MiStRaL')).toBe('Mistral');
+    // A key that merely IMPERSONATES a brand — not a registered provider at all —
+    // must not print it.
+    expect(label('Fireworks AI')).toBe('Unknown provider');
+    expect(label('anthropic ')).toBe('Anthropic');
+    expect(label('Google Vertex AI')).toBe('Unknown provider');
   });
 
   it('falls back to the wire label when no endpoint is configured', () => {
-    expect(providerBrandLabel('openai')).toBe('OpenAI-compatible');
-    expect(providerBrandLabel('custom')).toBe('Custom');
-    expect(providerBrandLabel('custom', 'https://proxy.internal/v1')).toBe('Custom');
+    expect(label('openai')).toBe('OpenAI-compatible');
+    expect(label('custom')).toBe('Custom');
+    expect(label('custom', 'https://proxy.internal/v1')).toBe('Custom');
+  });
+
+  it('keeps two unpinned endpoints apart even though they share a label', () => {
+    // Both print 'OpenAI-compatible'. Keying the dedup on that string would drop
+    // the second proxy — and with it any outage it is reporting.
+    expect(label('openai', 'https://proxy-a.internal/v1')).toBe(label('openai', 'https://proxy-b.internal/v1'));
+    expect(key('openai', 'https://proxy-a.internal/v1')).not.toBe(key('openai', 'https://proxy-b.internal/v1'));
+    // Same host, different path/scheme spelling → still one provider.
+    expect(key('openai', 'https://proxy-a.internal/v1')).toBe(key('openai', 'https://proxy-a.internal/openai/v1'));
   });
 
   it('bounds and sanitises an unregistered provider key', () => {
-    // `ProviderKey` is open and LYNOX_TIER_SET_JSON is an untrusted boundary,
-    // so whatever it carries reaches the status bar. Print it, but bounded and
+    // `ProviderKey` is open and LYNOX_TIER_SET_JSON is an untrusted boundary, so
+    // whatever it carries reaches the status bar. Print it, but bounded and
     // without control characters or markup.
-    expect(providerBrandLabel('gemini')).toBe('gemini');
-    expect(providerBrandLabel('<img src=x onerror=alert(1)>')).toBe('img srcx onerroralert1');
-    expect(providerBrandLabel('x'.repeat(200))).toHaveLength(24);
-    expect(providerBrandLabel('\u0000\u0007')).toBe('Unknown provider');
+    expect(label('gemini')).toBe('gemini');
+    expect(label('<img src=x onerror=alert(1)>')).toBe('img srcx onerroralert1');
+    expect(label('x'.repeat(200))).toBe('x'.repeat(24));
+    expect(label('\u0000\u0007')).toBe('Unknown provider');
   });
 });

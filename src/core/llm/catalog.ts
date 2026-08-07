@@ -653,9 +653,43 @@ export function pinnedVaultSlotForEndpoint(
   return entry.vault_slot;
 }
 
+/** Who a (provider, endpoint) pair IS, and what to call it. */
+export interface ProviderIdentity {
+  /**
+   * Stable dedup key. Distinct from the label on purpose: two different
+   * unpinned proxies both DISPLAY as "OpenAI-compatible", so comparing display
+   * strings would silently drop one of two genuinely different providers.
+   */
+  key: string;
+  /** Human brand name — what the status bar prints. */
+  label: string;
+}
+
 /**
- * The BRAND name to print for a (provider, endpoint) pair — what the status bar
- * names when it lists the providers an instance actually talks to.
+ * The first-class registry key `'mistral'` (provider-registry.ts) IS the pinned
+ * Mistral endpoint — it carries the host in its identity and arrives without a
+ * base URL. It must therefore share a key with `openai` + `api.mistral.ai`, or
+ * one provider would be listed twice under two spellings.
+ */
+const NATIVE_IDENTITIES: Readonly<Record<string, ProviderIdentity>> = Object.freeze({
+  anthropic: { key: 'preset:anthropic', label: 'Anthropic' },
+  vertex: { key: 'preset:vertex', label: 'Google Vertex AI' },
+  mistral: { key: 'preset:mistral', label: 'Mistral' },
+});
+
+/** Host of a base URL, or a bounded form of the raw string when it will not parse. */
+function endpointHost(apiBaseURL: string | undefined): string {
+  if (!apiBaseURL) return '';
+  try {
+    return new URL(apiBaseURL).host.toLowerCase();
+  } catch {
+    return apiBaseURL.trim().toLowerCase().slice(0, 64);
+  }
+}
+
+/**
+ * Identify a (provider, endpoint) pair — for the status bar, which must both
+ * NAME every provider an instance talks to and count each of them once.
  *
  * A brand may only come from a catalog entry lynox PINS by URL
  * (`base_url_default`), the same discipline as `pinnedVaultSlotForEndpoint`: the
@@ -663,36 +697,54 @@ export function pinnedVaultSlotForEndpoint(
  * would label `api.mistral.ai.attacker.com` as "Mistral". The hostname matching
  * itself is `resolveCatalogKey`'s, which already refuses that suffix trick.
  *
- * The fall-through is the wire-format label the status bar used before hybrid
- * routing existed ('OpenAI-compatible' / 'Custom'). That is honest rather than
- * vague: it states what we know (the wire) and claims no brand we cannot verify.
+ * The provider key is compared CASE-FOLDED. It reaches here from
+ * `LYNOX_TIER_SET_JSON`, an untrusted boundary, and an exact-case ladder let a
+ * single capital letter (`'Mistral'`) skip every branch and fall through to the
+ * raw-key path — which printed the brand "Mistral" for an arbitrary endpoint,
+ * defeating the pinning above. For the same reason the raw-key fall-through
+ * refuses any name that collides with a brand we DO verify.
+ *
+ * The wire labels ('OpenAI-compatible' / 'Custom') are what the status bar
+ * printed before hybrid routing existed. They are honest rather than vague:
+ * they state what we know — the wire — and claim no brand we cannot verify.
  */
-export function providerBrandLabel(
+export function providerIdentity(
   provider: ProviderKey,
   apiBaseURL?: string | undefined,
   catalog: LLMCatalog = LLM_CATALOG,
-): string {
-  if (provider === 'anthropic') return 'Anthropic';
-  if (provider === 'vertex') return 'Google Vertex AI';
-  // The registry's first-class 'mistral' key (provider-registry.ts) carries the
-  // host in its identity, so it never arrives with a base URL to match on.
-  if (provider === 'mistral') return 'Mistral';
+): ProviderIdentity {
+  const folded = provider.trim().toLowerCase();
+  const native = NATIVE_IDENTITIES[folded];
+  if (native) return native;
+
   // Re-stated as literals rather than narrowed in place: `ProviderKey` is an
   // OPEN union (`string & {}`), so an `=== 'openai'` comparison does not narrow.
   const wire: LLMProvider | undefined =
-    provider === 'openai' ? 'openai' : provider === 'custom' ? 'custom' : undefined;
+    folded === 'openai' ? 'openai' : folded === 'custom' ? 'custom' : undefined;
   if (wire) {
-    if (apiBaseURL) {
-      const key = resolveCatalogKey(wire, apiBaseURL, catalog);
-      const entry = catalog.find((e) => catalogEntryKey(e) === key);
-      if (entry?.base_url_default) return entry.display_name;
-    }
-    return wire === 'openai' ? 'OpenAI-compatible' : 'Custom';
+    const catKey = resolveCatalogKey(wire, apiBaseURL, catalog);
+    const entry = catalog.find((e) => catalogEntryKey(e) === catKey);
+    if (entry?.base_url_default) return { key: `preset:${catKey}`, label: entry.display_name };
+    // Generic tile. The label cannot tell two proxies apart, so the KEY carries
+    // the host — otherwise a second, differently-configured endpoint would be
+    // deduped away and its outage would never reach the status bar.
+    return {
+      key: `endpoint:${wire}:${endpointHost(apiBaseURL)}`,
+      label: wire === 'openai' ? 'OpenAI-compatible' : 'Custom',
+    };
   }
-  // An unregistered provider key. `ProviderKey` is open and `LYNOX_TIER_SET_JSON`
-  // is an untrusted boundary, so print what is configured — bounded and stripped
-  // of anything but plain label characters, because this string reaches the UI.
-  return provider.replace(/[^\w .+-]/g, '').slice(0, 24) || 'Unknown provider';
+
+  // An unregistered provider key. Print what is configured — bounded and
+  // stripped to plain label characters, because this string reaches the UI —
+  // unless it impersonates a brand this function otherwise only grants to a
+  // verified endpoint.
+  const cleaned = provider.replace(/[^\w .+-]/g, '').trim().slice(0, 24);
+  const impersonates = catalog.some((e) => e.display_name.toLowerCase() === cleaned.toLowerCase())
+    || Object.values(NATIVE_IDENTITIES).some((n) => n.label.toLowerCase() === cleaned.toLowerCase());
+  return {
+    key: `provider:${folded}`,
+    label: cleaned && !impersonates ? cleaned : 'Unknown provider',
+  };
 }
 
 /**
