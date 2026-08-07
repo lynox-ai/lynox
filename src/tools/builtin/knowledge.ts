@@ -214,7 +214,11 @@ export const recallTool: ToolEntry<RecallInput> = {
     // person to judge it. Write-time asks scale with how much gets READ; this scales with
     // usefulness, and it is the only emptying path for captures made on background runs,
     // which have no chip by construction.
-    const waiting = input.subject ? ks.pendingCountForSubjectHint(input.subject) : 0;
+    // No caller-side guard on an absent subject: `pendingCountForSubjectHint` returns 0 for an
+    // empty needle itself, so a second check here is unreachable by construction — a line no
+    // test can distinguish from its own removal. The store's guard is pinned by a test of its
+    // own, so this delegation cannot break silently.
+    const waiting = ks.pendingCountForSubjectHint(input.subject ?? '');
     const waitingLine = waiting > 0
       ? `\n\n(${String(waiting)} further ${waiting === 1 ? 'fact' : 'facts'} about this subject ${waiting === 1 ? 'is' : 'are'} waiting for the user's approval and cannot be shown until then. If it matters here, tell them so they can review it — do not guess at the content.)`
       : '';
