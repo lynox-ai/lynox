@@ -947,6 +947,21 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.knowledge.thread_pending_open': { de: 'ansehen', en: 'review' },
 	'chat.knowledge.review_tag': { de: 'prüfen', en: 'review' },
 	'chat.knowledge.review_hint': { de: 'aus externem Inhalt', en: 'from external content' },
+	// WHY a write is waiting. "from external content" is true of every queued write and so tells
+	// the person nothing; these two say WHERE it came from.
+	//
+	// Two, not three, although the engine distinguishes three causes. `marker` and
+	// `external-tool` differ in how the engine noticed, not in anything the person can act on —
+	// showing both would be a distinction without a difference. The split that DOES matter is
+	// this step vs an earlier one, because in the second case nothing external happened here at
+	// all and the chip would otherwise look like a malfunction.
+	//
+	// Worded as a POSSIBILITY, not an event. `EXTERNAL_CONTENT_TOOLS` is a capability list that
+	// includes stored read-back (`task_list`, `data_store_query`, `contacts_search`): asking
+	// "which tasks are open?" arms it, and claiming "something external was read" there would be
+	// plainly untrue to someone who just asked about their own to-dos.
+	'chat.knowledge.cause.this_step': { de: 'kann Inhalte von ausserhalb enthalten', en: 'may include content from outside' },
+	'chat.knowledge.cause.earlier': { de: 'ein früherer Schritt in diesem Chat hatte Inhalte von ausserhalb', en: 'an earlier step in this chat had content from outside' },
 	'chat.knowledge.review_keep': { de: 'behalten', en: 'keep' },
 	'chat.knowledge.review_edit': { de: 'bearbeiten', en: 'edit' },
 	'chat.knowledge.review_discard': { de: 'verwerfen', en: 'discard' },

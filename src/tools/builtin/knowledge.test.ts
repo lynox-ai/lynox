@@ -96,6 +96,43 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     expect(kw!['status']).toBe('pending_review');
   });
 
+  it('the queued event NAMES why it was queued, per signal', async () => {
+    // "from external content" is true of every queued write, so as the only line it gives
+    // the person nothing to judge — and a confirmation nobody can judge is a reflex. Each
+    // signal must arrive distinctly, especially `conversation`: nothing external happened
+    // on THIS turn, and without saying so the chip reads as a malfunction.
+    // The sticky latch is CO-SET whenever the marker or an external-content tool fires on a
+    // real Agent (`agent.ts` arms both at each site), so a fixture that sets only one of the
+    // first two is a state production cannot reach — and it would leave the ORDERING, which is
+    // what actually decides the wording, untested. Each case below is a reachable state.
+    const cases = [
+      [{ sawUntrustedData: true, conversationSawUntrusted: true }, 'marker'],
+      [{ sawExternalContentTool: true, conversationSawUntrusted: true }, 'external-tool'],
+      [{ conversationSawUntrusted: true }, 'conversation'],
+    ] as const;
+    for (const [signals, expected] of cases) {
+      const { agent } = make(signals as Record<string, boolean>);
+      const events: Array<Record<string, unknown>> = [];
+      (agent.toolContext as { streamHandler: unknown }).streamHandler = (e: unknown) => { events.push(e as Record<string, unknown>); };
+      await rememberTool.handler({ text: `A fact about ${expected} sourcing`, subject: 'ACME' }, agent);
+      const kw = events.find((e) => e['type'] === 'knowledge_write');
+      expect(kw!['status'], expected).toBe('pending_review');
+      expect(kw!['cause'], expected).toBe(expected);
+    }
+  });
+
+  it('a TRUSTED write carries no cause — there is nothing to explain', async () => {
+    // The pair matters: always attaching would also pass the test above, and would put a
+    // reason line on a chip that was never queued.
+    const { agent } = make();
+    const events: Array<Record<string, unknown>> = [];
+    (agent.toolContext as { streamHandler: unknown }).streamHandler = (e: unknown) => { events.push(e as Record<string, unknown>); };
+    await rememberTool.handler({ text: 'ACME pays annually in advance', subject: 'ACME' }, agent);
+    const kw = events.find((e) => e['type'] === 'knowledge_write');
+    expect(kw!['status']).toBe('active');
+    expect(kw!['cause']).toBeUndefined();
+  });
+
   describe('recall names what is WAITING, by count only', () => {
     it('THE POINT: a queued fact about this subject is announced without its wording', async () => {
       // A queued entry was written on a turn that handled content the operator did not author.

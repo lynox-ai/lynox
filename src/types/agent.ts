@@ -228,8 +228,15 @@ export interface IAgent {
    *  child inherits the flag (else a sub-agent on an ON tenant would still run legacy extraction). */
   readonly durableMemoryEnabled?: boolean | undefined;
   /** Wave 1.2: mark this run as having seen untrusted content — used by spawn to
-   *  propagate a shared-Memory child's taint onto the parent. */
+   *  propagate a shared-Memory child's taint onto the parent. Arms the run-scoped
+   *  marker AND the sticky conversation latch; use {@link restoreConversationTaint}
+   *  when only the latter is true. */
   noteUntrustedData?(): void;
+  /** Arm ONLY the sticky conversation latch. The gate is the same either way (both OR into
+   *  `deriveTurnUntrusted`) — the difference is what gets REPORTED: the review chip names the
+   *  cause, so arming the marker for a taint that was merely inherited tells the operator this
+   *  turn read something external when nothing did. */
+  restoreConversationTaint?(): void;
   readonly spawnDepth?: number | undefined;
   readonly secretStore?: SecretStoreLike | undefined;
   readonly userId?: string | undefined;

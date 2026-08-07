@@ -156,6 +156,9 @@ export const rememberTool: ToolEntry<RememberInput> = {
         status: result.status,
         text,
         agent: agent.name,
+        // Only for a queued write: on a trusted one there is no cause to name, and sending
+        // 'none' would invite the UI to render an empty reason.
+        ...(result.status === 'pending_review' ? { cause: describeTurnUntrusted(agent) } : {}),
       });
     }
 

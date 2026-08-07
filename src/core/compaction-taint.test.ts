@@ -80,7 +80,12 @@ function endTurnResponse(text: string) {
   };
 }
 
-describe('a compaction keeps the durable-write gate armed', () => {
+// These build a REAL engine (`engine.init()`), which is the point — the taint has to survive an
+// actual compaction, not a stubbed one — and it is also why the default 5s timeout is too tight.
+// Measured: ~1.7s on a dev machine, 10.0s on a CI runner, i.e. straight into a 10s ceiling. A
+// test that fails on the runner's mood blocks unrelated PRs and teaches people to re-run rather
+// than read, so the budget is set from the slow environment with room, not from the fast one.
+describe('a compaction keeps the durable-write gate armed', { timeout: 45_000 }, () => {
   let dataDir = '';
   let prevDataDir: string | undefined;
 

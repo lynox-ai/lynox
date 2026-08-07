@@ -69,6 +69,11 @@ export interface KnowledgeWriteChip {
 	status: 'active' | 'pending_review';
 	/** Raw wording (for the untrusted review chip). Client-only; never re-enters model context. */
 	text: string;
+	/** WHY this was queued, in the engine's vocabulary. Only set for `pending_review`.
+	 *  `marker` — a tool result this turn carried wrapped external content.
+	 *  `external-tool` — an external-content tool ran this turn.
+	 *  `conversation` — the taint is sticky from an EARLIER turn of this thread. */
+	cause?: 'marker' | 'external-tool' | 'conversation' | 'none' | undefined;
 	/** UI-local once the user resolves the chip, so it renders as done and the buttons retire. */
 	resolved?: 'undone' | 'kept' | 'discarded' | undefined;
 }
@@ -1779,6 +1784,9 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					kind: typeof data['kind'] === 'string' ? data['kind'] : undefined,
 					status,
 					text: String(data['text'] ?? ''),
+					cause: typeof data['cause'] === 'string'
+						? (data['cause'] as KnowledgeWriteChip['cause'])
+						: undefined,
 				});
 			}
 			break;
