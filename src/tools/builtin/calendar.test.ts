@@ -411,6 +411,30 @@ END:VEVENT`,
     expect(out).toContain('Krummer Eintrag');
   });
 
+  it('survives a timed entry whose end carries only a date', async () => {
+    // The mirror of the all-day case, arriving the same way: `DTSTART` with a time and a
+    // DATE-valued `DTEND`. Slicing a clock out of a bare date yields "", which printed
+    // "12:00–2026-08-13 " or, when the dates matched, a dangling "12:00–".
+    vi.mocked(fetchIcsFeed).mockResolvedValue({
+      ics: TZ_ICS(
+        `BEGIN:VEVENT
+UID:spiegel@t
+DTSTART:20260812T120000Z
+DTEND;VALUE=DATE:20260813
+SUMMARY:Spiegelfall
+END:VEVENT`,
+      ),
+      truncated: false,
+    });
+    const out = await calendarReadTool.handler(
+      { from: '2026-08-01', to: '2026-08-31' },
+      agentWith({ [`${CALENDAR_FEED_PREFIX}MAIN`]: 'https://calendar.example/x.ics' }),
+    );
+    expect(out).toContain('- 2026-08-12 12:00 UTC Spiegelfall');
+    expect(out).not.toMatch(/12:00–\s/);
+    expect(out).not.toContain('12:00–2026-08-13');
+  });
+
   it('names the last day it actually covered, not the exclusive end', async () => {
     // The window is half-open. Naming its exclusive end tells the model the 1st is covered when
     // a meeting on the 1st was filtered out — an overstatement in the "you are free" direction,

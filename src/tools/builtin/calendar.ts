@@ -66,6 +66,12 @@ function parseBound(value: string | undefined, fallback: Date, endOfDay: boolean
   return dateOnly && endOfDay ? new Date(d.getTime() + 86_400_000) : d;
 }
 
+/** `HH:MM` out of an ISO wall time, or null when the value carries no clock at all. */
+function clockOf(iso: string): string | null {
+  const m = /^\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})/.exec(iso);
+  return m?.[1] ?? null;
+}
+
 /**
  * Render one appointment the way the operator wrote it.
  *
@@ -92,10 +98,17 @@ function renderWhen(e: CalendarEvent): string {
   }
   const zone = e.timezone ? ` ${e.timezone}` : '';
   const startDay = e.start.slice(0, 10);
+  const startClock = clockOf(e.start);
+  const endClock = clockOf(e.end);
+  // The mirror of the all-day case above, and it arrives the same way: `DTSTART` with a time
+  // and a DATE-valued `DTEND` is the same §3.8.2.2 violation, ical.js takes it, and slicing a
+  // clock out of a bare date yields "" — printing "12:00–2026-08-13 " or, on one day, the
+  // dangling "12:00–". No end is better than a malformed one.
+  if (startClock === null || endClock === null) return `${startDay} ${startClock ?? ''}${zone}`.trimEnd();
   const endDay = e.end.slice(0, 10);
   // Naming the end date when it differs stops "22:00–02:00" from reading as a backwards range.
-  const end = endDay === startDay ? e.end.slice(11, 16) : `${endDay} ${e.end.slice(11, 16)}`;
-  return `${startDay} ${e.start.slice(11, 16)}–${end}${zone}`;
+  const end = endDay === startDay ? endClock : `${endDay} ${endClock}`;
+  return `${startDay} ${startClock}–${end}${zone}`;
 }
 
 export const calendarReadTool: ToolEntry<CalendarReadInput> = {
