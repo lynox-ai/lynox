@@ -98,14 +98,27 @@ function renderWhen(e: CalendarEvent): string {
   }
   const zone = e.timezone ? ` ${e.timezone}` : '';
   const startDay = e.start.slice(0, 10);
-  const startClock = clockOf(e.start);
+  const startClock = clockOf(e.start) ?? '';
   const endClock = clockOf(e.end);
-  // The mirror of the all-day case above, and it arrives the same way: `DTSTART` with a time
-  // and a DATE-valued `DTEND` is the same §3.8.2.2 violation, ical.js takes it, and slicing a
-  // clock out of a bare date yields "" — printing "12:00–2026-08-13 " or, on one day, the
-  // dangling "12:00–". No end is better than a malformed one.
-  if (startClock === null || endClock === null) return `${startDay} ${startClock ?? ''}${zone}`.trimEnd();
   const endDay = e.end.slice(0, 10);
+  if (endClock === null) {
+    // The mirror of the all-day case above, arriving the same way: `DTSTART` with a time and a
+    // DATE-valued `DTEND` is the same §3.8.2.2 violation and ical.js takes it. Slicing a clock
+    // out of a bare date yields "", so an earlier version printed "12:00–2026-08-13 ".
+    //
+    // Dropping the end entirely was the wrong repair, and worse than the malformed string it
+    // replaced: an eight-day block rendered as "12:00" reads as a lunchtime appointment, and
+    // the operator concludes they are free all week. The end DATE is perfectly legible — only
+    // its clock is missing — so it is reported, exclusive like the all-day branch.
+    const parsedEnd = new Date(`${endDay}T00:00:00Z`);
+    if (Number.isNaN(parsedEnd.getTime())) return `${startDay} ${startClock}${zone}`.replace(/\s+/gu, ' ').trimEnd();
+    parsedEnd.setUTCDate(parsedEnd.getUTCDate() - 1);
+    const last = parsedEnd.toISOString().slice(0, 10);
+    // Compare the LAST COVERED day, not the raw end: an end on the following day covers only
+    // the start day, and "2026-08-12 – 2026-08-12" is noise dressed as information.
+    if (last <= startDay) return `${startDay} ${startClock}${zone}`.replace(/\s+/gu, ' ').trimEnd();
+    return `${startDay} ${startClock} – ${last}${zone}`.replace(/\s+/gu, ' ');
+  }
   // Naming the end date when it differs stops "22:00–02:00" from reading as a backwards range.
   const end = endDay === startDay ? endClock : `${endDay} ${endClock}`;
   return `${startDay} ${startClock}–${end}${zone}`;

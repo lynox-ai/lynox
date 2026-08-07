@@ -467,6 +467,36 @@ END:VEVENT`,
     expect(r.truncated).toBe(true);
   });
 
+  it('trips the ceiling on OTHER components too, not just on events', () => {
+    // The cost is `new ICAL.Event()` scanning the whole enclosing calendar, so it is driven by
+    // the total component count — while a VEVENT-only trigger sees 5,000 and waves it through.
+    // Measured on the earlier version: 5,000 events beside 138,000 VTODOs took 14.5 s, and the
+    // same feed with one event MORE took 1.1 s. Staying under the ceiling was 13× dearer than
+    // crossing it, which is precisely backwards.
+    const events = Array.from({ length: 4000 }, (_, i) =>
+      `BEGIN:VEVENT\nUID:e${String(i)}@t\nDTSTART:20260812T120000Z\nDTEND:20260812T235900Z\nSUMMARY:E${String(i)}\nEND:VEVENT`);
+    const todos = Array.from({ length: 4000 }, (_, i) =>
+      `BEGIN:VTODO\nUID:t${String(i)}@t\nDTSTAMP:20260812T120000Z\nSUMMARY:T${String(i)}\nEND:VTODO`);
+    const r = parseIcsEvents(cal(...events, ...todos), { ...AUG, maxEvents: 99_999 });
+    expect(r.truncated).toBe(true);
+  });
+
+  it('does not carry an unbounded number of zone definitions', () => {
+    // Carrying every VTIMEZONE reintroduced the same cost by another door — 112,000 zones put
+    // `new ICAL.Event()` back at 12 s. The kept events still resolve their own zone.
+    const zones = Array.from({ length: 300 }, (_, i) =>
+      `BEGIN:VTIMEZONE\nTZID:Zone/Z${String(i)}\nBEGIN:STANDARD\nDTSTART:19700101T000000\nTZOFFSETFROM:+0000\nTZOFFSETTO:+0000\nEND:STANDARD\nEND:VTIMEZONE`);
+    const events = Array.from({ length: 5001 }, (_, i) =>
+      `BEGIN:VEVENT\nUID:z${String(i)}@t\nDTSTART;TZID=Europe/Zurich:20260812T140000\nDTEND;TZID=Europe/Zurich:20260812T150000\nSUMMARY:Z${String(i)}\nEND:VEVENT`);
+    const started = Date.now();
+    const r = parseIcsEvents([
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//test//EN', TZ, ...zones, ...events, 'END:VCALENDAR',
+    ].join('\n'), { ...AUG, maxEvents: 10 });
+    expect(r.truncated).toBe(true);
+    expect(r.events[0]?.timezone).toBe('Europe/Zurich');
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
   it('keeps a VTIMEZONE that sits AFTER the events when it cuts', () => {
     // RFC 5545 fixes no order between components. Cutting the tail away takes the zone
     // definition with it, and every kept event silently degrades to a floating time — a wrong

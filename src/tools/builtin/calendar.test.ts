@@ -435,6 +435,29 @@ END:VEVENT`,
     expect(out).not.toContain('12:00–2026-08-13');
   });
 
+  it('shows the span of a timed entry whose end carries only a date', async () => {
+    // Dropping the end was the wrong repair for the malformed-end case, and worse than what it
+    // replaced: an eight-day block rendered as "12:00" reads as a lunchtime appointment, and
+    // the operator concludes they are free for the rest of the week. The end DATE is legible —
+    // only its clock is missing — so it is reported, exclusive like the all-day branch.
+    vi.mocked(fetchIcsFeed).mockResolvedValue({
+      ics: TZ_ICS(
+        `BEGIN:VEVENT
+UID:block@t
+DTSTART:20260812T120000Z
+DTEND;VALUE=DATE:20260820
+SUMMARY:Langer Block
+END:VEVENT`,
+      ),
+      truncated: false,
+    });
+    const out = await calendarReadTool.handler(
+      { from: '2026-08-01', to: '2026-08-31' },
+      agentWith({ [`${CALENDAR_FEED_PREFIX}MAIN`]: 'https://calendar.example/x.ics' }),
+    );
+    expect(out).toContain('2026-08-12 12:00 – 2026-08-19 UTC Langer Block');
+  });
+
   it('names the last day it actually covered, not the exclusive end', async () => {
     // The window is half-open. Naming its exclusive end tells the model the 1st is covered when
     // a meeting on the 1st was filtered out — an overstatement in the "you are free" direction,

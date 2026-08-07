@@ -94,15 +94,23 @@ const STATIC_PROMPT_FRAGMENTS: readonly string[] = [
 // double-counts a set that is never on the wire alongside the legacy one.
 const DK1_SWAP_TOOL_NAMES = new Set(['remember', 'recall', 'memory_block_edit', 'memory_retire', 'memory_focus', 'archive_search']);
 
+// Same reason, different shape: `calendar_read` is registered only when `calendar_enabled` is
+// on (engine.ts), and that flag ships OFF. The barrel exports it so the flag can turn it on, but
+// the prefix a default tenant pays does not carry it — measuring it here would budget for a cost
+// nobody is charged, and would quietly hide the real growth of the tools that ARE always on.
+// When the flag becomes the default, move this name out and re-baseline in the same commit.
+const FLAG_GATED_TOOL_NAMES = new Set(['calendar_read']);
+
 /** All builtin `ToolEntry` objects exported from the builtin tools barrel (minus the DK.1
- *  swap tools — see above; they replace the legacy set at runtime, never co-exist with it). */
+ *  swap tools and the flag-gated ones — see above; neither is on a default turn's wire). */
 const BUILTIN_TOOLS: readonly ToolEntry[] = Object.values(builtinTools).filter(
   (v): v is ToolEntry =>
     typeof v === 'object' &&
     v !== null &&
     'definition' in v &&
     typeof (v as { definition: unknown }).definition === 'object' &&
-    !DK1_SWAP_TOOL_NAMES.has((v as ToolEntry).definition.name),
+    !DK1_SWAP_TOOL_NAMES.has((v as ToolEntry).definition.name) &&
+    !FLAG_GATED_TOOL_NAMES.has((v as ToolEntry).definition.name),
 );
 
 /**
@@ -259,12 +267,17 @@ function measureStaticPrefixTokens(): number {
 // an implemented auth path instead of a schema value that silently 401s. The PROSE
 // explaining it deliberately went to `detailedGuidance` (paid on use) rather than the
 // cached description, so what lands here is only the two property declarations.
-// 2026-08-07: +148 for `calendar_read`, down from +199 once the how-to-read-it prose
-// (zones, floating times, "it cannot book anything") moved to on-use `detailedGuidance`,
-// which the prefix does not carry — a single-action tool has one too, and assuming
-// otherwise cost 51 tokens for nothing. (Superseded by the next commit: the tool moves
-// behind a flag and this drops back out of the prefix entirely.)
-const STATIC_PREFIX_BUDGET = 23510;
+// 2026-08-07: `calendar_read` costs this budget NOTHING, and the number moved DOWN
+// because it is excluded above rather than counted. It ships behind `calendar_enabled`,
+// default off, so a default tenant's prefix does not carry it — measured both ways:
+// counted it was +148, gated it is 0.
+//
+// Two things this is not. It is not a free pass: turning the flag on costs those 148 tokens on
+// every turn of that tenant, and flipping the default means moving the name out of
+// FLAG_GATED_TOOL_NAMES and re-baselining here, in the same commit. And it is not a reason to
+// gate tools for cost — a capability nobody can reach is worth nothing; this one is gated
+// because a calendar feed is externally authored and only a real one proves the read is right.
+const STATIC_PREFIX_BUDGET = 23360;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated

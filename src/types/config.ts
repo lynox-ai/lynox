@@ -534,6 +534,17 @@ export interface LynoxUserConfig {
    */
   durable_memory_enabled?: boolean | undefined;
   /**
+   * Calendar reading from a subscribed ICS feed (`calendar_read`). When false the tool is not
+   * registered at all — the agent's decision space is byte-identical to a build without it,
+   * which also means it costs nothing in the always-on prefix.
+   *
+   * Ships OFF so a production tenant can be switched back without a release: a calendar feed
+   * is externally authored, endlessly varied, and only a real one proves the read is right.
+   * Operator-only per-tenant flip; intentionally NOT in PROJECT_SAFE_KEYS — an agent-settable
+   * flag would let injected content switch on a tool that reads external text into context.
+   */
+  calendar_enabled?: boolean | undefined;
+  /**
    * Extended debug capture (operator surface). When true, the engine persists a
    * REDACTED per-turn {@link import('../core/wire-capture.js').WireSnapshot} — the
    * fully-assembled outbound request (system-prompt hash, the FULL last user message

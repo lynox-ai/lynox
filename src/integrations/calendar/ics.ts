@@ -126,6 +126,10 @@ const MAX_TOTAL_ITERATIONS = 50_000;
  */
 const MAX_COMPONENTS = 5000;
 
+/** Zone definitions carried into the rehomed document. A calendar cannot legitimately need
+ *  more zones than the world has; unbounded, they cost as much as the events did. */
+const MAX_TIMEZONES = 100;
+
 /**
  * Parse an ICS document and return the occurrences overlapping a window.
  *
@@ -235,17 +239,34 @@ export function parseIcsEvents(ics: string, opts: ParseIcsOptions): ParseIcsResu
  * the parse instead of on the text is what makes it unspoofable — ical.js has already decided
  * what a component is, so there is no literal for an invitation to forge.
  *
- * Every VTIMEZONE comes along regardless of where it sat. RFC 5545 fixes no order between
- * components, and leaving one behind turns every zoned time in the kept events into a floating
- * one — a silently wrong clock, which is worse than a visible failure.
+ * Three details here are each a measured defect from an earlier version, and each is invisible
+ * until measured:
+ *
+ *  · The trigger counts ALL components, not just VEVENTs. `new ICAL.Event()` scans the whole
+ *    enclosing calendar, so 5,000 events beside 138,000 VTODOs cost 14.5 s while never
+ *    tripping a VEVENT-only ceiling — staying just UNDER it was 13× more expensive than
+ *    crossing it, which is the opposite of what a ceiling is for.
+ *  · Components are COPIED into the new document, not moved. `addSubcomponent` calls
+ *    `removeSubcomponent` on the old parent, which is a linear scan and a splice per item —
+ *    O(source) each, measured at 8.5 s to rehome out of a 143,000-component feed. Pushing the
+ *    jCal array is O(1) and the zones still resolve.
+ *  · VTIMEZONEs are capped too. Carrying them unbounded reintroduced the same cost by another
+ *    door: 112,000 zones put `new ICAL.Event()` back at 12 s. No real calendar defines more
+ *    zones than the world has.
+ *
+ * Zones are carried at all — rather than dropped with the tail — because RFC 5545 fixes no
+ * order between components, and leaving one behind turns every zoned time in the kept events
+ * into a floating one: a silently wrong clock, which is worse than a visible failure.
  */
 function capComponents(parsed: ICAL.Component): { comp: ICAL.Component; capped: boolean } {
-  const events = parsed.getAllSubcomponents('vevent');
-  if (events.length <= MAX_COMPONENTS) return { comp: parsed, capped: false };
+  if (parsed.getAllSubcomponents().length <= MAX_COMPONENTS) return { comp: parsed, capped: false };
 
   const small = new ICAL.Component(['vcalendar', [], []]);
-  for (const zone of parsed.getAllSubcomponents('vtimezone')) small.addSubcomponent(zone);
-  for (const event of events.slice(0, MAX_COMPONENTS)) small.addSubcomponent(event);
+  const take = (components: ICAL.Component[], limit: number): void => {
+    for (const c of components.slice(0, limit)) small.jCal[2].push(c.jCal);
+  };
+  take(parsed.getAllSubcomponents('vtimezone'), MAX_TIMEZONES);
+  take(parsed.getAllSubcomponents('vevent'), MAX_COMPONENTS);
   return { comp: small, capped: true };
 }
 
