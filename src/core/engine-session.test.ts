@@ -585,6 +585,46 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(typeof failedCall![0]).toBe('string'); // the failed run's id
     });
 
+    it('H2b: an in-run helper cost is SHOWN to the customer but not debited a second time', async () => {
+      // The two roles of the run's cost number pull in opposite directions, and a first
+      // version of this got it exactly backwards.
+      //
+      // A helper call (the follow-up-chip recovery) spends on the pool key WITHOUT producing
+      // tokens in `session.usage`. It debits itself through `reportMeteredCost`, under its own
+      // fresh run id — so the control plane is already correct. What was short were the
+      // numbers the CUSTOMER reads, which are derived from the usage deltas.
+      //
+      // Adding the helper dollars to the value handed to `onAfterRun` therefore does not fix
+      // the display: it bills the tenant twice, because `managed-hook` dedups per run id and
+      // these are two different ids. This test pins both halves at once.
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+
+      const HELPER_USD = 0.25;
+      mockSend.mockImplementationOnce(async () => {
+        session.usage.input_tokens += 1000;
+        session.usage.output_tokens += 500;
+        return 'done';
+      });
+      // Stand in for the recovery having spent on the pool key during this run.
+      const agent = (session as unknown as { agent?: { getHelperCostUsd?: () => number } }).agent;
+      if (agent) agent.getHelperCostUsd = () => HELPER_USD;
+
+      await session.run('go');
+
+      // The number the customer sees CARRIES the helper spend. `run()` returns the reply text;
+      // the figure the UI and the thread rollup read is the last run's usage summary.
+      const shown = (session as unknown as { _lastRunUsage?: { costUsd: number } })._lastRunUsage;
+      expect(shown, 'the run must record a usage summary').toBeDefined();
+      expect(shown!.costUsd).toBeGreaterThanOrEqual(HELPER_USD);
+
+      // The number the control plane DEBITS does not — the helper already debited itself.
+      const runCall = after.mock.calls.find(c => (c[2] as { modelTier?: string })?.modelTier !== 'fast');
+      expect(runCall, 'the run must still fire onAfterRun').toBeDefined();
+      expect(runCall![1] as number).toBeLessThan(HELPER_USD);
+    });
+
     it('Tier 2: a manual compaction records a compaction event (trigger=manual)', async () => {
       const { engine, session } = await createEngineAndSession();
       mockSend.mockResolvedValueOnce('summary text');   // the internal summary run

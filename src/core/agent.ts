@@ -1023,14 +1023,25 @@ export class Agent implements IAgent {
     try {
       const provider = getActiveProvider();
       const fastSnap = resolveTierModel('fast', provider);
-      // The ambient provider must describe the client being passed, not the process default.
-      // `this.client` was built from `config.provider` (see the constructor), so handing
-      // `getActiveProvider()` here makes `changesProvider` compare the snapshot against the
-      // WRONG side: on a hybrid session whose thread runs a different provider than the base,
-      // it reads false, the ambient client is returned, and the fast model-id is sent to a wire
-      // client that has never heard of it. `resolveTierModel` stays base-relative — the tier
-      // catalogue is a process-level thing; only the client identity is per-agent.
-      const client = clientForTierSnapshot(fastSnap, this.client, this.provider);
+      // `getActiveProvider()` and NOT `this.provider`, deliberately — the obvious-looking fix
+      // here costs money.
+      //
+      // The defect is real: `this.client` was built from `config.provider`, so on a session
+      // whose thread runs a different provider the comparison inside `clientForTierSnapshot`
+      // reads false, the ambient client is returned, and the fast model id goes to a wire
+      // client that has never heard of it. Today that ends in a 404 — wrong, free, and silent.
+      //
+      // Passing `this.provider` makes the comparison true, which builds a FRESH client from
+      // `fastSnap` — and outside hybrid mode the snapshot carries no apiKey, so
+      // `createLLMClient` falls through to `new Anthropic()` and the SDK picks up
+      // `ANTHROPIC_API_KEY` from the environment. On a managed instance that is the platform
+      // pool key: a Mistral tenant's helper call stops 404ing and starts billing us for a
+      // provider they never chose. Trading a free wrong answer for a paid one is not a fix.
+      //
+      // So the wrong client stays until the right one can be chosen WITH its credentials, and
+      // the catch below now says when this path fails — which is what was missing to measure
+      // how often it actually fires. See DEF-followup-recovery-wire-client.
+      const client = clientForTierSnapshot(fastSnap, this.client, provider);
       const stream = client.beta.messages.stream({
         model: fastSnap.modelId,
         max_tokens: FOLLOW_UP_FALLBACK_MAX_TOKENS,

@@ -1449,7 +1449,14 @@ Next steps before calling create:
       secretStore.set(outputName, accessToken);
       // Stash refresh_token too if the response carries one (for later refresh_token grants).
       if (parsed.refresh_token && typeof parsed.refresh_token === 'string') {
+        // Derived from the profile id rather than chosen — but `ID_PATTERN` permits ids like
+        // `google-oauth` or `mail-account-x`, so the derived name lands inside a protected
+        // prefix just as easily as a chosen one. Guarding only the caller-supplied name would
+        // close the door and leave the window.
         const refreshName = `${input.id.toUpperCase().replace(/-/g, '_')}_REFRESH_TOKEN`;
+        if (isInfraSecret(refreshName)) {
+          return `Token exchange OK, but the refresh token was NOT stored: "${refreshName}" is an infrastructure secret managed by the platform. Rename the api_profile so its derived key does not collide.`;
+        }
         secretStore.set(refreshName, parsed.refresh_token);
       }
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';

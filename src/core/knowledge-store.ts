@@ -758,7 +758,10 @@ export class KnowledgeStore {
   // `memory_retire` tells the user the entry "is marked superseded, never deleted"
   // (`tools/builtin/knowledge.ts`), and `KnowledgeStatus` says `rejected`/`superseded` are
   // "kept (auditable), not deleted" (`types/memory.ts`). A sweep would quietly break both.
-  // Erasure is served by the targeted deletes below, which is the shape a data-subject
+  // Erasure is MEANT to be served by the targeted deletes below — no production caller
+  // reaches them yet (tracked; the GDPR export half shipped first). They are correct for the
+  // day they are wired, which is why the block-line drop belongs in them now rather than
+  // being remembered later. Which is the shape a data-subject
   // request actually arrives in — retire-then-wait could never answer one anyway.
 
   /**

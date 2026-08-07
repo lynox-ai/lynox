@@ -948,23 +948,31 @@ export class Session {
       const tokensOut = this.usage.output_tokens - usageBefore.output_tokens;
       const cacheRead = this.usage.cache_read_input_tokens - usageBefore.cache_read_input_tokens;
       const cacheWrite = this.usage.cache_creation_input_tokens - usageBefore.cache_creation_input_tokens;
-      // `?.()` on the METHOD, not just on `agent`: the field is typed as the Agent class but a
-      // handful of tests and the pipeline path put a partial double there, and `agent?.m()`
-      // guards only a missing agent — a missing METHOD still throws. Found by 22 red tests
-      // rather than by reading, which is the honest reason this note exists.
-      //
-      // In-run helper calls (the follow-up-chip recovery) are billed to the tenant but produce
-      // no tokens in `this.usage`, so the deltas above cannot see them. Left out, the control
-      // plane charges one figure and every number the customer reads is smaller — on roughly
-      // every turn that needs the recovery. Added as dollars, not tokens: they are priced on
-      // the FAST model, and folding them into this run's token counts would bill them at the
-      // run's own `pricePerM`.
       const costUsd = calculateCost(model, {
         input_tokens: tokensIn,
         output_tokens: tokensOut,
         cache_creation_input_tokens: cacheWrite,
         cache_read_input_tokens: cacheRead,
-      }) + (this.agent?.getHelperCostUsd?.() ?? 0);
+      });
+
+      // In-run helper calls (the follow-up-chip recovery) spend on the pool key without
+      // producing tokens in `this.usage`, so the deltas above cannot see them.
+      //
+      // ⚠ This is a DISPLAY term and must never reach `onAfterRun`. `costUsd` above is the
+      // value the managed hook DEBITS, and the helper already debited itself through its own
+      // `reportMeteredCost` call (`metered-request.ts`, `debitInRunHelperCost`) under a fresh
+      // run id. `managed-hook.ts` dedups per run id, so adding the same dollars to `costUsd`
+      // bills the tenant twice — which a first version of this did, on the belief that the
+      // CP figure was the one missing them. It was the other way round: the CP was right and
+      // the numbers the CUSTOMER reads were short.
+      //
+      // Dollars rather than tokens: the helper is priced on the FAST model, and folding its
+      // tokens into this run's counts would re-price them at the run's own `pricePerM`.
+      // `?.()` on the METHOD, not just on `agent`: several tests and the pipeline path put a
+      // partial double there, and `agent?.m()` guards only a missing agent. (Nothing asserts
+      // the ACCOUNTING here — the 22 tests that caught the missing `?.` were checking other
+      // things and merely happened to run this line.)
+      const displayCostUsd = costUsd + (this.agent?.getHelperCostUsd?.() ?? 0);
 
       // What this run's sub-agents spent, if it delegated. Read from RunHistory
       // rather than tracked in memory: the children are already rows there,
@@ -986,7 +994,7 @@ export class Session {
         tokensOut,
         cacheRead,
         cacheWrite,
-        costUsd,
+        costUsd: displayCostUsd,
         model,
         ...(spawnCostUsd > 0 ? { spawnCostUsd } : {}),
         ...(this.currentRunId ? { runId: this.currentRunId } : {}),
@@ -1005,7 +1013,7 @@ export class Session {
             tokensOut,
             tokensCacheRead: cacheRead,
             tokensCacheWrite: cacheWrite,
-            costUsd,
+            costUsd: displayCostUsd,
             toolCallCount: this.runToolCallSeq,
             durationMs,
             userWaitMs: this._userWaitMs,
@@ -1049,7 +1057,7 @@ export class Session {
           const rollupTokens = threadTotals
             ? threadTotals.tokens_in + threadTotals.tokens_out
             : this.usage.input_tokens + this.usage.output_tokens;
-          const rollupCost = threadTotals ? threadTotals.cost_usd : costUsd;
+          const rollupCost = threadTotals ? threadTotals.cost_usd : displayCostUsd;
           if (newMessages.length > 0) {
             // Combined append + rollup in one transaction (P1). Seqs start at
             // MAX(seq)+1 (deletion-safe), message_count tracks total rows.
@@ -1202,7 +1210,9 @@ export class Session {
             tokensOut: failedTokensOut,
             tokensCacheRead: failedCacheRead,
             tokensCacheWrite: failedCacheWrite,
-            costUsd: failedCostUsd,
+            // Display, like the success path: the helper already debited itself, so this
+            // number must include it while `onAfterRun` below must not.
+            costUsd: failedCostUsd + (this.agent?.getHelperCostUsd?.() ?? 0),
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
             status: isAbort ? 'aborted' : 'failed',

@@ -15,8 +15,9 @@
 		descKey: string;
 	}
 
-	// The probe is back, and the calendar is why. It ships with `calendar_enabled` OFF on every
-	// tenant, so `calendar_read` is not registered — but the tile linked to a settings page that
+	// The probe is back, and the calendar is why. It ships with `calendar_enabled` off wherever the
+	// control plane has not turned it on — which is every tenant today, but that state lives in
+	// the CP database, not here. So the tile follows the PROBE rather than an assumption — but the tile linked to a settings page that
 	// happily takes the operator's ICS address, stores it in the vault and reports success, for
 	// a tool that will never read it. A channel offering a credential nothing consumes is worse
 	// than a missing channel. Same shape as IntelligenceHub's tab gating; costs one RTT on mount.

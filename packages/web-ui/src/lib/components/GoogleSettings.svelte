@@ -62,9 +62,10 @@
 		// link to the tenant. Claiming is authenticated, so it takes the tenant's own logged-in
 		// browser to finish — which auto-claiming supplied for free: opening the link was the
 		// whole attack, with no dialog, no gesture, and nothing on screen naming the account.
-		// The engine cannot name it either (`getAccountInfo` returns scopes and expiry, no
+		// The engine cannot name it BEFORE the claim either (`getAccountInfo` reads a connection that
+		// does not exist yet, and even after it returns scopes and expiry, no
 		// identity), so a confirmation the user has to press is the only barrier available
-		// tonight. Binding the state to the browser is the real fix and is the next patch.
+		// tonight. Binding the state to the browser is the real fix; it is tracked, not promised here.
 		if (!oauthClaimHandled && typeof window !== 'undefined') {
 			const params = new URLSearchParams(window.location.search);
 			const claimNonce = params.get('google_oauth');
