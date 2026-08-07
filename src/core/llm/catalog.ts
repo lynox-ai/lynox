@@ -7,6 +7,7 @@
 
 import type { LLMProvider, ModelTier } from '../../types/models.js';
 import type { TierSet } from '../../types/config.js';
+import type { ProviderKey } from '../../types/provider-registry.js';
 import {
   MODEL_MAP,
   VERTEX_MODEL_MAP,
@@ -650,6 +651,124 @@ export function pinnedVaultSlotForEndpoint(
   const entry = catalog.find((e) => catalogEntryKey(e) === key);
   if (!entry?.base_url_default) return undefined;   // generic / free-text tile
   return entry.vault_slot;
+}
+
+/** Who a (provider, endpoint) pair IS, and what to call it. */
+export interface ProviderIdentity {
+  /**
+   * Stable dedup key. Distinct from the label on purpose: two different
+   * unpinned proxies both DISPLAY as "OpenAI-compatible", so comparing display
+   * strings would silently drop one of two genuinely different providers.
+   */
+  key: string;
+  /** Human brand name — what the status bar prints. */
+  label: string;
+}
+
+/**
+ * The first-class registry key `'mistral'` (provider-registry.ts) IS the pinned
+ * Mistral endpoint — it carries the host in its identity and arrives without a
+ * base URL. It must therefore share a key with `openai` + `api.mistral.ai`, or
+ * one provider would be listed twice under two spellings.
+ */
+// A Map, not an object literal: the lookup key comes from LYNOX_TIER_SET_JSON,
+// and `{}['constructor']` is a truthy Object.prototype member. An object here
+// would answer `'constructor'` / `'__proto__'` / `'toString'` with a garbage
+// identity — `{key: undefined, label: undefined}` — which both blanks the
+// provider name in the response and collapses two different providers onto one
+// dedup key. `resolveCatalogKey` documents the same class of bug (it uses
+// `Object.hasOwn` for it); a Map has no prototype chain to walk at all.
+const NATIVE_IDENTITIES: ReadonlyMap<string, ProviderIdentity> = new Map([
+  ['anthropic', { key: 'preset:anthropic', label: 'Anthropic' }],
+  ['vertex', { key: 'preset:vertex', label: 'Google Vertex AI' }],
+  ['mistral', { key: 'preset:mistral', label: 'Mistral' }],
+]);
+
+/** Reduce a name to the plain label characters that may reach the UI. */
+function sanitizeLabel(s: string): string {
+  return s.replace(/[^\w .+-]/g, '').trim();
+}
+
+/**
+ * Host of a base URL, or a bounded form of the raw string when it will not parse.
+ * A trailing root dot is normalised away — `api.example.com.` and
+ * `api.example.com` are the same host, and keeping both would list one provider
+ * twice. The scheme is deliberately NOT part of the key: http and https to the
+ * same host are one provider.
+ */
+function endpointHost(apiBaseURL: string | undefined): string {
+  if (!apiBaseURL) return '';
+  const strip = (h: string): string => h.replace(/\.(?=$|:)/, '');
+  try {
+    return strip(new URL(apiBaseURL).host.toLowerCase());
+  } catch {
+    return strip(apiBaseURL.trim().toLowerCase().slice(0, 64));
+  }
+}
+
+/**
+ * Identify a (provider, endpoint) pair — for the status bar, which must both
+ * NAME every provider an instance talks to and count each of them once.
+ *
+ * A brand may only come from a catalog entry lynox PINS by URL
+ * (`base_url_default`), the same discipline as `pinnedVaultSlotForEndpoint`: the
+ * generic openai-compat tile matches ANY host, so letting it lend a display name
+ * would label `api.mistral.ai.attacker.com` as "Mistral". The hostname matching
+ * itself is `resolveCatalogKey`'s, which already refuses that suffix trick.
+ *
+ * The provider key is compared CASE-FOLDED. It reaches here from
+ * `LYNOX_TIER_SET_JSON`, an untrusted boundary, and an exact-case ladder let a
+ * single capital letter (`'Mistral'`) skip every branch and fall through to the
+ * raw-key path — which printed the brand "Mistral" for an arbitrary endpoint,
+ * defeating the pinning above. For the same reason the raw-key fall-through
+ * refuses any name that collides with a brand we DO verify.
+ *
+ * The wire labels ('OpenAI-compatible' / 'Custom') are what the status bar
+ * printed before hybrid routing existed. They are honest rather than vague:
+ * they state what we know — the wire — and claim no brand we cannot verify.
+ */
+export function providerIdentity(
+  provider: ProviderKey,
+  apiBaseURL?: string | undefined,
+  catalog: LLMCatalog = LLM_CATALOG,
+): ProviderIdentity {
+  const folded = provider.trim().toLowerCase();
+  const native = NATIVE_IDENTITIES.get(folded);
+  if (native) return native;
+
+  // Re-stated as literals rather than narrowed in place: `ProviderKey` is an
+  // OPEN union (`string & {}`), so an `=== 'openai'` comparison does not narrow.
+  const wire: LLMProvider | undefined =
+    folded === 'openai' ? 'openai' : folded === 'custom' ? 'custom' : undefined;
+  if (wire) {
+    const catKey = resolveCatalogKey(wire, apiBaseURL, catalog);
+    const entry = catalog.find((e) => catalogEntryKey(e) === catKey);
+    if (entry?.base_url_default) return { key: `preset:${catKey}`, label: entry.display_name };
+    // Generic tile. The label cannot tell two proxies apart, so the KEY carries
+    // the host — otherwise a second, differently-configured endpoint would be
+    // deduped away and its outage would never reach the status bar.
+    return {
+      key: `endpoint:${wire}:${endpointHost(apiBaseURL)}`,
+      label: wire === 'openai' ? 'OpenAI-compatible' : 'Custom',
+    };
+  }
+
+  // An unregistered provider key. Print what is configured — bounded and
+  // stripped to plain label characters, because this string reaches the UI —
+  // unless it impersonates a brand this function otherwise only grants to a
+  // verified endpoint.
+  const cleaned = sanitizeLabel(provider).slice(0, 24);
+  // Compare the SANITISED form on both sides. Comparing against the raw
+  // display_name let every brand containing a stripped character through:
+  // 'Ollama (local)' sanitises to 'Ollama local', which matched nothing and was
+  // printed verbatim — a borrowed brand wearing one less bracket.
+  const folded_clean = cleaned.toLowerCase();
+  const impersonates = catalog.some((e) => sanitizeLabel(e.display_name).toLowerCase() === folded_clean)
+    || [...NATIVE_IDENTITIES.values()].some((n) => sanitizeLabel(n.label).toLowerCase() === folded_clean);
+  return {
+    key: `provider:${folded}`,
+    label: cleaned && !impersonates ? cleaned : 'Unknown provider',
+  };
 }
 
 /**

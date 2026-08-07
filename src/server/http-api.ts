@@ -32,9 +32,11 @@ import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
 import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
 import { getActiveProvider } from '../core/llm-client.js';
+import { getActiveRoutingMode } from '../core/tier-resolver.js';
+import type { RunRecord } from '../core/run-history.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
 import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
-import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
+import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, providerIdentity, type ProviderIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import { RunAbortedError } from '../core/agent.js';
@@ -48,6 +50,7 @@ import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
+import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import type {
@@ -701,7 +704,12 @@ export class LynoxHTTPApi {
   private readonly staticRouteScopes = new Map<string, AuthScope>();
   private readonly dynamicRoutes: DynamicRoute[] = [];
   private rateGcTimer: ReturnType<typeof setInterval> | null = null;
-  private providerStatusCache: { data: ProviderStatus; expiresAt: number } | null = null;
+  // `identityKey` rides along with the cached status: `getProvidersStatus` seeds
+  // its dedup set from the PRIMARY, and the primary may be up to 60s stale.
+  // Re-deriving the key from live config would let a provider switch produce a
+  // seed for the new provider while the old name is still being printed —
+  // suppressing the new provider's own tier_set slot.
+  private providerStatusCache: { data: ProviderStatus; identityKey: string; expiresAt: number } | null = null;
   private healthCache: { data: HealthBody; expiresAt: number } | null = null;
   // 30 s TTL per (period, windowStart) key. Usage Dashboard typically re-opens
   // the tab with the same window multiple times in quick succession — this
@@ -1437,21 +1445,6 @@ export class LynoxHTTPApi {
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Content-Security-Policy', "default-src 'none'");
 
-    // Provider status — cached Anthropic statuspage check (unauthenticated, public data)
-    if (method === 'GET' && (pathname === '/api/provider/status')) {
-      const status = await this.getProviderStatus();
-      jsonResponse(res, 200, status);
-      return;
-    }
-
-    // Multi-provider status — returns primary provider + any configured secondary
-    // providers (Mistral fallback, TTS, etc.). Public, unauthenticated.
-    if (method === 'GET' && (pathname === '/api/providers/status')) {
-      const providers = await this.getProvidersStatus();
-      jsonResponse(res, 200, { providers });
-      return;
-    }
-
     // Google OAuth callback — unauthenticated (browser redirect from Google).
     // CSRF protection is via the `state` parameter (HMAC-bound to a separate
     // SameSite=Lax state cookie scoped to /api/google/callback). The main
@@ -1684,6 +1677,15 @@ export class LynoxHTTPApi {
     // not-configured signal MUST still surface — pre-fix the status bar
     // showed "API OK" on managed-BYOK with empty vault while SetupBanner
     // was simultaneously demanding the key, lying green on the indicator.
+    // ONE identity for every branch below — the name printed and the key the
+    // dedup compares must come from the same resolution, or the two disagree
+    // for exactly the endpoints that need them to agree.
+    const identity = providerIdentity(provider, userConfig.api_base_url);
+    const cache = (data: ProviderStatus, ttlMs: number): ProviderStatus => {
+      this.providerStatusCache = { data, identityKey: identity.key, expiresAt: now + ttlMs };
+      return data;
+    };
+
     const cpSuppliesKey = cpSuppliesLLMKey(managedMode);
     if (!cpSuppliesKey && store) {
       let configured = false;
@@ -1716,46 +1718,34 @@ export class LynoxHTTPApi {
         configured = false;
       }
       if (!configured) {
-        const providerLabel = provider === 'anthropic' ? 'Anthropic'
-          : provider === 'vertex' ? 'Google Vertex AI'
-          : provider === 'openai' ? 'OpenAI-compatible'
-          : 'Custom';
-        const data: ProviderStatus = { indicator: 'not-configured', description: 'API key not configured', provider: providerLabel };
-        this.providerStatusCache = { data, expiresAt: now + 30_000 };
-        return data;
+        // Hand-rolling the label here used to ignore the endpoint entirely, so
+        // an unkeyed Mistral instance printed 'OpenAI-compatible' while its
+        // tier_set slot printed 'Mistral' — one provider, listed twice.
+        return cache({ indicator: 'not-configured', description: 'API key not configured', provider: identity.label }, 30_000);
       }
     }
 
     // Custom + OpenAI providers have no public status page — rely solely on run history
     if (provider === 'custom' || provider === 'openai') {
-      // Hostname-aware label: detect the well-known managed-EU preset (Mistral)
-      // so the status bar reads 'Mistral' instead of the wire-format-internal
-      // 'OpenAI-compatible'. Other openai-compat endpoints (Ollama, LiteLLM,
-      // etc.) keep the generic label.
-      const apiBaseURL = this.engine?.getUserConfig().api_base_url;
-      let label = provider === 'openai' ? 'OpenAI-compatible' : 'Custom';
-      if (provider === 'openai' && apiBaseURL) {
-        try {
-          const hostname = new URL(apiBaseURL).hostname.toLowerCase();
-          if (hostname === 'api.mistral.ai') label = 'Mistral';
-        } catch { /* malformed baseURL — fall through to generic label */ }
-      }
-      const data = this.getRunBasedStatus(now, label);
-      this.providerStatusCache = { data, expiresAt: now + 60_000 };
-      return data;
+      // Hostname-aware label, via the shared identity function: a pinned host
+      // (Mistral, Fireworks, Groq, a local Ollama) reads as its brand instead of
+      // the wire-format-internal 'OpenAI-compatible'; anything unpinned keeps
+      // the generic label. This USED to special-case api.mistral.ai and nothing
+      // else, which meant a Fireworks primary printed 'OpenAI-compatible' while
+      // the same endpoint in a tier_set slot printed 'Fireworks AI' — the dedup
+      // in getProvidersStatus then saw two providers where there is one.
+      return cache(this.getRunBasedStatus(now, identity.label), 60_000);
     }
 
     // Vertex AI uses Google Cloud status; Anthropic has native status page
     const statusUrl = provider === 'vertex'
       ? 'https://status.cloud.google.com/incidents.json'
       : 'https://status.anthropic.com/api/v2/status.json';
-    const providerLabel = provider === 'vertex' ? 'Google Vertex AI' : 'Anthropic';
+    const providerLabel = identity.label;
 
     // GCP incidents API has different format — fall back to run-history-based status
     if (provider === 'vertex') {
-      const data = this.getRunBasedStatus(now, providerLabel);
-      this.providerStatusCache = { data, expiresAt: now + 60_000 };
-      return data;
+      return cache(this.getRunBasedStatus(now, providerLabel), 60_000);
     }
 
     const fallback: ProviderStatus = { indicator: 'unknown', description: 'Status unavailable', provider: providerLabel };
@@ -1767,10 +1757,7 @@ export class LynoxHTTPApi {
       });
       clearTimeout(timeout);
 
-      if (!res.ok) {
-        this.providerStatusCache = { data: fallback, expiresAt: now + 30_000 };
-        return fallback;
-      }
+      if (!res.ok) return cache(fallback, 30_000);
 
       const body = (await res.json()) as { status?: { indicator?: string; description?: string } };
       const indicator = body.status?.indicator;
@@ -1797,12 +1784,9 @@ export class LynoxHTTPApi {
         }
       }
 
-      const data: ProviderStatus = { indicator: resolvedIndicator, description, provider: providerLabel };
-      this.providerStatusCache = { data, expiresAt: now + 60_000 };
-      return data;
+      return cache({ indicator: resolvedIndicator, description, provider: providerLabel }, 60_000);
     } catch {
-      this.providerStatusCache = { data: fallback, expiresAt: now + 30_000 };
-      return fallback;
+      return cache(fallback, 30_000);
     }
   }
 
@@ -1843,65 +1827,121 @@ export class LynoxHTTPApi {
 
   /**
    * Return status for every LLM provider currently configured on this instance.
-   * The primary provider is the first entry; Mistral follows if MISTRAL_API_KEY
-   * is set (used as fallback/worker in standard mode or primary in eu-sovereign).
-   * Voxtral voice provider shares the Mistral key — if the key is present it is
-   * already covered by the Mistral entry.
+   * The primary provider is the first entry, followed by every OTHER provider
+   * the router can actually reach: one per hybrid `tier_set` slot, plus Mistral
+   * when MISTRAL_API_KEY is set (the standard-mode fallback/worker). Voxtral
+   * shares the Mistral key — if the key is present it is already covered.
+   *
+   * Pre-fix this had exactly TWO hard-coded slots — the primary, and Mistral if
+   * keyed — so a tenant routing {fast: Mistral, balanced: Fireworks/GLM, deep:
+   * Anthropic} saw the footer name ONE of its three providers, and if the
+   * primary already WAS Mistral it named that one alone (the prod symptom,
+   * 2026-08-07). Nothing enumerated the tier_set.
    */
   private async getProvidersStatus(): Promise<ProviderStatus[]> {
+    const cfg = this.engine?.getUserConfig();
     const primary = await this.getProviderStatus();
     const list: ProviderStatus[] = [primary];
 
-    // Mistral is present when MISTRAL_API_KEY is configured AND we are not
-    // already reporting Mistral as the primary (eu-sovereign mode).
-    const hasMistralKey = !!(process.env['MISTRAL_API_KEY']?.length);
-    const primaryIsMistral = primary.provider?.toLowerCase().includes('mistral') ?? false;
-    if (hasMistralKey && !primaryIsMistral) {
-      list.push(this.getMistralStatus());
+    // Dedup on IDENTITY, not on the display name. Two differently-configured
+    // proxies both read as 'OpenAI-compatible', so keying on the label would
+    // drop the second one — and with it any outage it is reporting. The seed
+    // comes from the CACHED primary, not from live config: the primary may be
+    // up to 60s stale, and a seed for a provider whose name is not the one
+    // being printed would suppress that provider's own slot.
+    const seen = new Set<string>([this.providerStatusCache?.identityKey ?? '']);
+
+    // At most ONE run query for the whole response, and only if something
+    // actually needs it. `getRecentRuns` is `SELECT * FROM runs … LIMIT 50`
+    // followed by an AES-GCM decrypt of every row's task/response text, and this
+    // endpoint is polled every 30s per open client: querying per slot would
+    // multiply that by four, and querying eagerly would charge it to a
+    // standard-mode self-host that has no secondary provider to report at all.
+    let recentRuns: readonly RunRecord[] | null | undefined;
+    const runs = (): readonly RunRecord[] | null => {
+      recentRuns ??= this.engine?.getRunHistory()?.getRecentRuns(50) ?? null;
+      return recentRuns;
+    };
+
+    const push = (id: ProviderIdentity, matches: (modelId: string) => boolean): void => {
+      if (seen.has(id.key)) return;
+      seen.add(id.key);
+      list.push(this.getModelBasedStatus(id.label, matches, runs()));
+    };
+
+    // Hybrid routing: each tier may sit on a different provider, so the set of
+    // providers this instance talks to IS the tier_set.
+    //
+    // The MODE comes from the resolver, not from config: `setTierSetResolver`
+    // skips an `undefined` routingMode, so the router can still be hybrid after
+    // a reload whose config dropped the field. Reading config there would make
+    // the footer omit providers that runs are still reaching.
+    //
+    // The SLOTS come from config, and only three fields of each are read. That
+    // projection is deliberate: on a managed instance
+    // `applyManagedTierSetConstraints` writes the control plane's `api_key`
+    // INTO `tier_set`, so this object holds live platform credentials.
+    if (getActiveRoutingMode() === 'hybrid' && cfg?.tier_set) {
+      for (const tier of ['fast', 'balanced', 'deep'] as const) {
+        const slot = cfg.tier_set[tier];
+        // `isTierSlot`, not a truthy check: tier_set can arrive from
+        // `LYNOX_TIER_SET_JSON`, where a malformed slot is an untrusted value.
+        if (!isTierSlot(slot)) continue;
+        const provider = slot.provider;
+        const modelId = slot.model_id;
+        // A slot without its own endpoint routes to the ambient one
+        // (`hybridSlotClientConfig` keeps the base values for it), so it must
+        // identify as that endpoint — otherwise it appears as a phantom second
+        // provider next to the primary it actually IS.
+        const baseUrl = slot.api_base_url ?? cfg.api_base_url;
+        push(providerIdentity(provider, baseUrl), (id) => id === modelId);
+      }
+    }
+
+    // Mistral is reachable WITHOUT a tier_set slot too: standard mode keeps it
+    // as the engine-level fallback/worker whenever MISTRAL_API_KEY is set. The
+    // `seen` set suppresses it when Mistral is already listed.
+    if (process.env['MISTRAL_API_KEY']?.length) {
+      push(providerIdentity('mistral'), (id) => id.toLowerCase().startsWith('mistral'));
     }
 
     return list;
   }
 
   /**
-   * Derive Mistral status from run history. Mistral does not publish a
-   * Statuspage-compatible JSON endpoint, so we infer health from recent runs
-   * whose model_id starts with "mistral".
+   * Status of one non-primary provider, derived from the most recent run that
+   * used one of ITS models. Shared by the Mistral fallback entry (prefix match)
+   * and by every hybrid `tier_set` slot (exact model-id match).
    *
-   * Healthy-config rule: when MISTRAL_API_KEY is configured but no Mistral
-   * run has been recorded yet, return `none` ("Ready") — mirroring the
-   * primary's `getRunBasedStatus` semantics for the same state. This is the
-   * normal day-1 state for every prod tenant that has the EU-residency
-   * fallback key set engine-side but hasn't toggled into Mistral yet.
-   *
-   * Pre-fix this returned `unknown` here, which the StatusBar aggregator
-   * (severity-ranked unknown > none) then bubbled up over a fully healthy
-   * Anthropic primary — surfacing in the UI as "Anthropic · API ?" despite
-   * the API being fine. Caller (`getProvidersStatus`) only invokes this
-   * function when the key IS present, so the key-existence precondition is
-   * implicit.
+   * NEVER returns `unknown`. That is load-bearing, not caution: the StatusBar
+   * aggregator severity-ranks `unknown` ABOVE `none`, so a secondary entry with
+   * no runs yet would bubble "API ?" over a perfectly healthy primary — the
+   * exact v1.7.4 regression the healthy-config rule above was written to close.
+   * A configured provider we have no evidence about is `none` ("Ready").
    */
-  private getMistralStatus(): ProviderStatus {
-    const label = 'Mistral AI';
-    const history = this.engine?.getRunHistory();
-    if (!history) return { indicator: 'none', description: 'Ready', provider: label };
+  private getModelBasedStatus(
+    label: string,
+    matches: (modelId: string) => boolean,
+    rows: readonly RunRecord[] | null,
+  ): ProviderStatus {
+    if (!rows) return { indicator: 'none', description: 'Ready', provider: label };
+    const recent = rows;
 
-    const recent = history.getRecentRuns(50);
-    const mistralRun = recent.find(r => r.model_id?.toLowerCase().startsWith('mistral'));
+    const run = recent.find(r => r.model_id !== undefined && r.model_id !== '' && matches(r.model_id));
 
-    if (!mistralRun) {
+    if (!run) {
       return { indicator: 'none', description: 'Ready', provider: label };
     }
 
-    const lastRunTime = new Date(mistralRun.created_at).getTime();
+    const lastRunTime = new Date(run.created_at).getTime();
     const fiveMinAgo = Date.now() - 5 * 60_000;
 
-    if (mistralRun.status === 'completed') {
+    if (run.status === 'completed') {
       return lastRunTime > fiveMinAgo
         ? { indicator: 'none', description: 'All Systems Operational', provider: label }
         : { indicator: 'none', description: 'API OK (last success older than 5min)', provider: label };
     }
-    if (mistralRun.status === 'failed') {
+    if (run.status === 'failed') {
       return lastRunTime > fiveMinAgo
         ? { indicator: 'major', description: 'Last run failed', provider: label }
         : { indicator: 'minor', description: 'Last run failed (not recent)', provider: label };
@@ -5379,6 +5419,32 @@ export class LynoxHTTPApi {
         return { name: e.definition.name, description };
       });
       jsonResponse(res, 200, { tools });
+    });
+
+    // ── Provider status (singular) ──
+    // Was unauthenticated, on the reasoning that it reported a vendor's public
+    // statuspage. That stopped being true in this change: its label now resolves
+    // through the catalog, so it names Fireworks / Groq / Together / a local
+    // Ollama where it previously only ever said 'OpenAI-compatible'. That is the
+    // same instance-configuration disclosure the plural route was moved behind
+    // auth for, so it moves too rather than being argued as an exception. No
+    // consumer in core, web-ui or the control plane reads it.
+    this.addStatic('user', 'GET /api/provider/status', async (_req, res) => {
+      jsonResponse(res, 200, await this.getProviderStatus());
+    });
+
+    // ── Multi-provider status ──
+    // Primary provider plus every other one the router can reach (each hybrid
+    // tier_set slot, and the MISTRAL_API_KEY fallback). AUTHENTICATED, unlike
+    // the singular `/api/provider/status` next to the health probe: that one
+    // reports a vendor's public statuspage, this one reports THIS tenant's
+    // provider topology and each provider's recent failures — instance
+    // configuration, not public data. The status bar polls it alongside
+    // `/api/tasks` and `/api/history/cost/daily`, which are user-scoped too, so
+    // it already carries credentials on this call.
+    this.addStatic('user', 'GET /api/providers/status', async (_req, res) => {
+      const providers = await this.getProvidersStatus();
+      jsonResponse(res, 200, { providers });
     });
 
     // ── LLM model catalog ──
