@@ -1318,7 +1318,21 @@ export class Engine {
     // tools with `remember`/`recall`/`memory_block_edit` when `durable_memory_enabled` is on
     // (H9 — no partial swap: the six legacy tools are NOT registered when durable is on, and
     // the new three are NOT registered when it is off, so flag-OFF is byte-identical).
-    if (this.userConfig.durable_memory_enabled === true) {
+    //
+    // `&& this.engineDb` matches the STORE wiring further down (search `durable-memory wiring`),
+    // and the two conditions have to agree or the swap stops being a swap. engine.db opening is
+    // best-effort — the constructor catches and leaves the field null so chat still boots — and
+    // when it is null the store block below is skipped while this one still fired. That left the
+    // six durable tools registered over a null `toolContext.knowledgeStore`, every one of them
+    // answering "Durable memory is not enabled for this agent", AND the else-branch never ran,
+    // so the six legacy tools were absent too. The tenant had no memory at all and nothing said
+    // so: boot green, /api/health OK, one line on stderr.
+    //
+    // That state used to need a deliberate operator flip on a watched instance, which is why it
+    // was carried as dormant. The CP default flipped ON (pro migration 0048), so it is now the
+    // path every newly provisioned tenant takes. Falling back to the legacy tools here is not a
+    // silent downgrade over the alternative — the alternative was silence with nothing working.
+    if (this.userConfig.durable_memory_enabled === true && this.engineDb) {
       this.registry
         .register(rememberTool)
         .register(recallTool)
