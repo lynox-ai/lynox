@@ -408,24 +408,40 @@ END:VEVENT`,
     expect(r.events.length).toBeLessThan(6000);
   });
 
-  it('is not fooled into cutting mid-value by the boundary literal inside a DESCRIPTION', () => {
-    // Attacker-triggerable denial of the whole feature, and it needs only one invitation. An
-    // unanchored search for the component boundary matches inside a property VALUE, so a
-    // DESCRIPTION repeating the literal past the ceiling drops the cut into the middle of that
-    // value — the document no longer parses and the operator's ENTIRE calendar reads as
-    // unavailable. Not "some entries missing": all of them.
-    const payload = Array.from({ length: 5001 }, () => 'BEGIN:VEVENT').join(' ');
-    const r = parseIcsEvents(cal(
-      `BEGIN:VEVENT
+  // The component ceiling is the one limit an attacker attacks directly, and three separate
+  // text-level implementations of it were each defeated by one calendar invitation. These are
+  // those three payloads. They pass now for a structural reason rather than a cleverer pattern:
+  // the ceiling is applied to PARSED components, so what counts as a component is ical.js's
+  // decision and there is no literal left to forge.
+  describe.each([
+    ['the boundary literal repeated in a DESCRIPTION', () => Array.from({ length: 5001 }, () => 'BEGIN:VEVENT').join(' ')],
+    ['the literal after U+2028, a JS line terminator RFC 5545 allows in a value', () => Array.from({ length: 5001 }, () => ' BEGIN:VEVENT').join('')],
+    ['the literal after U+2029', () => Array.from({ length: 5001 }, () => ' BEGIN:VEVENT').join('')],
+  ])('a DESCRIPTION carrying %s', (_label, payload) => {
+    it('neither breaks the feed nor hides the real appointment', () => {
+      const r = parseIcsEvents(cal(
+        `BEGIN:VEVENT
 UID:echt@t
 DTSTART:20260812T120000Z
 DTEND:20260812T130000Z
 SUMMARY:Echter Termin
-DESCRIPTION:${payload}
+DESCRIPTION:${payload()}
 END:VEVENT`,
-    ), AUG);
-    expect(r.events.map(e => e.summary)).toEqual(['Echter Termin']);
-    expect(r.truncated).toBe(false);
+      ), AUG);
+      expect(r.events.map(e => e.summary)).toEqual(['Echter Termin']);
+      expect(r.truncated).toBe(false);
+    });
+  });
+
+  it('counts lower-case component names, which RFC 5545 makes equivalent', () => {
+    // `begin:vevent` is legal — component names are case-insensitive — and ical.js parses it
+    // into ordinary components. A ceiling that matches the upper-case literal simply does not
+    // see 5,001 of them, so the cap it enforces is not a cap.
+    const many = Array.from({ length: 5001 }, (_, i) =>
+      `begin:vevent\nUID:l${String(i)}@t\nDTSTART:20260812T120000Z\nDTEND:20260812T235900Z\nSUMMARY:L${String(i)}\nend:vevent`);
+    const r = parseIcsEvents(cal(...many), { ...AUG, maxEvents: 99_999 });
+    expect(r.truncated).toBe(true);
+    expect(r.events.length).toBeLessThanOrEqual(5000);
   });
 
   it('does not treat a FOLDED continuation line as a component boundary', () => {

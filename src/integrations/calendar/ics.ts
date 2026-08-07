@@ -99,22 +99,30 @@ export const DEFAULT_MAX_EVENTS = 200;
 const MAX_TOTAL_ITERATIONS = 50_000;
 
 /**
- * Ceiling on VEVENT components, applied to the TEXT before it is parsed.
+ * Ceiling on VEVENT components read from one document.
  *
- * This is the limit that actually bounds a hostile feed, and it took two measurements that each
- * contradicted the previous fix to land on it:
+ * Landing on the right MECHANISM here took four attempts, and the first three failed in the
+ * same way, which is the useful part of the history:
  *
  *  1. The iteration budget above bounds expansion — and expansion was never where the time
  *     went. A 5 MB feed of `FREQ=SECONDLY` series still took 302 seconds.
- *  2. Capping how many components we CONSTRUCT dropped that to 29 seconds, no further, because
+ *  2. Capping how many events we CONSTRUCT dropped that to 29 seconds, no further, because
  *     `new ICAL.Event()` costs O(components in the enclosing VCALENDAR) — it scans the parent
- *     for RECURRENCE-ID overrides. Constructing 5,000 events inside a 57,614-component document
- *     measured 23 SECONDS; the same 5,000 in a document of their own take ~500 ms. The cost is
- *     set by the document around them, not by how many we build.
+ *     for RECURRENCE-ID overrides. Building 5,000 events inside a 57,614-component document
+ *     measured 23 SECONDS; the same 5,000 in a document of their own take ~600 ms. The cost is
+ *     set by the document AROUND them.
+ *  3. So the document has to shrink — and cutting the TEXT to shrink it meant deciding where a
+ *     component begins without a parser, which is a second and much worse parser. Every fix to
+ *     it revealed the next way around: a plain substring match was fooled by the literal inside
+ *     a DESCRIPTION; anchoring with a `/m` regex was fooled by U+2028, which JavaScript treats
+ *     as a line terminator and RFC 5545 permits inside a value; and neither noticed
+ *     `begin:vevent`, which is legal because component names are case-insensitive. Each of the
+ *     three was attacker-triggerable with one calendar invitation.
  *
- * So the cap has to shrink the DOCUMENT, which means cutting the text before `ICAL.parse` ever
- * sees it. 5,000 events is generous for a personal calendar; past it the read is honestly
- * reported as incomplete.
+ * The fix is to stop guessing: PARSE the document — which is cheap, ~100 ms for 5 MB — and then
+ * REHOME the first {@link MAX_COMPONENTS} events into a fresh, small VCALENDAR. ical.js decides
+ * what a component is, so there is nothing left to spoof. 5,000 events is generous for a
+ * personal calendar; past it the read is honestly reported as incomplete.
  */
 const MAX_COMPONENTS = 5000;
 
@@ -126,8 +134,9 @@ const MAX_COMPONENTS = 5000;
  */
 export function parseIcsEvents(ics: string, opts: ParseIcsOptions): ParseIcsResult {
   const max = opts.maxEvents ?? DEFAULT_MAX_EVENTS;
-  const capped = capComponents(ics);
-  const comp = new ICAL.Component(ICAL.parse(capped.ics));
+  const parsed = new ICAL.Component(ICAL.parse(ics));
+  const capped = capComponents(parsed);
+  const comp = capped.comp;
 
   // No VTIMEZONE registration here, deliberately. ical.js ships with no timezones registered
   // — a size trade-off by its authors, with `ical.timezones.js` as the add-on — but it
@@ -218,59 +227,26 @@ export function parseIcsEvents(ics: string, opts: ParseIcsOptions): ParseIcsResu
 }
 
 /**
- * Cut the document to {@link MAX_COMPONENTS} events, on the text, before parsing.
+ * Bound the document to {@link MAX_COMPONENTS} events, structurally.
  *
- * Textual rather than structural because the cost being bounded is set by the size of the
- * parsed document itself (see {@link MAX_COMPONENTS}) — dropping components after the parse
- * would leave that cost fully paid. The header, and with it any VTIMEZONE the remaining events
- * resolve against, is kept.
+ * Rehoming rather than cutting: the events that survive are moved into a NEW, small VCALENDAR,
+ * because the cost being bounded is `new ICAL.Event()`'s scan of the enclosing document (see
+ * {@link MAX_COMPONENTS}) and only a genuinely smaller enclosure pays it down. Doing this after
+ * the parse instead of on the text is what makes it unspoofable — ical.js has already decided
+ * what a component is, so there is no literal for an invitation to forge.
  *
- * The LINE ANCHOR is load-bearing, not tidiness. A plain substring search matches
- * `BEGIN:VEVENT` inside a property VALUE, and an attacker only needs to send the operator one
- * invitation whose DESCRIPTION repeats the literal 5,001 times: the cut then lands in the
- * middle of that value, `ICAL.parse` throws on the malformed document, and the operator's
- * ENTIRE calendar reads as unavailable. Verified — it threw "component began but did not end"
- * before this was anchored. RFC 5545 folds a long line by indenting the continuation with a
- * space or tab, so a line that begins in column zero with `BEGIN:VEVENT` is always a real
- * component boundary and a folded payload never is.
+ * Every VTIMEZONE comes along regardless of where it sat. RFC 5545 fixes no order between
+ * components, and leaving one behind turns every zoned time in the kept events into a floating
+ * one — a silently wrong clock, which is worse than a visible failure.
  */
-function capComponents(ics: string): { ics: string; capped: boolean } {
-  const boundary = /^BEGIN:VEVENT/gm;
-  for (let seen = 0; ; seen++) {
-    const match = boundary.exec(ics);
-    if (!match) return { ics, capped: false };
-    if (seen === MAX_COMPONENTS) {
-      const head = ics.slice(0, match.index);
-      // Carry any VTIMEZONE that sits AFTER the events. RFC 5545 fixes no order, and dropping
-      // one turns every zoned time in the kept events into a floating one — a silently wrong
-      // clock rather than a visible failure, which is the worse of the two.
-      const zones = collectTimezones(ics.slice(match.index));
-      return { ics: `${head}\r\n${zones}END:VCALENDAR\r\n`, capped: true };
-    }
-  }
-}
+function capComponents(parsed: ICAL.Component): { comp: ICAL.Component; capped: boolean } {
+  const events = parsed.getAllSubcomponents('vevent');
+  if (events.length <= MAX_COMPONENTS) return { comp: parsed, capped: false };
 
-/**
- * Pull the VTIMEZONE blocks out of the part being discarded.
- *
- * Scanned with indexOf rather than a lazy regex on purpose: `/BEGIN:VTIMEZONE[\s\S]*?END:.../g`
- * over a 5 MB tail is quadratic when the openings have no matching close, which is a document
- * an attacker can simply write. The count is capped for the same reason — no real calendar
- * defines more zones than there are zones.
- */
-function collectTimezones(tail: string): string {
-  const MAX_ZONES = 100;
-  const out: string[] = [];
-  let at = 0;
-  while (out.length < MAX_ZONES) {
-    const start = tail.indexOf('\nBEGIN:VTIMEZONE', at);
-    if (start < 0) break;
-    const end = tail.indexOf('\nEND:VTIMEZONE', start);
-    if (end < 0) break;
-    out.push(tail.slice(start + 1, end + '\nEND:VTIMEZONE'.length).replace(/\r$/, ''));
-    at = end + 1;
-  }
-  return out.length > 0 ? `${out.join('\r\n')}\r\n` : '';
+  const small = new ICAL.Component(['vcalendar', [], []]);
+  for (const zone of parsed.getAllSubcomponents('vtimezone')) small.addSubcomponent(zone);
+  for (const event of events.slice(0, MAX_COMPONENTS)) small.addSubcomponent(event);
+  return { comp: small, capped: true };
 }
 
 function isCancelled(component: ICAL.Component): boolean {
