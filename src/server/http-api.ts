@@ -2217,6 +2217,14 @@ export class LynoxHTTPApi {
           }
           if (isImage) {
             content.push({ type: 'image', source: { type: 'base64', media_type: rawType, data: file.data } });
+            // The image itself carries no marker — `_contentHoldsUntrustedMarker` only reads
+            // `type: 'text'` blocks, by construction — so an image upload marked the turn
+            // clean no matter what the picture said. It is also the ONLY upload the web UI
+            // produces itself, which made the taint gate mostly decorative on the real path.
+            // A model reads text out of an image as readily as out of a file; a screenshot of
+            // an instruction is an instruction. Pushing a wrapped companion block re-uses the
+            // existing marker channel rather than adding a second signalling mechanism.
+            content.push({ type: 'text', text: wrapUntrustedData(`[Image: ${safeName}]`, 'file_upload') });
           } else {
             // Non-image files: decode and include as text. Cap the decoded
             // size so a 10 MB base64 can't push ~7.5 MB of arbitrary text
@@ -2296,11 +2304,17 @@ export class LynoxHTTPApi {
               errorResponse(res, 415, `"${safeName}" looks like a binary document (Excel/PowerPoint/…). Inline text extraction for this format isn't supported yet — paste the text, or upload a PDF, Word (.docx), or .txt/.md/.csv.`);
               return;
             }
-            const decoded = buf.toString('utf-8');
+            const decoded = stripUntrustedSeparators(buf.toString('utf-8'));
             const text = decoded.length > MAX_TEXT_FILE_DECODED_CHARS
               ? `${decoded.slice(0, MAX_TEXT_FILE_DECODED_CHARS)}\n[…truncated, ${String(decoded.length - MAX_TEXT_FILE_DECODED_CHARS)} chars omitted]`
               : decoded;
-            content.push({ type: 'text', text: `[File: ${safeName}]\n${text}` });
+            // Same wrap as the PDF/DOCX branch above. It was applied there only, so every
+            // OTHER text format — .txt, .md, .csv, .json, .ics, .eml — reached the model
+            // unmarked, and a turn that read one counted as clean: no untrusted marker means
+            // `_sawUntrustedData` stays false, so a `remember` in that turn writes straight to
+            // active knowledge instead of the review queue. The formats that skipped the gate
+            // were the majority, and the plainest ones.
+            content.push({ type: 'text', text: wrapUntrustedData(`[File: ${safeName}]\n${text}`, 'file_upload') });
           }
         }
         content.push({ type: 'text', text: composedTask });
@@ -4353,9 +4367,16 @@ export class LynoxHTTPApi {
         can_set_custom_endpoints: !isManagedTier,
         can_export_data: true,
         can_delete_account: true,
-        // Dark gates — flip to true when PRD-MCP / PRD-CAL backends land
+        // Dark gate — flip to true when the PRD-MCP backend lands
         has_mcp_support: false,
-        has_calendar: false,
+        // PRD-CAL: true iff `calendar_enabled` actually registered the tool. Read from the
+        // REGISTRY, not from the config field, for the same reason as the two probes below:
+        // the config flag says what was asked for, the registry says what the agent got, and
+        // they part company whenever registration grows a second precondition.
+        // Left hard-coded `false` this reported "no calendar" on an instance where the
+        // calendar WAS on — so the settings page took the operator's ICS URL, stored it in the
+        // vault, showed it as connected, and the agent then said it had no calendar access.
+        has_calendar: engine.getRegistry().find('calendar_read') !== undefined,
         // R2b subject-graph surface: true iff subject_graph_enabled wired the store
         // (fleet OFF today) → the Web UI shows/hides the Subjects tab on this probe.
         has_subject_graph: engine.getSubjectStore() !== null,
