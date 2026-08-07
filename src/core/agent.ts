@@ -1023,6 +1023,24 @@ export class Agent implements IAgent {
     try {
       const provider = getActiveProvider();
       const fastSnap = resolveTierModel('fast', provider);
+      // `getActiveProvider()` and NOT `this.provider`, deliberately — the obvious-looking fix
+      // here costs money.
+      //
+      // The defect is real: `this.client` was built from `config.provider`, so on a session
+      // whose thread runs a different provider the comparison inside `clientForTierSnapshot`
+      // reads false, the ambient client is returned, and the fast model id goes to a wire
+      // client that has never heard of it. Today that ends in a 404 — wrong, free, and silent.
+      //
+      // Passing `this.provider` makes the comparison true, which builds a FRESH client from
+      // `fastSnap` — and outside hybrid mode the snapshot carries no apiKey, so
+      // `createLLMClient` falls through to `new Anthropic()` and the SDK picks up
+      // `ANTHROPIC_API_KEY` from the environment. On a managed instance that is the platform
+      // pool key: a Mistral tenant's helper call stops 404ing and starts billing us for a
+      // provider they never chose. Trading a free wrong answer for a paid one is not a fix.
+      //
+      // So the wrong client stays until the right one can be chosen WITH its credentials, and
+      // the catch below now says when this path fails — which is what was missing to measure
+      // how often it actually fires. See DEF-followup-recovery-wire-client.
       const client = clientForTierSnapshot(fastSnap, this.client, provider);
       const stream = client.beta.messages.stream({
         model: fastSnap.modelId,
@@ -1055,6 +1073,7 @@ export class Agent implements IAgent {
         // an Opus run charging Haiku tokens that trips the ceiling ~20x early.
         this.costGuard?.recordExternalCost(usd);
         debitInRunHelperCost(this.toolContext.meteredHost, this.sessionCounters, usd, 'fast');
+        this._helperCostUsd += usd;
       }
 
       const call = response.content.find(
@@ -1109,8 +1128,15 @@ export class Agent implements IAgent {
         role: 'user',
         content: [{ type: 'tool_result', tool_use_id: toolUseId, content: await entry.handler(input, this) }],
       });
-    } catch {
-      // Chips are a convenience; a failed recovery must never fail the turn.
+    } catch (err) {
+      // Chips are a convenience; a failed recovery must never fail the turn — but it must not
+      // be INVISIBLE either. This call is the one model call in the turn that `_callAPI`'s
+      // wire-capture never sees, so a silent catch made "the model had no suggestions" and
+      // "every recovery in production is throwing" the same observation: zero chips. One line
+      // on stderr is what separates them.
+      process.stderr.write(
+        `[lynox:follow-up] recovery failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
     } finally {
       clearTimeout(timer);
     }
@@ -1254,10 +1280,27 @@ export class Agent implements IAgent {
     return { ...composition, cacheReadTokens: this._lastCacheReadTokens };
   }
 
+  /**
+   * Dollars this run spent on IN-RUN HELPER calls — today the follow-up-chip recovery.
+   *
+   * These are billed to the tenant (`debitInRunHelperCost`) but produce no tokens in
+   * `Session.usage`, which is where the run's `costUsd` is derived from. So without this the
+   * control plane charges one number and every surface the customer can see reports a smaller
+   * one, on roughly every turn that needs the recovery. Accumulated here rather than folded
+   * into `usage`, because these tokens are priced on the FAST model and adding them to a run's
+   * own token counts would misprice them at the run's `pricePerM`.
+   */
+  private _helperCostUsd = 0;
+
+  /** {@link _helperCostUsd} for the run that just finished; reset at the start of each `send`. */
+  getHelperCostUsd(): number { return this._helperCostUsd; }
+
   async send(
     userMessage: string | unknown[],
     opts?: { suppressTools?: boolean; userMessagePrePersisted?: boolean },
   ): Promise<string> {
+    // Per RUN, not per session: `Session` reads it once after this returns.
+    this._helperCostUsd = 0;
     const snapshot = this.messages.length;
     // Support multimodal content blocks (e.g. vision: image + text)
     const content = Array.isArray(userMessage)

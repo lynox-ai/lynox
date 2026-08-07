@@ -1210,6 +1210,22 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.channels.search': { de: 'Websuche', en: 'Web search' },
 	'settings.channels.search_desc': { de: 'SearXNG-Endpunkt für Webrecherche', en: 'SearXNG endpoint for web research' },
 	'settings.channels.calendar': { de: 'Kalender', en: 'Calendar' },
+	'settings.channels.unavailable': { de: '· auf dieser Instanz nicht aktiv', en: '· not enabled on this instance' },
+	'settings.channels.calendar_unavailable_desc': {
+		de: 'Der Kalender ist auf dieser Instanz nicht freigeschaltet. Eine hier hinterlegte Adresse wird von nichts gelesen.',
+		en: 'The calendar is not enabled on this instance. An address stored here is not read by anything.',
+	},
+	// Each language written natively — the German is not a translation of the English.
+	'settings.google.claim_confirm': {
+		de: 'Ein Google-Konto wartet darauf, mit dieser Instanz verbunden zu werden. Verbinden?',
+		en: 'A Google account is waiting to be connected to this instance. Connect it?',
+	},
+	'settings.google.claim_confirm_hint': {
+		de: 'Nur bestätigen, wenn du die Verbindung gerade selbst gestartet hast. Welches Konto es ist, können wir hier nicht anzeigen — wer den Link geschickt hat, könnte ein fremdes Konto verbinden.',
+		en: 'Only confirm if you started this yourself. We cannot show you which account it is — whoever sent you the link could be connecting theirs.',
+	},
+	'settings.google.claim_confirm_yes': { de: 'Verbinden', en: 'Connect' },
+	'settings.google.claim_confirm_no': { de: 'Abbrechen', en: 'Cancel' },
 	'settings.channels.calendar_desc': { de: 'Termine lesen — aus Google, Outlook, Apple oder einer Buchungssoftware', en: 'Read appointments — from Google, Outlook, Apple, or booking software' },
 	// Each language written natively: the German is not a translation of the English. The
 	// instructions name the menu items as the operator sees them in their own product.

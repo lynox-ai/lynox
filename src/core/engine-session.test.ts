@@ -585,6 +585,84 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(typeof failedCall![0]).toBe('string'); // the failed run's id
     });
 
+    it('H2b: an in-run helper cost is SHOWN to the customer but not debited a second time', async () => {
+      // The two roles of the run's cost number pull in opposite directions, and a first
+      // version of this got it exactly backwards.
+      //
+      // A helper call (the follow-up-chip recovery) spends on the pool key WITHOUT producing
+      // tokens in `session.usage`. It debits itself through `reportMeteredCost`, under its own
+      // fresh run id — so the control plane is already correct. What was short were the
+      // numbers the CUSTOMER reads, which are derived from the usage deltas.
+      //
+      // Adding the helper dollars to the value handed to `onAfterRun` therefore does not fix
+      // the display: it bills the tenant twice, because `managed-hook` dedups per run id and
+      // these are two different ids. This test pins both halves at once.
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+
+      const HELPER_USD = 0.25;
+      mockSend.mockImplementationOnce(async () => {
+        session.usage.input_tokens += 1000;
+        session.usage.output_tokens += 500;
+        return 'done';
+      });
+      // Stand in for the recovery having spent on the pool key during this run.
+      const agent = (session as unknown as { agent?: { getHelperCostUsd?: () => number } }).agent;
+      if (agent) agent.getHelperCostUsd = () => HELPER_USD;
+
+      await session.run('go');
+
+      // The number the customer sees CARRIES the helper spend. `run()` returns the reply text;
+      // the figure the UI and the thread rollup read is the last run's usage summary.
+      const shown = (session as unknown as { _lastRunUsage?: { costUsd: number } })._lastRunUsage;
+      expect(shown, 'the run must record a usage summary').toBeDefined();
+      expect(shown!.costUsd).toBeGreaterThanOrEqual(HELPER_USD);
+
+      // The number the control plane DEBITS does not — the helper already debited itself.
+      const runCall = after.mock.calls.find(c => (c[2] as { modelTier?: string })?.modelTier !== 'fast');
+      expect(runCall, 'the run must still fire onAfterRun').toBeDefined();
+      expect(runCall![1] as number).toBeLessThan(HELPER_USD);
+    });
+
+    it('H2c: the ABORTED path shows the helper spend too, and still debits without it', async () => {
+      // The success path is pinned by H2b. The failure path repeats the same split by hand,
+      // and nothing held it — removing the helper term there left the suite green, which
+      // silently reopens the under-display this whole change exists to close, on every
+      // errored or cancelled turn. Three guards went in with no failing-capable test; this is
+      // the third.
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+
+      const HELPER_USD = 0.25;
+      mockSend.mockImplementationOnce(async () => {
+        session.usage.input_tokens += 1000;
+        session.usage.output_tokens += 500;
+        throw Object.assign(new Error('mid-turn boom'), { status: 500, type: 'api_error' });
+      });
+      const agent = (session as unknown as { agent?: { getHelperCostUsd?: () => number } }).agent;
+      if (agent) agent.getHelperCostUsd = () => HELPER_USD;
+
+      await expect(session.run('go')).rejects.toThrow('mid-turn boom');
+
+      const failed = after.mock.calls.find(c => (c[2] as { modelTier?: string })?.modelTier !== 'fast');
+      expect(failed, 'the aborted run must still fire onAfterRun').toBeDefined();
+      // Debited WITHOUT the helper term — it already debited itself, same as the success path.
+      expect(failed![1] as number).toBeLessThan(HELPER_USD);
+
+      // And the RECORDED number — the one the customer reads back — carries it. Asserting only
+      // the debit above let the display term be deleted with the suite still green, which is
+      // how this test first shipped: it pinned one half of a split whose whole point is that
+      // the two halves differ.
+      const rh = engine.getRunHistory()!;
+      const recorded = (rh.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .map(c => c[1] as { costUsd?: number; status?: string })
+        .find(a => a?.status === 'failed' || a?.status === 'aborted');
+      expect(recorded, 'the aborted run must be recorded').toBeDefined();
+      expect(recorded!.costUsd ?? 0).toBeGreaterThanOrEqual(HELPER_USD);
+    });
+
     it('Tier 2: a manual compaction records a compaction event (trigger=manual)', async () => {
       const { engine, session } = await createEngineAndSession();
       mockSend.mockResolvedValueOnce('summary text');   // the internal summary run

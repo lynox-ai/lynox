@@ -955,6 +955,24 @@ export class Session {
         cache_read_input_tokens: cacheRead,
       });
 
+      // In-run helper calls (the follow-up-chip recovery) spend on the pool key without
+      // producing tokens in `this.usage`, so the deltas above cannot see them.
+      //
+      // ⚠ This is a DISPLAY term and must never reach `onAfterRun`. `costUsd` above is the
+      // value the managed hook DEBITS, and the helper already debited itself through its own
+      // `reportMeteredCost` call (`metered-request.ts`, `debitInRunHelperCost`) under a fresh
+      // run id. `managed-hook.ts` dedups per run id, so adding the same dollars to `costUsd`
+      // bills the tenant twice — which a first version of this did, on the belief that the
+      // CP figure was the one missing them. It was the other way round: the CP was right and
+      // the numbers the CUSTOMER reads were short.
+      //
+      // Dollars rather than tokens: the helper is priced on the FAST model, and folding its
+      // tokens into this run's counts would re-price them at the run's own `pricePerM`.
+      // `?.()` on the METHOD, not just on `agent`: several tests and the pipeline path put a
+      // partial double there, and `agent?.m()` guards only a missing agent. (The accounting itself is
+      // pinned by `engine-session.test.ts` H2b/H2c, in both directions and on both paths.)
+      const displayCostUsd = costUsd + (this.agent?.getHelperCostUsd?.() ?? 0);
+
       // What this run's sub-agents spent, if it delegated. Read from RunHistory
       // rather than tracked in memory: the children are already rows there,
       // written before `spawn_agent` returns (the parent blocks on them), so by
@@ -975,7 +993,7 @@ export class Session {
         tokensOut,
         cacheRead,
         cacheWrite,
-        costUsd,
+        costUsd: displayCostUsd,
         model,
         ...(spawnCostUsd > 0 ? { spawnCostUsd } : {}),
         ...(this.currentRunId ? { runId: this.currentRunId } : {}),
@@ -994,7 +1012,7 @@ export class Session {
             tokensOut,
             tokensCacheRead: cacheRead,
             tokensCacheWrite: cacheWrite,
-            costUsd,
+            costUsd: displayCostUsd,
             toolCallCount: this.runToolCallSeq,
             durationMs,
             userWaitMs: this._userWaitMs,
@@ -1038,7 +1056,7 @@ export class Session {
           const rollupTokens = threadTotals
             ? threadTotals.tokens_in + threadTotals.tokens_out
             : this.usage.input_tokens + this.usage.output_tokens;
-          const rollupCost = threadTotals ? threadTotals.cost_usd : costUsd;
+          const rollupCost = threadTotals ? threadTotals.cost_usd : displayCostUsd;
           if (newMessages.length > 0) {
             // Combined append + rollup in one transaction (P1). Seqs start at
             // MAX(seq)+1 (deletion-safe), message_count tracks total rows.
@@ -1191,7 +1209,9 @@ export class Session {
             tokensOut: failedTokensOut,
             tokensCacheRead: failedCacheRead,
             tokensCacheWrite: failedCacheWrite,
-            costUsd: failedCostUsd,
+            // Display, like the success path: the helper already debited itself, so this
+            // number must include it while `onAfterRun` below must not.
+            costUsd: failedCostUsd + (this.agent?.getHelperCostUsd?.() ?? 0),
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
             status: isAbort ? 'aborted' : 'failed',

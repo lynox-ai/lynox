@@ -41,13 +41,31 @@
 	}
 
 	let oauthClaimHandled = $state(false);
+	/** A claim waiting for the user to confirm it — see the effect below for why. */
+	let pendingClaimNonce = $state<string | null>(null);
+
+	function confirmPendingClaim(): void {
+		const nonce = pendingClaimNonce;
+		pendingClaimNonce = null;
+		if (nonce) void claimManagedGoogleTokens(nonce);
+	}
 
 	$effect(() => {
 		void loadManagedStatus();
 		void loadGoogleStatus();
 
-		// Auto-claim Google tokens after OAuth redirect (managed flow).
-		// Only fires on this route — previously lived in IntegrationsView.
+		// A pending Google claim is PARKED here, not executed. The user confirms it.
+		//
+		// `/oauth/google/start` takes an `instance_id` and no auth, and the signed state binds
+		// only that id — nothing about the browser. So anyone who knows a tenant's instance id
+		// can run the consent themselves with THEIR Google account and hand the resulting
+		// link to the tenant. Claiming is authenticated, so it takes the tenant's own logged-in
+		// browser to finish — which auto-claiming supplied for free: opening the link was the
+		// whole attack, with no dialog, no gesture, and nothing on screen naming the account.
+		// The engine cannot name it BEFORE the claim either (`getAccountInfo` reads a connection that
+		// does not exist yet, and even after it returns scopes and expiry, no
+		// identity), so a confirmation the user has to press is the only barrier available
+		// tonight. Binding the state to the browser is the real fix; it is tracked, not promised here.
 		if (!oauthClaimHandled && typeof window !== 'undefined') {
 			const params = new URLSearchParams(window.location.search);
 			const claimNonce = params.get('google_oauth');
@@ -57,8 +75,7 @@
 				const url = new URL(window.location.href);
 				url.searchParams.delete('google_oauth');
 				window.history.replaceState({}, '', url.toString());
-				// Claim tokens using nonce
-				void claimManagedGoogleTokens(claimNonce);
+				pendingClaimNonce = claimNonce;
 			}
 		}
 	});
@@ -71,6 +88,23 @@
 <div class="p-6 max-w-4xl mx-auto space-y-4">
 	<a href="/app/settings/channels" class="text-xs text-text-subtle hover:text-text transition-colors">&larr; {t('settings.channels.back')}</a>
 	<h1 class="text-xl font-light tracking-tight mb-6 mt-2">{t('settings.channels.google')}</h1>
+
+	{#if pendingClaimNonce}
+		<!-- Deliberately a decision, not a notice. The wording says what cannot be shown —
+		     which account — because that absence is the reason the confirmation exists. -->
+		<div class="rounded-[var(--radius-md)] border border-warning/20 bg-warning/10 p-5 space-y-3 text-warning">
+			<p class="text-sm">{t('settings.google.claim_confirm')}</p>
+			<p class="text-xs text-text-subtle">{t('settings.google.claim_confirm_hint')}</p>
+			<div class="flex gap-2">
+				<button class="btn-primary text-sm" onclick={confirmPendingClaim}>
+					{t('settings.google.claim_confirm_yes')}
+				</button>
+				<button class="btn-ghost text-sm" onclick={() => { pendingClaimNonce = null; }}>
+					{t('settings.google.claim_confirm_no')}
+				</button>
+			</div>
+		</div>
+	{/if}
 
 	<div class="rounded-[var(--radius-md)] border border-border bg-bg-subtle p-5">
 		<div class="flex items-center justify-between mb-4">

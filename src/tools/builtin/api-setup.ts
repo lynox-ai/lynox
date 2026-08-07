@@ -25,7 +25,7 @@ import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
-import { isInfraSecret } from '../../core/secret-store.js';
+import { isInfraSecret, isProtectedSecretWrite } from '../../core/secret-store.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -1432,13 +1432,31 @@ Next steps before calling create:
       if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(outputName)) {
         return `Error: output_secret_name "${outputName}" is not valid UPPER_SNAKE_CASE.`;
       }
+      // The same refusal `validateProfile` makes for `vault_keys` — this path had only the
+      // shape check, so a well-formed name was enough to write over any platform secret.
+      // `secretStore.set` below overwrites without asking, and the agent chooses the name:
+      // one injected `fetch_token` could replace a mail credential or a feed address with an
+      // OAuth token, and the only symptom is the feature quietly failing afterwards.
+      // Worth stating because it is what makes this a gap rather than a gap-by-omission: this
+      // release ADDS entries to `INFRA_SECRET_PATTERNS` and applies them at the sibling site,
+      // so the protected set grew while this door stayed open.
+      if (isProtectedSecretWrite(outputName)) {
+        return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
+      }
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
       }
       secretStore.set(outputName, accessToken);
       // Stash refresh_token too if the response carries one (for later refresh_token grants).
       if (parsed.refresh_token && typeof parsed.refresh_token === 'string') {
+        // Derived from the profile id rather than chosen — but `ID_PATTERN` permits ids like
+        // `google-oauth` or `mail-account-x`, so the derived name lands inside a protected
+        // prefix just as easily as a chosen one. Guarding only the caller-supplied name would
+        // close the door and leave the window.
         const refreshName = `${input.id.toUpperCase().replace(/-/g, '_')}_REFRESH_TOKEN`;
+        if (isProtectedSecretWrite(refreshName)) {
+          return `Token exchange OK, but the refresh token was NOT stored: "${refreshName}" would overwrite a credential the tenant cannot recover. Rename the api_profile so its derived key does not collide.`;
+        }
         secretStore.set(refreshName, parsed.refresh_token);
       }
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
