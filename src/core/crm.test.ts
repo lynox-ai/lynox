@@ -156,6 +156,80 @@ describe('CRM', () => {
     });
   });
 
+  describe('deleteContact', () => {
+    it('THE POINT: a wrong contact can be removed at all', () => {
+      // Before this the CRM had NO removal path. `contacts_save` upserts on email, so a wrong
+      // row could only be overwritten — and only if it has one.
+      crm.upsertContact({ name: 'Wrong Person', email: 'wrong@example.com', source: 'agent' });
+      const [row] = crm.listContacts();
+      expect(row?._id).toBeDefined();
+      expect(crm.deleteContact(row!._id!)).toBe(true);
+      expect(crm.listContacts()).toHaveLength(0);
+    });
+
+    it('removes ONLY the named row', () => {
+      // A filter that matched more than the id would take the neighbours with it.
+      crm.upsertContact({ name: 'Keep Me', email: 'keep@example.com', source: 'agent' });
+      crm.upsertContact({ name: 'Drop Me', email: 'drop@example.com', source: 'agent' });
+      const drop = crm.listContacts().find(c => c.name === 'Drop Me')!;
+      crm.deleteContact(drop._id!);
+      const left = crm.listContacts();
+      expect(left).toHaveLength(1);
+      expect(left[0]?.name).toBe('Keep Me');
+    });
+
+    it('reports false for an id that is not there, instead of pretending', () => {
+      expect(crm.deleteContact(999_999)).toBe(false);
+    });
+
+    it('removes an EMAIL-LESS contact — the case re-saving could never repair', () => {
+      // A NULL email never collides, so every re-save inserted another row. Lead research
+      // produces exactly these.
+      crm.upsertContact({ name: 'Researched Lead', company: 'Some Clinic', source: 'agent_external' });
+      const row = crm.listContacts()[0]!;
+      expect(crm.deleteContact(row._id!)).toBe(true);
+      expect(crm.listContacts()).toHaveLength(0);
+    });
+
+    it('takes the interactions and deals with it', () => {
+      // Otherwise "remove this person" deletes the row holding their phone number and keeps
+      // the notes ABOUT them — `interactions.summary` is free text on what was discussed, and
+      // both collections stay readable by name through their own routes.
+      crm.upsertContact({ name: 'Alte Kundin', email: 'alt@example.com', source: 'agent' });
+      crm.logInteraction({ contact_name: 'Alte Kundin', type: 'call', summary: 'Wollte einen Termin im Herbst' });
+      crm.upsertDeal({ title: 'Beratung', contact_name: 'Alte Kundin', value: 900, stage: 'proposal' });
+      expect(crm.getInteractions('Alte Kundin')).toHaveLength(1);
+      expect(crm.getDealsForContact('Alte Kundin')).toHaveLength(1);
+
+      const row = crm.listContacts().find(c => c.name === 'Alte Kundin')!;
+      expect(crm.deleteContact(row._id!)).toBe(true);
+      expect(crm.getInteractions('Alte Kundin')).toHaveLength(0);
+      expect(crm.getDealsForContact('Alte Kundin')).toHaveLength(0);
+    });
+
+    it('leaves another contact\'s interactions and deals alone', () => {
+      // The cascade is keyed by NAME, so a filter that is too loose takes the neighbours' history.
+      crm.upsertContact({ name: 'Geht Weg', email: 'weg@example.com', source: 'agent' });
+      crm.upsertContact({ name: 'Bleibt Da', email: 'bleibt@example.com', source: 'agent' });
+      crm.logInteraction({ contact_name: 'Geht Weg', type: 'call', summary: 'a' });
+      crm.logInteraction({ contact_name: 'Bleibt Da', type: 'call', summary: 'b' });
+      crm.upsertDeal({ title: 'D1', contact_name: 'Bleibt Da', value: 100, stage: 'lead' });
+
+      const row = crm.listContacts().find(c => c.name === 'Geht Weg')!;
+      crm.deleteContact(row._id!);
+      expect(crm.getInteractions('Bleibt Da')).toHaveLength(1);
+      expect(crm.getDealsForContact('Bleibt Da')).toHaveLength(1);
+    });
+
+    it('touches nothing when the id was not there', () => {
+      crm.upsertContact({ name: 'Unbeteiligt', email: 'u@example.com', source: 'agent' });
+      crm.logInteraction({ contact_name: 'Unbeteiligt', type: 'call', summary: 'x' });
+      expect(crm.deleteContact(999_999)).toBe(false);
+      expect(crm.listContacts()).toHaveLength(1);
+      expect(crm.getInteractions('Unbeteiligt')).toHaveLength(1);
+    });
+  });
+
   describe('subject-graph mirror', () => {
     it('logs an ambiguous-name failure WITHOUT the contact name (data minimisation)', () => {
       // The mirror's catch writes `err.message` to stderr under an explicit promise that

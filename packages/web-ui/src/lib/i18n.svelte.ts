@@ -557,6 +557,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'crm.create_in_chat': { de: 'Neuer Kontakt', en: 'New contact' },
 	'crm.create_in_chat_prompt': { de: 'Ich möchte einen neuen Kontakt erfassen.', en: "I'd like to add a new contact." },
 	'crm.edit_in_chat': { de: 'Im Chat bearbeiten', en: 'Edit in chat' },
+	// Removal + provenance for a contact. `source` used to read 'manual' for every
+	// agent-written row, which claimed the person entered it themselves.
+	'crm.remove': { de: 'Kontakt entfernen', en: 'Remove contact' },
+	'crm.removing': { de: 'wird entfernt...', en: 'removing...' },
+	'crm.remove_confirm': { de: '{name} aus den Kontakten entfernen? Das lässt sich nicht rückgängig machen.', en: 'Remove {name} from contacts? This cannot be undone.' },
+	'crm.remove_failed': { de: 'Der Kontakt konnte nicht entfernt werden. Bitte erneut versuchen.', en: 'That contact could not be removed. Please try again.' },
+	'crm.source.agent': { de: 'von lynox angelegt', en: 'created by lynox' },
+	'crm.source.agent_external': { de: 'von lynox angelegt, aus externen Inhalten', en: 'created by lynox, from external content' },
 	'crm.edit_in_chat_prompt': { de: 'Ich möchte diesen Kontakt bearbeiten:', en: "I'd like to edit this contact:" },
 
 	// Backups

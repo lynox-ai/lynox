@@ -6301,6 +6301,33 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
 
+    it('DELETE /api/crm/contacts/:id removes the row and reports it', async () => {
+      const deleteContact = vi.fn((id: number) => id === 7);
+      await swapEngine({ getCRM: () => ({ deleteContact }) }, async () => {
+        const res = await jsonFetch('/api/crm/contacts/7', { method: 'DELETE' });
+        expect(res.status).toBe(200);
+        expect(deleteContact).toHaveBeenCalledWith(7);
+      });
+    });
+
+    it('DELETE /api/crm/contacts/:id answers 404 for an id that is not there', async () => {
+      // Not 200-with-removed-false: the caller has to be able to tell "gone now" from
+      // "was never here", or a stale list looks like a successful delete.
+      await swapEngine({ getCRM: () => ({ deleteContact: () => false }) }, async () => {
+        const res = await jsonFetch('/api/crm/contacts/7', { method: 'DELETE' });
+        expect(res.status).toBe(404);
+      });
+    });
+
+    it('DELETE /api/crm/contacts/:id refuses a non-numeric id without touching the store', async () => {
+      const deleteContact = vi.fn(() => true);
+      await swapEngine({ getCRM: () => ({ deleteContact }) }, async () => {
+        const res = await jsonFetch('/api/crm/contacts/not-a-number', { method: 'DELETE' });
+        expect(res.status).toBe(400);
+        expect(deleteContact).not.toHaveBeenCalled();
+      });
+    });
+
     it('GET /api/export caps the entity page-loop at MAX_PAGES (no runaway on a full-page-forever store)', async () => {
       // A store that always returns a full PAGE would loop forever without the
       // MAX_PAGES bound — assert the loop stops at the 1000-page cap.

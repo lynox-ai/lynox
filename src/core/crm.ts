@@ -325,6 +325,46 @@ export class CRM {
     });
   }
 
+  /**
+   * Remove one contact by its row id. Returns true when a row was removed.
+   *
+   * Until this existed the CRM had no removal path of ANY kind: `contacts_save` upserts on
+   * email, so a wrong contact could only be overwritten — and only if it HAS an email, since
+   * a NULL email never collides and every save inserts another row. A contact the agent
+   * researched off a web page has no email as often as not, so "just save it again" was not
+   * a repair, it was a duplicate.
+   *
+   * A hard delete, unlike the durable-knowledge store's `retireEntry`, which supersedes and
+   * keeps the row. The reason is what the two hold: a knowledge entry is a claim whose
+   * history is worth auditing, while a contact row is a person's name, address and phone —
+   * data whose right answer to "remove this" is that it is gone.
+   *
+   * The interactions and deals keyed to this contact go WITH it, and that is the difference
+   * between removing a contact and hiding one. `interactions.summary` is free text about the
+   * person — what was discussed, what they wanted — and both collections stay readable by name
+   * through their own routes, so leaving them behind would answer "remove this person" by
+   * deleting the row that holds their phone number and keeping the notes about them. Re-saving
+   * the same name would then silently re-adopt the old history.
+   *
+   * The engine.db subject mirror (S1c, flag-gated) is deliberately NOT touched. It is
+   * additive, and a subject can be referenced by durable knowledge entries written long
+   * after the contact; deleting it here would cut those loose to repair one CRM row. A
+   * subject with no contact behind it is inert — the focus block renders only pinned
+   * knowledge, never contact fields.
+   */
+  deleteContact(id: number): boolean {
+    this.ensureSchema();
+    // Read the name BEFORE the row goes: interactions and deals are keyed by name, not by id.
+    const result = this.ds.queryRecords({ collection: 'contacts', filter: { _id: id }, limit: 1 });
+    const contact = (result.rows[0] as unknown as ContactRecord | undefined) ?? null;
+    if (this.ds.deleteRecords({ collection: 'contacts', filter: { _id: id } }) === 0) return false;
+    if (contact?.name) {
+      this.ds.deleteRecords({ collection: 'interactions', filter: { contact_name: contact.name } });
+      this.ds.deleteRecords({ collection: 'deals', filter: { contact_name: contact.name } });
+    }
+    return true;
+  }
+
   /** List contacts with optional filter. */
   listContacts(filter?: Record<string, unknown>, limit = 50): ContactRecord[] {
     this.ensureSchema();
