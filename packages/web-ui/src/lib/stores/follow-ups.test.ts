@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { parseFollowUps, followUpsFromToolInput, computeDeferredTray, stripFollowUpsFromHistory, taskPreview, type FollowUpHistoryMessage } from './follow-ups.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, taskPreview, type FollowUpHistoryMessage } from './follow-ups.js';
 
 describe('parseFollowUps', () => {
 	it('parses the wrapped <follow_ups> form and strips it from the text', () => {
@@ -107,49 +109,43 @@ describe('followUpsFromToolInput (suggest_follow_ups tool-call path)', () => {
 	});
 });
 
-describe('computeDeferredTray (deferred-siblings tray — the "second option survives" fix)', () => {
-	const A = { label: 'A', task: 'ta' };
-	const B = { label: 'B', task: 'tb' };
-	const C = { label: 'C', task: 'tc' };
+describe('the deferred-follow-ups tray is gone', () => {
+	// Removed 2026-08-08. It captured the un-taken siblings of a clicked pill
+	// AUTOMATICALLY and pinned them above the composer until dismissed by hand.
+	// Two defects, one root: it decided for the user what was worth keeping, and
+	// then had to guess whether a later, rephrased suggestion was the same one —
+	// a comparison over model-written strings, which never matched, so the tray
+	// grew, showed near-duplicates of the live pills, and ate a permanent row of
+	// chips on mobile. The replacement is an explicit pin: DEF-followup-pin-explicit.
+	//
+	// Asserted against the sources because these components are not mountable in
+	// this suite (same approach as chat-nav-targets.test.ts). Without it, a
+	// half-removal — store still capturing into invisible state, or a stray
+	// render block — would look exactly like a clean one.
+	const read = (rel: string): string =>
+		readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf-8');
 
-	it('adds the un-taken siblings of the clicked pill, excluding the clicked one', () => {
-		const next = computeDeferredTray([], A, [A, B, C], 8);
-		expect(next.map((f) => f.task)).toEqual(['tb', 'tc']);
+	it('nothing renders it and nothing captures into it', () => {
+		const view = read('../components/ChatView.svelte');
+		const store = read('./chat.svelte.ts');
+		expect(view).not.toMatch(/deferredFollowUps|DeferredFollowUp|deferred_title/);
+		// The store may still READ an old persisted blob's type, but must not
+		// write, load or hold tray state — invisible state that still evicts at
+		// its cap is worse than the visible tray was.
+		expect(store).not.toMatch(/computeDeferredTray|loadDeferredFollowUps/);
+		expect(store).not.toMatch(/deferredFollowUps\s*=/);
 	});
 
-	it('dedups new siblings against what is already in the tray', () => {
-		const next = computeDeferredTray([B], A, [A, B, C], 8);
-		expect(next.map((f) => f.task)).toEqual(['tb', 'tc']); // B not duplicated, C added
+	it('takeFollowUp just sends the clicked task', () => {
+		// No second argument: there is no sibling set to capture any more, and a
+		// parameter nothing reads is how the capture quietly comes back.
+		const store = read('./chat.svelte.ts');
+		expect(store).toMatch(/export function takeFollowUp\(clicked: FollowUpSuggestion\): void \{/);
+		expect(read('../components/ChatView.svelte')).toMatch(/takeFollowUp\(fu\)/);
 	});
 
-	it('caps at max, dropping the oldest (newest-last)', () => {
-		const current = [
-			{ label: 'x1', task: 't1' },
-			{ label: 'x2', task: 't2' },
-		];
-		const next = computeDeferredTray(current, A, [A, B, C], 3);
-		// current [t1,t2] + siblings [tb,tc] = 4 → cap 3 → drop oldest t1
-		expect(next.map((f) => f.task)).toEqual(['t2', 'tb', 'tc']);
-	});
-
-	it('returns the SAME reference when there are no new siblings (single-pill set)', () => {
-		const current = [B];
-		expect(computeDeferredTray(current, A, [A], 8)).toBe(current); // no siblings → unchanged
-	});
-
-	it('returns the SAME reference when every sibling is already in the tray', () => {
-		const current = [B, C];
-		expect(computeDeferredTray(current, A, [A, B, C], 8)).toBe(current);
-	});
-
-	it('dedups two siblings that share a task but differ by label (task-keyed tray must not duplicate)', () => {
-		// normalizeSuggestions dedups by LABEL, so a set can legitimately hold two items with
-		// the same `task` and different labels. The tray `{#each … (fu.task)}` is task-keyed, so
-		// letting both through would crash Svelte with each_key_duplicate. Only ONE must land.
-		const bAlt = { label: 'B alternative', task: 'tb' };
-		const next = computeDeferredTray([], A, [A, B, bAlt, C], 8);
-		expect(next.map((f) => f.task)).toEqual(['tb', 'tc']); // tb once, not twice
-		expect(new Set(next.map((f) => f.task)).size).toBe(next.length); // no duplicate task keys
+	it('leaves no orphaned translation keys', () => {
+		expect(read('../i18n.svelte.ts')).not.toMatch(/chat\.deferred_/);
 	});
 });
 

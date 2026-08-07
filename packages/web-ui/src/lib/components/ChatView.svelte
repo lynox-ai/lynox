@@ -36,10 +36,6 @@
 		cancelQueue,
 		removeQueuedMessage,
 		takeFollowUp,
-		getDeferredFollowUps,
-		runDeferredFollowUp,
-		dismissDeferredFollowUp,
-		clearDeferredFollowUps,
 		getSessionModel,
 		getContextBudget,
 		getCompactionOffer,
@@ -1641,7 +1637,6 @@
 		return t('chat.thinking');
 	});
 	const queueLength = $derived(getQueueLength());
-	const deferredFollowUpsList = $derived(getDeferredFollowUps());
 	const pendingPermission = $derived(getPendingPermission());
 	const pendingTabsPrompt = $derived(getPendingTabsPrompt());
 	const pendingSecret = $derived(getPendingSecretPrompt());
@@ -2878,7 +2873,7 @@
 						{#each lastAssistant.followUps as fu}
 							{@const preview = taskPreview(fu)}
 							<button
-								onclick={() => takeFollowUp(fu, lastAssistant.followUps ?? [])}
+								onclick={() => takeFollowUp(fu)}
 								title={preview ?? fu.label}
 								class="max-w-full sm:max-w-sm text-left rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 px-3 py-1.5 text-xs text-accent-text hover:border-accent/50 hover:bg-accent/10 transition-all"
 							>
@@ -3451,48 +3446,6 @@
 			currentToolStartedAt={currentToolStartedAt}
 			lastEventAt={lastEventAt}
 		/>
-	{/if}
-
-	<!-- Deferred follow-ups tray: un-taken siblings of a pill the user took, kept
-	     pinned above the composer so a second matching suggestion isn't lost.
-	     Clicking one runs it as a FRESH in-context turn (sendMessage), not a blind
-	     pre-recorded queue. Glanceable + click-to-run + dismiss only — no editor. -->
-	{#if deferredFollowUpsList.length > 0}
-		<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2">
-			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex flex-wrap items-center gap-2">
-				<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('chat.deferred_title')}</span>
-				{#each deferredFollowUpsList as fu (fu.task)}
-					{@const preview = taskPreview(fu)}
-					<div class="inline-flex max-w-full items-center rounded-full border border-accent/30 bg-accent/5 text-xs text-accent-text hover:border-accent/50 hover:bg-accent/10 transition-all">
-						<!-- Same consent argument as the chips above: this button also
-						     runs `task` on one click. The tray is a single compact row,
-						     so the instruction rides inline and truncated — about 40
-						     characters at this size, which is an opening and not an
-						     instruction. The tooltip carries it whole for a mouse; a
-						     screen reader gets the full text from the visible span,
-						     since `truncate` is CSS and hides nothing from assistive
-						     tech (an `sr-only` copy here read the task twice). -->
-						<button
-							onclick={() => runDeferredFollowUp(fu)}
-							title={preview ?? fu.label}
-							class="rounded-l-full px-3 py-1.5 min-w-0 text-left"
-						>{fu.label}{#if preview}<span class="text-text-subtle"> · <span class="inline-block max-w-[16rem] truncate align-bottom">{preview}</span></span>{/if}</button>
-						<button
-							onclick={() => dismissDeferredFollowUp(fu)}
-							aria-label={t('chat.deferred_dismiss')}
-							title={t('chat.deferred_dismiss')}
-							class="rounded-r-full py-1.5 pl-1 pr-2.5 text-text-subtle hover:text-danger"
-						>×</button>
-					</div>
-				{/each}
-				{#if deferredFollowUpsList.length > 1}
-					<button
-						onclick={() => clearDeferredFollowUps()}
-						class="text-[10px] font-mono uppercase tracking-widest text-text-subtle hover:text-danger"
-					>{t('chat.deferred_clear')}</button>
-				{/if}
-			</div>
-		</div>
 	{/if}
 
 	<!-- Input. NO safe-area-inset-bottom here — the StatusBar below this row

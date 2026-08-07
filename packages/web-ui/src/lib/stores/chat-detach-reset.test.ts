@@ -34,7 +34,7 @@ const SRC = readFileSync(
 
 /** Cleared when detaching from a thread — on BOTH `newChat` and `resumeThread`. */
 const THREAD_SCOPED = [
-	'messages', 'sessionId', 'deferredFollowUps', 'isStreaming', 'streamingActivity',
+	'messages', 'sessionId', 'isStreaming', 'streamingActivity',
 	'streamingToolName', 'streamingToolPhase', 'pendingPermission', 'pendingTabsPrompt',
 	'pendingSecretPrompt', 'pendingMailConnect', 'pendingChangeset', 'changesetLoading',
 	'skipExtraction', 'chatError', 'runInterrupted', 'messageQueue', 'runStartedAt',
