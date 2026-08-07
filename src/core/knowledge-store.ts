@@ -141,6 +141,7 @@ export class KnowledgeStore {
 
     let subjectId: string | null = null;
     let subjectHint: string | null = null;
+    let subjectAmbiguous = false;
     const name = params.subjectName?.trim();
     if (name) {
       if (status === 'active') {
@@ -150,7 +151,7 @@ export class KnowledgeStore {
         // text as a hint and leave the link unmade. The write is not lost and nothing is
         // bound to a guess; whoever resolves the hint later has the full name to work with.
         const r = this.subjects.findOrCreate({ kind: params.subjectKind ?? 'organization', name });
-        if (r.ambiguous) { subjectId = null; subjectHint = name; } else { subjectId = r.id; }
+        if (r.ambiguous) { subjectId = null; subjectHint = name; subjectAmbiguous = true; } else { subjectId = r.id; }
       } else {
         // Pending-entry hygiene (acceptance §2): link by hint; findOrCreate on approval only,
         // so a rejected queue entry never leaves an empty minted subject behind.
@@ -167,7 +168,10 @@ export class KnowledgeStore {
     // clause would otherwise reach). Conservative: only when EXACTLY ONE subject is mentioned.
     if (status === 'active' && !subjectId) {
       const mentioned = this._deriveFocusSubjects(params.text, null, null);
-      if (mentioned.length === 1) subjectId = mentioned[0]!;
+      // A link made here SUPERSEDES an unresolved hint: the row must not carry both, or the
+      // same fact answers to two different subject keys and whoever resolves the queue later
+      // re-attributes a row that is already attributed.
+      if (mentioned.length === 1) { subjectId = mentioned[0]!; subjectHint = null; }
     }
 
     // Structural write-path dedup (only for ACTIVE-landing writes). The model, despite the
@@ -220,7 +224,7 @@ export class KnowledgeStore {
       params.sourceRunId ?? null,
     );
 
-    return { id, status, tier, subjectId, pinned: pinned === 1 };
+    return { id, status, tier, subjectId, pinned: pinned === 1, ...(subjectAmbiguous && !subjectId ? { subjectAmbiguous: true } : {}) };
   }
 
   /**
@@ -289,6 +293,21 @@ export class KnowledgeStore {
     const rows = scopeIds === null
       ? this._selectActiveGlobal()
       : this._selectActiveForSubjects(scopeIds);
+
+    // An ACTIVE row can carry an unresolved `subject_hint` instead of a link: `write()` refuses
+    // to bind an ambiguous name to a guess and parks the plain name instead. Such a row matches
+    // no `subject_id`, so the scoped read above cannot reach it — and an ambiguous name resolves
+    // to an EMPTY scope, which is exactly the case where the caller asked BY THAT NAME. Two
+    // "Meier" organizations, `remember` a fact about "Meier", then ask about "Meier": the fact
+    // is stored, reported as remembered, and invisible. Union those rows in by hint.
+    //
+    // Not a cross-subject bleed, which is the thing the empty scope exists to prevent: the hint
+    // IS the queried name and the row was never attributed to anyone else, so returning it
+    // cannot surface another client's fact.
+    const seen = new Set(rows.map(r => r.id));
+    for (const row of this._selectActiveByHint(params.subjectName)) {
+      if (!seen.has(row.id)) rows.push(row);
+    }
 
     const queryTokens = new Set(KnowledgeStore.tokenize(params.query));
     const scored = rows.map(row => {
@@ -886,6 +905,17 @@ export class KnowledgeStore {
     ).all(...subjectIds) as KnowledgeRow[];
   }
 
+  /** ACTIVE rows parked on an unresolved `subject_hint` equal to `name`, case- and
+   *  space-insensitively. `subject_id IS NULL` is part of the predicate on purpose: an approved
+   *  pending row keeps neither, and a linked row is already reachable through its subject. */
+  private _selectActiveByHint(name: string | undefined): KnowledgeRow[] {
+    const hint = name?.trim().toLowerCase();
+    if (!hint) return [];
+    return this.db.prepare(
+      "SELECT * FROM knowledge_entries WHERE status = 'active' AND subject_id IS NULL AND lower(trim(subject_hint)) = ?",
+    ).all(hint) as KnowledgeRow[];
+  }
+
   private _selectActiveGlobal(): KnowledgeRow[] {
     // Bounded so a large corpus doesn't rank-scan unboundedly; newest-first pre-cut.
     return this.db.prepare(
@@ -995,6 +1025,11 @@ export interface KnowledgeWriteResult {
   /** True when the write was a near-duplicate of an existing active entry and was NOT inserted;
    *  `id` then points at that existing entry. */
   deduped?: boolean;
+  /** True when a `subjectName` was given but names more than one subject, so no link was made
+   *  and the row is parked on `subject_hint`. Present ONLY on that outcome, so a caller cannot
+   *  confuse it with "no subject was named at all" — the two look identical in `subjectId`, and
+   *  telling the model apart from them is the whole point (it can ask WHICH one). */
+  subjectAmbiguous?: true;
 }
 
 /** The raw v9 `knowledge_entries` row (text still enc()'d). */

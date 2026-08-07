@@ -592,15 +592,33 @@ describe('a recurrence rule whose date can never exist', () => {
   ].join('\n');
 
   it.each([
+    // Impossible arithmetic — the family the guard was originally written for.
     ['30 February, daily',        'RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30'],
     ['31 February, daily',        'RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=31'],
     ['31 April/June, daily',      'RRULE:FREQ=DAILY;BYMONTH=4,6;BYMONTHDAY=31'],
+    // Possible but UNBOUNDABLE below MONTHLY — every one measured at 60-75 s before the fix,
+    // and none of them caught by the impossible-date arithmetic, which reads -1 as a legal day.
+    // The first is the one an ordinary exporter can really emit.
+    ['last day of month, daily',  'RRULE:FREQ=DAILY;BYMONTHDAY=-1'],
+    ['last Friday, daily',        'RRULE:FREQ=DAILY;BYDAY=-1FR'],
+    ['2nd Monday, daily',         'RRULE:FREQ=DAILY;BYDAY=2MO'],
+    ['week number, weekly',       'RRULE:FREQ=WEEKLY;BYWEEKNO=10'],
+    ['day of year, daily',        'RRULE:FREQ=DAILY;BYYEARDAY=200'],
+    ['last day of month, hourly', 'RRULE:FREQ=HOURLY;BYMONTHDAY=-1'],
+    ['negative set position',     'RRULE:FREQ=DAILY;BYSETPOS=-1;BYDAY=MO'],
+    // A SECOND rule line. RFC 5545 permits it and ical.js merges all of them, so a guard that
+    // read only the first was bypassed by putting anything harmless in front of the impossible
+    // one: 70 s on a feed whose single-rule form is refused in 1 ms.
+    ['impossible rule behind a harmless one',
+      'RRULE:FREQ=DAILY;COUNT=3\nRRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30'],
   ])('returns instead of hanging: %s', (_label, rule) => {
     const started = performance.now();
     const r = parseIcsEvents(withRule(rule), YEAR);
-    // Seconds, not milliseconds — the assertion is "it came back at all". Before the guard the
-    // call never returned and the process had to be killed.
-    expect(performance.now() - started).toBeLessThan(5_000);
+    // The real failure detector is `skipped` below — with the guard removed this call still
+    // RETURNS, just after 60-75 s, so the suite fails on the assertion rather than on a
+    // deadlock. This bound is the separate claim that refusing is CHEAP: it runs in ~1 ms, so
+    // a two-second ceiling catches a guard that starts doing real work without being noticed.
+    expect(performance.now() - started).toBeLessThan(2_000);
     expect(r.events).toHaveLength(0);
     // Reported as unreadable rather than silently dropped: the operator is told a series is
     // missing instead of believing the calendar is empty.
@@ -614,13 +632,58 @@ describe('a recurrence rule whose date can never exist', () => {
     ['every Monday',                         'RRULE:FREQ=WEEKLY;BYDAY=MO',                52],
     ['the last day of every month',          'RRULE:FREQ=MONTHLY;BYMONTHDAY=-1',          12],
     ['the 30th of April and June',           'RRULE:FREQ=YEARLY;BYMONTH=4,6;BYMONTHDAY=30', 2],
+    // The rows that pin the SECOND family's boundary. Each is one step away from a refused rule
+    // — same BY* part, either a positive value or a frequency ical.js can bound — so a guard
+    // that reached one notch too far empties them.
+    ['the 15th of every month, daily',       'RRULE:FREQ=DAILY;BYMONTHDAY=15',            12],
+    ['the 1st and 15th, daily',              'RRULE:FREQ=DAILY;BYMONTHDAY=1,15',          24],
+    ['Mondays and Fridays',                  'RRULE:FREQ=WEEKLY;BYDAY=MO,FR',            104],
+    ['last Friday in November, yearly',      'RRULE:FREQ=YEARLY;BYDAY=-1FR;BYMONTH=11',    1],
   ])('still expands: %s', (_label, rule, expected) => {
     // The other direction, and it carries the weight: a guard that refuses "unusual" rules
-    // instead of impossible ones would pass every assertion above while quietly emptying real
+    // instead of unexpandable ones would pass every assertion above while quietly emptying real
     // calendars. 2026 is not a leap year, so the first row legitimately yields nothing — but it
     // must reach that answer by EXPANDING, which `skipped === 0` is what pins.
     const r = parseIcsEvents(withRule(rule), YEAR);
     expect(r.skipped).toBe(0);
     expect(r.events).toHaveLength(expected);
+  });
+
+  it('keeps the explicit RDATE dates of an event whose RULE is refused', () => {
+    // The rule is what cannot be expanded; a fixed date needs no iterator. Dropping the whole
+    // VEVENT made a malformed rule swallow real appointments as collateral — measured: this
+    // feed returned 0 events before the fix.
+    const r = parseIcsEvents(withRule(
+      'RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30\nRDATE:20260805T090000Z\nRDATE:20260812T090000Z',
+    ), YEAR);
+    expect(r.skipped).toBeGreaterThan(0);
+    expect(r.events.map(e => e.start)).toEqual(['2026-08-05T09:00:00Z', '2026-08-12T09:00:00Z']);
+  });
+
+  it('disarms an unexpandable rule inside a VTIMEZONE and keeps the appointment', () => {
+    // A DST transition is a recurrence too, expanded by a DIFFERENT path (`Timezone.
+    // _expandComponent`, reached by resolving a TZID) that the VEVENT guard never sees. This
+    // feed has NO event rule at all and still blocked the thread for 73 s — and lost the event.
+    const ics = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0',
+      'BEGIN:VTIMEZONE', 'TZID:Evil/Zone',
+      'BEGIN:STANDARD', 'DTSTART:19700101T000000', 'TZOFFSETFROM:+0100', 'TZOFFSETTO:+0100',
+      'TZNAME:EVL', 'RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30', 'END:STANDARD',
+      'END:VTIMEZONE',
+      'BEGIN:VEVENT', 'UID:tz@y', 'DTSTAMP:20260101T000000Z',
+      'DTSTART;TZID=Evil/Zone:20260805T090000', 'DTEND;TZID=Evil/Zone:20260805T100000',
+      'SUMMARY:Zonentermin', 'END:VEVENT', 'END:VCALENDAR',
+    ].join('\n');
+
+    const started = performance.now();
+    const r = parseIcsEvents(ics, YEAR);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    // The zone keeps its base offset, so the appointment survives with its wall time intact —
+    // only the seasonal transition is gone. Dropping the zone would have degraded it to
+    // floating and refusing the feed would have hidden the whole calendar.
+    expect(r.events).toHaveLength(1);
+    expect(r.events[0]?.summary).toBe('Zonentermin');
+    expect(r.events[0]?.start).toBe('2026-08-05T09:00:00');
+    expect(r.skipped).toBeGreaterThan(0);
   });
 });

@@ -872,3 +872,69 @@ describe('pendingCountForThread', () => {
     expect(ks.pendingCountForThread('   ')).toBe(0);
   });
 });
+
+describe('an ambiguous subject name on an ACTIVE write', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  function make(): { ks: KnowledgeStore; subjects: SubjectStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-amb-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    return { ks: new KnowledgeStore(engine, subjects), subjects };
+  }
+
+  /** Two organizations sharing the alias `Meier` — the shape that makes `findOrCreate` refuse
+   *  to pick one. Both need an active entry, because an alias only becomes ambiguous once more
+   *  than one subject actually answers to it. */
+  function twoMeiers(ks: KnowledgeStore, subjects: SubjectStore): void {
+    for (const name of ['Meier Bau AG', 'Meier Transport GmbH']) {
+      subjects.findOrCreate({ kind: 'organization', name, aliases: ['Meier'] });
+      ks.write({ text: `${name} is a client`, subjectName: name, sourceChannel: 'agent' });
+    }
+  }
+
+  it('parks the fact on a hint, reports the ambiguity, and still finds it by that name', () => {
+    const { ks, subjects } = make();
+    twoMeiers(ks, subjects);
+
+    const res = ks.write({ text: 'Meier owes 5000 CHF', subjectName: 'Meier', sourceChannel: 'agent' });
+
+    // Refusing to guess is correct — binding the fact to whichever row came first is the bug
+    // this replaced. What must NOT follow is silence about it.
+    expect(res.status).toBe('active');
+    expect(res.subjectId).toBeNull();
+    expect(res.subjectAmbiguous).toBe(true);
+
+    // The half that matters to the user: asking by the very name it was filed under finds it.
+    // Before this, the scoped read matched on `subject_id` only and an ambiguous name resolved
+    // to an EMPTY scope, so this returned nothing — the fact was stored, reported as
+    // remembered, and unreachable by the one question anyone would ask.
+    const hits = ks.recall({ query: 'What does Meier owe?', subjectName: 'Meier' });
+    expect(hits.map(h => h.text)).toContain('Meier owes 5000 CHF');
+  });
+
+  it('does not leak either namesake\'s own facts into the other\'s scope', () => {
+    const { ks, subjects } = make();
+    twoMeiers(ks, subjects);
+    ks.write({ text: 'Meier owes 5000 CHF', subjectName: 'Meier', sourceChannel: 'agent' });
+
+    // The opposite direction, and it is the one the empty scope was protecting. Pulling hint
+    // rows in must not turn an ambiguous query into a global scan across both clients.
+    const hits = ks.recall({ query: 'What does Meier owe?', subjectName: 'Meier' });
+    expect(hits.map(h => h.text)).not.toContain('Meier Bau AG is a client');
+    expect(hits.map(h => h.text)).not.toContain('Meier Transport GmbH is a client');
+  });
+
+  it('an UNAMBIGUOUS name still links and reports no ambiguity', () => {
+    const { ks } = make();
+    const res = ks.write({ text: 'Nordberg pays monthly', subjectName: 'Nordberg AG', sourceChannel: 'agent' });
+
+    // The boundary. A guard that flagged every write would satisfy the assertions above while
+    // telling the model a plain name was ambiguous — and the model would start asking users to
+    // disambiguate names that were never in doubt.
+    expect(res.subjectId).not.toBeNull();
+    expect(res.subjectAmbiguous).toBeUndefined();
+  });
+});

@@ -171,8 +171,17 @@ export const rememberTool: ToolEntry<RememberInput> = {
       // it stops re-recording the same fact (and does not report a spurious new save to the user).
       return 'Already recorded — this matches an existing durable entry, so nothing new was stored.';
     }
-    const linked = result.subjectId ? ' and linked to the named subject' : '';
     const pinned = result.pinned ? ', pinned to focus' : '';
+    if (result.subjectAmbiguous === true) {
+      // Say WHICH way it is incomplete. The store refuses to bind an ambiguous name to a guess,
+      // so the fact is kept against the bare name — recoverable, but attributed to nobody. Left
+      // as a plain "Remembered." the model reports full success and the user learns nothing;
+      // naming the ambiguity is what lets it ask which one and record the fact properly. This is
+      // the model's only view of that outcome — the return string IS the surface.
+      return `Remembered${pinned}, but "${input.subject}" matches more than one subject, so it is `
+        + 'not linked to any of them. Ask which one is meant, then record it again with the full name.';
+    }
+    const linked = result.subjectId ? ' and linked to the named subject' : '';
     return `Remembered${linked}${pinned}.`;
   },
 };
