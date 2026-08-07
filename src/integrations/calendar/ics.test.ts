@@ -563,3 +563,64 @@ END:VEVENT`,
     expect(r.events[0]?.timezone).toBe('UTC');
   });
 });
+
+describe('a recurrence rule whose date can never exist', () => {
+  /**
+   * This is the one case the iteration budget cannot cover, and the tests that came before it
+   * could not see the difference.
+   *
+   * ical.js expands a contracting rule by walking the calendar until the BY* parts match, and
+   * it gives up after a bounded search — but only for MONTHLY and YEARLY. For DAILY and below
+   * there is no counter, so a rule that can never match spins inside ONE `it.next()` and never
+   * returns. The budget is decremented between calls, so it is never read again; nothing is
+   * thrown, so the catch never fires; and because the loop is synchronous on the single JS
+   * thread, no timer fires either. One appointment takes the tenant's whole engine down, and
+   * restarting only helps until the next read, because the feed still carries the rule.
+   *
+   * The existing hang test uses `FREQ=SECONDLY` with no BY parts. That terminates cleanly on
+   * every call and the budget stops it, so it passes either way — it cannot fail for this.
+   *
+   * `maxEvents` is deliberately generous below: with a small cap a passing run would prove only
+   * that the cap was hit, not that the rule was refused before expansion.
+   */
+  const YEAR = { from: new Date('2026-01-01T00:00:00Z'), to: new Date('2027-01-01T00:00:00Z'), maxEvents: 5000 };
+  const withRule = (rule: string): string => [
+    'BEGIN:VCALENDAR', 'VERSION:2.0',
+    'BEGIN:VEVENT', 'UID:x@y', 'DTSTAMP:20200101T000000Z',
+    'DTSTART:20200101T100000Z', 'DTEND:20200101T110000Z', 'SUMMARY:Serie',
+    rule, 'END:VEVENT', 'END:VCALENDAR',
+  ].join('\n');
+
+  it.each([
+    ['30 February, daily',        'RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30'],
+    ['31 February, daily',        'RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=31'],
+    ['31 April/June, daily',      'RRULE:FREQ=DAILY;BYMONTH=4,6;BYMONTHDAY=31'],
+  ])('returns instead of hanging: %s', (_label, rule) => {
+    const started = performance.now();
+    const r = parseIcsEvents(withRule(rule), YEAR);
+    // Seconds, not milliseconds — the assertion is "it came back at all". Before the guard the
+    // call never returned and the process had to be killed.
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(r.events).toHaveLength(0);
+    // Reported as unreadable rather than silently dropped: the operator is told a series is
+    // missing instead of believing the calendar is empty.
+    expect(r.skipped).toBeGreaterThan(0);
+  });
+
+  it.each([
+    ['29 February — a real leap-day series', 'RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29', 0],
+    ['the 31st of every month',              'RRULE:FREQ=MONTHLY;BYMONTHDAY=31',           7],
+    ['every day in February',                'RRULE:FREQ=DAILY;BYMONTH=2',                28],
+    ['every Monday',                         'RRULE:FREQ=WEEKLY;BYDAY=MO',                52],
+    ['the last day of every month',          'RRULE:FREQ=MONTHLY;BYMONTHDAY=-1',          12],
+    ['the 30th of April and June',           'RRULE:FREQ=YEARLY;BYMONTH=4,6;BYMONTHDAY=30', 2],
+  ])('still expands: %s', (_label, rule, expected) => {
+    // The other direction, and it carries the weight: a guard that refuses "unusual" rules
+    // instead of impossible ones would pass every assertion above while quietly emptying real
+    // calendars. 2026 is not a leap year, so the first row legitimately yields nothing — but it
+    // must reach that answer by EXPANDING, which `skipped === 0` is what pins.
+    const r = parseIcsEvents(withRule(rule), YEAR);
+    expect(r.skipped).toBe(0);
+    expect(r.events).toHaveLength(expected);
+  });
+});

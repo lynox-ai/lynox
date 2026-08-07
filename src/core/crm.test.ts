@@ -221,6 +221,44 @@ describe('CRM', () => {
       expect(crm.getDealsForContact('Bleibt Da')).toHaveLength(1);
     });
 
+    it('keeps a NAMESAKE\'s interactions and deals — the case the neighbour test cannot see', () => {
+      // The test above passes with different names, which is the easy half. `interactions` and
+      // `deals` are keyed by `contact_name`, so two people called the same thing share one key
+      // and the cascade cannot tell them apart — it deleted the survivor's entire history.
+      // Not orphaned rows: gone, with nothing to restore them from. Common name, one duplicate
+      // cleaned up, a real customer's record silently emptied.
+      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-a.ch', source: 'agent' });
+      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-b.ch', source: 'agent' });
+      crm.logInteraction({ contact_name: 'Michael Müller', type: 'call', summary: 'Angebot besprochen' });
+      crm.upsertDeal({ title: 'Wartung', contact_name: 'Michael Müller', value: 4200, stage: 'proposal' });
+
+      const both = crm.listContacts().filter(c => c.name === 'Michael Müller');
+      expect(both).toHaveLength(2);
+      expect(crm.deleteContact(both[0]!._id!)).toBe(true);
+
+      // The other Michael Müller is still a contact, so the history still has an owner.
+      expect(crm.listContacts().filter(c => c.name === 'Michael Müller')).toHaveLength(1);
+      expect(crm.getInteractions('Michael Müller')).toHaveLength(1);
+      expect(crm.getDealsForContact('Michael Müller')).toHaveLength(1);
+    });
+
+    it('cascades once the LAST namesake goes', () => {
+      // The other direction, and it has to be stated: a guard that keeps history whenever a
+      // name was ever shared would leak rows forever. Deleting the second of two identical
+      // names leaves no owner, so the cascade must fire — the test above is satisfied by a
+      // cascade that never runs at all.
+      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-a.ch', source: 'agent' });
+      crm.upsertContact({ name: 'Michael Müller', email: 'michael@firma-b.ch', source: 'agent' });
+      crm.logInteraction({ contact_name: 'Michael Müller', type: 'call', summary: 'Angebot besprochen' });
+      crm.upsertDeal({ title: 'Wartung', contact_name: 'Michael Müller', value: 4200, stage: 'proposal' });
+
+      for (const c of crm.listContacts().filter(c => c.name === 'Michael Müller')) {
+        crm.deleteContact(c._id!);
+      }
+      expect(crm.getInteractions('Michael Müller')).toHaveLength(0);
+      expect(crm.getDealsForContact('Michael Müller')).toHaveLength(0);
+    });
+
     it('touches nothing when the id was not there', () => {
       crm.upsertContact({ name: 'Unbeteiligt', email: 'u@example.com', source: 'agent' });
       crm.logInteraction({ contact_name: 'Unbeteiligt', type: 'call', summary: 'x' });

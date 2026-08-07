@@ -198,6 +198,32 @@ export function parseIcsEvents(ics: string, opts: ParseIcsOptions): ParseIcsResu
         continue;
       }
 
+      // Refuse a rule whose date can never exist BEFORE handing it to the iterator. This is
+      // not defence in depth — it is the only defence, because the iteration budget below
+      // cannot reach this case.
+      //
+      // ical.js expands a contracting rule by stepping the calendar forward until the BY*
+      // parts match, and it carries a give-up counter for exactly that search — but only for
+      // MONTHLY and YEARLY (`invalid_count`, 336 and 28). For DAILY and below there is none,
+      // so a rule that can NEVER match spins inside a single `it.next()` and never returns.
+      // The budget below is decremented BETWEEN calls, so it is never read again; nothing is
+      // thrown, so the catch never fires; the loop is synchronous on the one JS thread, so no
+      // timer fires either — not the fetch timeout, not an AbortSignal, nothing. One
+      // appointment permanently takes the tenant's engine down, and a restart only survives
+      // until the next read, because the feed still carries the rule.
+      //
+      // Measured on ical.js 2.2.1: `FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30` never returns from the
+      // FIRST next() (killed at 8s), the same rule as YEARLY returns in 0ms, and as WEEKLY it
+      // throws in the constructor. That spread is the give-up counter, not luck.
+      //
+      // The check is narrow on purpose: only an IMPOSSIBLE day is refused, never a merely rare
+      // one. `BYMONTHDAY=29 BYMONTH=2` is a real leap-day series and still expands — it costs
+      // a bounded scan and returns.
+      if (hasImpossibleMonthDay(ev.component)) {
+        skipped++;
+        continue;
+      }
+
       const it = ev.iterator();
       for (;;) {
         if (budget-- <= 0) { truncated = true; break; }
@@ -272,6 +298,46 @@ function capComponents(parsed: ICAL.Component): { comp: ICAL.Component; capped: 
 
 function isCancelled(component: ICAL.Component): boolean {
   return String(component.getFirstPropertyValue('status') ?? '').toUpperCase() === 'CANCELLED';
+}
+
+/** Longest possible month, 1-indexed. February is 29 — a leap-day series is legal. */
+const DAYS_IN_MONTH = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * True when the rule pins a day-of-month that CANNOT occur in any month it also pins.
+ *
+ * `FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30` is the shape: February has no 30th, so ical.js searches
+ * forward forever inside one `it.next()` (see the call site for why nothing upstream can stop
+ * it). Refusing it here costs one array lookup and turns a hang into a skipped series.
+ *
+ * Deliberately conservative — it answers only "is this arithmetically impossible", never "is
+ * this unlikely":
+ *  - a day within the longest form of ANY listed month passes, including 29 February;
+ *  - a rule with no BYMONTHDAY passes, whatever else it says;
+ *  - a rule with no BYMONTH is checked against the longest month there is, so only >31 fails.
+ * Negative BYMONTHDAY counts from the end of the month and is bounded by the same lengths.
+ */
+function hasImpossibleMonthDay(component: ICAL.Component): boolean {
+  const rrule = component.getFirstPropertyValue('rrule') as { parts?: Record<string, unknown> } | null;
+  const parts = rrule?.parts;
+  if (!parts) return false;
+
+  const nums = (v: unknown): number[] =>
+    (Array.isArray(v) ? v : v === undefined || v === null ? [] : [v])
+      .map(Number)
+      .filter((n) => Number.isFinite(n));
+
+  const days = nums(parts['BYMONTHDAY']);
+  if (days.length === 0) return false;
+
+  const months = nums(parts['BYMONTH']);
+  const lengths = months.length > 0
+    ? months.map((m) => DAYS_IN_MONTH[m] ?? 0)
+    : [31];
+
+  // Impossible only when EVERY pinned day fails in EVERY pinned month — one workable pair is
+  // enough for the iterator to terminate.
+  return days.every((d) => lengths.every((len) => Math.abs(d) > len || d === 0));
 }
 
 /**

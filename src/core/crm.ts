@@ -359,8 +359,27 @@ export class CRM {
     const contact = (result.rows[0] as unknown as ContactRecord | undefined) ?? null;
     if (this.ds.deleteRecords({ collection: 'contacts', filter: { _id: id } }) === 0) return false;
     if (contact?.name) {
-      this.ds.deleteRecords({ collection: 'interactions', filter: { contact_name: contact.name } });
-      this.ds.deleteRecords({ collection: 'deals', filter: { contact_name: contact.name } });
+      // Cascade ONLY when no other contact answers to this name.
+      //
+      // interactions and deals are keyed by `contact_name`, not by contact id — so the
+      // cascade cannot distinguish two people called the same thing. Deleting one Michael
+      // Müller took the other one's entire history with it: a surviving contact, silently
+      // stripped of every interaction and every deal, with nothing to restore it from. The
+      // rows are gone, not orphaned.
+      //
+      // Checked AFTER the delete, so the departing contact is already out of the count and a
+      // genuinely unique name still cascades exactly as before. When the name IS shared, the
+      // history stays — attached to a name that still has an owner. Leaving a row behind is
+      // recoverable; deleting a third party's data is not, so the tie goes to keeping it.
+      const namesakes = this.ds.queryRecords({
+        collection: 'contacts',
+        filter: { name: contact.name },
+        limit: 1,
+      });
+      if (namesakes.rows.length === 0) {
+        this.ds.deleteRecords({ collection: 'interactions', filter: { contact_name: contact.name } });
+        this.ds.deleteRecords({ collection: 'deals', filter: { contact_name: contact.name } });
+      }
     }
     return true;
   }
