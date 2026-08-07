@@ -6758,8 +6758,14 @@ export class LynoxHTTPApi {
     // contact could only be overwritten, and only if it HAS an email: a NULL email never
     // collides, so every re-save inserted another row. A contact the agent researched off a
     // page has no email as often as not, which made "save it again" a duplicate rather than a
-    // repair. 'user' scope = owner-authenticated; the model has NO tool path here, deliberately
-    // — removing a person's record is the operator's act, not an agent's.
+    // repair. 'user' scope = owner-authenticated, so nothing reaches THIS route but the operator.
+    //
+    // That is a statement about the route, not about the data: `data_store_delete` takes the
+    // collection name as a free string and writes through the same DataStore, so the agent can
+    // reach these rows by another door. What bounds that door is the consent gate — it is
+    // `destructive`, the permission guard blocks it in autonomous mode, and it is refused
+    // headless — not the absence of a path. Worth stating precisely, because "the model cannot
+    // delete contacts" is the kind of belief a reader would carry into the next design.
     this.dynamicRoutes.push(parseDynamicRoute('user', 'DELETE', '/api/crm/contacts/:id', async (_req, res, params) => {
       const crm = engine.getCRM();
       if (!requireService(res, crm, 'Contacts')) return;

@@ -339,6 +339,13 @@ export class CRM {
    * history is worth auditing, while a contact row is a person's name, address and phone —
    * data whose right answer to "remove this" is that it is gone.
    *
+   * The interactions and deals keyed to this contact go WITH it, and that is the difference
+   * between removing a contact and hiding one. `interactions.summary` is free text about the
+   * person — what was discussed, what they wanted — and both collections stay readable by name
+   * through their own routes, so leaving them behind would answer "remove this person" by
+   * deleting the row that holds their phone number and keeping the notes about them. Re-saving
+   * the same name would then silently re-adopt the old history.
+   *
    * The engine.db subject mirror (S1c, flag-gated) is deliberately NOT touched. It is
    * additive, and a subject can be referenced by durable knowledge entries written long
    * after the contact; deleting it here would cut those loose to repair one CRM row. A
@@ -347,7 +354,15 @@ export class CRM {
    */
   deleteContact(id: number): boolean {
     this.ensureSchema();
-    return this.ds.deleteRecords({ collection: 'contacts', filter: { _id: id } }) > 0;
+    // Read the name BEFORE the row goes: interactions and deals are keyed by name, not by id.
+    const result = this.ds.queryRecords({ collection: 'contacts', filter: { _id: id }, limit: 1 });
+    const contact = (result.rows[0] as unknown as ContactRecord | undefined) ?? null;
+    if (this.ds.deleteRecords({ collection: 'contacts', filter: { _id: id } }) === 0) return false;
+    if (contact?.name) {
+      this.ds.deleteRecords({ collection: 'interactions', filter: { contact_name: contact.name } });
+      this.ds.deleteRecords({ collection: 'deals', filter: { contact_name: contact.name } });
+    }
+    return true;
   }
 
   /** List contacts with optional filter. */
