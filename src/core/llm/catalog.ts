@@ -7,6 +7,7 @@
 
 import type { LLMProvider, ModelTier } from '../../types/models.js';
 import type { TierSet } from '../../types/config.js';
+import type { ProviderKey } from '../../types/provider-registry.js';
 import {
   MODEL_MAP,
   VERTEX_MODEL_MAP,
@@ -650,6 +651,48 @@ export function pinnedVaultSlotForEndpoint(
   const entry = catalog.find((e) => catalogEntryKey(e) === key);
   if (!entry?.base_url_default) return undefined;   // generic / free-text tile
   return entry.vault_slot;
+}
+
+/**
+ * The BRAND name to print for a (provider, endpoint) pair — what the status bar
+ * names when it lists the providers an instance actually talks to.
+ *
+ * A brand may only come from a catalog entry lynox PINS by URL
+ * (`base_url_default`), the same discipline as `pinnedVaultSlotForEndpoint`: the
+ * generic openai-compat tile matches ANY host, so letting it lend a display name
+ * would label `api.mistral.ai.attacker.com` as "Mistral". The hostname matching
+ * itself is `resolveCatalogKey`'s, which already refuses that suffix trick.
+ *
+ * The fall-through is the wire-format label the status bar used before hybrid
+ * routing existed ('OpenAI-compatible' / 'Custom'). That is honest rather than
+ * vague: it states what we know (the wire) and claims no brand we cannot verify.
+ */
+export function providerBrandLabel(
+  provider: ProviderKey,
+  apiBaseURL?: string | undefined,
+  catalog: LLMCatalog = LLM_CATALOG,
+): string {
+  if (provider === 'anthropic') return 'Anthropic';
+  if (provider === 'vertex') return 'Google Vertex AI';
+  // The registry's first-class 'mistral' key (provider-registry.ts) carries the
+  // host in its identity, so it never arrives with a base URL to match on.
+  if (provider === 'mistral') return 'Mistral';
+  // Re-stated as literals rather than narrowed in place: `ProviderKey` is an
+  // OPEN union (`string & {}`), so an `=== 'openai'` comparison does not narrow.
+  const wire: LLMProvider | undefined =
+    provider === 'openai' ? 'openai' : provider === 'custom' ? 'custom' : undefined;
+  if (wire) {
+    if (apiBaseURL) {
+      const key = resolveCatalogKey(wire, apiBaseURL, catalog);
+      const entry = catalog.find((e) => catalogEntryKey(e) === key);
+      if (entry?.base_url_default) return entry.display_name;
+    }
+    return wire === 'openai' ? 'OpenAI-compatible' : 'Custom';
+  }
+  // An unregistered provider key. `ProviderKey` is open and `LYNOX_TIER_SET_JSON`
+  // is an untrusted boundary, so print what is configured — bounded and stripped
+  // of anything but plain label characters, because this string reaches the UI.
+  return provider.replace(/[^\w .+-]/g, '').slice(0, 24) || 'Unknown provider';
 }
 
 /**

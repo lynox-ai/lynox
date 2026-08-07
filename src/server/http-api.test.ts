@@ -6048,7 +6048,10 @@ describe('LynoxHTTPApi', () => {
       // `.find(r => r.model_id?.toLowerCase().startsWith("mistral"))` resolves
       // to undefined — the path we want to pin.
       const status = (api as unknown as { getMistralStatus(): { indicator: string; description: string; provider: string } }).getMistralStatus();
-      expect(status.provider).toBe('Mistral AI');
+      // 'Mistral', not 'Mistral AI': the label must match what the primary path
+      // prints for the same endpoint, or the dedup in getProvidersStatus would
+      // see two spellings of one provider and list it twice.
+      expect(status.provider).toBe('Mistral');
       expect(status.indicator).toBe('none');
     });
 
@@ -6063,6 +6066,105 @@ describe('LynoxHTTPApi', () => {
       } finally {
         if (prevImpl) mockHistoryGetRecentRuns.mockImplementation(prevImpl);
       }
+    });
+  });
+
+  // The footer names the providers an instance actually talks to. Pre-fix
+  // `getProvidersStatus` had exactly TWO hard-coded slots — the top-level
+  // provider, and Mistral if MISTRAL_API_KEY was set — so nothing ever
+  // enumerated the hybrid `tier_set`. On rafael prod (2026-08-07) the primary
+  // WAS Mistral, so the second slot was suppressed and the status bar read
+  // "· Mistral" while the instance was routing balanced→Fireworks/GLM and
+  // deep→Anthropic on every turn.
+  describe('getProvidersStatus — hybrid tier_set enumeration', () => {
+    type Entry = { indicator: string; description: string; provider: string };
+    const callProvidersStatus = (): Promise<Entry[]> =>
+      (api as unknown as { getProvidersStatus(): Promise<Entry[]> }).getProvidersStatus();
+    // The primary status is cached for up to 60s on the instance; clear it or a
+    // neighbouring test's provider leaks into this one.
+    const clearPrimaryCache = (): void => {
+      (api as unknown as { providerStatusCache: unknown }).providerStatusCache = null;
+    };
+
+    const HYBRID = {
+      api_base_url: 'https://api.mistral.ai/v1',
+      routing_mode: 'hybrid',
+      tier_set: {
+        fast: { provider: 'openai', model_id: 'ministral-8b-2512', api_base_url: 'https://api.mistral.ai/v1' },
+        balanced: { provider: 'openai', model_id: 'accounts/fireworks/models/glm-5p2', api_base_url: 'https://api.fireworks.ai/inference/v1' },
+        deep: { provider: 'anthropic', model_id: 'claude-sonnet-5' },
+      },
+    };
+
+    let providerSpy: { mockRestore(): void } | null = null;
+    async function withMistralPrimary(config: Record<string, unknown>): Promise<void> {
+      const llmClient = await import('../core/llm-client.js');
+      providerSpy = vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('openai');
+      // cp_supplied tier → the not-configured preflight is skipped, so the
+      // primary resolves through the run-history path with the Mistral label.
+      vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
+      mockGetUserConfig.mockReturnValue(config);
+      clearPrimaryCache();
+    }
+    afterEach(() => {
+      providerSpy?.mockRestore();
+      providerSpy = null;
+      vi.unstubAllEnvs();
+      mockGetUserConfig.mockReturnValue({});
+      clearPrimaryCache();
+    });
+
+    it('lists one entry per tier_set provider, primary first, deduped', async () => {
+      await withMistralPrimary(HYBRID);
+      const list = await callProvidersStatus();
+      // fast is Mistral again — same provider as the primary, so it collapses.
+      expect(list.map((p) => p.provider)).toEqual(['Mistral', 'Fireworks AI', 'Anthropic']);
+    });
+
+    it('gives a tier_set provider with no runs yet `none`, never `unknown`', async () => {
+      // Load-bearing: the StatusBar aggregator severity-ranks `unknown` ABOVE
+      // `none`, so an entry added here that reported `unknown` would bubble
+      // "API ?" over a healthy primary — the v1.7.4 regression, re-introduced
+      // by the fix meant to improve the same line.
+      await withMistralPrimary(HYBRID);
+      const list = await callProvidersStatus();
+      expect(list.map((p) => p.indicator)).not.toContain('unknown');
+      expect(list.find((p) => p.provider === 'Fireworks AI')?.indicator).toBe('none');
+    });
+
+    it('surfaces a failing tier_set provider as major', async () => {
+      await withMistralPrimary(HYBRID);
+      const prevImpl = mockHistoryGetRecentRuns.getMockImplementation();
+      mockHistoryGetRecentRuns.mockReturnValue([
+        { id: 'r-glm', model_id: 'accounts/fireworks/models/glm-5p2', status: 'failed', created_at: new Date().toISOString() },
+      ]);
+      try {
+        const list = await callProvidersStatus();
+        expect(list.find((p) => p.provider === 'Fireworks AI')?.indicator).toBe('major');
+      } finally {
+        if (prevImpl) mockHistoryGetRecentRuns.mockImplementation(prevImpl);
+      }
+    });
+
+    it('does not list a Mistral entry twice when the key is set AND a slot uses it', async () => {
+      await withMistralPrimary(HYBRID);
+      vi.stubEnv('MISTRAL_API_KEY', 'test-key');
+      const list = await callProvidersStatus();
+      // Asserted as the WHOLE list, not just a count of 'Mistral': a fallback
+      // entry labelled differently ('Mistral AI') would pass a count check
+      // while still printing the same provider twice in the footer.
+      expect(list.map((p) => p.provider)).toEqual(['Mistral', 'Fireworks AI', 'Anthropic']);
+    });
+
+    it('standard mode is unchanged: primary plus the Mistral fallback only', async () => {
+      // Byte-parity guard for the non-hybrid path. A tier_set present WITHOUT
+      // routing_mode:'hybrid' is one the router ignores, so the footer must
+      // ignore it too — naming a provider no run can reach is the failure in
+      // the other direction.
+      await withMistralPrimary({ ...HYBRID, api_base_url: undefined, routing_mode: 'standard' });
+      vi.stubEnv('MISTRAL_API_KEY', 'test-key');
+      const list = await callProvidersStatus();
+      expect(list.map((p) => p.provider)).toEqual(['OpenAI-compatible', 'Mistral']);
     });
   });
 

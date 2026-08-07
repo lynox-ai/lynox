@@ -34,7 +34,7 @@ import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../
 import { getActiveProvider } from '../core/llm-client.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
 import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
-import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
+import { endpointNeedsCredential, getCatalogEntryByKey, resolveCatalogKey, providerBrandLabel, mainChatTierLabels, mainChatTierLabelsFromTierSet } from '../core/llm/catalog.js';
 import type { LLMProvider } from '../types/models.js';
 import { SessionStore } from '../core/session-store.js';
 import { RunAbortedError } from '../core/agent.js';
@@ -48,6 +48,7 @@ import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
+import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import type {
@@ -1843,22 +1844,56 @@ export class LynoxHTTPApi {
 
   /**
    * Return status for every LLM provider currently configured on this instance.
-   * The primary provider is the first entry; Mistral follows if MISTRAL_API_KEY
-   * is set (used as fallback/worker in standard mode or primary in eu-sovereign).
-   * Voxtral voice provider shares the Mistral key — if the key is present it is
-   * already covered by the Mistral entry.
+   * The primary provider is the first entry, followed by every OTHER provider
+   * the router can actually reach: one per hybrid `tier_set` slot, plus Mistral
+   * when MISTRAL_API_KEY is set (the standard-mode fallback/worker). Voxtral
+   * shares the Mistral key — if the key is present it is already covered.
+   *
+   * Pre-fix this had exactly TWO hard-coded slots — the primary, and Mistral if
+   * keyed — so a tenant routing {fast: Mistral, balanced: Fireworks/GLM, deep:
+   * Anthropic} saw the footer name ONE of its three providers, and if the
+   * primary already WAS Mistral it named that one alone (the prod symptom,
+   * 2026-08-07). Nothing enumerated the tier_set.
    */
   private async getProvidersStatus(): Promise<ProviderStatus[]> {
     const primary = await this.getProviderStatus();
     const list: ProviderStatus[] = [primary];
+    // Dedup by label, case-folded: the same provider reached through two slots
+    // (or through a slot AND the MISTRAL_API_KEY fallback below) is ONE entry.
+    // A duplicate would both read as noise in the footer and double-count in the
+    // StatusBar's worst-indicator aggregation.
+    const seen = new Set<string>([(primary.provider ?? '').trim().toLowerCase()]);
+    const push = (entry: ProviderStatus): void => {
+      const key = (entry.provider ?? '').trim().toLowerCase();
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      list.push(entry);
+    };
 
-    // Mistral is present when MISTRAL_API_KEY is configured AND we are not
-    // already reporting Mistral as the primary (eu-sovereign mode).
-    const hasMistralKey = !!(process.env['MISTRAL_API_KEY']?.length);
-    const primaryIsMistral = primary.provider?.toLowerCase().includes('mistral') ?? false;
-    if (hasMistralKey && !primaryIsMistral) {
-      list.push(this.getMistralStatus());
+    // Hybrid routing: each tier may sit on a different provider, so the set of
+    // providers this instance talks to IS the tier_set. Gated on
+    // `routing_mode === 'hybrid'` to mirror `resolveTierModel` — a tier_set the
+    // router ignores must not be named here either. `getUserConfig()` is the
+    // right source: managed hardening (`applyManagedTierSetConstraints`) already
+    // ran at config-load, so a slot the CP dropped is gone from it, and the
+    // resolver's own copy differs only by in-memory credential enrichment.
+    const cfg = this.engine?.getUserConfig();
+    if (cfg?.routing_mode === 'hybrid' && cfg.tier_set) {
+      for (const tier of ['fast', 'balanced', 'deep'] as const) {
+        const slot = cfg.tier_set[tier];
+        if (!isTierSlot(slot)) continue;
+        push(this.getModelBasedStatus(
+          providerBrandLabel(slot.provider, slot.api_base_url),
+          (modelId) => modelId === slot.model_id,
+        ));
+      }
     }
+
+    // Mistral is reachable WITHOUT a tier_set slot too: standard mode keeps it
+    // as the engine-level fallback/worker whenever MISTRAL_API_KEY is set. The
+    // `seen` set (not a substring test) suppresses it when Mistral is already
+    // listed as the primary or as a slot.
+    if (process.env['MISTRAL_API_KEY']?.length) push(this.getMistralStatus());
 
     return list;
   }
@@ -1877,31 +1912,55 @@ export class LynoxHTTPApi {
    * Pre-fix this returned `unknown` here, which the StatusBar aggregator
    * (severity-ranked unknown > none) then bubbled up over a fully healthy
    * Anthropic primary — surfacing in the UI as "Anthropic · API ?" despite
-   * the API being fine. Caller (`getProvidersStatus`) only invokes this
-   * function when the key IS present, so the key-existence precondition is
-   * implicit.
+   * the API being fine. The rule now lives in `getModelBasedStatus`, which
+   * every secondary entry shares. Caller (`getProvidersStatus`) only invokes
+   * this function when the key IS present, so the key-existence precondition
+   * is implicit.
+   *
+   * The label is 'Mistral', matching the catalog's `display_name` and what the
+   * primary path already prints for the same endpoint — so the dedup in
+   * `getProvidersStatus` sees one provider, not two spellings of it. (The
+   * StatusBar's "Mistral AI" → "Mistral" rewrite is now a no-op; it stays as
+   * defence for an older engine behind a newer UI.)
    */
   private getMistralStatus(): ProviderStatus {
-    const label = 'Mistral AI';
+    return this.getModelBasedStatus(
+      'Mistral',
+      (modelId) => modelId.toLowerCase().startsWith('mistral'),
+    );
+  }
+
+  /**
+   * Status of one non-primary provider, derived from the most recent run that
+   * used one of ITS models. Shared by the Mistral fallback entry (prefix match)
+   * and by every hybrid `tier_set` slot (exact model-id match).
+   *
+   * NEVER returns `unknown`. That is load-bearing, not caution: the StatusBar
+   * aggregator severity-ranks `unknown` ABOVE `none`, so a secondary entry with
+   * no runs yet would bubble "API ?" over a perfectly healthy primary — the
+   * exact v1.7.4 regression the healthy-config rule above was written to close.
+   * A configured provider we have no evidence about is `none` ("Ready").
+   */
+  private getModelBasedStatus(label: string, matches: (modelId: string) => boolean): ProviderStatus {
     const history = this.engine?.getRunHistory();
     if (!history) return { indicator: 'none', description: 'Ready', provider: label };
 
     const recent = history.getRecentRuns(50);
-    const mistralRun = recent.find(r => r.model_id?.toLowerCase().startsWith('mistral'));
+    const run = recent.find(r => r.model_id !== undefined && r.model_id !== '' && matches(r.model_id));
 
-    if (!mistralRun) {
+    if (!run) {
       return { indicator: 'none', description: 'Ready', provider: label };
     }
 
-    const lastRunTime = new Date(mistralRun.created_at).getTime();
+    const lastRunTime = new Date(run.created_at).getTime();
     const fiveMinAgo = Date.now() - 5 * 60_000;
 
-    if (mistralRun.status === 'completed') {
+    if (run.status === 'completed') {
       return lastRunTime > fiveMinAgo
         ? { indicator: 'none', description: 'All Systems Operational', provider: label }
         : { indicator: 'none', description: 'API OK (last success older than 5min)', provider: label };
     }
-    if (mistralRun.status === 'failed') {
+    if (run.status === 'failed') {
       return lastRunTime > fiveMinAgo
         ? { indicator: 'major', description: 'Last run failed', provider: label }
         : { indicator: 'minor', description: 'Last run failed (not recent)', provider: label };
