@@ -86,15 +86,33 @@ const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
- * True for a private-LAN / on-premise host — no third-party exposure.
+ * Does an api_profile pointed at `url` need a human acceptance before the engine
+ * will hand it a stored credential?
  *
- * For callers that need `isAllowlistedEndpoint`'s tolerance of on-premise
- * endpoints WITHOUT its `*.openai.azure.com` wildcard. The engine-managed auth
- * attach in `http.ts` is the case: it hands a stored credential to the host, so
- * vouching for an attacker-registerable namespace would let a prompt-injected
- * profile collect one — but refusing an operator's own LAN endpoint would break
- * self-hosted setups that work today.
+ * ONE question, asked in TWO places that must agree: `api_setup` decides here
+ * whether to raise the controller-responsibility prompt and persist an ack, and
+ * the credential attach in `http.ts` decides here whether an ack was required.
+ * When they disagreed, the result was an unrecoverable dead end — `api_setup`
+ * read `*.openai.azure.com` as vetted, so it never prompted AND deleted any ack
+ * that existed, while the attach refused for want of exactly that ack and told
+ * the user to "re-save and accept when prompted". No prompt was reachable.
+ *
+ * Narrower than {@link isAllowlistedEndpoint} by exactly one entry, and that one
+ * is the point: `*.openai.azure.com` is a namespace ANY account can register, so
+ * vouching for it silently lets a prompt-injected profile collect a vault
+ * credential. It gets the disclosure prompt like any other third-party host.
+ *
+ * Private-LAN names stay vetted — an operator's own `.local` endpoint is not a
+ * sub-processor. (In practice `http_request` cannot reach one anyway:
+ * `assertHostPolicy` rejects private IPs and `fetchPinned` rejects hosts that
+ * resolve to one. Keeping them here costs nothing and avoids a pointless
+ * disclosure prompt on save for the non-HTTP callers that can reach them.)
  */
+export function isVettedEgressHost(url: string): boolean {
+  return isGuardedBaselineHost(url) || isPrivateLanEndpoint(url);
+}
+
+/** True for a private-LAN / on-premise host — no third-party exposure. */
 export function isPrivateLanEndpoint(url: string): boolean {
   try {
     const u = new URL(url);

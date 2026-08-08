@@ -37,6 +37,10 @@ export interface MailAccountFormFields {
  * as Business came back Personal — with a different send policy and persona than
  * the one chosen — while a connection test beforehand looked entirely correct.
  * One builder means the save path cannot silently carry less than the test path.
+ *
+ * `type` is REQUIRED on the input on purpose: dropping it at a call site is then a
+ * compile error under `web-ui-typecheck` (a required check), which is what actually
+ * guards the two callers. A unit test here can only pin the builder.
  */
 export function buildMailAccountPayload(f: MailAccountFormFields): Record<string, unknown> {
 	const payload: Record<string, unknown> = {

@@ -23,7 +23,7 @@ import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
-import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
+import { describeDisclosure, isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
 import { isInfraSecret, isProtectedSecretWrite } from '../../core/secret-store.js';
 
@@ -976,7 +976,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
     'bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). It returns a DRAFT profile — enrich it with extra guidelines/avoid/response_shape from reading the docs, then call `create`.\n' +
     'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled.' +
     ' basic + basic_format="user_pass_split": name the two vault keys in `username_key` and `password_key` (or list them in `vault_keys`, username first). The ENGINE combines and Base64-encodes them onto every http_request to this host — do NOT set an Authorization header and do NOT try to encode anything; you never hold the plaintext, only `secret:` references, so you cannot. Use `pre_encoded_b64` only when the credential genuinely arrives already Base64-encoded.' +
-    ' bearer / header: name the vault key holding the token in `vault_keys` (first entry; for `header` also set `header_name`, default Authorization). The ENGINE attaches it to every http_request to this host — do NOT set the header yourself and do NOT pass `secret:NAME` in one. Hand-setting it is not merely redundant: the value resolves before the egress scanner runs, so a token shaped like a known credential (a JWT, `ghp_…`, `sk-…`) gets the request blocked as exfiltration. Store the value with ask_secret, then just call http_request.',
+    ' bearer / header: name the vault key holding the token in `vault_keys` (first entry; for `header` also set `header_name`, default X-Api-Key). The ENGINE attaches it to every http_request to this host — do NOT set the header yourself and do NOT pass `secret:NAME` in one. Hand-setting it is not merely redundant: the value resolves before the egress scanner runs, so a token shaped like a known credential (a JWT, `ghp_…`, `sk-…`) gets the request blocked as exfiltration. Store the value with ask_secret, then just call http_request.',
   handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> => {
     const apisDir = getApisDir();
 
@@ -1142,7 +1142,13 @@ Next steps before calling create:
       if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.token_url) {
         egressUrls.push(profile.auth.oauth.token_url);
       }
-      const nonAllowlisted = egressUrls.filter((u) => !isAllowlistedEndpoint(u));
+      // isVettedEgressHost, not isAllowlistedEndpoint: the credential attach in
+      // http.ts asks the same function, and the two MUST agree. While this asked the
+      // broader one, an `*.openai.azure.com` profile saved with no prompt and no ack,
+      // and the attach then refused it with advice ("re-save and accept when
+      // prompted") that could never be followed — the prompt was unreachable and the
+      // else-branch below deleted any ack that did exist.
+      const nonAllowlisted = egressUrls.filter((u) => !isVettedEgressHost(u));
       if (nonAllowlisted.length > 0) {
         // Controller-responsibility acceptance MUST be a real OUT-OF-BAND human
         // confirmation — NEVER an agent-supplied tool argument. A prompt-injected
@@ -1284,7 +1290,7 @@ Next steps before calling create:
       // re-verify here fail-closed: a non-allowlisted token_url is refused unless
       // the profile carries a persisted acceptance covering that exact host.
       // Refuse BEFORE resolving any vault secret so nothing leaks on the way out.
-      if (!isAllowlistedEndpoint(oauth.token_url) && !isEndpointAcked(profile.custom_endpoint_ack, oauth.token_url)) {
+      if (!isVettedEgressHost(oauth.token_url) && !isEndpointAcked(profile.custom_endpoint_ack, oauth.token_url)) {
         let host = oauth.token_url;
         try { host = new URL(oauth.token_url).hostname; } catch { /* keep raw value */ }
         return `Error: profile "${input.id}" token_url points at a non-vetted sub-processor (${host}) with no recorded acceptance — fetch_token is refused because it would POST the client_secret to an unaccepted host. Re-save the profile via api_setup({ action: 'update', ... }); you'll be prompted to accept controller-responsibility, which records the acceptance and unblocks fetch_token.`;

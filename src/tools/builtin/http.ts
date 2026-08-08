@@ -8,7 +8,7 @@ import { isFeatureEnabled } from '../../core/features.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
 import type { EgressSurface } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
-import { isEndpointAcked, isGuardedBaselineHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
+import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite } from '../../core/secret-store.js';
 import {
   extractHtmlText,
@@ -332,7 +332,7 @@ interface AttachedAuth {
  *   - `refusal` — the engine says no and nothing is sent. Reserved for a profile
  *                 that is trying something it may not: a protected vault key, a
  *                 CRLF-bearing header name. These are attacks, not misconfigurations.
- *   - `hint`    — could not attach for a recoverable reason (no acceptance on
+ *   - `hint`    — bearer/header only: could not attach for a recoverable reason (no acceptance on
  *                 record, no vault key, empty value). Nothing is dropped, the
  *                 model's own header stands, and the request proceeds exactly as
  *                 it does today; the hint rides along on a 401 so the cause is
@@ -378,14 +378,10 @@ async function attachEngineManagedAuth(
   // save it with no human prompt because it reads as allowlisted, and have the
   // engine attach a vault credential to an attacker's host — past the scan that
   // would otherwise have caught it, since the engine's own slot is exempt.
-  // `isPrivateLanEndpoint` keeps the on-premise half of what `isAllowlistedEndpoint`
-  // used to vouch for: an operator's own `.local`/RFC1918 endpoint is not a
-  // third-party sub-processor, and dropping it would break self-hosted setups that
-  // work today. What is deliberately NOT carried over is the `*.openai.azure.com`
-  // wildcard — the one part of that list an attacker can register a match for.
-  const hostVetted = isGuardedBaselineHost(url)
-    || isPrivateLanEndpoint(url)
-    || isEndpointAcked(profile.custom_endpoint_ack, url);
+  // Same question api_setup asks when it decides whether to prompt for acceptance.
+  // They must agree: when they did not, the attach demanded an ack that api_setup
+  // would never create — see isVettedEgressHost.
+  const hostVetted = isVettedEgressHost(url) || isEndpointAcked(profile.custom_endpoint_ack, url);
 
   if (auth.type === 'oauth2') {
     // Wave 5d runtime egress gate (base_url parity with fetch_token). A profile can
