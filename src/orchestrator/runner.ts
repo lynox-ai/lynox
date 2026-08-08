@@ -245,9 +245,14 @@ export async function runManifest(
   }
   // Name the workflow on every prompt its steps raise. Unlike the budget this
   // is set at EVERY depth and overwrites a parent's: a step belongs to the
-  // manifest that declares it, so a nested sub-pipeline's prompt must name the
-  // sub-pipeline — naming the outer one would point the user at a step list
-  // that does not contain the step asking.
+  // manifest that declares it, so a REAL nested workflow names itself rather
+  // than the outer one, which would point the user at a step list that does not
+  // contain the step asking.
+  //
+  // `originWorkflowName` is the exception, and it exists because that rule has a
+  // blind spot: `spawnPipeline` wraps a composed step in a manifest called
+  // `<stepId>-sub`, and preferring THAT swaps a name the user started for one
+  // they have never seen. The caller that knows the manifest is synthetic says so.
   //
   // An empty name is dropped rather than carried. `validateManifest` requires
   // min(1), but `runManifest` does not itself validate, and a stored `''` would

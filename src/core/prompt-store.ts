@@ -120,9 +120,12 @@ export function promptOriginOf(meta: PromptMeta | undefined): PromptOrigin | und
 export function parseOriginJson(raw: string | null): PromptOrigin | undefined {
   if (!raw) return undefined;
   try {
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
-    const o = parsed as Record<string, unknown>;
+    // Deliberately no `typeof parsed === 'object'` / not-an-array guard: the
+    // per-field string checks below already reject every non-object shape by
+    // reading `undefined` off it, and `null` throws into the catch. A guard
+    // whose removal changes no output is not a guard — it is an untestable
+    // branch that makes the function look more careful than it is.
+    const o = JSON.parse(raw) as Record<string, unknown>;
     return promptOriginOf({
       workflowName: typeof o['workflowName'] === 'string' ? o['workflowName'] : undefined,
       stepId: typeof o['stepId'] === 'string' ? o['stepId'] : undefined,

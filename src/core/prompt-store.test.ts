@@ -506,11 +506,17 @@ describe('parseOriginJson', () => {
     expect(parseOriginJson(JSON.stringify(origin))).toEqual(origin);
   });
 
-  it('degrades to undefined on a malformed or wrong-shaped row', () => {
+  it('degrades to undefined instead of throwing, whatever the row holds', () => {
     // The origin is a LABEL on a prompt. A bad label must cost the user their
     // provenance line, never the resume of the prompt a run is blocked on —
     // an unguarded JSON.parse here 500s `GET /pending-prompt` for that session
     // and the run stays wedged with no way to answer it.
+    //
+    // Only the first two of these DISCRIMINATE: they are the cases that throw
+    // without the try/catch. The rest pin the contract, not a guard — they would
+    // stay green with every shape check deleted, which is why the implementation
+    // does not carry those checks.
+    expect(() => parseOriginJson('{not json')).not.toThrow();
     expect(parseOriginJson('{not json')).toBeUndefined();
     expect(parseOriginJson('null')).toBeUndefined();
     expect(parseOriginJson('"a string"')).toBeUndefined();

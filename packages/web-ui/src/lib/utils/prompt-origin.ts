@@ -42,7 +42,11 @@ const BIDI_CHARS = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
  */
 function clean(value: string, max: number): string {
 	const stripped = value.replace(CONTROL_CHARS, '').replace(BIDI_CHARS, '').trim();
-	return stripped.length > max ? `${stripped.slice(0, max - 1)}…` : stripped;
+	if (stripped.length <= max) return stripped;
+	// Cut on CODE POINTS, not UTF-16 units: `slice` on a string whose (max-1)th
+	// unit is a lead surrogate splits the pair and leaves a lone half, which
+	// renders as U+FFFD. An emoji in a workflow name is ordinary, not exotic.
+	return `${[...stripped].slice(0, max - 1).join('')}…`;
 }
 
 /**
