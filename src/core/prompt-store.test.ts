@@ -1,6 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
-import { PromptStore, PromptConflictError } from './prompt-store.js';
+import { PromptStore, PromptConflictError, promptOriginOf } from './prompt-store.js';
+import { RunHistory } from './run-history.js';
 
 /** Build a fresh SQLite instance with just the pending_prompts schema the
  * PromptStore depends on. Mirrors migrations v25 + v27 + v29 + v33 + v43
@@ -24,6 +28,7 @@ function makeDb(): Database.Database {
       answer_error TEXT,
       multi_select INTEGER,
       payload_json TEXT,
+      origin_json TEXT,
       status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       answered_at TEXT,
@@ -400,5 +405,87 @@ describe('PromptStore', () => {
     it('throws on an empty question set', () => {
       expect(() => store.insertOnboardingBasics('s-onb2', [], [])).toThrow();
     });
+  });
+
+  // A prompt raised inside a workflow step can sit here for minutes, which is
+  // exactly the window a page gets reloaded in. The live SSE event carries the
+  // origin; without persisting it the restored dialog drops back to the
+  // unexplained "Allow / Deny" the whole feature exists to prevent.
+  describe('prompt origin (v52)', () => {
+    const origin = { workflowName: 'bexio Triage Phase 1-3', stepId: 'load_contacts', stepTask: 'Paginate contacts' };
+
+    it('persists the origin on every prompt kind that a step can raise', () => {
+      const cases: Array<[string, string]> = [
+        ['ask_user', store.insertAskUser('o1', 'Allow?', ['Allow', 'Deny'], false, undefined, origin)],
+        ['tabs', store.insertAskUserTabs('o2', [{ question: 'Which?' }], origin)],
+        ['ask_secret', store.insertAskSecret('o3', 'BEXIO_TOKEN', 'Key?', 'api_key', origin)],
+        ['connect_mail', store.insertConnectMail('o4', 'Connect', '{"address":"a@b.c"}', origin)],
+      ];
+      for (const [kind, id] of cases) {
+        const row = store.getById(id);
+        expect(JSON.parse(row!.origin_json!), kind).toEqual(origin);
+      }
+    });
+
+    it('stores NULL when the prompt has no origin — a main-agent prompt must render no origin line', () => {
+      const id = store.insertAskUser('o5', 'Allow?', ['Allow', 'Deny']);
+      expect(store.getById(id)?.origin_json).toBeNull();
+    });
+
+    it('keeps a partial origin partial instead of inventing the missing half', () => {
+      const id = store.insertAskUser('o6', 'Allow?', undefined, false, undefined, { stepId: 'solo' });
+      expect(JSON.parse(store.getById(id)!.origin_json!)).toEqual({ stepId: 'solo' });
+    });
+  });
+});
+
+/**
+ * The suite above builds `pending_prompts` by hand, so it can only prove the
+ * store agrees with ITSELF — a migration that added the wrong column name, or
+ * none at all, would leave every test above green and every real tenant
+ * throwing on the first workflow prompt. This one runs the actual migrations.
+ */
+describe('PromptStore against the real migrated schema', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  it('writes and reads the origin on a database built by the migrations', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-prompt-origin-'));
+    tmpDirs.push(dir);
+    const history = new RunHistory(join(dir, 'history.db'));
+    try {
+      const store = new PromptStore(history.getDb());
+      const id = store.insertAskUser('real-1', 'Allow?', ['Allow', 'Deny'], false, undefined, {
+        workflowName: 'bexio Triage Phase 1-3',
+        stepId: 'load_contacts',
+      });
+      expect(JSON.parse(store.getById(id)!.origin_json!))
+        .toEqual({ workflowName: 'bexio Triage Phase 1-3', stepId: 'load_contacts' });
+    } finally {
+      history.close();
+    }
+  });
+});
+
+describe('promptOriginOf', () => {
+  it('narrows a full meta to exactly the three origin fields', () => {
+    expect(promptOriginOf({ workflowName: 'W', stepId: 's', stepTask: 't', multiSelect: true }))
+      .toEqual({ workflowName: 'W', stepId: 's', stepTask: 't' });
+  });
+
+  it('is undefined when the meta carries no origin — multiSelect alone is not one', () => {
+    expect(promptOriginOf({ multiSelect: true })).toBeUndefined();
+    expect(promptOriginOf({})).toBeUndefined();
+    expect(promptOriginOf(undefined)).toBeUndefined();
+  });
+
+  it('survives on the workflow name alone', () => {
+    // The half that matters most to a non-technical user: a step id is jargon,
+    // the workflow name is what they clicked. Dropping the origin because two
+    // of three fields are missing would lose exactly the useful one.
+    expect(promptOriginOf({ workflowName: 'bexio Triage' })).toEqual({ workflowName: 'bexio Triage' });
   });
 });

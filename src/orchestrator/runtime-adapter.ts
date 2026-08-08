@@ -125,12 +125,17 @@ export interface SubAgentPromptHandles {
   parentPromptTabs?: PromptTabsFn | undefined;
   parentPromptSecret?: PromptSecretFn | undefined;
   promptBudget?: PromptBudget | undefined;
+  /** Name of the workflow whose steps these callbacks serve. Stamped onto every
+   *  prompt a step raises so the dialog can say which workflow asked — see
+   *  {@link PromptOrigin}. Set by `runManifest`; undefined for callers that
+   *  spawn a step outside a manifest. */
+  workflowName?: string | undefined;
 }
 
 /**
  * Build the per-step Agent prompt callbacks. Wraps the parent callbacks so
- * each prompt is tagged with the originating step's id + task. Returns
- * undefined for callbacks the parent didn't provide (autonomous run).
+ * each prompt is tagged with the originating workflow name, step id and task.
+ * Returns undefined for callbacks the parent didn't provide (autonomous run).
  *
  * If a PromptBudget is attached, every successful prompt consumes one slot;
  * once the budget is exhausted the wrapper throws PromptBudgetExceededError
@@ -142,7 +147,7 @@ export function buildSubAgentPromptCallbacks(
   parent: SubAgentPromptHandles | undefined,
 ): { promptUser?: PromptUserFn | undefined; promptTabs?: PromptTabsFn | undefined; promptSecret?: PromptSecretFn | undefined } {
   if (!parent) return {};
-  const meta: PromptMeta = { stepId: step.id, stepTask: step.task };
+  const meta: PromptMeta = { stepId: step.id, stepTask: step.task, workflowName: parent.workflowName };
   const budget = parent.promptBudget;
   // Budget is checked up-front (so a saturated budget rejects without ever
   // touching the parent), then refunded if the parent rejects/aborts —

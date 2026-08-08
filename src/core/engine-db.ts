@@ -184,6 +184,7 @@ const MIGRATIONS: string[] = [
      answer_error TEXT,
      multi_select INTEGER,
      payload_json TEXT,
+     origin_json TEXT,
      created_at TEXT NOT NULL DEFAULT (datetime('now')),
      answered_at TEXT,
      expires_at TEXT NOT NULL
