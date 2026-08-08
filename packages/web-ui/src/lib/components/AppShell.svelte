@@ -54,8 +54,6 @@
 	let railMq: MediaQueryList | null = null;
 	const onRailMq = () => { isDesktop = railMq?.matches ?? false; };
 	const navExpanded = $derived(isDesktop ? railExpanded : sidebarOpen);
-	// The chat surface manages its own scrolling; see the content slot below.
-	const isChatRoute = $derived($page.url.pathname === '/app');
 
 	function focusOnMount(node: HTMLElement) { node.focus(); }
 
@@ -981,21 +979,7 @@
 			<!-- Main Content -->
 			<main class="flex-1 min-w-0 flex flex-col overflow-hidden">
 				<div class="flex-1 min-h-0 flex overflow-hidden">
-					<!--
-						The chat view is a FIXED-HEIGHT app surface: it owns its own
-						scroller (the transcript pane) and pins the composer under it.
-						Letting this slot scroll too puts a second scroller around that
-						column, and a wheel or touch anywhere — including over the
-						composer itself — drags the whole column up, taking the composer
-						off the bottom of the screen and leaving dead space below.
-						Reported 2026-08-08 from an iPhone PWA and a Windows PC; measured
-						on a 37-message thread, one wheel gesture over the composer moved
-						its bottom edge from 816 to 216, a second to -384.
-
-						Every OTHER route is document-shaped and must keep scrolling here,
-						so this is scoped rather than removed.
-					-->
-					<div class="flex-1 min-w-0 {isChatRoute ? 'overflow-hidden' : 'overflow-y-auto'} scrollbar-none">
+					<div class="flex-1 min-w-0 overflow-y-auto scrollbar-none">
 						{@render children()}
 					</div>
 

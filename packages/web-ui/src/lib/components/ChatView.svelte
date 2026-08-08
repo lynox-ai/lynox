@@ -3042,6 +3042,18 @@
 	{/if}
 	</div>
 
+	<!-- The non-transcript stack (pipeline progress, changeset review, prompts).
+		 One shrinkable, self-scrolling region: these blocks have
+		 `min-height: auto`, so without the wrapper a tall one (a ChangesetReview
+		 file list, a batch dialog) pushes the whole column taller than
+		 AppShell's slot — the slot's own scroller engages and the composer rides
+		 out of the viewport (reported from a live workflow run 2026-08-08).
+		 `min-h-0` lets the region shrink below its content instead;
+		 `overflow-y-auto` keeps a shrunken block reachable — clipping it away
+		 (the first fix attempt) made the changeset actions unreachable, which is
+		 worse than the bug. The transcript above keeps `flex-1`, so the stack
+		 only shrinks when it genuinely doesn't fit. -->
+	<div data-chat-stack class="min-h-0 shrink overflow-y-auto scrollbar-thin">
 	<!-- Pipeline progress: sticky above input during active execution only -->
 	{#if activePipeline && isStreaming && pipelineRunning}
 		<div class="border-t border-border bg-bg-subtle px-4 py-2">
@@ -3491,12 +3503,15 @@
 		/>
 	{/if}
 
+	</div>
+
 	<!-- Input. NO safe-area-inset-bottom here — the StatusBar below this row
 		 (rendered by AppShell) already absorbs the iOS Home Indicator zone via
 		 its own `pb-[env(safe-area-inset-bottom)]`. Adding it here double-pays
 		 the safe area and renders as wasted black space between the input and
-		 the status bar. -->
-	<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2">
+		 the status bar. `shrink-0`: the composer never pays for a tall stack —
+		 the stack above shrinks and scrolls instead. -->
+	<div class="shrink-0 border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2">
 		<!-- Pending files -->
 		{#if pendingFiles.length > 0}
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex flex-wrap gap-2 mb-2">
