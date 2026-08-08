@@ -63,6 +63,7 @@
 		type ToolCallInfo,
 		type ChatMessage,
 	} from '../stores/chat.svelte.js';
+	import type { PromptOrigin } from '../utils/prompt-origin.js';
 	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase, getDemoMode } from '../config.svelte.js';
 	import { isDiagnosticsEnabled } from '../stores/diagnostics.svelte.js';
@@ -96,7 +97,7 @@
 	import ComposerModelPicker from './ComposerModelPicker.svelte';
 	import ThreadModelControl from './ThreadModelControl.svelte';
 	import OnboardingBasics from './OnboardingBasics.svelte';
-	import { t, getLocale } from '../i18n.svelte.js';
+	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { playSpeech, playSpeechQueued, stopSpeech, primeIosTts, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
@@ -2142,6 +2143,40 @@
 	{/if}
 {/snippet}
 
+<!-- Who asked. A workflow step's tool calls never enter the transcript, so a
+     confirmation it raises has no visible cause on screen — the user is shown
+     "Allow / Deny" for a command nothing they can see requested. This line is
+     that cause. Rendered only when the engine supplied an origin: a prompt from
+     the main agent has its cause in the message directly above, and a redundant
+     "asked by" line there would be noise. -->
+{#snippet promptOrigin(origin: PromptOrigin | undefined)}
+	{#if origin && (origin.workflowName || origin.stepId)}
+		<!-- Workflow and step are SEPARATE elements with a real separator element
+		     between them, not one joined string. Both names come from a manifest
+		     a model may have written; a joined string lets a name containing the
+		     separator forge a second field on the very line that exists to say who
+		     asked. Structure it cannot reach beats punctuation it can imitate.
+		     `toPromptOrigin` bounds the length and strips control/bidi chars. -->
+		<div class="text-[11px] text-text-subtle">
+			<div class="flex items-start gap-1.5">
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M4 6h6a2 2 0 012 2v8a2 2 0 002 2h4m0 0l-3-3m3 3l-3 3M4 6V4m0 2v2" />
+				</svg>
+				<span class="min-w-0 [overflow-wrap:anywhere]">
+					{#if origin.workflowName}<span>{tf('chat.prompt_origin_workflow', { name: origin.workflowName })}</span>{/if}
+					{#if origin.workflowName && origin.stepId}<span class="mx-1" aria-hidden="true">·</span>{/if}
+					{#if origin.stepId}<span>{tf('chat.prompt_origin_step', { id: origin.stepId })}</span>{/if}
+				</span>
+			</div>
+			{#if origin.stepTask}
+				<!-- The readable half. It was hover-only `title` first, which is
+				     invisible on touch — where most of these prompts are answered. -->
+				<p class="mt-0.5 ml-5 text-text-subtle/80 [overflow-wrap:anywhere]">{origin.stepTask}</p>
+			{/if}
+		</div>
+	{/if}
+{/snippet}
+
 {#snippet micButton()}
 	<!-- Tap-to-toggle on every device. Hold-to-record was racy on touch
 	     (async getUserMedia vs pointerup, plus the synthesised click that
@@ -3038,6 +3073,11 @@
 		<div role="dialog" aria-label={t('chat.batch_mode')} tabindex="-1" data-pending-prompt data-prompt-kind="tabs" class="border-t border-border bg-bg-subtle px-4 py-3"
 			onkeydown={(e) => { if (e.key === 'Escape') answerPrompt('__dismissed__'); }}>
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-1">
+				<!-- Whichever prompt the batch is actually DRIVING owns the origin.
+				     A `??` fallback would hand a v2 tabs prompt the provenance of a
+				     permission prompt that merely happens to still be pending —
+				     naming the wrong asker is worse than naming none. -->
+				{@render promptOrigin(batchMode === 'v2' ? pendingTabsPrompt?.origin : pendingPermission?.origin)}
 				{#each batchQuestions as q, i}
 					{#if batchFocusIdx === i}
 						<!-- Focused question: expanded -->
@@ -3171,6 +3211,7 @@
 		{@const visibleOptions = isPermissionGuard ? [] : opts.filter(o => o !== '\x00')}
 		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
+				{@render promptOrigin(pendingPermission.origin)}
 				<div class="flex items-start gap-2">
 					{#if isPermissionGuard}
 						<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
@@ -3249,6 +3290,7 @@
 	{#if pendingSecret}
 		<div data-pending-prompt data-prompt-kind="secret" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-3">
+				{@render promptOrigin(pendingSecret.origin)}
 				<div class="flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-warning shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
 					<span class="text-sm font-medium text-text">{pendingSecret.prompt}</span>
@@ -3290,6 +3332,7 @@
 	{#if pendingMailConnect}
 		<div data-pending-prompt data-prompt-kind="mail" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-3">
+				{@render promptOrigin(pendingMailConnect.origin)}
 				<div class="flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-accent shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
 					<span class="text-sm font-medium text-text">{t('chat.mail_connect_title')}</span>

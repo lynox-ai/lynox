@@ -1232,6 +1232,18 @@ const MIGRATIONS: string[] = [
   // before this migration, and every caller still passing a plain string.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (51);
    ALTER TABLE pending_prompts ADD COLUMN segments_json TEXT;`,
+
+  // v52: Who asked. A prompt raised from inside a pipeline step has no visible
+  // cause in the thread (the step's tool calls carry an empty `context_id` and
+  // never enter `thread_messages`), so the workflow/step that asked rides the
+  // prompt itself. The live SSE events already carried `step_id`/`step_task`;
+  // without this column a page reload resolved through /pending-prompt and the
+  // restored dialog lost the provenance again — i.e. the fix would have held
+  // right up until someone refreshed, which is when a long workflow is most
+  // likely to be waiting. NULL = no origin: every pre-v52 row and every prompt
+  // the main agent raises, where the cause is on screen anyway.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (52);
+   ALTER TABLE pending_prompts ADD COLUMN origin_json TEXT;`,
 ];
 
 export class RunHistory {

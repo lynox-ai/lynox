@@ -49,6 +49,25 @@ describe('selectPendingPromptHead', () => {
 		expect(head?.options).toEqual(['Yes', 'No']);
 	});
 
+	// The anchor is the bar shown when the dialog is scrolled out of view — the
+	// moment the user has the LEAST context for what they are being asked. If the
+	// head drops the origin, the surface that most needs "who asked" is the one
+	// surface that cannot say it.
+	it('carries the origin through for every prompt kind that can have one', () => {
+		const origin = { workflowName: 'bexio Triage Phase 1-3', stepId: 'load_contacts' };
+
+		expect(selectPendingPromptHead({ ...permission('Allow?'), origin }, null, null)?.origin).toEqual(origin);
+		expect(selectPendingPromptHead(null, { ...tabs('Which?'), origin }, null)?.origin).toEqual(origin);
+		expect(selectPendingPromptHead(null, null, { name: 'K', prompt: 'Key?', promptId: 'ps-1', origin })?.origin)
+			.toEqual(origin);
+		expect(selectPendingPromptHead(null, null, null, { ...mailConnect('a@b.com'), origin })?.origin).toEqual(origin);
+	});
+
+	it('leaves the origin undefined for a prompt the main agent raised', () => {
+		// Contrast, so the assertion above cannot pass by stamping every head.
+		expect(selectPendingPromptHead(permission('Allow?'), null, null)?.origin).toBeUndefined();
+	});
+
 	it('prioritises secret over permission over tabs', () => {
 		const secret = selectPendingPromptHead(
 			permission('PermQ'),

@@ -12,6 +12,7 @@ import type {
 	TabsPrompt,
 	MailConnectPromptView,
 } from '../stores/chat.svelte.js';
+import type { PromptOrigin } from './prompt-origin.js';
 
 /**
  * Collapse the legacy pendingX vars into the unified head shape the
@@ -23,7 +24,7 @@ export function selectPendingPromptHead(
 	pendingPermission: PermissionPrompt | null,
 	pendingTabsPrompt: TabsPrompt | null,
 	pendingSecretPrompt:
-		| { name: string; prompt: string; keyType?: string; promptId?: string }
+		| { name: string; prompt: string; keyType?: string; promptId?: string; origin?: PromptOrigin }
 		| null,
 	pendingMailConnect?: MailConnectPromptView | null,
 ): PendingPromptHead | null {
@@ -32,6 +33,7 @@ export function selectPendingPromptHead(
 			kind: 'mail',
 			question: pendingMailConnect.address,
 			promptId: pendingMailConnect.promptId,
+			origin: pendingMailConnect.origin,
 		};
 	}
 	if (pendingSecretPrompt) {
@@ -39,6 +41,7 @@ export function selectPendingPromptHead(
 			kind: 'secret',
 			question: pendingSecretPrompt.prompt,
 			promptId: pendingSecretPrompt.promptId,
+			origin: pendingSecretPrompt.origin,
 		};
 	}
 	if (pendingPermission) {
@@ -47,6 +50,7 @@ export function selectPendingPromptHead(
 			question: pendingPermission.question,
 			promptId: pendingPermission.promptId,
 			options: pendingPermission.options,
+			origin: pendingPermission.origin,
 		};
 	}
 	if (pendingTabsPrompt) {
@@ -56,6 +60,7 @@ export function selectPendingPromptHead(
 			question: head?.question ?? '',
 			promptId: pendingTabsPrompt.promptId,
 			options: head?.options,
+			origin: pendingTabsPrompt.origin,
 		};
 	}
 	return null;

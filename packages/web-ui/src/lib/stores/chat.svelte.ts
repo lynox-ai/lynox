@@ -25,6 +25,7 @@ import { addToast } from './toast.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
 import { selectReattachTarget, type ReattachTarget } from '../utils/active-runs.js';
+import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
 // `import { UsageInfo } from './chat.svelte.js'` callers keep working.
@@ -191,6 +192,8 @@ export interface PermissionPrompt {
 	/** When true, render the options as multi-select (toggle several + Send)
 	 *  instead of single-click auto-send. */
 	multiSelect?: boolean;
+	/** The workflow step that raised this prompt, when one did. */
+	origin?: PromptOrigin;
 }
 
 /** Question descriptor inside a multi-question tabs prompt. Mirrors the
@@ -211,6 +214,8 @@ export interface TabsPrompt {
 	partialAnswers?: (string | null)[];
 	timeoutMs?: number;
 	receivedAt?: number;
+	/** The workflow step that raised this prompt, when one did. */
+	origin?: PromptOrigin;
 }
 
 interface QueuedMessage {
@@ -426,7 +431,7 @@ let lastEventAt = $state<number | null>(null);
 let lastAppliedSeq = 0;
 let pendingPermission = $state<PermissionPrompt | null>(null);
 let pendingTabsPrompt = $state<TabsPrompt | null>(null);
-let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string; promptId?: string } | null>(null);
+let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string; promptId?: string; origin?: PromptOrigin } | null>(null);
 let secretPromptGeneration = $state(0);
 
 /** One IMAP/SMTP endpoint as shown in the connect-mail consent step. */
@@ -445,6 +450,8 @@ export interface MailConnectPromptView {
 	smtp: MailConnectServerView;
 	appPasswordUrl?: string;
 	requires2FA?: boolean;
+	/** The workflow step that raised this prompt, when one did. */
+	origin?: PromptOrigin;
 }
 let pendingMailConnect = $state<MailConnectPromptView | null>(null);
 let mailConnectGeneration = $state(0);
@@ -1451,6 +1458,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				receivedAt: Date.now(),
 				promptId: data['promptId'] as string | undefined,
 				multiSelect: data['multi_select'] === true,
+				origin: originFromEvent(data),
 			};
 			break;
 		case 'prompt_tabs': {
@@ -1463,6 +1471,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				questions,
 				timeoutMs: typeof data['timeoutMs'] === 'number' ? data['timeoutMs'] : undefined,
 				receivedAt: Date.now(),
+				origin: originFromEvent(data),
 			};
 			break;
 		}
@@ -1483,6 +1492,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				prompt: String(data['prompt'] ?? ''),
 				keyType: data['key_type'] as string | undefined,
 				promptId: data['promptId'] as string | undefined,
+				origin: originFromEvent(data),
 			};
 			// Reset UI state for fresh prompt (handles retry after cancel)
 			secretPromptGeneration++;
@@ -1500,6 +1510,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				smtp: data['smtp'] as MailConnectServerView,
 				appPasswordUrl: data['appPasswordUrl'] as string | undefined,
 				requires2FA: data['requires2FA'] as boolean | undefined,
+				origin: originFromEvent(data),
 			};
 			mailConnectGeneration++;
 			break;
@@ -2026,6 +2037,9 @@ export async function checkPendingPrompt(): Promise<void> {
 
 		const promptType = data['promptType'] as string;
 		const kind = data['kind'] as string | undefined;
+		// Restored the same way for every kind: a prompt that named its workflow
+		// while the stream was live must still name it after a reload (v52).
+		const origin = originFromPending(data['origin']);
 		if (promptType === 'ask_user' && kind === 'tabs' && Array.isArray(data['questions'])) {
 			pendingTabsPrompt = {
 				promptId: String(data['promptId'] ?? ''),
@@ -2033,6 +2047,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				partialAnswers: Array.isArray(data['partialAnswers']) ? (data['partialAnswers'] as (string | null)[]) : undefined,
 				timeoutMs: data['timeoutMs'] as number | undefined,
 				receivedAt: Date.now(),
+				origin,
 			};
 		} else if (promptType === 'ask_user') {
 			pendingPermission = {
@@ -2045,6 +2060,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				// Restore multi-select pills on reconnect (v33) — without this the
 				// prompt degraded to single-select after a reload mid-prompt.
 				multiSelect: data['multiSelect'] === true,
+				origin,
 			};
 		} else if (promptType === 'ask_secret') {
 			pendingSecretPrompt = {
@@ -2052,6 +2068,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				prompt: String(data['question'] ?? ''),
 				keyType: data['secretKeyType'] as string | undefined,
 				promptId: data['promptId'] as string | undefined,
+				origin,
 			};
 			secretPromptGeneration++;
 		} else if (promptType === 'connect_mail' && data['mailConnect']) {
@@ -2067,6 +2084,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				smtp: mc['smtp'] as MailConnectServerView,
 				appPasswordUrl: mc['appPasswordUrl'] as string | undefined,
 				requires2FA: mc['requires2FA'] as boolean | undefined,
+				origin,
 			};
 			mailConnectGeneration++;
 		}
@@ -2347,6 +2365,10 @@ export interface PendingPromptHead {
 	question: string;
 	promptId?: string;
 	options?: string[];
+	/** The workflow step that raised it. The anchor is the surface shown when
+	 *  the dialog is scrolled out of view — i.e. exactly when the user has the
+	 *  least context for what they are being asked. */
+	origin?: PromptOrigin;
 }
 
 export function getPendingPrompt(): PendingPromptHead | null {

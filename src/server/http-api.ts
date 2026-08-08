@@ -49,6 +49,7 @@ import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
+import { promptOriginOf, parseOriginJson } from '../core/prompt-store.js';
 import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
@@ -2462,7 +2463,8 @@ export class LynoxHTTPApi {
         // the flattened form IS the concatenation of the segments.
         const segments = promptSegments(rawQuestion);
         const question = flattenPrompt(rawQuestion);
-        const promptId = promptStore.insertAskUser(sessionId, question, options, meta?.multiSelect === true, segments);
+        const origin = promptOriginOf(meta);
+        const promptId = promptStore.insertAskUser(sessionId, question, options, meta?.multiSelect === true, segments, origin);
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         // Best-effort SSE notification (client may not be connected).
@@ -2472,7 +2474,7 @@ export class LynoxHTTPApi {
             // Omitted when there is nothing to distinguish (an all-frame
             // prompt), so the payload does not grow for un-migrated callers.
             segments: segments.some((s: PromptSegment) => s.kind === 'value') ? segments : undefined,
-            step_id: meta?.stepId, step_task: meta?.stepTask,
+            step_id: meta?.stepId, step_task: meta?.stepTask, workflow_name: meta?.workflowName,
             // Multi-select pills (toggle several + Send). The client posts the
             // chosen labels back as a JSON array string via the normal /reply;
             // the ask_user tool parses it. A reconnect mid-prompt (which loads
@@ -2499,13 +2501,13 @@ export class LynoxHTTPApi {
       if (tabsCapable) {
         session.promptTabs = async (questions, meta?: PromptMeta): Promise<string[]> => {
           if (!promptStore) return [];
-          const promptId = promptStore.insertAskUserTabs(sessionId, questions);
+          const promptId = promptStore.insertAskUserTabs(sessionId, questions, promptOriginOf(meta));
           hasActivePendingPrompt = true;
           pauseWallClock(); // parked on a human — don't spend the compute budget
           if (!aborted && !res.writableEnded) {
             const data = JSON.stringify({
               promptId, questions, timeoutMs: PROMPT_TIMEOUT_MS,
-              step_id: meta?.stepId, step_task: meta?.stepTask,
+              step_id: meta?.stepId, step_task: meta?.stepTask, workflow_name: meta?.workflowName,
             });
             res.write(`event: prompt_tabs\ndata: ${data}\n\n`);
           }
@@ -2567,13 +2569,13 @@ export class LynoxHTTPApi {
           return 'managed_blocked';
         }
 
-        const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType);
+        const promptId = promptStore.insertAskSecret(sessionId, name, prompt, keyType, promptOriginOf(meta));
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         if (!aborted && !res.writableEnded) {
           const data = JSON.stringify({
             promptId, name, prompt, key_type: keyType,
-            step_id: meta?.stepId, step_task: meta?.stepTask,
+            step_id: meta?.stepId, step_task: meta?.stepTask, workflow_name: meta?.workflowName,
           });
           res.write(`event: secret_prompt\ndata: ${data}\n\n`);
         }
@@ -2606,13 +2608,14 @@ export class LynoxHTTPApi {
           sessionId,
           `Connect mailbox ${data.address}`,
           JSON.stringify(data),
+          promptOriginOf(meta),
         );
         hasActivePendingPrompt = true;
         pauseWallClock(); // parked on a human — don't spend the compute budget
         if (!aborted && !res.writableEnded) {
           const payload = JSON.stringify({
             promptId, ...data,
-            step_id: meta?.stepId, step_task: meta?.stepTask,
+            step_id: meta?.stepId, step_task: meta?.stepTask, workflow_name: meta?.workflowName,
           });
           res.write(`event: mail_connect_prompt\ndata: ${payload}\n\n`);
         }
@@ -2976,6 +2979,14 @@ export class LynoxHTTPApi {
         secretKeyType: row.secret_key_type,
         // The staged mail-account fields for a connect_mail prompt (no password).
         mailConnect: row.payload_json ? JSON.parse(row.payload_json) as unknown : undefined,
+        // Who asked (v52). A workflow's prompt can sit here for minutes, which
+        // is exactly the window in which a page gets reloaded — restoring the
+        // dialog without its provenance would put the user back in front of the
+        // unexplained "Allow / Deny" this field exists to prevent.
+        // Parsed defensively: a malformed row must cost the user their origin
+        // LINE, not the whole resume — the prompt behind it is what a run is
+        // blocked on.
+        origin: parseOriginJson(row.origin_json),
         timeoutMs: PROMPT_TIMEOUT_MS,
         createdAt: row.created_at,
       });

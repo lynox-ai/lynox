@@ -49,6 +49,14 @@ export interface RunManifestOptions {
    */
   parentPrompt?: SubAgentPromptHandles | undefined;
   /**
+   * The workflow name to put on this run's prompts, when it is not
+   * `manifest.name`. Exists for SYNTHETIC manifests: `spawnPipeline` builds a
+   * sub-manifest called `<stepId>-sub`, which is a machine id the user has never
+   * seen — naming it in a confirmation dialog is worse than naming the workflow
+   * they actually started. Omit and `manifest.name` is used.
+   */
+  originWorkflowName?: string | undefined;
+  /**
    * Per-run prompt budget. When omitted, a fresh PromptBudget is created from
    * the parent's existing budget (sub-pipelines inherit) or from the user
    * config / default. Pipelines without parentPrompt skip budgeting entirely.
@@ -234,6 +242,27 @@ export async function runManifest(
     const limit = config.pipeline_prompt_budget ?? DEFAULT_PROMPT_BUDGET;
     const budget = options.promptBudget ?? new PromptBudget(limit);
     parentPrompt = { ...parentPrompt, promptBudget: budget };
+  }
+  // Name the workflow on every prompt its steps raise. Unlike the budget this
+  // is set at EVERY depth and overwrites a parent's: a step belongs to the
+  // manifest that declares it, so a REAL nested workflow names itself rather
+  // than the outer one, which would point the user at a step list that does not
+  // contain the step asking.
+  //
+  // `originWorkflowName` is the exception, and it exists because that rule has a
+  // blind spot: `spawnPipeline` wraps a composed step in a manifest called
+  // `<stepId>-sub`, and preferring THAT swaps a name the user started for one
+  // they have never seen. The caller that knows the manifest is synthetic says so.
+  //
+  // An empty name is dropped rather than carried. `validateManifest` requires
+  // min(1), but `runManifest` does not itself validate, and a stored `''` would
+  // travel all the way to the renderer as a workflow that asked and cannot be
+  // named — which is the one thing the origin line must never say.
+  if (parentPrompt) {
+    const originName = options.originWorkflowName ?? manifest.name;
+    parentPrompt = originName
+      ? { ...parentPrompt, workflowName: originName }
+      : { ...parentPrompt, workflowName: undefined };
   }
 
   // Session counters for this pipeline run. When invoked from a chat
