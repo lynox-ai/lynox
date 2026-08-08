@@ -113,7 +113,9 @@ export interface ApiAuth {
   username_key?: string | undefined;
   /** For 'basic' + 'user_pass_split': vault key holding the password. Falls back to `vault_keys[1]`. */
   password_key?: string | undefined;
-  /** Header name for 'header' type (e.g. 'X-Api-Key'). Default: 'Authorization'. */
+  /** Header name for 'header' type. Default: 'X-Api-Key' — matches what the profile
+   *  description shows the model and what `api_setup bootstrap` writes. The engine
+   *  fills this slot from `vault_keys[0]`; see the attach in `http.ts`. */
   header_name?: string | undefined;
   /** Query parameter name for 'query' type. */
   query_param?: string | undefined;
