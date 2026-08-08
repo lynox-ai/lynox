@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
-import { PromptStore, PromptConflictError, promptOriginOf } from './prompt-store.js';
+import { PromptStore, PromptConflictError, promptOriginOf, parseOriginJson } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
 
 /** Build a fresh SQLite instance with just the pending_prompts schema the
@@ -487,5 +487,39 @@ describe('promptOriginOf', () => {
     // the workflow name is what they clicked. Dropping the origin because two
     // of three fields are missing would lose exactly the useful one.
     expect(promptOriginOf({ workflowName: 'bexio Triage' })).toEqual({ workflowName: 'bexio Triage' });
+  });
+
+  it('treats an empty field as absent, so the row cannot claim what the dialog denies', () => {
+    // The client-side parser treats '' as absent. If this side kept it, the row
+    // would persist `{"workflowName":""}` — an origin the renderer then refuses
+    // to show. Two layers disagreeing about the same value is how a stored fact
+    // and a displayed one drift apart.
+    expect(promptOriginOf({ workflowName: '', stepId: 'load_contacts' }))
+      .toEqual({ workflowName: undefined, stepId: 'load_contacts', stepTask: undefined });
+    expect(promptOriginOf({ workflowName: '', stepId: '', stepTask: '' })).toBeUndefined();
+  });
+});
+
+describe('parseOriginJson', () => {
+  it('round-trips what promptOriginOf wrote', () => {
+    const origin = { workflowName: 'bexio Triage', stepId: 'load_contacts', stepTask: 'Paginate' };
+    expect(parseOriginJson(JSON.stringify(origin))).toEqual(origin);
+  });
+
+  it('degrades to undefined on a malformed or wrong-shaped row', () => {
+    // The origin is a LABEL on a prompt. A bad label must cost the user their
+    // provenance line, never the resume of the prompt a run is blocked on —
+    // an unguarded JSON.parse here 500s `GET /pending-prompt` for that session
+    // and the run stays wedged with no way to answer it.
+    expect(parseOriginJson('{not json')).toBeUndefined();
+    expect(parseOriginJson('null')).toBeUndefined();
+    expect(parseOriginJson('"a string"')).toBeUndefined();
+    expect(parseOriginJson('[{"workflowName":"x"}]')).toBeUndefined();
+    expect(parseOriginJson(null)).toBeUndefined();
+  });
+
+  it('drops non-string fields rather than rendering them', () => {
+    expect(parseOriginJson('{"workflowName":42,"stepId":"load_contacts"}'))
+      .toEqual({ workflowName: undefined, stepId: 'load_contacts', stepTask: undefined });
   });
 });

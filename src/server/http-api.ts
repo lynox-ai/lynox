@@ -49,7 +49,7 @@ import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
-import { promptOriginOf } from '../core/prompt-store.js';
+import { promptOriginOf, parseOriginJson } from '../core/prompt-store.js';
 import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
@@ -2983,7 +2983,10 @@ export class LynoxHTTPApi {
         // is exactly the window in which a page gets reloaded — restoring the
         // dialog without its provenance would put the user back in front of the
         // unexplained "Allow / Deny" this field exists to prevent.
-        origin: row.origin_json ? JSON.parse(row.origin_json) as unknown : undefined,
+        // Parsed defensively: a malformed row must cost the user their origin
+        // LINE, not the whole resume — the prompt behind it is what a run is
+        // blocked on.
+        origin: parseOriginJson(row.origin_json),
         timeoutMs: PROMPT_TIMEOUT_MS,
         createdAt: row.created_at,
       });

@@ -3740,39 +3740,75 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
-    it('the live prompt SSE event names the workflow, not just the step', async () => {
-      // The reload path above proves persistence; this proves the path a user
-      // actually hits first. `step_id`/`step_task` already rode this event and
-      // the client still could not name what asked — the workflow name is the
-      // half a non-technical user recognises, so it has to be on the wire too.
-      await withStores(async () => {
+    // Every prompt kind a workflow step can raise must carry the workflow name
+    // on the LIVE frame, not just the resumed one. Parametrised because the
+    // first version of this test asserted only the `prompt` event: deleting
+    // `workflow_name` from the other three left the whole suite green, which is
+    // the same "one arm proved, three assumed" gap the mutation table exists to
+    // catch.
+    const SSE_PROMPT_KINDS = [
+      {
+        label: 'prompt',
+        raise: (session: typeof mockSessionInstance) =>
+          (session.promptUser as ((q: string, o?: string[], m?: Record<string, unknown>) => Promise<string>))(
+            '⚠ bash: remote shell access', ['Allow', 'Deny'], ORIGIN_META),
+      },
+      {
+        label: 'prompt_tabs',
+        raise: (session: typeof mockSessionInstance) =>
+          (session.promptTabs as ((q: unknown[], m?: Record<string, unknown>) => Promise<string[]>))(
+            [{ question: 'Which contact?' }], ORIGIN_META),
+      },
+      {
+        label: 'secret_prompt',
+        raise: (session: typeof mockSessionInstance) =>
+          (session.promptSecret as ((n: string, p: string, k?: string, m?: Record<string, unknown>) => Promise<string>))(
+            'BEXIO_API_TOKEN', 'bexio key?', 'api_key', ORIGIN_META),
+      },
+    ] as const;
+
+    const ORIGIN_META = {
+      workflowName: 'bexio Triage Phase 1-3',
+      stepId: 'load_contacts',
+      stepTask: 'Paginate GET /2.0/contact',
+    };
+
+    it.each(SSE_PROMPT_KINDS)('the live $label frame names the workflow, not just the step', async ({ raise }) => {
+      await withStores(async (ps) => {
         // Same pre-flight key stub the `runs` block installs — POST /run refuses
         // before it ever opens a stream without a resolvable provider key.
         mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+        let parked: Promise<unknown> | undefined;
         mockSessionRun.mockImplementationOnce(async () => {
-          const ask = mockSessionInstance.promptUser as
-            ((q: string, o?: string[], m?: Record<string, unknown>) => Promise<string>) | null;
-          // Deliberately not awaited: the handler writes the SSE frame
-          // synchronously and then parks on the human. Awaiting it here would
-          // deadlock the request that carries the frame we are asserting on.
-          if (ask) void ask('⚠ bash: remote shell access', ['Allow', 'Deny'], {
-            workflowName: 'bexio Triage Phase 1-3',
-            stepId: 'load_contacts',
-            stepTask: 'Paginate GET /2.0/contact',
-          });
+          // Deliberately not awaited HERE: the handler writes the SSE frame
+          // synchronously and then parks on the human, so awaiting inside the
+          // run would deadlock the request carrying the frame under assertion.
+          // It IS settled below — an unsettled prompt leaves waitForSettled's
+          // 30s interval running against a database `withStores` then closes.
+          parked = raise(mockSessionInstance);
           await new Promise((r) => setImmediate(r));
           return 'done';
         });
 
+        // protocol=2 — without it the route never wires `promptTabs` at all and
+        // the tabs case would pass by never raising a prompt.
         const res = await jsonFetch('/api/sessions/sse-wf/run', {
-          method: 'POST', body: JSON.stringify({ task: 'run the triage workflow' }),
+          method: 'POST', body: JSON.stringify({ task: 'run the triage workflow', protocol: 2 }),
         });
         const text = await res.text();
+
         const frame = text.split('\n').find((l) => l.startsWith('data:') && l.includes('"promptId"'));
         expect(frame, 'no prompt frame on the stream').toBeDefined();
         const payload = JSON.parse(frame!.slice('data:'.length)) as Record<string, unknown>;
         expect(payload['workflow_name']).toBe('bexio Triage Phase 1-3');
         expect(payload['step_id']).toBe('load_contacts');
+
+        // Settle the parked prompt so its expiry interval is cleared before the
+        // db closes. Without this the timer fires ~30s later against a closed
+        // handle and surfaces as an unhandled error charged to a LATER test.
+        const pending = ps.getPending('sse-wf');
+        if (pending) ps.expirePrompt(pending.id);
+        await parked;
       });
     });
 

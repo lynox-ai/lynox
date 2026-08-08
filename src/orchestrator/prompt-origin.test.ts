@@ -108,10 +108,46 @@ describe('prompt origin — a workflow step names itself in its own confirmation
     );
   });
 
-  it('leaves the origin empty for a run with no workflow name', async () => {
-    // `name` is a required Manifest field, so the honest no-origin case is the
-    // one the main agent takes: no pipeline, no wrapper, no meta at all. Pinned
-    // here so the origin line can never render an empty frame for it.
+  it('a nested pipeline still names the workflow the user started, not `<step>-sub`', async () => {
+    // `spawnPipeline` builds a sub-manifest called `${step.id}-sub`. That is a
+    // machine id nobody has ever seen in the UI, so the "innermost manifest
+    // wins" rule — right for a real nested workflow — would here replace a name
+    // the user recognises with one they cannot place.
+    const parentPromptUser = vi.fn(async () => 'y');
+    const composed: Manifest = {
+      manifest_version: '1.1',
+      name: 'bexio Triage Phase 1-3',
+      triggered_by: 'test',
+      context: {},
+      agents: [{
+        id: 'load_contacts',
+        agent: 'load_contacts',
+        runtime: 'pipeline',
+        task: 'Paginate contacts',
+        pipeline: [{ id: 'fetch_page', task: 'GET /2.0/contact' }],
+      }],
+      gate_points: [],
+      on_failure: 'stop',
+    };
+
+    await runManifest(composed, CONFIG, { parentTools: TOOLS, parentPrompt: { parentPromptUser } });
+
+    await stepPromptUser()('Q');
+
+    const meta = parentPromptUser.mock.calls[0]![2] as Record<string, unknown> | undefined;
+    expect(meta?.['workflowName']).toBe('bexio Triage Phase 1-3');
+    expect(meta?.['workflowName']).not.toContain('-sub');
+    // The STEP still names the inner step — the composition is not hidden, just
+    // not mislabelled as the workflow.
+    expect(meta?.['stepId']).toBe('fetch_page');
+  });
+
+  it('carries NO workflow name when the manifest has none, rather than an empty one', async () => {
+    // `validateManifest` requires min(1), but `runManifest` does not validate —
+    // so an empty name is reachable, and `''` would persist as a non-NULL
+    // `{"workflowName":""}` and reach the renderer as a workflow that asked and
+    // cannot be named. Undefined is the honest value; the step still names
+    // itself.
     const parentPromptUser = vi.fn(async () => 'y');
     const unnamed = { ...manifestNamed(''), name: '' };
     await runManifest(unnamed, CONFIG, { parentTools: TOOLS, parentPrompt: { parentPromptUser } });
@@ -119,7 +155,8 @@ describe('prompt origin — a workflow step names itself in its own confirmation
     await stepPromptUser()('Q');
 
     const meta = parentPromptUser.mock.calls[0]![2] as Record<string, unknown> | undefined;
-    expect(meta?.['workflowName']).toBe('');
+    expect(meta?.['workflowName']).toBeUndefined();
+    // The step still names itself — dropping the workflow must not drop the origin.
     expect(meta?.['stepId']).toBe('load_contacts');
   });
 });

@@ -15,17 +15,53 @@ export interface PromptOrigin {
 }
 
 /**
+ * A workflow name and a step id come from a manifest, and a manifest can be
+ * model-authored: `validateManifest` requires `min(1)` and imposes no ceiling.
+ * This label sits directly above Allow/Deny, so an unbounded string would push
+ * the buttons out of the viewport — and "the user cannot see what they are
+ * agreeing to" is the actual failure this whole feature exists to prevent.
+ */
+const MAX_LABEL = 80;
+/** The task is prose on its own line, so it may run longer than a label. */
+const MAX_TASK = 160;
+
+/** C0/C1 controls — a newline would turn one label into several lines. */
+// eslint-disable-next-line no-control-regex -- removing them is the point
+const CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/g;
+/** Bidi marks and overrides — they render text in an order it is not written in. */
+const BIDI_CHARS = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+
+/**
+ * Strip what can forge a label rather than fill it, then bound the length.
+ *
+ * This does NOT try to defeat lookalike quotes — a name containing
+ * `" - Schritt "` can still read like two fields. That is handled where it
+ * belongs: the renderer puts the workflow and the step in SEPARATE elements, so
+ * the separator between them is structure the content cannot reach, not
+ * punctuation it can imitate.
+ */
+function clean(value: string, max: number): string {
+	const stripped = value.replace(CONTROL_CHARS, '').replace(BIDI_CHARS, '').trim();
+	return stripped.length > max ? `${stripped.slice(0, max - 1)}…` : stripped;
+}
+
+/**
  * Build an origin from three loosely-typed fields, or `undefined` when none of
- * them carries anything. Empty strings count as absent: a prompt with no origin
- * must render NO origin line, and an empty frame is worse than none — it claims
- * a workflow asked and then fails to name it.
+ * them carries anything. Empty counts as absent: a prompt with no origin must
+ * render NO origin line, and an empty frame is worse than none — it claims a
+ * workflow asked and then fails to name it. A value that is nothing BUT control
+ * characters cleans down to empty and is therefore absent too.
  */
 export function toPromptOrigin(workflowName: unknown, stepId: unknown, stepTask: unknown): PromptOrigin | undefined {
+	const name = typeof workflowName === 'string' ? clean(workflowName, MAX_LABEL) : '';
+	const step = typeof stepId === 'string' ? clean(stepId, MAX_LABEL) : '';
+	const task = typeof stepTask === 'string' ? clean(stepTask, MAX_TASK) : '';
+	if (!name && !step && !task) return undefined;
 	const o: PromptOrigin = {};
-	if (typeof workflowName === 'string' && workflowName) o.workflowName = workflowName;
-	if (typeof stepId === 'string' && stepId) o.stepId = stepId;
-	if (typeof stepTask === 'string' && stepTask) o.stepTask = stepTask;
-	return o.workflowName ?? o.stepId ?? o.stepTask ? o : undefined;
+	if (name) o.workflowName = name;
+	if (step) o.stepId = step;
+	if (task) o.stepTask = task;
+	return o;
 }
 
 /** Origin off a live SSE prompt event — flat, snake_case wire fields. */

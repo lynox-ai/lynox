@@ -49,6 +49,14 @@ export interface RunManifestOptions {
    */
   parentPrompt?: SubAgentPromptHandles | undefined;
   /**
+   * The workflow name to put on this run's prompts, when it is not
+   * `manifest.name`. Exists for SYNTHETIC manifests: `spawnPipeline` builds a
+   * sub-manifest called `<stepId>-sub`, which is a machine id the user has never
+   * seen — naming it in a confirmation dialog is worse than naming the workflow
+   * they actually started. Omit and `manifest.name` is used.
+   */
+  originWorkflowName?: string | undefined;
+  /**
    * Per-run prompt budget. When omitted, a fresh PromptBudget is created from
    * the parent's existing budget (sub-pipelines inherit) or from the user
    * config / default. Pipelines without parentPrompt skip budgeting entirely.
@@ -240,8 +248,16 @@ export async function runManifest(
   // manifest that declares it, so a nested sub-pipeline's prompt must name the
   // sub-pipeline — naming the outer one would point the user at a step list
   // that does not contain the step asking.
+  //
+  // An empty name is dropped rather than carried. `validateManifest` requires
+  // min(1), but `runManifest` does not itself validate, and a stored `''` would
+  // travel all the way to the renderer as a workflow that asked and cannot be
+  // named — which is the one thing the origin line must never say.
   if (parentPrompt) {
-    parentPrompt = { ...parentPrompt, workflowName: manifest.name };
+    const originName = options.originWorkflowName ?? manifest.name;
+    parentPrompt = originName
+      ? { ...parentPrompt, workflowName: originName }
+      : { ...parentPrompt, workflowName: undefined };
   }
 
   // Session counters for this pipeline run. When invoked from a chat

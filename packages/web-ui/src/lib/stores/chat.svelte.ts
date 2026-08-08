@@ -2365,6 +2365,10 @@ export interface PendingPromptHead {
 	question: string;
 	promptId?: string;
 	options?: string[];
+	/** The workflow step that raised it. The anchor is the surface shown when
+	 *  the dialog is scrolled out of view — i.e. exactly when the user has the
+	 *  least context for what they are being asked. */
+	origin?: PromptOrigin;
 }
 
 export function getPendingPrompt(): PendingPromptHead | null {

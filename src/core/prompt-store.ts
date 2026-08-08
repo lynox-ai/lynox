@@ -102,9 +102,35 @@ function isOnboardingBasicsPayload(payloadJson: string | null): boolean {
  */
 export function promptOriginOf(meta: PromptMeta | undefined): PromptOrigin | undefined {
   if (!meta) return undefined;
-  const { workflowName, stepId, stepTask } = meta;
+  // Empty counts as absent, matching the client-side parser. An `undefined`-vs-
+  // `''` split between the two would persist `{"workflowName":""}` here and then
+  // render nothing there — the row would claim an origin the dialog denies.
+  const workflowName = meta.workflowName || undefined;
+  const stepId = meta.stepId || undefined;
+  const stepTask = meta.stepTask || undefined;
   if (workflowName === undefined && stepId === undefined && stepTask === undefined) return undefined;
   return { workflowName, stepId, stepTask };
+}
+
+/**
+ * Read back a persisted origin. Malformed JSON yields `undefined` rather than
+ * throwing: the origin is a label on a prompt, and a bad label must not take
+ * down the resume of the prompt a run is blocked on.
+ */
+export function parseOriginJson(raw: string | null): PromptOrigin | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+    const o = parsed as Record<string, unknown>;
+    return promptOriginOf({
+      workflowName: typeof o['workflowName'] === 'string' ? o['workflowName'] : undefined,
+      stepId: typeof o['stepId'] === 'string' ? o['stepId'] : undefined,
+      stepTask: typeof o['stepTask'] === 'string' ? o['stepTask'] : undefined,
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 export class PromptConflictError extends Error {

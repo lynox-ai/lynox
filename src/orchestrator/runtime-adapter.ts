@@ -796,6 +796,11 @@ export async function spawnPipeline(
     // 2a/B5: stamp the caller's run id so the nested pipeline_runs row links to
     // its parent and is filtered out of the top-level run list + cost stats.
     parentRunId,
+    // `subManifest.name` is the synthetic `<stepId>-sub` a few lines up — a
+    // machine id the user has never seen. A confirmation from inside this
+    // composition names the workflow they actually started instead; the step id
+    // beside it still says which step is asking.
+    originWorkflowName: parentPrompt?.workflowName,
   });
 
   // Aggregate results

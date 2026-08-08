@@ -849,8 +849,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	// from these two halves rather than one sentence: a step can be reached
 	// without a named workflow (and vice versa), and a half-filled sentence
 	// reads worse than the half that is true.
-	'chat.prompt_origin_workflow': { de: 'Workflow „{name}“', en: 'Workflow “{name}”' },
-	'chat.prompt_origin_step': { de: 'Schritt „{id}“', en: 'Step “{id}”' },
+	'chat.prompt_origin_workflow': { de: 'Workflow „{name}“', en: 'Workflow "{name}"' },
+	'chat.prompt_origin_step': { de: 'Schritt „{id}“', en: 'Step "{id}"' },
 	'chat.batch_mode': { de: 'Fragen beantworten', en: 'Answer questions' },
 
 	// Pipeline status v2 — prompt anchor (sticky bar above the chat input)

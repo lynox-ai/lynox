@@ -10,10 +10,10 @@ import { EngineDb } from './engine-db.js';
  *
  * Every fixture in this file constructs a partial database at some old version, and every
  * later migration that READS a baseline table then throws on it — v4 needed `memories`, v7
- * needed `subjects`, v11 needs the verb tables. Three rounds of the same edit is the signal:
- * the fixtures encode "what this migration touches", not "what a real db at that version
- * looks like", and a REAL pre-v11 db has all of these (v1 creates them). `IF NOT EXISTS`
- * so a fixture that defines its own richer shape keeps it.
+ * needed `subjects`, v11 needs the verb tables, v12 needs `pending_prompts`. Four rounds of
+ * the same edit is the signal: the fixtures encode "what this migration touches", not "what
+ * a real db at that version looks like", and a REAL pre-v12 db has all of these (v1 creates
+ * them). `IF NOT EXISTS` so a fixture that defines its own richer shape keeps it.
  */
 function topUpBaselineTables(raw: Database.Database): void {
   raw.exec(`
@@ -22,6 +22,7 @@ function topUpBaselineTables(raw: Database.Database): void {
     CREATE TABLE IF NOT EXISTS workflows (id TEXT PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS triggers (id TEXT PRIMARY KEY, source TEXT, effect TEXT);
     CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS pending_prompts (id TEXT PRIMARY KEY);
   `);
 }
 
@@ -45,10 +46,21 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     tmpDirs.length = 0;
   });
 
-  it('creates the database and stamps schema_version v11', () => {
+  it('creates the database and stamps schema_version v12', () => {
     const e = createEngineDb();
     const row = e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(11); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather) + v7 (subjects.merged_into) + v8 (memories evidence: source_channel/source_untrusted) + v9 (knowledge_entries + memory_blocks — Durable Knowledge Substrate) + v10 (onboarding_flags — Onboarding Wave 1) + v11 (onboarding backfill for pre-W1 instances)
+    expect(row.v).toBe(12); // v1 baseline + v2 (idx_triggers_next_run) + v3 (effect) + v4 (idx_memories_created) + v5 (verb_backfill_marker) + v6 (triggers.confirmed_at + grandfather) + v7 (subjects.merged_into) + v8 (memories evidence: source_channel/source_untrusted) + v9 (knowledge_entries + memory_blocks — Durable Knowledge Substrate) + v10 (onboarding_flags — Onboarding Wave 1) + v11 (onboarding backfill for pre-W1 instances) + v12 (pending_prompts segments_json + origin_json — the history.db twin)
+    // v12: the pending_prompts twin carries the two columns history.db grew in
+    // v51/v52. This table's whole contract is to match the live history.db shape
+    // verbatim so the S2 data-move is a pure INSERT..SELECT — a missing column
+    // there is a column of data that silently has nowhere to land. Asserted on a
+    // FRESH db, which is the case a base-block-only edit gets right and an
+    // ALTER-only edit gets wrong; the upgrade case is covered below.
+    const promptCols = (e.getDb().prepare("PRAGMA table_info('pending_prompts')").all() as Array<{ name: string }>)
+      .map(c => c.name);
+    expect(promptCols).toContain('segments_json');
+    expect(promptCols).toContain('origin_json');
+
     // v5 (B1): the exactly-once boot-backfill marker table is created + seeded done=0.
     const marker = e.getDb().prepare('SELECT done FROM verb_backfill_marker WHERE id = 1').get() as { done: number } | undefined;
     expect(marker?.done).toBe(0);
@@ -181,7 +193,43 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     expect(byId['g-workflow']).toBeNull();
     expect(byId['g-backup']).toBeNull();
     expect(byId['g-notify']).toBeNull();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
+    e.close();
+  });
+
+  it('v12 migration adds the two prompt columns to an ALREADY-BOOTED database', () => {
+    // The case a base-block-only edit misses entirely, and the one that covers
+    // the whole fleet: `new EngineDb()` runs on every boot, so every instance
+    // already has an engine.db at some version and never sees an edit to the v1
+    // CREATE. v51's `segments_json` was added that way and has been missing here
+    // since; this migration closes both.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-engine-v12-'));
+    tmpDirs.push(dir);
+    const dbPath = join(dir, 'engine.db');
+
+    const raw = new Database(dbPath);
+    raw.exec(`
+      CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+      INSERT INTO schema_version (version) VALUES (11);
+      CREATE TABLE pending_prompts (id TEXT PRIMARY KEY, session_id TEXT, question TEXT);
+      CREATE TABLE onboarding_flags (owner_user_id TEXT, flag TEXT, value TEXT, updated_at TEXT);
+    `);
+    raw.prepare("INSERT INTO pending_prompts (id, session_id, question) VALUES ('p1','s1','Allow?')").run();
+    topUpBaselineTables(raw);
+    raw.close();
+
+    const e = new EngineDb(dbPath, '');
+    const cols = (e.getDb().prepare("PRAGMA table_info('pending_prompts')").all() as Array<{ name: string }>)
+      .map(c => c.name);
+    expect(cols).toContain('segments_json');
+    expect(cols).toContain('origin_json');
+    // Additive: the pre-existing row survives, both new columns NULL.
+    const row = e.getDb().prepare("SELECT question, segments_json, origin_json FROM pending_prompts WHERE id='p1'")
+      .get() as { question: string; segments_json: string | null; origin_json: string | null };
+    expect(row.question).toBe('Allow?');
+    expect(row.segments_json).toBeNull();
+    expect(row.origin_json).toBeNull();
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
     e.close();
   });
 
@@ -208,7 +256,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     const row = e.getDb().prepare('SELECT id, name, merged_into FROM subjects WHERE id = ?').get('s1') as
       { id: string; name: string; merged_into: string | null };
     expect(row).toEqual({ id: 's1', name: 'Dr. Ada Lovelace', merged_into: null });   // survived, column added NULL
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
     e.close();
   });
 
@@ -243,7 +291,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
       text: 'a fact from before v8', source_type: 'user_asserted',
       source_channel: null, source_untrusted: 0, embedding_model: null,
     });
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
     e.close();
   });
 
@@ -279,7 +327,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // The two v9 tables exist and are empty.
     expect((db.prepare("SELECT COUNT(*) c FROM knowledge_entries").get() as { c: number }).c).toBe(0);
     expect((db.prepare("SELECT COUNT(*) c FROM memory_blocks").get() as { c: number }).c).toBe(0);
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
 
     // H6 (pin is a store invariant): an active, trusted row MAY pin.
     expect(() =>
@@ -441,7 +489,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
 
     const e2 = new EngineDb(path, '');
     const row = e2.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(11); // no re-migration on reopen — stays at the latest applied
+    expect(row.v).toBe(12); // no re-migration on reopen — stays at the latest applied
     expect(e2.getDb().prepare("SELECT name FROM subjects WHERE id='keep'").get()).toMatchObject({ name: 'Keep' });
     e2.close();
   });
@@ -575,7 +623,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // boot backfill re-populating from the still-present legacy history.db).
     expect((db.prepare('SELECT COUNT(*) c FROM verb_backfill_marker').get() as { c: number }).c).toBe(1);
     // The schema itself survives — version stays at the latest, no re-migration on next open.
-    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
     // And the DB is still usable (inserts work — the tables weren't dropped).
     expect(() =>
       db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('s3','person','Bob')").run(),
@@ -586,7 +634,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
   it('deleteAllData is idempotent on an already-empty database', () => {
     const e = createEngineDb();
     expect(() => { e.deleteAllData(); e.deleteAllData(); }).not.toThrow();
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
     e.close();
   });
 
@@ -601,7 +649,7 @@ describe('EngineDb (Foundation Rework v2 — S0 baseline)', () => {
     // A .corrupt-* sidecar of the original was created.
     expect(readdirSync(dir).some(f => f.startsWith('engine.db.corrupt-'))).toBe(true);
     // The fresh DB is usable and stamped at the latest schema version.
-    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(11);
+    expect((e.getDb().prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number }).v).toBe(12);
     e.close();
   });
 });
@@ -621,11 +669,26 @@ describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
   const flags = (e: EngineDb): Array<{ flag: string; value: string }> =>
     e.getDb().prepare("SELECT flag, value FROM onboarding_flags WHERE owner_user_id = 'system'").all() as Array<{ flag: string; value: string }>;
 
-  /** Take a db to v10 exactly, then close it — the state every pre-W1 instance is in. */
+  /**
+   * Take a db to v10 exactly, then close it — the state every pre-W1 instance is in.
+   *
+   * Two things have to be rewound, not one. `>= 11` rather than `= 11` because the
+   * runner resumes from MAX(version): leaving a LATER stamp behind makes it skip v11
+   * entirely, so the test would pass or fail on which migration was added last rather
+   * than on v11. And rewinding the stamp alone is only safe while every later
+   * migration is idempotent — v11 is (`INSERT … WHERE NOT EXISTS`), v12 is not
+   * (`ADD COLUMN` throws on a second run), so the schema those migrations produced
+   * has to go back too. These tests only read `onboarding_flags`, so the minimal
+   * `pending_prompts` v12 expects to find is enough.
+   */
   const openAtV10 = (p: string): void => {
     const e = new EngineDb(p, '');
-    e.getDb().prepare('DELETE FROM schema_version WHERE version = 11').run();
-    e.getDb().prepare('DELETE FROM onboarding_flags').run();
+    e.getDb().exec(`
+      DELETE FROM schema_version WHERE version >= 11;
+      DELETE FROM onboarding_flags;
+      DROP TABLE IF EXISTS pending_prompts;
+      CREATE TABLE pending_prompts (id TEXT PRIMARY KEY);
+    `);
     e.close();
   };
 

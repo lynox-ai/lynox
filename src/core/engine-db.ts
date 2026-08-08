@@ -179,12 +179,12 @@ const MIGRATIONS: string[] = [
      answer_saved INTEGER,
      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
      questions_json TEXT,
-     segments_json TEXT,
      partial_answers_json TEXT,
      answer_error TEXT,
      multi_select INTEGER,
      payload_json TEXT,
-     origin_json TEXT,
+     -- segments_json + origin_json are deliberately NOT here: they arrive in
+     -- v12, so a fresh db and an existing one converge on the same shape.
      created_at TEXT NOT NULL DEFAULT (datetime('now')),
      answered_at TEXT,
      expires_at TEXT NOT NULL
@@ -711,6 +711,30 @@ const MIGRATIONS: string[] = [
        OR EXISTS (SELECT 1 FROM subjects)
        OR EXISTS (SELECT 1 FROM knowledge_entries)
        OR EXISTS (SELECT 1 FROM memories));`,
+
+  // ── v12: bring the pending_prompts twin back to the history.db shape ──
+  //
+  //   This table's whole contract (see the SPINE comment on the v1 block) is to
+  //   match the live history.db shape VERBATIM, so the S2 data-move is a pure
+  //   INSERT..SELECT. Two columns had drifted out of it:
+  //
+  //     · `segments_json` — history.db v51, added here in the v1 CREATE only;
+  //     · `origin_json`   — history.db v52, the prompt's workflow/step origin.
+  //
+  //   Adding a column to the v1 block reaches FRESH databases only, and
+  //   `new EngineDb()` is unconditional (engine.ts) — so every instance that has
+  //   ever booted already has an engine.db sitting at its own version and never
+  //   sees the edit. The v51 column has been missing on the whole fleet since;
+  //   this closes both, because one ALTER pair is cheaper than two migrations on
+  //   one table and the S2 move needs both or neither.
+  //
+  //   Both columns therefore moved OUT of the v1 CREATE and arrive here, so a
+  //   fresh db and an upgraded one converge on one shape instead of two.
+  //   Nothing reads this table yet (S0 additive) — the cost of being wrong is a
+  //   failed migration on boot, not lost data.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (12);
+   ALTER TABLE pending_prompts ADD COLUMN segments_json TEXT;
+   ALTER TABLE pending_prompts ADD COLUMN origin_json TEXT;`,
 ];
 
 /**
