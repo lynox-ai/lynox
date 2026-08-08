@@ -1496,3 +1496,15 @@ describe('A1: §4.5 drift fixes', () => {
     await inFlight;
   });
 });
+
+describe('buildManifest carries the declared tool set (F2)', () => {
+  it('copies step.tools onto the manifest agent entry', async () => {
+    const { buildManifest } = await import('./pipeline.js');
+    const manifest = buildManifest('m', [
+      { id: 'a', task: 'fetch', tools: ['http_request'] },
+      { id: 'b', task: 'bare' },
+    ], 'stop');
+    expect(manifest.agents[0]!.tools).toEqual(['http_request']);
+    expect(manifest.agents[1]!.tools).toBeUndefined();
+  });
+});

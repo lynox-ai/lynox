@@ -174,6 +174,7 @@ export function buildManifest(name: string, steps: InlinePipelineStep[], onFailu
       thinking: s.thinking,
       input_from: s.input_from,
       timeout_ms: s.timeout_ms,
+      tools: s.tools,
       // Deterministic-replay pair — preserved so the inline runtime can replay
       // the literal captured call instead of re-interpreting `task`.
       tool: s.tool,

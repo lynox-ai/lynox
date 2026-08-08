@@ -48,6 +48,14 @@ describe('stepUsesHumanInTheLoopTool', () => {
   it('handles undefined task gracefully', () => {
     expect(stepUsesHumanInTheLoopTool({ id: 'x', task: '' })).toBeUndefined();
   });
+  it('detects a DECLARED ask_user even when the task prose never names it (F2)', () => {
+    expect(stepUsesHumanInTheLoopTool({ id: 'x', task: 'Confirm the shortlist with a question.', tools: ['ask_user'] }))
+      .toBe('ask_user');
+  });
+  it('a declared non-HITL tool set does not trip the detector', () => {
+    expect(stepUsesHumanInTheLoopTool({ id: 'x', task: 'Fetch data.', tools: ['http_request'] }))
+      .toBeUndefined();
+  });
 });
 
 describe('inferPipelineMode', () => {

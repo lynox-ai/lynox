@@ -4,6 +4,7 @@ import { validateGraph } from './graph.js';
 import type { Manifest } from '../types/orchestration.js';
 import type { InlinePipelineStep, PipelineMode, PlannedPipeline } from '../types/index.js';
 import { findAutonomousViolations } from './human-in-the-loop.js';
+import { INLINE_CORE_TOOLS } from './runtime-adapter.js';
 
 /**
  * Hard ceiling on workflow steps — single source of truth.
@@ -28,6 +29,9 @@ const ManifestStepSchema = z.object({
   runtime: z.enum(['agent', 'mock', 'inline', 'pipeline']),
   task: z.string().optional(),
   model: z.string().optional(),
+  // Declared tool set (F2/D2) — schema'd so validation preserves it; zod
+  // strips unknown keys, and loadManifestFile USES the validated result.
+  tools: z.array(z.string()).optional(),
   // Deterministic-replay pair — schema'd so validation preserves (not strips)
   // the literal captured call carried on a promoted step.
   tool: z.string().optional(),
@@ -46,6 +50,7 @@ const ManifestStepSchema = z.object({
     id: z.string().min(1),
     task: z.string().min(1),
     model: z.string().optional(),
+    tools: z.array(z.string()).optional(),
     input_from: z.array(z.string()).optional(),
     conditions: z.array(ManifestConditionSchema).optional(),
     timeout_ms: z.number().positive().optional(),
@@ -140,7 +145,28 @@ export function assertPipelineModeIsValid(steps: InlinePipelineStep[], mode: Pip
   if (issues.length > 0) throw new AutonomousPipelineViolation(issues);
 }
 
+/**
+ * Save-time gate (F2/D2): a declared tool name that is not in the inline pool
+ * is a generator bug — fail LOUD at save, not silently at dispatch ("Tool not
+ * available" mid-run is how four unexplainable approval dialogs reached a
+ * customer). Steps that declare nothing pass (legacy manifests keep working
+ * and get the bash-less default pool at run time).
+ */
+export function assertDeclaredToolsAreValid(steps: InlinePipelineStep[]): void {
+  for (const step of steps) {
+    if (!step.tools?.length) continue;
+    const unknown = step.tools.filter(name => !INLINE_CORE_TOOLS.has(name));
+    if (unknown.length > 0) {
+      throw new Error(
+        `Step "${step.id}" declares unknown tool(s): ${unknown.join(', ')}. ` +
+        `Declarable tools: ${[...INLINE_CORE_TOOLS].join(', ')}.`,
+      );
+    }
+  }
+}
+
 /** Convenience overload that takes a stored PlannedPipeline. */
 export function assertPlannedPipelineIsValid(planned: PlannedPipeline): void {
   assertPipelineModeIsValid(planned.steps, planned.mode);
+  assertDeclaredToolsAreValid(planned.steps);
 }

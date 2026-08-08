@@ -32,6 +32,14 @@ export interface InlinePipelineStep {
   effort?: EffortLevel | undefined;
   /** Role for agent specialization. Used by YAML manifests — not exposed to LLM. */
   role?: string | undefined;
+  /**
+   * Tools this step declared it needs (F2, PRD-COST-CONTROLS-V2 D2). The
+   * generator declares the set; the inline runtime grants ONLY these (drawn
+   * from the inline-safe pool — a declaration can narrow the pool or opt into
+   * `bash`, never widen past it). Absent (legacy manifests) = the pool minus
+   * `bash`: bash is never granted silently.
+   */
+  tools?: string[] | undefined;
   input_from?: string[] | undefined;
   timeout_ms?: number | undefined;
   /**

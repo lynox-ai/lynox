@@ -10,6 +10,13 @@ const HITL_REGEXES: ReadonlyArray<readonly [string, RegExp]> =
   HUMAN_IN_THE_LOOP_TOOLS.map((name) => [name, new RegExp(`\\b${name}\\b`)] as const);
 
 export function stepUsesHumanInTheLoopTool(step: InlinePipelineStep): string | undefined {
+  // A declared tool set (F2) is the precise signal — a step that declared
+  // ask_user needs a human even if its task prose never names the tool.
+  if (step.tools) {
+    for (const name of step.tools) {
+      if (HITL_SET.has(name)) return name;
+    }
+  }
   const haystack = step.task ?? '';
   for (const [name, re] of HITL_REGEXES) {
     if (re.test(haystack)) return name;

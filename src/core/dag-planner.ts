@@ -2,7 +2,7 @@ import type { InlinePipelineStep, PipelineCostEstimate, StepCostEstimate } from 
 import { getBetasForProvider, getModelId, normalizeTier } from '../types/index.js';
 import { createLLMClient, getActiveProvider } from './llm-client.js';
 import { calculateCost } from './pricing.js';
-import { resolveModel } from '../orchestrator/runtime-adapter.js';
+import { resolveModel, undeclaredInlineStepTier } from '../orchestrator/runtime-adapter.js';
 
 export interface DagPlanResult {
   steps: InlinePipelineStep[];
@@ -13,7 +13,7 @@ export interface DagPlanResult {
   actualCostUsd: number;
 }
 
-const PLANNING_SYSTEM = `You are a DAG pipeline planner. Given a goal, decompose it into discrete steps that can run as independent sub-agents. Each step gets its own agent context — it has access to tools (bash, read_file, write_file, etc.) but not to your conversation.
+const PLANNING_SYSTEM = `You are a DAG pipeline planner. Given a goal, decompose it into discrete steps that can run as independent sub-agents. Each step gets its own agent context — it has access ONLY to the tools you declare for it, not to your conversation.
 
 Rules:
 - Each step must have a clear, self-contained task description
@@ -21,6 +21,7 @@ Rules:
 - Steps without dependencies run in parallel automatically
 - Prefer fewer, broader steps over many tiny ones (3-8 steps ideal)
 - Each step's task should be specific enough that a sub-agent can execute it without additional context
+- Declare in "tools" exactly the tools the step's task needs — nothing more. Available: http_request, web_research, read_file, write_file, bash, ask_user, data_store_query, data_store_insert, memory_recall, memory_store, memory_update, memory_list, recall. Declare bash ONLY when the task genuinely needs a shell — every bash use raises an approval dialog for the user.
 
 IMPORTANT — you MUST set the "model" field on EVERY step. The tiers are provider-agnostic capability bands; choose the cheapest tier that can handle the task:
 - "fast" (~$0.005/step): Read-only tasks, data extraction, validation, simple transformations, status checks where the result is returned as text output. USE THIS BY DEFAULT for tasks that do NOT write files.
@@ -43,10 +44,11 @@ const PROPOSE_DAG_TOOL = {
           properties: {
             id: { type: 'string' as const, description: 'Unique step ID (e.g. "analyze", "implement", "test")' },
             task: { type: 'string' as const, description: 'Task description for the sub-agent' },
-            model: { type: 'string' as const, enum: ['deep', 'balanced', 'fast'], description: 'Capability tier (default: balanced)' },
+            model: { type: 'string' as const, enum: ['deep', 'balanced', 'fast'], description: 'Capability tier (omitted = fast)' },
+            tools: { type: 'array' as const, items: { type: 'string' as const }, description: 'Exact tool names this step needs (see system prompt for the available set). Declare only what the task needs; bash only when a shell is genuinely required.' },
             input_from: { type: 'array' as const, items: { type: 'string' as const }, description: 'Step IDs whose output this step depends on' },
           },
-          required: ['id', 'task'],
+          required: ['id', 'task', 'tools'],
         },
         description: 'List of pipeline steps',
       },
@@ -143,6 +145,13 @@ export async function planDAG(
           if (tier) step.model = tier;
         }
 
+        // Lenient parse (mirrors model/input_from): a missing/invalid tools
+        // array degrades to undeclared — the runtime then grants the default
+        // pool minus bash, never more.
+        if (Array.isArray(s['tools']) && s['tools'].every((x: unknown) => typeof x === 'string') && s['tools'].length > 0) {
+          step.tools = s['tools'] as string[];
+        }
+
         if (Array.isArray(s['input_from']) && s['input_from'].every((x: unknown) => typeof x === 'string')) {
           step.input_from = s['input_from'] as string[];
         }
@@ -196,8 +205,11 @@ export function estimatePipelineCost(
   historicalAvgByTier?: Record<string, number>,
 ): PipelineCostEstimate {
   const stepEstimates: StepCostEstimate[] = steps.map(step => {
-    const model = resolveModel(step.model, 'balanced');
-    const tier = step.model ?? 'balanced';
+    // F1: an undeclared step runs `fast` — the estimate must price the tier
+    // that will actually run, or the plan preview overstates by ~16× per step.
+    const fallbackTier = undeclaredInlineStepTier(step);
+    const model = resolveModel(step.model, fallbackTier);
+    const tier = step.model ?? fallbackTier;
     const estimatedCostUsd = historicalAvgByTier?.[tier] ?? COST_PER_STEP[tier] ?? 0.08;
     return {
       stepId: step.id,

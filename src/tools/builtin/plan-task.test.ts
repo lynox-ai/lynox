@@ -511,6 +511,17 @@ describe('plan_task — decoupled from execution (D4/D9)', () => {
   });
 });
 
+describe('plan_task schema (D2 mechanism)', () => {
+  it('requires a tools declaration on every phase', () => {
+    const schema = planTaskTool.definition.input_schema as {
+      properties: { phases: { items: { required: string[] } } };
+    };
+    // D2: the generator MUST declare its tool set — dropping 'tools' from the
+    // required list silently reverts new plans to the undeclared default.
+    expect(schema.properties.phases.items.required).toContain('tools');
+  });
+});
+
 describe('phasesToPipelineSteps', () => {
   it('should convert phases to pipeline steps with dependencies', () => {
     const steps = phasesToPipelineSteps([
@@ -533,6 +544,18 @@ describe('phasesToPipelineSteps', () => {
     ]);
     expect(steps[0]!.id).toBe('process');
     expect(steps[1]!.id).toBe('process-2');
+  });
+
+  it('carries the declared tools and model onto the pipeline step (F1/F2)', () => {
+    const steps = phasesToPipelineSteps([
+      { name: 'Fetch', steps: ['Call API'], model: 'fast', tools: ['http_request'] },
+      { name: 'Report', steps: ['Write summary'] },
+    ]);
+    expect(steps[0]!.tools).toEqual(['http_request']);
+    expect(steps[0]!.model).toBe('fast');
+    // An undeclared phase stays undeclared — the runtime supplies the F1 default.
+    expect(steps[1]!.tools).toBeUndefined();
+    expect(steps[1]!.model).toBeUndefined();
   });
 
   it('should include verification in task', () => {

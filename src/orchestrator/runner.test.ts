@@ -869,6 +869,42 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
     return { h: new RunHistory(join(dir, 'history.db')), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
   }
 
+  it('records the F1 fast default as the model_tier of an undeclared INLINE step row', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // Inline runtime + mockResponses: dispatch takes the mock path, but
+      // recordStepRow keys on step.runtime — this drives the tier the row
+      // records, which feeds getAvgStepCostByModelTier (the plan estimate).
+      const manifest: Manifest = {
+        manifest_version: '1.0',
+        name: 'tier-record',
+        triggered_by: 'test',
+        context: {},
+        agents: [
+          { id: 'undeclared', agent: 'undeclared', runtime: 'inline', task: 'paginate' },
+          { id: 'declared', agent: 'declared', runtime: 'inline', task: 'analyze', model: 'balanced', input_from: ['undeclared'] },
+        ],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      const mockResponses = new Map([['undeclared', 'ra'], ['declared', 'rb']]);
+      const state = await runManifest(manifest, CONFIG, { mockResponses, runHistory: h });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare(
+        `SELECT step_id, model_tier FROM pipeline_step_results WHERE pipeline_run_id = ? ORDER BY step_id`,
+      ).all(state.runId) as Array<{ step_id: string; model_tier: string }>;
+
+      expect(rows).toEqual([
+        { step_id: 'declared', model_tier: 'balanced' },
+        { step_id: 'undeclared', model_tier: 'fast' },
+      ]);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
   it('records a `pipeline_step` run per step (status running→completed, chained via spawn_parent_id)', async () => {
     const { h, cleanup } = tmpHistory();
     try {

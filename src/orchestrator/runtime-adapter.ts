@@ -45,6 +45,54 @@ export const INLINE_CORE_TOOLS = new Set([
 ]);
 
 /**
+ * F1 (PRD-COST-CONTROLS-V2, D1): a pipeline step that declares no tier runs
+ * `fast`. A step is a scoped, described unit of work — if neither the step nor
+ * its role justifies a premium tier, the default must not supply one silently.
+ * The session `default_tier` deliberately does NOT reach steps: an undeclared
+ * step inheriting the session's `balanced` is exactly how a 2000-contact
+ * pagination loop ran on Sonnet. The main conversation loop keeps its own
+ * default; agent-runtime steps keep their declared `AgentDef.defaultTier`.
+ */
+export const UNDECLARED_STEP_TIER: ModelTier = 'fast';
+
+/**
+ * The tier an inline step runs on when `step.model` is absent: the role's
+ * declared tier, else `fast`. Shared by the spawn path, the runner's budget
+ * check, the step-row record and the plan-time estimate so none of the four
+ * can disagree about what an undeclared step costs.
+ */
+export function undeclaredInlineStepTier(step: Pick<ManifestStep, 'role'>): ModelTier {
+  return (step.role ? getRole(step.role)?.model : undefined) ?? UNDECLARED_STEP_TIER;
+}
+
+/**
+ * F2 (PRD-COST-CONTROLS-V2, D2): which tool NAMES an inline step may draw from
+ * the parent set. A step that declares `tools` gets exactly the declared names
+ * that exist in the inline-safe pool — a declaration can NARROW the pool or opt
+ * into `bash`, never widen past the sandbox (destructive opt-ins like
+ * `memory_delete` still require a role's allowTools). A step that declares
+ * nothing (legacy manifests, hand-written YAML without roles) gets the pool
+ * minus `bash`: bash is granted only by declaration, never silently — four
+ * unexplainable bash approval dialogs on a customer's pagination step are how
+ * this rule got here. A captured replay step's `tool` is always admitted from
+ * the pool (the step exists to replay exactly that call).
+ */
+export function inlineStepToolNames(step: Pick<ManifestStep, 'tools' | 'tool'>): ReadonlySet<string> {
+  const admitted = new Set<string>();
+  if (step.tools?.length) {
+    for (const name of step.tools) {
+      if (INLINE_CORE_TOOLS.has(name)) admitted.add(name);
+    }
+  } else {
+    for (const name of INLINE_CORE_TOOLS) {
+      if (name !== 'bash') admitted.add(name);
+    }
+  }
+  if (step.tool !== undefined && INLINE_CORE_TOOLS.has(step.tool)) admitted.add(step.tool);
+  return admitted;
+}
+
+/**
  * A2 observability: a step's tool calls are recorded under its own
  * `pipeline_step` run id. The runner builds this callback (closing over the
  * step run id + RunHistory + a sequence counter) and threads it into the
@@ -547,14 +595,14 @@ export async function spawnInline(
     throw new Error(`Unknown role "${step.role}" on step "${step.id}". Available roles: ${getRoleNames().join(', ')}.`);
   }
 
-  // Single chokepoint: step > role > user config > default, then the override
-  // gate (now a pass-through, D8) + CLAMP to max_tier + map to the provider's
-  // id. The cost-guard bucket below uses the same resolved tier so the budget
-  // can't disagree with the chosen model.
-  const configTier = config.default_tier;
+  // Single chokepoint: step > role > `fast` (F1/D1 — the session default_tier
+  // deliberately does not reach steps), then the override gate (now a
+  // pass-through, D8) + CLAMP to max_tier + map to the provider's id. The
+  // cost-guard bucket below uses the same resolved tier so the budget can't
+  // disagree with the chosen model.
   const runModel = resolveRunModel({
     requested: step.model,
-    defaultTier: (resolved?.model ?? configTier ?? 'balanced') as ModelTier,
+    defaultTier: undeclaredInlineStepTier(step),
     accountTier: config.account_tier,
     maxTier: config.max_tier,
     blockedModelIds: config.blocked_model_ids,
@@ -568,11 +616,15 @@ export async function spawnInline(
   // A2: pipeline steps carry the grounding block too (they previously ran on a
   // bare task prompt with no provenance discipline).
   const systemPrompt = `${GROUNDING_PROMPT_BLOCK}\n\nYou are a focused task agent. Complete the task precisely. Return structured data (JSON, Markdown tables) over verbose prose. When creating artifacts, keep HTML/SVG minimal — use plain data + CSS, avoid large JS chart libraries inline. Optimize for clarity, not visual complexity.`;
-  // Use minimal tool set for inline steps unless role specifies custom tools
+  // Tool grant (narrowest wins): a role's allowTools passes the full parent set
+  // to the profile filter (existing YAML surface, can widen deliberately);
+  // otherwise the step draws from `inlineStepToolNames` — its declared set, or
+  // the inline pool minus bash when it declared nothing (F2/D2).
   const roleProfile = resolved
     ? { allowedTools: resolved.allowTools ? [...resolved.allowTools] : undefined, deniedTools: resolved.denyTools ? [...resolved.denyTools] : undefined }
     : null;
-  const filteredParent = resolved?.allowTools ? parentTools : parentTools.filter(t => INLINE_CORE_TOOLS.has(t.definition.name));
+  const stepToolNames = inlineStepToolNames(step);
+  const filteredParent = resolved?.allowTools ? parentTools : parentTools.filter(t => stepToolNames.has(t.definition.name));
   let tools = resolveTools(undefined, roleProfile, filteredParent, INLINE_EXCLUDED_TOOLS);
   // Strip ask_user / ask_secret if no parent prompt callback (autonomous run).
   // Belt-and-suspenders: validator/scheduler should already block this path,
@@ -762,6 +814,7 @@ export async function spawnPipeline(
       thinking: s.thinking,
       input_from: s.input_from,
       timeout_ms: s.timeout_ms,
+      tools: s.tools,
       tool: s.tool,
       input_template: s.input_template,
     })),
