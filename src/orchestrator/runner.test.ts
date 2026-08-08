@@ -3,6 +3,17 @@ import { channel } from 'node:diagnostics_channel';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+
+// Partial mock: only spawnInline is stubbed (and only tests that run an inline
+// step WITHOUT mockResponses reach it). Everything else — including the budget
+// check and model resolution in executeStep, which run BEFORE the spawn — is
+// real, which is the point: the F1 tier-default test below drives that path.
+const mockSpawnInline = vi.fn().mockResolvedValue({ result: 'inline-r', tokensIn: 10, tokensOut: 5, durationMs: 3 });
+vi.mock('./runtime-adapter.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./runtime-adapter.js')>();
+  return { ...actual, spawnInline: (...args: unknown[]) => mockSpawnInline(...args) };
+});
+
 import { runManifest, retryManifest, workflowBoundExceeded } from './runner.js';
 import { RunHistory } from '../core/run-history.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
@@ -899,6 +910,37 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
         { step_id: 'declared', model_tier: 'balanced' },
         { step_id: 'undeclared', model_tier: 'fast' },
       ]);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('prices an undeclared INLINE step at the fast tier on the budget path (model_id stamp)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // NO mockResponses → executeStep takes the real inline branch:
+      // resolveModelForCost (with the F1 default) + checkSessionBudget run,
+      // then the stubbed spawnInline returns. The resolved model is stamped as
+      // model_id on the pipeline_step run row at finalize — reverting the
+      // budget fallback to 'balanced' stamps sonnet and this assert fails.
+      const manifest: Manifest = {
+        manifest_version: '1.0',
+        name: 'budget-tier',
+        triggered_by: 'test',
+        context: {},
+        agents: [{ id: 'undeclared', agent: 'undeclared', runtime: 'inline', task: 'paginate' }],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      const state = await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [] });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare(
+        `SELECT model_id FROM runs WHERE spawn_parent_id = ? AND run_type = 'pipeline_step'`,
+      ).all(state.runId) as Array<{ model_id: string }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.model_id).toContain('haiku');
     } finally {
       h.close();
       cleanup();

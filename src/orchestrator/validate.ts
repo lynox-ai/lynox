@@ -99,6 +99,20 @@ export function validateManifest(raw: unknown): Manifest {
     if (step.runtime === 'pipeline' && !step.pipeline) {
       throw new Error(`Invalid manifest: agents.${step.id}: "pipeline" is required when runtime is "pipeline"`);
     }
+    // F2/D2: a typo'd declared tool on an inline step must fail HERE, not
+    // degrade to a silent "Tool not available" at dispatch — this is the gate
+    // for YAML manifests and raw run_workflow steps, the same one
+    // assertPlannedPipelineIsValid applies to stored plans.
+    if (step.runtime === 'inline') {
+      const issue = declaredToolIssue(step);
+      if (issue) throw new Error(`Invalid manifest: ${issue}`);
+    }
+    if (step.runtime === 'pipeline' && Array.isArray(step.pipeline)) {
+      for (const nested of step.pipeline) {
+        const issue = declaredToolIssue(nested);
+        if (issue) throw new Error(`Invalid manifest: ${issue}`);
+      }
+    }
   }
 
   // v1.1: validate dependency graph
@@ -150,18 +164,31 @@ export function assertPipelineModeIsValid(steps: InlinePipelineStep[], mode: Pip
  * is a generator bug — fail LOUD at save, not silently at dispatch ("Tool not
  * available" mid-run is how four unexplainable approval dialogs reached a
  * customer). Steps that declare nothing pass (legacy manifests keep working
- * and get the bash-less default pool at run time).
+ * and get the bash-less default pool at run time). An empty declared array is
+ * valid — it means "no tools". A captured replay step's `tool` is deliberately
+ * NOT pool-checked here: captured workflows legitimately carry non-pool tools,
+ * and the runtime already degrades an ungranted replay to the prose task (the
+ * allowlist stays the boundary — see the replay gate in runtime-adapter). What
+ * IS rejected is a declaration that contradicts its own replay tool: both
+ * fields present but `tool` outside `tools` is a generator bug, new data only.
  */
+function declaredToolIssue(step: { id: string; tools?: string[] | undefined; tool?: string | undefined }): string | undefined {
+  if (!step.tools) return undefined;
+  const unknown = step.tools.filter(name => !INLINE_CORE_TOOLS.has(name));
+  if (unknown.length > 0) {
+    return `Step "${step.id}" declares unknown tool(s): ${unknown.join(', ')}. ` +
+      `Declarable tools: ${[...INLINE_CORE_TOOLS].join(', ')}.`;
+  }
+  if (step.tool !== undefined && !step.tools.includes(step.tool)) {
+    return `Step "${step.id}" replays tool "${step.tool}" but its declared tools (${step.tools.join(', ') || 'none'}) exclude it.`;
+  }
+  return undefined;
+}
+
 export function assertDeclaredToolsAreValid(steps: InlinePipelineStep[]): void {
   for (const step of steps) {
-    if (!step.tools?.length) continue;
-    const unknown = step.tools.filter(name => !INLINE_CORE_TOOLS.has(name));
-    if (unknown.length > 0) {
-      throw new Error(
-        `Step "${step.id}" declares unknown tool(s): ${unknown.join(', ')}. ` +
-        `Declarable tools: ${[...INLINE_CORE_TOOLS].join(', ')}.`,
-      );
-    }
+    const issue = declaredToolIssue(step);
+    if (issue) throw new Error(issue);
   }
 }
 

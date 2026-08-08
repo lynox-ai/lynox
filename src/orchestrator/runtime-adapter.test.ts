@@ -681,6 +681,36 @@ describe('F2: declared step tool sets (spawn wiring)', () => {
     await spawnInline(step, {}, mockConfig, mockParentTools);
     expect(toolNames()).toEqual(['bash']);
   });
+
+  it('a declared EMPTY array grants zero tools (declaration, not absence)', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'pure reasoning', tools: [] };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual([]);
+  });
+
+  it('role allowTools wins over a step tools declaration (pinned precedence)', async () => {
+    // Both present is YAML-author territory (plan_task steps carry no role).
+    // The role grant is the wider, deliberate surface — pin that it wins so a
+    // refactor can't silently flip the precedence.
+    mockGetRole.mockReturnValue({ model: 'fast', effort: 'high', autonomy: 'autonomous', allowTools: ['bash'], description: 'op' });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', role: 'operator', tools: ['read_file'] };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual(['bash']);
+  });
+
+  it('declared ask_user is still stripped when no parent prompt callback exists', async () => {
+    // Belt-and-suspenders pin: the validator blocks autonomous+ask_user at
+    // save, but if such a step reaches an autonomous spawn anyway, the strip
+    // must win over the declaration — leaving the step with zero tools beats
+    // a dispatch-time throw inside an unattended run.
+    const withAskUser: ToolEntry[] = [...mockParentTools, {
+      definition: { name: 'ask_user', description: 'Ask', input_schema: { type: 'object' } } as ToolEntry['definition'],
+      handler: async () => 'answer',
+    }];
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'confirm', tools: ['ask_user'] };
+    await spawnInline(step, {}, mockConfig, withAskUser);
+    expect(toolNames()).toEqual([]);
+  });
 });
 
 describe('INLINE_CORE_TOOLS membership (regression-gate)', () => {

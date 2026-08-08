@@ -145,10 +145,11 @@ export async function planDAG(
           if (tier) step.model = tier;
         }
 
-        // Lenient parse (mirrors model/input_from): a missing/invalid tools
-        // array degrades to undeclared — the runtime then grants the default
-        // pool minus bash, never more.
-        if (Array.isArray(s['tools']) && s['tools'].every((x: unknown) => typeof x === 'string') && s['tools'].length > 0) {
+        // Lenient parse: a missing/invalid tools array degrades to undeclared —
+        // the runtime then grants the default pool minus bash, never more. An
+        // explicit EMPTY array is kept as a declaration ("this step needs no
+        // tools") and grants nothing.
+        if (Array.isArray(s['tools']) && s['tools'].every((x: unknown) => typeof x === 'string')) {
           step.tools = s['tools'] as string[];
         }
 

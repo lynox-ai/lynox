@@ -702,6 +702,32 @@ describe('plan_task auto-planning fallback', () => {
     expect(counters.costUSD).toBe(0);
   });
 
+  it('carries planDAG\'s declared model AND tools into the stored pipeline (auto-plan)', async () => {
+    // The regression this pins: the auto-plan phase mapping used to drop
+    // `model` (and would drop `tools`), so every auto-planned step ran on the
+    // undeclared default despite the planner declaring a tier per step.
+    mockPlanDAG.mockResolvedValueOnce({
+      steps: [
+        { id: 's1', task: 'fetch pages', model: 'fast', tools: ['http_request'] },
+        { id: 's2', task: 'write report', model: 'balanced', tools: ['write_file'], input_from: ['s1'] },
+      ],
+      reasoning: 'r', estimatedCost: 0.01, actualCostUsd: 0,
+    });
+    const promptUser = vi.fn().mockResolvedValue('Proceed');
+    const agent = makeAgent({ promptUser }, mockConfig);
+
+    const result = await planTaskTool.handler({ summary: 'Sync the shop' }, agent);
+    const parsed = JSON.parse(result) as { approved: boolean; workflow_id: string };
+    expect(parsed.workflow_id).toBeDefined();
+
+    const pipeline = getPipeline(parsed.workflow_id);
+    expect(pipeline).toBeDefined();
+    expect(pipeline!.steps[0]!.model).toBe('fast');
+    expect(pipeline!.steps[0]!.tools).toEqual(['http_request']);
+    expect(pipeline!.steps[1]!.model).toBe('balanced');
+    expect(pipeline!.steps[1]!.tools).toEqual(['write_file']);
+  });
+
   it('should skip auto-plan when planDAG returns null', async () => {
     mockPlanDAG.mockResolvedValueOnce(null);
 

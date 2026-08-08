@@ -11,7 +11,9 @@ import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
-import type { SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { undeclaredInlineStepTier, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { normalizeTier } from '../../types/index.js';
+import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 
@@ -349,13 +351,28 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
  * (saved-workflow-runner), and the step rows never enter the CP cost queries, so
  * there is no double-count on the CP axis either.
  */
-function debitInSessionWorkflowCost(deps: PipelineDeps, state: RunState): void {
+function debitInSessionWorkflowCost(
+  deps: PipelineDeps,
+  state: RunState,
+  steps: ReadonlyArray<{ id: string; model?: string | undefined; role?: string | undefined }>,
+): void {
   // No metered host = self-host / BYOK → no CP balance to debit (mirrors spawn.ts).
   const meteredHost = deps.toolContext?.meteredHost;
   if (!meteredHost) return;
-  const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
-  const tier: ModelTier = deps.config.default_tier ?? 'balanced';
-  reportMeteredCost(meteredHost, randomUUID(), costUsd, tier);
+  // Per-step debit under the tier the step actually ran on (F1: an undeclared
+  // step runs `fast` now — one aggregated debit under the session tier would
+  // report fast spend as balanced, the #1155 mis-attribution on a new surface).
+  // A pinned concrete model id resolves through the capability registry; a step
+  // the id map can't place falls back to the step's own resolution rule.
+  const byId = new Map(steps.map(s => [s.id, s]));
+  for (const [stepId, output] of state.outputs) {
+    if (output.costUsd <= 0) continue;
+    const step = byId.get(stepId);
+    const tier: ModelTier = step
+      ? normalizeTier(step.model ?? '') ?? modelCapability(step.model ?? '')?.tier ?? undeclaredInlineStepTier(step)
+      : deps.config.default_tier ?? 'balanced';
+    reportMeteredCost(meteredHost, randomUUID(), output.costUsd, tier);
+  }
 }
 
 async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
@@ -418,7 +435,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       secretStore: deps.secretStore,
     }));
 
-    debitInSessionWorkflowCost(deps, state);
+    debitInSessionWorkflowCost(deps, state, steps);
     return formatResult(state, input.name ?? 'inline-pipeline', resultLimit);
   } catch (err: unknown) {
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
@@ -694,7 +711,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       }));
 
       recordExecutedState(planned.id, { manifest: prev.manifest, state });
-      debitInSessionWorkflowCost(deps, state);
+      debitInSessionWorkflowCost(deps, state, prev.manifest.agents);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
       return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
@@ -776,7 +793,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
     }
 
-    debitInSessionWorkflowCost(deps, state);
+    debitInSessionWorkflowCost(deps, state, manifest.agents);
     return formatResult(state, planned.name, resultLimit);
   } catch (err: unknown) {
     if (!isTemplate) planned.executed = false; // Allow retry on validation errors
@@ -828,6 +845,8 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
             properties: {
               id: { type: 'string', description: 'Unique step ID' },
               task: { type: 'string', description: 'Task description for the sub-agent' },
+              model: { type: 'string', enum: ['deep', 'balanced', 'fast'], description: 'Capability tier (omitted = fast)' },
+              tools: { type: 'array', items: { type: 'string' }, description: 'Exact tool names this step needs, from your own toolset. bash only when a shell is essential.' },
               input_from: { type: 'array', items: { type: 'string' }, description: 'Step IDs whose output flows into this step\'s context' },
               timeout_ms: { type: 'number', description: 'Timeout in ms (default: 600000)' },
             },

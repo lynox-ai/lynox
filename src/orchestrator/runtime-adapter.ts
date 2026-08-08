@@ -53,7 +53,7 @@ export const INLINE_CORE_TOOLS = new Set([
  * pagination loop ran on Sonnet. The main conversation loop keeps its own
  * default; agent-runtime steps keep their declared `AgentDef.defaultTier`.
  */
-export const UNDECLARED_STEP_TIER: ModelTier = 'fast';
+const UNDECLARED_STEP_TIER: ModelTier = 'fast';
 
 /**
  * The tier an inline step runs on when `step.model` is absent: the role's
@@ -74,21 +74,22 @@ export function undeclaredInlineStepTier(step: Pick<ManifestStep, 'role'>): Mode
  * nothing (legacy manifests, hand-written YAML without roles) gets the pool
  * minus `bash`: bash is granted only by declaration, never silently — four
  * unexplainable bash approval dialogs on a customer's pagination step are how
- * this rule got here. A captured replay step's `tool` is always admitted from
- * the pool (the step exists to replay exactly that call).
+ * this rule got here. A declared EMPTY array is a declaration too — a
+ * pure-reasoning step that names zero tools gets zero, not the default pool.
+ * A captured replay step's `tool` is always admitted from the pool (the step
+ * exists to replay exactly that call).
  */
-export function inlineStepToolNames(step: Pick<ManifestStep, 'tools' | 'tool'>): ReadonlySet<string> {
-  const admitted = new Set<string>();
-  if (step.tools?.length) {
-    for (const name of step.tools) {
-      if (INLINE_CORE_TOOLS.has(name)) admitted.add(name);
-    }
-  } else {
-    for (const name of INLINE_CORE_TOOLS) {
-      if (name !== 'bash') admitted.add(name);
-    }
-  }
-  if (step.tool !== undefined && INLINE_CORE_TOOLS.has(step.tool)) admitted.add(step.tool);
+const INLINE_DEFAULT_TOOL_NAMES: ReadonlySet<string> = new Set(
+  [...INLINE_CORE_TOOLS].filter(name => name !== 'bash'),
+);
+
+function inlineStepToolNames(step: Pick<ManifestStep, 'tools' | 'tool'>): ReadonlySet<string> {
+  const replayTool = step.tool !== undefined && INLINE_CORE_TOOLS.has(step.tool) ? step.tool : undefined;
+  if (!step.tools && replayTool === undefined) return INLINE_DEFAULT_TOOL_NAMES;
+  const admitted = new Set(
+    step.tools ? step.tools.filter(name => INLINE_CORE_TOOLS.has(name)) : INLINE_DEFAULT_TOOL_NAMES,
+  );
+  if (replayTool !== undefined) admitted.add(replayTool);
   return admitted;
 }
 
