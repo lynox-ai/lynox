@@ -214,15 +214,15 @@ describe('isVettedEgressHost — the credential-attach gate', () => {
   });
 
   it('vouches for EXACTLY these hosts and patterns — nothing may join silently', () => {
-    // Pinned positively, because the dangerous direction is WIDENING. The first
+    // Pinned positively, because the dangerous direction is WIDENING. An earlier
     // version asserted the DECLINED set (all-minus-privateLan), which does not move
     // when someone adds to the vouched-for side: a new `privateLan` pattern, or a new
     // exact host, hands the credential attach another host that needs no acceptance
-    // on record. Both left 393 tests green. Whatever is added here has to be added to
-    // these literals too, which is the point — that edit is where someone asks whether
-    // the engine should hand a stored credential to that host unprompted.
+    // on record. Both left 393 tests green. Whatever is added there has to be added
+    // here too, and that edit is where someone asks whether the engine should hand a
+    // stored credential to that host unprompted.
     const { privateLan, exactHosts } = GATE_MEMBERSHIP_FOR_TESTS;
-    expect(privateLan.map(String)).toEqual([
+    expect(privateLan).toEqual([
       String(/^192\.168\.\d{1,3}\.\d{1,3}$/),
       String(/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/),
       String(/^172\.(1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}$/),
@@ -230,7 +230,7 @@ describe('isVettedEgressHost — the credential-attach gate', () => {
       String(/\.lan$/),
       String(/\.intranet$/),
     ]);
-    expect([...exactHosts].sort()).toEqual([
+    expect(exactHosts).toEqual([
       '0.0.0.0', '127.0.0.1', 'aiplatform.googleapis.com', 'api.anthropic.com',
       'api.fireworks.ai', 'api.groq.com', 'api.mistral.ai', 'api.openai.com',
       'api.together.xyz', 'localhost',
@@ -239,18 +239,38 @@ describe('isVettedEgressHost — the credential-attach gate', () => {
 
   it('declines the azure wildcard — the one entry isAllowlistedEndpoint adds', () => {
     const { allPatterns, privateLan } = GATE_MEMBERSHIP_FOR_TESTS;
-    const lan = new Set(privateLan.map(String));
-    expect(allPatterns.filter(p => !lan.has(String(p))).map(String))
-      .toEqual([String(/\.openai\.azure\.com$/)]);
+    const lan = new Set(privateLan);
+    expect(allPatterns.filter(p => !lan.has(p))).toEqual([String(/\.openai\.azure\.com$/)]);
   });
 
-  it('the exported membership cannot widen the gate at runtime', () => {
-    // It is a live view of what the gates read, so an unfrozen export would be a
-    // runtime hole, not a test convenience: pushing onto it flipped
-    // isVettedEgressHost false→true for an attacker host from outside this module.
-    const url = 'https://x.openai.azure.com/steal';
-    expect(isVettedEgressHost(url)).toBe(false);
-    expect(() => (GATE_MEMBERSHIP_FOR_TESTS.privateLan as RegExp[]).push(/./)).toThrow();
-    expect(isVettedEgressHost(url)).toBe(false);
+  // Membership is only half of it. The assertions above compare literals to literals
+  // and never call the gate, so they are blind to the FUNCTIONS: four logic mutations
+  // once survived the whole 9778-test suite — an extra `||` branch, a dropped protocol
+  // check in either helper, and swapping the exact-host lookup for `endsWith`, which
+  // reinstates the very suffix spoof this file's own comment claims to defeat.
+  describe('the gate LOGIC, not just its membership', () => {
+    it('refuses a non-HTTP protocol on a host it otherwise vouches for', () => {
+      // Both helpers check this independently; a drop in either one survives if only
+      // the https spelling is ever asserted.
+      expect(isVettedEgressHost('https://api.mistral.ai/v1')).toBe(true);
+      expect(isVettedEgressHost('ftp://api.mistral.ai/v1')).toBe(false);
+      expect(isVettedEgressHost('https://nas.local/api')).toBe(true);
+      expect(isVettedEgressHost('ftp://nas.local/api')).toBe(false);
+    });
+
+    it('matches exact hosts exactly — no suffix spoof', () => {
+      // `endsWith` instead of a Set lookup would vouch for both of these, which is
+      // exactly the attack the pattern anchoring elsewhere in this file is against.
+      expect(isVettedEgressHost('https://evillocalhost/x')).toBe(false);
+      expect(isVettedEgressHost('https://notapi.mistral.ai/v1')).toBe(false);
+      expect(isVettedEgressHost('https://api.mistral.ai.attacker.com/v1')).toBe(false);
+    });
+
+    it('vouches for nothing beyond the two sets it names', () => {
+      // A third `||` branch is invisible to membership assertions.
+      expect(isVettedEgressHost('https://api.bexio.com/3.0/users/me')).toBe(false);
+      expect(isVettedEgressHost('https://x.openai.azure.com/v1')).toBe(false);
+      expect(isVettedEgressHost('not a url')).toBe(false);
+    });
   });
 });

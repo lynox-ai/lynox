@@ -1158,7 +1158,7 @@ Next steps before calling create:
         // auto-attaches by hostname). So we ask the human out-of-band via
         // `promptUser` (PromptStore ask_user) — the agent cannot supply this
         // answer — and fail CLOSED when no interactive prompt exists. Disclose
-        // EVERY non-allowlisted egress host so the single accept is informed.
+        // EVERY non-vetted egress host so the single accept is informed.
         const disclosure = nonVetted.map((u) => describeDisclosure(u)).join('\n\n');
         if (!agent.promptUser) {
           return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance of controller-responsibility — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
@@ -1287,7 +1287,7 @@ Next steps before calling create:
       // to token_url. The save-time allowlist gate covers profiles created via
       // this tool, but a profile can re-enter the store WITHOUT passing it —
       // loadFromDirectory at boot, or a JSON written into the apis dir — so
-      // re-verify here fail-closed: a non-allowlisted token_url is refused unless
+      // re-verify here fail-closed: a non-vetted token_url is refused unless
       // the profile carries a persisted acceptance covering that exact host.
       // Refuse BEFORE resolving any vault secret so nothing leaks on the way out.
       if (!isVettedEgressHost(oauth.token_url) && !isEndpointAcked(profile.custom_endpoint_ack, oauth.token_url)) {

@@ -90,24 +90,29 @@ const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
- * @internal — the membership behind the gates, exposed for ONE invariant test.
+ * @internal — the membership behind the gates, as STRINGS, for the membership tests.
  *
- * What `isVettedEgressHost` VOUCHES FOR has to be pinned positively, not by
- * subtraction. The first attempt asserted the declined set (`all` minus
- * `privateLan`) and was invariant under the change that actually matters:
- * adding a pattern to `privateLan` — or a host to `exactHosts` — WIDENS what the
- * credential attach accepts without an acceptance on record, and the declined
- * set never moves. Measured: both widenings left 393 tests green.
+ * What `isVettedEgressHost` vouches for is pinned positively, not by subtraction.
+ * An earlier attempt asserted the declined set (`all` minus `privateLan`), which
+ * does not move under the change that matters: adding a pattern to `privateLan` —
+ * or a host to `exactHosts` — WIDENS what the credential attach accepts with no
+ * acceptance on record. Measured: both widenings left 393 tests green.
  *
- * FROZEN, and not as decoration. These are live references into the arrays the
- * gates read on every call, so an unfrozen export is a runtime hole rather than
- * a test convenience: `privateLan.push(/./)` flipped `isVettedEgressHost` from
- * false to true for an attacker host, from outside this module, at runtime.
+ * Strings, not the RegExp objects, and that is the whole point. Handing out the
+ * objects gives an importer a mutable handle on internals the gates read every
+ * call: `Object.freeze` is shallow, so the array was safe while its elements were
+ * not, and `privateLan[3].test = () => true` flipped `isVettedEgressHost` false→
+ * true for an attacker host from outside this module. A string cannot do that.
+ *
+ * These pin MEMBERSHIP only. The gate functions' own logic — protocol checks,
+ * exact-match vs. suffix — is not visible here and is covered by behavioural
+ * cases in the test file, because four logic mutations once survived the entire
+ * 9778-test suite while every membership assertion stayed green.
  */
 export const GATE_MEMBERSHIP_FOR_TESTS = Object.freeze({
-  allPatterns: Object.freeze([...ALLOWLISTED_PATTERNS]),
-  privateLan: Object.freeze([...PRIVATE_LAN_PATTERNS]),
-  exactHosts: Object.freeze([...ALLOWLISTED_HOSTS]),
+  allPatterns: Object.freeze(ALLOWLISTED_PATTERNS.map(String)),
+  privateLan: Object.freeze(PRIVATE_LAN_PATTERNS.map(String)),
+  exactHosts: Object.freeze([...ALLOWLISTED_HOSTS].sort()),
 });
 
 /**
