@@ -828,7 +828,12 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
       agent,
       // Honour the operator model blocklist: without this a managed trial that
       // blocks premium Anthropic ids would still run the Sonnet default here on
-      // the CP pool key (the resolved model falls back to the fast tier).
+      // the CP pool key. Note what this does NOT say: the fast-tier fallback
+      // happens only when the blocklist rejects the resolved id. With no
+      // blocklist — the ordinary case — this extraction runs
+      // `MODEL_MAP.balanced`. An earlier version of this comment read as though
+      // fast were the norm, and that reading survived into the billing label
+      // one line below (see `result.tier`).
       ...(agent.toolContext.userConfig?.blocked_model_ids !== undefined
         ? { blockedModelIds: agent.toolContext.userConfig.blocked_model_ids }
         : {}),
@@ -838,7 +843,13 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     // This pool-key extraction runs on a separate stream inside the (already
     // gated) tool run — account its spend to the local session cap + the tenant
     // balance so it isn't invisible to billing. No-op on self-host / BYOK.
-    debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, 'fast');
+    //
+    // The tier comes from the helper, not from here. This call site used to pass
+    // a literal `'fast'` while `callForStructuredJson` defaults to
+    // `MODEL_MAP.balanced` — so a real customer's $0.3848 Sonnet extraction was
+    // reported to the control plane as Haiku spend, and every per-tier breakdown
+    // understated `balanced` by exactly the helper calls it could not see.
+    debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, result.tier);
   } catch (err: unknown) {
     if (err instanceof BudgetError) {
       return `Error: extraction budget exceeded (estimated $${err.estimatedCostUsd.toFixed(4)} > $${DOCS_EXTRACT_BUDGET_USD.toFixed(2)}). Try a smaller / more focused docs URL.`;
