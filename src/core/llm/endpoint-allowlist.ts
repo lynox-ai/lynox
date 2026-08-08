@@ -45,27 +45,14 @@ const ALLOWLISTED_HOSTS: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
- * Hostname patterns that vouch for a class of endpoints rather than a single
- * host: Azure OpenAI deployments, RFC1918 private LAN, mDNS.
- *
- * NOTE: there is deliberately NO `*.amazonaws.com` entry. It was added to vouch
- * for AWS Bedrock, but Bedrock was removed as a provider and the apex pattern
- * over-vouched — it silently allowlisted ANY self-hosted model behind a default
- * AWS hostname (`ec2-*.compute-*.amazonaws.com`, SageMaker), letting a BYOK
- * customer point the engine at an uncensored cloud model WITHOUT triggering the
- * controller-shift disclosure. Such endpoints now correctly fall through to the
- * disclosure gate like any other customer-configured endpoint.
- *
- * IMPORTANT: each pattern is suffix-anchored (`$`) or prefix-anchored (`^`)
- * to defeat suffix-spoof attacks like `evil.openai.azure.com.attacker.com`,
- * which would still match a naive `.openai.azure.com` substring check.
- */
-/**
  * Private-LAN / on-premise names. Split out from the provider patterns because
  * the two carry different risk: a `.local` name resolves inside the operator's
  * own network and exposes nothing to a third party, whereas `*.openai.azure.com`
  * is a namespace ANY account can register — so a caller that must not vouch for
  * an attacker-registerable host can still safely vouch for these.
+ *
+ * Each pattern is prefix-anchored (`^`) or suffix-anchored (`$`) to defeat
+ * suffix-spoof attacks like `evil.local.attacker.com`.
  */
 const PRIVATE_LAN_PATTERNS: readonly RegExp[] = [
   // RFC1918 — IP-octet form only. The numeric-octet anchors prevent a public
@@ -80,6 +67,23 @@ const PRIVATE_LAN_PATTERNS: readonly RegExp[] = [
   /\.intranet$/,
 ];
 
+/**
+ * Hostname patterns that vouch for a class of endpoints rather than a single
+ * host: Azure OpenAI deployments plus the private-LAN set above.
+ *
+ * The azure entry is suffix-anchored (`$`) to defeat suffix-spoof attacks like
+ * `evil.openai.azure.com.attacker.com`. Anchoring is not the same as safety
+ * here — the namespace itself is open to registration, which is why
+ * {@link isVettedEgressHost} declines to vouch for it.
+ *
+ * NOTE: there is deliberately NO `*.amazonaws.com` entry. It was added to vouch
+ * for AWS Bedrock, but Bedrock was removed as a provider and the apex pattern
+ * over-vouched — it silently allowlisted ANY self-hosted model behind a default
+ * AWS hostname (`ec2-*.compute-*.amazonaws.com`, SageMaker), letting a BYOK
+ * customer point the engine at an uncensored cloud model WITHOUT triggering the
+ * controller-shift disclosure. Such endpoints now correctly fall through to the
+ * disclosure gate like any other customer-configured endpoint.
+ */
 const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
   /\.openai\.azure\.com$/,
   ...PRIVATE_LAN_PATTERNS,
@@ -103,10 +107,11 @@ const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
  * credential. It gets the disclosure prompt like any other third-party host.
  *
  * Private-LAN names stay vetted — an operator's own `.local` endpoint is not a
- * sub-processor. (In practice `http_request` cannot reach one anyway:
+ * sub-processor. Note that `http_request` cannot actually reach one:
  * `assertHostPolicy` rejects private IPs and `fetchPinned` rejects hosts that
- * resolve to one. Keeping them here costs nothing and avoids a pointless
- * disclosure prompt on save for the non-HTTP callers that can reach them.)
+ * resolve to one. They are kept here for the save gate, which evaluates the URL
+ * without fetching it, so an on-premise profile is not made to answer a
+ * third-party disclosure prompt it has no business being asked.
  */
 export function isVettedEgressHost(url: string): boolean {
   return isGuardedBaselineHost(url) || isPrivateLanEndpoint(url);

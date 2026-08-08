@@ -2239,11 +2239,14 @@ describe('httpRequestTool', () => {
 
     it('SECURITY: an attacker-registerable azure host does NOT count as vetted', async () => {
       // `isAllowlistedEndpoint` vouches for `*.openai.azure.com`, a namespace any
-      // account can register, and api_setup therefore saves such a profile with NO
-      // human prompt and no ack. Gating the attach on it would let a prompt-injected
+      // account can register. Gating the attach on it would let a prompt-injected
       // profile have the engine post a vault credential to an attacker — past the
-      // scan, since the engine's own slot is exempt. `isGuardedBaselineHost` is the
-      // narrow check and is what the attach asks.
+      // scan, since the engine's own slot is exempt. The attach asks
+      // `isVettedEgressHost`, which excludes that wildcard; api_setup asks the same
+      // function, so such a profile now takes the disclosure prompt on save and this
+      // host reaches the attach only with a recorded acceptance (see
+      // api-setup.test.ts, 'an attacker-registerable azure host gets the disclosure
+      // prompt and an ack'). This case has none, so nothing is attached.
       const { ApiStore } = await import('../../core/api-store.js');
       const store = new ApiStore();
       store.register({

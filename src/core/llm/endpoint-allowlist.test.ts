@@ -6,7 +6,7 @@
  * (Wave-5c convention).
  */
 import { describe, it, expect } from 'vitest';
-import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked, type CustomEndpointAck } from './endpoint-allowlist.js';
+import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked, isVettedEgressHost, type CustomEndpointAck } from './endpoint-allowlist.js';
 
 describe('isAllowlistedEndpoint — exact-match hosts', () => {
   it('allows api.mistral.ai (https)', () => {
@@ -184,5 +184,35 @@ describe('isEndpointAcked — persisted acceptance for runtime egress', () => {
   });
   it('matches on hostname only — port/path/query do not defeat the match', () => {
     expect(isEndpointAcked(ack, 'https://token-thief.example.com:8443/oauth/token?x=1')).toBe(true);
+  });
+});
+
+describe('isVettedEgressHost — the credential-attach gate', () => {
+  // Two callers ask this: api_setup decides whether to raise the acceptance prompt
+  // and persist an ack, and the credential attach in http.ts decides whether an ack
+  // was required. They MUST agree — when they did not, an `*.openai.azure.com`
+  // profile saved with no prompt and no ack, and the attach then refused it with
+  // advice ("re-save and accept when prompted") that could never be followed.
+  const CASES: Array<{ url: string; vetted: boolean; why: string }> = [
+    { url: 'https://api.anthropic.com/v1/messages', vetted: true,  why: 'vetted provider' },
+    { url: 'https://api.mistral.ai/v1/chat',        vetted: true,  why: 'vetted provider' },
+    { url: 'https://nas.local/api',                 vetted: true,  why: 'operator LAN, not a sub-processor' },
+    { url: 'https://192.168.1.5/api',               vetted: true,  why: 'operator LAN, not a sub-processor' },
+    { url: 'https://x.openai.azure.com/v1',         vetted: false, why: 'ANY account can register this label' },
+    { url: 'https://api.bexio.com/3.0/users/me',    vetted: false, why: 'ordinary third party' },
+  ];
+
+  for (const { url, vetted, why } of CASES) {
+    it(`${vetted ? 'vouches for' : 'requires acceptance for'} ${url} — ${why}`, () => {
+      expect(isVettedEgressHost(url)).toBe(vetted);
+    });
+  }
+
+  it('is narrower than isAllowlistedEndpoint by EXACTLY the azure wildcard', () => {
+    // The docstring makes this claim and the security of the attach rests on it.
+    // Unpinned, a future entry in ALLOWLISTED_PATTERNS would silently re-split the
+    // two gates and reopen the dead end, or worse, re-widen what gets a credential.
+    const divergent = CASES.filter(c => isAllowlistedEndpoint(c.url) !== isVettedEgressHost(c.url));
+    expect(divergent.map(c => c.url)).toEqual(['https://x.openai.azure.com/v1']);
   });
 });
