@@ -253,9 +253,13 @@ describe('isVettedEgressHost — the credential-attach gate', () => {
       // Both helpers check this independently; a drop in either one survives if only
       // the https spelling is ever asserted.
       expect(isVettedEgressHost('https://api.mistral.ai/v1')).toBe(true);
-      expect(isVettedEgressHost('ftp://api.mistral.ai/v1')).toBe(false);
       expect(isVettedEgressHost('https://nas.local/api')).toBe(true);
-      expect(isVettedEgressHost('ftp://nas.local/api')).toBe(false);
+      // More than one non-HTTP scheme: a check written as `protocol === 'ftp:'`
+      // passes an ftp-only assertion and still vets `file://api.mistral.ai/x`.
+      for (const scheme of ['ftp:', 'file:', 'javascript:', 'data:']) {
+        expect(isVettedEgressHost(`${scheme}//api.mistral.ai/v1`)).toBe(false);
+        expect(isVettedEgressHost(`${scheme}//nas.local/api`)).toBe(false);
+      }
     });
 
     it('matches exact hosts exactly — no suffix spoof', () => {
@@ -264,6 +268,12 @@ describe('isVettedEgressHost — the credential-attach gate', () => {
       expect(isVettedEgressHost('https://evillocalhost/x')).toBe(false);
       expect(isVettedEgressHost('https://notapi.mistral.ai/v1')).toBe(false);
       expect(isVettedEgressHost('https://api.mistral.ai.attacker.com/v1')).toBe(false);
+      // A SUBDOMAIN of a vetted host is not the vetted host. `h === x ||
+      // h.endsWith('.' + x)` reads like a correct fix for the naive `endsWith`
+      // and passes every case above, while vetting anything anyone can put in
+      // front of a provider domain.
+      expect(isVettedEgressHost('https://foo.api.mistral.ai/v1')).toBe(false);
+      expect(isVettedEgressHost('https://x.localhost/api')).toBe(false);
     });
 
     it('vouches for nothing beyond the two sets it names', () => {

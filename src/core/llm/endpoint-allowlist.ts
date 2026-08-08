@@ -105,14 +105,21 @@ const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
  * true for an attacker host from outside this module. A string cannot do that.
  *
  * These pin MEMBERSHIP only. The gate functions' own logic — protocol checks,
- * exact-match vs. suffix — is not visible here and is covered by behavioural
- * cases in the test file, because four logic mutations once survived the entire
- * 9778-test suite while every membership assertion stayed green.
+ * exact-match vs. suffix — is not visible here, and membership assertions stayed
+ * green through four logic mutations that survived the entire 9778-test suite.
+ * The test file carries behavioural cases for that; they cover those mutants,
+ * not every mutant of their class.
+ *
+ * GETTERS, not fields: a snapshot taken at module load decouples from what the
+ * gates actually read. `ALLOWLISTED_HOSTS.add(...)` after this declaration then
+ * widens the gate while the pinned membership still reports the old contents —
+ * verified, 532 tests green. Recomputing per read keeps the assertion pointed at
+ * the live structures.
  */
 export const GATE_MEMBERSHIP_FOR_TESTS = Object.freeze({
-  allPatterns: Object.freeze(ALLOWLISTED_PATTERNS.map(String)),
-  privateLan: Object.freeze(PRIVATE_LAN_PATTERNS.map(String)),
-  exactHosts: Object.freeze([...ALLOWLISTED_HOSTS].sort()),
+  get allPatterns(): readonly string[] { return ALLOWLISTED_PATTERNS.map(String); },
+  get privateLan(): readonly string[] { return PRIVATE_LAN_PATTERNS.map(String); },
+  get exactHosts(): readonly string[] { return [...ALLOWLISTED_HOSTS].sort(); },
 });
 
 /**
