@@ -43,7 +43,7 @@ async function injectTallStackBlock(page: import('@playwright/test').Page, px: n
 		// ChangesetReview renders at. The wrapper the fix adds must contain it.
 		const stack = document.querySelector('[data-chat-stack]');
 		(stack ?? composerRow.parentElement).insertBefore(block, stack ? null : composerRow);
-	}, TALL_SIBLING_PX);
+	}, px);
 }
 
 test.describe('composer stays pinned', () => {
@@ -63,6 +63,14 @@ test.describe('composer stays pinned', () => {
 		const box = (await composer.boundingBox())!;
 		const viewport = page.viewportSize()!;
 		expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+
+		// And the transcript must NOT have been collapsed to nothing to pay for
+		// it (the cap on the stack is what guarantees this).
+		const transcriptHeight = await page.evaluate(() => {
+			const pane = document.querySelector('[class*="overflow-y-auto"][class*="py-6"]');
+			return pane ? pane.clientHeight : 0;
+		});
+		expect(transcriptHeight).toBeGreaterThan(100);
 	});
 
 	// NOTE deliberately ABSENT: a "wheel gesture over the composer doesn't move
@@ -89,10 +97,13 @@ test.describe('composer stays pinned', () => {
 				pane.appendChild(d);
 			}
 			pane.scrollTop = 200;
-			return pane.scrollTop;
+			// scrollTop succeeds on overflow:hidden too (programmatic scrolling
+			// ignores overflow), so assert the pane is genuinely USER-scrollable.
+			return { top: pane.scrollTop, overflowY: getComputedStyle(pane).overflowY };
 		});
 
-		expect(scrolled).toBeGreaterThan(0);
+		expect(scrolled.top).toBeGreaterThan(0);
+		expect(scrolled.overflowY).toBe('auto');
 	});
 
 	test('the stack block itself stays reachable (scrollable), not clipped away', async ({ page }) => {
