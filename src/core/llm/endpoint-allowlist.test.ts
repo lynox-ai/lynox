@@ -6,7 +6,7 @@
  * (Wave-5c convention).
  */
 import { describe, it, expect } from 'vitest';
-import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked, isVettedEgressHost, type CustomEndpointAck } from './endpoint-allowlist.js';
+import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked, isVettedEgressHost, PATTERNS_FOR_INVARIANT_TEST, type CustomEndpointAck } from './endpoint-allowlist.js';
 
 describe('isAllowlistedEndpoint — exact-match hosts', () => {
   it('allows api.mistral.ai (https)', () => {
@@ -208,11 +208,24 @@ describe('isVettedEgressHost — the credential-attach gate', () => {
     });
   }
 
-  it('is narrower than isAllowlistedEndpoint by EXACTLY the azure wildcard', () => {
-    // The docstring makes this claim and the security of the attach rests on it.
-    // Unpinned, a future entry in ALLOWLISTED_PATTERNS would silently re-split the
-    // two gates and reopen the dead end, or worse, re-widen what gets a credential.
+  it('the CASES above diverge only on the azure wildcard', () => {
     const divergent = CASES.filter(c => isAllowlistedEndpoint(c.url) !== isVettedEgressHost(c.url));
     expect(divergent.map(c => c.url)).toEqual(['https://x.openai.azure.com/v1']);
+  });
+
+  it('and the azure wildcard is the ONLY pattern it declines — over the real lists', () => {
+    // The case above cannot carry this claim, and saying it did was the same
+    // over-statement this change keeps finding elsewhere: a pattern added for a host
+    // no CASES entry mentions widens what the ATTACH vouches for while all six
+    // examples still answer identically. Adding `/\.attacker-registerable\.example$/`
+    // to ALLOWLISTED_PATTERNS left the entire suite green.
+    //
+    // Iterating the real lists is what actually fails on such an addition: anything
+    // in `all` that is not a private-LAN pattern is a host class the attach will
+    // NOT vouch for, and that set must stay exactly one entry long.
+    const { all, privateLan } = PATTERNS_FOR_INVARIANT_TEST;
+    const lan = new Set(privateLan.map(String));
+    const declinedByAttach = all.filter(p => !lan.has(String(p)));
+    expect(declinedByAttach.map(String)).toEqual([String(/\.openai\.azure\.com$/)]);
   });
 });

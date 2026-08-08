@@ -90,6 +90,21 @@ const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
+ * The two pattern lists, exported for ONE invariant test.
+ *
+ * `isVettedEgressHost` declines exactly one of these patterns — the azure
+ * wildcard — and the security of the credential attach rests on that being the
+ * complete list of what it declines. A test over example hostnames cannot pin
+ * it: a pattern added here for a host no example mentions widens what the
+ * ATTACH vouches for while every example still answers the same, which is
+ * silence exactly where it matters. The test iterates these instead.
+ */
+export const PATTERNS_FOR_INVARIANT_TEST = {
+  all: ALLOWLISTED_PATTERNS,
+  privateLan: PRIVATE_LAN_PATTERNS,
+} as const;
+
+/**
  * Does an api_profile pointed at `url` need a human acceptance before the engine
  * will hand it a stored credential?
  *
