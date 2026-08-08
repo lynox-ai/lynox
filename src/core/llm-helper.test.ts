@@ -527,7 +527,41 @@ describe('callForStructuredJson — provider-aware model resolution', () => {
       // Whatever the registry says for this id — the point is that it is DERIVED
       // from the model that ran, so it tracks a provider change instead of
       // freezing whatever the call site once wrote down.
-      expect(r.tier).toBe(modelCapability('mistral-large-2512')?.tier ?? 'balanced');
+      // Pinned, not recomputed: `toBe(modelCapability(id)?.tier ?? 'balanced')`
+      // is the implementation restated, so it stays green no matter what the
+      // derivation does.
+      expect(r.tier).toBe('deep');
+    });
+
+    it('falls back to balanced for a registered id the registry gives no tier', () => {
+      // `mistral-small-2603` carries `tier: null`. Without a case here, flipping
+      // the fallback to `'fast'` leaves the whole suite green — measured: 141/141.
+      const { client } = captureClient({ name: 'a', count: 1, level: 'low' });
+      const agent = stubAgent({
+        provider: 'openai', apiKey: 'k', apiBaseURL: 'https://api.mistral.ai/v1',
+        openaiModelId: 'mistral-small-2603', openaiAuth: 'static',
+      });
+      return callForStructuredJson({ system: 'E', user: 'S', schema: SCHEMA, agent, client })
+        .then((r) => {
+          expect(modelCapability('mistral-small-2603')?.tier).toBeNull();
+          expect(r.tier).toBe('balanced');
+        });
+    });
+
+    it('falls back to balanced for an id the registry does not carry at all', () => {
+      // A BYOK / custom-proxy id. Worth pinning because the DOLLARS are a guess
+      // on this path too (`pricingFor` falls back to Sonnet list pricing), so
+      // the tier being the conservative guess is the only thing holding.
+      const { client } = captureClient({ name: 'a', count: 1, level: 'low' });
+      const agent = stubAgent({
+        provider: 'openai', apiKey: 'k', apiBaseURL: 'https://api.openai.com/v1',
+        openaiModelId: 'gpt-5.2-not-in-registry', openaiAuth: 'static',
+      });
+      return callForStructuredJson({ system: 'E', user: 'S', schema: SCHEMA, agent, client })
+        .then((r) => {
+          expect(modelCapability('gpt-5.2-not-in-registry')).toBeUndefined();
+          expect(r.tier).toBe('balanced');
+        });
     });
   });
 });

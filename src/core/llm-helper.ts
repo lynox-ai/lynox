@@ -102,10 +102,22 @@ export interface StructuredJsonResult<T> {
   model: string;
   /**
    * {@link model}'s capability tier, for callers that need the billing bucket
-   * rather than the id. Falls back to `'balanced'` for a model outside the
-   * capability registry (a custom-proxy or OpenAI-compatible id): the cost
-   * figure is exact either way, and mislabelling an unknown model as the
-   * cheaper tier is the direction that understates premium spend.
+   * rather than the id. Falls back to `'balanced'` for an id the capability
+   * registry does not carry a tier for — an unregistered custom-proxy/BYOK id,
+   * or one of the registered ids with `tier: null`. Of the two wrong answers
+   * available, `'balanced'` is the one that does not understate premium spend.
+   *
+   * Two honest limits on this value:
+   *   · For an UNREGISTERED id the cost figure is not exact either: `pricingFor`
+   *     falls back to `claude-sonnet-4-6` list pricing, so a BYOK `gpt-*` call
+   *     is billed at $3/$15 regardless of what it really costs. That predates
+   *     this field and is not fixed by it — but "the tier is a guess AND the
+   *     dollars are a guess" is the accurate description of that path.
+   *   · A Mistral tenant is over-labelled: `MISTRAL_MODEL_MAP.balanced` is
+   *     `mistral-medium-2604`, whose registry tier is `'deep'`. The label
+   *     follows the MODEL, which is what makes it honest about what ran; it
+   *     does not follow the tenant's tier SLOT. Reconciling the two is a
+   *     registry question, not a helper one.
    */
   tier: ModelTier;
 }
