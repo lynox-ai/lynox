@@ -6,7 +6,7 @@
  * (Wave-5c convention).
  */
 import { describe, it, expect } from 'vitest';
-import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked, isVettedEgressHost, PATTERNS_FOR_INVARIANT_TEST, type CustomEndpointAck } from './endpoint-allowlist.js';
+import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked, isVettedEgressHost, GATE_MEMBERSHIP_FOR_TESTS, type CustomEndpointAck } from './endpoint-allowlist.js';
 
 describe('isAllowlistedEndpoint — exact-match hosts', () => {
   it('allows api.mistral.ai (https)', () => {
@@ -213,19 +213,44 @@ describe('isVettedEgressHost — the credential-attach gate', () => {
     expect(divergent.map(c => c.url)).toEqual(['https://x.openai.azure.com/v1']);
   });
 
-  it('and the azure wildcard is the ONLY pattern it declines — over the real lists', () => {
-    // The case above cannot carry this claim, and saying it did was the same
-    // over-statement this change keeps finding elsewhere: a pattern added for a host
-    // no CASES entry mentions widens what the ATTACH vouches for while all six
-    // examples still answer identically. Adding `/\.attacker-registerable\.example$/`
-    // to ALLOWLISTED_PATTERNS left the entire suite green.
-    //
-    // Iterating the real lists is what actually fails on such an addition: anything
-    // in `all` that is not a private-LAN pattern is a host class the attach will
-    // NOT vouch for, and that set must stay exactly one entry long.
-    const { all, privateLan } = PATTERNS_FOR_INVARIANT_TEST;
+  it('vouches for EXACTLY these hosts and patterns — nothing may join silently', () => {
+    // Pinned positively, because the dangerous direction is WIDENING. The first
+    // version asserted the DECLINED set (all-minus-privateLan), which does not move
+    // when someone adds to the vouched-for side: a new `privateLan` pattern, or a new
+    // exact host, hands the credential attach another host that needs no acceptance
+    // on record. Both left 393 tests green. Whatever is added here has to be added to
+    // these literals too, which is the point — that edit is where someone asks whether
+    // the engine should hand a stored credential to that host unprompted.
+    const { privateLan, exactHosts } = GATE_MEMBERSHIP_FOR_TESTS;
+    expect(privateLan.map(String)).toEqual([
+      String(/^192\.168\.\d{1,3}\.\d{1,3}$/),
+      String(/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/),
+      String(/^172\.(1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}$/),
+      String(/\.local$/),
+      String(/\.lan$/),
+      String(/\.intranet$/),
+    ]);
+    expect([...exactHosts].sort()).toEqual([
+      '0.0.0.0', '127.0.0.1', 'aiplatform.googleapis.com', 'api.anthropic.com',
+      'api.fireworks.ai', 'api.groq.com', 'api.mistral.ai', 'api.openai.com',
+      'api.together.xyz', 'localhost',
+    ]);
+  });
+
+  it('declines the azure wildcard — the one entry isAllowlistedEndpoint adds', () => {
+    const { allPatterns, privateLan } = GATE_MEMBERSHIP_FOR_TESTS;
     const lan = new Set(privateLan.map(String));
-    const declinedByAttach = all.filter(p => !lan.has(String(p)));
-    expect(declinedByAttach.map(String)).toEqual([String(/\.openai\.azure\.com$/)]);
+    expect(allPatterns.filter(p => !lan.has(String(p))).map(String))
+      .toEqual([String(/\.openai\.azure\.com$/)]);
+  });
+
+  it('the exported membership cannot widen the gate at runtime', () => {
+    // It is a live view of what the gates read, so an unfrozen export would be a
+    // runtime hole, not a test convenience: pushing onto it flipped
+    // isVettedEgressHost false→true for an attacker host from outside this module.
+    const url = 'https://x.openai.azure.com/steal';
+    expect(isVettedEgressHost(url)).toBe(false);
+    expect(() => (GATE_MEMBERSHIP_FOR_TESTS.privateLan as RegExp[]).push(/./)).toThrow();
+    expect(isVettedEgressHost(url)).toBe(false);
   });
 });

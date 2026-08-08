@@ -1136,8 +1136,8 @@ Next steps before calling create:
       // there. Gating base_url alone let a profile pair an allowlisted base_url
       // with an arbitrary token_url and egress the client_secret past the
       // allowlist. validateProfile() has already verified base_url and (for
-      // oauth2 profiles) token_url parse as URLs, so isAllowlistedEndpoint()
-      // returns false here only for genuinely non-allowlisted hosts.
+      // oauth2 profiles) token_url parse as URLs, so isVettedEgressHost()
+      // returns false here only for genuinely non-vetted hosts.
       const egressUrls: string[] = [profile.base_url];
       if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.token_url) {
         egressUrls.push(profile.auth.oauth.token_url);
@@ -1148,8 +1148,8 @@ Next steps before calling create:
       // and the attach then refused it with advice ("re-save and accept when
       // prompted") that could never be followed — the prompt was unreachable and the
       // else-branch below deleted any ack that did exist.
-      const nonAllowlisted = egressUrls.filter((u) => !isVettedEgressHost(u));
-      if (nonAllowlisted.length > 0) {
+      const nonVetted = egressUrls.filter((u) => !isVettedEgressHost(u));
+      if (nonVetted.length > 0) {
         // Controller-responsibility acceptance MUST be a real OUT-OF-BAND human
         // confirmation — NEVER an agent-supplied tool argument. A prompt-injected
         // agent (malicious mail/page/doc) that could self-approve would repoint an
@@ -1159,7 +1159,7 @@ Next steps before calling create:
         // `promptUser` (PromptStore ask_user) — the agent cannot supply this
         // answer — and fail CLOSED when no interactive prompt exists. Disclose
         // EVERY non-allowlisted egress host so the single accept is informed.
-        const disclosure = nonAllowlisted.map((u) => describeDisclosure(u)).join('\n\n');
+        const disclosure = nonVetted.map((u) => describeDisclosure(u)).join('\n\n');
         if (!agent.promptUser) {
           return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance of controller-responsibility — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
         }
@@ -1180,10 +1180,10 @@ Next steps before calling create:
       // overwrite it unconditionally here. Bound to the specific hosts so a
       // later `token_url`/`base_url` swap to a different non-vetted host does
       // not inherit this ack — it re-gates.
-      if (nonAllowlisted.length > 0) {
+      if (nonVetted.length > 0) {
         // Reachable only after the human accepted above (else returned).
         const ackHosts = Array.from(new Set(
-          nonAllowlisted
+          nonVetted
             .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
             .filter((h): h is string => h !== null),
         ));

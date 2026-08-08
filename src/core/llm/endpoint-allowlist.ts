@@ -90,19 +90,25 @@ const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
 ];
 
 /**
- * The two pattern lists, exported for ONE invariant test.
+ * @internal — the membership behind the gates, exposed for ONE invariant test.
  *
- * `isVettedEgressHost` declines exactly one of these patterns — the azure
- * wildcard — and the security of the credential attach rests on that being the
- * complete list of what it declines. A test over example hostnames cannot pin
- * it: a pattern added here for a host no example mentions widens what the
- * ATTACH vouches for while every example still answers the same, which is
- * silence exactly where it matters. The test iterates these instead.
+ * What `isVettedEgressHost` VOUCHES FOR has to be pinned positively, not by
+ * subtraction. The first attempt asserted the declined set (`all` minus
+ * `privateLan`) and was invariant under the change that actually matters:
+ * adding a pattern to `privateLan` — or a host to `exactHosts` — WIDENS what the
+ * credential attach accepts without an acceptance on record, and the declined
+ * set never moves. Measured: both widenings left 393 tests green.
+ *
+ * FROZEN, and not as decoration. These are live references into the arrays the
+ * gates read on every call, so an unfrozen export is a runtime hole rather than
+ * a test convenience: `privateLan.push(/./)` flipped `isVettedEgressHost` from
+ * false to true for an attacker host, from outside this module, at runtime.
  */
-export const PATTERNS_FOR_INVARIANT_TEST = {
-  all: ALLOWLISTED_PATTERNS,
-  privateLan: PRIVATE_LAN_PATTERNS,
-} as const;
+export const GATE_MEMBERSHIP_FOR_TESTS = Object.freeze({
+  allPatterns: Object.freeze([...ALLOWLISTED_PATTERNS]),
+  privateLan: Object.freeze([...PRIVATE_LAN_PATTERNS]),
+  exactHosts: Object.freeze([...ALLOWLISTED_HOSTS]),
+});
 
 /**
  * Does an api_profile pointed at `url` need a human acceptance before the engine

@@ -371,7 +371,7 @@ async function attachEngineManagedAuth(
   };
 
   // The engine is about to hand a stored credential to this host, so the host must
-  // be vetted or carry a recorded human acceptance. `isGuardedBaselineHost`, not
+  // be vetted or carry a recorded human acceptance. `isVettedEgressHost`, not
   // `isAllowlistedEndpoint`: the latter also vouches for `*.openai.azure.com`, a
   // namespace ANY account can register (see its own docstring). Under the broader
   // check, a prompt-injected agent could point a profile at `x.openai.azure.com`,
