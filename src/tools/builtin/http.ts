@@ -1,6 +1,6 @@
 import type { ToolEntry } from '../../types/index.js';
 import { applyShape } from '../../core/api-shape.js';
-import type { ApiAuth, ResponseShape } from '../../core/api-store.js';
+import type { ResponseShape } from '../../core/api-store.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -8,7 +8,7 @@ import { isFeatureEnabled } from '../../core/features.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
 import type { EgressSurface } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
-import { isAllowlistedEndpoint, isEndpointAcked, isGuardedBaselineHost } from '../../core/llm/endpoint-allowlist.js';
+import { isEndpointAcked, isGuardedBaselineHost, isPrivateLanEndpoint } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite } from '../../core/secret-store.js';
 import {
   extractHtmlText,
@@ -378,7 +378,14 @@ async function attachEngineManagedAuth(
   // save it with no human prompt because it reads as allowlisted, and have the
   // engine attach a vault credential to an attacker's host — past the scan that
   // would otherwise have caught it, since the engine's own slot is exempt.
-  const hostVetted = isGuardedBaselineHost(url) || isEndpointAcked(profile.custom_endpoint_ack, url);
+  // `isPrivateLanEndpoint` keeps the on-premise half of what `isAllowlistedEndpoint`
+  // used to vouch for: an operator's own `.local`/RFC1918 endpoint is not a
+  // third-party sub-processor, and dropping it would break self-hosted setups that
+  // work today. What is deliberately NOT carried over is the `*.openai.azure.com`
+  // wildcard — the one part of that list an attacker can register a match for.
+  const hostVetted = isGuardedBaselineHost(url)
+    || isPrivateLanEndpoint(url)
+    || isEndpointAcked(profile.custom_endpoint_ack, url);
 
   if (auth.type === 'oauth2') {
     // Wave 5d runtime egress gate (base_url parity with fetch_token). A profile can

@@ -2248,6 +2248,24 @@ describe('httpRequestTool', () => {
       expect(sentHeader('authorization')).toBeUndefined();
     });
 
+    it('an on-premise host still counts as vetted without an acceptance', async () => {
+      // The narrow baseline check drops `*.openai.azure.com` — but it also drops the
+      // `.local`/`.lan`/RFC1918 names the broad one vouched for, and those are the
+      // operator's OWN network, not a third-party sub-processor. Taking them along
+      // would have broken self-hosted setups that work today, which is the same
+      // mistake as refusing on a missing acceptance.
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'nas', name: 'NAS', base_url: 'https://nas.local',
+        description: 'on-prem', auth: { type: 'bearer', vault_keys: ['NAS_TOKEN'] },
+      });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://nas.local/api/v1/me' }, agentWith(store, { NAS_TOKEN: JWT }));
+      expect(sentHeader('authorization')).toBe(`Bearer ${JWT}`);
+    });
+
     it('SECURITY: a header_name carrying CRLF is refused, not smuggled', async () => {
       const store = await storeWith({ type: 'header', header_name: 'X-Key\r\nX-Evil: yes', vault_keys: ['BEXIO_API_TOKEN'] });
       mockDnsPublic();

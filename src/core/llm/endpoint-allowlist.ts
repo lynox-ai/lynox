@@ -60,8 +60,14 @@ const ALLOWLISTED_HOSTS: ReadonlySet<string> = new Set<string>([
  * to defeat suffix-spoof attacks like `evil.openai.azure.com.attacker.com`,
  * which would still match a naive `.openai.azure.com` substring check.
  */
-const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
-  /\.openai\.azure\.com$/,
+/**
+ * Private-LAN / on-premise names. Split out from the provider patterns because
+ * the two carry different risk: a `.local` name resolves inside the operator's
+ * own network and exposes nothing to a third party, whereas `*.openai.azure.com`
+ * is a namespace ANY account can register — so a caller that must not vouch for
+ * an attacker-registerable host can still safely vouch for these.
+ */
+const PRIVATE_LAN_PATTERNS: readonly RegExp[] = [
   // RFC1918 — IP-octet form only. The numeric-octet anchors prevent a public
   // DNS name like `10.example.com` from being mistaken for the 10.0.0.0/8
   // block. `\d{1,3}` is bounded by the dotted-quad terminator (`$`) so we
@@ -73,6 +79,31 @@ const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
   /\.lan$/,
   /\.intranet$/,
 ];
+
+const ALLOWLISTED_PATTERNS: readonly RegExp[] = [
+  /\.openai\.azure\.com$/,
+  ...PRIVATE_LAN_PATTERNS,
+];
+
+/**
+ * True for a private-LAN / on-premise host — no third-party exposure.
+ *
+ * For callers that need `isAllowlistedEndpoint`'s tolerance of on-premise
+ * endpoints WITHOUT its `*.openai.azure.com` wildcard. The engine-managed auth
+ * attach in `http.ts` is the case: it hands a stored credential to the host, so
+ * vouching for an attacker-registerable namespace would let a prompt-injected
+ * profile collect one — but refusing an operator's own LAN endpoint would break
+ * self-hosted setups that work today.
+ */
+export function isPrivateLanEndpoint(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    return PRIVATE_LAN_PATTERNS.some((p) => p.test(u.hostname));
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Returns true iff the given URL points at a vetted endpoint that lynox can
