@@ -9,7 +9,7 @@ import {
   type ExtractSchema,
 } from './llm-helper.js';
 import type { IAgent, ProviderConfigSnapshot } from '../types/index.js';
-import { MODEL_MAP } from '../types/models.js';
+import { MODEL_MAP, modelCapability } from '../types/models.js';
 
 const SCHEMA: ExtractSchema = {
   type: 'object',
@@ -485,5 +485,49 @@ describe('callForStructuredJson — provider-aware model resolution', () => {
     });
 
     expect(lastCall.thinking).toEqual({ type: 'disabled' });
+  });
+
+  // The billing label has to come from here, because the call site cannot know
+  // it. `api_setup` asserted `'fast'` for years while this helper's default is
+  // `MODEL_MAP.balanced`, so a real customer's $0.3848 Sonnet extraction went to
+  // the control plane as Haiku spend. What makes that a HELPER bug rather than a
+  // call-site typo is that the resolution depends on the provider snapshot, an
+  // env override and the blocklist — three inputs the caller does not see.
+  describe('reports the model + tier it actually ran', () => {
+    it('default Anthropic path returns the balanced tier, not fast', async () => {
+      const { client } = captureClient({ name: 'a', count: 1, level: 'low' });
+      const r = await callForStructuredJson({ system: 'Extract.', user: 'Sample', schema: SCHEMA, client });
+      expect(r.model).toBe('claude-sonnet-4-6');
+      expect(r.tier).toBe('balanced');
+    });
+
+    it('follows the blocklist fallback down to fast', async () => {
+      // The one case where the old literal was accidentally right — pinned so a
+      // future change cannot make the two paths report the same tier again.
+      const { client } = captureClient({ name: 'a', count: 1, level: 'low' });
+      const r = await callForStructuredJson({
+        system: 'Extract.', user: 'Sample', schema: SCHEMA, client,
+        blockedModelIds: ['claude-sonnet-'],
+      });
+      expect(r.model).toBe(MODEL_MAP.fast);
+      expect(r.tier).toBe('fast');
+    });
+
+    it('follows the provider snapshot to a non-Anthropic model', async () => {
+      const { client } = captureClient({ name: 'a', count: 1, level: 'low' });
+      const agent = stubAgent({
+        provider: 'openai',
+        apiKey: 'mistral-key',
+        apiBaseURL: 'https://api.mistral.ai/v1',
+        openaiModelId: 'mistral-large-2512',
+        openaiAuth: 'static',
+      });
+      const r = await callForStructuredJson({ system: 'Extract.', user: 'Sample', schema: SCHEMA, agent, client });
+      expect(r.model).toBe('mistral-large-2512');
+      // Whatever the registry says for this id — the point is that it is DERIVED
+      // from the model that ran, so it tracks a provider change instead of
+      // freezing whatever the call site once wrote down.
+      expect(r.tier).toBe(modelCapability('mistral-large-2512')?.tier ?? 'balanced');
+    });
   });
 });

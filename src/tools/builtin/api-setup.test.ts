@@ -1047,8 +1047,15 @@ describe('api_setup tool', () => {
       );
     }
 
-    function stubExtraction(data: Record<string, unknown>, costUsd = 0.001): void {
-      mockedExtract.mockResolvedValue({ data, inputTokens: 1000, outputTokens: 200, costUsd });
+    /** `resolved` mirrors what the helper reports back about the model it ran —
+     *  the field the billing label is derived from. Defaults to the helper's own
+     *  default (`MODEL_MAP.balanced`), so existing callers describe reality. */
+    function stubExtraction(
+      data: Record<string, unknown>,
+      costUsd = 0.001,
+      resolved: { model: string; tier: 'fast' | 'balanced' | 'deep' } = { model: 'claude-sonnet-4-6', tier: 'balanced' },
+    ): void {
+      mockedExtract.mockResolvedValue({ data, inputTokens: 1000, outputTokens: 200, costUsd, ...resolved });
     }
 
     it('returns a draft v2 profile from a DataForSEO-style docs page', async () => {
@@ -1101,6 +1108,56 @@ describe('api_setup tool', () => {
         expect((agent.sessionCounters as { costUSD: number }).costUSD).toBeCloseTo(0.0021, 6);
         expect(onAfterRun).toHaveBeenCalledOnce();
         expect(onAfterRun.mock.calls[0]![1] as number).toBeCloseTo(0.0021, 6);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('debits under the tier the extraction ACTUALLY ran on, not a literal', async () => {
+      // This call site passed `'fast'` while `callForStructuredJson` defaults to
+      // `MODEL_MAP.balanced`, so a real customer's $0.3848 Sonnet extraction was
+      // reported to the control plane as Haiku spend and every per-tier
+      // breakdown understated `balanced`. The label now comes off the helper's
+      // own result, which is the only layer that knows what it resolved.
+      const fetchSpy = mockFetchOk('<html>plain docs body, no links...</html>');
+      stubExtraction({ description: 'Some API', auth: { type: 'bearer' } }, 0.3848, {
+        model: 'claude-sonnet-4-6', tier: 'balanced',
+      });
+      const onAfterRun = vi.fn();
+      try {
+        const agent = createMockAgent(new ApiStore());
+        (agent.sessionCounters as { costUSD?: number }).costUSD = 0;
+        (agent.toolContext as { meteredHost?: unknown }).meteredHost = {
+          getHooks: () => [{ onAfterRun }], getContext: () => undefined,
+        };
+        await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/v1' }, agent);
+
+        const ctx = onAfterRun.mock.calls[0]![2] as { modelTier: string };
+        expect(ctx.modelTier).toBe('balanced');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('still debits as fast when the helper actually resolved the fast tier', async () => {
+      // The contrast that makes the assertion above non-tautological: it must
+      // FOLLOW the helper, not simply always say `balanced` now. This is the
+      // blocklist-fallback shape, where the old literal was accidentally right.
+      const fetchSpy = mockFetchOk('<html>plain docs body, no links...</html>');
+      stubExtraction({ description: 'Some API', auth: { type: 'bearer' } }, 0.002, {
+        model: 'claude-haiku-4-5-20251001', tier: 'fast',
+      });
+      const onAfterRun = vi.fn();
+      try {
+        const agent = createMockAgent(new ApiStore());
+        (agent.sessionCounters as { costUSD?: number }).costUSD = 0;
+        (agent.toolContext as { meteredHost?: unknown }).meteredHost = {
+          getHooks: () => [{ onAfterRun }], getContext: () => undefined,
+        };
+        await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/v1' }, agent);
+
+        const ctx = onAfterRun.mock.calls[0]![2] as { modelTier: string };
+        expect(ctx.modelTier).toBe('fast');
       } finally {
         fetchSpy.mockRestore();
       }

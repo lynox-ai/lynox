@@ -17,7 +17,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient } from './llm-client.js';
 import { MODEL_MAP, modelCapability, isBlockedModelId } from '../types/models.js';
-import type { IAgent, ProviderConfigSnapshot } from '../types/index.js';
+import type { IAgent, ModelTier, ProviderConfigSnapshot } from '../types/index.js';
 
 /** Minimal JSON-schema subset accepted by the extractor. */
 export interface ExtractSchema {
@@ -86,6 +86,28 @@ export interface StructuredJsonResult<T> {
   outputTokens: number;
   /** Computed USD cost from the model-appropriate list pricing. */
   costUsd: number;
+  /**
+   * The model id this call actually ran on, after `resolveModel` applied the
+   * provider snapshot, the `LYNOX_LLM_HELPER_MODEL` override and the operator
+   * blocklist.
+   *
+   * Returned because the caller CANNOT derive it. Every consumer of this
+   * helper's `costUsd` has to label that spend with a tier for billing, and
+   * before this field existed the only thing available at the call site was a
+   * guess — `api_setup` guessed `'fast'` while the helper's own default is
+   * `MODEL_MAP.balanced`, so a real customer's $0.3848 Sonnet extraction was
+   * reported to the control plane as Haiku spend. A label the caller asserts
+   * drifts from the model the helper picks; a label derived from this does not.
+   */
+  model: string;
+  /**
+   * {@link model}'s capability tier, for callers that need the billing bucket
+   * rather than the id. Falls back to `'balanced'` for a model outside the
+   * capability registry (a custom-proxy or OpenAI-compatible id): the cost
+   * figure is exact either way, and mislabelling an unknown model as the
+   * cheaper tier is the direction that understates premium spend.
+   */
+  tier: ModelTier;
 }
 
 /**
@@ -378,6 +400,8 @@ export async function callForStructuredJson<T = unknown>(
     inputTokens,
     outputTokens,
     costUsd: computeCostUsd(inputTokens, outputTokens, model),
+    model,
+    tier: modelCapability(model)?.tier ?? 'balanced',
   };
 }
 
