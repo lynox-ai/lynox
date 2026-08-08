@@ -1,5 +1,50 @@
 # Changelog
 
+## 2.12.1 — 2026-08-08
+
+A patch for two things the status bar and the composer were getting wrong on a
+hybrid setup, plus the dependency pin that forced the cut.
+
+### Fixed
+- **The status bar names every provider the router reaches.** It reported one.
+  Under hybrid routing each tier can sit on a different provider, but the list
+  was assembled from two hard-coded slots — the top-level provider, and Mistral
+  if its key was set and the primary was not already Mistral. An instance routing
+  fast→Mistral, balanced→Fireworks and deep→Anthropic therefore named one of the
+  three, and when the primary *was* Mistral the second slot was suppressed too.
+  The list is now derived from the tier set, and each provider is counted once
+  even when two tiers share it. (#1149)
+- **The deferred follow-ups tray is removed.** It captured the un-taken
+  suggestions of a chip you clicked, automatically, and pinned them above the
+  composer until you dismissed them by hand — then had to guess whether a later,
+  rephrased suggestion was one it already held. That guess was an exact string
+  comparison over text the model rewrites every turn, so it never matched: the
+  shelf grew, showed near-duplicates of the live chips, and cost a permanent row
+  on a phone. Follow-up suggestions are now inline only, for the turn that
+  offered them. The replacement is an explicit one — you mark what to keep — and
+  is being designed rather than patched in. (#1150)
+
+### Security
+- **nanoid is pinned past `GHSA-2v37-7h3g-55p8`** (CVSS 8.2), in the root tree
+  and in the docs tree, which has its own lockfile. Neither was introduced here;
+  the advisory is new. (#1151)
+
+### Also worth knowing
+- `GET /api/providers/status` and `GET /api/provider/status` now require
+  authentication. They were public, which was defensible while they reported a
+  vendor's status page — they now report which providers *this* instance routes
+  to and which of them recently failed, which is instance configuration. The web
+  UI already sent credentials on both calls.
+- The dependency scan reads the root lockfile only, so the docs tree — a
+  separate, non-workspace package — is invisible to it, including to the release
+  gate. Found while fixing the advisory above and tracked; not switched on in a
+  patch, because doing so fails every open branch the moment it lands.
+
+### Upgrade and rollback
+Nothing to migrate; no schema change in either repo. Rolling back to 2.12.0
+restores the tray, including any entries still persisted from before the
+removal — nothing was deleted from storage.
+
 ## 2.12.0 — 2026-08-07
 
 A memory release. The durable knowledge store stops being an opt-in experiment and becomes the default for newly provisioned managed tenants, which raises a question the earlier phase could postpone: if the agent keeps what it learns, you have to be able to see it, correct it, and delete it. So this release ships the other half — a fact you can drop, a subject you can erase from both stores, a chip that says what it is asking about, and a recall surface that reports what is still waiting by count rather than by adjective. Alongside it, delegation stops being invisible: a sub-agent's activity is attributed to the sub-agent, and a delegated turn says what it cost and how long you waited. Calendar reading arrives as an ICS feed reader and ships **off on every tenant**. Two control-plane migrations, both additive; the engine schema does not move.
