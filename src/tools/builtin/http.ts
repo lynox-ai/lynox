@@ -8,8 +8,8 @@ import { isFeatureEnabled } from '../../core/features.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
 import type { EgressSurface } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
-import { isAllowlistedEndpoint, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
-import { isInfraSecret } from '../../core/secret-store.js';
+import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
+import { isProtectedSecretWrite } from '../../core/secret-store.js';
 import {
   extractHtmlText,
   isHtmlContentType,
@@ -99,6 +99,15 @@ export async function fetchWithValidatedRedirects(
   // for a full-control surface under `guarded`. Computed in the handler (where
   // the ApiStore resolves) and re-checked here per redirect hop.
   guardedAckHosts?: ReadonlySet<string> | undefined,
+  // An engine-attached credential header whose name is NOT in the fixed
+  // cross-origin drop set. `CROSS_ORIGIN_DROP_HEADERS` covers Authorization,
+  // Cookie and the common `X-Api-Key`/`X-Auth-Token` spellings, but an
+  // `auth.type: 'header'` profile names its own slot — `Private-Token`,
+  // `X-Shopify-Access-Token`, anything — and the engine now fills it from the
+  // vault on every request. One 302 off the accepted host would otherwise replay
+  // that credential to the new origin, and it is exempt from the egress scan
+  // precisely because the engine put it there.
+  extraCredentialHeader?: string | undefined,
   // Returns the FINAL hop alongside the response. Callers need the URL, not
   // just the bytes: cost attribution profiles by hostname, and link extraction
   // resolves relative hrefs against it and filters on its origin — so handing
@@ -150,7 +159,7 @@ export async function fetchWithValidatedRedirects(
     }
     // Drop credential headers before a cross-origin hop (mirror fetch()) so the
     // OAuth2 Bearer / Authorization / Cookie is not replayed off-origin.
-    headers = redirectHopHeaders(headers, currentUrl, nextUrl);
+    headers = redirectHopHeaders(headers, currentUrl, nextUrl, extraCredentialHeader);
     // A 307/308 preserves the method + body — drop the body too on a cross-origin
     // hop (e.g. an api_setup OAuth client_secret POST whose token_url issues an
     // open redirect), degrading to a bodyless GET like the 301/302/303 path.
@@ -297,6 +306,199 @@ function detectGetExfiltration(url: string): string | null {
     // Invalid URL — will be caught by assertHostPolicy later
   }
   return null;
+}
+
+
+/** Outcome of the engine-managed auth attach. */
+interface AttachedAuth {
+  /** Lower-cased header the engine filled. The egress scan skips exactly this one. */
+  slot?: string | undefined;
+  /** Set when the engine REFUSED — the handler returns this verbatim and sends nothing. */
+  refusal?: string | undefined;
+  /** Set when the engine declined to attach for a recoverable reason. Surfaced on a 401. */
+  hint?: string | undefined;
+}
+
+/**
+ * Attach the profile's credential to `headers` and report which slot was filled.
+ *
+ * Runs BEFORE the egress secret scan, which then skips the returned slot. That
+ * order is deliberate: the alternative is predicting which slot is about to
+ * become engine-owned so the scan can spare it, and a prediction that disagrees
+ * with what the attach actually did sends the request with no credential at all.
+ *
+ * Three outcomes, and the difference matters:
+ *   - `slot`    — attached; the scan skips it, redirects drop it cross-origin.
+ *   - `refusal` — the engine says no and nothing is sent. Reserved for a profile
+ *                 that is trying something it may not: a protected vault key, a
+ *                 CRLF-bearing header name. These are attacks, not misconfigurations.
+ *   - `hint`    — bearer/header only: could not attach for a recoverable reason (no acceptance on
+ *                 record, no vault key, empty value). Nothing is dropped, the
+ *                 model's own header stands, and the request proceeds exactly as
+ *                 it does today; the hint rides along on a 401 so the cause is
+ *                 nameable instead of silent. `custom_endpoint_ack` only exists
+ *                 since 2026-07-02 and `regateMigratedApiConnections` strips it on
+ *                 self→managed import, so refusing here would break integrations
+ *                 that work today, on upgrade, with no action by their owner.
+ */
+async function attachEngineManagedAuth(
+  url: string,
+  headers: Record<string, string>,
+  toolContext: ToolContext | undefined,
+  agent: import('../../types/index.js').IAgent,
+): Promise<AttachedAuth> {
+  const secretStore = agent.secretStore;
+  if (!toolContext?.apiStore || !secretStore) return {};
+
+  let profile: ReturnType<NonNullable<ToolContext['apiStore']>['getByHostname']>;
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+    profile = toolContext.apiStore.getByHostname(hostname);
+  } catch {
+    return {}; // invalid URL — assertHostPolicy reports it downstream
+  }
+  const auth = profile?.auth;
+  if (!profile || !auth) return {};
+
+  /** Replace the slot case-insensitively so no second, differently-cased entry survives. */
+  const put = (name: string, value: string): AttachedAuth => {
+    for (const k of Object.keys(headers)) {
+      if (k.toLowerCase() === name.toLowerCase()) delete headers[k];
+    }
+    headers[name] = value;
+    return { slot: name.toLowerCase() };
+  };
+
+  // The engine is about to hand a stored credential to this host, so the host must
+  // be vetted or carry a recorded human acceptance. `isVettedEgressHost`, not
+  // `isAllowlistedEndpoint`: the latter also vouches for `*.openai.azure.com`, a
+  // namespace ANY account can register (see its own docstring). Under the broader
+  // check, a prompt-injected agent could point a profile at `x.openai.azure.com`,
+  // save it with no human prompt because it reads as allowlisted, and have the
+  // engine attach a vault credential to an attacker's host — past the scan that
+  // would otherwise have caught it, since the engine's own slot is exempt.
+  // Same question api_setup asks when it decides whether to prompt for acceptance.
+  // They must agree: when they did not, the attach demanded an ack that api_setup
+  // would never create — see isVettedEgressHost.
+  const hostVetted = isVettedEgressHost(url) || isEndpointAcked(profile.custom_endpoint_ack, url);
+
+  if (auth.type === 'oauth2') {
+    // Wave 5d runtime egress gate (base_url parity with fetch_token). A profile can
+    // enter the store without passing the save-time gate (loadFromDirectory at boot,
+    // or a JSON dropped into the apis dir), so re-verify here, fail-closed.
+    if (!hostVetted) {
+      return { refusal: `Error: api_profile "${profile.id}" maps to a non-vetted sub-processor (${hostname}) with no recorded acceptance — refusing to attach the managed access_token to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.` };
+    }
+    // Profile drives — the agent should NOT have to remember which vault key holds
+    // the current access_token. Prevents two failure modes: a stale key re-referenced
+    // after api_setup recreated the profile (staging 2026-05-18: fetch_token had
+    // written SHOPIFY_SEO_ACCESS_TOKEN, the agent kept reaching for
+    // SHOPIFY_ACCESS_TOKEN → 401 forever), and rotation, where every later request
+    // should pick up a freshly minted token automatically.
+    const tokenKey = `${profile.id.toUpperCase().replace(/-/g, '_')}_ACCESS_TOKEN`;
+    const resolved = secretStore.resolve(tokenKey);
+    if (!resolved) {
+      return { refusal: `Error: api_profile "${profile.id}" is oauth2 but the vault has no access_token under "${tokenKey}". Mint one first with: api_setup({ action: "fetch_token", id: "${profile.id}" }). Requires client_id + client_secret already stored under the keys configured in auth.oauth.` };
+    }
+    return put('Authorization', `Bearer ${resolved}`);
+  }
+
+  if (auth.type === 'basic' && auth.basic_format === 'user_pass_split') {
+    // The model CANNOT do this one itself: Basic is base64(user:pass) and it never
+    // holds either half, only `secret:NAME` refs resolved after it has composed the
+    // header. You cannot Base64-encode a value you do not have.
+    if (!hostVetted) {
+      return { refusal: `Error: api_profile "${profile.id}" maps to a non-vetted sub-processor (${hostname}) with no recorded acceptance — refusing to attach the stored credentials to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.` };
+    }
+    // HTTPS only. Unlike the oauth2 sibling's rotatable access_token this is a
+    // long-lived password the operator typed once; `getByHostname` keys on hostname
+    // alone, so without this an `http://` URL to the same host would ship it clear.
+    if (!url.toLowerCase().startsWith('https://')) {
+      return { refusal: `Error: api_profile "${profile.id}" uses stored credentials — refusing to attach them over a non-HTTPS URL. Use https://.` };
+    }
+    // Explicit keys win; otherwise the first two `vault_keys` IN ORDER. A profile
+    // carrying both would otherwise authenticate as whichever the array listed first.
+    const userKey = auth.username_key ?? auth.vault_keys?.[0];
+    const passKey = auth.password_key ?? auth.vault_keys?.[1];
+    if (!userKey || !passKey) {
+      return { refusal: `Error: api_profile "${profile.id}" is basic/user_pass_split but does not name two vault keys. Set auth.username_key and auth.password_key (or list both in auth.vault_keys, username first) via api_setup({ action: "update", ... }).` };
+    }
+    const protectedKeys = [userKey, passKey].filter(k => isProtectedSecretWrite(k));
+    if (protectedKeys.length > 0) {
+      return { refusal: protectedKeyRefusal(profile.id, protectedKeys.join(' + ')) };
+    }
+    const user = secretStore.resolve(userKey);
+    const pass = secretStore.resolve(passKey);
+    // Truthiness, not a null check: an EMPTY vault value would ship
+    // `Basic base64("ck:")` — a half-credential that reads as an auth failure
+    // rather than as a missing secret.
+    if (!user || !pass) {
+      const missing = [user ? null : userKey, pass ? null : passKey].filter(Boolean).join(' + ');
+      return { refusal: `Error: api_profile "${profile.id}" is basic/user_pass_split but the vault has no usable value for ${missing}. Ask the user for the credential with ask_secret, then retry.` };
+    }
+    return put('Authorization', `Basic ${Buffer.from(`${user}:${pass}`, 'utf-8').toString('base64')}`);
+  }
+
+  if (auth.type === 'bearer' || auth.type === 'header') {
+    // The last two types the model still had to attach by hand — and the reason a
+    // bexio connection could not be made at all on 2026-08-08. The model CAN compose
+    // these (the value goes on the wire as-is), but it cannot survive doing so: it
+    // holds only a `secret:NAME` ref that agent.ts resolves before this handler runs,
+    // so the scanner sees the real credential, and for a token shaped like one it
+    // knows (a JWT, `ghp_…`, `sk-…`) it blocks the request to the very host the
+    // operator authorised. bexio issues JWTs, so `bearer` there had NO working path.
+    //
+    // Below this line every exit is a `hint`, not a `refusal`, except the two that
+    // catch a profile reaching for something it may not have.
+    const tokenKey = auth.vault_keys?.[0];
+    if (!tokenKey) {
+      return { hint: `api_profile "${profile.id}" is auth.type="${auth.type}" but names no vault key, so the engine could not attach the credential. Set auth.vault_keys: ["YOUR_KEY_NAME"] via api_setup({ action: "update", ... }) and store the value with ask_secret.` };
+    }
+    // The bound the oauth2 branch gets for free by deriving its key from the profile
+    // id. This name comes from the PROFILE, which a prompt-injected agent can author:
+    // without it, `vault_keys: ['ANTHROPIC_API_KEY']` hands the tenant's own provider
+    // key to whatever host the profile names. `isProtectedSecretWrite`, not
+    // `isInfraSecret` — the provider slots live in a separate set that
+    // `isInfraSecret` does not cover, and they are exactly what such a profile wants.
+    if (isProtectedSecretWrite(tokenKey)) {
+      return { refusal: protectedKeyRefusal(profile.id, tokenKey) };
+    }
+    if (!hostVetted) {
+      return { hint: `api_profile "${profile.id}" maps to ${hostname}, which is not a vetted sub-processor and carries no recorded acceptance, so the engine did not attach the stored credential. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted.` };
+    }
+    if (!url.toLowerCase().startsWith('https://')) {
+      return { hint: `api_profile "${profile.id}" uses a stored credential and the engine will not attach it over a non-HTTPS URL. Use https://.` };
+    }
+    const token = secretStore.resolve(tokenKey);
+    // Truthiness, not a null check — an empty value would ship a bare `Bearer `,
+    // which reads on the wire as a bad token rather than as a missing one.
+    if (!token) {
+      return { hint: `api_profile "${profile.id}" is auth.type="${auth.type}" but the vault has no usable value for ${tokenKey}. Ask the user for the credential with ask_secret, then retry.` };
+    }
+    // `header` names its own slot and carries the raw token; `bearer` is the
+    // Authorization/`Bearer ` special case. The default matches what the profile
+    // description shows the model (api-store.ts) and what bootstrap writes
+    // (api-setup.ts) — defaulting to Authorization here would put the token in a
+    // header the model was told is called something else, i.e. a silent 401.
+    const slot = auth.type === 'bearer' ? 'Authorization' : (auth.header_name ?? 'X-Api-Key');
+    const value = auth.type === 'bearer' ? `Bearer ${token}` : token;
+    // The handler's CRLF check covers `input.headers` — the agent's own map. These
+    // two come from the PROFILE and the VAULT and would otherwise enter having
+    // passed nothing; `X-Key\r\nX-Evil: …` would smuggle a second header on a path
+    // that exists precisely to bypass the agent.
+    if (/[\r\n\0]/.test(slot) || /[\r\n\0]/.test(value)) {
+      return { refusal: `Error: api_profile "${profile.id}" produced an auth header containing CRLF/null — refusing to send it. Check auth.header_name and the stored value of ${tokenKey}.` };
+    }
+    return put(slot, value);
+  }
+
+  return {};
+}
+
+/** Shared wording — the same refusal for basic and bearer/header. */
+function protectedKeyRefusal(profileId: string, keys: string): string {
+  return `Error: api_profile "${profileId}" names protected secret(s) ${keys} as its credentials. Those belong to the platform or hold the tenant's own provider key, and are never attached to an outbound request. Use a credential the user supplied for this API.`;
 }
 
 /**
@@ -452,15 +654,35 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       headers[key] = value;
     }
 
+    // Engine-managed auth runs BEFORE the egress scan, and reports back the slot
+    // it actually filled. The scan then skips exactly that slot.
+    //
+    // The ordering is the whole design. Attaching after the scan needs someone to
+    // PREDICT, before the fact, which slot is about to be engine-owned so the scan
+    // can spare it — and a prediction that disagrees with the attach is a request
+    // sent with no credential at all. Attaching first replaces the prediction with
+    // an observation: `attachedAuthSlot` is set by the code that did the attaching.
+    //
+    // It also makes the change additive. When the engine cannot attach — no
+    // acceptance recorded, no vault key, no `secretStore` on this agent — nothing
+    // is dropped, the model's own header stands and is scanned exactly as it is
+    // today. A profile that works now keeps working; `custom_endpoint_ack` only
+    // exists since 2026-07-02 and the self→managed migration strips it on purpose,
+    // so anything else would break live integrations on upgrade.
+    const auth = await attachEngineManagedAuth(input.url, headers, toolContext, agent);
+    if (auth.refusal) return auth.refusal;
+    const attachedAuthSlot = auth.slot;
+
     // Egress secret scan over AGENT-SUPPLIED header values (all methods).
     // Headers are an equally valid exfil channel as bodies — `Authorization:
     // Bearer sk-ant-…` on a GET to a third-party host hands the credential
-    // over just as plainly as POSTing it in JSON. Run BEFORE the OAuth2
-    // injection below so engine-managed access tokens (which may be JWT-
-    // shaped and would self-trip the scan) are never re-scanned: the
-    // engine-managed Authorization path is the trusted, profile-driven flow
-    // — anything the agent hand-set is what we're trying to catch here.
+    // over just as plainly as POSTing it in JSON. The engine-managed slot above
+    // is skipped: the engine put that value there from the vault, on the
+    // profile-driven path, and re-scanning it would flag the profile's OWN
+    // credential (a bexio PAT is a JWT). Anything the agent hand-set is what
+    // we're trying to catch here, and on every other header it still is.
     for (const [headerName, headerValue] of Object.entries(headers)) {
+      if (attachedAuthSlot !== undefined && headerName.toLowerCase() === attachedAuthSlot) continue;
       const headerMatch = detectSecretInContent(headerValue);
       if (headerMatch) {
         return `Blocked: request header '${headerName}' appears to contain a ${headerMatch}. Sending secrets to external servers is not allowed.`;
@@ -491,106 +713,6 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       }
     }
 
-    // Engine-managed OAuth2 Authorization for matched api_profile.
-    // Profile drives — the agent should NOT have to remember which vault key
-    // holds the current access_token. Two failure modes this prevents:
-    //   1. Agent re-references the OLD vault key after api_setup recreates a
-    //      profile (staging 2026-05-18: SHOPIFY_ACCESS_TOKEN was stale, but
-    //      fetch_token had written the new token to SHOPIFY_SEO_ACCESS_TOKEN.
-    //      Agent kept reaching for the old key → 401 forever).
-    //   2. Token rotation: when fetch_token mints a fresh access_token, every
-    //      subsequent http_request to this profile should use it automatically.
-    // For oauth2 profiles, engine owns auth — override whatever the agent set.
-    if (toolContext?.apiStore && agent.secretStore) {
-      try {
-        const reqHostnameForAuth = new URL(input.url).hostname;
-        const oauthProfile = toolContext.apiStore.getByHostname(reqHostnameForAuth);
-        if (oauthProfile?.auth?.type === 'oauth2') {
-          // Wave 5d runtime egress gate (base_url parity with fetch_token). The
-          // engine force-attaches the managed access_token below, so a profile
-          // that entered the store WITHOUT passing the save-time allowlist gate
-          // (loadFromDirectory at boot, or a JSON written into the apis dir)
-          // could hand the vault token to a non-vetted host. Fail-closed: refuse
-          // the attach unless the target host is allowlisted OR the profile
-          // carries a persisted acceptance covering it.
-          if (
-            !isAllowlistedEndpoint(input.url) &&
-            !isEndpointAcked(oauthProfile.custom_endpoint_ack, input.url)
-          ) {
-            return `Error: api_profile "${oauthProfile.id}" maps to a non-vetted sub-processor (${reqHostnameForAuth}) with no recorded acceptance — refusing to attach the managed access_token to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.`;
-          }
-          const tokenKey = `${oauthProfile.id.toUpperCase().replace(/-/g, '_')}_ACCESS_TOKEN`;
-          const resolvedToken = agent.secretStore.resolve(tokenKey);
-          if (resolvedToken) {
-            for (const k of Object.keys(headers)) {
-              if (k.toLowerCase() === 'authorization') delete headers[k];
-            }
-            headers['Authorization'] = `Bearer ${resolvedToken}`;
-          } else {
-            return `Error: api_profile "${oauthProfile.id}" is oauth2 but the vault has no access_token under "${tokenKey}". Mint one first with: api_setup({ action: "fetch_token", id: "${oauthProfile.id}" }). Requires client_id + client_secret already stored under the keys configured in auth.oauth.`;
-          }
-        }
-
-        // Engine-managed Basic auth for a `user_pass_split` profile — for the same reason
-        // the oauth2 branch exists, but a harder one: the model CANNOT do this itself. Basic
-        // auth is `base64(user:pass)`, and the model never holds either half — it sees only
-        // `secret:NAME` references, resolved after it has already composed the header. You
-        // cannot Base64-encode a value you do not have. Before this, `user_pass_split` was a
-        // schema value with no implementation anywhere in the request path: an agent would
-        // pick it, compose something plausible, and get a 401 with no diagnosable cause.
-        //
-        // The same egress gate as above applies, and for the same reason — the engine is about
-        // to attach a credential, so the host must be vetted or explicitly accepted.
-        const basicProfile = toolContext.apiStore.getByHostname(reqHostnameForAuth);
-        if (basicProfile?.auth?.type === 'basic' && basicProfile.auth.basic_format === 'user_pass_split') {
-          if (
-            !isAllowlistedEndpoint(input.url) &&
-            !isEndpointAcked(basicProfile.custom_endpoint_ack, input.url)
-          ) {
-            return `Error: api_profile "${basicProfile.id}" maps to a non-vetted sub-processor (${reqHostnameForAuth}) with no recorded acceptance — refusing to attach the stored credentials to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.`;
-          }
-          // HTTPS only. Unlike the oauth2 sibling's rotatable access_token, this is a
-          // long-lived password the operator typed once; putting it on the wire in clear
-          // is not a degraded mode worth having. `getByHostname` keys on hostname alone,
-          // so without this an `http://` URL to the same host would do exactly that.
-          if (!input.url.toLowerCase().startsWith('https://')) {
-            return `Error: api_profile "${basicProfile.id}" uses stored credentials — refusing to attach them over a non-HTTPS URL. Use https://.`;
-          }
-          // Explicit keys win; otherwise the first two `vault_keys` IN ORDER (username, password).
-          const userKey = basicProfile.auth.username_key ?? basicProfile.auth.vault_keys?.[0];
-          const passKey = basicProfile.auth.password_key ?? basicProfile.auth.vault_keys?.[1];
-          if (!userKey || !passKey) {
-            return `Error: api_profile "${basicProfile.id}" is basic/user_pass_split but does not name two vault keys. Set auth.username_key and auth.password_key (or list both in auth.vault_keys, username first) via api_setup({ action: "update", ... }).`;
-          }
-          // THE bound this branch needs and the oauth2 sibling gets for free. That one derives
-          // its key from the profile id (`${id}_ACCESS_TOKEN`), so no caller can point it at an
-          // arbitrary vault entry. These key names come from the PROFILE, which a prompt-injected
-          // agent can author — so without this, `username_key: 'MAIL_ACCOUNT_1'` would hand an
-          // infrastructure credential to whatever host the profile names. `resolveSecretRefs`
-          // (the path the model normally uses) refuses infra secrets for exactly this reason;
-          // calling `resolve()` directly would otherwise walk around that control.
-          const infra = [userKey, passKey].filter(k => isInfraSecret(k));
-          if (infra.length > 0) {
-            return `Error: api_profile "${basicProfile.id}" names infrastructure secret(s) ${infra.join(' + ')} as its credentials. Those belong to the platform and are never attached to an outbound request. Use a credential the user supplied for this API.`;
-          }
-          const user = agent.secretStore.resolve(userKey);
-          const pass = agent.secretStore.resolve(passKey);
-          // Truthiness, not a null check: an EMPTY vault value would otherwise ship
-          // `Basic base64("ck:")` — a silent half-credential that reads as an auth failure
-          // rather than as a missing secret. The oauth2 sibling checks truthiness too.
-          if (!user || !pass) {
-            const missing = [user ? null : userKey, pass ? null : passKey].filter(Boolean).join(' + ');
-            return `Error: api_profile "${basicProfile.id}" is basic/user_pass_split but the vault has no usable value for ${missing}. Ask the user for the credential with ask_secret, then retry.`;
-          }
-          for (const k of Object.keys(headers)) {
-            if (k.toLowerCase() === 'authorization') delete headers[k];
-          }
-          headers['Authorization'] = `Basic ${Buffer.from(`${user}:${pass}`, 'utf-8').toString('base64')}`;
-        }
-      } catch {
-        // Invalid URL — caught by assertHostPolicy below
-      }
-    }
 
     // Under the `guarded` egress policy a full-control http_request may reach
     // only baseline ∪ the operator floor ∪ hosts a connected api_profile was
@@ -724,7 +846,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             contractGrants('http_request', { url: nextUrl, method: redirectMethod }, contract)
         : undefined;
       const { response, finalUrl: finalRequestUrl } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, 'full-control', toolContext, redirectGuard, guardedAckHosts),
+        fetchWithValidatedRedirects(input.url, opts, 'full-control', toolContext, redirectGuard, guardedAckHosts, attachedAuthSlot),
         wallTimeout,
       ]);
       const status = `${response.status} ${response.statusText}`;
@@ -838,6 +960,16 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // Wrap response in data boundary markers (prompt injection defense)
       const { wrapUntrustedData } = await import('../../core/data-boundary.js');
       let wrapped = wrapUntrustedData(rawResult, 'http_response');
+
+      // Engine-managed-auth 401-hint. When the engine DECLINED to attach a
+      // credential it did not fail the request — a profile that works today keeps
+      // working — so the reason would otherwise be invisible and the 401 would
+      // read as a bad token. That is the exact loop this whole change exists to
+      // end: three token rotations against a request that carried no credential.
+      // Outside the untrusted_data wrap: system guidance, not response data.
+      if (response.status === 401 && auth.hint !== undefined) {
+        wrapped += `\n\n**[Agent reminder — the engine did not attach this profile's credential]**\n${auth.hint}\nUntil then the request goes out with only the headers you set yourself.`;
+      }
 
       // OAuth2 401-hint: append OUTSIDE the untrusted_data wrap so the
       // agent treats it as system guidance, not external response data.

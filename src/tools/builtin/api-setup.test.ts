@@ -443,6 +443,56 @@ describe('api_setup tool', () => {
       expect(onDisk.custom_endpoint_ack?.hosts).toEqual(['my-litellm-proxy.example.com']);
     });
 
+    // The save gate and the credential attach in http.ts must answer ONE question
+    // the same way. While the save gate asked the broader `isAllowlistedEndpoint`,
+    // an `*.openai.azure.com` profile saved with no prompt and no ack — and the
+    // attach then refused it, advising a re-save that could never produce one,
+    // because this branch also DELETES an ack when it considers every host vetted.
+    // An Azure OpenAI profile was a dead end with no way back.
+    it('an attacker-registerable azure host gets the disclosure prompt and an ack', async () => {
+      const store = new ApiStore();
+      const promptUser = vi.fn(async () => 'Allow');
+      const agent = createMockAgent(store, undefined, promptUser);
+      await apiSetupTool.handler({ action: 'create', profile: {
+        ...SAMPLE_PROFILE, id: 'azure-ack', base_url: 'https://x.openai.azure.com/v1',
+      } }, agent);
+
+      expect(promptUser).toHaveBeenCalled();
+      const stored = store.get('azure-ack');
+      // Without the ack the attach cannot hand this host a credential — and could
+      // never be unblocked, since no prompt was reachable.
+      expect(stored?.custom_endpoint_ack?.hosts).toEqual(['x.openai.azure.com']);
+    });
+
+    it('an azure host fails CLOSED when headless, like any other non-vetted host', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store); // no promptUser
+      const res = await apiSetupTool.handler({ action: 'create', profile: {
+        ...SAMPLE_PROFILE, id: 'azure-headless', base_url: 'https://x.openai.azure.com/v1',
+      } }, agent);
+
+      expect(res).toContain('Blocked');
+      expect(store.get('azure-headless')).toBeUndefined();
+    });
+
+    it('fetch_token refuses an azure token_url with no recorded acceptance', async () => {
+      // Same question, third caller: this one POSTs the client_secret, so reading
+      // the azure wildcard as vetted would have shipped it to an attacker's host.
+      const store = new ApiStore();
+      store.register({
+        ...SAMPLE_PROFILE, id: 'azure-token', base_url: 'https://api.example.com',
+        auth: { type: 'oauth2', vault_keys: ['AZURE_TOKEN_CLIENT_ID'], oauth: {
+          token_url: 'https://x.openai.azure.com/oauth/token',
+          grant_type: 'client_credentials',
+          client_id_key: 'AZURE_TOKEN_CLIENT_ID', client_secret_key: 'AZURE_TOKEN_CLIENT_SECRET',
+        } },
+      } as ApiProfile);
+      const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
+      const res = await apiSetupTool.handler({ action: 'fetch_token', id: 'azure-token' }, agent);
+
+      expect(res).toContain('non-vetted sub-processor');
+    });
+
     it('records only the non-allowlisted egress hosts in the ack (allowlisted base_url + non-allowlisted token_url → token host only)', async () => {
       const store = new ApiStore();
       const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
