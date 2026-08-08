@@ -1416,6 +1416,7 @@ describe('LynoxHTTPApi', () => {
         answer_error TEXT,
         multi_select INTEGER,
         payload_json TEXT,
+        origin_json TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -1503,6 +1504,7 @@ describe('LynoxHTTPApi', () => {
         answer_error TEXT,
         multi_select INTEGER,
         payload_json TEXT,
+        origin_json TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -1843,6 +1845,7 @@ describe('LynoxHTTPApi', () => {
         question TEXT NOT NULL, options_json TEXT, questions_json TEXT, segments_json TEXT,
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
+        origin_json TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -1951,6 +1954,7 @@ describe('LynoxHTTPApi', () => {
         question TEXT NOT NULL, options_json TEXT, questions_json TEXT, segments_json TEXT,
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
+        origin_json TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -3643,6 +3647,7 @@ describe('LynoxHTTPApi', () => {
         question TEXT NOT NULL, options_json TEXT, questions_json TEXT, segments_json TEXT,
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
+        origin_json TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -3706,6 +3711,68 @@ describe('LynoxHTTPApi', () => {
         ps.insertAskUserTabs('sess-normal', [{ question: 'Which file?' }]);
         const shown = await (await jsonFetch('/api/sessions/sess-normal/pending-prompt')).json();
         expect(shown).toMatchObject({ pending: true, kind: 'tabs' });
+      });
+    });
+
+    it('/pending-prompt restores the workflow origin so a reload keeps the "who asked"', async () => {
+      await withStores(async (ps) => {
+        // The reload path is where this silently regressed before: the live SSE
+        // event carried the origin, the resumed prompt did not, and a long
+        // workflow is precisely the case where a page gets refreshed mid-prompt.
+        ps.insertAskUser('sess-wf', '⚠ bash: remote shell access', ['Allow', 'Deny'], false, undefined, {
+          workflowName: 'bexio Triage Phase 1-3',
+          stepId: 'load_contacts',
+          stepTask: 'Paginate GET /2.0/contact',
+        });
+        const resumed = await (await jsonFetch('/api/sessions/sess-wf/pending-prompt')).json() as { origin?: unknown };
+        expect(resumed.origin).toEqual({
+          workflowName: 'bexio Triage Phase 1-3',
+          stepId: 'load_contacts',
+          stepTask: 'Paginate GET /2.0/contact',
+        });
+
+        // Contrast (non-tautological): a prompt with no origin resumes WITHOUT
+        // one, so the client renders no origin line rather than an empty frame.
+        ps.insertAskUser('sess-plain', 'Allow?', ['Allow', 'Deny']);
+        const plain = await (await jsonFetch('/api/sessions/sess-plain/pending-prompt')).json() as { pending: boolean; origin?: unknown };
+        expect(plain.pending).toBe(true);
+        expect(plain.origin).toBeUndefined();
+      });
+    });
+
+    it('the live prompt SSE event names the workflow, not just the step', async () => {
+      // The reload path above proves persistence; this proves the path a user
+      // actually hits first. `step_id`/`step_task` already rode this event and
+      // the client still could not name what asked — the workflow name is the
+      // half a non-technical user recognises, so it has to be on the wire too.
+      await withStores(async () => {
+        // Same pre-flight key stub the `runs` block installs — POST /run refuses
+        // before it ever opens a stream without a resolvable provider key.
+        mockSecretResolve.mockImplementation((name: string) => (name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null));
+        mockSessionRun.mockImplementationOnce(async () => {
+          const ask = mockSessionInstance.promptUser as
+            ((q: string, o?: string[], m?: Record<string, unknown>) => Promise<string>) | null;
+          // Deliberately not awaited: the handler writes the SSE frame
+          // synchronously and then parks on the human. Awaiting it here would
+          // deadlock the request that carries the frame we are asserting on.
+          if (ask) void ask('⚠ bash: remote shell access', ['Allow', 'Deny'], {
+            workflowName: 'bexio Triage Phase 1-3',
+            stepId: 'load_contacts',
+            stepTask: 'Paginate GET /2.0/contact',
+          });
+          await new Promise((r) => setImmediate(r));
+          return 'done';
+        });
+
+        const res = await jsonFetch('/api/sessions/sse-wf/run', {
+          method: 'POST', body: JSON.stringify({ task: 'run the triage workflow' }),
+        });
+        const text = await res.text();
+        const frame = text.split('\n').find((l) => l.startsWith('data:') && l.includes('"promptId"'));
+        expect(frame, 'no prompt frame on the stream').toBeDefined();
+        const payload = JSON.parse(frame!.slice('data:'.length)) as Record<string, unknown>;
+        expect(payload['workflow_name']).toBe('bexio Triage Phase 1-3');
+        expect(payload['step_id']).toBe('load_contacts');
       });
     });
 

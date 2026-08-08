@@ -13,15 +13,28 @@ export interface TabQuestion {
 }
 
 /**
+ * Who asked. A confirmation prompt raised from inside a pipeline step has no
+ * visible cause in the thread — the step's tool calls carry an empty
+ * `context_id` and never enter `thread_messages` — so the dialog has to carry
+ * its own provenance or the user sees a bare "Allow / Deny" for a command
+ * nothing on screen asked for. Populated by the pipeline spawners; the
+ * main-agent path leaves every field undefined (there the cause IS on screen).
+ */
+export interface PromptOrigin {
+  /** The workflow that owns `stepId`, as the user named it. */
+  workflowName?: string | undefined;
+  stepId?: string | undefined;
+  stepTask?: string | undefined;
+}
+
+/**
  * Optional metadata threaded through prompt callbacks so the surfacing
  * layer (HTTP API SSE, MCP, CLI) can tag the prompt with the originating
  * pipeline step. Sub-agent spawners populate this when a pipeline step
  * triggers ask_user / ask_secret; the main-agent ask_user path leaves it
  * undefined.
  */
-export interface PromptMeta {
-  stepId?: string | undefined;
-  stepTask?: string | undefined;
+export interface PromptMeta extends PromptOrigin {
   /** Render the option pills as MULTI-select (toggle several, then an explicit
    *  Send) instead of single-select auto-send. The answer comes back as a
    *  JSON-encoded string[] of the chosen labels. Default false. */

@@ -235,6 +235,14 @@ export async function runManifest(
     const budget = options.promptBudget ?? new PromptBudget(limit);
     parentPrompt = { ...parentPrompt, promptBudget: budget };
   }
+  // Name the workflow on every prompt its steps raise. Unlike the budget this
+  // is set at EVERY depth and overwrites a parent's: a step belongs to the
+  // manifest that declares it, so a nested sub-pipeline's prompt must name the
+  // sub-pipeline — naming the outer one would point the user at a step list
+  // that does not contain the step asking.
+  if (parentPrompt) {
+    parentPrompt = { ...parentPrompt, workflowName: manifest.name };
+  }
 
   // Session counters for this pipeline run. When invoked from a chat
   // turn the pipeline tool threads the parent Session's counters; for
