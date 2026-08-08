@@ -1,6 +1,6 @@
 import type { ToolEntry } from '../../types/index.js';
 import { applyShape } from '../../core/api-shape.js';
-import type { ResponseShape } from '../../core/api-store.js';
+import type { ApiAuth, ResponseShape } from '../../core/api-store.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -300,6 +300,42 @@ function detectGetExfiltration(url: string): string | null {
 }
 
 /**
+ * The header slot the ENGINE fills for this URL's profile, lower-cased — or
+ * undefined when the engine fills nothing and the header is the model's to set.
+ *
+ * This MUST mirror the injection branches in the handler exactly. It is used to
+ * drop an agent-set auth header before the egress scan, and the dangerous
+ * direction is a false positive: claiming a slot nothing then fills would strip
+ * the credential and send the request bare — the silent 401 this whole change
+ * exists to end. Hence `basic` is listed only for `user_pass_split`
+ * (`pre_encoded_b64` stays the model's to compose), and `none`/`query` are
+ * absent — `query` carries its key in the URL, not a header.
+ *
+ * Every branch named here must, in the handler, either attach a credential or
+ * return an error — never fall through to a request without one.
+ */
+export function engineManagedAuthSlot(url: string, toolContext: ToolContext | undefined): string | undefined {
+  let auth: ApiAuth | undefined;
+  try {
+    auth = toolContext?.apiStore?.getByHostname(new URL(url).hostname)?.auth;
+  } catch {
+    return undefined; // invalid URL — assertHostPolicy reports it downstream
+  }
+  if (!auth) return undefined;
+  switch (auth.type) {
+    case 'oauth2':
+    case 'bearer':
+      return 'authorization';
+    case 'basic':
+      return auth.basic_format === 'user_pass_split' ? 'authorization' : undefined;
+    case 'header':
+      return (auth.header_name ?? 'Authorization').toLowerCase();
+    default:
+      return undefined;
+  }
+}
+
+/**
  * Apply the API profile's response_shape (if any) to a parsed JSON response.
  * Falls back to standard JSON.stringify on any error; never throws.
  */
@@ -452,13 +488,37 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       headers[key] = value;
     }
 
+    // An auth header the agent hand-set for a host whose profile has
+    // ENGINE-MANAGED auth is dropped here, before the scan — not blocked.
+    // The injection below overwrites that exact slot anyway, so its content
+    // never reaches the wire either way; the only question is whether the run
+    // continues or dead-ends. It used to dead-end, and that is the bexio
+    // failure of 2026-08-08: the model wrote the documented
+    // `Authorization: Bearer secret:BEXIO_API_TOKEN`, agent.ts resolved the ref
+    // to the real value BEFORE the handler saw it (agent.ts, resolveSecretRefs),
+    // and a bexio PAT is a JWT — so the scan below matched the profile's OWN
+    // credential and returned "Sending secrets to external servers is not
+    // allowed" for the one host the operator had just authorised. The model,
+    // reading that, dropped the header and got 401s no token change could fix.
+    //
+    // Scoped deliberately: only the slot this profile's auth owns, only for a
+    // profile whose type the engine actually fills. Every other header — and
+    // every header on an unprofiled host — is still scanned, so `X-Exfil:
+    // sk-ant-…` is caught exactly as before.
+    const managedAuthSlot = engineManagedAuthSlot(input.url, toolContext);
+    if (managedAuthSlot) {
+      for (const k of Object.keys(headers)) {
+        if (k.toLowerCase() === managedAuthSlot) delete headers[k];
+      }
+    }
+
     // Egress secret scan over AGENT-SUPPLIED header values (all methods).
     // Headers are an equally valid exfil channel as bodies — `Authorization:
     // Bearer sk-ant-…` on a GET to a third-party host hands the credential
-    // over just as plainly as POSTing it in JSON. Run BEFORE the OAuth2
-    // injection below so engine-managed access tokens (which may be JWT-
+    // over just as plainly as POSTing it in JSON. Run BEFORE the auth
+    // injection below so engine-managed credentials (which may be JWT-
     // shaped and would self-trip the scan) are never re-scanned: the
-    // engine-managed Authorization path is the trusted, profile-driven flow
+    // engine-managed auth path is the trusted, profile-driven flow
     // — anything the agent hand-set is what we're trying to catch here.
     for (const [headerName, headerValue] of Object.entries(headers)) {
       const headerMatch = detectSecretInContent(headerValue);
@@ -586,6 +646,72 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             if (k.toLowerCase() === 'authorization') delete headers[k];
           }
           headers['Authorization'] = `Basic ${Buffer.from(`${user}:${pass}`, 'utf-8').toString('base64')}`;
+        }
+
+        // Engine-managed single-token auth — `bearer` and `header`. The last two
+        // credential types the model was still expected to attach by hand, and the
+        // reason a bexio connection could not be made at all on 2026-08-08.
+        //
+        // Unlike Basic, the model CAN compose these: the value goes on the wire as-is.
+        // What it cannot do is survive the egress scanner, because it never holds the
+        // token — only a `secret:NAME` ref that agent.ts resolves after the model has
+        // composed the header. So the scanner sees the real credential, and for any
+        // token shaped like one of the patterns it knows (a JWT, `ghp_…`, `sk-…`,
+        // `AIza…`, `AKIA…`) it blocks the request to the very host the operator
+        // authorised. bexio issues JWTs, so `bearer` there had NO working path: set
+        // the header and it is blocked, omit it and the request goes out bare.
+        //
+        // Attaching it engine-side removes the model from the credential path
+        // entirely — the same answer the oauth2 and basic branches already give,
+        // extended to the two types that were left out.
+        const tokenProfile = toolContext.apiStore.getByHostname(reqHostnameForAuth);
+        const tokenAuthType = tokenProfile?.auth?.type;
+        if (tokenProfile && (tokenAuthType === 'bearer' || tokenAuthType === 'header')) {
+          // Same egress gate, same reason: the engine is about to hand a stored
+          // credential to a host, so that host must be vetted or explicitly accepted.
+          if (
+            !isAllowlistedEndpoint(input.url) &&
+            !isEndpointAcked(tokenProfile.custom_endpoint_ack, input.url)
+          ) {
+            return `Error: api_profile "${tokenProfile.id}" maps to a non-vetted sub-processor (${reqHostnameForAuth}) with no recorded acceptance — refusing to attach the stored credential to that host. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted to unblock.`;
+          }
+          // HTTPS only — an API token is a long-lived credential, same as the Basic sibling.
+          if (!input.url.toLowerCase().startsWith('https://')) {
+            return `Error: api_profile "${tokenProfile.id}" uses a stored credential — refusing to attach it over a non-HTTPS URL. Use https://.`;
+          }
+          const tokenKey = tokenProfile.auth?.vault_keys?.[0];
+          if (!tokenKey) {
+            return `Error: api_profile "${tokenProfile.id}" is auth.type="${tokenAuthType}" but names no vault key. Set auth.vault_keys: ["YOUR_KEY_NAME"] via api_setup({ action: "update", ... }), then store the value with ask_secret.`;
+          }
+          // The same bound the basic branch needs, for the same reason: this key name
+          // comes from the PROFILE, which a prompt-injected agent can author. Without
+          // it, `vault_keys: ['MAIL_ACCOUNT_1']` would hand an infrastructure
+          // credential to whatever host the profile names.
+          if (isInfraSecret(tokenKey)) {
+            return `Error: api_profile "${tokenProfile.id}" names infrastructure secret ${tokenKey} as its credential. Those belong to the platform and are never attached to an outbound request. Use a credential the user supplied for this API.`;
+          }
+          const token = agent.secretStore.resolve(tokenKey);
+          // Truthiness, not a null check — an empty vault value would ship a bare
+          // `Bearer `, which reads on the wire as a bad token rather than a missing one.
+          if (!token) {
+            return `Error: api_profile "${tokenProfile.id}" is auth.type="${tokenAuthType}" but the vault has no usable value for ${tokenKey}. Ask the user for the credential with ask_secret, then retry.`;
+          }
+          // `header` names its own slot and carries the raw token; `bearer` is the
+          // Authorization/`Bearer ` special case of the same thing.
+          const slot = tokenAuthType === 'bearer' ? 'Authorization' : (tokenProfile.auth?.header_name ?? 'Authorization');
+          const value = tokenAuthType === 'bearer' ? `Bearer ${token}` : token;
+          // The CRLF check at the top of the handler covers `input.headers` — the
+          // agent's own map. These two come from the PROFILE and the VAULT, so they
+          // enter the header map having passed nothing. A `header_name` of
+          // `X-Key\r\nX-Evil: …` would otherwise smuggle a second header past every
+          // check above, on a path that exists precisely to bypass the agent.
+          if (/[\r\n\0]/.test(slot) || /[\r\n\0]/.test(value)) {
+            return `Error: api_profile "${tokenProfile.id}" produced an auth header containing CRLF/null — refusing to send it. Check auth.header_name and the stored value of ${tokenKey}.`;
+          }
+          for (const k of Object.keys(headers)) {
+            if (k.toLowerCase() === slot.toLowerCase()) delete headers[k];
+          }
+          headers[slot] = value;
         }
       } catch {
         // Invalid URL — caught by assertHostPolicy below
