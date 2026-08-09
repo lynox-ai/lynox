@@ -723,6 +723,8 @@ export class LynoxHTTPApi {
    * since each miss is a full re-read of the sink.
    */
   private _captureReportCache: { report: Promise<import('../core/capture-telemetry-report.js').CaptureReport>; expiresAt: number } | null = null;
+  /** Serialized model catalog + its ETag, computed once — the catalog is a frozen module constant. */
+  private _catalogCache: { payload: string; etag: string } | null = null;
   /** Test-only: drop cached usage summaries between tests so 30s TTL doesn't bleed mocks across cases. */
   public _clearUsageCache(): void { this._usageSummaryCache.clear(); }
   private pushChannel: import('../integrations/push/web-push-channel.js').WebPushNotificationChannel | null = null;
@@ -5468,9 +5470,17 @@ export class LynoxHTTPApi {
     // an unchanged catalog costs one cheap 304 round-trip and a deploy that
     // changes it is visible immediately.
     this.addStatic('user', 'GET /api/llm/catalog', async (req, res) => {
-      const { LLM_CATALOG } = await import('../core/llm/catalog.js');
-      const payload = JSON.stringify({ providers: LLM_CATALOG });
-      const etag = `"${createHash('sha256').update(payload).digest('hex').slice(0, 16)}"`;
+      // Memoized: LLM_CATALOG is a frozen module constant, so payload + ETag are
+      // fixed per process — stringify/sha256 on every revalidate would be pure waste.
+      if (!this._catalogCache) {
+        const { LLM_CATALOG } = await import('../core/llm/catalog.js');
+        const payload = JSON.stringify({ providers: LLM_CATALOG });
+        this._catalogCache = {
+          payload,
+          etag: `"${createHash('sha256').update(payload).digest('hex').slice(0, 16)}"`,
+        };
+      }
+      const { payload, etag } = this._catalogCache;
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('ETag', etag);
       if (req.headers['if-none-match'] === etag) {
@@ -5478,7 +5488,7 @@ export class LynoxHTTPApi {
         res.end();
         return;
       }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) });
       res.end(payload);
     });
 

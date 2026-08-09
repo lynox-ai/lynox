@@ -1200,6 +1200,11 @@ describe('OpenAIAdapter', () => {
       expect(body['reasoning_effort']).toBe('high');
     });
 
+    it("clamps 'xhigh' to 'high' too — both Anthropic-only tiers, one wire ceiling", async () => {
+      const body = await withFlag(() => captureBody(GLM, { effort: 'xhigh' }));
+      expect(body['reasoning_effort']).toBe('high');
+    });
+
     it('sends nothing when the caller sent no effort — the model stays self-adaptive', async () => {
       const body = await withFlag(() => captureBody(GLM, undefined));
       expect(body).not.toHaveProperty('reasoning_effort');
