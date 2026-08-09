@@ -2663,13 +2663,16 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('degraded is FALSE for a hybrid balanced-Sonnet preset on a MISTRAL base (the opposite)', async () => {
-      // The base-provider mapping would judge Mistral here and warn falsely — but
-      // `max-quality` pins balanced to Sonnet even on a Mistral base, so the
-      // executed balanced model is strong. Kills a base-only resolution that would
-      // over-warn.
+      // The base-provider mapping WOULD judge Mistral here and warn falsely — the
+      // openai resolver is set to the Mistral map, so a base-only resolution
+      // resolves balanced to mistral-medium (weak). But `max-quality` pins balanced
+      // to Sonnet even on a Mistral base, so the EXECUTED balanced model is strong.
+      // A revert to the base resolution flips this to a false TRUE, killing itself.
       const { setTierSetResolver } = await import('../core/tier-resolver.js');
+      const { setOpenAIModelResolver, MISTRAL_MODEL_MAP } = await import('../types/models.js');
       const llmClient = await import('../core/llm-client.js');
       const providerSpy = vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('openai');
+      setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP }); // base would resolve to mistral-medium (weak)
       setTierSetResolver({ routingMode: 'hybrid', tierSet: { balanced: { provider: 'anthropic', model_id: 'claude-sonnet-5' } } });
       const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
       const origKs = engineRef['getKnowledgeStore'];
@@ -2681,6 +2684,7 @@ describe('LynoxHTTPApi', () => {
         expect(caps['durable_memory_capture_degraded']).toBe(false);
       } finally {
         providerSpy.mockRestore();
+        setOpenAIModelResolver({ map: null, fallbackModelId: null });
         setTierSetResolver({ routingMode: 'standard', tierSet: null });
         engineRef['getKnowledgeStore'] = origKs;
       }
