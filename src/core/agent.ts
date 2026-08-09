@@ -57,6 +57,7 @@ import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
+import { evictSavedArtifactBodies } from './artifact-eviction.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
@@ -942,7 +943,10 @@ export class Agent implements IAgent {
     // Rehydrated histories can have drifted tool_use/tool_result pairs
     // (partial persist, rolled-back run). Anthropic 400s on unpaired blocks,
     // so normalise at the single entry point for external history.
-    this.messages = sanitizeToolPairs(messages);
+    // F5: loaded history is by definition past turns — evict successfully
+    // saved artifact bodies here too, or a resume would re-send (and
+    // cache-write) every body the live session had already evicted.
+    this.messages = evictSavedArtifactBodies(sanitizeToolPairs(messages));
     // Everything just loaded is "already accounted for": it is EITHER the
     // post-compaction synthetic summary (the real messages stay on disk and
     // must NOT be re-persisted) OR the summary+recent tail loaded FROM disk on
@@ -1301,6 +1305,20 @@ export class Agent implements IAgent {
   ): Promise<string> {
     // Per RUN, not per session: `Session` reads it once after this returns.
     this._helperCostUsd = 0;
+    // F5: everything already in the buffer is a PREVIOUS turn — replace the
+    // bodies of successfully saved artifacts with a reference (next-turn
+    // eviction, D4). Runs here rather than pre-send so the turn that produced
+    // a save keeps its body while the model may still be composing against it.
+    // Identity-preserving for unchanged messages, and only ever touches
+    // messages BEFORE this turn's user push, so the persisted mark (a count)
+    // stays valid. In the ordinary flow nothing evicted is re-persisted (the
+    // end-of-run persist advanced the mark past these messages); the one
+    // narrow exception is a FAILED end-of-run persist whose retry then writes
+    // the evicted form — benign direction, since eviction fires only on a
+    // confirmed save and the result row names the recoverable file. NOT gated
+    // on the mark: for a persistence-less agent (sub-agents, pipeline steps)
+    // the mark never advances and the gate would disable eviction entirely.
+    this.messages = evictSavedArtifactBodies(this.messages);
     const snapshot = this.messages.length;
     // Support multimodal content blocks (e.g. vision: image + text)
     const content = Array.isArray(userMessage)
