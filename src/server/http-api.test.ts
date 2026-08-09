@@ -2640,6 +2640,52 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    it('degraded is TRUE for a hybrid balanced-Mistral preset on an ANTHROPIC base (the main case)', async () => {
+      // The base-provider mapping would judge Sonnet here and miss the warning
+      // entirely — but a `balanced`/`efficient` preset pins balanced to Mistral
+      // even on an Anthropic base, so the EXECUTED balanced model is weak. This is
+      // exactly the tenant DEF-dk-capture-tool-dependence is about. Kills a revert
+      // to the hybrid-blind base resolution.
+      const { setTierSetResolver } = await import('../core/tier-resolver.js');
+      setTierSetResolver({ routingMode: 'hybrid', tierSet: { balanced: { provider: 'openai', model_id: 'mistral-medium-2604' } } });
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origKs = engineRef['getKnowledgeStore'];
+      engineRef['getKnowledgeStore'] = (): unknown => ({}); // DK ON, base provider = anthropic
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const caps = (await res.json() as Record<string, unknown>)['capabilities'] as Record<string, unknown>;
+        expect(caps['durable_memory_capture_degraded']).toBe(true);
+      } finally {
+        setTierSetResolver({ routingMode: 'standard', tierSet: null });
+        engineRef['getKnowledgeStore'] = origKs;
+      }
+    });
+
+    it('degraded is FALSE for a hybrid balanced-Sonnet preset on a MISTRAL base (the opposite)', async () => {
+      // The base-provider mapping would judge Mistral here and warn falsely — but
+      // `max-quality` pins balanced to Sonnet even on a Mistral base, so the
+      // executed balanced model is strong. Kills a base-only resolution that would
+      // over-warn.
+      const { setTierSetResolver } = await import('../core/tier-resolver.js');
+      const llmClient = await import('../core/llm-client.js');
+      const providerSpy = vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('openai');
+      setTierSetResolver({ routingMode: 'hybrid', tierSet: { balanced: { provider: 'anthropic', model_id: 'claude-sonnet-5' } } });
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origKs = engineRef['getKnowledgeStore'];
+      engineRef['getKnowledgeStore'] = (): unknown => ({}); // DK ON
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const caps = (await res.json() as Record<string, unknown>)['capabilities'] as Record<string, unknown>;
+        expect(caps['durable_memory_capture_degraded']).toBe(false);
+      } finally {
+        providerSpy.mockRestore();
+        setTierSetResolver({ routingMode: 'standard', tierSet: null });
+        engineRef['getKnowledgeStore'] = origKs;
+      }
+    });
+
     it('GET resolves active_model under Mistral tier-set (openai provider)', async () => {
       // Bootstrap the openai resolver the way engine.ts does for managed-EU
       // tenants, then flip getActiveProvider via the module-level state.
