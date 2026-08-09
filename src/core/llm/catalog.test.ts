@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
 import { MODEL_CAPABILITIES, MODEL_MAP, VERTEX_MODEL_MAP, MISTRAL_MODEL_MAP, resolveBalancedModel } from '../../types/models.js';
-import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, vaultSlotForEndpoint, endpointNeedsCredential, providerIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet } from './catalog.js';
+import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, vaultSlotForEndpoint, endpointNeedsCredential, providerIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet, formatContextWindow } from './catalog.js';
 import type { TierSet } from '../../types/config.js';
 import type { CatalogProviderEntry } from './catalog.js';
 import { isAllowlistedEndpoint } from './endpoint-allowlist.js';
@@ -424,25 +424,27 @@ describe('LLM_CATALOG.main_chat_models (standard-mode picker options)', () => {
 describe('mainChatTierLabels (composer picker — DEF-0082 name-enrichment + hide)', () => {
   it('anthropic: per-tier labels, balanced defaults to the configured Sonnet 4.6', () => {
     const entry = getCatalogForProvider('anthropic')!;
+    // Labels carry the registry context window (rafael 2026-08-09: every model
+    // picker states the window — "· 200k" / "· 1M").
     expect(mainChatTierLabels(entry, resolveBalancedModel({}))).toEqual({
-      fast: 'Haiku 4.5',
-      balanced: 'Sonnet 4.6',
-      deep: 'Opus 4.6',
+      fast: 'Haiku 4.5 · 200k',
+      balanced: 'Sonnet 4.6 · 200k',
+      deep: 'Opus 4.6 · 1M',
     });
   });
 
   it('anthropic: balanced label follows the tenant-selected Sonnet variant (5)', () => {
     const entry = getCatalogForProvider('anthropic')!;
     const resolved = resolveBalancedModel({ balanced_model: 'claude-sonnet-5' });
-    expect(mainChatTierLabels(entry, resolved)?.balanced).toBe('Sonnet 5');
+    expect(mainChatTierLabels(entry, resolved)?.balanced).toBe('Sonnet 5 · 1M');
   });
 
   it('mistral: the three tier representatives, labelled', () => {
     const entry = getCatalogEntryByKey('mistral')!;
     expect(mainChatTierLabels(entry, resolveBalancedModel({}))).toEqual({
-      fast: 'Ministral 8B',
-      balanced: 'Mistral Medium 3.5',
-      deep: 'Mistral Medium 3.5',
+      fast: 'Ministral 8B · 256k',
+      balanced: 'Mistral Medium 3.5 · 256k',
+      deep: 'Mistral Medium 3.5 · 256k',
     });
   });
 
@@ -518,9 +520,9 @@ describe('mainChatTierLabelsFromTierSet (hybrid picker — labels follow the tie
       deep: { provider: 'anthropic', model_id: 'claude-sonnet-5' },
     };
     expect(mainChatTierLabelsFromTierSet(tierSet, 'anthropic')).toEqual({
-      fast: 'Haiku 4.5',
-      balanced: 'Mistral Large 3', // NOT the base-provider "Sonnet 5"
-      deep: 'Sonnet 5', // NOT the base-provider "Opus 4.6"
+      fast: 'Haiku 4.5 · 200k',
+      balanced: 'Mistral Large 3 · 256k', // NOT the base-provider "Sonnet 5"
+      deep: 'Sonnet 5 · 1M', // NOT the base-provider "Opus 4.6"
     });
   });
 
@@ -528,9 +530,9 @@ describe('mainChatTierLabelsFromTierSet (hybrid picker — labels follow the tie
     // Only balanced is overridden; fast/deep fall back to the base (anthropic).
     const tierSet: TierSet = { balanced: { provider: 'mistral', model_id: 'mistral-large-2512' } };
     const out = mainChatTierLabelsFromTierSet(tierSet, 'anthropic');
-    expect(out?.balanced).toBe('Mistral Large 3');
-    expect(out?.fast).toBe('Haiku 4.5');
-    expect(out?.deep).toBe('Opus 4.6');
+    expect(out?.balanced).toBe('Mistral Large 3 · 256k');
+    expect(out?.fast).toBe('Haiku 4.5 · 200k');
+    expect(out?.deep).toBe('Opus 4.6 · 1M');
   });
 
   it('labels a Fireworks slot via tier_models — never the raw accounts/… path', () => {
@@ -547,8 +549,22 @@ describe('mainChatTierLabelsFromTierSet (hybrid picker — labels follow the tie
       },
     };
     const out = mainChatTierLabelsFromTierSet(tierSet, 'anthropic');
-    expect(out?.deep).toBe('GLM 5.2');
-    expect(out?.fast).toBe('Haiku 4.5');
+    expect(out?.deep).toBe('GLM 5.2 · 1M');
+    expect(out?.fast).toBe('Haiku 4.5 · 200k');
+  });
+
+  it('formatContextWindow: the shorthand behind every picker label', () => {
+    // Decimal-k windows (256_000 → 256k) win over the binary divisor trap; binary
+    // windows render conventionally; exact millions to M. '' for unknown.
+    expect(formatContextWindow(1_000_000)).toBe('1M');
+    expect(formatContextWindow(262_144)).toBe('256k');
+    expect(formatContextWindow(131_072)).toBe('128k');
+    expect(formatContextWindow(524_288)).toBe('512k');
+    expect(formatContextWindow(200_000)).toBe('200k');
+    expect(formatContextWindow(256_000)).toBe('256k');
+    expect(formatContextWindow(128_000)).toBe('128k');
+    expect(formatContextWindow(undefined)).toBe('');
+    expect(formatContextWindow(0)).toBe('');
   });
 });
 

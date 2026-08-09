@@ -2541,8 +2541,9 @@ describe('LynoxHTTPApi', () => {
       // balanced preset's balanced tier = mistral-medium-2604 exactly (WS2; NOT a Sonnet
       // default). Exact catalog-label match — a bare 'Mistral Medium' substring would also
       // match 'Mistral Medium 3.1' (128k, below the context floor) and 'Mistral Medium
-      // (latest)' (the forbidden -latest tag).
-      expect(tiers!['balanced']).toBe('Mistral Medium 3.5');
+      // (latest)' (the forbidden -latest tag). Labels carry the registry context
+      // window since 2026-08-09 ("· 256k").
+      expect(tiers!['balanced']).toBe('Mistral Medium 3.5 · 256k');
       expect(tiers!['balanced']).not.toContain('Sonnet');
     });
 
