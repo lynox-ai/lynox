@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isDangerous, normalizeCommand, splitCommandSegments } from './permission-guard.js';
+import { isDangerous, isCriticalTool, normalizeCommand, splitCommandSegments } from './permission-guard.js';
 import type { AutonomyLevel, PreApprovalSet, ToolEntry } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { channels } from '../core/observability.js';
@@ -396,8 +396,71 @@ describe('isDangerous', () => {
       expect(result).toContain('lynox secret store');
     });
 
+    it('flags strings on vault.db in interactive mode', () => {
+      const result = isDangerous('bash', { command: 'strings ~/.lynox/vault.db' });
+      expect(result).not.toBeNull();
+      expect(result).toContain('lynox secret store');
+    });
+
+    it('BLOCKS the glob spelling in autonomous mode: cat ~/.lynox/http-*', () => {
+      const result = isDangerous('bash', { command: 'cat ~/.lynox/http-*' }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+      expect(result).toContain('glob into lynox data dir');
+    });
+
+    it('BLOCKS the relative-path spelling in autonomous mode: cd + bare filename', () => {
+      const result = isDangerous('bash', { command: 'cd ~/.lynox && cat http-secret' }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+      expect(result).toContain('lynox secret store');
+    });
+
     it('returns null for bash touching non-secret .lynox files', () => {
       expect(isDangerous('bash', { command: 'cat ~/.lynox/config.json' }, 'autonomous')).toBeNull();
+    });
+
+    it('returns null for the hyphen-free lookalike http_secret', () => {
+      expect(isDangerous('bash', { command: 'echo http_secret' }, 'autonomous')).toBeNull();
+    });
+  });
+
+  describe('lynox dir via batch_files', () => {
+    it('BLOCKS batch_files operating in ~/.lynox in autonomous mode (rename strips the path guard)', () => {
+      const result = isDangerous(
+        'batch_files',
+        { directory: '/Users/op/.lynox', pattern: 'http-*', operation: 'rename', rename_pattern: 'x-{n}' },
+        'autonomous',
+      );
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+      expect(result).toContain('sensitive directory');
+    });
+
+    it('BLOCKS batch_files moving into ~/.lynox in autonomous mode', () => {
+      const result = isDangerous(
+        'batch_files',
+        { directory: '/tmp/staging', pattern: '*', operation: 'move', destination: '/home/op/.lynox' },
+        'autonomous',
+      );
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+    });
+
+    it('returns null for batch_files in an unrelated project directory', () => {
+      expect(
+        isDangerous('batch_files', { directory: '/tmp/project-a', pattern: '*.txt', operation: 'rename', rename_pattern: 'y-{n}' }, 'autonomous'),
+      ).toBeNull();
+    });
+  });
+
+  describe('lynox secret patterns are pre-approve-critical', () => {
+    it('refuses to treat a lynox-glob pre-approval as non-critical', () => {
+      expect(isCriticalTool('bash', 'cat ~/.lynox/*')).toBe(true);
+    });
+
+    it('refuses to treat an http-secret pre-approval as non-critical', () => {
+      expect(isCriticalTool('bash', 'cat ~/.lynox/http-secret')).toBe(true);
     });
   });
 
@@ -1215,6 +1278,13 @@ describe('isDangerous', () => {
 
     it('returns null for read_file on lynox config.json (non-secret .lynox file)', () => {
       expect(isDangerous('read_file', { path: '/home/op/.lynox/config.json' })).toBeNull();
+    });
+
+    it('BLOCKS write_file on the engine HTTP secret in autonomous mode', () => {
+      const result = isDangerous('write_file', { path: '/home/op/.lynox/http-secret', content: 'attacker-chosen' }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+      expect(result).toContain('sensitive path');
     });
 
     it('flags read_file on /etc/passwd', () => {
