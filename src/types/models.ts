@@ -368,6 +368,17 @@ export interface ModelFeatures {
   toolUse: boolean;
   promptCaching: boolean;
   pdfInput: boolean;
+  /**
+   * The openai wire accepts `reasoning_effort` (low|medium|high) for this model
+   * (Fireworks hybrid-reasoning convention). OPT-IN per model and deliberately
+   * absent everywhere until a replay measurement justifies the flip: the Agent
+   * sends `output_config.effort` (default 'high') on every request, and the
+   * adapter forwarding that blindly would pin every hybrid-reasoning model to
+   * maximum thinking — the opposite of the model-adaptive default this flag
+   * exists to preserve. Absent/false → the adapter drops effort, the model
+   * decides its own thinking depth per request (today's behaviour).
+   */
+  reasoningEffort?: boolean;
 }
 
 /** Where a model's WEIGHTS originate (supply-chain provenance) — axis (c) of the

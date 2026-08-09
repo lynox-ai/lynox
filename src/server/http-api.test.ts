@@ -3117,14 +3117,38 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('llm catalog', () => {
-    it('GET /api/llm/catalog returns the full LLM_CATALOG payload and a cacheable header', async () => {
+    it('GET /api/llm/catalog revalidates per request: no-cache + content-derived ETag', async () => {
       const { LLM_CATALOG } = await import('../core/llm/catalog.js');
       const res = await jsonFetch('/api/llm/catalog');
       expect(res.status).toBe(200);
-      expect(res.headers.get('cache-control')).toBe('public, max-age=3600, must-revalidate');
+      // `no-cache`, NOT max-age: the old 1h TTL served a pre-deploy catalog for
+      // up to an hour after a rollout (2026-08-09: iPhone showed 2 picker models
+      // while the engine served 9). The ETag makes the revalidation a cheap 304.
+      expect(res.headers.get('cache-control')).toBe('no-cache');
+      const etag = res.headers.get('etag');
+      // CONTENT-derived, not just well-formed: a hash computed over the wrong
+      // (or a constant) string would pass a format check and silently defeat
+      // the whole fix — catalog changes would never invalidate the cache.
+      const { createHash } = await import('node:crypto');
+      const expected = `"${createHash('sha256').update(JSON.stringify({ providers: LLM_CATALOG })).digest('hex').slice(0, 16)}"`;
+      expect(etag).toBe(expected);
       const body = await res.json() as { providers: unknown[] };
       // Serialization drift guard: the wire shape must round-trip the SSoT exactly.
       expect(body.providers).toEqual(JSON.parse(JSON.stringify(LLM_CATALOG)));
+    });
+
+    it('GET /api/llm/catalog answers a matching If-None-Match with 304 and no body', async () => {
+      const first = await jsonFetch('/api/llm/catalog');
+      const etag = first.headers.get('etag')!;
+      const second = await jsonFetch('/api/llm/catalog', { headers: { 'If-None-Match': etag } });
+      expect(second.status).toBe(304);
+      expect(await second.text()).toBe('');
+      // A stale validator must still get the FULL payload, not just a 200.
+      const third = await jsonFetch('/api/llm/catalog', { headers: { 'If-None-Match': '"deadbeefdeadbeef"' } });
+      expect(third.status).toBe(200);
+      const { LLM_CATALOG } = await import('../core/llm/catalog.js');
+      expect((await third.json() as { providers: unknown[] }).providers)
+        .toEqual(JSON.parse(JSON.stringify(LLM_CATALOG)));
     });
   });
 

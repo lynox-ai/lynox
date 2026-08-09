@@ -14,7 +14,7 @@ import { statfs } from 'node:fs/promises';
 import { freemem, totalmem, loadavg } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
 import { Engine } from '../core/engine.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
 import { MemoryFacade } from '../core/memory-facade.js';
@@ -723,6 +723,8 @@ export class LynoxHTTPApi {
    * since each miss is a full re-read of the sink.
    */
   private _captureReportCache: { report: Promise<import('../core/capture-telemetry-report.js').CaptureReport>; expiresAt: number } | null = null;
+  /** Serialized model catalog + its ETag, computed once — the catalog is a frozen module constant. */
+  private _catalogCache: { payload: string; etag: string } | null = null;
   /** Test-only: drop cached usage summaries between tests so 30s TTL doesn't bleed mocks across cases. */
   public _clearUsageCache(): void { this._usageSummaryCache.clear(); }
   private pushChannel: import('../integrations/push/web-push-channel.js').WebPushNotificationChannel | null = null;
@@ -5459,11 +5461,35 @@ export class LynoxHTTPApi {
     });
 
     // ── LLM model catalog ──
-    // Static + version-pinned — safe to cache aggressively on the client.
-    this.addStatic('user', 'GET /api/llm/catalog', async (_req, res) => {
-      const { LLM_CATALOG } = await import('../core/llm/catalog.js');
-      res.setHeader('Cache-Control', 'public, max-age=3600, must-revalidate');
-      jsonResponse(res, 200, { providers: LLM_CATALOG });
+    // Static per BUILD, not per hour: the old `max-age=3600` claimed the response
+    // was "version-pinned", but the URL carries no version, so after a deploy every
+    // client kept serving the previous catalog for up to an hour (observed on
+    // 2026-08-09: an iPhone showed 2 Fireworks picker models while the engine
+    // already served 9; a re-login does not clear the HTTP cache). `no-cache`
+    // means "store, but revalidate every use" — the ETag is content-derived, so
+    // an unchanged catalog costs one cheap 304 round-trip and a deploy that
+    // changes it is visible immediately.
+    this.addStatic('user', 'GET /api/llm/catalog', async (req, res) => {
+      // Memoized: LLM_CATALOG is a frozen module constant, so payload + ETag are
+      // fixed per process — stringify/sha256 on every revalidate would be pure waste.
+      if (!this._catalogCache) {
+        const { LLM_CATALOG } = await import('../core/llm/catalog.js');
+        const payload = JSON.stringify({ providers: LLM_CATALOG });
+        this._catalogCache = {
+          payload,
+          etag: `"${createHash('sha256').update(payload).digest('hex').slice(0, 16)}"`,
+        };
+      }
+      const { payload, etag } = this._catalogCache;
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('ETag', etag);
+      if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) });
+      res.end(payload);
     });
 
     // ── LLM connection probe (PRD-SETTINGS-REFACTOR Phase 2) ──

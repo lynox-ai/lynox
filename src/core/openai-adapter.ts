@@ -934,6 +934,30 @@ export class OpenAIAdapter {
       body.tool_choice = translated ?? 'auto';
     }
 
+    // `reasoning_effort` — Anthropic-shape `output_config.effort` translated onto the
+    // openai wire, DOUBLE-gated: the registry must flag the model (`features.
+    // reasoningEffort`, opt-in per model — absent everywhere until a replay
+    // measurement justifies a flip) AND the caller must have sent an effort.
+    //
+    // How effort actually reaches this wire (verified against agent.ts/session.ts):
+    // the Agent CONSTRUCTOR zeroes `this.effort` for openai-wire providers, so a
+    // default run sends no `output_config` here at all. But `setEffort` is not
+    // zeroed — a per-run override, and the post-run RESTORE to the session default
+    // (`'medium'`), do reach this adapter. Ungated, a flagged model would therefore
+    // silently start receiving `medium` after the first overridden run; the flag
+    // gate keeps that from happening until a flip is a measured decision, and the
+    // model stays self-adaptive (today's behaviour) everywhere else.
+    // 'max'/'xhigh' (Anthropic-only tiers) clamp to 'high', the wire's ceiling.
+    if (modelCapability(model)?.features?.reasoningEffort === true) {
+      const oc = params['output_config'];
+      const effortRaw = typeof oc === 'object' && oc !== null && 'effort' in oc
+        ? (oc as { effort?: unknown }).effort : undefined;
+      const mapped = effortRaw === 'max' || effortRaw === 'xhigh' ? 'high' : effortRaw;
+      if (mapped === 'low' || mapped === 'medium' || mapped === 'high') {
+        body['reasoning_effort'] = mapped;
+      }
+    }
+
     // Mistral-native prompt cache: forward prompt_cache_key when caller sets
     // it AND outgoing endpoint is api.mistral.ai. Hostname-gate keeps the
     // Mistral-shaped key from leaking into other OpenAI-compat endpoints

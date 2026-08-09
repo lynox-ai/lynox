@@ -1149,6 +1149,80 @@ describe('OpenAIAdapter', () => {
   // T2-P2: tool_choice was ignored — forced tool-use (llm-helper /
   // dag-planner / process-capture / entity-extractor-v2) was silently
   // downgraded to "auto", breaking structured-extraction contracts.
+  describe('reasoning_effort forwarding (double-gated)', () => {
+    // The registry flag is deliberately absent on every model today; the test
+    // flips it on GLM's shared features object for its own duration. `features`
+    // is FIREWORKS_TEXT_FEATURES, shared across the Fireworks entries — the
+    // unflagged case therefore uses a MISTRAL model (its own features object).
+    const GLM = 'accounts/fireworks/models/glm-5p2';
+
+    async function captureBody(model: string, outputConfig: unknown): Promise<Record<string, unknown>> {
+      let captured = '';
+      const server = await createMockServer((req, res) => {
+        let body = '';
+        req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+        req.on('end', () => {
+          captured = body;
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.write(sseChunk({
+            id: 're-1', choices: [{ index: 0, delta: { content: 'OK' }, finish_reason: 'stop' }],
+          }));
+          res.write('data: [DONE]\n\n');
+          res.end();
+        });
+      });
+      try {
+        const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'key', modelId: model });
+        await collectEvents(adapter.beta.messages.stream({
+          model, max_tokens: 100,
+          messages: [{ role: 'user', content: 'Go.' }],
+          ...(outputConfig !== undefined ? { output_config: outputConfig } : {}),
+        } as unknown as Parameters<typeof adapter.beta.messages.stream>[0]));
+      } finally {
+        server.close();
+      }
+      return JSON.parse(captured) as Record<string, unknown>;
+    }
+
+    function withFlag<T>(fn: () => Promise<T>): Promise<T> {
+      const features = modelCapability(GLM)!.features as { reasoningEffort?: boolean };
+      features.reasoningEffort = true;
+      return fn().finally(() => { delete features.reasoningEffort; });
+    }
+
+    it('forwards effort for a flagged model', async () => {
+      const body = await withFlag(() => captureBody(GLM, { effort: 'high' }));
+      expect(body['reasoning_effort']).toBe('high');
+    });
+
+    it("clamps the Anthropic-only 'max' tier to the wire ceiling 'high'", async () => {
+      const body = await withFlag(() => captureBody(GLM, { effort: 'max' }));
+      expect(body['reasoning_effort']).toBe('high');
+    });
+
+    it("clamps 'xhigh' to 'high' too — both Anthropic-only tiers, one wire ceiling", async () => {
+      const body = await withFlag(() => captureBody(GLM, { effort: 'xhigh' }));
+      expect(body['reasoning_effort']).toBe('high');
+    });
+
+    it('sends nothing when the caller sent no effort — the model stays self-adaptive', async () => {
+      const body = await withFlag(() => captureBody(GLM, undefined));
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+
+    it('drops a malformed effort value instead of forwarding it', async () => {
+      const body = await withFlag(() => captureBody(GLM, { effort: 'turbo' }));
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+
+    it('drops effort for an unflagged model — the registry default keeps today\'s wire byte-identical', async () => {
+      // mistral-medium is registered but NOT flagged (own features object, not
+      // the mutated Fireworks one) — the Agent's default effort must not reach it.
+      const body = await captureBody('mistral-medium-2604', { effort: 'high' });
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+  });
+
   describe('tool_choice translation (T2-P2)', () => {
     async function captureRequestBody(toolChoice: unknown): Promise<{ tool_choice?: unknown }> {
       let captured = '';
