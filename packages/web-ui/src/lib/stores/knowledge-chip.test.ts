@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
+	allKnowledgeWrites,
 	carryKnowledgeWrites,
 	knowledgeCauseKey,
 	projectKnowledgeWrite,
@@ -149,17 +150,21 @@ describe('carryKnowledgeWrites', () => {
 	it('falls back to the LAST assistant message when the server reprojected the turn', () => {
 		// Local fragmented shape vs the server's merged projection (the #4 multi-step merge):
 		// no content match exists, so the chip anchors to the last assistant message.
+		// TWO assistant messages in `adopted`, or "last" would be indistinguishable
+		// from "first" — the mutation this fixture must kill.
 		const local: ChipBearer[] = [
 			{ role: 'user', content: 'hi' },
 			{ role: 'assistant', content: 'step 1', knowledgeWrites: [chip('k1')] },
 			{ role: 'assistant', content: 'step 2' },
 		];
 		const adopted: ChipBearer[] = [
+			{ role: 'assistant', content: 'earlier turn' },
 			{ role: 'user', content: 'hi' },
 			{ role: 'assistant', content: 'merged answer' },
 		];
 		carryKnowledgeWrites(local, adopted);
-		expect(adopted[1]!.knowledgeWrites?.map((w) => w.id)).toEqual(['k1']);
+		expect(adopted[0]!.knowledgeWrites).toBeUndefined();
+		expect(adopted[2]!.knowledgeWrites?.map((w) => w.id)).toEqual(['k1']);
 	});
 
 	it('never duplicates an id the adopted transcript already carries', () => {
@@ -197,6 +202,48 @@ describe('carryKnowledgeWrites', () => {
 		const adopted: ChipBearer[] = [{ role: 'user', content: 'hi' }];
 		carryKnowledgeWrites(local, adopted);
 		expect(adopted[0]!.knowledgeWrites).toBeUndefined();
+		carryKnowledgeWrites(local, []); // empty adopted: same drop branch, must not throw
+	});
+
+	it('advances the cursor past chip-less twins so a later chip anchors positionally', () => {
+		// The first "done" reply has NO chip; the second does. Without lockstep cursor
+		// advance the chip would anchor onto the earlier, chip-less twin.
+		const local: ChipBearer[] = [
+			{ role: 'assistant', content: 'done' },
+			{ role: 'user', content: 'again' },
+			{ role: 'assistant', content: 'done', knowledgeWrites: [chip('k1')] },
+		];
+		const adopted: ChipBearer[] = [
+			{ role: 'assistant', content: 'done' },
+			{ role: 'user', content: 'again' },
+			{ role: 'assistant', content: 'done' },
+		];
+		carryKnowledgeWrites(local, adopted);
+		expect(adopted[0]!.knowledgeWrites).toBeUndefined();
+		expect(adopted[2]!.knowledgeWrites?.map((w) => w.id)).toEqual(['k1']);
+	});
+
+	it('dedups partially on the fallback path — only the fresh chip lands', () => {
+		const local: ChipBearer[] = [
+			{ role: 'assistant', content: 'step 1', knowledgeWrites: [chip('k1'), chip('k2')] },
+		];
+		const adopted: ChipBearer[] = [
+			{ role: 'assistant', content: 'merged', knowledgeWrites: [chip('k1')] },
+		];
+		carryKnowledgeWrites(local, adopted);
+		expect(adopted[0]!.knowledgeWrites?.map((w) => w.id)).toEqual(['k1', 'k2']);
+	});
+});
+
+describe('allKnowledgeWrites', () => {
+	it('flattens every chip across the transcript in message order', () => {
+		const messages: ChipBearer[] = [
+			{ role: 'assistant', content: 'a', knowledgeWrites: [{ id: 'k1', status: 'active', text: 'x' }] },
+			{ role: 'user', content: 'b' },
+			{ role: 'assistant', content: 'c', knowledgeWrites: [{ id: 'k2', status: 'pending_review', text: 'y' }] },
+		];
+		expect(allKnowledgeWrites(messages).map((w) => w.id)).toEqual(['k1', 'k2']);
+		expect(allKnowledgeWrites([])).toEqual([]);
 	});
 });
 
@@ -210,9 +257,19 @@ describe('transcript adoption wires the carry-over (source guard)', () => {
 	// itself is covered by the block above.
 	it('both adoption sites call carryKnowledgeWrites before swapping in serverMessages', () => {
 		const src = readFileSync(fileURLToPath(new URL('./chat.svelte.ts', import.meta.url)), 'utf-8');
-		const swaps = src.match(/carryKnowledgeWrites\((?:localMessages|messages), serverMessages\);[\s\S]{0,220}?messages = serverMessages;/g) ?? [];
+		// Line-start anchored: a commented-out call (`// carryKnowledgeWrites(...)`)
+		// must NOT satisfy this guard.
+		const swaps = src.match(/(?:^|\n)[\t ]*carryKnowledgeWrites\((?:localMessages|messages), serverMessages\);[\s\S]{0,220}?messages = serverMessages;/g) ?? [];
 		expect(swaps.length, 'each wholesale adoption must carry knowledgeWrites over').toBe(2);
 		const totalSwaps = src.match(/messages = serverMessages;/g) ?? [];
 		expect(totalSwaps.length, 'a new adoption site was added without carry-over').toBe(2);
+	});
+
+	it('the SSE knowledge_write handler dedups against the whole transcript', () => {
+		const src = readFileSync(fileURLToPath(new URL('./chat.svelte.ts', import.meta.url)), 'utf-8');
+		// Per-message dedup (`projectKnowledgeWrite(msg.knowledgeWrites ?? []`) re-adds a
+		// replayed id after adoption anchored the carried chip on another message.
+		expect(/(?:^|\n)[\t ]*\[\.\.\.allKnowledgeWrites\(messages\), \.\.\.\(msg\.knowledgeWrites \?\? \[\]\)\], data\)/.test(src),
+			'knowledge_write must dedup transcript-globally via allKnowledgeWrites').toBe(true);
 	});
 });

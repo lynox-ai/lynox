@@ -19,7 +19,7 @@ import {
 	type ContentBlock,
 } from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
-import { projectKnowledgeWrite, reviewResolution, retireResolution, carryKnowledgeWrites, type KnowledgeWriteChip } from './knowledge-chip.js';
+import { projectKnowledgeWrite, reviewResolution, retireResolution, carryKnowledgeWrites, allKnowledgeWrites, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -1778,7 +1778,14 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// Projection + dedup (Tier-2 replay) is pure — see `projectKnowledgeWrite`. Only
 			// materialise the array when there is a chip to push, so a malformed (no-id) or
 			// duplicate event leaves the message exactly as it was.
-			const chip = projectKnowledgeWrite(msg.knowledgeWrites ?? [], data);
+			// Dedup against the WHOLE transcript, not just this message: after an adoption
+			// anchored a carried chip elsewhere (the reprojection fallback), a Tier-2
+			// replay of the same id would otherwise re-add it here as a second,
+			// unresolved-looking chip.
+			// `msg` is included explicitly in case it is not yet part of `messages`
+			// (duplicates in the existing-list are harmless — the check is a `.some`).
+			const chip = projectKnowledgeWrite(
+				[...allKnowledgeWrites(messages), ...(msg.knowledgeWrites ?? [])], data);
 			if (chip) (msg.knowledgeWrites ??= []).push(chip);
 			break;
 		}
