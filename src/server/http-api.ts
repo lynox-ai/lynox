@@ -14,7 +14,7 @@ import { statfs } from 'node:fs/promises';
 import { freemem, totalmem, loadavg } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
 import { Engine } from '../core/engine.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
 import { MemoryFacade } from '../core/memory-facade.js';
@@ -5459,11 +5459,27 @@ export class LynoxHTTPApi {
     });
 
     // ── LLM model catalog ──
-    // Static + version-pinned — safe to cache aggressively on the client.
-    this.addStatic('user', 'GET /api/llm/catalog', async (_req, res) => {
+    // Static per BUILD, not per hour: the old `max-age=3600` claimed the response
+    // was "version-pinned", but the URL carries no version, so after a deploy every
+    // client kept serving the previous catalog for up to an hour (observed on
+    // 2026-08-09: an iPhone showed 2 Fireworks picker models while the engine
+    // already served 9; a re-login does not clear the HTTP cache). `no-cache`
+    // means "store, but revalidate every use" — the ETag is content-derived, so
+    // an unchanged catalog costs one cheap 304 round-trip and a deploy that
+    // changes it is visible immediately.
+    this.addStatic('user', 'GET /api/llm/catalog', async (req, res) => {
       const { LLM_CATALOG } = await import('../core/llm/catalog.js');
-      res.setHeader('Cache-Control', 'public, max-age=3600, must-revalidate');
-      jsonResponse(res, 200, { providers: LLM_CATALOG });
+      const payload = JSON.stringify({ providers: LLM_CATALOG });
+      const etag = `"${createHash('sha256').update(payload).digest('hex').slice(0, 16)}"`;
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('ETag', etag);
+      if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(payload);
     });
 
     // ── LLM connection probe (PRD-SETTINGS-REFACTOR Phase 2) ──

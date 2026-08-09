@@ -934,6 +934,22 @@ export class OpenAIAdapter {
       body.tool_choice = translated ?? 'auto';
     }
 
+    // `reasoning_effort` — Anthropic-shape `output_config.effort` translated onto the
+    // openai wire, DOUBLE-gated: the registry must flag the model (`features.
+    // reasoningEffort`, opt-in per model — absent everywhere until a replay
+    // measurement justifies a flip) AND the caller must have sent an effort. The
+    // Agent sends effort 'high' by DEFAULT on every request, so an ungated forward
+    // would pin every hybrid-reasoning model (GLM/Kimi/MiniMax) to maximum thinking
+    // — the exact opposite of the model-adaptive default this gate preserves.
+    // 'max'/'xhigh' (Anthropic-only tiers) clamp to 'high', the wire's ceiling.
+    if (modelCapability(model)?.features?.reasoningEffort === true) {
+      const effortRaw = (params['output_config'] as { effort?: unknown } | undefined)?.effort;
+      const mapped = effortRaw === 'max' || effortRaw === 'xhigh' ? 'high' : effortRaw;
+      if (mapped === 'low' || mapped === 'medium' || mapped === 'high') {
+        body['reasoning_effort'] = mapped;
+      }
+    }
+
     // Mistral-native prompt cache: forward prompt_cache_key when caller sets
     // it AND outgoing endpoint is api.mistral.ai. Hostname-gate keeps the
     // Mistral-shaped key from leaking into other OpenAI-compat endpoints
