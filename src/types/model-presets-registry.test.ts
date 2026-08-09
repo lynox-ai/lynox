@@ -72,4 +72,39 @@ describe('model-presets Wave 1 — new model registrations', () => {
     expect(m.features.vision).toBe(false);
     expect(m.provenance).toBe('CN');
   });
+
+  it('Kimi K3 (Fireworks) — verified $3/$15 + $0.30 cached, text-only pending vision validation, CN', () => {
+    const m = MODEL_CAPABILITIES['accounts/fireworks/models/kimi-k3']!;
+    expect(m.provider).toBe('openai');
+    // Read from the Fireworks model page 2026-08-09. cacheRead $0.30 is Kimi's
+    // published cached-input rate (here it DOES equal input×0.1 — unlike the flat
+    // $0.14 of GLM/DeepSeek; each page is its own source).
+    expect(m.pricing).toEqual({ input: 3.0, output: 15.0, cacheWrite: 3.0, cacheRead: 0.30 });
+    expect(m.contextWindow).toBeGreaterThanOrEqual(1_000_000);
+    // Fireworks serves Kimi K3 WITH image input; vision stays false here until
+    // the openai-wire image path is validated — flipping it is a separate change.
+    expect(m.features.vision).toBe(false);
+    expect(m.provenance).toBe('CN');
+  });
+
+  it('DeepSeek v4 Flash (Fireworks) — verified $0.14/$0.28 + $0.028 cached, text-only, CN', () => {
+    const m = MODEL_CAPABILITIES['accounts/fireworks/models/deepseek-v4-flash']!;
+    expect(m.provider).toBe('openai');
+    // Read from the Fireworks model page 2026-08-09.
+    expect(m.pricing).toEqual({ input: 0.14, output: 0.28, cacheWrite: 0.14, cacheRead: 0.028 });
+    expect(m.contextWindow).toBeGreaterThanOrEqual(1_000_000);
+    expect(m.features.vision).toBe(false);
+    expect(m.provenance).toBe('CN');
+  });
+
+  it('Qwen3.7 Plus (Fireworks) — verified $0.40/$1.60 + $0.08 cached, 262k ctx, text-only pending vision validation, CN', () => {
+    const m = MODEL_CAPABILITIES['accounts/fireworks/models/qwen3p7-plus']!;
+    expect(m.provider).toBe('openai');
+    // Read from the Fireworks model page 2026-08-09. Vision stays false pending
+    // openai-wire image validation (Fireworks lists image input as supported).
+    expect(m.pricing).toEqual({ input: 0.40, output: 1.60, cacheWrite: 0.40, cacheRead: 0.08 });
+    expect(m.contextWindow).toBe(262_144);
+    expect(m.features.vision).toBe(false);
+    expect(m.provenance).toBe('CN');
+  });
 });

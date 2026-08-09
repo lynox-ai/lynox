@@ -271,14 +271,19 @@ describe('LLM_CATALOG', () => {
 });
 
 describe('LLM_CATALOG.tier_models (per-tier picker options on a free-text tile)', () => {
-  it('fireworks pins exactly the two measured preset-slot models — no tier tag', () => {
+  it('fireworks pins exactly the served preset-slot/candidate models — no tier tag', () => {
     const entry = getCatalogEntryByKey('fireworks')!;
     expect((entry.tier_models ?? []).map((m) => m.id)).toEqual([
       'accounts/fireworks/models/glm-5p2',
       'accounts/fireworks/models/deepseek-v4-pro',
+      // Candidates (2026-08-09, rafael canary) — replay measurement owed before
+      // any preset pins them; presence here only makes them picker-selectable.
+      'accounts/fireworks/models/kimi-k3',
+      'accounts/fireworks/models/deepseek-v4-flash',
+      'accounts/fireworks/models/qwen3p7-plus',
     ]);
     for (const m of entry.tier_models ?? []) {
-      // Both are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no
+      // All are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no
       // measured tier map) — a `tier` tag here would fake a band mapping.
       expect(m.tier, `${m.id} must not fake a tier band`).toBeUndefined();
       expect(m.capabilities).toEqual(['tool_use']);   // text-only on Fireworks

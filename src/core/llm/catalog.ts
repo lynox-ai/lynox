@@ -475,9 +475,11 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     verification: 'verified',
     notes: 'Model is free-text — pick a tool-capable one.',
     // Per-tier picker options only (`tier_models`, see the interface doc): the
-    // two measured, currently-served models the hybrid presets pin. The TILE
-    // stays free-text (`models: []` above is untouched). No `tier` field — both
-    // are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no tier map).
+    // currently-served preset-slot/candidate models. GLM + DeepSeek are replay
+    // -measured; Kimi K3 is a CANDIDATE (added 2026-08-09 for the rafael canary,
+    // replay measurement owed via the #1112 harness before any preset pins it).
+    // The TILE stays free-text (`models: []` above is untouched). No `tier`
+    // field — all are `tier: null` in MODEL_CAPABILITIES (no measured tier map).
     tier_models: [
       {
         id: 'accounts/fireworks/models/glm-5p2',
@@ -496,6 +498,33 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
         notes: '1M context; alternative deep/big-context model. Text-only (no vision).',
+      },
+      {
+        id: 'accounts/fireworks/models/kimi-k3',
+        label: 'Kimi K3',
+        context_window: 1_000_000,
+        pricing: { input: 3.00, output: 15.00 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '1M context; deep/main candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
+      },
+      {
+        id: 'accounts/fireworks/models/deepseek-v4-flash',
+        label: 'DeepSeek v4 Flash',
+        context_window: 1_000_000,
+        pricing: { input: 0.14, output: 0.28 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '1M context; fast/balanced candidate (unmeasured) at fast-slot cost. Text-only (no vision).',
+      },
+      {
+        id: 'accounts/fireworks/models/qwen3p7-plus',
+        label: 'Qwen3.7 Plus',
+        context_window: 262_144,
+        pricing: { input: 0.40, output: 1.60 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '262k context; balanced candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
       },
     ],
   },

@@ -958,6 +958,59 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     uiLabel: 'DeepSeek v4 Pro',
     provenance: 'CN',
   },
+  // Kimi K3 (Moonshot). Pricing read from its Fireworks page 2026-08-09 —
+  // cacheRead $0.30 here IS input×0.1, unlike the flat $0.14 of the two above
+  // (each page is its own source of truth). Fireworks lists image-input support,
+  // but the entry stays FIREWORKS_TEXT_FEATURES (vision:false → loud attach
+  // refusal, not a silent drop) until the openai-wire image path is validated —
+  // flipping vision on is a separate, tested change. Context: the page says
+  // "1040k"; pinned to the round 1M the sibling entries use — a conservative
+  // floor for compaction, not a capability claim.
+  'accounts/fireworks/models/kimi-k3': {
+    id: 'accounts/fireworks/models/kimi-k3',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 3.00, output: 15.00, cacheWrite: 3.00, cacheRead: 0.30 },
+    uiLabel: 'Kimi K3',
+    provenance: 'CN',
+  },
+  // Balanced/main-chat CANDIDATES (2026-08-09, rafael canary): mistral-medium
+  // underperforms as the main on real requests (rafael), so the picker offers
+  // alternatives to test. Pricing read from each model's Fireworks page — the
+  // cached rates differ per model (0.028 / 0.08), never derived.
+  'accounts/fireworks/models/deepseek-v4-flash': {
+    id: 'accounts/fireworks/models/deepseek-v4-flash',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 1_000_000,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 0.14, output: 0.28, cacheWrite: 0.14, cacheRead: 0.028 },
+    uiLabel: 'DeepSeek v4 Flash',
+    provenance: 'CN',
+  },
+  // Fireworks lists image input for Qwen3.7 Plus; text-only here for the same
+  // reason as Kimi K3 (vision flip = separate, validated change). 262k context.
+  'accounts/fireworks/models/qwen3p7-plus': {
+    id: 'accounts/fireworks/models/qwen3p7-plus',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 262_144,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 0.40, output: 1.60, cacheWrite: 0.40, cacheRead: 0.08 },
+    uiLabel: 'Qwen3.7 Plus',
+    provenance: 'CN',
+  },
 };
 
 /** Resolve a model id (canonical or @-suffixed Vertex variant) to its
