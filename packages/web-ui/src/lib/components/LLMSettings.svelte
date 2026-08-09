@@ -223,6 +223,12 @@
 	// Per-provider key cache (UI-only — kept in vault, sent on save).
 	let keys = $state<Record<string, string>>({});
 	let loaded = $state(false);
+	// DEF-dk-capture-tool-dependence: server-computed flag (GET /api/config
+	// capabilities) — DK is on AND the active balanced model is a measured-weak
+	// capture caller (Mistral Medium), so `remember` rarely fires and the
+	// knowledge store stays silently inert. Drives the warning banner at the
+	// point the operator can fix it: switch the balanced model.
+	let captureDegraded = $state(false);
 	let testing = $state(false);
 	let saving = $state(false);
 	// PR 4.6: deferred mount of embedded LLMAdvancedView — avoids the duplicate
@@ -367,10 +373,11 @@
 			if (!catRes.ok || !configRes.ok) throw new Error(`HTTP ${catRes.status} / ${configRes.status}`);
 			const catBody = (await catRes.json()) as { providers: CatalogProvider[] };
 			providers = catBody.providers;
-			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks; available_tier_presets?: Record<string, PresetInfo> };
+			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks; available_tier_presets?: Record<string, PresetInfo>; capabilities?: { durable_memory_capture_degraded?: boolean } };
 			config = configBody;
 			locks = configBody.locks ?? {};
 			availablePresets = configBody.available_tier_presets ?? {};
+			captureDegraded = configBody.capabilities?.durable_memory_capture_degraded === true;
 			// F1b: when env-pinned the provider isn't on disk, so fall back to the
 			// effective `active_provider` the engine surfaces. An env-pinned
 			// provider IS an explicit choice (just made via env) → count it for
@@ -1059,6 +1066,20 @@
 		     stay switchable, only free-text endpoints are off-limits. -->
 		<div class="border border-warning/50 bg-warning/5 rounded p-3 text-sm">
 			<p>{t('llm.custom_endpoints_locked_notice')}</p>
+		</div>
+	{/if}
+
+	{#if captureDegraded}
+		<!-- DEF-dk-capture-tool-dependence: DK is on but the active balanced model
+		     is a measured-weak capture caller (Mistral Medium 2/12 vs Sonnet 12/12).
+		     The durable knowledge store stays silently empty because the model rarely
+		     invokes `remember`. Warn here, at the model picker, where it is fixable. -->
+		<!-- Dominant state-surface shape (shapes.contract.json `state`): a tint + a
+		     same-colour border at LOW opacity, not a full-strength one — this is a
+		     standing advisory, not one of the five full-strength warning exceptions. -->
+		<div role="status" class="border border-warning/20 bg-warning/10 rounded p-3 text-sm text-warning">
+			<p class="font-medium">{t('llm.capture_degraded_title')}</p>
+			<p class="text-text-muted mt-1">{t('llm.capture_degraded_body')}</p>
 		</div>
 	{/if}
 

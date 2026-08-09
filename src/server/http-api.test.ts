@@ -2573,6 +2573,73 @@ describe('LynoxHTTPApi', () => {
       expect(features['pdfInput']).toBe(true);
     });
 
+    it('capabilities.durable_memory_capture_degraded is TRUE for DK-on + Mistral balanced (the wiring)', async () => {
+      // The WIRING test (DEF-dk-capture-tool-dependence): the pure couple is
+      // unit-tested in models.test.ts; what is only checkable here is that the
+      // route computes the flag from the REAL runtime values — the active
+      // KnowledgeStore and the active balanced model resolved via the provider
+      // registry. Hardcoding the field `false` or dropping the getActiveProvider
+      // resolution leaves models.test.ts green — this is the test that dies.
+      const { setOpenAIModelResolver, MISTRAL_MODEL_MAP } = await import('../types/models.js');
+      const llmClient = await import('../core/llm-client.js');
+      const providerSpy = vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('openai');
+      setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origKs = engineRef['getKnowledgeStore'];
+      engineRef['getKnowledgeStore'] = (): unknown => ({}); // DK ON
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        const caps = body['capabilities'] as Record<string, unknown>;
+        expect(caps['has_durable_memory']).toBe(true);
+        expect(caps['durable_memory_capture_degraded']).toBe(true);
+      } finally {
+        providerSpy.mockRestore();
+        setOpenAIModelResolver({ map: null, fallbackModelId: null });
+        engineRef['getKnowledgeStore'] = origKs;
+      }
+    });
+
+    it('capabilities.durable_memory_capture_degraded is FALSE when DK is off, even on Mistral', async () => {
+      // Kills a mutation that drops the DK term: a Mistral tenant with DK OFF has
+      // inert capture already, so no warning is owed. Base mock: getKnowledgeStore
+      // returns null (DK off).
+      const { setOpenAIModelResolver, MISTRAL_MODEL_MAP } = await import('../types/models.js');
+      const llmClient = await import('../core/llm-client.js');
+      const providerSpy = vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('openai');
+      setOpenAIModelResolver({ map: MISTRAL_MODEL_MAP });
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        const caps = body['capabilities'] as Record<string, unknown>;
+        expect(caps['has_durable_memory']).toBe(false);
+        expect(caps['durable_memory_capture_degraded']).toBe(false);
+      } finally {
+        providerSpy.mockRestore();
+        setOpenAIModelResolver({ map: null, fallbackModelId: null });
+      }
+    });
+
+    it('capabilities.durable_memory_capture_degraded is FALSE for DK-on + a strong Anthropic balanced', async () => {
+      // Kills a mutation that drops the model term: DK on but Sonnet balanced
+      // captures fine, so no warning. Anthropic is the base provider.
+      const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+      const origKs = engineRef['getKnowledgeStore'];
+      engineRef['getKnowledgeStore'] = (): unknown => ({}); // DK ON
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        const caps = body['capabilities'] as Record<string, unknown>;
+        expect(caps['has_durable_memory']).toBe(true);
+        expect(caps['durable_memory_capture_degraded']).toBe(false);
+      } finally {
+        engineRef['getKnowledgeStore'] = origKs;
+      }
+    });
+
     it('GET resolves active_model under Mistral tier-set (openai provider)', async () => {
       // Bootstrap the openai resolver the way engine.ts does for managed-EU
       // tenants, then flip getActiveProvider via the module-level state.

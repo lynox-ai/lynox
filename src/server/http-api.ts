@@ -52,7 +52,7 @@ import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson } from '../core/prompt-store.js';
 import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
-import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, resolveModelIdViaRegistry, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import type {
   HealthBody,
@@ -4437,6 +4437,18 @@ export class LynoxHTTPApi {
         // DK.2 durable-memory surface: true iff durable_memory_enabled wired the
         // KnowledgeStore → the Web UI shows/hides the review-queue tab on this probe.
         has_durable_memory: engine.getKnowledgeStore() !== null,
+        // DEF-dk-capture-tool-dependence: DK capture depends on the model INVOKING
+        // `remember`. A measured-weak balanced caller (Mistral Medium 2/12 vs
+        // Sonnet 12/12, core#1130) leaves the durable tier silently inert while the
+        // store advertises itself. Surface a degradation flag ONLY when DK is on AND
+        // the active balanced model is measured-weak, so the model-picker can warn at
+        // the point the operator can fix it. Resolve the ACTIVE balanced id through the
+        // provider registry (not resolveBalancedModel, which only knows Sonnet ids) so
+        // a Mistral tenant resolves to mistral-medium-2604.
+        durable_memory_capture_degraded: isDurableCaptureDegraded({
+          hasDurableMemory: engine.getKnowledgeStore() !== null,
+          activeBalancedModelId: resolveModelIdViaRegistry('balanced', getActiveProvider()),
+        }),
         // Hard-limits exposure: full numbers for self-host/BYOK,
         // opaque tier-tag for managed (prevents DoS-knob disclosure).
         hard_limits: isManagedTier

@@ -104,6 +104,46 @@ export const MISTRAL_MODEL_MAP: Record<ModelTier, string> = {
 };
 
 /**
+ * Models MEASURED to be weak at durable-knowledge capture — they rarely invoke
+ * the `remember` tool, so on a DK-on tenant the durable tier stays effectively
+ * inert while the store still advertises itself (the silent under-capture
+ * DEF-dk-capture-tool-dependence exists for). Measured by the capture-fitness
+ * benchmark (core#1130, 2026-08-06, live engine): `mistral-medium-2604` scored
+ * 2/12 against Sonnet's 12/12 and Haiku's 10/12.
+ *
+ * A POSITIVE, evidence-anchored set — NOT an inferred one: only a model with a
+ * MEASURED weak score belongs here, so a new or untested model never trips a
+ * false degradation warning (the fail-open direction here is "no warning", the
+ * safe one for a false positive). Add an entry ONLY from a measured benchmark run.
+ */
+export const CAPTURE_WEAK_MODEL_IDS: ReadonlySet<string> = new Set([
+  'mistral-medium-2604',
+]);
+
+/** True when `modelId` is a measured-weak durable-knowledge capture caller
+ *  (see {@link CAPTURE_WEAK_MODEL_IDS}). */
+export function isCaptureWeakModel(modelId: string): boolean {
+  return CAPTURE_WEAK_MODEL_IDS.has(modelId);
+}
+
+/**
+ * Whether a tenant's active setup leaves durable-knowledge capture silently
+ * degraded: DK is ON but the active `balanced` model is a measured-weak capture
+ * caller, so `remember` rarely fires and the knowledge store never grows while
+ * the UI advertises it. The couple is the whole point — DK OFF means capture is
+ * already inert (no warning owed), and a strong `balanced` model captures fine.
+ * Pure so the /api/config handler that surfaces the flag is unit-testable and
+ * both directions (DK-off, strong-model) can be pinned. See
+ * DEF-dk-capture-tool-dependence.
+ */
+export function isDurableCaptureDegraded(opts: {
+  hasDurableMemory: boolean;
+  activeBalancedModelId: string;
+}): boolean {
+  return opts.hasDurableMemory && isCaptureWeakModel(opts.activeBalancedModelId);
+}
+
+/**
  * True when `apiBaseURL`'s host is the Mistral API — `api.mistral.ai` or any
  * `*.mistral.ai` subdomain. Hostname-strict (parses the URL) so a crafted base
  * URL like `https://api.mistral.ai.evil.com` or `https://x/?proxy=mistral.ai`

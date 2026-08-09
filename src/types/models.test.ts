@@ -27,6 +27,9 @@ import {
   claudeModelRejectsManualThinking,
   isBlockedModelId,
   parseBlockedModelIds,
+  isCaptureWeakModel,
+  isDurableCaptureDegraded,
+  CAPTURE_WEAK_MODEL_IDS,
 } from './models.js';
 
 describe('pricing-vs-TTL contract (cache-write must match the TTL the agent sends)', () => {
@@ -267,6 +270,38 @@ describe('Mistral tier-set', () => {
     expect(getMaxContinuations('mistral-small-2603')).toBe(5);
     expect(getMaxContinuations('mistral-large-2512')).toBe(10);
     expect(getMaxContinuations('magistral-medium-2509')).toBe(20);
+  });
+});
+
+describe('durable-knowledge capture degradation (DEF-dk-capture-tool-dependence)', () => {
+  it('flags the measured-weak balanced caller, not the strong ones', () => {
+    // Anchored to the capture-fitness benchmark (core#1130): Mistral Medium 2/12,
+    // Sonnet 12/12, Haiku 10/12. Only the measured-weak id is in the set.
+    expect(isCaptureWeakModel('mistral-medium-2604')).toBe(true);
+    expect(isCaptureWeakModel('claude-sonnet-4-6')).toBe(false);
+    expect(isCaptureWeakModel('claude-haiku-4-5-20251001')).toBe(false);
+    expect(isCaptureWeakModel('ministral-8b-2512')).toBe(false);
+    // A new/untested id must NOT trip the warning (positive set, not inferred).
+    expect(isCaptureWeakModel('some-future-model-2099')).toBe(false);
+  });
+
+  it('the weak-set is exactly the balanced Mistral model today', () => {
+    // Pins the set membership so adding an id is a deliberate, reviewed change —
+    // and so this fails loudly if the balanced Mistral pin and the weak-set drift.
+    expect([...CAPTURE_WEAK_MODEL_IDS]).toEqual(['mistral-medium-2604']);
+    expect(CAPTURE_WEAK_MODEL_IDS.has(MISTRAL_MODEL_MAP.balanced)).toBe(true);
+  });
+
+  it('degraded ONLY when DK is on AND the balanced model is measured-weak', () => {
+    // Both directions must kill a mutation of the `&&`:
+    // DK on + weak model → the silent-under-capture state the warning exists for.
+    expect(isDurableCaptureDegraded({ hasDurableMemory: true, activeBalancedModelId: 'mistral-medium-2604' })).toBe(true);
+    // DK off → capture is already inert, no warning owed (kills dropping the DK term).
+    expect(isDurableCaptureDegraded({ hasDurableMemory: false, activeBalancedModelId: 'mistral-medium-2604' })).toBe(false);
+    // Strong balanced model → capture works, no warning (kills dropping the model term).
+    expect(isDurableCaptureDegraded({ hasDurableMemory: true, activeBalancedModelId: 'claude-sonnet-4-6' })).toBe(false);
+    // Neither → false.
+    expect(isDurableCaptureDegraded({ hasDurableMemory: false, activeBalancedModelId: 'claude-sonnet-4-6' })).toBe(false);
   });
 });
 
