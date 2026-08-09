@@ -139,9 +139,13 @@ export function resolveRunModel(req: RunModelRequest): ResolvedRunModel {
  * The model id a tier ACTUALLY runs under the active routing mode: the hybrid
  * tier_set slot's model when configured, else the base provider's mapping.
  * Used by the blocklist check above so enforcement judges the executed model,
- * not a base mapping that hybrid routing would override anyway.
+ * not a base mapping that hybrid routing would override anyway — and by the
+ * /api/config capture-degradation probe, which must judge the SAME executed
+ * balanced model (a `balanced`/`efficient` preset pins balanced to Mistral even
+ * on an Anthropic base). Side-effect-free, unlike {@link resolveTierModel} which
+ * publishes a routing event — a config GET is not a resolution.
  */
-function effectiveTierModelId(tier: ModelTier, provider: LLMProvider): string {
+export function effectiveTierModelId(tier: ModelTier, provider: LLMProvider): string {
   const slotModel = _routingMode === 'hybrid' ? _tierSet?.[tier]?.model_id : undefined;
   return slotModel ?? getModelId(tier, provider);
 }
