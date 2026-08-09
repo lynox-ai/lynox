@@ -11,6 +11,7 @@ import {
   normalizeTier,
   isExpensiveModel,
   buildMainModelOptions,
+  formatContextWindow,
   selectMainModelId,
   selectMainModelKey,
   mainModelOptionKey,
@@ -47,9 +48,9 @@ const anthropic: ProviderLike = {
     { id: 'claude-opus-4-6', tier: 'deep' },
   ],
   models: [
-    { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', pricing: { input: 1, output: 5 } },
+    { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', pricing: { input: 1, output: 5 }, context_window: 200_000 },
     { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', pricing: { input: 3, output: 15 } },
-    { id: 'claude-sonnet-5', label: 'Sonnet 5', pricing: { input: 3, output: 15 } },
+    { id: 'claude-sonnet-5', label: 'Sonnet 5', pricing: { input: 3, output: 15 }, context_window: 1_000_000 },
     { id: 'claude-opus-4-6', label: 'Opus 4.6', pricing: { input: 5, output: 25 } },
   ],
 };
@@ -112,6 +113,19 @@ describe('buildMainModelOptions', () => {
     // balanced options carry their variant; non-balanced carry none (omitted key).
     expect(byId['claude-sonnet-5']!.balanced_model).toBe('claude-sonnet-5');
     expect('balanced_model' in byId['claude-opus-4-6']!).toBe(false);
+    // context_window rides through when the catalog carries it; omitted otherwise
+    // (exactOptionalPropertyTypes — an absent window must not become undefined).
+    expect(byId['claude-haiku-4-5-20251001']!.contextWindow).toBe(200_000);
+    expect(byId['claude-sonnet-5']!.contextWindow).toBe(1_000_000);
+    expect('contextWindow' in byId['claude-opus-4-6']!).toBe(false);
+  });
+
+  it('formatContextWindow mirrors core catalog.ts — lockstep', () => {
+    expect(formatContextWindow(1_000_000)).toBe('1M');
+    expect(formatContextWindow(262_144)).toBe('256k');
+    expect(formatContextWindow(131_072)).toBe('128k');
+    expect(formatContextWindow(200_000)).toBe('200k');
+    expect(formatContextWindow(undefined)).toBe('');
   });
 
   it('greys options above the max_tier ceiling (overCeiling), keeps the rest', () => {

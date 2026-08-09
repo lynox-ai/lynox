@@ -14,7 +14,24 @@ import {
   MISTRAL_MODEL_MAP,
   SERVED_BALANCED_SONNET_IDS,
   getModelId,
+  modelCapability,
 } from '../../types/models.js';
+
+/**
+ * Human context-window shorthand for picker labels: 1_000_000 → "1M",
+ * 262_144 → "256k", 200_000 → "200k". Binary-k models (2^n windows) render
+ * their conventional size; everything else rounds to decimal k. Returns ''
+ * for unknown/absent windows so callers can append conditionally.
+ * Mirrored in web-ui `llm-main-model.ts` (`formatContextWindow`) — the file
+ * architecture forbids direct core imports there; keep both in lockstep.
+ */
+export function formatContextWindow(n: number | undefined): string {
+  if (!n || n <= 0) return '';
+  if (n % 1_000_000 === 0) return `${n / 1_000_000}M`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (n % 1024 === 0) return `${n / 1024}k`;
+  return `${Math.round(n / 1000)}k`;
+}
 
 export interface CatalogModel {
   id: string;
@@ -1023,7 +1040,14 @@ export function mainChatTierLabels(
 ): Partial<Record<ModelTier, string>> | undefined {
   const models = entry.main_chat_models;
   if (!models || models.length === 0) return undefined;
-  const labelForId = (id: string): string => entry.models.find((m) => m.id === id)?.label ?? id;
+  // Context window rides the label ("Haiku 4.5 · 200k") — rafael 2026-08-09:
+  // every model picker states the window. Registry-sourced (not the catalog
+  // row) so the number matches what the engine actually trims against.
+  const labelForId = (id: string): string => {
+    const base = entry.models.find((m) => m.id === id)?.label ?? id;
+    const ctx = formatContextWindow(modelCapability(id)?.contextWindow);
+    return ctx ? `${base} · ${ctx}` : base;
+  };
   const out: Partial<Record<ModelTier, string>> = {};
   const pickedIds: string[] = [];
   for (const tier of ['fast', 'balanced', 'deep'] as const) {
@@ -1074,11 +1098,13 @@ export function mainChatTierLabelsFromTierSet(
     // `models: []`), and without it the picker would label the tier with the raw
     // `accounts/fireworks/models/…` path. Fall back to the raw id.
     const modelId = slot?.model_id ?? getModelId(tier, baseProvider);
-    const label = catalog
+    const base = catalog
       .flatMap((e) => [...e.models, ...(e.tier_models ?? [])])
       .find((m) => m.id === modelId)?.label ?? modelId;
+    // Same window suffix as mainChatTierLabels — registry-sourced.
+    const ctx = formatContextWindow(modelCapability(modelId)?.contextWindow);
     pickedIds.push(modelId);
-    out[tier] = label;
+    out[tier] = ctx ? `${base} · ${ctx}` : base;
   }
   return new Set(pickedIds).size >= 2 ? out : undefined;
 }

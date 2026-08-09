@@ -27,7 +27,7 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
 	import { clearTierConfigCache } from '../utils/tier-config.js';
-	import { buildMainModelOptions, selectMainModelKey, mainModelOptionKey, findMainModelOptionByKey, isExpensiveModel, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
+	import { buildMainModelOptions, selectMainModelKey, mainModelOptionKey, findMainModelOptionByKey, isExpensiveModel, formatContextWindow, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
 	import { isManaged, cpSuppliesLLMKeyForInstance, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
@@ -1368,7 +1368,7 @@
 									aria-label={t('llm.model')}
 									class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
 									{#each entry ? tierPickerModels(entry) : [] as m (m.id)}
-										<option value={m.id}>{m.label} — ${m.pricing?.input ?? '?'}/M in · ${m.pricing?.output ?? '?'}/M out{isExpensive(m) ? ' ⚡' : ''}</option>
+										<option value={m.id}>{m.label} — ${m.pricing?.input ?? '?'}/M in · ${m.pricing?.output ?? '?'}/M out{formatContextWindow(m.context_window) ? ` · ${formatContextWindow(m.context_window)} ctx` : ''}{isExpensive(m) ? ' ⚡' : ''}</option>
 									{/each}
 								</select>
 							</div>
@@ -1423,7 +1423,7 @@
 							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
 							{#each mainModelOptions as opt (mainModelOptionKey(opt))}
 								<option value={mainModelOptionKey(opt)} disabled={opt.overCeiling}>
-									{opt.label}{#if opt.pricing} — ${opt.pricing.input}/M in · ${opt.pricing.output}/M out{/if}{#if opt.expensive} ⚡{/if}{#if opt.notRecommended} · {t('llm.main_model.fast_suffix')}{/if}{#if opt.overCeiling} · {t('llm.main_model.locked_suffix')}{/if}
+									{opt.label}{#if opt.pricing} — ${opt.pricing.input}/M in · ${opt.pricing.output}/M out{/if}{#if opt.contextWindow} · {formatContextWindow(opt.contextWindow)} ctx{/if}{#if opt.expensive} ⚡{/if}{#if opt.notRecommended} · {t('llm.main_model.fast_suffix')}{/if}{#if opt.overCeiling} · {t('llm.main_model.locked_suffix')}{/if}
 								</option>
 							{/each}
 						</select>
