@@ -7,6 +7,7 @@
 
 import type { LLMProvider, ModelTier } from '../../types/models.js';
 import type { TierSet } from '../../types/config.js';
+import type { ProviderKey } from '../../types/provider-registry.js';
 import {
   MODEL_MAP,
   VERTEX_MODEL_MAP,
@@ -72,7 +73,9 @@ export interface CatalogProviderEntry {
    * SLOT is a different promise: it pins exactly one model per band, so the
    * picker needs a short, vetted list instead of a free-text field per tier.
    *
-   * These are therefore only the entry's MEASURED, currently-served models —
+   * These are therefore only the entry's vetted, currently-served models —
+   * either replay-MEASURED preset-slot models or explicitly-marked CANDIDATES
+   * (unmeasured, picker-selectable for canary testing; no preset pins them) —
    * each id registered in MODEL_CAPABILITIES, pricing/context mirrored from
    * there (same drift-guard test as `models`). Entries that ship a `models`
    * catalog never need this: the picker uses `models` directly.
@@ -474,9 +477,11 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     verification: 'verified',
     notes: 'Model is free-text — pick a tool-capable one.',
     // Per-tier picker options only (`tier_models`, see the interface doc): the
-    // two measured, currently-served models the hybrid presets pin. The TILE
-    // stays free-text (`models: []` above is untouched). No `tier` field — both
-    // are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no tier map).
+    // currently-served preset-slot/candidate models. GLM + DeepSeek are replay
+    // -measured; Kimi K3 is a CANDIDATE (added 2026-08-09 for the rafael canary,
+    // replay measurement owed via the #1112 harness before any preset pins it).
+    // The TILE stays free-text (`models: []` above is untouched). No `tier`
+    // field — all are `tier: null` in MODEL_CAPABILITIES (no measured tier map).
     tier_models: [
       {
         id: 'accounts/fireworks/models/glm-5p2',
@@ -495,6 +500,69 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
         notes: '1M context; alternative deep/big-context model. Text-only (no vision).',
+      },
+      {
+        id: 'accounts/fireworks/models/kimi-k3',
+        label: 'Kimi K3',
+        context_window: 1_000_000,
+        pricing: { input: 3.00, output: 15.00 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '1M context; deep/main candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
+      },
+      {
+        id: 'accounts/fireworks/models/deepseek-v4-flash',
+        label: 'DeepSeek v4 Flash',
+        context_window: 1_000_000,
+        pricing: { input: 0.14, output: 0.28 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '1M context; fast/balanced candidate (unmeasured) at fast-slot cost. Text-only (no vision).',
+      },
+      {
+        id: 'accounts/fireworks/models/qwen3p7-plus',
+        label: 'Qwen3.7 Plus',
+        context_window: 262_144,
+        pricing: { input: 0.40, output: 1.60 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '262k context; balanced candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
+      },
+      {
+        id: 'accounts/fireworks/models/gpt-oss-120b',
+        label: 'GPT-OSS 120B',
+        context_window: 131_072,
+        pricing: { input: 0.15, output: 0.60 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance US (OpenAI open weights)',
+        notes: '131k context; balanced candidate — the one whose tool_use wire the reachability suite has proven. Text-only.',
+      },
+      {
+        id: 'accounts/fireworks/models/kimi-k2p6',
+        label: 'Kimi K2.6',
+        context_window: 262_144,
+        pricing: { input: 0.95, output: 4.00 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '262k context; generalist main-chat candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
+      },
+      {
+        id: 'accounts/fireworks/models/kimi-k2p7-code',
+        label: 'Kimi K2.7 Code',
+        context_window: 262_144,
+        pricing: { input: 0.95, output: 4.00 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '262k context; agentic/coding candidate (unmeasured); reasons on every turn (no non-thinking mode). Text-only for now.',
+      },
+      {
+        id: 'accounts/fireworks/models/minimax-m3',
+        label: 'MiniMax M3',
+        context_window: 524_288,
+        pricing: { input: 0.30, output: 1.20 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '512k context; balanced candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
       },
     ],
   },
@@ -650,6 +718,124 @@ export function pinnedVaultSlotForEndpoint(
   const entry = catalog.find((e) => catalogEntryKey(e) === key);
   if (!entry?.base_url_default) return undefined;   // generic / free-text tile
   return entry.vault_slot;
+}
+
+/** Who a (provider, endpoint) pair IS, and what to call it. */
+export interface ProviderIdentity {
+  /**
+   * Stable dedup key. Distinct from the label on purpose: two different
+   * unpinned proxies both DISPLAY as "OpenAI-compatible", so comparing display
+   * strings would silently drop one of two genuinely different providers.
+   */
+  key: string;
+  /** Human brand name — what the status bar prints. */
+  label: string;
+}
+
+/**
+ * The first-class registry key `'mistral'` (provider-registry.ts) IS the pinned
+ * Mistral endpoint — it carries the host in its identity and arrives without a
+ * base URL. It must therefore share a key with `openai` + `api.mistral.ai`, or
+ * one provider would be listed twice under two spellings.
+ */
+// A Map, not an object literal: the lookup key comes from LYNOX_TIER_SET_JSON,
+// and `{}['constructor']` is a truthy Object.prototype member. An object here
+// would answer `'constructor'` / `'__proto__'` / `'toString'` with a garbage
+// identity — `{key: undefined, label: undefined}` — which both blanks the
+// provider name in the response and collapses two different providers onto one
+// dedup key. `resolveCatalogKey` documents the same class of bug (it uses
+// `Object.hasOwn` for it); a Map has no prototype chain to walk at all.
+const NATIVE_IDENTITIES: ReadonlyMap<string, ProviderIdentity> = new Map([
+  ['anthropic', { key: 'preset:anthropic', label: 'Anthropic' }],
+  ['vertex', { key: 'preset:vertex', label: 'Google Vertex AI' }],
+  ['mistral', { key: 'preset:mistral', label: 'Mistral' }],
+]);
+
+/** Reduce a name to the plain label characters that may reach the UI. */
+function sanitizeLabel(s: string): string {
+  return s.replace(/[^\w .+-]/g, '').trim();
+}
+
+/**
+ * Host of a base URL, or a bounded form of the raw string when it will not parse.
+ * A trailing root dot is normalised away — `api.example.com.` and
+ * `api.example.com` are the same host, and keeping both would list one provider
+ * twice. The scheme is deliberately NOT part of the key: http and https to the
+ * same host are one provider.
+ */
+function endpointHost(apiBaseURL: string | undefined): string {
+  if (!apiBaseURL) return '';
+  const strip = (h: string): string => h.replace(/\.(?=$|:)/, '');
+  try {
+    return strip(new URL(apiBaseURL).host.toLowerCase());
+  } catch {
+    return strip(apiBaseURL.trim().toLowerCase().slice(0, 64));
+  }
+}
+
+/**
+ * Identify a (provider, endpoint) pair — for the status bar, which must both
+ * NAME every provider an instance talks to and count each of them once.
+ *
+ * A brand may only come from a catalog entry lynox PINS by URL
+ * (`base_url_default`), the same discipline as `pinnedVaultSlotForEndpoint`: the
+ * generic openai-compat tile matches ANY host, so letting it lend a display name
+ * would label `api.mistral.ai.attacker.com` as "Mistral". The hostname matching
+ * itself is `resolveCatalogKey`'s, which already refuses that suffix trick.
+ *
+ * The provider key is compared CASE-FOLDED. It reaches here from
+ * `LYNOX_TIER_SET_JSON`, an untrusted boundary, and an exact-case ladder let a
+ * single capital letter (`'Mistral'`) skip every branch and fall through to the
+ * raw-key path — which printed the brand "Mistral" for an arbitrary endpoint,
+ * defeating the pinning above. For the same reason the raw-key fall-through
+ * refuses any name that collides with a brand we DO verify.
+ *
+ * The wire labels ('OpenAI-compatible' / 'Custom') are what the status bar
+ * printed before hybrid routing existed. They are honest rather than vague:
+ * they state what we know — the wire — and claim no brand we cannot verify.
+ */
+export function providerIdentity(
+  provider: ProviderKey,
+  apiBaseURL?: string | undefined,
+  catalog: LLMCatalog = LLM_CATALOG,
+): ProviderIdentity {
+  const folded = provider.trim().toLowerCase();
+  const native = NATIVE_IDENTITIES.get(folded);
+  if (native) return native;
+
+  // Re-stated as literals rather than narrowed in place: `ProviderKey` is an
+  // OPEN union (`string & {}`), so an `=== 'openai'` comparison does not narrow.
+  const wire: LLMProvider | undefined =
+    folded === 'openai' ? 'openai' : folded === 'custom' ? 'custom' : undefined;
+  if (wire) {
+    const catKey = resolveCatalogKey(wire, apiBaseURL, catalog);
+    const entry = catalog.find((e) => catalogEntryKey(e) === catKey);
+    if (entry?.base_url_default) return { key: `preset:${catKey}`, label: entry.display_name };
+    // Generic tile. The label cannot tell two proxies apart, so the KEY carries
+    // the host — otherwise a second, differently-configured endpoint would be
+    // deduped away and its outage would never reach the status bar.
+    return {
+      key: `endpoint:${wire}:${endpointHost(apiBaseURL)}`,
+      label: wire === 'openai' ? 'OpenAI-compatible' : 'Custom',
+    };
+  }
+
+  // An unregistered provider key. Print what is configured — bounded and
+  // stripped to plain label characters, because this string reaches the UI —
+  // unless it impersonates a brand this function otherwise only grants to a
+  // verified endpoint.
+  const cleaned = sanitizeLabel(provider).slice(0, 24);
+  // Compare the SANITISED form on both sides. Comparing against the raw
+  // display_name let every brand containing a stripped character through:
+  // 'Ollama (local)' sanitises to 'Ollama local', which matched nothing and was
+  // printed verbatim — a borrowed brand wearing one less bracket.
+  const folded_clean = cleaned.toLowerCase();
+  const impersonates = catalog.some((e) => sanitizeLabel(e.display_name).toLowerCase() === folded_clean)
+    || [...NATIVE_IDENTITIES.values()].some((n) => sanitizeLabel(n.label).toLowerCase() === folded_clean);
+  return {
+    key: `provider:${folded}`,
+    label: cleaned && !impersonates ? cleaned : 'Unknown provider',
+  };
 }
 
 /**

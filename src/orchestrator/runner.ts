@@ -11,7 +11,7 @@ import { buildApprovalSet } from '../core/pre-approve.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, resolveTaskTemplate, resolveInputTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
-import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
 import { channels } from '../core/observability.js';
 import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from '../types/orchestration.js';
@@ -48,6 +48,14 @@ export interface RunManifestOptions {
    * tagged with the originating step's id + task. Omit for autonomous runs.
    */
   parentPrompt?: SubAgentPromptHandles | undefined;
+  /**
+   * The workflow name to put on this run's prompts, when it is not
+   * `manifest.name`. Exists for SYNTHETIC manifests: `spawnPipeline` builds a
+   * sub-manifest called `<stepId>-sub`, which is a machine id the user has never
+   * seen — naming it in a confirmation dialog is worse than naming the workflow
+   * they actually started. Omit and `manifest.name` is used.
+   */
+  originWorkflowName?: string | undefined;
   /**
    * Per-run prompt budget. When omitted, a fresh PromptBudget is created from
    * the parent's existing budget (sub-pipelines inherit) or from the user
@@ -108,6 +116,18 @@ export interface RunManifestOptions {
    * unchanged pre-fix behaviour (the step agent's `secretStore` stays undefined).
    */
   secretStore?: SecretStoreLike | undefined;
+  /**
+   * Run-level untrusted-content accumulator (see {@link RunTaint} in
+   * runtime-adapter.ts). Created per run by the pipeline entrypoints — seeded
+   * from the calling agent in-session, clean for headless runs — and MUTATED by
+   * the real step spawners (inline / named-agent; `spawnMock` never touches
+   * it): an armed accumulator arms each step agent's sticky
+   * latch before send, and each finished step folds what it saw back in. This
+   * is the cross-STEP counterpart of spawn.ts's parent↔child taint seed; a
+   * nested sub-pipeline shares the same object so taint crosses nesting levels.
+   * Absent (ad-hoc tests, legacy callers) = pre-fix behaviour: steps start clean.
+   */
+  runTaint?: RunTaint | undefined;
 }
 
 /**
@@ -132,6 +152,7 @@ export interface RunCtxInput {
   limits?: WorkflowLimits | undefined;
   secretStore?: SecretStoreLike | undefined;
   workflowId?: string | undefined;
+  runTaint?: RunTaint | undefined;
 }
 
 /**
@@ -163,6 +184,7 @@ export function buildRunCtx(input: RunCtxInput): RunManifestOptions {
     limits: input.limits,
     secretStore: input.secretStore,
     workflowId: input.workflowId,
+    runTaint: input.runTaint,
   };
 }
 
@@ -234,6 +256,27 @@ export async function runManifest(
     const limit = config.pipeline_prompt_budget ?? DEFAULT_PROMPT_BUDGET;
     const budget = options.promptBudget ?? new PromptBudget(limit);
     parentPrompt = { ...parentPrompt, promptBudget: budget };
+  }
+  // Name the workflow on every prompt its steps raise. Unlike the budget this
+  // is set at EVERY depth and overwrites a parent's: a step belongs to the
+  // manifest that declares it, so a REAL nested workflow names itself rather
+  // than the outer one, which would point the user at a step list that does not
+  // contain the step asking.
+  //
+  // `originWorkflowName` is the exception, and it exists because that rule has a
+  // blind spot: `spawnPipeline` wraps a composed step in a manifest called
+  // `<stepId>-sub`, and preferring THAT swaps a name the user started for one
+  // they have never seen. The caller that knows the manifest is synthetic says so.
+  //
+  // An empty name is dropped rather than carried. `validateManifest` requires
+  // min(1), but `runManifest` does not itself validate, and a stored `''` would
+  // travel all the way to the renderer as a workflow that asked and cannot be
+  // named — which is the one thing the origin line must never say.
+  if (parentPrompt) {
+    const originName = options.originWorkflowName ?? manifest.name;
+    parentPrompt = originName
+      ? { ...parentPrompt, workflowName: originName }
+      : { ...parentPrompt, workflowName: undefined };
   }
 
   // Session counters for this pipeline run. When invoked from a chat
@@ -525,7 +568,11 @@ function recordStepRow(
       tokensIn: output.tokensIn,
       tokensOut: output.tokensOut,
       costUsd: output.costUsd,
-      modelTier: step.model ?? 'balanced',
+      // F1: record the tier an undeclared step actually RAN on. This row feeds
+      // getAvgStepCostByModelTier — a wrong tier here poisons the per-tier cost
+      // estimate the plan preview shows. Agent/mock runtimes keep the legacy
+      // fallback (their tier lives in the AgentDef, which this record can't see).
+      modelTier: step.model ?? (step.runtime === 'inline' ? undeclaredInlineStepTier(step) : 'balanced'),
     });
     acc.push({
       rowId, result: output.result,
@@ -644,7 +691,7 @@ async function executeStep(
     if (options.mockResponses !== undefined || step.runtime === 'mock') {
       r = await spawnMock(step, options.mockResponses ?? new Map());
     } else if (step.runtime === 'pipeline') {
-      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId);
+      r = await spawnPipeline(step, stepContext, config, options.parentTools ?? [], options.depth ?? 0, options.parentPrompt, options.userTimezone, stepCounters, options.parentMemory ?? null, options.autonomy, options.capabilityContract, options.runHistory, options.secretStore, state.runId, options.runTaint);
       costUsd = 0; // Cost comes from sub-pipeline steps (tracked individually)
     } else if (step.runtime === 'inline') {
       if (!options.parentTools) {
@@ -662,12 +709,13 @@ async function executeStep(
         (resolvedTask !== step.task || resolvedInputTemplate !== step.input_template)
           ? { ...step, task: resolvedTask, input_template: resolvedInputTemplate }
           : step;
-      // Check session budget before spawning step agent
-      const stepModel = resolveModelForCost(step, 'balanced', config);
+      // Check session budget before spawning step agent — same undeclared-tier
+      // default as the spawn (F1), so the budget prices the model that runs.
+      const stepModel = resolveModelForCost(step, undeclaredInlineStepTier(step), config);
       stepModelId = stepModel; // A2: stamp the resolved model on the step run at finalize
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore);
+      r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     } else {
@@ -677,7 +725,7 @@ async function executeStep(
       stepModelId = stepModel; // A2: stamp the resolved model on the step run at finalize
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
-      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore);
+      r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint);
       costUsd = calculateCost(stepModel, { input_tokens: r.tokensIn, output_tokens: r.tokensOut });
       adjustSessionCost(stepCounters, costUsd - stepEstimate); // correct estimate to actual
     }

@@ -664,7 +664,15 @@ export class RetrievalEngine {
       const record = await this.entityResolver.resolve(
         entity.name, entity.type, scopes, { createIfMissing: false },
       );
-      if (record) resolved.push(record);
+      // An entity outlives the memories it was derived from: `memory_delete` sets
+      // `is_active = 0` on the memory and leaves the entity row alone, and the sweep
+      // that reaps orphans may not run for a long time. Without this check the NAME of
+      // a deleted memory's subject keeps reaching the model through the context graph,
+      // which is not what a user who deleted it expects.
+      //
+      // Dormant, not "no active mentions" — an entity that never had a mention (every
+      // DataStore collection is one) must still resolve.
+      if (record && !this.db.entityIsDormant(record.id)) resolved.push(record);
     }
 
     return resolved;

@@ -210,7 +210,7 @@ function childFor(state: AttributionState, subAgentId: unknown): SubAgentActivit
 }
 
 /** True when the engine attributed this event to a child, known to us or not. */
-function isChildEvent(subAgentId: unknown, subAgent: unknown): boolean {
+export function isChildEvent(subAgentId: unknown, subAgent: unknown): boolean {
 	return (typeof subAgentId === 'string' && subAgentId.length > 0)
 		|| (typeof subAgent === 'string' && subAgent.length > 0);
 }

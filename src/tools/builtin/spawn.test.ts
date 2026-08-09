@@ -28,6 +28,7 @@ interface MockedAgentShape {
   promptTabs?: unknown;
   // F5/S8: spawn seeds the child's sticky taint from a tainted parent.
   noteUntrustedData: ReturnType<typeof vi.fn>;
+  restoreConversationTaint: ReturnType<typeof vi.fn>;
   getCostSnapshot: () => import('../../types/index.js').CostSnapshot | null;
 }
 
@@ -53,6 +54,7 @@ vi.mock('../../core/agent.js', () => ({
     this.promptSecret = config.promptSecret;
     this.promptTabs = config.promptTabs;
     this.noteUntrustedData = vi.fn();
+    this.restoreConversationTaint = vi.fn();
     // Per-instance when a queue is set. The single shared `mockCostSnapshot`
     // cannot express "these two children spent different amounts", so a test
     // that needs per-child cost would be asserting the fixture, not the code.
@@ -615,6 +617,33 @@ describe('spawn_agent tool', () => {
     );
   });
 
+  /**
+   * Dispatch takes about a second; waiting for the children takes minutes. The
+   * `spawn_agent` activity label says "delegating", which described the whole
+   * wait — measured at 212s on a real deep review against a ~1s dispatch. The
+   * handover to a `waiting` phase must be emitted AFTER the batch is announced
+   * (so the UI has the panel to sit under) and BEFORE the parent blocks on the
+   * children, which is the entire window it needs to cover.
+   */
+  it('hands the activity label over to a waiting phase once the batch is running', async () => {
+    const onStream = vi.fn();
+    await spawnAgentTool.handler(
+      { agents: [{ name: 'reviewer', task: 'Review' }] },
+      makeAgent({ onStream: onStream as StreamHandler }),
+    );
+
+    const evs = streamEvents(onStream);
+    const spawnIdx = evs.findIndex((e) => e['type'] === 'spawn');
+    const waitIdx = evs.findIndex((e) => e['type'] === 'tool_progress' && e['phase'] === 'waiting');
+
+    expect(waitIdx).toBeGreaterThan(-1);
+    expect(evs[waitIdx]).toMatchObject({ type: 'tool_progress', tool: 'spawn_agent', phase: 'waiting' });
+    // Ordering is the point: after the announcement, before any child finishes.
+    expect(waitIdx).toBeGreaterThan(spawnIdx);
+    const firstDoneIdx = evs.findIndex((e) => e['type'] === 'spawn_child_done');
+    expect(firstDoneIdx).toBeGreaterThan(waitIdx);
+  });
+
   it('forwards a filtered stream wrapper to child agents for progress visibility', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     const onStream = vi.fn() as StreamHandler;
@@ -919,7 +948,73 @@ describe('spawn_agent tool', () => {
     const agent = makeAgent({ conversationSawUntrusted: true } as Partial<IAgent>);
     await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
     const child = vi.mocked(MockAgent).mock.instances[0] as unknown as MockedAgentShape;
+    // The GATE is armed either way — this asserts the child ends up tainted, whichever
+    // method carried it. Which one it is, and why that matters, is the next test.
+    expect(
+      child.noteUntrustedData.mock.calls.length + child.restoreConversationTaint.mock.calls.length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('F5/S8: an INHERITED taint seeds the sticky latch only — not the run marker', async () => {
+    // The gate is identical either way, but the marker is also what gets REPORTED: the review
+    // chip names the cause. `noteUntrustedData()` here would make a turn that read nothing
+    // external claim it processed third-party content — and then the child back-taints the
+    // parent with that same false marker, so the chip lies on the parent's turn too.
+    // `agent.ts` says exactly this where it introduces `restoreConversationTaint`.
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const agent = makeAgent({ conversationSawUntrusted: true } as Partial<IAgent>);
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
+    const child = vi.mocked(MockAgent).mock.instances[0] as unknown as MockedAgentShape;
+    expect(child.restoreConversationTaint).toHaveBeenCalled();
+    expect(child.noteUntrustedData).not.toHaveBeenCalled();
+  });
+
+  it('F5/S8: a parent tainted THIS turn does seed the run marker', async () => {
+    // The pair: routing everything through restoreConversationTaint would also pass the test
+    // above, and would under-report a turn that genuinely handled wrapped external content.
+    const { Agent: MockAgent } = await import('../../core/agent.js');
+    const agent = makeAgent({ sawUntrustedData: true, conversationSawUntrusted: true } as Partial<IAgent>);
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
+    const child = vi.mocked(MockAgent).mock.instances[0] as unknown as MockedAgentShape;
     expect(child.noteUntrustedData).toHaveBeenCalled();
+  });
+
+  it('S8 reverse: a child tainted only by inheritance does not hand the parent a marker', async () => {
+    const parentNote = vi.fn();
+    const parentRestore = vi.fn();
+    const agent = makeAgent({
+      memory: {} as IAgent['memory'],
+      conversationSawUntrusted: true,
+      noteUntrustedData: parentNote,
+      restoreConversationTaint: parentRestore,
+    } as Partial<IAgent>);
+    mockSend.mockImplementationOnce(async function (this: { conversationSawUntrusted?: boolean }) {
+      this.conversationSawUntrusted = true; // inherited only — read nothing itself
+      return 'sub-agent result';
+    });
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
+    expect(parentRestore).toHaveBeenCalled();
+    expect(parentNote).not.toHaveBeenCalled();
+  });
+
+  it('S8 fallback: a parent WITHOUT restoreConversationTaint still receives the hand-off via noteUntrustedData', async () => {
+    // `restoreConversationTaint` is optional on IAgent. An implementation that
+    // omits it must not lose the child→parent taint SILENTLY — the failure
+    // direction would be under-tainting, the wrong one. The fallback hands the
+    // coarser (over-claiming) marker instead: safe direction, and observable.
+    const parentNote = vi.fn();
+    const agent = makeAgent({
+      memory: {} as IAgent['memory'],
+      conversationSawUntrusted: true,
+      noteUntrustedData: parentNote,
+      // deliberately NO restoreConversationTaint
+    } as Partial<IAgent>);
+    mockSend.mockImplementationOnce(async function (this: { conversationSawUntrusted?: boolean }) {
+      this.conversationSawUntrusted = true; // inherited only — read nothing itself
+      return 'sub-agent result';
+    });
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
+    expect(parentNote).toHaveBeenCalled();
   });
 
   it('F5/S8: a clean parent does NOT taint the spawned child', async () => {

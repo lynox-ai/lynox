@@ -35,6 +35,26 @@ describe('tier-presets (model-presets W2 SoT)', () => {
     }
   });
 
+  it('presets pin ONLY replay-measured Fireworks models — candidates stay picker-only', () => {
+    // The 2026-08-09 candidates (kimi-k3, deepseek-v4-flash, qwen3p7-plus) are
+    // picker-selectable but UNMEASURED — this guard is the mechanism behind the
+    // "no preset pins them before a replay measurement" invariant, which was
+    // otherwise only a comment (pr-review #1162). Extend the set ONLY together
+    // with the measurement.
+    const MEASURED_FIREWORKS = new Set([
+      'accounts/fireworks/models/glm-5p2',
+      'accounts/fireworks/models/deepseek-v4-pro',
+    ]);
+    for (const [name, preset] of Object.entries(TIER_PRESETS)) {
+      for (const [tier, slot] of Object.entries(preset.tier_set)) {
+        if (slot!.api_base_url?.includes('fireworks.ai')) {
+          expect(MEASURED_FIREWORKS.has(slot!.model_id),
+            `${name}.${tier} pins ${slot!.model_id} — Fireworks preset slots require a replay measurement first`).toBe(true);
+        }
+      }
+    }
+  });
+
   it('CN-provenance models appear ONLY via the Fireworks host — never a direct-CN endpoint', () => {
     for (const [name, preset] of Object.entries(TIER_PRESETS)) {
       for (const [tier, slot] of Object.entries(preset.tier_set)) {

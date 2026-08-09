@@ -27,6 +27,20 @@ export interface ProvenanceEvidence {
   sourceChannel?: string | undefined;
   /** The turn that produced this write read untrusted external content. Outranks the channel. */
   sourceUntrusted?: boolean | undefined;
+  /**
+   * A human reviewer was shown this exact text in the review queue and accepted it
+   * (`review_action` ∈ `approve` | `edit_approve`). Outranks everything — see rule 0.
+   *
+   * ⚠️ SECURITY PRECONDITION, stated as what it is rather than as a guarantee: rule 0 is only
+   * sound while the review action is genuinely a human act. Within this module the only
+   * producer is `KnowledgeStore.reviewEntry` via the `user`-scoped review route — but whether
+   * that route is reachable by anything else is a property of the DEPLOYMENT (its auth
+   * configuration, its autonomy mode, which tools are exposed), and nothing here enforces it.
+   * An earlier draft of this comment asserted the absolute; it was wrong. Treat a reachable
+   * approve path as an escalation from `external_unverified` to `user_asserted` in one step,
+   * and re-derive from something the agent cannot assert if the boundary has to move.
+   */
+  reviewApproved?: boolean | undefined;
 }
 
 /**
@@ -44,6 +58,15 @@ export interface ProvenanceEvidence {
  * a clean tool-result ingest path is its own future arc.
  */
 export function deriveProvenanceTier(ev: ProvenanceEvidence): ProvenanceKind {
+  // Rule 0 — a human reviewer accepted this exact text. Outranks rule 1 on purpose, and the
+  // distinction is narrow: rule 1 distrusts a human WRITE made on a turn that had attacker text
+  // in context, because nobody asked the operator to vouch for that text. A review approval is
+  // the opposite situation — the queue shows the reviewer the entry itself and the only thing
+  // the action means is "I vouch for this". Without this rule an approved entry stores
+  // `user_asserted` while its own evidence re-derives to `external_unverified`, the far end of
+  // the ordering — which breaks the invariant this function's contract rests on
+  // (`DEF-dk-trust-gate-consistency` (d)). See `reviewApproved` for why the agent cannot set it.
+  if (ev.reviewApproved === true) return 'user_asserted';
   // Rule 1 — untrusted OUTRANKS the channel. A `ui`/`user` write on a turn that read a
   // malicious document is not first-party trust; the operator may be relaying attacker text.
   if (ev.sourceUntrusted === true) return 'external_unverified';
@@ -75,8 +98,47 @@ export function deriveProvenanceTier(ev: ProvenanceEvidence): ProvenanceKind {
  * scalar `provenanceRank === N`, which would silently cement the inversion).
  */
 export function provenanceRank(kind: ProvenanceKind): number {
-  return (ALL_PROVENANCE_KINDS.length - 1) - ALL_PROVENANCE_KINDS.indexOf(kind);
+  const index = ALL_PROVENANCE_KINDS.indexOf(kind);
+  // FAIL CLOSED on a value this build does not know. `indexOf` answers -1, and the
+  // reversal above turns -1 into `length` — a rank ABOVE `user_asserted`, so an
+  // unrecognised tier would outrank every real one and `canSupersede(<unknown>,
+  // 'user_asserted')` returned true: the one direction this gate must never take.
+  // The tier is read back from a TEXT column, so "unknown" is not hypothetical — a
+  // migration, a hand-edited row, or a future build's new tier name all produce one,
+  // and the current fleet simply has none yet (checked: every stored value is in the
+  // enum). An unknown tier is untrusted BY DEFINITION: we cannot place what we cannot
+  // name, so it sorts below everything nameable.
+  if (index === -1) return -1;
+  return (ALL_PROVENANCE_KINDS.length - 1) - index;
 }
+
+/**
+ * Two consequences of the `-1` sentinel that are deliberate, because they follow from
+ * the arithmetic rather than from a decision, and arithmetic is a poor place to leave
+ * a trust rule implicit:
+ *
+ *  - **Unknown vs unknown supersedes** (`-1 >= -1`). Two unrecognised tiers rank equal
+ *    and the equal-trust rule is newest-wins, so one may retire the other. This is not a
+ *    trust loss (neither is trusted) and it is what keeps an unknown row CORRECTABLE
+ *    rather than wedged. Reachable: `agent-memory-db.ts` compares two DB-sourced tiers.
+ *  - **A dedup hit against an unknown row now RAISES it.** `knowledge-layer.ts` decides
+ *    `tier-raise` vs `confirm` on `rank(incoming) > rank(existing)`; with the old
+ *    fail-open sentinel no known tier could beat an unknown row, so it stayed unknown
+ *    forever. Now any nameable tier raises it — supersede-not-mutate, so reversible.
+ *    That is a repair path the fail-open version did not have.
+ *  - **Even `external_unverified` may now supersede an unknown row** (`0 >= -1`, where
+ *    it was `0 >= 4` = false). Stated because it is the one direction that WIDENS: the
+ *    injection-seeded tier can act on an unknown row where it previously could not. The
+ *    alternative — letting only a high tier correct an unknown row — buys little (an
+ *    unknown row is untrusted either way) and costs the total order a special case, so
+ *    the simple ordering wins. Revisit if unknown tiers ever become routine rather than
+ *    the zero-occurrence case measured here.
+ *
+ * The same sentinel also fixes the KEEPER SORT, which is the half of this that bites
+ * without any retire at all: consolidation sorts a cluster by rank descending
+ * (`agent-memory-db.ts`), so a rank above `user_asserted` made an unknown row the
+ * survivor and dropped the user's own duplicate. Both halves are one ordering bug.
+ */
 
 /**
  * The trust gate primitive: may a write of tier `newTier` retire (supersede) an

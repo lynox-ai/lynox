@@ -53,6 +53,49 @@ describe('P0 — provenanceRank / canSupersede (trust total order)', () => {
     expect(canSupersede('agent_inferred', 'tool_verified')).toBe(false);
   });
 
+  it('an UNKNOWN tier fails CLOSED — it may retire nothing, and nothing outranks it', () => {
+    // The tier is read back from a TEXT column and cast `as ProvenanceKind` at both
+    // gate call sites (`agent-memory-db.ts`, `memory-graph-store.ts`), so the type is an
+    // assertion about the database, not a guarantee from it. `indexOf` answers -1 for a
+    // value this build cannot name, and the rank reversal turned that -1 into a rank
+    // ABOVE `user_asserted` — so an unrecognised tier could retire a user's own truth,
+    // the exact direction the gate exists to forbid.
+    //
+    // Measured before fixing: no such value exists in the fleet today (every stored
+    // `source_type` is in the enum). This is fixed anyway because the failure is in the
+    // guard's DIRECTION: a gate that opens on input it does not understand is wrong
+    // independently of whether that input has arrived yet, and the ways one arrives —
+    // a migration, a hand-edited row, a newer build writing a tier this one predates —
+    // are all silent.
+    const unknown = 'tier_from_a_future_build' as ProvenanceKind;
+    for (const known of ALL_PROVENANCE_KINDS) {
+      expect(canSupersede(unknown, known)).toBe(false);
+    }
+    // ...and it is itself retireable by anything nameable, so an unknown row is not
+    // permanently un-correctable — the fail-closed direction must not create a wedge.
+    for (const known of ALL_PROVENANCE_KINDS) {
+      expect(canSupersede(known, unknown)).toBe(true);
+    }
+    // Two unknowns rank EQUAL, and the equal-trust rule is newest-wins, so one may
+    // retire the other. Neither is trusted, so this loses no trust — and it is what
+    // keeps a pair of unknown rows correctable instead of frozen against each other.
+    // Reachable: `agent-memory-db.ts` compares two DB-sourced tiers, so both sides can
+    // be unknown at once. Asserted rather than left to fall out of `-1 >= -1`.
+    expect(canSupersede(unknown, 'another_unknown_tier' as ProvenanceKind)).toBe(true);
+  });
+
+  it('a dedup hit against an UNKNOWN-tier row raises it instead of confirming it', () => {
+    // `knowledge-layer` picks `tier-raise` over `confirm` on `rank(incoming) >
+    // rank(existing)`. Under the old fail-open sentinel an unknown row outranked every
+    // real tier, so nothing could ever raise it and it stayed unknown forever. The
+    // fail-closed sentinel turns that into a repair path — a second consequence of the
+    // same change, and one worth pinning because nothing else in the diff mentions it.
+    const unknown = 'tier_from_a_future_build' as ProvenanceKind;
+    for (const known of ALL_PROVENANCE_KINDS) {
+      expect(provenanceRank(known) > provenanceRank(unknown)).toBe(true);
+    }
+  });
+
   it('the rank is a strict total order following the array position (highest-first → reverse)', () => {
     // user_asserted is index 0 in ALL_PROVENANCE_KINDS but MOST trusted → highest rank.
     expect(provenanceRank('user_asserted')).toBeGreaterThan(provenanceRank('tool_verified'));
@@ -210,21 +253,29 @@ describe('Backstops — direct retire primitives (both stores)', () => {
     db.close();
   });
 
-  it('MemoryGraphStore.markSuperseded refuses a downgrade when passed a lower newTier', () => {
+  it('MemoryGraphStore.markSuperseded REPORTS a tier disagreement and retires anyway', () => {
     const engine = new EngineDb(join(dir, 'engine.db'), 'vault-key-bs');
     const mgs = new MemoryGraphStore(engine);
     const emb = Buffer.alloc(8 * 8);
     mgs.upsertStub({ id: 'truth', text: 't', namespace: NS, scopeType: 'context', scopeId: 's', sourceType: 'user_asserted', embedding: emb });
-    // A lower-trust supersede is refused (newTier below the stored tier).
-    mgs.markSuperseded('truth', 'incoming', { newTier: 'agent_inferred' });
-    expect(mgs.getStub('truth')!.is_active).toBe(1);
-    // An equal-or-higher newTier retires it.
-    mgs.markSuperseded('truth', 'incoming', { newTier: 'user_asserted' });
+    // A lower incoming tier than the stub holds: the two stores disagree about this row
+    // (agent-memory.db already allowed the retire, or the mirror would not be running).
+    // Reported with BOTH compared tiers — and the retire still lands, because refusing here
+    // could only split the two stores, never undo the legacy retire that already committed.
+    expect(mgs.markSuperseded('truth', 'incoming', { newTier: 'agent_inferred' }))
+      .toEqual({ newTier: 'agent_inferred', stubTier: 'user_asserted' });
     expect(mgs.getStub('truth')!.is_active).toBe(0);
-    // Undefined newTier (consolidation mirror / flag off) → unconditional legacy retire.
+    // Agreement (equal-or-higher incoming tier) → nothing to report, same retire.
     mgs.upsertStub({ id: 'truth2', text: 't2', namespace: NS, scopeType: 'context', scopeId: 's', sourceType: 'user_asserted', embedding: emb });
-    mgs.markSuperseded('truth2', 'incoming2');
+    expect(mgs.markSuperseded('truth2', 'incoming', { newTier: 'user_asserted' })).toBeNull();
     expect(mgs.getStub('truth2')!.is_active).toBe(0);
+    // Undefined newTier (consolidation mirror / flag off) → no comparison at all.
+    mgs.upsertStub({ id: 'truth3', text: 't3', namespace: NS, scopeType: 'context', scopeId: 's', sourceType: 'user_asserted', embedding: emb });
+    expect(mgs.markSuperseded('truth3', 'incoming3')).toBeNull();
+    expect(mgs.getStub('truth3')!.is_active).toBe(0);
+    // No stub to compare → no report; the UPDATE no-ops on a missing row as before.
+    expect(mgs.markSuperseded('ghost', 'incoming', { newTier: 'external_unverified' })).toBeNull();
+    expect(mgs.getStub('ghost')).toBeNull();
     engine.close();
   });
 

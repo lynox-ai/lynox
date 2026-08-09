@@ -5,7 +5,7 @@ import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedM
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
 import { Agent, RunAbortedError } from '../../core/agent.js';
-import { deriveTurnUntrusted } from '../../core/untrusted-signals.js';
+import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import type { AgentConfig } from '../../types/index.js';
 import { loadConfig } from '../../core/config.js';
 import { getPricing } from '../../core/pricing.js';
@@ -641,7 +641,17 @@ async function executeThinker(
     // without this an injected write would launder to active+pinned through the child. Arm the
     // child's STICKY conversation latch (survives its send() per-run reset, unlike sawUntrustedData)
     // so any such write routes to pending_review. Over-taints in the safe direction only.
-    if (deriveTurnUntrusted(parentAgent)) {
+    // Propagate the parent's CAUSE, not a blanket marker. `noteUntrustedData()` arms the
+    // run-scoped marker as well as the sticky latch — which claims "this run handled wrapped
+    // external content" for a child that merely inherited a conversation's history. The gate
+    // is identical either way (both OR into `deriveTurnUntrusted`), but the marker is also
+    // what gets REPORTED: the review chip names the cause, so a wrong one tells the operator
+    // this turn read something external when nothing did. `agent.ts` says as much where it
+    // introduces `restoreConversationTaint` for exactly this distinction.
+    const parentCause = describeTurnUntrusted(parentAgent);
+    if (parentCause === 'conversation') {
+      childAgent.restoreConversationTaint?.();
+    } else if (parentCause !== 'none') {
       childAgent.noteUntrustedData();
     }
 
@@ -656,8 +666,22 @@ async function executeThinker(
     // FULL union, not the bare marker — a child that read external content via a non-wrapping
     // tool (web_research/mail/read_file) must taint the parent too, symmetric with the
     // parent→child seed above. No-op when the child ran with isolated memory (`memory === undefined`).
-    if (memory !== undefined && deriveTurnUntrusted(childAgent)) {
-      parentAgent.noteUntrustedData?.();
+    if (memory !== undefined) {
+      // Same distinction on the way back: a child tainted only by the inherited conversation
+      // must not hand the parent a marker it never earned.
+      const childCause = describeTurnUntrusted(childAgent);
+      if (childCause === 'conversation') {
+        // `restoreConversationTaint` is OPTIONAL on IAgent, and an implementation
+        // that omits it would lose the child→parent hand-off SILENTLY — no error,
+        // just a turn that looks clean and is not (pipeline.ts already calls
+        // `noteUntrustedData` optionally, so partial IAgent implementations have
+        // precedent). Fall back to the coarser signal: over-tainting the parent's
+        // run marker is the safe direction; losing the taint is not.
+        if (parentAgent.restoreConversationTaint) parentAgent.restoreConversationTaint();
+        else parentAgent.noteUntrustedData?.();
+      } else if (childCause !== 'none') {
+        parentAgent.noteUntrustedData?.();
+      }
     }
 
     // T2-X1 part 5: record the child's actual LLM spend into the same
@@ -870,6 +894,14 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
 
     if (agent.onStream) {
       await agent.onStream({ type: 'spawn', spawnId, subAgents, estimatedCostUSD: totalEstimate, agent: agent.name });
+      // Hand the activity label over from "delegating" to "waiting". Dispatch is
+      // over by this line; everything after it is the parent BLOCKED on
+      // `Promise.allSettled` below. Without this the status sits on "Delegating
+      // to sub-agents…" for the entire child run — measured at 212s on a real
+      // deep review, describing a step that took about a second. `api_setup`
+      // already uses this same tool_progress channel for a 5-8s gap; the
+      // minutes-long one had no phase at all.
+      await agent.onStream({ type: 'tool_progress', tool: 'spawn_agent', phase: 'waiting', agent: agent.name });
     }
 
     // Sub-agent progress state — visible to the UI via forwarded events.

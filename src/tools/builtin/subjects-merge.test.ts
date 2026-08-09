@@ -106,6 +106,51 @@ describe('subjects_merge tool (PR-C3)', () => {
     expect(subjectsMergeTool.destructive).toEqual({ mode: 'data' });
   });
 
+  it('merges ORGANIZATIONS when told the kind, and is UNREACHABLE for them without it', async () => {
+    // The tool resolved `person` only, while `organization` is the durable-knowledge
+    // write path's DEFAULT kind and the bulk of a real graph — so the one user-reachable
+    // way to fix a duplicate could not name most of what needed fixing.
+    // Both halves are asserted, and they catch DIFFERENT regressions: hardcoding `kind`
+    // back to 'person' is caught by the without-kind half below (it would stop erroring),
+    // while the with-kind half catches a silent cross-kind fallback — a resolver that
+    // ignores the kind and finds the person 'Ada' when asked for an organization.
+    const id = (r: { ambiguous: boolean } & Record<string, unknown>): string => {
+      if (r.ambiguous) throw new Error('fixture should not be ambiguous');
+      return r['id'] as string;
+    };
+    const canon = id(subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG' }));
+    const dup = id(subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau' }));
+    const other = id(subjects.findOrCreate({ kind: 'organization', name: 'Nordberg AG' }));
+
+    const withoutKind = await subjectsMergeTool.handler(
+      { duplicate: 'Meridian Bau', canonical: 'Meridian Bau AG' }, makeAgent('Merge'));
+    expect(withoutKind).toMatch(/no person named/);
+    expect(subjects.getSubject(dup)!.merged_into).toBeNull();
+
+    const res = await subjectsMergeTool.handler(
+      { duplicate: 'Meridian Bau', canonical: 'Meridian Bau AG', kind: 'organization' }, makeAgent('Merge'));
+    expect(res).not.toMatch(/^Error/);
+    expect(subjects.getSubject(dup)!.merged_into).toBe(canon);
+    expect(subjects.getSubject(other)!.merged_into).toBeNull();   // untouched
+  });
+
+  it('refuses a kind it must not merge by name', async () => {
+    // `engagement` identity is provider×client×period, not the name; merging two by
+    // name would fold distinct pieces of work that merely share a title.
+    const agent = makeAgent('Merge');
+    const res = await subjectsMergeTool.handler(
+      { duplicate: 'A', canonical: 'B', kind: 'engagement' }, agent);
+    expect(res).toMatch(/`kind` must be one of/);
+    expect(agent.promptUser).not.toHaveBeenCalled();
+  });
+
+  it('still defaults to person when no kind is given', async () => {
+    const agent = makeAgent('Merge');
+    const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);
+    expect(res).not.toMatch(/^Error/);
+    expect(subjects.getSubject(dupId)!.merged_into).toBe(canonId);
+  });
+
   it('hard-refuses in autonomous mode even WITH a wired promptUser (no rubber-stamp notification)', async () => {
     // The worker loop runs autonomous AND wires promptUser to a notification, so the
     // requiresConfirmation/[BLOCKED] path alone would escalate a rubber-stampable "Merge X into

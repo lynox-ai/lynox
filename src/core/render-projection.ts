@@ -70,6 +70,10 @@ export interface RenderedUsage {
   cacheWrite: number;
   costUsd: number;
   model?: string;
+  /** Sub-agent spend for this turn (see `RunUsageSummary.spawnCostUsd`). Carried
+   *  through the projection so a reloaded thread shows the same total as the
+   *  live one — the footer adds it to `costUsd`. */
+  spawnCostUsd?: number;
   /** Diagnostics fields persisted in usage_json (see RunUsageSummary) so the
    *  opt-in diagnostics panel survives a thread resume. */
   runId?: string;
@@ -227,6 +231,12 @@ function parseUsage(raw: string | null): RenderedUsage | undefined {
     if (typeof u['model'] === 'string') usage.model = u['model'].slice(0, 64);
     if (typeof u['runId'] === 'string') usage.runId = u['runId'].slice(0, 64);
     if (typeof u['durationMs'] === 'number') usage.durationMs = u['durationMs'];
+    // Only carried when positive: the writer omits the key for a turn that
+    // delegated nothing, and a stored 0 would add a pointless "+$0.00" split to
+    // the footer tooltip.
+    if (typeof u['spawnCostUsd'] === 'number' && u['spawnCostUsd'] > 0) {
+      usage.spawnCostUsd = u['spawnCostUsd'];
+    }
     return usage;
   } catch {
     return undefined;

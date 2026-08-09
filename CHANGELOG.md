@@ -1,5 +1,156 @@
 # Changelog
 
+## 2.13.0 — 2026-08-09
+
+A cost release. Its origin is one afternoon of real usage: a customer's
+workflow ran a 2000-contact pagination step on the premium tier with the full
+toolset — including a shell nobody asked for — and an approval dialog could not
+say who was asking. Every default this release changes is one nobody had
+chosen.
+
+### Changed
+- **A workflow step that declares no capability tier runs on `fast`.** The
+  resolution chain is step > role > `fast`; the session default deliberately no
+  longer reaches steps. Measured before shipping on the mechanical shape that
+  prompted it (2000 contacts, 100 per page, stop signal = empty page, three
+  repeats per tier): the fast tier was 3/3 perfect on every gate — all pages,
+  no duplicates, correct total. A declared step tier and a role tier still win.
+  The budget check, the step record, and the plan-time estimate share the same
+  fallback, so none of the four surfaces can disagree about what an undeclared
+  step costs. (#1157)
+- **A generated workflow step declares its tools; `bash` is never granted
+  silently.** The planner (plan_task and the auto-planner) must name the tools
+  each step needs; the step gets exactly those, drawn from the inline-safe
+  pool. A step that declares nothing keeps the pool minus `bash` — a shell now
+  requires a declaration or a role grant, never a default. A typo'd tool name
+  fails loudly at save with the grantable list instead of degrading to a silent
+  "tool not available" mid-run. Validated on the wire across providers: 18/18
+  generated steps declared valid sets, and neither model reached for bash
+  without a reason. (#1157)
+- **A saved artifact's body leaves the conversation on the next turn.** After a
+  successful `artifact_save`, the body in the conversation buys nothing — the
+  artifact is persisted, the result names its id and file path, and the agent
+  can read the file if it needs the content again. Measured on a real thread:
+  134 KB of artifact bodies re-read as cache writes on every subsequent run,
+  19.1% of that thread's cost. The turn that produced the save keeps its body;
+  a failed save keeps it forever (it is the only copy left); the persisted
+  thread history — what the UI renders and debug-export reads — is untouched.
+  (#1158)
+
+### Fixed
+- **The composer stays at the bottom of the chat.** With a tall block between
+  transcript and composer — a changeset review, a batch of approval dialogs, a
+  running workflow's progress — the whole column grew past the shell and the
+  composer rode out of the viewport. The non-transcript stack is now capped
+  and scrolls internally; the conversation keeps at least 40% of the height.
+  Reported from a phone and a Windows PC during a live workflow run. (#1156)
+- **The auto-planner's per-step tier choice reaches the pipeline.** The plan
+  conversion dropped the `model` field, so every auto-planned step ran on the
+  undeclared default despite the planner declaring a tier per step. (#1157)
+- **In-session workflow spend is billed per step under the tier the step ran
+  on.** One aggregated debit under the session tier would have reported
+  fast-tier spend as balanced — the same mis-attribution 2.12.1's predecessor
+  fixed for helper calls, on a new surface. (#1157)
+
+### Upgrade and rollback
+One engine-schema migration (history.db v52, additive: approval prompts carry
+their origin). Two control-plane migrations pending from 2.12.x, both additive
+and idempotent. Rolling back to 2.12.1 is safe: evicted artifact bodies exist
+only in the wire-side conversation, never in stored history, and the new step
+fields are optional everywhere.
+
+## 2.12.1 — 2026-08-08
+
+A patch for two things the status bar and the composer were getting wrong on a
+hybrid setup, plus the dependency pin that forced the cut.
+
+### Fixed
+- **The status bar names every provider the router reaches.** It reported one.
+  Under hybrid routing each tier can sit on a different provider, but the list
+  was assembled from two hard-coded slots — the top-level provider, and Mistral
+  if its key was set and the primary was not already Mistral. An instance routing
+  fast→Mistral, balanced→Fireworks and deep→Anthropic therefore named one of the
+  three, and when the primary *was* Mistral the second slot was suppressed too.
+  The list is now derived from the tier set, and each provider is counted once
+  even when two tiers share it. (#1149)
+- **The deferred follow-ups tray is removed.** It captured the un-taken
+  suggestions of a chip you clicked, automatically, and pinned them above the
+  composer until you dismissed them by hand — then had to guess whether a later,
+  rephrased suggestion was one it already held. That guess was an exact string
+  comparison over text the model rewrites every turn, so it never matched: the
+  shelf grew, showed near-duplicates of the live chips, and cost a permanent row
+  on a phone. Follow-up suggestions are now inline only, for the turn that
+  offered them. The replacement is an explicit one — you mark what to keep — and
+  is being designed rather than patched in. (#1150)
+
+### Security
+- **nanoid is pinned past `GHSA-2v37-7h3g-55p8`** (CVSS 8.2), in the root tree
+  and in the docs tree, which has its own lockfile. Neither was introduced here;
+  the advisory is new. (#1151)
+
+### Also worth knowing
+- `GET /api/providers/status` and `GET /api/provider/status` now require
+  authentication. They were public, which was defensible while they reported a
+  vendor's status page — they now report which providers *this* instance routes
+  to and which of them recently failed, which is instance configuration. The web
+  UI already sent credentials on both calls.
+- The dependency scan reads the root lockfile only, so the docs tree — a
+  separate, non-workspace package — is invisible to it, including to the release
+  gate. Found while fixing the advisory above and tracked; not switched on in a
+  patch, because doing so fails every open branch the moment it lands.
+
+### Upgrade and rollback
+Nothing to migrate; no schema change in either repo. Rolling back to 2.12.0
+restores the tray, including any entries still persisted from before the
+removal — nothing was deleted from storage.
+
+## 2.12.0 — 2026-08-07
+
+A memory release. The durable knowledge store stops being an opt-in experiment and becomes the default for newly provisioned managed tenants, which raises a question the earlier phase could postpone: if the agent keeps what it learns, you have to be able to see it, correct it, and delete it. So this release ships the other half — a fact you can drop, a subject you can erase from both stores, a chip that says what it is asking about, and a recall surface that reports what is still waiting by count rather than by adjective. Alongside it, delegation stops being invisible: a sub-agent's activity is attributed to the sub-agent, and a delegated turn says what it cost and how long you waited. Calendar reading arrives as an ICS feed reader and ships **off on every tenant**. Two control-plane migrations, both additive; the engine schema does not move.
+
+### Added
+- **Durable knowledge is the default for new managed tenants.** The per-tenant column's default flips to `true`. Existing rows are untouched, so a tenant switched off by hand stays off, and the operator flip remains the way to change one.
+- **Erasure that reaches both stores.** A subject or entry can be deleted, and the reap that removes its orphans actually runs. A tenant on durable knowledge has data in two databases, and until now only one of them had a delete path. (#1119, #1137, #1142)
+- **The always-loaded profile block is seeded from the onboarding answers**, so what you told the agent on day one is present on every turn instead of waiting to be retrieved. (#1136)
+- **Recall says what is waiting.** A conversation with unconfirmed facts says so, by count — never by wording that implies more or less certainty than the number supports. (#1141, #1143)
+- **Calendar reading from an ICS feed**, with a settings page that says where to find the address. **Off by default and off on every tenant in this release** — with the flag off the tool is not registered at all, so the decision space and the cached prefix are byte-identical to a build without it. (#1144, #1145)
+- **Sub-agent attribution.** A delegated run's activity is shown as the sub-agent's, not the main chat's, and the composer is no longer blocked while one is in flight. The run names the provider and model id it actually used. (#1100, #1098)
+- **A delegated turn reports its cost and its wait.** (#1101, #1111)
+- **Basic and split user/password auth** are implemented paths in API setup rather than options that could be selected and then failed. (#1138)
+- **A capture-fitness evaluation with a labelled denominator** — the measurement that produced the funnel number below. (#1130, #1114)
+
+### Fixed
+- **A wrong fact can be dropped from the Wissen view**, and the knowledge chip says which subject it is asking about instead of showing an unanchored prompt. (#1137, #1139)
+- **An ambiguous alias is refused instead of resolving to whichever row came first.** The lookup now returns either a resolution or the candidate list, so every caller has to decide what to do with an ambiguity rather than inherit a silent pick. (#1108)
+- **The legacy memory archive is no longer written under durable knowledge**, which had been mixing two retention stories in one place. (#1135)
+- **The compaction offer stays with its thread** instead of following the user to the next one, and both of its exits are covered. (#1117, and the thread-scoping fix)
+- **The reasoning channel survives the OpenAI-compat wire** instead of being discarded on the way through.
+- **Follow-up chips are recovered on models that skip the tool call.** (#1099)
+- **The balance mirror clears on an explicit null** rather than freezing at its last value, and a tier disagreement between the mirror and its source is reported instead of hidden. (#1102, #1127)
+- **The cache-miss detector is gated on what was observed on the wire**, not on what the provider config says should be possible. (#1110)
+- **The calendar expander is bounded.** A contracting recurrence rule below `MONTHLY` had no bail-out, so a crafted or merely unlucky feed could search indefinitely; unexpandable rules are now detected up front and skipped, including inside timezone definitions. (#1146)
+- **A helper call is no longer debited twice.** Its cost is added to what a managed tenant is *shown*, and deliberately not to what they are *charged* — the helper already reports its own metered cost under its own run id, and the deduplication is per run id. (#1147)
+
+### Security
+- **An uploaded document is treated as the untrusted content it is.** (#1140)
+- **The wire-capture sinks are refused on a control-plane-provisioned instance**, where the operator is not the only party whose data would land in them. (#1103)
+- **The durable-knowledge trust gate fails closed**, and the write-trust backstop's refusal is consulted rather than discarded. An approved entry derives its tier from evidence that can be re-derived, so an approval cannot silently outrank its own basis. (#1116, #1126, #1128)
+- **One injection channel that detection cannot see is guarded structurally** instead of scanned. (#1113)
+- **The provider key slots are protected from an agent-initiated overwrite.** They are agent-*visible* by design — which is a different question from agent-*writable*. On BYOK an injected write would have destroyed access the operator cannot recover. (#1147)
+- Advisory floors raised past two high-severity findings. (#1134)
+
+### Changed
+- **The merge rule is a check rather than a paragraph.** A pull request now carries a gate record pinned to its head SHA; the check enforces that the record exists and describes the current code, and documents plainly which of its lines it can verify and which are attestations. Binding customer texts additionally require a named human sign-off with a date. (#1104, #1105, #1118)
+- **The durable-knowledge capture rate is a measured number** — 3.4% of carriers on the reference corpus, 4.5% on `mistral-medium` — rather than an assumption. The first denominator this project used was three times too small, because it counted carriers as turns. (#1114)
+- The Fireworks sub-processor scope was corrected to match what the code actually does. (#1109)
+
+### Upgrade and rollback notes
+- **The engine needs nothing on upgrade.** No new tables, no new columns, no schema-version move.
+- **Two control-plane migrations ship**, both additive and idempotent: the durable-knowledge column default flips to `true` (inserts only — existing rows are untouched), and a `calendar_enabled` column is added defaulting to `false`.
+- **Turning durable knowledge back off** is a two-part revert, and it is worth knowing before you need it: the column default has to be set back to `false` *and* the provisioner reverted, because a default is not what an already-provisioned tenant reads. A single tenant is switched with the operator flip plus an env sync. The procedure is written down in the hosting repo's release strategy.
+- **Rolling back to 2.11.0:** nothing to undo by hand. Both new control-plane columns are ignored by the previous build, and durable knowledge written by 2.12.0 is readable by 2.11.0 — what changes is the default a *new* tenant comes up on, not the shape of anyone's data.
+- **The calendar reader is off** and stays off unless a tenant is deliberately flipped on. It is shipped rather than held back because the surface is inert while the flag is false; the open items behind that decision are tracked, not forgotten.
+
 ## 2.11.0 — 2026-07-29
 
 An onboarding and trust release. First run now grounds the agent in the business it is pointed at instead of starting from an empty context: it reads the site, asks the three to five questions that reading made possible, and keeps the answers as durable knowledge rather than chat scrollback. The second theme is confirmation prompts — everything the model writes into one is now rendered as text instead of parsed as markup, so a tool result cannot dress itself up as part of the question you are approving. Claude Opus 5 joins the catalog, and operators get a model blocklist. Engine schema moves to v51 (additive); one control-plane migration ships.

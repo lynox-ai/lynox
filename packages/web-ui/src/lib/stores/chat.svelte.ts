@@ -12,18 +12,21 @@ import {
 	SPAWN_EVENT,
 	SPAWN_PROGRESS_EVENT,
 	SPAWN_CHILD_DONE_EVENT,
+	isChildEvent,
 	type ToolCallInfo,
 	type SpawnProgress,
 	type SubAgentActivity,
 	type ContentBlock,
 } from './chat-attribution.js';
-import { parseFollowUps, followUpsFromToolInput, computeDeferredTray, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
+import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
+import { projectKnowledgeWrite, reviewResolution, retireResolution, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
 import { selectReattachTarget, type ReattachTarget } from '../utils/active-runs.js';
+import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
 // `import { UsageInfo } from './chat.svelte.js'` callers keep working.
@@ -61,17 +64,10 @@ export interface ApiCallCost {
 
 export type { ContentBlock } from './chat-attribution.js';
 
-/** DK-UX inline chip for a durable-knowledge write (from the `knowledge_write` SSE event). */
-export interface KnowledgeWriteChip {
-	id: string;
-	subject?: string | undefined;
-	kind?: string | undefined;
-	status: 'active' | 'pending_review';
-	/** Raw wording (for the untrusted review chip). Client-only; never re-enters model context. */
-	text: string;
-	/** UI-local once the user resolves the chip, so it renders as done and the buttons retire. */
-	resolved?: 'undone' | 'kept' | 'discarded' | undefined;
-}
+// The DK-UX chip type + its pure projection/resolve logic live in `knowledge-chip.ts` (a
+// `.svelte` store can't be imported from a test). Re-exported so existing consumers that
+// import it from the chat store keep working.
+export type { KnowledgeWriteChip } from './knowledge-chip.js';
 
 export interface ChatMessage {
 	role: 'user' | 'assistant';
@@ -185,6 +181,8 @@ export interface PermissionPrompt {
 	/** When true, render the options as multi-select (toggle several + Send)
 	 *  instead of single-click auto-send. */
 	multiSelect?: boolean;
+	/** The workflow step that raised this prompt, when one did. */
+	origin?: PromptOrigin;
 }
 
 /** Question descriptor inside a multi-question tabs prompt. Mirrors the
@@ -205,6 +203,8 @@ export interface TabsPrompt {
 	partialAnswers?: (string | null)[];
 	timeoutMs?: number;
 	receivedAt?: number;
+	/** The workflow step that raised this prompt, when one did. */
+	origin?: PromptOrigin;
 }
 
 interface QueuedMessage {
@@ -253,6 +253,11 @@ interface PersistedChat {
 	 *  user clicked, kept visible + clickable so a second matching suggestion
 	 *  isn't lost when taking the first (rafael 2026-07-17). Plain {label,task}
 	 *  JSON — persisted exactly like `queues`, no payload concern. */
+	/**
+	 * Retired 2026-08-08 with the deferred-follow-ups tray. Kept on the READ
+	 * side of the type so an existing localStorage blob still parses; nothing
+	 * writes it any more, and the entries are inert.
+	 */
 	deferredFollowUps?: Record<string, FollowUpSuggestion[]>;
 }
 
@@ -275,7 +280,6 @@ function readPersistedRoot(): PersistedChat {
 			sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : null,
 			threads: raw.threads ?? {},
 			...(raw.queues ? { queues: raw.queues } : {}),
-			...(raw.deferredFollowUps ? { deferredFollowUps: raw.deferredFollowUps } : {}),
 		};
 	} catch { /* corrupt data */ }
 	return { sessionId: null, threads: {} };
@@ -284,11 +288,6 @@ function readPersistedRoot(): PersistedChat {
 /** Restore a thread's pending send-queue (text-only entries — see PersistedChat.queues). */
 function loadPersistedQueue(threadId: string): QueuedMessage[] {
 	return (readPersistedRoot().queues?.[threadId] ?? []).map((q) => ({ id: q.id, task: q.task }));
-}
-
-/** Restore a thread's deferred-follow-ups tray (see PersistedChat.deferredFollowUps). */
-function loadDeferredFollowUps(threadId: string): FollowUpSuggestion[] {
-	return (readPersistedRoot().deferredFollowUps?.[threadId] ?? []).map((f) => ({ label: f.label, task: f.task }));
 }
 
 function writePersistedRoot(root: PersistedChat): void {
@@ -326,10 +325,9 @@ function dropEmptyUserMessages(list: ChatMessage[]): ChatMessage[] {
  */
 export function dropPersistedThread(threadId: string): void {
 	const root = readPersistedRoot();
-	if (threadId in root.threads || root.queues?.[threadId] || root.deferredFollowUps?.[threadId]) {
+	if (threadId in root.threads || root.queues?.[threadId]) {
 		delete root.threads[threadId];
 		if (root.queues) delete root.queues[threadId];
-		if (root.deferredFollowUps) delete root.deferredFollowUps[threadId];
 		if (root.sessionId === threadId) root.sessionId = null;
 		writePersistedRoot(root);
 	}
@@ -368,9 +366,6 @@ function persistChatNow(): void {
 		if (fileless.length > 0) root.queues[sessionId] = fileless;
 		else if (root.queues[sessionId]) delete root.queues[sessionId];
 		// Persist the deferred-follow-ups tray alongside, same per-thread shape.
-		root.deferredFollowUps = root.deferredFollowUps ?? {};
-		if (deferredFollowUps.length > 0) root.deferredFollowUps[sessionId] = deferredFollowUps.map((f) => ({ label: f.label, task: f.task }));
-		else if (root.deferredFollowUps[sessionId]) delete root.deferredFollowUps[sessionId];
 	}
 	writePersistedRoot(root);
 }
@@ -399,7 +394,6 @@ const persisted = loadPersistedChat();
 let messages = $state<ChatMessage[]>(persisted.messages);
 let sessionId = $state<string | null>(persisted.sessionId);
 // Deferred-follow-ups tray for the current thread (rehydrated on resume/switch).
-let deferredFollowUps = $state<FollowUpSuggestion[]>(persisted.sessionId ? loadDeferredFollowUps(persisted.sessionId) : []);
 let isStreaming = $state(false);
 let streamingActivity = $state<'thinking' | 'tool' | 'writing' | 'idle'>('idle');
 let streamingToolName = $state<string | null>(null);
@@ -426,7 +420,7 @@ let lastEventAt = $state<number | null>(null);
 let lastAppliedSeq = 0;
 let pendingPermission = $state<PermissionPrompt | null>(null);
 let pendingTabsPrompt = $state<TabsPrompt | null>(null);
-let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string; promptId?: string } | null>(null);
+let pendingSecretPrompt = $state<{ name: string; prompt: string; keyType?: string; promptId?: string; origin?: PromptOrigin } | null>(null);
 let secretPromptGeneration = $state(0);
 
 /** One IMAP/SMTP endpoint as shown in the connect-mail consent step. */
@@ -445,6 +439,8 @@ export interface MailConnectPromptView {
 	smtp: MailConnectServerView;
 	appPasswordUrl?: string;
 	requires2FA?: boolean;
+	/** The workflow step that raised this prompt, when one did. */
+	origin?: PromptOrigin;
 }
 let pendingMailConnect = $state<MailConnectPromptView | null>(null);
 let mailConnectGeneration = $state(0);
@@ -1319,6 +1315,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// card, no context flash, not pushed to toolCalls/blocks. The turn ends
 			// server-side (endsTurn), so no further model output follows.
 			if (toolName === 'suggest_follow_ups') {
+				// A CHILD's suggestions are not the main agent's. This short-circuit sat above
+				// `recordToolCall`, which is the one function that routes by attribution — so
+				// it was the single path that falsified the guarantee stated three lines below
+				// it, and a spawned sub-agent's chips replaced the ones the user was looking at.
+				// Dropped rather than rendered elsewhere: a child's follow-ups have no surface.
+				if (isChildEvent(data['subAgentId'], data['subAgent'])) break;
 				const fu = followUpsFromToolInput(toolInput);
 				if (fu.length > 0) msg.followUps = fu;
 				break;
@@ -1415,6 +1417,19 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case SPAWN_PROGRESS_EVENT: {
 			applySpawnProgress(msg, data);
 			syncSpawnContext(msg);
+			// Re-arm the waiting label. `spawn_agent` emits the phase once when the
+			// batch starts, but a child's tool calls are forwarded onto this same
+			// stream, and the `tool_call` case overwrites `streamingToolName` and
+			// nulls the phase. So on any child that uses tools the label was lost
+			// seconds in and never came back, leaving the indicator stuck on whatever
+			// the child's LAST tool was for the rest of a minutes-long wait. This
+			// heartbeat runs every 5s while children are still running (and stops when
+			// they finish), which makes it the only signal that can restore it. The
+			// child's own tool activity still shows in between — that is real and
+			// informative; what it must not do is outlive the tool it describes.
+			streamingActivity = 'tool';
+			streamingToolName = 'spawn_agent';
+			streamingToolPhase = { tool: 'spawn_agent', phase: 'waiting' };
 			break;
 		}
 		case SPAWN_CHILD_DONE_EVENT: {
@@ -1432,6 +1447,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				receivedAt: Date.now(),
 				promptId: data['promptId'] as string | undefined,
 				multiSelect: data['multi_select'] === true,
+				origin: originFromEvent(data),
 			};
 			break;
 		case 'prompt_tabs': {
@@ -1444,6 +1460,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				questions,
 				timeoutMs: typeof data['timeoutMs'] === 'number' ? data['timeoutMs'] : undefined,
 				receivedAt: Date.now(),
+				origin: originFromEvent(data),
 			};
 			break;
 		}
@@ -1464,6 +1481,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				prompt: String(data['prompt'] ?? ''),
 				keyType: data['key_type'] as string | undefined,
 				promptId: data['promptId'] as string | undefined,
+				origin: originFromEvent(data),
 			};
 			// Reset UI state for fresh prompt (handles retry after cancel)
 			secretPromptGeneration++;
@@ -1481,6 +1499,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 				smtp: data['smtp'] as MailConnectServerView,
 				appPasswordUrl: data['appPasswordUrl'] as string | undefined,
 				requires2FA: data['requires2FA'] as boolean | undefined,
+				origin: originFromEvent(data),
 			};
 			mailConnectGeneration++;
 			break;
@@ -1544,6 +1563,12 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 					...(prev?.ttfbMs !== undefined ? { ttfbMs: prev.ttfbMs } : {}),
 					...(turnStop !== undefined ? { stopReason: turnStop } : {}),
 					...(turnIters !== undefined ? { iterations: turnIters } : {}),
+					// Sub-agent spend is written by the terminal `done` frame, so today
+					// no turn_end can follow it and this carry is inert. It is here
+					// because this rebuild is an explicit allowlist: anything not named
+					// is dropped, and "the events happen to arrive in this order" is a
+					// weaker guarantee than naming the field.
+					...(prev?.spawnCostUsd !== undefined ? { spawnCostUsd: prev.spawnCostUsd } : {}),
 				};
 				// Context budget is owned solely by the engine `context_budget`
 				// event (exact API usage). turn_end no longer writes it — the old
@@ -1748,20 +1773,11 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// message as an inline chip (trusted → "gemerkt · rückgängig"; untrusted →
 			// keep/discard review). Client-only: never persisted, never re-injected into
 			// model context — so a resume cannot re-surface the untrusted wording.
-			const id = String(data['id'] ?? '');
-			if (!id) break;
-			const status = data['status'] === 'pending_review' ? 'pending_review' : 'active';
-			msg.knowledgeWrites = msg.knowledgeWrites ?? [];
-			// Dedup by id — a Tier-2 SSE replay on reconnect can re-deliver the event.
-			if (!msg.knowledgeWrites.some((w) => w.id === id)) {
-				msg.knowledgeWrites.push({
-					id,
-					subject: typeof data['subject'] === 'string' ? data['subject'] : undefined,
-					kind: typeof data['kind'] === 'string' ? data['kind'] : undefined,
-					status,
-					text: String(data['text'] ?? ''),
-				});
-			}
+			// Projection + dedup (Tier-2 replay) is pure — see `projectKnowledgeWrite`. Only
+			// materialise the array when there is a chip to push, so a malformed (no-id) or
+			// duplicate event leaves the message exactly as it was.
+			const chip = projectKnowledgeWrite(msg.knowledgeWrites ?? [], data);
+			if (chip) (msg.knowledgeWrites ??= []).push(chip);
 			break;
 		}
 	}
@@ -1998,6 +2014,9 @@ export async function checkPendingPrompt(): Promise<void> {
 
 		const promptType = data['promptType'] as string;
 		const kind = data['kind'] as string | undefined;
+		// Restored the same way for every kind: a prompt that named its workflow
+		// while the stream was live must still name it after a reload (v52).
+		const origin = originFromPending(data['origin']);
 		if (promptType === 'ask_user' && kind === 'tabs' && Array.isArray(data['questions'])) {
 			pendingTabsPrompt = {
 				promptId: String(data['promptId'] ?? ''),
@@ -2005,6 +2024,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				partialAnswers: Array.isArray(data['partialAnswers']) ? (data['partialAnswers'] as (string | null)[]) : undefined,
 				timeoutMs: data['timeoutMs'] as number | undefined,
 				receivedAt: Date.now(),
+				origin,
 			};
 		} else if (promptType === 'ask_user') {
 			pendingPermission = {
@@ -2017,6 +2037,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				// Restore multi-select pills on reconnect (v33) — without this the
 				// prompt degraded to single-select after a reload mid-prompt.
 				multiSelect: data['multiSelect'] === true,
+				origin,
 			};
 		} else if (promptType === 'ask_secret') {
 			pendingSecretPrompt = {
@@ -2024,6 +2045,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				prompt: String(data['question'] ?? ''),
 				keyType: data['secretKeyType'] as string | undefined,
 				promptId: data['promptId'] as string | undefined,
+				origin,
 			};
 			secretPromptGeneration++;
 		} else if (promptType === 'connect_mail' && data['mailConnect']) {
@@ -2039,6 +2061,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				smtp: mc['smtp'] as MailConnectServerView,
 				appPasswordUrl: mc['appPasswordUrl'] as string | undefined,
 				requires2FA: mc['requires2FA'] as boolean | undefined,
+				origin,
 			};
 			mailConnectGeneration++;
 		}
@@ -2182,8 +2205,11 @@ export async function retireKnowledge(msgIdx: number, id: string): Promise<void>
 	if (!chip || chip.resolved) return;
 	try {
 		const res = await fetch(`${getApiBase()}/knowledge/entries/${id}/retire`, { method: 'POST' });
-		if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		chip.resolved = 'undone';
+		// `retireResolution` IS the 2xx gate: null on a non-2xx drives the throw, so the chip
+		// flips to done only when the route accepted the retire (a failed one stays actionable).
+		const resolved = retireResolution(res.ok);
+		if (!resolved) throw new Error(`HTTP ${res.status}`);
+		chip.resolved = resolved;
 	} catch {
 		addToast(t('chat.knowledge.undo_failed'), 'error', 4000);
 	}
@@ -2210,8 +2236,13 @@ export async function reviewKnowledge(
 			const body = (await res.json().catch(() => null)) as { error?: string } | null;
 			throw new Error(body?.error ?? `HTTP ${res.status}`);
 		}
+		// Only reached after a 2xx — a failed review threw above, leaving the chip
+		// unresolved and its editor open. `reviewResolution` maps the accepted action.
 		if (editedText !== undefined) chip.text = editedText;
-		chip.resolved = action === 'reject' ? 'discarded' : 'kept';
+		chip.resolved = reviewResolution(action);
+		// One fewer waiting in this thread — the banner must not keep claiming otherwise
+		// after the person has just dealt with it.
+		void refreshThreadPendingCount();
 	} catch (e) {
 		addToast(e instanceof Error ? e.message : t('chat.knowledge.review_failed'), 'error', 4000);
 	}
@@ -2272,49 +2303,21 @@ export function getQueueLength() {
 	return messageQueue.length;
 }
 
-// --- Deferred follow-ups tray -------------------------------------------------
-// When the user clicks one follow-up pill, its un-taken siblings would otherwise
-// vanish with the turn. Instead they land in a per-thread tray that stays pinned
-// above the composer until taken or dismissed — so a second matching suggestion
-// isn't lost, and taking it later runs as a FRESH turn with full accumulated
-// context (not a blind pre-recorded queue). Client-only; no engine/agent state.
-const MAX_DEFERRED_FOLLOW_UPS = 8;
+// --- Follow-ups ------------------------------------------------------------
+// The deferred-follow-ups tray was removed on 2026-08-08. It captured the
+// un-taken siblings of a clicked pill AUTOMATICALLY and pinned them above the
+// composer until dismissed by hand, which is the wrong default in two ways: it
+// decided for the user what was worth keeping, and it then had to guess whether
+// a later, rephrased suggestion was the same one — a string comparison the model
+// defeats every turn. It also cost a permanent row of chips on mobile.
+// The replacement is an explicit signal (pin what you want to keep), designed
+// separately: DEF-followup-pin-explicit.
 
-export function getDeferredFollowUps(): FollowUpSuggestion[] {
-	return deferredFollowUps;
-}
-
-/**
- * Take a follow-up pill from an in-transcript set: run it now AND keep the set's
- * un-taken siblings in the tray (deduped by task, newest-last, capped).
- */
-export function takeFollowUp(clicked: FollowUpSuggestion, set: FollowUpSuggestion[]): void {
-	const next = computeDeferredTray(deferredFollowUps, clicked, set, MAX_DEFERRED_FOLLOW_UPS);
-	if (next !== deferredFollowUps) {
-		deferredFollowUps = next;
-		persistChatNow();
-	}
+/** Run a follow-up pill: send it as a fresh in-context turn. */
+export function takeFollowUp(clicked: FollowUpSuggestion): void {
 	void sendMessage(clicked.task);
 }
 
-/** Run a tray pill: fire it as a fresh in-context turn and remove it from the tray. */
-export function runDeferredFollowUp(fu: FollowUpSuggestion): void {
-	dismissDeferredFollowUp(fu);
-	void sendMessage(fu.task);
-}
-
-/** Dismiss a single tray pill (the × on a chip). */
-export function dismissDeferredFollowUp(fu: FollowUpSuggestion): void {
-	deferredFollowUps = deferredFollowUps.filter((f) => f.task !== fu.task);
-	persistChatNow();
-}
-
-/** Clear the whole tray ("alle ×"). */
-export function clearDeferredFollowUps(): void {
-	if (deferredFollowUps.length === 0) return;
-	deferredFollowUps = [];
-	persistChatNow();
-}
 /** Monotonic counter, bumped each time a streaming text block closes. */
 export function getCompletedTextBlockGen(): number {
 	return completedTextBlockGen;
@@ -2344,6 +2347,10 @@ export interface PendingPromptHead {
 	question: string;
 	promptId?: string;
 	options?: string[];
+	/** The workflow step that raised it. The anchor is the surface shown when
+	 *  the dialog is scrolled out of view — i.e. exactly when the user has the
+	 *  least context for what they are being asked. */
+	origin?: PromptOrigin;
 }
 
 export function getPendingPrompt(): PendingPromptHead | null {
@@ -2476,15 +2483,63 @@ export function newChat() {
 	// "run interrupted" warning on a chat that never ran anything).
 	runInterrupted = null;
 	messageQueue = [];
-	deferredFollowUps = [];
 	sessionModel = null;
 	sessionTier = null;
 	pendingModel = null; // no stickiness — the next new chat starts at default_tier
 	contextBudget = null;
+	// The compaction offer belongs to the thread we just left, exactly like
+	// `runInterrupted` above. It is a ONE-SHOT engine event (`compaction_offer`)
+	// and was only ever cleared by `context_compacted` or a manual `compactNow` —
+	// so once any thread crossed the prepare threshold, the offer bar rendered on
+	// every subsequent new chat until a page reload, because its render condition
+	// is `compactionOffer !== null` and nothing on the new-chat path reset it.
+	compactionOffer = null;
+	// Thread-scoped: a count of what is waiting in the PREVIOUS conversation is exactly
+	// the wrong thing to leave on screen. Re-fetched by `resumeThread` for the new one.
+	threadPending = 0;
+	// Same class as `compactionOffer`: `retryStatus` renders UNGATED in ChatView
+	// (`{#if retryStatus}`) and was only cleared at the top of `_executeRun`, so a
+	// thread left mid-retry showed "attempt 2/3" / "busy" on the fresh chat until
+	// the next send.
+	retryStatus = null;
 	runStartedAt = null;
 	runPromptCount = 0;
 	clearContext();
 	persistChatNow();
+}
+
+/**
+ * How many durable-knowledge writes from THIS thread are still waiting for review.
+ *
+ * The inline chip is client-only by design — the raw wording of a queued write must never be
+ * re-injected on a resume — so a reload loses it and the entries go invisible in the place
+ * they were made. The global queue badge answers "there is something, somewhere"; after
+ * coming back to one conversation the question is "is anything from HERE waiting", and that
+ * is a different one.
+ *
+ * Count only. The wording stays server-side until a human has reviewed it, which is the whole
+ * reason those entries are queued.
+ */
+let threadPending = $state(0);
+
+export function getThreadPendingCount(): number {
+	return threadPending;
+}
+
+export async function refreshThreadPendingCount(): Promise<void> {
+	const sid = sessionId;
+	if (!sid) { threadPending = 0; return; }
+	try {
+		const res = await fetch(`${getApiBase()}/knowledge/queue/count?thread=${encodeURIComponent(sid)}`);
+		if (!res.ok) { threadPending = 0; return; }
+		const body = (await res.json()) as { pendingCount?: number };
+		// Guarded against a stale response landing after a thread switch: the fetch above may
+		// resolve when the user is already elsewhere, and a count from the previous
+		// conversation is exactly the wrong thing to show.
+		if (sessionId === sid) threadPending = typeof body.pendingCount === 'number' ? body.pendingCount : 0;
+	} catch {
+		threadPending = 0;
+	}
 }
 
 export function getSessionId() {
@@ -2758,7 +2813,6 @@ export async function resumeThread(threadId: string): Promise<void> {
 	// Restore any pending send-queue for this thread (durable across reload).
 	messageQueue = loadPersistedQueue(threadId);
 	// Restore the deferred-follow-ups tray for this thread (durable across reload).
-	deferredFollowUps = loadDeferredFollowUps(threadId);
 	// Reconcile restored bubbles: a `queued` bubble with no matching live queue
 	// entry (file-bearing — not persisted — or lost before the flush) is marked
 	// `failed` so the user can re-send instead of staring at a pill that will
@@ -2773,6 +2827,14 @@ export async function resumeThread(threadId: string): Promise<void> {
 		}
 	}
 	contextBudget = null;
+	// Same reason as in `newChat()`: these are the LEFT thread's state. Without
+	// them, switching into a thread that never compacted still showed its bar,
+	// and a retry banner followed the user across threads.
+	compactionOffer = null;
+	// Thread-scoped: a count of what is waiting in the PREVIOUS conversation is exactly
+	// the wrong thing to leave on screen. Re-fetched by `resumeThread` for the new one.
+	threadPending = 0;
+	retryStatus = null;
 	runStartedAt = null;
 	runPromptCount = 0;
 	runInterrupted = null;
@@ -2943,6 +3005,9 @@ export async function resumeThread(threadId: string): Promise<void> {
 			persistChatNow();
 			setTimeout(() => { void _executeRun(next.task, next.files, undefined, next.runOptions, next.id); }, 100);
 		}
+		// The chip that announced any queued write in this thread is client-only and did not
+		// survive the reload, so ask the server what is still waiting HERE.
+		void refreshThreadPendingCount();
 	} catch (err: unknown) {
 		// Silently ignore abort errors from superseded requests
 		if (err instanceof DOMException && err.name === 'AbortError') return;

@@ -8,9 +8,19 @@ const mockSend = vi.fn().mockResolvedValue('mock result');
 
 // Mock Agent class — must use function syntax for constructor
 vi.mock('../core/agent.js', () => ({
-  Agent: vi.fn().mockImplementation(function (this: { send: typeof mockSend; abort: ReturnType<typeof vi.fn> }) {
+  Agent: vi.fn().mockImplementation(function (this: {
+    send: typeof mockSend;
+    abort: ReturnType<typeof vi.fn>;
+    noteUntrustedData: ReturnType<typeof vi.fn>;
+    restoreConversationTaint: ReturnType<typeof vi.fn>;
+  }) {
     this.send = mockSend;
     this.abort = vi.fn();
+    // Cross-step taint seed: the spawner calls these on the constructed step
+    // agent; a mockSend implementation can set the UntrustedSignals fields on
+    // `this` to simulate what the step saw (same trick as spawn.test.ts).
+    this.noteUntrustedData = vi.fn();
+    this.restoreConversationTaint = vi.fn();
   }),
 }));
 
@@ -29,7 +39,7 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
-import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, createStepStreamHandler, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, runTaintArmed, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
 import type { AgentDef } from '../types/orchestration.js';
 import type { StreamEvent } from '../types/index.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
@@ -191,7 +201,11 @@ describe('spawnInline with role', () => {
     const tools = agentConfig['tools'] as ToolEntry[];
     expect(tools.find(t => t.definition.name === 'write_file')).toBeUndefined();
     expect(tools.find(t => t.definition.name === 'read_file')).toBeDefined();
-    expect(tools.find(t => t.definition.name === 'bash')).toBeDefined();
+    // F2/D2: a deny-only role never DECLARED bash, so it no longer gets it
+    // silently (pre-F2 this asserted bash present). bash needs step.tools or a
+    // role allowTools grant — for `operator` ("Read-only") this fixes the
+    // role's own stated contract.
+    expect(tools.find(t => t.definition.name === 'bash')).toBeUndefined();
   });
 
   it('role allowTools restricts to whitelist', async () => {
@@ -591,6 +605,124 @@ describe('secretStore propagation into pipeline sub-agents (fail-loud secret res
   });
 });
 
+describe('F1: undeclared step tier defaults to fast (spawn wiring)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  it('an inline step with no model and no role spawns on the fast tier', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'paginate' };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['model']).toContain('haiku');
+  });
+
+  it('the session default_tier does NOT reach an undeclared step', async () => {
+    const cfg = { api_key: 'test-key', default_tier: 'deep' } as unknown as LynoxUserConfig;
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'paginate' };
+    await spawnInline(step, {}, cfg, mockParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['model']).toContain('haiku');
+  });
+
+  it('a declared step.model still wins', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'analyze', model: 'balanced' };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['model']).toContain('sonnet');
+  });
+
+  it('undeclaredInlineStepTier: role tier wins over the fast default', () => {
+    mockGetRole.mockReturnValue({ model: 'balanced', effort: 'high', autonomy: 'guided', description: 'r' });
+    expect(undeclaredInlineStepTier({ role: 'researcher' })).toBe('balanced');
+    mockGetRole.mockReturnValue(undefined);
+    expect(undeclaredInlineStepTier({})).toBe('fast');
+  });
+});
+
+describe('F2: declared step tool sets (spawn wiring)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  const toolNames = (): string[] => {
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    return (agentConfig['tools'] as ToolEntry[]).map(t => t.definition.name);
+  };
+
+  it('an undeclared step gets the pool WITHOUT bash', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'do' };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toContain('read_file');
+    expect(toolNames()).toContain('write_file');
+    expect(toolNames()).not.toContain('bash');
+  });
+
+  it('a step gets bash ONLY by declaring it', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'run script', tools: ['bash'] };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual(['bash']);
+  });
+
+  it('a declared set narrows to exactly the declared names', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'read', tools: ['read_file'] };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual(['read_file']);
+  });
+
+  it('a declared name outside the inline pool is not granted', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'spawn', tools: ['spawn_agent', 'read_file'] };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual(['read_file']);
+  });
+
+  it('a captured replay step\'s tool is admitted alongside its declared set', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'replay', tools: ['read_file'], tool: 'bash', input_template: { cmd: 'ls' } };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toContain('bash');
+    expect(toolNames()).toContain('read_file');
+  });
+
+  it('a role allowTools grant still passes the full parent set to the role filter', async () => {
+    mockGetRole.mockReturnValue({ model: 'fast', effort: 'high', autonomy: 'autonomous', allowTools: ['bash'], description: 'op' });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', role: 'operator' };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual(['bash']);
+  });
+
+  it('a declared EMPTY array grants zero tools (declaration, not absence)', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'pure reasoning', tools: [] };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual([]);
+  });
+
+  it('role allowTools wins over a step tools declaration (pinned precedence)', async () => {
+    // Both present is YAML-author territory (plan_task steps carry no role).
+    // The role grant is the wider, deliberate surface — pin that it wins so a
+    // refactor can't silently flip the precedence.
+    mockGetRole.mockReturnValue({ model: 'fast', effort: 'high', autonomy: 'autonomous', allowTools: ['bash'], description: 'op' });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', role: 'operator', tools: ['read_file'] };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual(['bash']);
+  });
+
+  it('declared ask_user is still stripped when no parent prompt callback exists', async () => {
+    // Belt-and-suspenders pin: the validator blocks autonomous+ask_user at
+    // save, but if such a step reaches an autonomous spawn anyway, the strip
+    // must win over the declaration — leaving the step with zero tools beats
+    // a dispatch-time throw inside an unattended run.
+    const withAskUser: ToolEntry[] = [...mockParentTools, {
+      definition: { name: 'ask_user', description: 'Ask', input_schema: { type: 'object' } } as ToolEntry['definition'],
+      handler: async () => 'answer',
+    }];
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'confirm', tools: ['ask_user'] };
+    await spawnInline(step, {}, mockConfig, withAskUser);
+    expect(toolNames()).toEqual([]);
+  });
+});
+
 describe('INLINE_CORE_TOOLS membership (regression-gate)', () => {
   // Pins the inline-step sandbox allowlist so a future "let me trim a few
   // tools" refactor can't silently break workflows that depend on memory
@@ -764,6 +896,19 @@ describe('spawnPipeline — autonomy propagation (A1 C1 fix through nesting)', (
     expect(vi.mocked(Agent).mock.calls.length).toBeGreaterThanOrEqual(1);
     const innerConfig = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
     expect(innerConfig['autonomy']).toBe('autonomous');
+  });
+
+  it('carries a nested step\'s declared tools into the sub-manifest (F2)', async () => {
+    const step: ManifestStep = {
+      id: 'nested3', agent: 'nested3', runtime: 'pipeline',
+      pipeline: [{ id: 'inner3', task: 'run a script', tools: ['bash'] }],
+    };
+    await spawnPipeline(step, {}, mockConfig, mockParentTools, 0);
+    // Dropping `tools` in the sub-manifest conversion makes the inner step
+    // undeclared → bash-less default pool → this assert fails.
+    const innerConfig = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    const innerNames = (innerConfig['tools'] as ToolEntry[]).map(t => t.definition.name);
+    expect(innerNames).toEqual(['bash']);
   });
 
   it('passes undefined autonomy through unchanged (in-session inheritance)', async () => {
@@ -1062,5 +1207,157 @@ describe('spawnInline — a foreign-endpoint tier slot never inherits the base k
     // pending_review bypass). Only the read side is inline-safe; durable writes stay opt-in.
     expect(INLINE_CORE_TOOLS.has('recall')).toBe(true);
     expect(INLINE_CORE_TOOLS.has('remember')).toBe(false);
+  });
+});
+
+// ===========================================================================
+// Cross-step taint (RunTaint) + the DK flag riding to step agents.
+// The spawn seam already has both (spawn.ts); these pin the pipeline seam.
+// ===========================================================================
+
+describe('RunTaint — cross-step untrusted inheritance', () => {
+  const inlineStep: ManifestStep = { id: 's1', agent: 's1', runtime: 'inline', task: 'do work' };
+
+  /** spawnInline's runTaint is the 15th positional arg — keep ONE spelling of the pad. */
+  const runInline = (taint: RunTaint | undefined, config = mockConfig) =>
+    spawnInline(inlineStep, {}, config, mockParentTools,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, taint);
+
+  const lastInstance = () => {
+    const instances = vi.mocked(Agent).mock.instances as unknown as Array<{
+      noteUntrustedData: ReturnType<typeof vi.fn>;
+      restoreConversationTaint: ReturnType<typeof vi.fn>;
+    }>;
+    return instances[instances.length - 1]!;
+  };
+
+  beforeEach(() => {
+    vi.mocked(Agent).mockClear();
+    // mockReset, not mockClear: a failing test can leak a queued
+    // mockImplementationOnce that the next test would silently consume.
+    mockSend.mockReset();
+    mockSend.mockResolvedValue('mock result');
+  });
+
+  it('an armed accumulator seeds the step\'s STICKY latch — never the run marker', async () => {
+    // The marker is what the review chip REPORTS as the cause; a step that
+    // inherited taint but read nothing itself must not claim it did (the same
+    // distinction spawn.test.ts pins for the child seed).
+    const taint = { seeded: 'conversation', earned: 'none' } as RunTaint;
+    await runInline(taint);
+    expect(lastInstance().restoreConversationTaint).toHaveBeenCalled();
+    expect(lastInstance().noteUntrustedData).not.toHaveBeenCalled();
+  });
+
+  it('a clean accumulator leaves the step clean', async () => {
+    await runInline(newRunTaint());
+    expect(lastInstance().restoreConversationTaint).not.toHaveBeenCalled();
+    expect(lastInstance().noteUntrustedData).not.toHaveBeenCalled();
+  });
+
+  it('step 1 reads external content → the SAME accumulator arms step 2 (the H4 cross-step chain)', async () => {
+    const taint = newRunTaint();
+    // Step 1: reads external content via a non-wrapping tool (web/read_file class).
+    mockSend.mockImplementationOnce(async function (this: { sawExternalContentTool?: boolean }) {
+      this.sawExternalContentTool = true;
+      return 'step 1 result';
+    });
+    await runInline(taint);
+    expect(taint.earned).toBe('external-tool');
+    // Step 2: fresh agent, same run — must start with its sticky latch armed,
+    // so a durable write inside it routes to pending_review.
+    await runInline(taint);
+    expect(lastInstance().restoreConversationTaint).toHaveBeenCalled();
+  });
+
+  it('a step that read external content and then FAILED still folds its taint (finally-path)', async () => {
+    const taint = newRunTaint();
+    mockSend.mockImplementationOnce(async function (this: { sawExternalContentTool?: boolean }) {
+      this.sawExternalContentTool = true;
+      throw new Error('step blew up after the read');
+    });
+    await expect(runInline(taint)).rejects.toThrow('step blew up');
+    // Under on_failure:'continue' later steps still run — they must inherit.
+    expect(taint.earned).toBe('external-tool');
+  });
+
+  it('spawnViaAgent seeds and folds through the same accumulator', async () => {
+    const agentDef: AgentDef = { name: 'named', description: '', tools: [] };
+    const taint = { seeded: 'external-tool', earned: 'none' } as RunTaint;
+    const namedStep: ManifestStep = { id: 'n1', agent: 'named', runtime: 'agent' };
+    // The step itself reads external content — the FOLD half must record it.
+    // (Deleting only spawnViaAgent's finally-fold kept every other test green,
+    // because the mutation probe removed both copies at once.)
+    mockSend.mockImplementationOnce(async function (this: { sawExternalContentTool?: boolean }) {
+      this.sawExternalContentTool = true;
+      return 'named result';
+    });
+    await spawnViaAgent(namedStep, agentDef, {}, mockConfig, undefined, 'run-1',
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, taint);
+    expect(lastInstance().restoreConversationTaint).toHaveBeenCalled();
+    expect(taint.earned).toBe('external-tool');
+  });
+
+  it('helpers: marker outranks external-tool; a reflected conversation cause carries nothing', () => {
+    const taint = newRunTaint();
+    expect(runTaintArmed(taint)).toBe(false);
+    // 'conversation' off a fresh step agent is only our own seed reflected back.
+    noteStepTaint(taint, { conversationSawUntrusted: true });
+    expect(taint.earned).toBe('none');
+    noteStepTaint(taint, { sawExternalContentTool: true });
+    expect(taint.earned).toBe('external-tool');
+    // marker (wrapped content actually handled) is the more specific claim and wins…
+    noteStepTaint(taint, { sawUntrustedData: true });
+    expect(taint.earned).toBe('marker');
+    // …and is never downgraded by a later external-tool step.
+    noteStepTaint(taint, { sawExternalContentTool: true });
+    expect(taint.earned).toBe('marker');
+    expect(runTaintArmed(taint)).toBe(true);
+  });
+
+  it('a caller-tainted seed arms the accumulator without any step earning', () => {
+    const taint = newRunTaint({ conversationSawUntrusted: true });
+    expect(taint.seeded).toBe('conversation');
+    expect(taint.earned).toBe('none');
+    expect(runTaintArmed(taint)).toBe(true);
+  });
+});
+
+describe('durableMemoryEnabled rides to step agents (one flag governs the whole run)', () => {
+  const inlineStep: ManifestStep = { id: 's1', agent: 's1', runtime: 'inline', task: 'do work' };
+
+  beforeEach(() => {
+    vi.mocked(Agent).mockClear();
+    // mockReset, not mockClear: a failing test can leak a queued
+    // mockImplementationOnce that the next test would silently consume.
+    mockSend.mockReset();
+    mockSend.mockResolvedValue('mock result');
+  });
+
+  const lastCfg = () => {
+    const calls = vi.mocked(Agent).mock.calls;
+    return calls[calls.length - 1]![0] as unknown as Record<string, unknown>;
+  };
+
+  it('an inline step on a DK-on tenant stands the legacy extractor down', async () => {
+    // The inline path shares the parent's Memory, so WITHOUT the flag the step
+    // ran the legacy end-of-turn extraction the main agent stands down
+    // (agent.ts gates maybeUpdate on `durableMemoryEnabled === true`).
+    const dkOn = { ...mockConfig, durable_memory_enabled: true } as LynoxUserConfig;
+    await spawnInline(inlineStep, {}, dkOn, mockParentTools);
+    expect(lastCfg()['durableMemoryEnabled']).toBe(true);
+  });
+
+  it('a DK-off tenant\'s inline step keeps the pre-fix behaviour', async () => {
+    await spawnInline(inlineStep, {}, mockConfig, mockParentTools);
+    expect(lastCfg()['durableMemoryEnabled']).toBe(false);
+  });
+
+  it('the named-agent path carries the same flag (the two step paths must not diverge)', async () => {
+    const agentDef: AgentDef = { name: 'named', description: '', tools: [] };
+    const namedStep: ManifestStep = { id: 'n1', agent: 'named', runtime: 'agent' };
+    const dkOn = { ...mockConfig, durable_memory_enabled: true } as LynoxUserConfig;
+    await spawnViaAgent(namedStep, agentDef, {}, dkOn, undefined, 'run-1');
+    expect(lastCfg()['durableMemoryEnabled']).toBe(true);
   });
 });

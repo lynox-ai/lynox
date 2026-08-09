@@ -36,10 +36,6 @@
 		cancelQueue,
 		removeQueuedMessage,
 		takeFollowUp,
-		getDeferredFollowUps,
-		runDeferredFollowUp,
-		dismissDeferredFollowUp,
-		clearDeferredFollowUps,
 		getSessionModel,
 		getContextBudget,
 		getCompactionOffer,
@@ -59,6 +55,7 @@
 		retryInterruptedRun,
 		dismissInterruptedRun,
 		retireKnowledge,
+		getThreadPendingCount,
 		reviewKnowledge,
 		type FileAttachment,
 		type UsageInfo,
@@ -66,6 +63,7 @@
 		type ToolCallInfo,
 		type ChatMessage,
 	} from '../stores/chat.svelte.js';
+	import type { PromptOrigin } from '../utils/prompt-origin.js';
 	import { getSessionArtifacts, loadArtifacts } from '../stores/artifacts.svelte.js';
 	import { getApiBase, getDemoMode } from '../config.svelte.js';
 	import { isDiagnosticsEnabled } from '../stores/diagnostics.svelte.js';
@@ -73,6 +71,12 @@
 	import { taskPreview } from '../stores/follow-ups.js';
 	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
 	import { formatCost } from '../format.js';
+	import { knowledgeCauseKey } from '../stores/knowledge-chip.js';
+
+
+	// Read through a derived so the banner tracks the store's rune rather than a snapshot
+	// taken at mount — the count changes on thread switch and after a review.
+	const threadPending = $derived(getThreadPendingCount());
 	import { scrollFade } from '../utils/scroll-fade.js';
 	import { hasVoicePrefix, stripVoicePrefix, MIC_SVG_PATH } from '../utils/voice-prefix.js';
 	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
@@ -93,7 +97,7 @@
 	import ComposerModelPicker from './ComposerModelPicker.svelte';
 	import ThreadModelControl from './ThreadModelControl.svelte';
 	import OnboardingBasics from './OnboardingBasics.svelte';
-	import { t, getLocale } from '../i18n.svelte.js';
+	import { t, tf, getLocale } from '../i18n.svelte.js';
 	import { getTodaysQuote, getGreeting } from '../data/quotes.js';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { playSpeech, playSpeechQueued, stopSpeech, primeIosTts, getSpeakState, isSpeakActive, maybeShowPrivacyHint, type SpeakError } from '../stores/speak.svelte.js';
@@ -1634,7 +1638,6 @@
 		return t('chat.thinking');
 	});
 	const queueLength = $derived(getQueueLength());
-	const deferredFollowUpsList = $derived(getDeferredFollowUps());
 	const pendingPermission = $derived(getPendingPermission());
 	const pendingTabsPrompt = $derived(getPendingTabsPrompt());
 	const pendingSecret = $derived(getPendingSecretPrompt());
@@ -1648,6 +1651,13 @@
 	const ctxModel = $derived(getSessionModel());
 	const ctxBudget = $derived(getContextBudget());
 	const compactionOffer = $derived(getCompactionOffer());
+	/**
+	 * The percentage the compaction offer is actually judged on: the engine's
+	 * cost-aware budget figure, not raw window fill. `usagePercent` is the
+	 * fallback for an engine too old to send `budgetPercent`. See the offer bar
+	 * below for why the difference is load-bearing.
+	 */
+	const offerPct = $derived(ctxBudget?.budgetPercent ?? ctxBudget?.usagePercent);
 	const ctxWindow = $derived(getContextWindow());
 	const compacting = $derived(getIsCompacting());
 
@@ -2129,6 +2139,40 @@
 					{/if}
 				</div>
 			{/each}
+		</div>
+	{/if}
+{/snippet}
+
+<!-- Who asked. A workflow step's tool calls never enter the transcript, so a
+     confirmation it raises has no visible cause on screen — the user is shown
+     "Allow / Deny" for a command nothing they can see requested. This line is
+     that cause. Rendered only when the engine supplied an origin: a prompt from
+     the main agent has its cause in the message directly above, and a redundant
+     "asked by" line there would be noise. -->
+{#snippet promptOrigin(origin: PromptOrigin | undefined)}
+	{#if origin && (origin.workflowName || origin.stepId)}
+		<!-- Workflow and step are SEPARATE elements with a real separator element
+		     between them, not one joined string. Both names come from a manifest
+		     a model may have written; a joined string lets a name containing the
+		     separator forge a second field on the very line that exists to say who
+		     asked. Structure it cannot reach beats punctuation it can imitate.
+		     `toPromptOrigin` bounds the length and strips control/bidi chars. -->
+		<div class="text-[11px] text-text-subtle">
+			<div class="flex items-start gap-1.5">
+				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M4 6h6a2 2 0 012 2v8a2 2 0 002 2h4m0 0l-3-3m3 3l-3 3M4 6V4m0 2v2" />
+				</svg>
+				<span class="min-w-0 [overflow-wrap:anywhere]">
+					{#if origin.workflowName}<span>{tf('chat.prompt_origin_workflow', { name: origin.workflowName })}</span>{/if}
+					{#if origin.workflowName && origin.stepId}<span class="mx-1" aria-hidden="true">·</span>{/if}
+					{#if origin.stepId}<span>{tf('chat.prompt_origin_step', { id: origin.stepId })}</span>{/if}
+				</span>
+			</div>
+			{#if origin.stepTask}
+				<!-- The readable half. It was hover-only `title` first, which is
+				     invisible on touch — where most of these prompts are answered. -->
+				<p class="mt-0.5 ml-5 text-text-subtle/80 [overflow-wrap:anywhere]">{origin.stepTask}</p>
+			{/if}
 		</div>
 	{/if}
 {/snippet}
@@ -2749,16 +2793,25 @@
 							<div class="flex flex-col gap-1 mt-2">
 								{#each msg.knowledgeWrites as kw (kw.id)}
 									{#if kw.status === 'active'}
-										<div class="flex items-center gap-2 text-[11px] text-text-muted">
-											<span class="inline-flex items-center gap-1 rounded-full bg-accent/10 text-accent-text px-2 py-0.5">
+										<div class="flex items-start gap-2 text-[11px] text-text-muted">
+											<span class="shrink-0 inline-flex items-center gap-1 rounded-full bg-accent/10 text-accent-text px-2 py-0.5">
 												<span aria-hidden="true">✓</span>
 												{kw.subject ? t('chat.knowledge.saved_to').replace('{subject}', kw.subject) : t('chat.knowledge.saved')}
 											</span>
+											<!-- The fact itself. Without it this chip offers an undo for something the
+											     person cannot read — and "undo what?" is not a decision anyone can make.
+											     Plain text, never markdown: same discipline as the review chip below,
+											     since the wording is model-authored.
+											     No `flex-1`: it would push "undo" to the far edge of the column on a short
+											     fact, away from the thing it undoes. Clamped, because an entry may be up
+											     to MAX_KNOWLEDGE_ENTRY_CHARS and this is an 11px confirmation line, not a
+											     reader — the full text lives in the Wissen view. -->
+											<span class="min-w-0 text-text-subtle break-words line-clamp-2">{kw.text}</span>
 											{#if kw.resolved === 'undone'}
-												<span class="text-text-subtle">· {t('chat.knowledge.undone')}</span>
+												<span class="shrink-0 text-text-subtle">· {t('chat.knowledge.undone')}</span>
 											{:else}
 												<button
-													class="text-text-subtle hover:text-text underline underline-offset-2"
+													class="shrink-0 text-text-subtle hover:text-text underline underline-offset-2"
 													onclick={() => retireKnowledge(msgIdx, kw.id)}
 												>{t('chat.knowledge.undo')}</button>
 											{/if}
@@ -2772,7 +2825,11 @@
 											<div class="flex items-center gap-2 text-[10px] font-mono text-text-muted">
 												<span class="rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 px-1.5">{t('chat.knowledge.review_tag')}</span>
 												{#if kw.subject}<span>→ {kw.subject}</span>{/if}
-												<span class="text-text-subtle">{t('chat.knowledge.review_hint')}</span>
+												<!-- WHY it is here. The generic "from external content" is true of every
+												     queued write, so it gives the person nothing to judge. The sticky case
+												     matters most: nothing external happened on THIS turn, and without
+												     saying so the chip looks like a bug. -->
+												<span class="text-text-subtle">{t(knowledgeCauseKey(kw.cause))}</span>
 											</div>
 											{#if kw.resolved}
 												<p class="text-text-subtle">{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}</p>
@@ -2851,7 +2908,7 @@
 						{#each lastAssistant.followUps as fu}
 							{@const preview = taskPreview(fu)}
 							<button
-								onclick={() => takeFollowUp(fu, lastAssistant.followUps ?? [])}
+								onclick={() => takeFollowUp(fu)}
 								title={preview ?? fu.label}
 								class="max-w-full sm:max-w-sm text-left rounded-[var(--radius-md)] border border-accent/30 bg-accent/5 px-3 py-1.5 text-xs text-accent-text hover:border-accent/50 hover:bg-accent/10 transition-all"
 							>
@@ -2985,6 +3042,19 @@
 	{/if}
 	</div>
 
+	<!-- The non-transcript stack (pipeline progress, changeset review, prompts).
+		 One shrinkable, self-scrolling region: these blocks have
+		 `min-height: auto`, so without the wrapper a tall one (a ChangesetReview
+		 file list, a batch dialog) pushes the whole column taller than
+		 AppShell's slot — the slot's own scroller engages and the composer rides
+		 out of the viewport (reported from a live workflow run 2026-08-08).
+		 `min-h-0` lets the region shrink below its content instead;
+		 `overflow-y-auto` keeps a shrunken block reachable — clipping it away
+		 (the first fix attempt) made the changeset actions unreachable, which is
+		 worse than the bug. `max-h-[60%]` keeps the transcript from collapsing
+		 to 0px behind a tall block (flex-1 has basis 0, so in the shrink phase
+		 it loses everything without the cap). -->
+	<div data-chat-stack class="min-h-0 max-h-[60%] shrink overflow-y-auto scrollbar-thin">
 	<!-- Pipeline progress: sticky above input during active execution only -->
 	{#if activePipeline && isStreaming && pipelineRunning}
 		<div class="border-t border-border bg-bg-subtle px-4 py-2">
@@ -3016,6 +3086,11 @@
 		<div role="dialog" aria-label={t('chat.batch_mode')} tabindex="-1" data-pending-prompt data-prompt-kind="tabs" class="border-t border-border bg-bg-subtle px-4 py-3"
 			onkeydown={(e) => { if (e.key === 'Escape') answerPrompt('__dismissed__'); }}>
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-1">
+				<!-- Whichever prompt the batch is actually DRIVING owns the origin.
+				     A `??` fallback would hand a v2 tabs prompt the provenance of a
+				     permission prompt that merely happens to still be pending —
+				     naming the wrong asker is worse than naming none. -->
+				{@render promptOrigin(batchMode === 'v2' ? pendingTabsPrompt?.origin : pendingPermission?.origin)}
 				{#each batchQuestions as q, i}
 					{#if batchFocusIdx === i}
 						<!-- Focused question: expanded -->
@@ -3149,6 +3224,7 @@
 		{@const visibleOptions = isPermissionGuard ? [] : opts.filter(o => o !== '\x00')}
 		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
+				{@render promptOrigin(pendingPermission.origin)}
 				<div class="flex items-start gap-2">
 					{#if isPermissionGuard}
 						<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
@@ -3227,6 +3303,7 @@
 	{#if pendingSecret}
 		<div data-pending-prompt data-prompt-kind="secret" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-3">
+				{@render promptOrigin(pendingSecret.origin)}
 				<div class="flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-warning shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
 					<span class="text-sm font-medium text-text">{pendingSecret.prompt}</span>
@@ -3268,6 +3345,7 @@
 	{#if pendingMailConnect}
 		<div data-pending-prompt data-prompt-kind="mail" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-3">
+				{@render promptOrigin(pendingMailConnect.origin)}
 				<div class="flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-accent shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
 					<span class="text-sm font-medium text-text">{t('chat.mail_connect_title')}</span>
@@ -3364,8 +3442,19 @@
 	     window, so a "%" here contradicts the footer's window meter on a
 	     large-window model (e.g. Sonnet 5's 1M) — the copy carries the reason
 	     (keep replies fast + low-cost), the footer stays the honest window gauge. -->
-	{#if compactionOffer !== null || (ctxBudget && ctxBudget.usagePercent >= 80)}
-		{@const rawPct = compactionOffer ?? ctxBudget?.usagePercent ?? 80}
+	<!-- The fallback arm reads `budgetPercent` — the SAME cost-aware figure the
+	     engine fires the offer on (`session.ts` `_compactionUsagePercent`, put on
+	     the wire beside every context_budget event) — and falls back to
+	     `usagePercent` only when the engine is too old to send it. Using the raw
+	     window fill here contradicted the comment above and made the arm dead on
+	     any large window: the offer fires at 150k occupancy, so on Mistral's 262k
+	     window that is 57 % fill and `usagePercent >= 80` (209k) is never reached.
+	     That did not matter while `compactionOffer` persisted across threads —
+	     the bug it masked surfaced the moment that leak was fixed, because the
+	     engine's `_compactionOffered` is a per-Session one-shot latch that
+	     survives a thread switch and will not re-emit. -->
+	{#if compactionOffer !== null || (offerPct !== undefined && offerPct >= 80)}
+		{@const rawPct = compactionOffer ?? offerPct ?? 80}
 		{@const nearNet = rawPct >= 88}
 		<div
 			class="border-t {nearNet ? 'border-warning/30 bg-warning/10 text-warning/90' : 'border-border bg-bg-subtle text-text-subtle'} px-4 py-1.5 text-xs"
@@ -3400,6 +3489,12 @@
 	     scroll-locator to the inline form (which owns the reply controls), not a
 	     second reply surface. `secret`/`mail` stay excluded — surfacing a credential
 	     prompt's context in a persistent bar risks leaking it (pipeline-status.ts). -->
+	</div>
+
+	<!-- OUTSIDE the scrollable stack on purpose: both of these exist to be
+		 GUARANTEED visible (the anchor locates a waiting prompt, the activity
+		 bar shows life during long tool calls) — inside the stack a tall block
+		 above them could scroll them out of view, defeating their point. -->
 	{#if pendingPromptHead && (pendingPromptHead.kind === 'permission' || (pendingPromptHead.kind === 'tabs' && !inBatchMode))}
 		<PromptAnchor prompt={pendingPromptHead} promptCount={runPromptCount} runStartedAt={runStartedAt} />
 	{:else if isStreaming && !pendingPermission && !pendingSecret && !pendingTabsPrompt}
@@ -3415,54 +3510,13 @@
 		/>
 	{/if}
 
-	<!-- Deferred follow-ups tray: un-taken siblings of a pill the user took, kept
-	     pinned above the composer so a second matching suggestion isn't lost.
-	     Clicking one runs it as a FRESH in-context turn (sendMessage), not a blind
-	     pre-recorded queue. Glanceable + click-to-run + dismiss only — no editor. -->
-	{#if deferredFollowUpsList.length > 0}
-		<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2">
-			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex flex-wrap items-center gap-2">
-				<span class="text-[10px] font-mono uppercase tracking-widest text-text-subtle">{t('chat.deferred_title')}</span>
-				{#each deferredFollowUpsList as fu (fu.task)}
-					{@const preview = taskPreview(fu)}
-					<div class="inline-flex max-w-full items-center rounded-full border border-accent/30 bg-accent/5 text-xs text-accent-text hover:border-accent/50 hover:bg-accent/10 transition-all">
-						<!-- Same consent argument as the chips above: this button also
-						     runs `task` on one click. The tray is a single compact row,
-						     so the instruction rides inline and truncated — about 40
-						     characters at this size, which is an opening and not an
-						     instruction. The tooltip carries it whole for a mouse; a
-						     screen reader gets the full text from the visible span,
-						     since `truncate` is CSS and hides nothing from assistive
-						     tech (an `sr-only` copy here read the task twice). -->
-						<button
-							onclick={() => runDeferredFollowUp(fu)}
-							title={preview ?? fu.label}
-							class="rounded-l-full px-3 py-1.5 min-w-0 text-left"
-						>{fu.label}{#if preview}<span class="text-text-subtle"> · <span class="inline-block max-w-[16rem] truncate align-bottom">{preview}</span></span>{/if}</button>
-						<button
-							onclick={() => dismissDeferredFollowUp(fu)}
-							aria-label={t('chat.deferred_dismiss')}
-							title={t('chat.deferred_dismiss')}
-							class="rounded-r-full py-1.5 pl-1 pr-2.5 text-text-subtle hover:text-danger"
-						>×</button>
-					</div>
-				{/each}
-				{#if deferredFollowUpsList.length > 1}
-					<button
-						onclick={() => clearDeferredFollowUps()}
-						class="text-[10px] font-mono uppercase tracking-widest text-text-subtle hover:text-danger"
-					>{t('chat.deferred_clear')}</button>
-				{/if}
-			</div>
-		</div>
-	{/if}
-
 	<!-- Input. NO safe-area-inset-bottom here — the StatusBar below this row
 		 (rendered by AppShell) already absorbs the iOS Home Indicator zone via
 		 its own `pb-[env(safe-area-inset-bottom)]`. Adding it here double-pays
 		 the safe area and renders as wasted black space between the input and
-		 the status bar. -->
-	<div class="border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2">
+		 the status bar. `shrink-0`: the composer never pays for a tall stack —
+		 the stack above shrinks and scrolls instead. -->
+	<div class="shrink-0 border-t border-border bg-bg-subtle px-2 py-2 md:px-4 md:py-2">
 		<!-- Pending files -->
 		{#if pendingFiles.length > 0}
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto flex flex-wrap gap-2 mb-2">
@@ -3574,6 +3628,27 @@
 				{/if}
 			{/if}
 		</div>
+		<!-- Waiting facts FROM THIS THREAD. The inline chips above are client-only by design —
+		     the raw wording of a queued write must not be re-injected on a resume — so a reload
+		     loses them and the entries go invisible in the place they were made. The global
+		     queue badge answers "there is something, somewhere"; coming back to one
+		     conversation, the question is whether anything from HERE is waiting.
+		     Count only: the wording stays server-side until a human has reviewed it, which is
+		     the entire reason those entries are queued. -->
+		{#if threadPending > 0}
+			<div class="mt-1.5 max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto px-3 flex items-center justify-center gap-2 text-[11px]">
+				<span class="rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 px-2 py-0.5">
+					{threadPending === 1
+						? t('chat.knowledge.thread_pending_one')
+						: t('chat.knowledge.thread_pending_many').replace('{count}', () => String(threadPending))}
+				</span>
+				<button
+					type="button"
+					class="text-text-subtle hover:text-text underline underline-offset-2"
+					onclick={() => void goto('/app/intelligence?tab=queue')}
+				>{t('chat.knowledge.thread_pending_open')}</button>
+			</div>
+		{/if}
 		<!-- EU AI Act Art. 50 §1: persistent "interacting with AI" disclosure
 		     (the per-message AI badge is the primary signal; this reinforces it +
 		     carries the §8 output caveat). Yields the hint slot to the transient

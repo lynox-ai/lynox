@@ -140,6 +140,15 @@ interface OpenAIStreamChunk {
       // use an array of content parts. Narrowing happens at the read site
       // via `extractDeltaText` to keep the leak guard at one boundary.
       content?: unknown;
+      /**
+       * Reasoning channel of an OpenAI-compat reasoning model. NOT in the
+       * OpenAI spec — a de-facto convention: `reasoning_content` (DeepSeek,
+       * GLM/Zhipu, Qwen, and Fireworks' hosting of them) and `reasoning`
+       * (OpenRouter's normalisation). Typed `unknown` for the same reason as
+       * `content`: it is read through `extractDeltaText`, never coerced.
+       */
+      reasoning_content?: unknown;
+      reasoning?: unknown;
       tool_calls?: Array<{
         index: number;
         id?: string | undefined;
@@ -403,6 +412,9 @@ async function* translateStream(
   let buffer = '';
   let blockIndex = 0;
   let activeTextBlock = false;
+  // Reasoning-channel block (see the `reasoning_content` handling below).
+  // Mutually exclusive with `activeTextBlock` — each owns `blockIndex` while open.
+  let activeThinkingBlock = false;
   // Track tool call indices → block indices
   const toolBlockMap = new Map<number, number>();
   let totalInputTokens = 0;
@@ -460,8 +472,71 @@ async function* translateStream(
         // hallucinates runaway bracket tails (`}] }] }] }]`) trying to
         // "close" the malformed prefix it sees in its own prior turn.
         // Regression for issue #37 (Mistral spawn-bracket leak).
+        // Reasoning channel. A reasoning model puts the bulk of its output
+        // here and leaves `delta.content` empty until it is done — measured on
+        // `accounts/fireworks/models/glm-5p2` (2026-08-02): a plain answer
+        // billed 891 completion tokens and split 3242 chars of
+        // `reasoning_content` against 492 chars of `content`, and a
+        // tool-calling turn emitted 27 reasoning chunks with `content` empty
+        // throughout. Dropping the channel cost two things: the user paid for
+        // ~87% of the tokens with nothing to show, and a sub-agent's run record
+        // showed 8.7k output tokens against 186 characters of result.
+        //
+        // An earlier version of this comment also claimed `lastEventAt` went
+        // stale on the slow turns. That is WRONG and the review caught it: both
+        // `lastEventAt`s are heartbeat-driven, not event-driven — the server
+        // bumps its copy on a 10 s interval and the client bumps on the
+        // `heartbeat` SSE event, so model silence cannot age either one. What IS
+        // true is that the web UI renders no activity during the reasoning
+        // phase; the CLI is unaffected either way (`showThinking` defaults off
+        // and its spinner does not stop on `thinking`).
+        //
+        // Mapped to an Anthropic `thinking` block, which the rest of the
+        // pipeline already handles: `stream.ts` turns `thinking_delta` into a
+        // `thinking` event, and `agent.ts` strips thinking blocks out of the
+        // message history before the next request — so nothing here can be
+        // echoed back to a provider that would reject it. `translateMessages`
+        // is allow-list based (text + tool_use only) and would drop it anyway.
+        // `||`, not `??`: a normalising proxy that populates BOTH keys and
+        // leaves `reasoning_content` as the empty string would lose the channel
+        // entirely under `??` (`'' ?? x` is `''`). No provider is known to do
+        // that — this is cheap insurance on a field two vendors already spell
+        // differently, not a fix for an observed break.
+        const reasoningPart = extractDeltaText(
+          choice.delta.reasoning_content || choice.delta.reasoning,
+        );
+        if (reasoningPart) {
+          // A thinking block cannot interleave with a text block, and reasoning
+          // always precedes content on this wire. Close an open text block
+          // first so the two never share an index.
+          if (activeTextBlock) {
+            yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
+            blockIndex++;
+            activeTextBlock = false;
+          }
+          if (!activeThinkingBlock) {
+            activeThinkingBlock = true;
+            yield {
+              type: 'content_block_start',
+              index: blockIndex,
+              content_block: { type: 'thinking', thinking: '', signature: '' },
+            } as unknown as BetaRawContentBlockStartEvent as BetaRawMessageStreamEvent;
+          }
+          yield {
+            type: 'content_block_delta',
+            index: blockIndex,
+            delta: { type: 'thinking_delta', thinking: reasoningPart },
+          } as unknown as BetaRawContentBlockDeltaEvent as BetaRawMessageStreamEvent;
+        }
+
         const textPart = extractDeltaText(choice.delta.content);
         if (textPart) {
+          // Reasoning is finished the moment real content starts.
+          if (activeThinkingBlock) {
+            yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
+            blockIndex++;
+            activeThinkingBlock = false;
+          }
           if (!activeTextBlock) {
             activeTextBlock = true;
             yield {
@@ -486,6 +561,15 @@ async function* translateStream(
                 yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
                 blockIndex++;
                 activeTextBlock = false;
+              }
+              // Same for the reasoning block: on this wire a tool call is the
+              // common terminator of the reasoning phase (`delta.content` stays
+              // empty for the whole turn), so without this the thinking block
+              // would still be open and share `blockIndex` with the tool_use.
+              if (activeThinkingBlock) {
+                yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
+                blockIndex++;
+                activeThinkingBlock = false;
               }
               // Start new tool_use block
               toolBlockMap.set(tc.index, blockIndex);
@@ -525,6 +609,13 @@ async function* translateStream(
             yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
             blockIndex++;
             activeTextBlock = false;
+          }
+          // A reasoning-only turn (model spent the whole budget thinking and
+          // emitted no content) ends here with the thinking block still open.
+          if (activeThinkingBlock) {
+            yield { type: 'content_block_stop', index: blockIndex } as BetaRawMessageStreamEvent;
+            blockIndex++;
+            activeThinkingBlock = false;
           }
           for (const [, bi] of toolBlockMap) {
             yield { type: 'content_block_stop', index: bi } as BetaRawMessageStreamEvent;
@@ -655,6 +746,7 @@ export class OpenAIAdapter {
             const content: Array<{ type: string; text?: string; name?: string; input?: unknown; id?: string }> = [];
             const rawInputs = new Map<number, string>();
             let stopReason = 'end_turn';
+            let sawTerminal = false;
             let inputTokens = 0;
             let outputTokens = 0;
             let cacheReadTokens: number | null = null;
@@ -684,6 +776,7 @@ export class OpenAIAdapter {
                   try { block.input = JSON.parse(json); } catch { block.input = {}; }
                 }
               } else if (event.type === 'message_delta') {
+                sawTerminal = true;
                 const e = event as { delta: { stop_reason?: string }; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number | null } };
                 if (e.delta.stop_reason) stopReason = e.delta.stop_reason;
                 if (e.usage?.input_tokens) inputTokens = e.usage.input_tokens;
@@ -694,11 +787,69 @@ export class OpenAIAdapter {
               }
             }
 
+            // `message_delta` is emitted only once a finish_reason arrives, and it carries the
+            // token totals. A stream that ends without one is a TRUNCATED response — but it
+            // assembles into a message that looks entirely ordinary: partial content,
+            // `stop_reason: 'end_turn'`, and usage 0/0. `process-capture.ts` then debits zero
+            // for a real call and records it as a success. Throwing is the right way to be
+            // wrong here: a caller that retries costs one request, a caller that believes a
+            // truncated answer costs a wrong result and an unbilled call.
+            if (!sawTerminal) {
+              throw new Error('upstream stream ended without a finish_reason — response is incomplete');
+            }
             return { content, stop_reason: stopReason, usage: { input_tokens: inputTokens, output_tokens: outputTokens, cache_read_input_tokens: cacheReadTokens } };
           },
         };
       },
+      /**
+       * The non-streaming call, which this adapter did not have.
+       *
+       * Three callers use it — `llm-helper.ts` (`save_workflow` extraction),
+       * `process-capture.ts`, and the inbox classifier — all through the `Anthropic` cast in
+       * `createLLMClient`, so the compiler was satisfied and every one of them threw
+       * `client.beta.messages.create is not a function` at RUNTIME on any tenant whose
+       * `wireClient` is `openai` — that is, every Mistral and OpenAI customer. `save_workflow`
+       * answered them with "Workflow extraction failed … call save_workflow again to retry",
+       * a retry prompt for an error that recurs deterministically.
+       *
+       * It is the same request either way; only the delivery differs. Collecting the stream
+       * gives back the fields the three callers actually read — `content`, `stop_reason`,
+       * `usage` — which is why this belongs in the adapter and not in three call sites. It is
+       * NOT a full `Anthropic.Message`: `id`, `role`, `model` and `type` are absent, and the
+       * `as unknown as Anthropic` cast at the construction site means nothing enforces that.
+       * A caller reaching for one of those gets `undefined`, not a compile error.
+       */
+      create: (
+        params: {
+          model: string;
+          max_tokens: number;
+          system?: unknown;
+          messages: unknown[];
+          tools?: Anthropic.Tool[];
+          [key: string]: unknown;
+        },
+        options?: { signal?: AbortSignal | undefined },
+      ) => this.beta.messages.stream(params, options).finalMessage(),
     },
+  };
+
+  /**
+   * The un-prefixed surface. `client.messages.create(...)` is a distinct property from
+   * `client.beta.messages.create(...)`, and callers use both — so an adapter carrying only
+   * the `beta` path still failed for half of them. Delegates rather than duplicating.
+   */
+  messages = {
+    create: (
+      params: {
+        model: string;
+        max_tokens: number;
+        system?: unknown;
+        messages: unknown[];
+        tools?: Anthropic.Tool[];
+        [key: string]: unknown;
+      },
+      options?: { signal?: AbortSignal | undefined },
+    ) => this.beta.messages.create(params, options),
   };
 
   private _stream(

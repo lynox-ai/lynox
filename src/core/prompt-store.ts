@@ -15,7 +15,7 @@
 import type Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import type { PromptSegment, TabQuestion, SecretOutcome } from '../types/index.js';
+import type { PromptSegment, TabQuestion, SecretOutcome, PromptMeta, PromptOrigin } from '../types/index.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,6 +46,11 @@ export interface PendingPromptRow {
    * secrets — and for every pre-v33 row. Lets a reconnect via /pending-prompt
    * restore multi-select instead of degrading to single-select. */
   multi_select: number | null;
+  /** JSON-encoded {@link PromptOrigin} — the workflow + step that raised this
+   * prompt (v52). NULL when there is no origin to record: every pre-v52 row and
+   * every prompt the main agent raises, where the thread already shows the
+   * cause. Restored by /pending-prompt so a reload keeps the provenance. */
+  origin_json: string | null;
   answer: string | null;
   answer_saved: number | null;
   /** Non-NULL when the secret answer was a server-side rejection rather
@@ -86,6 +91,48 @@ function isOnboardingBasicsPayload(payloadJson: string | null): boolean {
     );
   } catch {
     return false;
+  }
+}
+
+/**
+ * Narrow a `PromptMeta` to the origin fields worth persisting, or `undefined`
+ * when the prompt has no origin. Takes the whole meta rather than three
+ * arguments on purpose: a call site cannot pass two of the three fields and
+ * silently drop the workflow name.
+ */
+export function promptOriginOf(meta: PromptMeta | undefined): PromptOrigin | undefined {
+  if (!meta) return undefined;
+  // Empty counts as absent, matching the client-side parser. An `undefined`-vs-
+  // `''` split between the two would persist `{"workflowName":""}` here and then
+  // render nothing there — the row would claim an origin the dialog denies.
+  const workflowName = meta.workflowName || undefined;
+  const stepId = meta.stepId || undefined;
+  const stepTask = meta.stepTask || undefined;
+  if (workflowName === undefined && stepId === undefined && stepTask === undefined) return undefined;
+  return { workflowName, stepId, stepTask };
+}
+
+/**
+ * Read back a persisted origin. Malformed JSON yields `undefined` rather than
+ * throwing: the origin is a label on a prompt, and a bad label must not take
+ * down the resume of the prompt a run is blocked on.
+ */
+export function parseOriginJson(raw: string | null): PromptOrigin | undefined {
+  if (!raw) return undefined;
+  try {
+    // Deliberately no `typeof parsed === 'object'` / not-an-array guard: the
+    // per-field string checks below already reject every non-object shape by
+    // reading `undefined` off it, and `null` throws into the catch. A guard
+    // whose removal changes no output is not a guard — it is an untestable
+    // branch that makes the function look more careful than it is.
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    return promptOriginOf({
+      workflowName: typeof o['workflowName'] === 'string' ? o['workflowName'] : undefined,
+      stepId: typeof o['stepId'] === 'string' ? o['stepId'] : undefined,
+      stepTask: typeof o['stepTask'] === 'string' ? o['stepTask'] : undefined,
+    });
+  } catch {
+    return undefined;
   }
 }
 
@@ -139,6 +186,7 @@ export class PromptStore {
     options?: string[],
     multiSelect?: boolean,
     segments?: readonly PromptSegment[],
+    origin?: PromptOrigin,
   ): string {
     return this._insert({
       sessionId,
@@ -153,12 +201,13 @@ export class PromptStore {
       secretKeyType: null,
       multiSelect: multiSelect === true,
       payloadJson: null,
+      origin,
     });
   }
 
   /** Insert a multi-question (tabs) ask_user prompt. All questions are
    * answered in a single reply. Throws PromptConflictError on collision. */
-  insertAskUserTabs(sessionId: string, questions: TabQuestion[]): string {
+  insertAskUserTabs(sessionId: string, questions: TabQuestion[], origin?: PromptOrigin): string {
     if (questions.length === 0) throw new Error('insertAskUserTabs: questions must be non-empty');
     return this._insert({
       sessionId,
@@ -172,10 +221,11 @@ export class PromptStore {
       secretKeyType: null,
       multiSelect: false,
       payloadJson: null,
+      origin,
     });
   }
 
-  insertAskSecret(sessionId: string, name: string, prompt: string, keyType?: string): string {
+  insertAskSecret(sessionId: string, name: string, prompt: string, keyType?: string, origin?: PromptOrigin): string {
     return this._insert({
       sessionId,
       promptType: 'ask_secret',
@@ -186,6 +236,7 @@ export class PromptStore {
       secretKeyType: keyType ?? null,
       multiSelect: false,
       payloadJson: null,
+      origin,
     });
   }
 
@@ -193,7 +244,7 @@ export class PromptStore {
    * (JSON `MailConnectPromptData`). The consent step renders it and forwards
    * the account to POST /api/mail/accounts; the password is entered there and
    * never touches this row. Throws PromptConflictError on collision. */
-  insertConnectMail(sessionId: string, question: string, payloadJson: string): string {
+  insertConnectMail(sessionId: string, question: string, payloadJson: string, origin?: PromptOrigin): string {
     return this._insert({
       sessionId,
       promptType: 'connect_mail',
@@ -204,6 +255,7 @@ export class PromptStore {
       secretKeyType: null,
       multiSelect: false,
       payloadJson,
+      origin,
     });
   }
 
@@ -240,6 +292,7 @@ export class PromptStore {
     secretKeyType: string | null;
     multiSelect: boolean;
     payloadJson: string | null;
+    origin?: PromptOrigin | undefined;
   }, retry = false): string {
     const id = randomUUID();
     const expiresAt = new Date(Date.now() + PROMPT_TTL_MS).toISOString();
@@ -260,6 +313,7 @@ export class PromptStore {
         expiresAt,
         args.multiSelect ? 1 : null,
         args.payloadJson,
+        args.origin ? JSON.stringify(args.origin) : null,
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -496,8 +550,9 @@ export class PromptStore {
     return (this._stmtInsert ??= this.db.prepare(`
       INSERT INTO pending_prompts
         (id, session_id, prompt_type, question, options_json, questions_json, segments_json,
-         secret_name, secret_key_type, answer, answer_saved, status, expires_at, multi_select, payload_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         secret_name, secret_key_type, answer, answer_saved, status, expires_at, multi_select,
+         payload_json, origin_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `));
   }
 

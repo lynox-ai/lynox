@@ -201,6 +201,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactHistoryTool: { definition: { name: 'artifact_history' }, handler: vi.fn() },
   artifactRestoreTool: { definition: { name: 'artifact_restore' }, handler: vi.fn() },
   recallToolResultTool: { definition: { name: 'recall_tool_result' }, handler: vi.fn() },
+  calendarReadTool: { definition: { name: 'calendar_read' }, handler: vi.fn() },
+  CALENDAR_FEED_PREFIX: 'CALENDAR_FEED_',
   suggestFollowUpsTool: { definition: { name: 'suggest_follow_ups' }, handler: vi.fn() },
   mediaProcessTool: { definition: { name: 'media_process' }, handler: vi.fn() },
 }));
@@ -318,6 +320,9 @@ vi.mock('./project.js', () => ({
 const mockInsertRun = vi.fn().mockReturnValue('run-123');
 const mockInsertPromptSnapshot = vi.fn();
 const mockInsertWireSnapshot = vi.fn();
+/** Sub-agent spend rollup (session.ts run-end). Defaults to 0 = the turn
+ *  delegated nothing; individual tests override it. */
+const mockGetDescendantCostUsd = vi.fn().mockReturnValue(0);
 
 vi.mock('./run-history.js', () => ({
   RunHistory: vi.fn().mockImplementation(function () {
@@ -343,6 +348,8 @@ vi.mock('./run-history.js', () => ({
     this.getCompactionEventsBySession = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.insertToolCall = vi.fn();
+    // @ts-expect-error mock constructor — sub-agent spend rollup (session.ts run-end).
+    this.getDescendantCostUsd = mockGetDescendantCostUsd;
     // @ts-expect-error mock constructor
     this.getEmbeddings = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
@@ -412,9 +419,10 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool.
-      // 38 builtin always (incl. edit_file + update_workflow_steps + export_workflow + import_workflow + diagnose_workflow_run + media_process + suggest_follow_ups); +1 `web_research`
+      // 39 builtin always (incl. edit_file + update_workflow_steps + export_workflow + import_workflow + diagnose_workflow_run + media_process + suggest_follow_ups); +1 `web_research`
       // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
       // isn't configured; +5 mail tools when vault is available.
+      // `calendar_read` is NOT here: it ships behind `calendar_enabled`, default off.
       expect([41, 46]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
@@ -577,6 +585,84 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(typeof failedCall![0]).toBe('string'); // the failed run's id
     });
 
+    it('H2b: an in-run helper cost is SHOWN to the customer but not debited a second time', async () => {
+      // The two roles of the run's cost number pull in opposite directions, and a first
+      // version of this got it exactly backwards.
+      //
+      // A helper call (the follow-up-chip recovery) spends on the pool key WITHOUT producing
+      // tokens in `session.usage`. It debits itself through `reportMeteredCost`, under its own
+      // fresh run id — so the control plane is already correct. What was short were the
+      // numbers the CUSTOMER reads, which are derived from the usage deltas.
+      //
+      // Adding the helper dollars to the value handed to `onAfterRun` therefore does not fix
+      // the display: it bills the tenant twice, because `managed-hook` dedups per run id and
+      // these are two different ids. This test pins both halves at once.
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+
+      const HELPER_USD = 0.25;
+      mockSend.mockImplementationOnce(async () => {
+        session.usage.input_tokens += 1000;
+        session.usage.output_tokens += 500;
+        return 'done';
+      });
+      // Stand in for the recovery having spent on the pool key during this run.
+      const agent = (session as unknown as { agent?: { getHelperCostUsd?: () => number } }).agent;
+      if (agent) agent.getHelperCostUsd = () => HELPER_USD;
+
+      await session.run('go');
+
+      // The number the customer sees CARRIES the helper spend. `run()` returns the reply text;
+      // the figure the UI and the thread rollup read is the last run's usage summary.
+      const shown = (session as unknown as { _lastRunUsage?: { costUsd: number } })._lastRunUsage;
+      expect(shown, 'the run must record a usage summary').toBeDefined();
+      expect(shown!.costUsd).toBeGreaterThanOrEqual(HELPER_USD);
+
+      // The number the control plane DEBITS does not — the helper already debited itself.
+      const runCall = after.mock.calls.find(c => (c[2] as { modelTier?: string })?.modelTier !== 'fast');
+      expect(runCall, 'the run must still fire onAfterRun').toBeDefined();
+      expect(runCall![1] as number).toBeLessThan(HELPER_USD);
+    });
+
+    it('H2c: the ABORTED path shows the helper spend too, and still debits without it', async () => {
+      // The success path is pinned by H2b. The failure path repeats the same split by hand,
+      // and nothing held it — removing the helper term there left the suite green, which
+      // silently reopens the under-display this whole change exists to close, on every
+      // errored or cancelled turn. Three guards went in with no failing-capable test; this is
+      // the third.
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+
+      const HELPER_USD = 0.25;
+      mockSend.mockImplementationOnce(async () => {
+        session.usage.input_tokens += 1000;
+        session.usage.output_tokens += 500;
+        throw Object.assign(new Error('mid-turn boom'), { status: 500, type: 'api_error' });
+      });
+      const agent = (session as unknown as { agent?: { getHelperCostUsd?: () => number } }).agent;
+      if (agent) agent.getHelperCostUsd = () => HELPER_USD;
+
+      await expect(session.run('go')).rejects.toThrow('mid-turn boom');
+
+      const failed = after.mock.calls.find(c => (c[2] as { modelTier?: string })?.modelTier !== 'fast');
+      expect(failed, 'the aborted run must still fire onAfterRun').toBeDefined();
+      // Debited WITHOUT the helper term — it already debited itself, same as the success path.
+      expect(failed![1] as number).toBeLessThan(HELPER_USD);
+
+      // And the RECORDED number — the one the customer reads back — carries it. Asserting only
+      // the debit above let the display term be deleted with the suite still green, which is
+      // how this test first shipped: it pinned one half of a split whose whole point is that
+      // the two halves differ.
+      const rh = engine.getRunHistory()!;
+      const recorded = (rh.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .map(c => c[1] as { costUsd?: number; status?: string })
+        .find(a => a?.status === 'failed' || a?.status === 'aborted');
+      expect(recorded, 'the aborted run must be recorded').toBeDefined();
+      expect(recorded!.costUsd ?? 0).toBeGreaterThanOrEqual(HELPER_USD);
+    });
+
     it('Tier 2: a manual compaction records a compaction event (trigger=manual)', async () => {
       const { engine, session } = await createEngineAndSession();
       mockSend.mockResolvedValueOnce('summary text');   // the internal summary run
@@ -715,6 +801,40 @@ describe('Engine + Session (Orchestrator)', () => {
         model: 'claude-sonnet-4-6',
       });
     });
+
+    /**
+     * The WIRING for the sub-agent cost rollup. The pieces either side of it are
+     * unit-tested (the SQL in run-history.test.ts, the projection in
+     * render-projection.test.ts, the formatter in chat-cost-footer.test.ts), but
+     * without these two the whole feature could be deleted from `Session.run`
+     * with every one of those still green — the run-end read is best-effort and
+     * swallows its own errors, so a missing call is indistinguishable from a
+     * turn that delegated nothing.
+     */
+    it('rolls sub-agent spend into the run usage, keyed on the CURRENT run id', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetDescendantCostUsd.mockClear().mockReturnValue(0.0698);
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('delegate something');
+
+      // Asked RunHistory for THIS run's descendants — not a stale or empty id.
+      expect(mockGetDescendantCostUsd).toHaveBeenCalledWith('run-123');
+      // ...and the answer reached the payload the `done` event echoes.
+      expect(session.getLastRunUsage()?.spawnCostUsd).toBe(0.0698);
+    });
+
+    it('omits spawnCostUsd entirely when the turn delegated nothing', async () => {
+      // Absent, not 0: the footer keys "did this turn delegate?" off presence,
+      // and a stored 0 would put an empty split in the tooltip.
+      const { session } = await createEngineAndSession();
+      mockGetDescendantCostUsd.mockClear().mockReturnValue(0);
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('no delegation here');
+
+      expect(session.getLastRunUsage()).not.toHaveProperty('spawnCostUsd');
+    });
   });
 
   // -- registerPipelineTools --
@@ -726,6 +846,32 @@ describe('Engine + Session (Orchestrator)', () => {
       // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
       // isn't configured; +5 mail tools when vault is available.
       expect([41, 46]).toContain(mockRegister.mock.calls.length);
+    });
+
+    it('does NOT register calendar_read while the flag is off', async () => {
+      // Off must be byte-identical, not merely inert: an unregistered tool is absent from the
+      // decision space AND from the prefix every turn pays for. A handler that refuses when
+      // called would satisfy neither.
+      await createEngineAndSession();
+      const names = mockRegister.mock.calls.map(c => (c[0] as { definition?: { name?: string } })?.definition?.name);
+      expect(names).not.toContain('calendar_read');
+    });
+
+    it('registers calendar_read when the flag is on', async () => {
+      // Driven through the config the engine actually reads: the flag lives in the USER config
+      // (`loadConfig()`), not in the runtime `LynoxConfig` the constructor takes. Setting the
+      // latter looked like it worked and tested nothing — the tool stayed unregistered and the
+      // assertion caught it.
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      engine.getUserConfig().calendar_enabled = true;
+      try {
+        await engine.init();   // registration happens here, not in registerPipelineTools()
+        const names = mockRegister.mock.calls.map(c => (c[0] as { definition?: { name?: string } })?.definition?.name);
+        expect(names).toContain('calendar_read');
+      } finally {
+        // loadConfig() memoises a singleton — reset so the flag does not leak into later tests.
+        delete engine.getUserConfig().calendar_enabled;
+      }
     });
 
     it('registerPipelineTools is idempotent after init', async () => {

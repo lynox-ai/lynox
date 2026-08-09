@@ -94,15 +94,23 @@ const STATIC_PROMPT_FRAGMENTS: readonly string[] = [
 // double-counts a set that is never on the wire alongside the legacy one.
 const DK1_SWAP_TOOL_NAMES = new Set(['remember', 'recall', 'memory_block_edit', 'memory_retire', 'memory_focus', 'archive_search']);
 
+// Same reason, different shape: `calendar_read` is registered only when `calendar_enabled` is
+// on (engine.ts), and that flag ships OFF. The barrel exports it so the flag can turn it on, but
+// the prefix a default tenant pays does not carry it — measuring it here would budget for a cost
+// nobody is charged, and would quietly hide the real growth of the tools that ARE always on.
+// When the flag becomes the default, move this name out and re-baseline in the same commit.
+const FLAG_GATED_TOOL_NAMES = new Set(['calendar_read']);
+
 /** All builtin `ToolEntry` objects exported from the builtin tools barrel (minus the DK.1
- *  swap tools — see above; they replace the legacy set at runtime, never co-exist with it). */
+ *  swap tools and the flag-gated ones — see above; neither is on a default turn's wire). */
 const BUILTIN_TOOLS: readonly ToolEntry[] = Object.values(builtinTools).filter(
   (v): v is ToolEntry =>
     typeof v === 'object' &&
     v !== null &&
     'definition' in v &&
     typeof (v as { definition: unknown }).definition === 'object' &&
-    !DK1_SWAP_TOOL_NAMES.has((v as ToolEntry).definition.name),
+    !DK1_SWAP_TOOL_NAMES.has((v as ToolEntry).definition.name) &&
+    !FLAG_GATED_TOOL_NAMES.has((v as ToolEntry).definition.name),
 );
 
 /**
@@ -254,7 +262,30 @@ function measureStaticPrefixTokens(): number {
 // 2026-07-18: +214 for the Session-Start task-proactivity rewrite (prompts.ts) —
 // the guardrail against the agent autonomously sending mail / mutating tasks from
 // a briefing nudge. Cached (paid once per session); the safety fix justifies it.
-const STATIC_PREFIX_BUDGET = 23350;
+// 2026-08-06: +4 (measured 23354) for `auth.username_key` / `auth.password_key` on
+// api_setup's input schema — the two fields that make `basic_format: 'user_pass_split'`
+// an implemented auth path instead of a schema value that silently 401s. The PROSE
+// explaining it deliberately went to `detailedGuidance` (paid on use) rather than the
+// cached description, so what lands here is only the two property declarations.
+// 2026-08-07: `calendar_read` costs this budget NOTHING, and the number moved DOWN
+// because it is excluded above rather than counted. It ships behind `calendar_enabled`,
+// default off, so a default tenant's prefix does not carry it — measured both ways:
+// counted it was +148, gated it is 0.
+//
+// Two things this is not. It is not a free pass: turning the flag on costs those 148 tokens on
+// every turn of that tenant, and flipping the default means moving the name out of
+// FLAG_GATED_TOOL_NAMES and re-baselining here, in the same commit. And it is not a reason to
+// gate tools for cost — a capability nobody can reach is worth nothing; this one is gated
+// because a calendar feed is externally authored and only a real one proves the read is right.
+// 2026-08-09 (F2/D2, cost-controls v2): +~120 tokens total for the `tools`
+// declaration on BOTH generator surfaces — required on plan_task phases, and
+// declarable (with `model`) on run_workflow ad-hoc steps, which previously had
+// no way to opt into bash at all post-F2. Deliberate: the field is the
+// mechanism that keeps bash (and its approval dialogs) out of every generated
+// workflow step, which buys back far more than the prefix pays. Descriptions
+// were tightened before bumping — neither names a tool list (the caller's own
+// toolset is in context; an invalid name fails loudly at save).
+const STATIC_PREFIX_BUDGET = 23500;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated

@@ -408,6 +408,12 @@ export function redirectHopHeaders(
   headers: Record<string, string>,
   fromUrl: string,
   toUrl: string,
+  // One more header to treat as a credential for this request. The fixed set
+  // below cannot know the slot an `auth.type: 'header'` api_profile names — it
+  // is whatever the API calls its key (`Private-Token`, `X-Shopify-Access-Token`)
+  // — and the engine fills that slot from the vault, exempt from the egress
+  // scan. Without this, one cross-origin hop replays it verbatim.
+  extraDropHeader?: string | undefined,
 ): Record<string, string> {
   let sameOrigin = false;
   try {
@@ -416,9 +422,12 @@ export function redirectHopHeaders(
     sameOrigin = false; // unparseable → treat as cross-origin, strip credentials
   }
   if (sameOrigin) return headers;
+  const extra = extraDropHeader?.toLowerCase();
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(headers)) {
-    if (!CROSS_ORIGIN_DROP_HEADERS.has(k.toLowerCase())) out[k] = v;
+    const lower = k.toLowerCase();
+    if (CROSS_ORIGIN_DROP_HEADERS.has(lower) || (extra !== undefined && lower === extra)) continue;
+    out[k] = v;
   }
   return out;
 }

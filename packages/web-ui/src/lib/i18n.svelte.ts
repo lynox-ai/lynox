@@ -1,3 +1,5 @@
+import { fillTemplate } from './i18n-fill.js';
+
 export type Locale = 'de' | 'en';
 
 let current = $state<Locale>('de');
@@ -118,12 +120,16 @@ const translations: Record<string, Record<Locale, string>> = {
 	'knowledge.queue.reject_confirm': { de: 'Eintrag ablehnen? Er bleibt als abgelehnt protokolliert und wird dem Agenten nie gezeigt.', en: 'Reject this entry? It stays on record as rejected and is never shown to the agent.' },
 	// DK-UX read-surface ("Wissen"-Tab, active durable knowledge — browse only).
 	'knowledge.active.count_label': { de: 'aktive Einträge', en: 'active entries' },
-	'knowledge.active.subtitle': { de: 'Was sich lynox über dich und deine Arbeit gemerkt hat. Änderungen besprichst du direkt im Chat.', en: 'What lynox has remembered about you and your work. Discuss any changes directly in chat.' },
+	'knowledge.active.subtitle': { de: 'Was sich lynox über dich und deine Arbeit gemerkt hat.', en: 'What lynox has remembered about you and your work.' },
 	'knowledge.active.profile': { de: 'Profil', en: 'Profile' },
 	'knowledge.active.playbook': { de: 'Playbook', en: 'Playbook' },
 	'knowledge.active.empty': { de: 'Noch nichts gemerkt. Sobald lynox etwas über dich lernt, erscheint es hier.', en: 'Nothing remembered yet. As lynox learns about you, it shows up here.' },
 	'knowledge.active.pinned': { de: 'angeheftet', en: 'pinned' },
-	'knowledge.active.edit_hint': { de: 'Etwas ändern oder löschen? Sag es lynox einfach im Chat.', en: 'Want to change or remove something? Just tell lynox in chat.' },
+	'knowledge.active.edit_hint': { de: 'Etwas ändern? Sag es lynox im Chat. Einen falschen Eintrag entfernst du direkt hier.', en: 'Want to change something? Tell lynox in chat. To remove a wrong entry, use the button on it.' },
+	'knowledge.active.retire': { de: 'entfernen', en: 'remove' },
+	'knowledge.active.retiring': { de: 'wird entfernt...', en: 'removing...' },
+	'knowledge.active.retire_confirm': { de: 'Diesen Eintrag entfernen? lynox nutzt ihn danach nicht mehr.\n\n{text}', en: 'Remove this entry? lynox will stop using it.\n\n{text}' },
+	'knowledge.active.retire_failed': { de: 'Der Eintrag konnte nicht entfernt werden. Bitte erneut versuchen.', en: 'That entry could not be removed. Please try again.' },
 	// PRD-IA-V2 P3-PR-H: `insights` folded as sub-tab under `graph`. Key kept
 	// (powers the sub-tab label). `graph_overview` labels the default graph
 	// view inside the `graph` top-tab.
@@ -557,6 +563,14 @@ const translations: Record<string, Record<Locale, string>> = {
 	'crm.create_in_chat': { de: 'Neuer Kontakt', en: 'New contact' },
 	'crm.create_in_chat_prompt': { de: 'Ich möchte einen neuen Kontakt erfassen.', en: "I'd like to add a new contact." },
 	'crm.edit_in_chat': { de: 'Im Chat bearbeiten', en: 'Edit in chat' },
+	// Removal + provenance for a contact. `source` used to read 'manual' for every
+	// agent-written row, which claimed the person entered it themselves.
+	'crm.remove': { de: 'Kontakt entfernen', en: 'Remove contact' },
+	'crm.removing': { de: 'wird entfernt...', en: 'removing...' },
+	'crm.remove_confirm': { de: '{name} aus den Kontakten entfernen? Das lässt sich nicht rückgängig machen.', en: 'Remove {name} from contacts? This cannot be undone.' },
+	'crm.remove_failed': { de: 'Der Kontakt konnte nicht entfernt werden. Bitte erneut versuchen.', en: 'That contact could not be removed. Please try again.' },
+	'crm.source.agent': { de: 'von lynox angelegt', en: 'created by lynox' },
+	'crm.source.agent_external': { de: 'von lynox angelegt, aus externen Inhalten', en: 'created by lynox, from external content' },
 	'crm.edit_in_chat_prompt': { de: 'Ich möchte diesen Kontakt bearbeiten:', en: "I'd like to edit this contact:" },
 
 	// Backups
@@ -783,6 +797,10 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.activity.tool.artifact_list': { de: 'Sucht Artefakte...', en: 'Searching artifacts...' },
 	'chat.activity.tool.artifact_delete': { de: 'Löscht Artefakt...', en: 'Deleting artifact...' },
 	'chat.activity.tool.spawn_agent': { de: 'Verteilt Aufgaben...', en: 'Delegating to sub-agents...' },
+	// Dispatch takes about a second; waiting for the children takes minutes. The
+	// generic label above describes only the first, so `spawn.ts` hands over to
+	// this phase as soon as the batch is running.
+	'chat.activity.tool.spawn_agent.waiting': { de: 'Sub-Agenten arbeiten...', en: 'Sub-agents working...' },
 	'chat.activity.tool.read_file': { de: 'Liest Datei...', en: 'Reading file...' },
 	'chat.activity.tool.write_file': { de: 'Schreibt Datei...', en: 'Writing file...' },
 	'chat.activity.tool.list_files': { de: 'Listet Dateien...', en: 'Listing files...' },
@@ -813,9 +831,6 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.send_failed': { de: 'Nicht gesendet — tippen zum Wiederholen', en: 'Not sent — tap to retry' },
 	'chat.cancel_queue': { de: 'Queue leeren', en: 'Clear queue' },
 	'chat.remove_queued': { de: 'Aus Queue entfernen', en: 'Remove from queue' },
-	'chat.deferred_title': { de: 'Noch offen', en: 'Still open' },
-	'chat.deferred_dismiss': { de: 'Vorschlag entfernen', en: 'Dismiss suggestion' },
-	'chat.deferred_clear': { de: 'Alle entfernen', en: 'Clear all' },
 	'chat.placeholder_streaming': { de: 'Nächste Nachricht vorbereiten...', en: 'Prepare next message...' },
 	'chat.placeholder_answer': { de: 'Antwort eingeben...', en: 'Type your answer...' },
 	'chat.placeholder_secret': { de: 'Schlüssel oben eingeben — dann geht es weiter', en: 'Enter the key above to continue' },
@@ -830,6 +845,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.skipped': { de: 'Übersprungen', en: 'Skipped' },
 	'chat.dismiss': { de: 'Abbrechen', en: 'Cancel' },
 	'chat.prompt_timeout_left': { de: 'Verbleibende Zeit', en: 'Time remaining' },
+	// Provenance of a confirmation raised from inside a workflow step. Composed
+	// from these two halves rather than one sentence: a step can be reached
+	// without a named workflow (and vice versa), and a half-filled sentence
+	// reads worse than the half that is true.
+	'chat.prompt_origin_workflow': { de: 'Workflow „{name}“', en: 'Workflow "{name}"' },
+	'chat.prompt_origin_step': { de: 'Schritt „{id}“', en: 'Step "{id}"' },
 	'chat.batch_mode': { de: 'Fragen beantworten', en: 'Answer questions' },
 
 	// Pipeline status v2 — prompt anchor (sticky bar above the chat input)
@@ -922,8 +943,28 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.knowledge.undone': { de: 'rückgängig gemacht', en: 'undone' },
 	'chat.knowledge.undo_failed': { de: 'Konnte nicht rückgängig gemacht werden.', en: 'Couldn’t undo that.' },
 	// DK-UX untrusted-capture review chip (turn read external content → keep/edit/discard).
+	// The per-thread reminder after a reload: the inline chip is client-only and did not
+	// survive it, and the global queue badge answers "somewhere", not "here".
+	'chat.knowledge.thread_pending_one': { de: '1 Fakt aus diesem Gespräch wartet auf dich', en: '1 fact from this conversation is waiting for you' },
+	'chat.knowledge.thread_pending_many': { de: '{count} Fakten aus diesem Gespräch warten auf dich', en: '{count} facts from this conversation are waiting for you' },
+	'chat.knowledge.thread_pending_open': { de: 'ansehen', en: 'review' },
 	'chat.knowledge.review_tag': { de: 'prüfen', en: 'review' },
 	'chat.knowledge.review_hint': { de: 'aus externem Inhalt', en: 'from external content' },
+	// WHY a write is waiting. "from external content" is true of every queued write and so tells
+	// the person nothing; these two say WHERE it came from.
+	//
+	// Two, not three, although the engine distinguishes three causes. `marker` and
+	// `external-tool` differ in how the engine noticed, not in anything the person can act on —
+	// showing both would be a distinction without a difference. The split that DOES matter is
+	// this step vs an earlier one, because in the second case nothing external happened here at
+	// all and the chip would otherwise look like a malfunction.
+	//
+	// Worded as a POSSIBILITY, not an event. `EXTERNAL_CONTENT_TOOLS` is a capability list that
+	// includes stored read-back (`task_list`, `data_store_query`, `contacts_search`): asking
+	// "which tasks are open?" arms it, and claiming "something external was read" there would be
+	// plainly untrue to someone who just asked about their own to-dos.
+	'chat.knowledge.cause.this_step': { de: 'kann Inhalte von ausserhalb enthalten', en: 'may include content from outside' },
+	'chat.knowledge.cause.earlier': { de: 'ein früherer Schritt in diesem Chat hatte Inhalte von ausserhalb', en: 'an earlier step in this chat had content from outside' },
 	'chat.knowledge.review_keep': { de: 'behalten', en: 'keep' },
 	'chat.knowledge.review_edit': { de: 'bearbeiten', en: 'edit' },
 	'chat.knowledge.review_discard': { de: 'verwerfen', en: 'discard' },
@@ -1171,6 +1212,59 @@ const translations: Record<string, Record<Locale, string>> = {
 	'settings.channels.notifications_desc': { de: 'Browser-Push für Workflow-Ende, Alerts und Deal-Hinweise', en: 'Browser push for workflow completion, alerts, and deal nudges' },
 	'settings.channels.search': { de: 'Websuche', en: 'Web search' },
 	'settings.channels.search_desc': { de: 'SearXNG-Endpunkt für Webrecherche', en: 'SearXNG endpoint for web research' },
+	'settings.channels.calendar': { de: 'Kalender', en: 'Calendar' },
+	'settings.channels.unavailable': { de: '· auf dieser Instanz nicht aktiv', en: '· not enabled on this instance' },
+	'settings.channels.calendar_unavailable_desc': {
+		de: 'Der Kalender ist auf dieser Instanz nicht freigeschaltet. Eine hier hinterlegte Adresse wird von nichts gelesen.',
+		en: 'The calendar is not enabled on this instance. An address stored here is not read by anything.',
+	},
+	// Each language written natively — the German is not a translation of the English.
+	'settings.google.claim_confirm': {
+		de: 'Ein Google-Konto wartet darauf, mit dieser Instanz verbunden zu werden. Verbinden?',
+		en: 'A Google account is waiting to be connected to this instance. Connect it?',
+	},
+	'settings.google.claim_confirm_hint': {
+		de: 'Nur bestätigen, wenn du die Verbindung gerade selbst gestartet hast. Welches Konto es ist, können wir hier nicht anzeigen — wer den Link geschickt hat, könnte ein fremdes Konto verbinden.',
+		en: 'Only confirm if you started this yourself. We cannot show you which account it is — whoever sent you the link could be connecting theirs.',
+	},
+	'settings.google.claim_confirm_yes': { de: 'Verbinden', en: 'Connect' },
+	'settings.google.claim_confirm_no': { de: 'Abbrechen', en: 'Cancel' },
+	'settings.channels.calendar_desc': { de: 'Termine lesen — aus Google, Outlook, Apple oder einer Buchungssoftware', en: 'Read appointments — from Google, Outlook, Apple, or booking software' },
+	// Each language written natively: the German is not a translation of the English. The
+	// instructions name the menu items as the operator sees them in their own product.
+	'calendar.title': { de: 'Kalender verbinden', en: 'Connect a calendar' },
+	'calendar.intro': {
+		de: 'Damit kennt der Agent deine Termine und kann sagen, wann du frei bist. Nur lesen — er kann nichts eintragen, verschieben oder absagen.',
+		en: 'This lets the agent see your appointments and say when you are free. Read-only — it cannot create, move, or cancel anything.',
+	},
+	'calendar.where_title': { de: 'Wo du die Adresse findest', en: 'Where to find the address' },
+	'calendar.where_google': {
+		de: 'Google Kalender: Einstellungen → den Kalender links auswählen → „Geheime Adresse im iCal-Format".',
+		en: 'Google Calendar: Settings → pick the calendar on the left → "Secret address in iCal format".',
+	},
+	'calendar.where_outlook': {
+		de: 'Outlook / Microsoft 365: Kalender → Freigeben → Veröffentlichen → ICS-Link kopieren.',
+		en: 'Outlook / Microsoft 365: Calendar → Share → Publish → copy the ICS link.',
+	},
+	'calendar.where_apple': {
+		de: 'Apple Kalender: Rechtsklick auf den Kalender → Freigabeeinstellungen → „Öffentlicher Kalender".',
+		en: 'Apple Calendar: right-click the calendar → Sharing Settings → "Public Calendar".',
+	},
+	'calendar.secrecy_note': {
+		de: 'Diese Adresse ist wie ein Passwort: wer sie hat, kann den Kalender lesen. Sie wird verschlüsselt gespeichert und dem Agenten nie gezeigt.',
+		en: 'This address works like a password: anyone holding it can read the calendar. It is stored encrypted and never shown to the agent.',
+	},
+	'calendar.connected': { de: 'Verbundene Kalender', en: 'Connected calendars' },
+	'calendar.add_first': { de: 'Kalender hinzufügen', en: 'Add a calendar' },
+	'calendar.add_another': { de: 'Weiteren Kalender hinzufügen', en: 'Add another calendar' },
+	'calendar.label': { de: 'Name (z. B. MAIN, PRIVAT, BUCHUNGEN)', en: 'Name (e.g. MAIN, PRIVATE, BOOKINGS)' },
+	'calendar.address': { de: 'Geheime iCal-Adresse', en: 'Secret iCal address' },
+	'calendar.connect': { de: 'Verbinden', en: 'Connect' },
+	'calendar.label_required': { de: 'Bitte einen Namen angeben.', en: 'Please give it a name.' },
+	'calendar.https_required': { de: 'Die Adresse muss mit https:// beginnen.', en: 'The address must start with https://.' },
+	'calendar.save_failed': { de: 'Der Kalender konnte nicht gespeichert werden.', en: 'That calendar could not be saved.' },
+	'calendar.load_failed': { de: 'Die verbundenen Kalender konnten nicht geladen werden.', en: 'Connected calendars could not be loaded.' },
+	'common.remove': { de: 'Entfernen', en: 'Remove' },
 	// PRD-IA-V2 P3-PR-G — `settings.tasks` retired; Tasks now lives under
 	// Automation Hub via `hub.automation.tasks`. Key was already unused in
 	// templates (only the definition remained after SettingsIndex never wired
@@ -2062,4 +2156,10 @@ export function initLocale(): void {
 
 export function t(key: string): string {
 	return translations[key]?.[current] ?? key;
+}
+
+/** Translate `key`, then fill its `{placeholder}` slots substitution-safely. See
+ *  {@link fillTemplate} for why the naive `t(key).replace('{x}', value)` is a hazard. */
+export function tf(key: string, vars: Record<string, string>): string {
+	return fillTemplate(t(key), vars);
 }

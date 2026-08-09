@@ -23,6 +23,9 @@
     "onlyBuiltDependencies": [
       "esbuild",
       "sharp"
-    ]
+    ],
+    "overrides": {
+      "nanoid@3": "^3.3.17"
+    }
   }
 }

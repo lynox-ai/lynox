@@ -22,8 +22,9 @@ import type {
   PromptTabsFn,
   PromptSecretFn,
   PromptMailConnectFn,
+  CacheProfile,
 } from '../types/index.js';
-import { getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL } from '../types/index.js';
+import { getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile } from '../types/index.js';
 import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
@@ -56,6 +57,7 @@ import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
+import { evictSavedArtifactBodies } from './artifact-eviction.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
@@ -415,12 +417,64 @@ export class Agent implements IAgent {
   /** Wallclock (ms) of the most recent API call — used by the warm-cache-miss
    *  detector to distinguish a broken cache from a legit post-TTL cold read. */
   private _lastCallAt = 0;
+  /** True once this agent has observed a cache READ on any call — the gate the
+   *  warm-miss detector actually needs.
+   *
+   *  Configuration cannot answer "does this endpoint cache?". `custom` is
+   *  registered `automatic-prefix`, but the engine strips its `cache_control`
+   *  (it is Anthropic-wire) AND withholds `prompt_cache_key` (that is
+   *  openai-wire only, see `shouldSendPromptCacheKey`) — so it reports zero
+   *  cache reads forever, by construction. An OpenAI-compatible endpoint
+   *  (Ollama, vLLM, LM Studio) may likewise report `prompt_tokens` without
+   *  `prompt_tokens_details.cached_tokens`. Warning those users on every
+   *  tool-loop iteration is exactly the "cry wolf on an entire provider class"
+   *  the previous gate was defending against.
+   *
+   *  Observation settles it without a per-provider table: a cache that never
+   *  existed cannot break, and one that produced a hit and then stopped is
+   *  precisely the regression worth reporting. Not reset by `loadMessages` —
+   *  whether the endpoint caches is a property of the endpoint, not of the
+   *  message buffer. */
+  private _sawCacheRead = false;
   // Warm-cache-miss thresholds (see the detector in `_loop`). Conservative on
   // purpose — only fire on a real break, never on a small prompt or a cold/
   // post-TTL read.
   private static readonly CACHE_HEALTH_MIN_PROMPT = 4000;
   private static readonly CACHE_HEALTH_MIN_HIT_RATIO = 0.3;
+  /** Grace window for `explicit-breakpoint` providers (Anthropic/Vertex): the
+   *  agent writes every breakpoint at `AGENT_CACHE_TTL` = 1h, so a gap under
+   *  ~50min should still have been warm. */
   private static readonly CACHE_TTL_GRACE_MS = 50 * 60 * 1000;
+  /** Grace window for `automatic-prefix` providers (Mistral and other
+   *  OpenAI-compatible endpoints). Deliberately much shorter than the 1h
+   *  breakpoint window: these providers cache transparently and publish no TTL
+   *  we can pin, and a real thread measured 95% hit at a 62s gap but only 8% at
+   *  a 74min gap — so a long gap is a legitimate cold read there, not a break.
+   *  Five minutes keeps the detector to the range where a miss cannot be
+   *  explained by expiry on any known prefix cache. */
+  private static readonly CACHE_PREFIX_GRACE_MS = 5 * 60 * 1000;
+
+  /**
+   * How long after the previous call a hit should still have been expected.
+   *
+   * This answers only "how long does this provider's cache live?" — NOT "does
+   * this endpoint cache at all?". That second question cannot be answered from
+   * the provider id (see `_sawCacheRead`) and is deliberately not asked here.
+   *
+   * `none` yields 0, which suppresses the detector. No `LLMProvider` currently
+   * maps to it — every registered provider claims a real mechanism — so this
+   * arm is unreachable from the agent loop today and exists for the registry's
+   * `?? { mechanism: 'none' }` fallback should an unregistered key ever reach
+   * it. It is NOT the safety valve for custom proxies; `_sawCacheRead` is.
+   */
+  static cacheGraceMsFor(mechanism: CacheProfile['mechanism']): number {
+    switch (mechanism) {
+      case 'explicit-breakpoint': return Agent.CACHE_TTL_GRACE_MS;
+      case 'automatic-prefix':
+      case 'context-cache':       return Agent.CACHE_PREFIX_GRACE_MS;
+      case 'none':                return 0;
+    }
+  }
 
   /**
    * Pure predicate for the warm-cache-miss detector (unit-tested directly).
@@ -431,16 +485,55 @@ export class Agent implements IAgent {
    * @param realInput   realInput of this call (base + cache_read + cache_write)
    * @param cacheRead   cache_read_input_tokens of this call
    * @param gapMs       ms since the previous call (Infinity = no prior call)
+   * @param graceMs     provider-specific window (see {@link cacheGraceMsFor});
+   *                    0 suppresses the detector for providers we cannot judge
    *
    * Suppressed (returns false) on: cold start (no prior, gap = Infinity),
    * post-TTL resume (gap ≥ grace window → a legit cold read), and small
    * prompts (below the min where caching meaningfully matters).
    */
-  static isWarmCacheMiss(prevPrompt: number, realInput: number, cacheRead: number, gapMs: number): boolean {
+  static isWarmCacheMiss(
+    prevPrompt: number,
+    realInput: number,
+    cacheRead: number,
+    gapMs: number,
+    graceMs: number = Agent.CACHE_TTL_GRACE_MS,
+  ): boolean {
     return prevPrompt >= Agent.CACHE_HEALTH_MIN_PROMPT
       && realInput >= Agent.CACHE_HEALTH_MIN_PROMPT
-      && gapMs < Agent.CACHE_TTL_GRACE_MS
+      && gapMs < graceMs
       && cacheRead < prevPrompt * Agent.CACHE_HEALTH_MIN_HIT_RATIO;
+  }
+
+  /**
+   * The FULL warn-or-not decision for the warm-cache-miss detector — the
+   * predicate above plus the conditions that gate it. Kept static and pure
+   * (like {@link isWarmCacheMiss}) so the whole decision is unit-testable; the
+   * agent loop is then a single call.
+   *
+   * Warns only when ALL hold:
+   *  - this agent has ALREADY seen a cache read (`sawCacheRead`). This is the
+   *    load-bearing gate. A cache that never existed cannot break, and several
+   *    supported configurations never produce one: `custom` is Anthropic-wire
+   *    with `cache_control` stripped and no `prompt_cache_key`, and an
+   *    OpenAI-compatible endpoint may omit `cached_tokens` entirely. Gating on
+   *    the provider's declared mechanism instead would warn those users on
+   *    every tool-loop iteration, seconds apart, forever.
+   *  - a non-zero grace window for the provider's mechanism, and
+   *  - the prompt should have been warm but read back almost nothing.
+   */
+  static shouldWarnCacheMiss(args: {
+    prevPrompt: number;
+    realInput: number;
+    cacheRead: number;
+    gapMs: number;
+    mechanism: CacheProfile['mechanism'];
+    sawCacheRead: boolean;
+  }): boolean {
+    if (!args.sawCacheRead) return false;
+    const graceMs = Agent.cacheGraceMsFor(args.mechanism);
+    if (graceMs <= 0) return false;
+    return Agent.isWarmCacheMiss(args.prevPrompt, args.realInput, args.cacheRead, args.gapMs, graceMs);
   }
 
   private _loopToolCount = 0;
@@ -532,6 +625,11 @@ export class Agent implements IAgent {
     'bash', 'http_request', 'read_file', 'batch_files', 'media_process', 'api_setup',
     'web_research', 'mail_read', 'mail_search', 'mail_triage',
     'google_docs', 'google_drive', 'google_sheets',
+    // `calendar_read` returns SUMMARY/LOCATION text chosen by whoever sent the invitation —
+    // an ingest channel that needs no compromise, only the operator's address. It wraps its
+    // result, so the marker signal covers it too; this is here because the two signals fail
+    // differently and a calendar is precisely where a "meeting note" reads as a durable fact.
+    'calendar_read',
     // `import_workflow` ingests an attacker-authored SHARED workflow block THIS turn and echoes
     // its name/goal/step text back into context (its consent render) — a direct-ingest source
     // that sets no wrap marker, so without it here a clean-classified `import_workflow →
@@ -768,6 +866,29 @@ export class Agent implements IAgent {
   /** DK.1 F5: does the current context still hold a wrapped-untrusted-data marker? Scans
    *  tool_result / text blocks (where wrapped external content rides) so a rehydrated thread
    *  re-derives its conversation taint. Short-circuits on the first hit; ignores image blocks. */
+  /**
+   * Does ONE message's content carry the wrapped-untrusted marker?
+   *
+   * Separate from {@link _contextHoldsUntrustedMarker}, which scans the whole history: that
+   * one re-derives the STICKY latch and may legitimately fire on an old message, while this
+   * is asked about the message arriving NOW, to seat the run-scoped marker. Conflating them
+   * would let a tainted turn from an hour ago mark today's run as having handled external
+   * content — the same over-claim `restoreConversationTaint` exists to avoid.
+   */
+  private static _contentHoldsUntrustedMarker(content: unknown): boolean {
+    if (typeof content === 'string') return containsUntrustedMarker(content);
+    if (!Array.isArray(content)) return false;
+    for (const block of content) {
+      if (
+        typeof block === 'object' && block !== null
+        && (block as { type?: unknown }).type === 'text'
+        && typeof (block as { text?: unknown }).text === 'string'
+        && containsUntrustedMarker((block as { text: string }).text)
+      ) return true;
+    }
+    return false;
+  }
+
   private _contextHoldsUntrustedMarker(): boolean {
     for (const msg of this.messages) {
       const content = msg.content;
@@ -822,7 +943,10 @@ export class Agent implements IAgent {
     // Rehydrated histories can have drifted tool_use/tool_result pairs
     // (partial persist, rolled-back run). Anthropic 400s on unpaired blocks,
     // so normalise at the single entry point for external history.
-    this.messages = sanitizeToolPairs(messages);
+    // F5: loaded history is by definition past turns — evict successfully
+    // saved artifact bodies here too, or a resume would re-send (and
+    // cache-write) every body the live session had already evicted.
+    this.messages = evictSavedArtifactBodies(sanitizeToolPairs(messages));
     // Everything just loaded is "already accounted for": it is EITHER the
     // post-compaction synthetic summary (the real messages stay on disk and
     // must NOT be re-persisted) OR the summary+recent tail loaded FROM disk on
@@ -903,6 +1027,24 @@ export class Agent implements IAgent {
     try {
       const provider = getActiveProvider();
       const fastSnap = resolveTierModel('fast', provider);
+      // `getActiveProvider()` and NOT `this.provider`, deliberately — the obvious-looking fix
+      // here costs money.
+      //
+      // The defect is real: `this.client` was built from `config.provider`, so on a session
+      // whose thread runs a different provider the comparison inside `clientForTierSnapshot`
+      // reads false, the ambient client is returned, and the fast model id goes to a wire
+      // client that has never heard of it. Today that ends in a 404 — wrong, free, and silent.
+      //
+      // Passing `this.provider` makes the comparison true, which builds a FRESH client from
+      // `fastSnap` — and outside hybrid mode the snapshot carries no apiKey, so
+      // `createLLMClient` falls through to `new Anthropic()` and the SDK picks up
+      // `ANTHROPIC_API_KEY` from the environment. On a managed instance that is the platform
+      // pool key: a Mistral tenant's helper call stops 404ing and starts billing us for a
+      // provider they never chose. Trading a free wrong answer for a paid one is not a fix.
+      //
+      // So the wrong client stays until the right one can be chosen WITH its credentials, and
+      // the catch below now says when this path fails — which is what was missing to measure
+      // how often it actually fires. See DEF-followup-recovery-wire-client.
       const client = clientForTierSnapshot(fastSnap, this.client, provider);
       const stream = client.beta.messages.stream({
         model: fastSnap.modelId,
@@ -935,6 +1077,7 @@ export class Agent implements IAgent {
         // an Opus run charging Haiku tokens that trips the ceiling ~20x early.
         this.costGuard?.recordExternalCost(usd);
         debitInRunHelperCost(this.toolContext.meteredHost, this.sessionCounters, usd, 'fast');
+        this._helperCostUsd += usd;
       }
 
       const call = response.content.find(
@@ -989,8 +1132,15 @@ export class Agent implements IAgent {
         role: 'user',
         content: [{ type: 'tool_result', tool_use_id: toolUseId, content: await entry.handler(input, this) }],
       });
-    } catch {
-      // Chips are a convenience; a failed recovery must never fail the turn.
+    } catch (err) {
+      // Chips are a convenience; a failed recovery must never fail the turn — but it must not
+      // be INVISIBLE either. This call is the one model call in the turn that `_callAPI`'s
+      // wire-capture never sees, so a silent catch made "the model had no suggestions" and
+      // "every recovery in production is throwing" the same observation: zero chips. One line
+      // on stderr is what separates them.
+      process.stderr.write(
+        `[lynox:follow-up] recovery failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
     } finally {
       clearTimeout(timer);
     }
@@ -1134,10 +1284,41 @@ export class Agent implements IAgent {
     return { ...composition, cacheReadTokens: this._lastCacheReadTokens };
   }
 
+  /**
+   * Dollars this run spent on IN-RUN HELPER calls — today the follow-up-chip recovery.
+   *
+   * These are billed to the tenant (`debitInRunHelperCost`) but produce no tokens in
+   * `Session.usage`, which is where the run's `costUsd` is derived from. So without this the
+   * control plane charges one number and every surface the customer can see reports a smaller
+   * one, on roughly every turn that needs the recovery. Accumulated here rather than folded
+   * into `usage`, because these tokens are priced on the FAST model and adding them to a run's
+   * own token counts would misprice them at the run's `pricePerM`.
+   */
+  private _helperCostUsd = 0;
+
+  /** {@link _helperCostUsd} for the run that just finished; reset at the start of each `send`. */
+  getHelperCostUsd(): number { return this._helperCostUsd; }
+
   async send(
     userMessage: string | unknown[],
     opts?: { suppressTools?: boolean; userMessagePrePersisted?: boolean },
   ): Promise<string> {
+    // Per RUN, not per session: `Session` reads it once after this returns.
+    this._helperCostUsd = 0;
+    // F5: everything already in the buffer is a PREVIOUS turn — replace the
+    // bodies of successfully saved artifacts with a reference (next-turn
+    // eviction, D4). Runs here rather than pre-send so the turn that produced
+    // a save keeps its body while the model may still be composing against it.
+    // Identity-preserving for unchanged messages, and only ever touches
+    // messages BEFORE this turn's user push, so the persisted mark (a count)
+    // stays valid. In the ordinary flow nothing evicted is re-persisted (the
+    // end-of-run persist advanced the mark past these messages); the one
+    // narrow exception is a FAILED end-of-run persist whose retry then writes
+    // the evicted form — benign direction, since eviction fires only on a
+    // confirmed save and the result row names the recoverable file. NOT gated
+    // on the mark: for a persistence-less agent (sub-agents, pipeline steps)
+    // the mark never advances and the gate would disable eviction entirely.
+    this.messages = evictSavedArtifactBodies(this.messages);
     const snapshot = this.messages.length;
     // Support multimodal content blocks (e.g. vision: image + text)
     const content = Array.isArray(userMessage)
@@ -1156,6 +1337,17 @@ export class Agent implements IAgent {
     this._repeatGuard.reset();
     this._sawUntrustedData = false;
     this._sawFollowUpCall = false;
+    // The USER turn can itself carry untrusted content. An uploaded document's extracted
+    // text is third-party-authored — the person attached the file, they did not write what
+    // is in it — and it arrives as a content block on this message, not as a tool result.
+    // Every other seat for the marker is on the TOOL path (`_executeOne`), and the sticky
+    // latch is only re-derived in `loadMessages`, so without this an upload-bearing turn
+    // reads as perfectly clean: a `remember` on it lands `active` and pinnable instead of in
+    // the review queue. Placed after the reset above, or it would be cleared again.
+    if (Agent._contentHoldsUntrustedMarker(content)) {
+      this._sawUntrustedData = true;
+      this._conversationSawUntrusted = true;
+    }
     // Run-scoped cost ceiling: the managed per-run $ ceiling (and the 200-iteration
     // backstop) is bounded PER RUN, not cumulatively over a session-long thread.
     // Without this reset the guard latches after 200 cumulative model-calls and every
@@ -1236,6 +1428,14 @@ export class Agent implements IAgent {
         }
         return extractText([]);
       }
+      // Stamped BEFORE the call, not after it. The warm-miss detector asks "was
+      // the cache entry still alive when this request hit the provider?", so the
+      // interval it needs ends at dispatch. Measuring it after the response was
+      // processed folded this call's own duration into the gap — invisible
+      // against a 50-minute window, but a single long generate (the stream
+      // timeout alone is 10 minutes) can exceed the 5-minute one on its own and
+      // silence the detector precisely on the expensive turns.
+      const callStartedAt = Date.now();
       const response = await this._callAPI();
 
       // Strip thinking blocks — signatures are invalidated by proxies
@@ -1294,15 +1494,26 @@ export class Agent implements IAgent {
         // inside the cache TTL — reads back almost nothing from cache. It does
         // NOT fire on a cold start (no prior call) or a post-TTL resume (gap
         // beyond the grace window), both of which legitimately read zero.
-        // Gated to providers that actually do prompt caching: custom/openai
-        // proxies (e.g. Mistral) strip cache_control and never report
-        // cache_read, so without this gate the detector would cry wolf on
-        // EVERY warm turn of an entire provider class. Anthropic-direct and
-        // Vertex both report cache_read, so both keep the detector.
-        const now = Date.now();
+        //
+        // Gated on whether this agent has EVER seen a cache read, not on the
+        // provider id. The old `!isCustomProxy` gate rested on "openai proxies
+        // (e.g. Mistral) … never report cache_read", and that premise is false:
+        // a real Mistral thread reported 117,088 cache-read tokens on one turn
+        // and 20,528 on another, so the detector was mute on a whole provider
+        // class. But the inverse gate — "trust the registered mechanism" — is
+        // just as wrong in the other direction: `custom` is registered
+        // `automatic-prefix` while the engine strips its `cache_control` and
+        // withholds `prompt_cache_key`, so it reports zero cache reads forever
+        // and would warn on every tool-loop iteration. Observation answers both:
+        // see `_sawCacheRead`. The mechanism still picks the grace WINDOW, which
+        // is a TTL question and safe to answer from configuration.
         const prevPrompt = this._lastRealInputTokens ?? 0;
-        const gapMs = this._lastCallAt > 0 ? now - this._lastCallAt : Infinity;
-        if (!this.isCustomProxy && Agent.isWarmCacheMiss(prevPrompt, realInput, cacheRead, gapMs)) {
+        const gapMs = this._lastCallAt > 0 ? callStartedAt - this._lastCallAt : Infinity;
+        if (Agent.shouldWarnCacheMiss({
+          prevPrompt, realInput, cacheRead, gapMs,
+          mechanism: getCacheProfile(this.provider).mechanism,
+          sawCacheRead: this._sawCacheRead,
+        })) {
           const expectedMin = Math.round(prevPrompt * Agent.CACHE_HEALTH_MIN_HIT_RATIO);
           const detail = `prompt-cache likely broken: a warm ~${Math.round(realInput / 1000)}k-token prompt read only ${cacheRead} cached tokens (expected ≳${expectedMin}). A volatile prefix re-bills the whole history every turn.`;
           channels.cacheHealth.publish({
@@ -1320,7 +1531,10 @@ export class Agent implements IAgent {
             void this.onStream({ type: 'warning', code: 'cache_break', detail, agent: this.name });
           }
         }
-        this._lastCallAt = now;
+        // Read BEFORE this update (above), latched after: the first call that
+        // produces a hit must not arm the detector for its own evaluation.
+        if (cacheRead > 0) this._sawCacheRead = true;
+        this._lastCallAt = callStartedAt;
 
         if (realInput > 0) {
           this._lastRealInputTokens = realInput;

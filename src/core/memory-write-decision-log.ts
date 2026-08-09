@@ -36,7 +36,42 @@ export type WriteDecision =
   /** P1b: a dedup hit with no trust change → the plain no-op-confirm path. */
   | 'confirm'
   /** P1b: a dedup hit whose incoming write strictly outranks the stored row → tier-raise. */
-  | 'tier-raise';
+  | 'tier-raise'
+  /**
+   * The `AgentMemoryDb.supersedMemory` BACKSTOP refused a retire that the decision above
+   * had already cleared. That is only possible when the two disagree about a row's tier —
+   * and they can, because they read it from different places: the decision above takes it
+   * from the recall row (engine.db under the S5b read cutover), the backstop looks it up in
+   * agent-memory.db. Without this line the refusal is silent and its rate cannot be counted.
+   *
+   * `existingTier` here is the tier the BACKSTOP compared — the authoritative agent-memory.db
+   * value. The decision's side comes from the `supersede`/`tier-raise` line that precedes it
+   * for the same `existingId`, so the two lines together are the two sides. Carrying the
+   * decision's tier on BOTH would record the disagreement as an agreement.
+   */
+  | 'backstop-refused'
+  /**
+   * The engine.db MIRROR (`MemoryGraphStore.markSuperseded`) found the stub's tier and the
+   * incoming tier in disagreement. The retire was applied anyway — see that method for why a
+   * mirror cannot be a gate — so this line is a pure DIVERGENCE report, not a blocked write.
+   *
+   * Kept distinct from `backstop-refused` on purpose: there the write was STOPPED, here it
+   * went through. One counter over both would mix a refusal rate with a drift rate and mean
+   * neither. (`DEF-dk-trust-gate-consistency` (a).)
+   *
+   * `existingTier` is the ENGINE.DB stub's tier — the value this check actually compared,
+   * the same convention every other variant follows. The legacy side gets no field of its
+   * own: the mirror is only reached once agent-memory.db did not refuse, and the exact value
+   * is one lookup by `existingId` away when debugging a row. Read that as "did not refuse",
+   * not "ranked and allowed" — `supersedMemory`'s guard needs both rows, so a retire whose
+   * legacy row is already hard-deleted reaches the mirror having ranked nothing.
+   *
+   * Like `backstop-refused`, this cannot appear under shadow-only measurement: the tier is
+   * passed to the mirror only when `memory_write_trust_gate` is ON. That is deliberate — with
+   * the gate off a low-tier retire is the configured policy, so there is no disagreement to
+   * record, only a policy someone chose.
+   */
+  | 'mirror-tier-diverged';
 
 /** One persisted line: a single write-trust decision. Text-free by construction. */
 export interface MemoryWriteDecisionEntry {

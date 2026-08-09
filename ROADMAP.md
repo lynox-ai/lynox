@@ -21,8 +21,8 @@ Recent capabilities that are live today, so you can tell them apart from plans:
 
 ## next
 
-- Reversible knowledge edits — being able to split or undo a merge, so the agent's memory is genuinely correctable rather than append-only. This one comes first: as long as merging two same-named things is a one-way door, everything built on top inherits that.
-- Durable Knowledge rollout — moving it from opt-in toward the default. Flipping a memory default changes behaviour on every existing instance, so the test is whether the archival path measurably beats the one it would replace, not whether a date has arrived. It now does — which moves the remaining question to the item above: we want memory to be correctable before we turn it on everywhere. Until then, opt-in is the honest setting.
+- Reversible knowledge edits — being able to split or undo a merge, so the agent's memory is genuinely correctable rather than append-only. This one comes first: as long as merging two same-named things is a one-way door, everything built on top inherits that. A first piece is in: when two records share a name, the agent now refuses the ambiguous match and asks, instead of silently picking one. That stops new merges from going wrong; undoing the ones already made is the part still ahead.
+- Durable Knowledge rollout — moving it from opt-in toward the default. Flipping a memory default changes behaviour on an instance that is already running, so the test is whether the archival path measurably beats the one it would replace, not whether a date has arrived. It does. What holds the switch is the item above: memory should be correctable before it becomes the store everything else reads from. Until then, opt-in is the honest setting.
 - Calendar Integration (CalDAV + ICS imports, then create)
 - OpenAI Native Provider (first-class, alongside Anthropic + Mistral)
 - MCP Client (connect to Smithery catalog + custom servers)

@@ -1,6 +1,8 @@
+import { createReadStream } from 'node:fs';
 import { appendFile, rename, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 
 /**
  * Bounded append-only JSONL telemetry sink — the shared retention primitive for the
@@ -24,8 +26,10 @@ import path from 'node:path';
  *    2 weeks would otherwise overflow.
  *
  * Invariants inherited from the sinks it replaces:
- *  - Best-effort: any FS error (read-only volume, disk full, permission, ENOTDIR) is
- *    swallowed — a telemetry failure must NEVER surface into the caller's run.
+ *  - Best-effort on the WRITE side: any FS error (read-only volume, disk full, permission,
+ *    ENOTDIR) is swallowed — a telemetry failure must never surface into the caller's run.
+ *    The read side is best-effort about the FILES but not about its caller's visitor; see
+ *    `scanBoundedJsonl` for exactly which failures it absorbs and which it propagates.
  *  - Deploy-safe path: written under the persistent data dir (`LYNOX_DATA_DIR`/`LYNOX_DIR`,
  *    else `~/.lynox`), the one volume writable in the managed read-only container.
  *  - Serialized per file so concurrent fire-and-forget writers cannot interleave a
@@ -108,4 +112,116 @@ export function appendBoundedJsonl(fileName: string, entry: unknown): Promise<vo
   // Store a non-rejecting tail so the chain can't accumulate an unhandled rejection.
   chains.set(file, next.catch(() => {}));
   return next;
+}
+
+/** What one `scanBoundedJsonl` pass saw — and what it could NOT read. */
+export interface BoundedJsonlScan {
+  /** Records handed to the visitor. */
+  readonly entriesSeen: number;
+  /**
+   * Lines that were present but did not parse as JSON. A reader that silently drops
+   * these reports a rate over a denominator it quietly shrank — the one failure mode
+   * a telemetry aggregate cannot afford, because it has no symptom. Counted, never hidden.
+   */
+  readonly unparsableLines: number;
+  /** Generations that existed and were read through (`<name>.1` first when present). */
+  readonly generationsRead: number;
+  /**
+   * Generations that existed but could not be read (permissions, a directory in the way,
+   * a rotation mid-scan). Separate from `generationsRead` because "no data" and "data we
+   * could not open" are different claims, and only the second one invalidates a rate.
+   */
+  readonly unreadableGenerations: number;
+}
+
+/**
+ * Stream the full retained window of a bounded sink through a visitor — the missing
+ * half of `appendBoundedJsonl`. Globs the two retained generations exactly as the
+ * retention model above describes: `<name>.1` (older, if it exists) then the live
+ * `<name>`, so the visitor sees records in chronological file order.
+ *
+ * STREAMING is the point, not an optimisation. These sinks are bounded but not small:
+ * the default cap already allows 2 × 32 MiB retained, and an operator may raise it to
+ * 2 × 2 GiB. Slurping a generation into a string (and again into a split array) would
+ * put a multi-hundred-MiB allocation behind whatever diagnostic surface calls this —
+ * on an HTTP endpoint, a repeatable one. Reading one line at a time makes the read cost
+ * a function of the longest LINE rather than of the file, which is what makes it safe to
+ * expose the aggregate over the API at all. (Not constant memory: a pathological sink
+ * with no newlines still buffers to the longest line. Every writer here emits one record
+ * per line, so that bound is a record, not a file.)
+ *
+ * Best-effort in the same sense as the append side: a generation that is absent, or that
+ * fails to open or read (EACCES, EISDIR, a rotation renaming it mid-scan), is SKIPPED and
+ * counted in `unreadableGenerations` — not thrown. Every caller is a diagnostic surface,
+ * and a telemetry read that fails the request is worse than one reporting a short window,
+ * as long as it says the window is short. It does NOT swallow *partial* damage either: an
+ * unparsable line is counted, so the caller can state how complete its numbers are.
+ *
+ * A visitor that throws DOES propagate — a swallowed visitor error would return counts
+ * that look complete while the caller's aggregation stopped halfway, which is a wrong
+ * number with no symptom. Callers keep visitors total.
+ *
+ * No validation of the record shape happens here: the sink is schema-per-file and the
+ * caller owns the type. `T` is an unchecked assertion, so callers that aggregate on a
+ * field must tolerate it being absent.
+ */
+export async function scanBoundedJsonl<T>(fileName: string, visit: (entry: T) => void): Promise<BoundedJsonlScan> {
+  let file: string;
+  try {
+    file = path.join(dataDir(), fileName);
+  } catch {
+    return { entriesSeen: 0, unparsableLines: 0, generationsRead: 0, unreadableGenerations: 0 };
+  }
+  let entriesSeen = 0;
+  let unparsableLines = 0;
+  let generationsRead = 0;
+  let unreadableGenerations = 0;
+  // A visitor error must escape the per-generation catch below, which exists for FS
+  // failures only — swallowing it there would turn a half-finished aggregation into a
+  // scan that reports itself complete.
+  let visitorError: unknown;
+  // Oldest first: `.1` is the rotated-out generation, the live file is newer.
+  for (const candidate of [`${file}.1`, file]) {
+    // No `stat` pre-check: it is both redundant and a TOCTOU window — a rotation between
+    // the check and the open would turn a routine race into a thrown request. Open first
+    // and let the failure classify itself.
+    const stream = createReadStream(candidate, { encoding: 'utf8' });
+    // `crlfDelay: Infinity` so a \r and \n split across read chunks stay one record.
+    const lines = createInterface({ input: stream, crlfDelay: Infinity });
+    let opened = false;
+    try {
+      for await (const line of lines) {
+        opened = true;
+        if (line.trim().length === 0) continue;
+        let parsed: T;
+        try {
+          parsed = JSON.parse(line) as T;
+        } catch {
+          // A torn last line is expected mid-append; anything else is real damage.
+          // Either way the caller learns the count rather than a quietly short list.
+          unparsableLines++;
+          continue;
+        }
+        entriesSeen++;
+        try {
+          visit(parsed);
+        } catch (err) {
+          visitorError = err;
+          break;
+        }
+      }
+      if (visitorError === undefined) generationsRead++;
+    } catch (err) {
+      // ENOENT for `.1` is the normal case and not worth counting as damage; anything
+      // else (EACCES, EISDIR, a mid-scan rename) is a window we genuinely could not read.
+      if ((err as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT') unreadableGenerations++;
+      // An empty-but-present file still counts as read.
+      if (opened) generationsRead++;
+    } finally {
+      lines.close();
+      stream.destroy();
+    }
+    if (visitorError !== undefined) throw visitorError;
+  }
+  return { entriesSeen, unparsableLines, generationsRead, unreadableGenerations };
 }

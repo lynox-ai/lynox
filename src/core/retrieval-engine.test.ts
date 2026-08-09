@@ -191,3 +191,80 @@ describe('RetrievalEngine — HyDE pool-key debit (managed)', () => {
     })).resolves.toBeDefined();
   });
 });
+
+/**
+ * The query side must not surface an entity whose memories were all deleted.
+ *
+ * `entities` has no is_active of its own: `memory_delete` deactivates the memory and
+ * leaves the entity row alone, and the sweep that reaps orphans runs off an in-memory
+ * run counter that resets on restart. Without a liveness check at the query site, the
+ * NAME of a deleted memory's subject keeps reaching the model through the context
+ * graph — measured on a production instance: 288 deactivated memories against 499
+ * surviving entities.
+ */
+describe('RetrievalEngine — deleted memories must not keep surfacing their entities', () => {
+  let tempDir: string;
+  let db: AgentMemoryDb;
+  let engine: RetrievalEngine;
+  const embedding = new LocalProvider();
+  const scopes: MemoryScopeRef[] = [{ type: 'global', id: 'global' }];
+
+  type QueryResolver = {
+    _resolveQueryEntities(
+      entities: { name: string; type: string; confidence: number }[],
+      scopes: MemoryScopeRef[],
+    ): Promise<{ id: string }[]>;
+  };
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'lynox-retrieval-liveness-'));
+    db = new AgentMemoryDb(join(tempDir, 'liveness.db'));
+    db.setEmbeddingDimensions(embedding.dimensions);
+    engine = new RetrievalEngine(db, embedding, new EntityResolver(db, embedding), undefined, undefined);
+  });
+
+  afterAll(async () => {
+    db.close();
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it('resolves the entity while its memory is live, and stops once the memory is deleted', async () => {
+    const memoryId = db.createMemory({
+      text: 'Jana Reber lives in Bern', namespace: 'knowledge',
+      scopeType: 'global', scopeId: 'global', embedding: new Array(embedding.dimensions).fill(0).map((_, i) => (i === 0 ? 1 : 0)),
+    });
+    const entityId = db.createEntity({
+      canonicalName: 'Jana Reber', entityType: 'person', scopeType: 'global', scopeId: 'global',
+    });
+    db.createMention(memoryId, entityId);
+
+    const query = [{ name: 'Jana Reber', type: 'person', confidence: 1 }];
+    const before = await (engine as unknown as QueryResolver)._resolveQueryEntities(query, scopes);
+    expect(before.map(e => e.id)).toContain(entityId);
+
+    db.deactivateMemoriesByPattern('Jana Reber');
+
+    const after = await (engine as unknown as QueryResolver)._resolveQueryEntities(query, scopes);
+    // The entity row still exists and is still findable by name — that is exactly why
+    // the check has to live here rather than in the lookup.
+    expect(db.getEntity(entityId)).not.toBeNull();
+    expect(after.map(e => e.id)).not.toContain(entityId);
+  });
+
+  it('still resolves an entity that never had a mention — DataStore collections are exactly that', async () => {
+    // The regression the first cut of this filter would have shipped: `registerCollection`
+    // creates one entity per DataStore collection and never calls `createMention`, so a
+    // "has no active mentions" test would have silently dropped every collection hint out
+    // of the context graph. Dormant means HAD mentions and lost them all — not never had any.
+    const collectionId = db.createEntity({
+      canonicalName: 'invoices', entityType: 'collection', scopeType: 'global', scopeId: 'global',
+      description: 'Data table: invoices — columns: id (text), total (number)',
+    });
+
+    const resolved = await (engine as unknown as QueryResolver)._resolveQueryEntities(
+      [{ name: 'invoices', type: 'collection', confidence: 1 }], scopes,
+    );
+
+    expect(resolved.map(e => e.id)).toContain(collectionId);
+  });
+});

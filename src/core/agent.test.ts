@@ -3324,6 +3324,21 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     expect(agent.sawExternalContentTool).toBe(true);
   });
 
+  it('sets sawExternalContentTool when calendar_read runs (invitation-authored text)', async () => {
+    // Anyone who can send the operator a calendar invitation chooses the SUMMARY and LOCATION
+    // this tool reads back — an ingest channel needing no compromise, only their address. The
+    // tool wraps its result too, so this is the second of two independent signals; they fail
+    // differently, and a calendar is precisely where "meeting note" reads as a durable fact.
+    const cal = makeTool('calendar_read', vi.fn().mockResolvedValue('- 2026-08-12 14:00–15:00 Termin'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'calendar_read', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [cal] });
+    expect(agent.sawExternalContentTool).toBe(false);
+    await agent.send('what is on this week');
+    expect(agent.sawExternalContentTool).toBe(true);
+  });
+
   it('leaves sawExternalContentTool false for a non-external tool', async () => {
     const benign = makeTool('task_create', vi.fn().mockResolvedValue('task created'));
     mockProcess
@@ -3382,6 +3397,39 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [plainTool] });
     await agent.send('do math');
     expect(agent.sawUntrustedData).toBe(false);
+  });
+
+  it('a user turn carrying wrapped content arms the run marker — an UPLOAD is untrusted', async () => {
+    // Every other seat for the marker is on the tool path, and the sticky latch is only
+    // re-derived on load. An uploaded document arrives as a content block on the USER
+    // message, so without this the turn reads clean and a `remember` on it lands active and
+    // pinnable instead of in the review queue.
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await agent.send([
+      { type: 'text', text: 'Was steht da drin?' },
+      { type: 'text', text: wrapUntrustedData('[File: vertrag.pdf]\nZahlungsziel 30 Tage', 'file_upload') },
+    ] as unknown[]);
+    expect(agent.sawUntrustedData).toBe(true);
+    expect(agent.conversationSawUntrusted).toBe(true);
+  });
+
+  it('a plain user turn does NOT arm it', async () => {
+    // The pair: arming unconditionally would also pass the test above, and would put every
+    // ordinary message into the review queue.
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await agent.send([{ type: 'text', text: 'Merk dir: Zahlungsziel 30 Tage' }] as unknown[]);
+    expect(agent.sawUntrustedData).toBe(false);
+  });
+
+  it('a plain STRING user turn carrying the marker arms it too', async () => {
+    // `send` accepts both shapes; the block-array branch is the upload path, but a caller
+    // passing a pre-composed string must not slip past.
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await agent.send(wrapUntrustedData('some fetched page text', 'web'));
+    expect(agent.sawUntrustedData).toBe(true);
   });
 
   it('noteUntrustedData() latches the flag (spawn propagates a shared-Memory child\'s taint here)', () => {
@@ -3477,4 +3525,58 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     ]);
     expect(agent.conversationSawUntrusted).toBe(false);
   });
+});
+
+describe('F5: artifact-body eviction (next-turn, D4)', () => {
+	const BIGBODY = 'y'.repeat(3000);
+	const SAVE_RESULT = 'Saved artifact "R" (id: aa11, v1).\nFile: /workspace/artifacts/aa11.md';
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+	});
+
+	it('keeps the body through the turn that saved it and evicts at the NEXT send', async () => {
+		mockProcess
+			.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_save', name: 'artifact_save', input: { title: 'R', content: BIGBODY } }]))
+			.mockResolvedValueOnce(endTurnResponse('saved.'))
+			.mockResolvedValueOnce(endTurnResponse('next answer'));
+		const saveTool = makeTool('artifact_save', vi.fn().mockResolvedValue(SAVE_RESULT));
+		const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [saveTool] });
+
+		await agent.send('save my report');
+		// D4's "one turn of overlap": the model may still be composing against
+		// the body it just wrote — it survives the turn that produced it.
+		expect(JSON.stringify(agent.getMessages())).toContain(BIGBODY);
+
+		await agent.send('what next?');
+		const after = JSON.stringify(agent.getMessages());
+		expect(after).not.toContain(BIGBODY);
+		expect(after).toContain('[evicted after successful save');
+	});
+
+	it('a FAILED save keeps its body across turns (it is the only copy left)', async () => {
+		mockProcess
+			.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_save', name: 'artifact_save', input: { title: 'R', content: BIGBODY } }]))
+			.mockResolvedValueOnce(endTurnResponse('could not save.'))
+			.mockResolvedValueOnce(endTurnResponse('ok'));
+		const saveTool = makeTool('artifact_save', vi.fn().mockResolvedValue('Artifact store not available.'));
+		const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [saveTool] });
+
+		await agent.send('save my report');
+		await agent.send('and now?');
+		expect(JSON.stringify(agent.getMessages())).toContain(BIGBODY);
+	});
+
+	it('loadMessages evicts on resume hydration (a resume must not re-send every body)', () => {
+		const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6' });
+		agent.loadMessages([
+			{ role: 'user', content: 'save it' },
+			{ role: 'assistant', content: [{ type: 'tool_use', id: 'tu_1', name: 'artifact_save', input: { title: 'R', content: BIGBODY } }] },
+			{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: SAVE_RESULT }] },
+			{ role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+		]);
+		const loaded = JSON.stringify(agent.getMessages());
+		expect(loaded).not.toContain(BIGBODY);
+		expect(loaded).toContain('[evicted after successful save');
+	});
 });

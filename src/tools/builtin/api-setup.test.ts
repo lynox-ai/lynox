@@ -443,6 +443,56 @@ describe('api_setup tool', () => {
       expect(onDisk.custom_endpoint_ack?.hosts).toEqual(['my-litellm-proxy.example.com']);
     });
 
+    // The save gate and the credential attach in http.ts must answer ONE question
+    // the same way. While the save gate asked the broader `isAllowlistedEndpoint`,
+    // an `*.openai.azure.com` profile saved with no prompt and no ack — and the
+    // attach then refused it, advising a re-save that could never produce one,
+    // because this branch also DELETES an ack when it considers every host vetted.
+    // An Azure OpenAI profile was a dead end with no way back.
+    it('an attacker-registerable azure host gets the disclosure prompt and an ack', async () => {
+      const store = new ApiStore();
+      const promptUser = vi.fn(async () => 'Allow');
+      const agent = createMockAgent(store, undefined, promptUser);
+      await apiSetupTool.handler({ action: 'create', profile: {
+        ...SAMPLE_PROFILE, id: 'azure-ack', base_url: 'https://x.openai.azure.com/v1',
+      } }, agent);
+
+      expect(promptUser).toHaveBeenCalled();
+      const stored = store.get('azure-ack');
+      // Without the ack the attach cannot hand this host a credential — and could
+      // never be unblocked, since no prompt was reachable.
+      expect(stored?.custom_endpoint_ack?.hosts).toEqual(['x.openai.azure.com']);
+    });
+
+    it('an azure host fails CLOSED when headless, like any other non-vetted host', async () => {
+      const store = new ApiStore();
+      const agent = createMockAgent(store); // no promptUser
+      const res = await apiSetupTool.handler({ action: 'create', profile: {
+        ...SAMPLE_PROFILE, id: 'azure-headless', base_url: 'https://x.openai.azure.com/v1',
+      } }, agent);
+
+      expect(res).toContain('Blocked');
+      expect(store.get('azure-headless')).toBeUndefined();
+    });
+
+    it('fetch_token refuses an azure token_url with no recorded acceptance', async () => {
+      // Same question, third caller: this one POSTs the client_secret, so reading
+      // the azure wildcard as vetted would have shipped it to an attacker's host.
+      const store = new ApiStore();
+      store.register({
+        ...SAMPLE_PROFILE, id: 'azure-token', base_url: 'https://api.example.com',
+        auth: { type: 'oauth2', vault_keys: ['AZURE_TOKEN_CLIENT_ID'], oauth: {
+          token_url: 'https://x.openai.azure.com/oauth/token',
+          grant_type: 'client_credentials',
+          client_id_key: 'AZURE_TOKEN_CLIENT_ID', client_secret_key: 'AZURE_TOKEN_CLIENT_SECRET',
+        } },
+      } as ApiProfile);
+      const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
+      const res = await apiSetupTool.handler({ action: 'fetch_token', id: 'azure-token' }, agent);
+
+      expect(res).toContain('non-vetted sub-processor');
+    });
+
     it('records only the non-allowlisted egress hosts in the ack (allowlisted base_url + non-allowlisted token_url → token host only)', async () => {
       const store = new ApiStore();
       const agent = createMockAgent(store, undefined, vi.fn(async () => 'Allow'));
@@ -785,6 +835,56 @@ describe('api_setup tool', () => {
       expect(result).toContain('Invalid auth.basic_format');
     });
 
+    it('SECURITY: rejects an INFRASTRUCTURE secret as auth.username_key', async () => {
+      // Fails at SETUP, when the operator is present, rather than at the first request.
+      // These key names come from the profile, which a prompt-injected agent can author,
+      // and the attach-time `resolve()` has no infra filter of its own.
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'MAIL_ACCOUNT_1', password_key: 'WOO_CS' },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('infrastructure secret');
+      expect(result).not.toContain('Created API profile');
+    });
+
+    it('rejects a malformed vault key name in auth.password_key', async () => {
+      // The UPPER_SNAKE pattern existed only on the bootstrap input schema — the
+      // create/update path took anything.
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'WOO_CK', password_key: 'not a key' },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('auth.password_key');
+      expect(result).not.toContain('Created API profile');
+    });
+
+    it('accepts an ordinary pair of vault key names', async () => {
+      // The pair matters: refusing everything would also pass the two tests above.
+      const agent = createMockAgent(new ApiStore());
+      const result = await apiSetupTool.handler(
+        {
+          action: 'create',
+          profile: withV2({
+            auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'WOO_CK', password_key: 'WOO_CS' },
+          }),
+        },
+        agent,
+      );
+      expect(result).toContain('Created API profile');
+    });
+
     it('rejects non-boolean concurrency.parallel_ok', async () => {
       const agent = createMockAgent(new ApiStore());
       const result = await apiSetupTool.handler(
@@ -947,8 +1047,15 @@ describe('api_setup tool', () => {
       );
     }
 
-    function stubExtraction(data: Record<string, unknown>, costUsd = 0.001): void {
-      mockedExtract.mockResolvedValue({ data, inputTokens: 1000, outputTokens: 200, costUsd });
+    /** `resolved` mirrors what the helper reports back about the model it ran —
+     *  the field the billing label is derived from. Defaults to the helper's own
+     *  default (`MODEL_MAP.balanced`), so existing callers describe reality. */
+    function stubExtraction(
+      data: Record<string, unknown>,
+      costUsd = 0.001,
+      resolved: { model: string; tier: 'fast' | 'balanced' | 'deep' } = { model: 'claude-sonnet-4-6', tier: 'balanced' },
+    ): void {
+      mockedExtract.mockResolvedValue({ data, inputTokens: 1000, outputTokens: 200, costUsd, ...resolved });
     }
 
     it('returns a draft v2 profile from a DataForSEO-style docs page', async () => {
@@ -1001,6 +1108,56 @@ describe('api_setup tool', () => {
         expect((agent.sessionCounters as { costUSD: number }).costUSD).toBeCloseTo(0.0021, 6);
         expect(onAfterRun).toHaveBeenCalledOnce();
         expect(onAfterRun.mock.calls[0]![1] as number).toBeCloseTo(0.0021, 6);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('debits under the tier the extraction ACTUALLY ran on, not a literal', async () => {
+      // This call site passed `'fast'` while `callForStructuredJson` defaults to
+      // `MODEL_MAP.balanced`, so a real customer's $0.3848 Sonnet extraction was
+      // reported to the control plane as Haiku spend and every per-tier
+      // breakdown understated `balanced`. The label now comes off the helper's
+      // own result, which is the only layer that knows what it resolved.
+      const fetchSpy = mockFetchOk('<html>plain docs body, no links...</html>');
+      stubExtraction({ description: 'Some API', auth: { type: 'bearer' } }, 0.3848, {
+        model: 'claude-sonnet-4-6', tier: 'balanced',
+      });
+      const onAfterRun = vi.fn();
+      try {
+        const agent = createMockAgent(new ApiStore());
+        (agent.sessionCounters as { costUSD?: number }).costUSD = 0;
+        (agent.toolContext as { meteredHost?: unknown }).meteredHost = {
+          getHooks: () => [{ onAfterRun }], getContext: () => undefined,
+        };
+        await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/v1' }, agent);
+
+        const ctx = onAfterRun.mock.calls[0]![2] as { modelTier: string };
+        expect(ctx.modelTier).toBe('balanced');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('still debits as fast when the helper actually resolved the fast tier', async () => {
+      // The contrast that makes the assertion above non-tautological: it must
+      // FOLLOW the helper, not simply always say `balanced` now. This is the
+      // blocklist-fallback shape, where the old literal was accidentally right.
+      const fetchSpy = mockFetchOk('<html>plain docs body, no links...</html>');
+      stubExtraction({ description: 'Some API', auth: { type: 'bearer' } }, 0.002, {
+        model: 'claude-haiku-4-5-20251001', tier: 'fast',
+      });
+      const onAfterRun = vi.fn();
+      try {
+        const agent = createMockAgent(new ApiStore());
+        (agent.sessionCounters as { costUSD?: number }).costUSD = 0;
+        (agent.toolContext as { meteredHost?: unknown }).meteredHost = {
+          getHooks: () => [{ onAfterRun }], getContext: () => undefined,
+        };
+        await apiSetupTool.handler({ action: 'bootstrap', docs_url: 'https://docs.example.com/v1' }, agent);
+
+        const ctx = onAfterRun.mock.calls[0]![2] as { modelTier: string };
+        expect(ctx.modelTier).toBe('fast');
       } finally {
         fetchSpy.mockRestore();
       }

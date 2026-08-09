@@ -8,6 +8,7 @@
 	import { t } from '../i18n.svelte.js';
 	import Checkbox from '../primitives/Checkbox.svelte';
 	import { addToast } from '../stores/toast.svelte.js';
+	import { buildMailAccountPayload } from '../api/mail-accounts.js';
 
 	interface ServerConfig {
 		host: string;
@@ -201,20 +202,16 @@
 		testing = true;
 		testResult = null;
 		try {
-			const payload: Record<string, unknown> = {
+			const payload = buildMailAccountPayload({
 				id: formId || formAddress,
 				displayName: formDisplayName || formAddress,
 				address: formAddress,
 				preset: formPreset,
 				type: formType,
-				credentials: { user: formAddress, pass: formPassword },
-			};
-			if (formPersonaPrompt.trim()) {
-				payload['personaPrompt'] = formPersonaPrompt.trim();
-			}
-			if (formPreset === 'custom') {
-				payload['custom'] = buildCustomPayload();
-			}
+				password: formPassword,
+				personaPrompt: formPersonaPrompt,
+				custom: formPreset === 'custom' ? buildCustomPayload() : undefined,
+			});
 			const res = await fetch(`${getApiBase()}/mail/accounts/test`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -247,16 +244,16 @@
 		}
 		saving = true;
 		try {
-			const payload: Record<string, unknown> = {
+			const payload = buildMailAccountPayload({
 				id: formId,
 				displayName: formDisplayName,
 				address: formAddress,
 				preset: formPreset,
-				credentials: { user: formAddress, pass: formPassword },
-			};
-			if (formPreset === 'custom') {
-				payload['custom'] = buildCustomPayload();
-			}
+				type: formType,
+				password: formPassword,
+				personaPrompt: formPersonaPrompt,
+				custom: formPreset === 'custom' ? buildCustomPayload() : undefined,
+			});
 			const res = await fetch(`${getApiBase()}/mail/accounts`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },

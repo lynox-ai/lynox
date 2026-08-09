@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { DataStore } from './data-store.js';
 import type { SubjectColumnBridge } from './subject-store.js';
+import { SubjectStore, makeSubjectColumnBridge } from './subject-store.js';
+import { EngineDb } from './engine-db.js';
+import { channels } from './observability.js';
 import type { MemoryScopeRef } from '../types/index.js';
 
 const scope: MemoryScopeRef = { type: 'context', id: 'test-proj' };
@@ -22,6 +25,7 @@ function makeTmpDb(): string {
 function makeStubBridge(): { bridge: SubjectColumnBridge; calls: Array<{ name: string; kind: string }> } {
   const idByKey = new Map<string, string>();
   const nameById = new Map<string, string>();
+  const sharedByKey = new Map<string, string[]>();
   const calls: Array<{ name: string; kind: string }> = [];
   let counter = 0;
   const keyOf = (name: string, kind: string): string => `${kind}::${name.toLowerCase()}`;
@@ -33,10 +37,19 @@ function makeStubBridge(): { bridge: SubjectColumnBridge; calls: Array<{ name: s
       if (id === undefined) { counter += 1; id = `subj-${String(counter)}`; idByKey.set(key, id); nameById.set(id, name); }
       return id;
     },
-    find(name, kind) { return idByKey.get(keyOf(name, kind)) ?? null; },
+    findAll(name, kind) {
+      const shared = sharedByKey.get(keyOf(name, kind));
+      if (shared) return shared;                       // a name several subjects carry
+      const id = idByKey.get(keyOf(name, kind));
+      return id === undefined ? [] : [id];
+    },
     name(id) { return nameById.get(id) ?? null; },
   };
-  return { bridge, calls };
+  /** Make `name` resolve to SEVERAL subjects, the way a shared alias does. */
+  const shareName = (name: string, kind: string, ids: string[]): void => {
+    sharedByKey.set(keyOf(name, kind), ids);
+  };
+  return { bridge, calls, shareName };
 }
 
 describe('DataStore', () => {
@@ -1085,7 +1098,7 @@ describe('DataStore', () => {
     it('stores null (not the raw name) when the resolver is present but returns null', () => {
       // A resolve FAILURE (distinct from flag-off) must keep the column id-pure —
       // never mix a raw name into a UUID column.
-      ds.setSubjectBridge({ resolve: () => null, find: () => null, name: () => null });
+      ds.setSubjectBridge({ resolve: () => null, findAll: () => [], name: () => null });
       ds.createCollection({
         name: 'leads',
         scope,
@@ -1248,6 +1261,156 @@ describe('DataStore', () => {
       expect(rows[0]!['patient']).toBe('Ben Roth');
     });
 
+    it('a SHARED name excludes every candidate under $neq', () => {
+      // The defect this replaced: an unresolvable name became a sentinel id, and
+      // "not equal to a thing that does not exist" matches EVERY row — the caller's
+      // exclusion silently stopped excluding. Now the name resolves to the candidate
+      // SET and the exclusion covers all of them.
+      const { bridge, shareName } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+      const anna = bridge.findAll('Anna Meier', 'person')[0]!;
+      const ben = bridge.findAll('Ben Roth', 'person')[0]!;
+      shareName('Meier', 'person', [anna, ben]);
+
+      const { rows } = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: { $neq: 'Meier' } },
+        subjectsByName: true,
+      });
+      expect(rows).toHaveLength(0);
+    });
+
+    it('a SHARED name matches any candidate under $eq, and does not fail an $or', () => {
+      // The over-correction this replaced: refusing outright fired for the polarity
+      // that was already correct, and inside an $or one shared name failed the whole
+      // query — killing a legitimate sibling branch that used to return rows.
+      const { bridge, shareName } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+      const anna = bridge.findAll('Anna Meier', 'person')[0]!;
+      const ben = bridge.findAll('Ben Roth', 'person')[0]!;
+      shareName('Meier', 'person', [anna, ben]);
+
+      const eq = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: 'Meier' },
+        subjectsByName: true,
+      });
+      expect(eq.rows).toHaveLength(3);            // both patients' rows
+
+      const or = ds.queryRecords({
+        collection: 'appointments',
+        filter: { $or: [{ patient: 'Meier' }, { note: 'nothing matches this' }] },
+        subjectsByName: true,
+      });
+      expect(or.rows).toHaveLength(3);            // the shared branch still contributes
+    });
+
+    it('an insert under a shared name KEEPS the record, unlinked — it does not lose the row', () => {
+      // The write bridge could resolve, bind-to-a-guess, or fail. Failing loudly costs
+      // more than it looks: `insertRecords` catches per record, so a throw discards the
+      // whole row including columns that have nothing to do with the subject. The
+      // module's own policy is the right one — a resolve failure stores null — so the
+      // record lands with an empty link and its other data intact.
+      // Through the REAL bridge and a real SubjectStore, not the stub: this is the one
+      // place the two halves meet, and a stub that mints on write would hide exactly the
+      // disagreement being tested.
+      const subjDir = makeTmpDb();
+      const subjects = new SubjectStore(new EngineDb(subjDir, ''));
+      ds.setSubjectBridge(makeSubjectColumnBridge(subjects));
+      subjects.findOrCreate({ kind: 'person', name: 'Anna Meier', aliases: ['Meier'] });
+      subjects.findOrCreate({ kind: 'person', name: 'Bernd Meier', aliases: ['Meier'] });
+      seedAppointments(ds);
+
+      // The skip must also be COUNTED — the comment claims it is not silent, and without
+      // this assertion deleting the publish leaves the whole suite green.
+      const counted: Array<{ kind: string; candidateCount: number }> = [];
+      const onAmbiguous = (msg: unknown): void => {
+        counted.push(msg as { kind: string; candidateCount: number });
+      };
+      channels.subjectAmbiguous.subscribe(onAmbiguous);
+
+      let res;
+      try {
+        res = ds.insertRecords({
+          collection: 'appointments',
+          records: [{ note: 'ambiguous patient', patient: 'Meier' }],
+        });
+      } finally {
+        channels.subjectAmbiguous.unsubscribe(onAmbiguous);
+      }
+      expect(counted).toEqual([{ kind: 'person', candidateCount: 2 }]);
+      expect(res.inserted).toBe(1);
+      const row = ds.queryRecords({ collection: 'appointments' })
+        .rows.find(r => r['note'] === 'ambiguous patient');
+      expect(row).toBeDefined();
+      expect(row!['note']).toBe('ambiguous patient');   // the unrelated column survived
+      expect(row!['patient']).toBeNull();               // only the edge is missing
+    });
+
+    it('AND-joins a widened $eq with a sibling $in by INTERSECTING', () => {
+      // Clauses in one operator object are AND-joined, so widening `$eq` into a set must
+      // narrow against a sibling `$in`, not replace or union it. Nothing covered this:
+      // replacing the intersect with a plain assignment passed the entire suite.
+      const { bridge, shareName } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+      const anna = bridge.findAll('Anna Meier', 'person')[0]!;
+      const ben = bridge.findAll('Ben Roth', 'person')[0]!;
+      shareName('Meier', 'person', [anna, ben]);
+
+      // "is one of {anna,ben}" AND "is one of {ben}" ⇒ ben only ⇒ his single row.
+      // BOTH key orders, because clause order must not change an AND — and because with
+      // only the `$eq`-first order a plain "last write wins" implementation gives the same
+      // answer by luck and the assertion proves nothing.
+      for (const filter of [
+        { patient: { $eq: 'Meier', $in: ['Ben Roth'] } },
+        { patient: { $in: ['Ben Roth'], $eq: 'Meier' } },
+      ]) {
+        const both = ds.queryRecords({ collection: 'appointments', filter, subjectsByName: true });
+        expect(both.rows, JSON.stringify(filter)).toHaveLength(1);
+        expect(both.rows[0]!['patient']).toBe('Ben Roth');
+      }
+    });
+
+    it('AND-joins a widened $neq with a sibling $nin by UNIONING', () => {
+      // The negated polarity composes the other way: excluding {anna,ben} AND excluding
+      // {ben} excludes all three. Same coverage gap as the intersect above.
+      const { bridge, shareName } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+      const anna = bridge.findAll('Anna Meier', 'person')[0]!;
+      const ben = bridge.findAll('Ben Roth', 'person')[0]!;
+      shareName('Meier', 'person', [anna, ben]);
+
+      const out = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: { $neq: 'Meier', $nin: ['Ben Roth'] } },
+        subjectsByName: true,
+      });
+      expect(out.rows).toHaveLength(0);
+    });
+
+    it('an EMPTY intersection returns zero rows instead of throwing', () => {
+      // The widened set can end up disjoint from its sibling — a legitimate "nothing
+      // satisfies both". Emitting an empty `$in` would hand the validator a malformed
+      // filter and turn that answer into an error.
+      const { bridge, shareName } = makeStubBridge();
+      ds.setSubjectBridge(bridge);
+      seedAppointments(ds);
+      const anna = bridge.findAll('Anna Meier', 'person')[0]!;
+      const ben = bridge.findAll('Ben Roth', 'person')[0]!;
+      shareName('Meier', 'person', [anna, ben]);
+
+      const out = ds.queryRecords({
+        collection: 'appointments',
+        filter: { patient: { $eq: 'Meier', $in: ['Nobody At All'] } },
+        subjectsByName: true,
+      });
+      expect(out.rows).toHaveLength(0);
+    });
+
     it('filters linked/unlinked rows via $is_null on a subject column', () => {
       const { bridge } = makeStubBridge();
       ds.setSubjectBridge(bridge);
@@ -1287,7 +1450,7 @@ describe('DataStore', () => {
     it('shows the raw id when the subject name can no longer be resolved (stale)', () => {
       // resolve+find work, but name() is null → the subject was purged. The id is
       // shown (never dropped) rather than a blank or a crash.
-      const bridge: SubjectColumnBridge = { resolve: () => 'subj-x', find: () => 'subj-x', name: () => null };
+      const bridge: SubjectColumnBridge = { resolve: () => 'subj-x', findAll: () => ['subj-x'], name: () => null };
       ds.setSubjectBridge(bridge);
       ds.createCollection({
         name: 'orders',

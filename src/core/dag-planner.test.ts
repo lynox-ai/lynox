@@ -87,6 +87,26 @@ describe('planDAG', () => {
     expect(result!.estimatedCost).toBe(0.12);
   });
 
+  it('parses a declared tools array and drops an invalid one (F2)', async () => {
+    mockCreate.mockResolvedValueOnce(makeToolUseResponse({
+      steps: [
+        { id: 'fetch', task: 'Fetch pages', model: 'fast', tools: ['http_request'] },
+        { id: 'store', task: 'Store rows', model: 'fast', tools: ['not-a-string', 42] },
+        { id: 'bare', task: 'No tools field', model: 'fast' },
+      ],
+      reasoning: 'r',
+      estimated_cost_usd: 0.01,
+    }));
+
+    const result = await planDAG('sync the shop');
+    expect(result).not.toBeNull();
+    expect(result!.steps[0]!.tools).toEqual(['http_request']);
+    // Invalid/missing arrays degrade to undeclared — the runtime then grants
+    // the default pool minus bash, never more.
+    expect(result!.steps[1]!.tools).toBeUndefined();
+    expect(result!.steps[2]!.tools).toBeUndefined();
+  });
+
   it('computes actualCostUsd from response usage (for the managed in-run debit)', async () => {
     mockCreate.mockResolvedValueOnce({
       ...makeToolUseResponse({
@@ -436,12 +456,25 @@ describe('estimatePipelineCost', () => {
     expect(haikuCost.steps[0]!.model).toBe('claude-haiku-4-5-20251001');
   });
 
-  it('defaults to sonnet cost when step has no model', () => {
+  it('prices an undeclared step at the fast tier (F1/D1)', () => {
     const steps: InlinePipelineStep[] = [
       { id: 'nomodel', task: 'A task without explicit model' },
     ];
     const result = estimatePipelineCost(steps);
 
+    // Pre-F1 this asserted sonnet/$0.08 — the estimate must price the tier
+    // that actually runs, or the plan preview overstates by ~16× per step.
+    expect(result.steps[0]!.model).toBe('claude-haiku-4-5-20251001');
+    expect(result.steps[0]!.estimatedCostUsd).toBe(0.005);
+  });
+
+  it('prices an undeclared step with a role at the role tier', () => {
+    const steps: InlinePipelineStep[] = [
+      { id: 'roled', task: 'Research something', role: 'researcher' },
+    ];
+    const result = estimatePipelineCost(steps);
+
+    // researcher declares balanced — the role declaration wins over the fast default.
     expect(result.steps[0]!.model).toBe('claude-sonnet-4-6');
     expect(result.steps[0]!.estimatedCostUsd).toBe(0.08);
   });

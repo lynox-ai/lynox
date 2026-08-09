@@ -922,6 +922,185 @@ describe('OpenAIAdapter', () => {
     });
   });
 
+  // Reasoning channel of an OpenAI-compat reasoning model. Every chunk shape
+  // below was OBSERVED on the wire against
+  // `accounts/fireworks/models/glm-5p2` (2026-08-02) — the ordering (reasoning
+  // first, `content` empty until reasoning ends, a tool call terminating the
+  // reasoning phase with `content` never arriving at all) is the model's real
+  // behaviour, not a guess about it. Before this, the adapter read only
+  // `delta.content` and the whole channel was billed and discarded: a plain
+  // answer split 3242 chars of reasoning against 492 of content (87% lost).
+  describe('reasoning channel → thinking blocks', () => {
+    /** Run one SSE script through the adapter and return the events. */
+    async function runStream(chunks: unknown[]): Promise<BetaRawMessageStreamEvent[]> {
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        for (const c of chunks) res.write(sseChunk(c));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`, apiKey: 'test-key', modelId: 'glm-5p2',
+        });
+        return await collectEvents(adapter.beta.messages.stream({
+          model: 'glm-5p2', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }));
+      } finally { server.close(); }
+    }
+
+    const thinkingDeltas = (evs: BetaRawMessageStreamEvent[]): string[] => evs
+      .filter(e => e.type === 'content_block_delta')
+      .map(e => (e as { delta: { type?: string; thinking?: string } }).delta)
+      .filter(d => d.type === 'thinking_delta')
+      .map(d => d.thinking ?? '');
+
+    const textDeltas = (evs: BetaRawMessageStreamEvent[]): string[] => evs
+      .filter(e => e.type === 'content_block_delta')
+      .map(e => (e as { delta: { type?: string; text?: string } }).delta)
+      .filter(d => d.type === 'text_delta')
+      .map(d => d.text ?? '');
+
+    it('emits reasoning_content as thinking deltas instead of discarding it', async () => {
+      const events = await runStream([
+        { id: 'r-1', choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: 'Der Nutzer fragt' }, finish_reason: null }] },
+        { id: 'r-1', choices: [{ index: 0, delta: { reasoning_content: ' nach Caching.' }, finish_reason: null }] },
+        { id: 'r-1', choices: [{ index: 0, delta: { content: 'Caching senkt' }, finish_reason: null }] },
+        { id: 'r-1', choices: [{ index: 0, delta: { content: ' die Kosten.' }, finish_reason: 'stop' }] },
+      ]);
+
+      expect(thinkingDeltas(events)).toEqual(['Der Nutzer fragt', ' nach Caching.']);
+      // The text channel must be untouched by the change.
+      expect(textDeltas(events)).toEqual(['Caching senkt', ' die Kosten.']);
+    });
+
+    it('opens a thinking block and closes it when content starts', async () => {
+      const events = await runStream([
+        { id: 'r-2', choices: [{ index: 0, delta: { reasoning_content: 'denk' }, finish_reason: null }] },
+        { id: 'r-2', choices: [{ index: 0, delta: { content: 'Antwort' }, finish_reason: 'stop' }] },
+      ]);
+
+      const starts = events.filter(e => e.type === 'content_block_start')
+        .map(e => (e as { index: number; content_block: { type: string } }));
+      expect(starts.map(s => s.content_block.type)).toEqual(['thinking', 'text']);
+      // Separate indices — a shared one makes StreamProcessor append the text
+      // onto the thinking block.
+      expect(starts[0]?.index).toBe(0);
+      expect(starts[1]?.index).toBe(1);
+      expect(events.filter(e => e.type === 'content_block_stop')).toHaveLength(2);
+    });
+
+    it('closes the thinking block when a tool call ends the reasoning phase', async () => {
+      // The observed glm-5p2 tool-calling turn: reasoning, then tool_calls,
+      // and `delta.content` never arrives at all.
+      const events = await runStream([
+        { id: 'r-3', choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: 'Ich brauche das Tool.' }, finish_reason: null }] },
+        { id: 'r-3', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'web_research', arguments: '' } }] }, finish_reason: null }] },
+        { id: 'r-3', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"action":"read"}' } }] }, finish_reason: 'tool_calls' }] },
+      ]);
+
+      const starts = events.filter(e => e.type === 'content_block_start')
+        .map(e => (e as { index: number; content_block: { type: string } }));
+      expect(starts.map(s => s.content_block.type)).toEqual(['thinking', 'tool_use']);
+      expect(starts[0]?.index).toBe(0);
+      expect(starts[1]?.index).toBe(1);
+
+      // StreamProcessor must still parse the tool input — a thinking block that
+      // stole the tool's index would corrupt `rawInputs`.
+      const processor = new StreamProcessor(async () => { /* no-op */ }, 'test-agent');
+      const result = await processor.process(
+        (async function* () { for (const e of events) yield e; })(),
+      );
+      const toolUse = result.content.find(b => b.type === 'tool_use') as BetaToolUseBlock | undefined;
+      expect(toolUse?.name).toBe('web_research');
+      expect(toolUse?.input).toEqual({ action: 'read' });
+    });
+
+    it('closes a reasoning-only turn that never produces content', async () => {
+      const events = await runStream([
+        { id: 'r-4', choices: [{ index: 0, delta: { reasoning_content: 'nur denken' }, finish_reason: null }] },
+        { id: 'r-4', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 900 } },
+      ]);
+
+      expect(thinkingDeltas(events)).toEqual(['nur denken']);
+      // Unbalanced start/stop leaves StreamProcessor with an open block.
+      expect(events.filter(e => e.type === 'content_block_start')).toHaveLength(1);
+      expect(events.filter(e => e.type === 'content_block_stop')).toHaveLength(1);
+    });
+
+    it("accepts OpenRouter's `reasoning` spelling of the same channel", async () => {
+      const events = await runStream([
+        { id: 'r-5', choices: [{ index: 0, delta: { reasoning: 'via openrouter' }, finish_reason: null }] },
+        { id: 'r-5', choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] },
+      ]);
+      expect(thinkingDeltas(events)).toEqual(['via openrouter']);
+    });
+
+    it('keeps the channel when a proxy sends an EMPTY reasoning_content beside `reasoning`', async () => {
+      // `?? ` would pick the empty string and lose the channel. Not observed at
+      // any provider — insurance on a field two vendors spell differently.
+      const events = await runStream([
+        { id: 'r-8', choices: [{ index: 0, delta: { reasoning_content: '', reasoning: 'über den proxy' }, finish_reason: null }] },
+        { id: 'r-8', choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] },
+      ]);
+      expect(thinkingDeltas(events)).toEqual(['über den proxy']);
+    });
+
+    it('keeps block indices disjoint when reasoning arrives BETWEEN two content deltas', async () => {
+      // glm-5p2 does reasoning-then-content, so this ordering is not observed
+      // there — but the code handles it (the text-block close above the
+      // reasoning branch exists for nothing else), so it needs a test. A shared
+      // index here would make StreamProcessor append text onto the thinking
+      // block.
+      const events = await runStream([
+        { id: 'r-9', choices: [{ index: 0, delta: { content: 'Die Rechnung ' }, finish_reason: null }] },
+        { id: 'r-9', choices: [{ index: 0, delta: { reasoning_content: 'Moment.' }, finish_reason: null }] },
+        { id: 'r-9', choices: [{ index: 0, delta: { content: 'betraegt 1200 Euro.' }, finish_reason: 'stop' }] },
+      ]);
+
+      const starts = events.filter(e => e.type === 'content_block_start')
+        .map(e => (e as { index: number; content_block: { type: string } }));
+      expect(starts.map(s => s.content_block.type)).toEqual(['text', 'thinking', 'text']);
+      expect(starts.map(s => s.index)).toEqual([0, 1, 2]);
+      expect(events.filter(e => e.type === 'content_block_stop')).toHaveLength(3);
+
+      // The user-visible text must survive the split intact. (The next request's
+      // history does NOT — `translateMessages` joins text parts with a newline
+      // and plants one mid-sentence. Pre-existing, tracked separately; asserted
+      // here only so the split itself is not blamed for it later.)
+      const processor = new StreamProcessor(async () => { /* no-op */ }, 'test-agent');
+      const result = await processor.process(
+        (async function* () { for (const e of events) yield e; })(),
+      );
+      const text = result.content.filter(b => b.type === 'text')
+        .map(b => (b as { text: string }).text).join('');
+      expect(text).toBe('Die Rechnung betraegt 1200 Euro.');
+    });
+
+    it('leaves a non-reasoning provider byte-identical (no thinking block)', async () => {
+      const events = await runStream([
+        { id: 'r-6', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hallo' }, finish_reason: null }] },
+        { id: 'r-6', choices: [{ index: 0, delta: { content: ' Welt' }, finish_reason: 'stop' }] },
+      ]);
+      expect(thinkingDeltas(events)).toEqual([]);
+      expect(textDeltas(events)).toEqual(['Hallo', ' Welt']);
+      const starts = events.filter(e => e.type === 'content_block_start')
+        .map(e => (e as { content_block: { type: string } }).content_block.type);
+      expect(starts).toEqual(['text']);
+    });
+
+    it('never lets a non-string reasoning field reach the thinking channel', async () => {
+      // Same leak guard as `delta.content`: an object coerced downstream bakes
+      // "[object Object]" into the block.
+      const events = await runStream([
+        { id: 'r-7', choices: [{ index: 0, delta: { reasoning_content: { unexpected: 'shape' } }, finish_reason: null }] },
+        { id: 'r-7', choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] },
+      ]);
+      expect(thinkingDeltas(events)).toEqual([]);
+      expect(textDeltas(events)).toEqual(['ok']);
+    });
+  });
+
   // T2-P1: OpenAI/Mistral/Ollama spec uses 'length' for max-tokens-hit; the
   // Anthropic event spec uses 'max_tokens'. Without the translation the
   // downstream Agent loop silently drops the truncated turn.
@@ -1474,4 +1653,85 @@ describe('OpenAIAdapter — request idle timeout (DEF-openai-adapter-timeout)', 
       ).rejects.toThrow();
     } finally { server.close(); }
   }, 5000);
+});
+
+describe('OpenAIAdapter — the non-streaming call every extraction path uses', () => {
+  /**
+   * `createLLMClient` returns `new OpenAIAdapter(...) as unknown as Anthropic` for every tenant
+   * whose provider maps to the openai wire client — Mistral and OpenAI. The cast makes the
+   * compiler agree with any shape, so a method the adapter simply did not have failed at
+   * RUNTIME and only there: `client.beta.messages.create is not a function`.
+   *
+   * Three callers reach it — `llm-helper.ts` (save_workflow extraction), `process-capture.ts`,
+   * and the inbox classifier — and two of them use the UN-prefixed `client.messages.create`,
+   * which is a different property. Both are covered here for that reason; testing one would
+   * have left half the callers broken while looking green.
+   */
+  function toolCallServer(): Promise<{ port: number; close: () => void }> {
+    return createMockServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(sseChunk({
+        id: 'x-1', choices: [{
+          index: 0,
+          delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_1', function: { name: 'extract', arguments: '{"ok":true}' } }] },
+          finish_reason: null,
+        }],
+      }));
+      res.write(sseChunk({
+        id: 'x-1', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+        usage: { prompt_tokens: 7, completion_tokens: 3 },
+      }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+  }
+
+  it.each([
+    ['beta.messages.create', (a: OpenAIAdapter) => a.beta.messages.create],
+    ['messages.create',      (a: OpenAIAdapter) => a.messages.create],
+  ])('%s returns an assembled message with the fields its callers read', async (_label, pick) => {
+    const server = await toolCallServer();
+    try {
+      const adapter = new OpenAIAdapter({
+        baseURL: `http://localhost:${server.port}`, apiKey: 'test-key', modelId: 'test-model',
+      });
+      const msg = await pick(adapter)({
+        model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+      });
+
+      // Exactly what the three call sites destructure: the content blocks and the usage.
+      expect(msg.stop_reason).toBe('tool_use');
+      expect(msg.content.find(b => b.type === 'tool_use')?.name).toBe('extract');
+      expect(msg.usage.input_tokens).toBe(7);
+      expect(msg.usage.output_tokens).toBe(3);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('OpenAIAdapter — a truncated stream must not assemble into a plausible message', () => {
+  it('throws instead of returning end_turn with zero usage', async () => {
+    // The upstream ends mid-answer: content arrived, no finish_reason ever did. Before this,
+    // `finalMessage()` returned partial content with `stop_reason: 'end_turn'` and usage 0/0 —
+    // indistinguishable from a short, cheap, successful call. `process-capture.ts` debits from
+    // that usage, so it recorded a real API call as costing nothing and accepted the truncated
+    // extraction as the answer.
+    const server = await createMockServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(sseChunk({ id: 't-1', choices: [{ index: 0, delta: { role: 'assistant', content: 'Half a th' }, finish_reason: null }] }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    try {
+      const adapter = new OpenAIAdapter({
+        baseURL: `http://localhost:${server.port}`, apiKey: 'test-key', modelId: 'test-model',
+      });
+      await expect(adapter.messages.create({
+        model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+      })).rejects.toThrow(/incomplete/);
+    } finally {
+      server.close();
+    }
+  });
 });

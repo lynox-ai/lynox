@@ -1,5 +1,68 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { LynoxUserConfigSchema } from './schemas.js';
+
+/**
+ * Every key the env bridge can put on the merged config must also be accepted by the strict
+ * schema — because the same keys are what an operator writes into `~/.lynox/config.json`.
+ *
+ * The failure this exists to stop is disproportionate to its cause. The schema is `.strict()`
+ * and `readConfigFile` (core/config.ts) returns null for the WHOLE file on any parse failure,
+ * so ONE key that the config type declares and the schema does not know does not degrade that
+ * key — it silently discards the entire config, `api_key` included. The operator sees an agent
+ * with no credentials and no obvious reason.
+ *
+ * Half a dozen individual rows in schemas.ts carry a hand-written comment warning about exactly
+ * this, which is the tell: a trap that needs a comment on every row is a trap no comment will
+ * catch. `calendar_enabled` was added to the interface, to the env bridge, and to the contract —
+ * and missed here. On its first run this guard also turned up `language`, which had been missing
+ * since v1.2.2 (2026-04-20).
+ *
+ * Substrate is `merged.<key> =` in config.ts — the assignment itself, with comment lines stripped
+ * first. That ordering is not cosmetic: a sibling guard in the pro repo matched case-insensitively
+ * against a raw file and ended up reading its answer out of a prose comment, passing while the
+ * code underneath said the opposite.
+ */
+const CONFIG_TS = fileURLToPath(new URL('../core/config.ts', import.meta.url));
+
+function envBridgedKeys(): string[] {
+  const code = readFileSync(CONFIG_TS, 'utf8')
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('//'))
+    .join('\n');
+  const keys = new Set<string>();
+  for (const m of code.matchAll(/\bmerged\.([a-z_0-9]+)\s*=/g)) {
+    if (m[1]) keys.add(m[1]);
+  }
+  return [...keys].sort();
+}
+
+describe('LynoxUserConfigSchema — accepts every key the env bridge can set', () => {
+  it('finds the assignments at all (the guard\'s own substrate)', () => {
+    // Without this the whole suite below passes vacuously the day someone renames `merged`
+    // or reformats the assignments — an empty list satisfies "every key is accepted".
+    const keys = envBridgedKeys();
+    expect(keys.length).toBeGreaterThan(20);
+    expect(keys).toContain('api_key');
+    expect(keys).toContain('calendar_enabled');
+  });
+
+  it.each(envBridgedKeys())('accepts %s alongside api_key', (key) => {
+    // A value of the right rough shape per key would be brittle; what is under test is whether
+    // the key is KNOWN, so probe with both a boolean and a string and require one to survive.
+    const asBool = LynoxUserConfigSchema.safeParse({ api_key: 'sk-x', [key]: true });
+    const asString = LynoxUserConfigSchema.safeParse({ api_key: 'sk-x', [key]: 'x' });
+    const unrecognized = [asBool, asString].every(
+      (r) => !r.success && JSON.stringify(r.error.issues).includes('nrecognized'),
+    );
+    expect(
+      unrecognized,
+      `"${key}" is set by the env bridge but is not a known schema key — under .strict() a ` +
+      `config.json carrying it makes readConfigFile drop the ENTIRE config, api_key included`,
+    ).toBe(false);
+  });
+});
 
 /**
  * Schema-validation tests for surfaces introduced by the Sprint-Review
