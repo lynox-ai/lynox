@@ -4,14 +4,115 @@
   "title": "AVV/DPA-Review vor Kundenabschluss (DE, Klausel-Detail, Nachverhandlungs-Entscheid)",
   "targetTokens": 21500,
   "messages": [
-    { "role": "user", "content": [ { "type": "text", "text": "Die Rechtsabteilung von Meridian Logistik hat uns ihren Auftragsverarbeitungsvertrag geschickt, den wir statt unserem Standard-AVV unterschreiben sollen. Geh das Ding durch und sag mir, wo es von unserem Standard abweicht und was davon kritisch ist. Signing ist fuer den 21.08. geplant." } ] },
-    { "role": "assistant", "content": [ { "type": "tool_use", "id": "tu_t08_01", "name": "read_document", "input": { "path": "/inbox/attachments/meridian-avv-entwurf-v2.pdf" } } ] },
-    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t08_01", "content": [ { "type": "text", "text": "Dokument: 18 Seiten, 14 Ziffern plus Anhaenge A-C. Auffaellige Abweichungen vom Marktstandard sind in Ziffer 5 (Weisungsrecht), Ziffer 7.3 (Unterauftragsverarbeiter), Ziffer 9 (Loeschfristen), Ziffer 12 (Vertragsstrafe) und Anhang C (TOM-Katalog).\n\nVolltext-Extrakt:" }, { "type": "pad", "generator": "maillist", "lines": 700, "seed": 81 } ] } ] },
-    { "role": "assistant", "content": [ { "type": "text", "text": "Abgleich gegen unseren Standard-AVV (Version 3.1):\n\nUnkritisch (koennen wir akzeptieren):\n- Ziffer 5, erweitertes Weisungsrecht in Textform: entspricht faktisch unserem Prozess.\n- Ziffer 9, Loeschfrist 30 Tage nach Vertragsende statt unserer 90: machbar, unser Backup-Zyklus loescht nach 28 Tagen — wichtig: das muss operativ auch fuer die Restore-Archive gelten, pruefe ich unten.\n\nKritisch:\n1. Ziffer 7.3: JEDER neue Unterauftragsverarbeiter braucht vorgaengige SCHRIFTLICHE Genehmigung (Einzelfreigabe). Unser Standard und unser Betrieb beruhen auf der Widerspruchsloesung (Ankuendigung + 30 Tage Widerspruchsrecht). Einzelfreigabe wuerde jeden Hosting- oder Tooling-Wechsel um Wochen blockieren.\n2. Ziffer 12: Vertragsstrafe CHF 50'000 pro Verstoss, verschuldensUNabhaengig, unbegrenzt kumulierbar. Das ist weit ueber Marktstandard und unkalkulierbar.\n3. Anhang C verlangt ISO-27001-Zertifizierung des Auftragsverarbeiters — wir sind nicht zertifiziert (nur auditiert nach eigenem TOM-Katalog)." }, { "type": "tool_use", "id": "tu_t08_02", "name": "run_sql", "input": { "db": "ops", "query": "SELECT archive_name, retention_days, last_purge FROM backup_archives ORDER BY retention_days DESC" } } ] },
-    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t08_02", "content": [ { "type": "text", "text": "backup_archives: primary-daily retention 28d; restore-archive-quarterly retention 365d (!); disaster-cold retention 180d.\n\nRows:" }, { "type": "pad", "generator": "sqlrows", "lines": 500, "seed": 82 } ] } ] },
-    { "role": "assistant", "content": [ { "type": "text", "text": "Wichtiger Befund zur Loeschfrist: unser restore-archive-quarterly haelt Daten 365 Tage, das disaster-cold-Archiv 180 Tage. Die 30-Tage-Loeschfrist aus Ziffer 9 koennen wir also NICHT zusagen, ohne entweder (a) die Archiv-Retention fuer Meridian-Daten technisch zu verkuerzen oder (b) in Ziffer 9 eine marktuebliche Backup-Ausnahme zu verhandeln (Loeschung im Rahmen der regulaeren Backup-Zyklen, spaetestens nach X Tagen). Empfehlung: Variante (b) mit X=180 und Zusicherung, dass Restores geloeschter Daten erneut geloescht werden.\n\nDamit ist meine Verhandlungsliste:\n1. Ziffer 7.3: Einzelfreigabe → Widerspruchsloesung (30 Tage), Sub-Prozessor-Liste als Anhang B pflegen.\n2. Ziffer 9: Backup-Ausnahme mit 180-Tage-Obergrenze.\n3. Ziffer 12: Vertragsstrafe deckeln (Vorschlag: max. CHF 50'000 pro Jahr kumuliert, verschuldensabhaengig).\n4. Anhang C: ISO-27001 ersetzen durch unseren auditierten TOM-Katalog plus jaehrlichen Audit-Report.\n\nWas davon ist verhandelbar, weiss deren Legal am besten — aber 7.3 und 12 sind aus meiner Sicht Deal-Breaker in der jetzigen Form." } ] },
-    { "role": "user", "content": [ { "type": "text", "text": "Einverstanden mit allen vier Punkten. Zu Ziffer 12 hat unser Anwalt letztes Mal bei einem aehnlichen Fall einen Cap bei einer Jahresvergueting durchbekommen, nimm das als Position. Schreib mir den Verhandlungsbrief als Entwurf, ich will ihn vor Versand sehen. Und das Signing am 21.08. wackelt damit vermutlich — sag dem Account Manager Bescheid, dass er Meridian vorwarnt." } ] },
-    { "role": "assistant", "content": [ { "type": "text", "text": "Verstanden. Positionen fuer den Entwurf:\n- Ziffer 7.3: Widerspruchsloesung mit 30-Tage-Frist, gepflegte Sub-Prozessor-Liste in Anhang B.\n- Ziffer 9: Backup-Ausnahme, endgueltige Loeschung spaetestens nach 180 Tagen, Restore-Wiederloeschungs-Zusicherung.\n- Ziffer 12: Cap bei einer Jahresverguetung, verschuldensabhaengig (Position deines Anwalts aus dem Praezedenzfall).\n- Anhang C: auditierter TOM-Katalog plus jaehrlicher Audit-Report statt ISO-27001.\n\nNaechste Schritte: (1) Entwurf des Verhandlungsbriefs bis morgen Mittag an dich zur Freigabe — geht NICHT direkt raus. (2) Nachricht an den Account Manager Pascal ist raus: Signing-Termin 21.08. ist gefaehrdet, er soll Meridian auf eine Verhandlungsrunde vorbereiten. (3) Nach deiner Freigabe geht der Brief an Meridian Legal, Frist fuer deren Antwort schlagen wir mit 10 Arbeitstagen vor." } ] }
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Die Rechtsabteilung von Meridian Logistik hat uns ihren Auftragsverarbeitungsvertrag geschickt, den wir statt unserem Standard-AVV unterschreiben sollen. Geh das Ding durch und sag mir, wo es von unserem Standard abweicht und was davon kritisch ist. Signing ist fuer den 21.08. geplant."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_t08_01",
+          "name": "read_document",
+          "input": {
+            "path": "/inbox/attachments/meridian-avv-entwurf-v2.pdf"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "tu_t08_01",
+          "content": [
+            {
+              "type": "text",
+              "text": "Dokument: 18 Seiten, 14 Ziffern plus Anhaenge A-C. Auffaellige Abweichungen vom Marktstandard sind in Ziffer 5 (Weisungsrecht), Ziffer 7.3 (Unterauftragsverarbeiter), Ziffer 9 (Loeschfristen), Ziffer 12 (Vertragsstrafe) und Anhang C (TOM-Katalog).\n\nVolltext-Extrakt:"
+            },
+            {
+              "type": "pad",
+              "generator": "maillist",
+              "lines": 700,
+              "seed": 81
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Abgleich gegen unseren Standard-AVV (Version 3.1):\n\nUnkritisch (koennen wir akzeptieren):\n- Ziffer 5, erweitertes Weisungsrecht in Textform: entspricht faktisch unserem Prozess.\n- Ziffer 9, Loeschfrist 30 Tage nach Vertragsende statt unserer 90: machbar, unser Backup-Zyklus loescht nach 28 Tagen — wichtig: das muss operativ auch fuer die Restore-Archive gelten, pruefe ich unten.\n\nKritisch:\n1. Ziffer 7.3: JEDER neue Unterauftragsverarbeiter braucht vorgaengige SCHRIFTLICHE Genehmigung (Einzelfreigabe). Unser Standard und unser Betrieb beruhen auf der Widerspruchsloesung (Ankuendigung + 30 Tage Widerspruchsrecht). Einzelfreigabe wuerde jeden Hosting- oder Tooling-Wechsel um Wochen blockieren.\n2. Ziffer 12: Vertragsstrafe CHF 50'000 pro Verstoss, verschuldensUNabhaengig, unbegrenzt kumulierbar. Das ist weit ueber Marktstandard und unkalkulierbar.\n3. Anhang C verlangt ISO-27001-Zertifizierung des Auftragsverarbeiters — wir sind nicht zertifiziert (nur auditiert nach eigenem TOM-Katalog)."
+        },
+        {
+          "type": "tool_use",
+          "id": "tu_t08_02",
+          "name": "run_sql",
+          "input": {
+            "db": "ops",
+            "query": "SELECT archive_name, retention_days, last_purge FROM backup_archives ORDER BY retention_days DESC"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "tu_t08_02",
+          "content": [
+            {
+              "type": "text",
+              "text": "backup_archives: primary-daily retention 28d; restore-archive-quarterly retention 365d (!); disaster-cold retention 180d.\n\nRows:"
+            },
+            {
+              "type": "pad",
+              "generator": "sqlrows",
+              "lines": 500,
+              "seed": 82
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Wichtiger Befund zur Loeschfrist: unser restore-archive-quarterly haelt Daten 365 Tage, das disaster-cold-Archiv 180 Tage. Die 30-Tage-Loeschfrist aus Ziffer 9 koennen wir also NICHT zusagen, ohne entweder (a) die Archiv-Retention fuer Meridian-Daten technisch zu verkuerzen oder (b) in Ziffer 9 eine marktuebliche Backup-Ausnahme zu verhandeln (Loeschung im Rahmen der regulaeren Backup-Zyklen, spaetestens nach X Tagen). Empfehlung: Variante (b) mit X=180 und Zusicherung, dass Restores geloeschter Daten erneut geloescht werden.\n\nDamit ist meine Verhandlungsliste:\n1. Ziffer 7.3: Einzelfreigabe → Widerspruchsloesung (30 Tage), Sub-Prozessor-Liste als Anhang B pflegen.\n2. Ziffer 9: Backup-Ausnahme mit 180-Tage-Obergrenze.\n3. Ziffer 12: Vertragsstrafe deckeln (Vorschlag: max. CHF 50'000 pro Jahr kumuliert, verschuldensabhaengig).\n4. Anhang C: ISO-27001 ersetzen durch unseren auditierten TOM-Katalog plus jaehrlichen Audit-Report.\n\nWas davon ist verhandelbar, weiss deren Legal am besten — aber 7.3 und 12 sind aus meiner Sicht Deal-Breaker in der jetzigen Form."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Einverstanden mit allen vier Punkten. Zu Ziffer 12 hat unser Anwalt letztes Mal bei einem aehnlichen Fall einen Cap bei einer Jahresvergueting durchbekommen, nimm das als Position. Schreib mir den Verhandlungsbrief als Entwurf, ich will ihn vor Versand sehen. Und das Signing am 21.08. wackelt damit vermutlich — sag dem Account Manager Bescheid, dass er Meridian vorwarnt."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Verstanden. Positionen fuer den Entwurf:\n- Ziffer 7.3: Widerspruchsloesung mit 30-Tage-Frist, gepflegte Sub-Prozessor-Liste in Anhang B.\n- Ziffer 9: Backup-Ausnahme, endgueltige Loeschung spaetestens nach 180 Tagen, Restore-Wiederloeschungs-Zusicherung.\n- Ziffer 12: Cap bei einer Jahresverguetung, verschuldensabhaengig (Position deines Anwalts aus dem Praezedenzfall).\n- Anhang C: auditierter TOM-Katalog plus jaehrlicher Audit-Report statt ISO-27001.\n\nNaechste Schritte: (1) Entwurf des Verhandlungsbriefs bis morgen Mittag an dich zur Freigabe — geht NICHT direkt raus. (2) Nachricht an den Account Manager Pascal ist raus: Signing-Termin 21.08. ist gefaehrdet, er soll Meridian auf eine Verhandlungsrunde vorbereiten. (3) Nach deiner Freigabe geht der Brief an Meridian Legal, Frist fuer deren Antwort schlagen wir mit 10 Arbeitstagen vor."
+        }
+      ]
+    }
   ],
   "checklist": {
     "literals": [
@@ -23,7 +124,10 @@
       "ISO-27001",
       "21.08",
       "Meridian",
-      "Anhang C"
+      [
+        "Anhang C",
+        "Annex C"
+      ]
     ],
     "rubric": [
       "Preserves the four negotiation points: 7.3 sub-processor approval → objection model, 9 backup exception (180-day cap), 12 penalty cap, Anhang C TOM catalog instead of ISO-27001.",

@@ -34,24 +34,52 @@ recovers follow-up chips. This bench measures the summarizer job:
 - **Prompt**: the EXACT production summarizer prompt, imported from
   `src/core/compaction-prompt.ts` (extracted from `Session.compact()` so it cannot
   drift from what production sends).
-- **Scoring**: (1) mechanical literal recall — contained or not, no LLM; (2) an
-  8-element rubric judged by a DEEP model that never shares a model family with the
-  candidate (DEF-replay-judge-self-family): Anthropic candidates are judged by the
-  Fireworks deep slot (glm-5p2) and vice versa.
-- **Served-model guard**: each run records which model the provider REPORTS having
-  served; a mismatch (or a missing report) marks the run invalid.
+- **Scoring**: (1) mechanical literal recall — contained or not, no LLM. The
+  matcher folds formatting, not content: digit-group separators (`48'200'113` ==
+  `48,200,113`), slash/percent spacing, typographic quotes/dashes. A checklist
+  literal may be an ANY-OF array of variants for content a summarizer
+  legitimately re-renders (`["24 von 31", "24 of 31", "24/31"]`); the first
+  variant is canonical and must occur in the transcript. (2) an 8-element rubric
+  judged by a DEEP model that never shares a model family with the candidate
+  (DEF-replay-judge-self-family): Anthropic candidates are judged by the
+  Fireworks deep slot (glm-5p2) and vice versa. The judge budget is 8192 tokens —
+  1024 made glm-5p2 (a reasoning model) burn the whole budget on its hidden
+  reasoning phase and return an empty verdict (run 2026-08-09T21-18: 19/24
+  reference rows judge-INVALID with stop_reason max_tokens).
+- **Served-model guard, three states**: `verified` / `unreported` / `mismatch`.
+  Only a MISMATCH (positive substitution evidence) invalidates a run.
+  `unreported` is the structural norm for every openai-wire candidate — the
+  `OpenAIAdapter` emits `model: ''` and drops the wire's model field — so a
+  fail-closed boolean would invalidate 5 of 6 candidates by construction
+  (observed 2026-08-09). Degraded providers are caught instead by the
+  **input-sanity tripwire**: a reported input-token count under 5% of the
+  transcript's known size (e.g. `tok in=1` from a suspended account) marks the
+  run invalid — the model cannot have seen the thread.
 - **Decision rule (P3)**: a candidate HOLDS the fast slot iff literal recall ≥ 95%
   AND its judge mean is within-noise of the haiku-4.5 reference
-  (noise = max(reference std, 0.5 rubric points)).
+  (noise = max(reference std, 0.5 rubric points)). **Bar resolvability**: if the
+  REFERENCE itself misses the 95% bar, every verdict is INVALID with an explicit
+  "recalibrate the checklist" reason — a bar the current prod model cannot reach
+  measures the checklist, not the candidates.
+- **Aggregation**: means over VALID rows only; an aggregate goes invalid when
+  fewer than half its rows are valid — a transient 412 burst must not zero an
+  otherwise-measured matrix, and an outage must not be quoted as a measurement.
 - **Preflight**: refuses to run if any planted literal does not occur in its
   transcript or any transcript misses the 20k-80k band — a broken instrument returns
   a plausible number with no symptom, so it must not run at all.
+- **Offline re-judge**: rows persist the candidate summary and the raw judge
+  reply, so `--rejudge <results.json>` re-scores stored summaries (recall re-runs
+  free against the current checklist/matcher, only judge calls are paid) —
+  a matcher/checklist/judge fix is re-measurable for cents instead of a full
+  $10-20 pass. Only works on results files that stored summaries (all runs from
+  2026-08-09 evening on).
 
 ```bash
 npx tsx scripts/model-fitness/fast-bench.ts                 # full matrix, 2 runs each
 npx tsx scripts/model-fitness/fast-bench.ts --runs 3
 npx tsx scripts/model-fitness/fast-bench.ts --only deepseek # reference is force-included
 npx tsx scripts/model-fitness/fast-bench.ts --transcript t01
+npx tsx scripts/model-fitness/fast-bench.ts --rejudge scripts/model-fitness/results/fast-bench-<ts>.json
 ```
 
 Output: Markdown matrix + JSON under `scripts/model-fitness/results/` (gitignored

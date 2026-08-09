@@ -4,20 +4,156 @@
   "title": "Team-Offsite Planung mit Themenwechsel zu HR (DE, Offerten-Vergleich)",
   "targetTokens": 21000,
   "messages": [
-    { "role": "user", "content": [ { "type": "text", "text": "Wir machen das Team-Offsite vom 24. bis 26.09.2026, zwoelf Personen. Ich habe drei Offerten reinbekommen: Hotel Seeblick am Vierwaldstaettersee, Berghaus Alpenrose in Adelboden, und das Seminarzentrum Waldegg bei Bern. Vergleich die mal und gib mir eine Empfehlung." } ] },
-    { "role": "assistant", "content": [ { "type": "tool_use", "id": "tu_t07_01", "name": "read_document", "input": { "path": "/inbox/attachments/offerte-seeblick.pdf" } } ] },
-    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t07_01", "content": [ { "type": "text", "text": "Offerte Hotel Seeblick: 12 EZ, 2 Naechte, VP, Seminarraum 60m2 mit Seeblick, Technik inklusive. Total CHF 9'450. Stornofrist 30 Tage kostenfrei. Anreise ab Zuerich 45 Min. Abendprogramm: Bootsfahrt buchbar (CHF 480 extra).\n\nDetails und Reservationsbedingungen:" }, { "type": "pad", "generator": "maillist", "lines": 350, "seed": 71 } ] } ] },
-    { "role": "assistant", "content": [ { "type": "tool_use", "id": "tu_t07_02", "name": "read_document", "input": { "path": "/inbox/attachments/offerte-alpenrose.pdf" } }, { "type": "tool_use", "id": "tu_t07_03", "name": "read_document", "input": { "path": "/inbox/attachments/offerte-waldegg.pdf" } } ] },
-    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t07_02", "content": [ { "type": "text", "text": "Offerte Berghaus Alpenrose: 6 DZ (Doppelbelegung!), 2 Naechte VP, Seminarraum klein (35m2, kein Tageslicht), Total CHF 7'120. Storno 60 Tage. Anreise ab Zuerich 2h15. Wanderung mit Bergfuehrer inklusive." }, { "type": "pad", "generator": "maillist", "lines": 330, "seed": 72 } ] }, { "type": "tool_result", "tool_use_id": "tu_t07_03", "content": [ { "type": "text", "text": "Offerte Seminarzentrum Waldegg: 12 EZ, 2 Naechte HP (kein Mittagessen!), Seminarraum 80m2 modern, Total CHF 8'880 plus Mittagessen extern ca. CHF 720. Storno 45 Tage. Anreise ab Zuerich 1h20. Kein Abendprogramm vor Ort." }, { "type": "pad", "generator": "maillist", "lines": 330, "seed": 73 } ] } ] },
-    { "role": "assistant", "content": [ { "type": "text", "text": "Vergleich:\n\n| | Seeblick | Alpenrose | Waldegg |\n|---|---|---|---|\n| Total effektiv | CHF 9'450 (+480 Boot optional) | CHF 7'120 | CHF 9'600 (inkl. externem Mittag) |\n| Zimmer | 12 EZ | 6 DZ — Doppelbelegung | 12 EZ |\n| Seminarraum | 60m2, Seeblick | 35m2, kein Tageslicht | 80m2, modern |\n| Anreise | 45 Min | 2h15 | 1h20 |\n| Storno | 30 Tage | 60 Tage | 45 Tage |\n\nEmpfehlung: Hotel Seeblick. Die Alpenrose ist zwar CHF 2'330 guenstiger, aber Doppelbelegung fuer ein Arbeits-Offsite gibt erfahrungsgemaess Beschwerden, und der fensterlose 35m2-Raum ist fuer zwoelf Leute zwei volle Tage ungeeignet. Waldegg ist effektiv teurer als Seeblick und hat kein Abendprogramm. Seeblick hat zudem die kuerzeste Anreise und die kulanteste Stornofrist (30 Tage — Buchung waere also bis 25.08. risikofrei)." } ] },
-    { "role": "user", "content": [ { "type": "text", "text": "Einverstanden, buch das Seeblick inklusive Bootsfahrt. Budget-Deckel fuers Offsite ist CHF 11'000, da sind wir ja drin. Anderes Thema, wo ich dich gerade habe: die neue Entwicklerin, Lea Brunner, faengt am 01.10. an. Was muss bis dahin organisiert sein?" } ] },
-    { "role": "assistant", "content": [ { "type": "text", "text": "Seeblick ist reserviert: 24.-26.09.2026, 12 EZ VP plus Bootsfahrt, Total CHF 9'930 — unter dem Deckel von CHF 11'000. Bestaetigung kommt per Mail, Stornofrist laeuft bis 25.08.\n\nZu Lea Brunner (Start 01.10.2026), Onboarding-Checkliste:\n1. IT: Laptop bestellen bis spaetestens 12.09. (Lieferfrist 2-3 Wochen), Accounts (Mail, Git, VPN) in der Woche vor Start.\n2. HR: Arbeitsvertrag ist unterschrieben zurueck? Pensionskassen-Anmeldung und Unfallversicherung bis 20.09.\n3. Team: Buddy bestimmen — Vorschlag Jonas, der hat die letzten beiden Onboardings gemacht.\n4. Arbeitsplatz: Platz im 2. OG frei machen, Monitor/Dock bestellen (gleiche Bestellung wie Laptop).\n5. Erste Woche: Onboarding-Plan mit Projektuebersicht — mache ich als Entwurf bis Ende August.\n\nSoll ich die IT-Bestellung gleich ausloesen und die HR-Punkte bei Sandra anstossen?" } ] },
-    { "role": "user", "content": [ { "type": "text", "text": "Ja, IT-Bestellung ausloesen, und frag Sandra wegen Vertrag und PK. Buddy machen wir aber nicht Jonas, der ist mit der Kandidaten-Pipeline schon voll — nimm Ruth. Und wichtig: Lea soll am Offsite schon dabei sein, auch wenn sie offiziell erst am 01.10. anfaengt. Klaer das vertraglich mit Sandra." } ] },
-    { "role": "assistant", "content": [ { "type": "text", "text": "Erledigt und notiert:\n- IT-Bestellung (Laptop, Monitor, Dock) ist ausgeloest, Ziel-Lieferung vor 12.09.\n- Anfrage an Sandra ist raus: Vertragsstatus, PK-Anmeldung bis 20.09., UND die vertragliche Klaerung, dass Lea Brunner schon am Offsite 24.-26.09. teilnimmt obwohl ihr Start erst der 01.10. ist (Versicherungsfrage — Sandra soll die Variante Schnuppertag vs. vorgezogener Vertragsbeginn pruefen).\n- Buddy ist Ruth, nicht Jonas (der ist mit der Kandidaten-Pipeline ausgelastet).\n- Seeblick muss von 12 auf 13 Personen aufgestockt werden wegen Lea — das gebe ich dem Hotel morgen durch, der Aufpreis liegt bei ca. CHF 790, Total dann ~CHF 10'720, immer noch unter dem Deckel.\n- Mein Entwurf des Onboarding-Plans: bis Ende August.\n\nOffen bei dir: nichts akut — naechster Meilenstein ist Sandras Rueckmeldung zur Offsite-Teilnahme." } ] }
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Wir machen das Team-Offsite vom 24. bis 26.09.2026, zwoelf Personen. Ich habe drei Offerten reinbekommen: Hotel Seeblick am Vierwaldstaettersee, Berghaus Alpenrose in Adelboden, und das Seminarzentrum Waldegg bei Bern. Vergleich die mal und gib mir eine Empfehlung."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_t07_01",
+          "name": "read_document",
+          "input": {
+            "path": "/inbox/attachments/offerte-seeblick.pdf"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "tu_t07_01",
+          "content": [
+            {
+              "type": "text",
+              "text": "Offerte Hotel Seeblick: 12 EZ, 2 Naechte, VP, Seminarraum 60m2 mit Seeblick, Technik inklusive. Total CHF 9'450. Stornofrist 30 Tage kostenfrei. Anreise ab Zuerich 45 Min. Abendprogramm: Bootsfahrt buchbar (CHF 480 extra).\n\nDetails und Reservationsbedingungen:"
+            },
+            {
+              "type": "pad",
+              "generator": "maillist",
+              "lines": 350,
+              "seed": 71
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "tu_t07_02",
+          "name": "read_document",
+          "input": {
+            "path": "/inbox/attachments/offerte-alpenrose.pdf"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "tu_t07_03",
+          "name": "read_document",
+          "input": {
+            "path": "/inbox/attachments/offerte-waldegg.pdf"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "tu_t07_02",
+          "content": [
+            {
+              "type": "text",
+              "text": "Offerte Berghaus Alpenrose: 6 DZ (Doppelbelegung!), 2 Naechte VP, Seminarraum klein (35m2, kein Tageslicht), Total CHF 7'120. Storno 60 Tage. Anreise ab Zuerich 2h15. Wanderung mit Bergfuehrer inklusive."
+            },
+            {
+              "type": "pad",
+              "generator": "maillist",
+              "lines": 330,
+              "seed": 72
+            }
+          ]
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "tu_t07_03",
+          "content": [
+            {
+              "type": "text",
+              "text": "Offerte Seminarzentrum Waldegg: 12 EZ, 2 Naechte HP (kein Mittagessen!), Seminarraum 80m2 modern, Total CHF 8'880 plus Mittagessen extern ca. CHF 720. Storno 45 Tage. Anreise ab Zuerich 1h20. Kein Abendprogramm vor Ort."
+            },
+            {
+              "type": "pad",
+              "generator": "maillist",
+              "lines": 330,
+              "seed": 73
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Vergleich:\n\n| | Seeblick | Alpenrose | Waldegg |\n|---|---|---|---|\n| Total effektiv | CHF 9'450 (+480 Boot optional) | CHF 7'120 | CHF 9'600 (inkl. externem Mittag) |\n| Zimmer | 12 EZ | 6 DZ — Doppelbelegung | 12 EZ |\n| Seminarraum | 60m2, Seeblick | 35m2, kein Tageslicht | 80m2, modern |\n| Anreise | 45 Min | 2h15 | 1h20 |\n| Storno | 30 Tage | 60 Tage | 45 Tage |\n\nEmpfehlung: Hotel Seeblick. Die Alpenrose ist zwar CHF 2'330 guenstiger, aber Doppelbelegung fuer ein Arbeits-Offsite gibt erfahrungsgemaess Beschwerden, und der fensterlose 35m2-Raum ist fuer zwoelf Leute zwei volle Tage ungeeignet. Waldegg ist effektiv teurer als Seeblick und hat kein Abendprogramm. Seeblick hat zudem die kuerzeste Anreise und die kulanteste Stornofrist (30 Tage — Buchung waere also bis 25.08. risikofrei)."
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Einverstanden, buch das Seeblick inklusive Bootsfahrt. Budget-Deckel fuers Offsite ist CHF 11'000, da sind wir ja drin. Anderes Thema, wo ich dich gerade habe: die neue Entwicklerin, Lea Brunner, faengt am 01.10. an. Was muss bis dahin organisiert sein?"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Seeblick ist reserviert: 24.-26.09.2026, 12 EZ VP plus Bootsfahrt, Total CHF 9'930 — unter dem Deckel von CHF 11'000. Bestaetigung kommt per Mail, Stornofrist laeuft bis 25.08.\n\nZu Lea Brunner (Start 01.10.2026), Onboarding-Checkliste:\n1. IT: Laptop bestellen bis spaetestens 12.09. (Lieferfrist 2-3 Wochen), Accounts (Mail, Git, VPN) in der Woche vor Start.\n2. HR: Arbeitsvertrag ist unterschrieben zurueck? Pensionskassen-Anmeldung und Unfallversicherung bis 20.09.\n3. Team: Buddy bestimmen — Vorschlag Jonas, der hat die letzten beiden Onboardings gemacht.\n4. Arbeitsplatz: Platz im 2. OG frei machen, Monitor/Dock bestellen (gleiche Bestellung wie Laptop).\n5. Erste Woche: Onboarding-Plan mit Projektuebersicht — mache ich als Entwurf bis Ende August.\n\nSoll ich die IT-Bestellung gleich ausloesen und die HR-Punkte bei Sandra anstossen?"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Ja, IT-Bestellung ausloesen, und frag Sandra wegen Vertrag und PK. Buddy machen wir aber nicht Jonas, der ist mit der Kandidaten-Pipeline schon voll — nimm Ruth. Und wichtig: Lea soll am Offsite schon dabei sein, auch wenn sie offiziell erst am 01.10. anfaengt. Klaer das vertraglich mit Sandra."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Erledigt und notiert:\n- IT-Bestellung (Laptop, Monitor, Dock) ist ausgeloest, Ziel-Lieferung vor 12.09.\n- Anfrage an Sandra ist raus: Vertragsstatus, PK-Anmeldung bis 20.09., UND die vertragliche Klaerung, dass Lea Brunner schon am Offsite 24.-26.09. teilnimmt obwohl ihr Start erst der 01.10. ist (Versicherungsfrage — Sandra soll die Variante Schnuppertag vs. vorgezogener Vertragsbeginn pruefen).\n- Buddy ist Ruth, nicht Jonas (der ist mit der Kandidaten-Pipeline ausgelastet).\n- Seeblick muss von 12 auf 13 Personen aufgestockt werden wegen Lea — das gebe ich dem Hotel morgen durch, der Aufpreis liegt bei ca. CHF 790, Total dann ~CHF 10'720, immer noch unter dem Deckel.\n- Mein Entwurf des Onboarding-Plans: bis Ende August.\n\nOffen bei dir: nichts akut — naechster Meilenstein ist Sandras Rueckmeldung zur Offsite-Teilnahme."
+        }
+      ]
+    }
   ],
   "checklist": {
     "literals": [
-      "Hotel Seeblick",
+      "Seeblick",
       "9'930",
       "11'000",
       "24.-26.09",

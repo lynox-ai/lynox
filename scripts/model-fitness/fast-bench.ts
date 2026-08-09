@@ -32,10 +32,10 @@ import { createLLMClient } from '../../src/core/llm-client.js';
 import { isDirectInvocation } from './replay.js';
 import {
   FIREWORKS_BASE, RUBRIC_SIZE,
-  buildBenchMarkdown, buildRubricJudgePrompt, checkServedModel, decideFastSlot,
-  expandTranscript, handAuthoredText, literalsMissingFromTranscript,
-  mean, parseRubricJudgeResponse, parseTranscript, pickJudgeModel,
-  scoreLiteralRecall, stddev,
+  aggregateBenchRows, buildBenchMarkdown, buildRubricJudgePrompt, checkInputSanity,
+  checkServedModel, decideFastSlot, expandTranscript, handAuthoredText, isRowValid,
+  literalName, literalsMissingFromTranscript, parseRubricJudgeResponse,
+  parseTranscript, pickJudgeModel, scoreLiteralRecall, stddev,
   type BenchMatrix, type BenchRow, type Transcript,
 } from './fast-bench-lib.js';
 
@@ -109,6 +109,13 @@ interface ContentBlock { type: string; text?: string }
 
 const SUMMARY_MAX_TOKENS = 4096;
 const CALL_TIMEOUT_MS = 240_000;
+/** Judge budget. Was 1024 — fatal for glm-5p2 (reasoning model): on a real-size
+ *  digest it burned the ENTIRE budget on its hidden reasoning phase and returned
+ *  an empty text block with stop_reason max_tokens (verified live 2026-08-09:
+ *  in=2010 out=1024 text=""), which the parser correctly refused — 19 of 24
+ *  reference rows judge-INVALID. 8192 leaves reasoning headroom plus the ~600
+ *  tokens the verdict list needs. */
+const JUDGE_MAX_TOKENS = 8192;
 
 /** Minimal system frame. KNOWN FIDELITY GAP, documented in the README: the
  *  production summarizer runs inside the full agent system prompt; replaying a
@@ -116,7 +123,7 @@ const CALL_TIMEOUT_MS = 240_000;
  *  exist. The transcript preload itself IS the real thread form. */
 const BENCH_SYSTEM = 'You are the assistant in an ongoing work thread. The conversation so far is provided; follow the final user instruction exactly.';
 
-async function summarizeOnce(c: FastCandidate, t: Transcript, key: string): Promise<{ text: string; served: string | undefined; ms: number; inTok: number; outTok: number; error?: string }> {
+async function summarizeOnce(c: FastCandidate, t: Transcript, key: string): Promise<{ text: string; served: string | undefined; stopReason: string; ms: number; inTok: number; outTok: number; error?: string }> {
   const started = Date.now();
   try {
     const client = createLLMClient({
@@ -140,16 +147,26 @@ async function summarizeOnce(c: FastCandidate, t: Transcript, key: string): Prom
     const text = ((final.content ?? []) as ContentBlock[]).filter(b => b.type === 'text').map(b => b.text ?? '').join('\n');
     const u = (final as { usage?: { input_tokens?: number; output_tokens?: number } }).usage;
     const served = (final as { model?: string }).model;
-    return { text, served, ms: Date.now() - started, inTok: u?.input_tokens ?? 0, outTok: u?.output_tokens ?? 0 };
+    const stopReason = (final as { stop_reason?: string | null }).stop_reason ?? '';
+    return { text, served, stopReason, ms: Date.now() - started, inTok: u?.input_tokens ?? 0, outTok: u?.output_tokens ?? 0 };
   } catch (err) {
-    return { text: '', served: undefined, ms: Date.now() - started, inTok: 0, outTok: 0, error: err instanceof Error ? err.message : String(err) };
+    return { text: '', served: undefined, stopReason: '', ms: Date.now() - started, inTok: 0, outTok: 0, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
-async function judgeOnce(candidateModelId: string, t: Transcript, summary: string, keys: Record<'anthropic' | 'mistral' | 'fireworks', string>): Promise<{ score: number; invalid: boolean; judgeModel: string; error?: string }> {
+interface JudgeOutcome { score: number; invalid: boolean; judgeModel: string; judgeRaw: string; judgeStopReason: string; error?: string }
+
+/** A reasoning judge's deliberation length is stochastic: the SAME summary that
+ *  judged 7/8 in one sample burned the whole 8192 budget on hidden reasoning in
+ *  the next (observed on glm-5p2, 2026-08-09). One fresh sample almost always
+ *  resolves it, so a max_tokens-starved verdict gets exactly one retry — bounded
+ *  cost, and still fail-closed if the retry starves too. */
+const JUDGE_MAX_TOKENS_RETRIES = 1;
+
+async function judgeOnce(candidateModelId: string, t: Transcript, summary: string, keys: Record<'anthropic' | 'mistral' | 'fireworks', string>, attempt = 0): Promise<JudgeOutcome> {
   const judge = pickJudgeModel(candidateModelId);
   const key = keys[judge.keyName];
-  if (!key) return { score: 0, invalid: true, judgeModel: judge.modelId, error: `no ${judge.keyName} key for judge` };
+  if (!key) return { score: 0, invalid: true, judgeModel: judge.modelId, judgeRaw: '', judgeStopReason: '', error: `no ${judge.keyName} key for judge` };
   try {
     const client = createLLMClient({
       provider: judge.provider,
@@ -163,19 +180,91 @@ async function judgeOnce(candidateModelId: string, t: Transcript, summary: strin
     const prompt = buildRubricJudgePrompt(t.checklist.rubric, digest, summary.slice(0, 16_000));
     const stream = client.beta.messages.stream({
       model: judge.modelId,
-      max_tokens: 1024,
+      max_tokens: JUDGE_MAX_TOKENS,
       messages: [{ role: 'user', content: prompt }],
     } as never);
     const final = await Promise.race([
       stream.finalMessage(),
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('judge timeout 120s')), 120_000)),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('judge timeout 180s')), 180_000)),
     ]);
     const text = ((final.content ?? []) as ContentBlock[]).filter(b => b.type === 'text').map(b => b.text ?? '').join('\n');
+    const judgeStopReason = (final as { stop_reason?: string | null }).stop_reason ?? '';
     const parsed = parseRubricJudgeResponse(text, t.checklist.rubric.length);
-    return { score: parsed.score, invalid: parsed.invalid, judgeModel: judge.modelId };
+    if (parsed.invalid && judgeStopReason === 'max_tokens' && attempt < JUDGE_MAX_TOKENS_RETRIES) {
+      return judgeOnce(candidateModelId, t, summary, keys, attempt + 1);
+    }
+    return {
+      score: parsed.score,
+      invalid: parsed.invalid,
+      judgeModel: judge.modelId,
+      judgeRaw: text,
+      judgeStopReason,
+      // Name the known failure mode explicitly instead of leaving a bare parse-invalid.
+      ...(parsed.invalid && judgeStopReason === 'max_tokens' ? { error: `judge hit max_tokens (${JUDGE_MAX_TOKENS}) before emitting verdicts` } : {}),
+    };
   } catch (err) {
-    return { score: 0, invalid: true, judgeModel: judge.modelId, error: err instanceof Error ? err.message : String(err) };
+    return { score: 0, invalid: true, judgeModel: judge.modelId, judgeRaw: '', judgeStopReason: '', error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** Assemble one BenchRow from a (possibly replayed) summary result + judge outcome. */
+function makeRow(
+  c: { label: string; modelId: string },
+  t: Transcript,
+  run: number,
+  s: { text: string; served: string | undefined; stopReason: string; ms: number; inTok: number; outTok: number; error?: string },
+  judged: JudgeOutcome,
+): BenchRow {
+  const servedCheck = s.error ? { status: 'unreported' as const, note: 'run errored' } : checkServedModel(c.modelId, s.served);
+  const sanity = s.error ? { ok: false, note: 'run errored' } : checkInputSanity(s.inTok, expandTranscript(t).approxTokens);
+  const recall = s.error ? { hits: [], misses: t.checklist.literals.map(literalName), recall: 0, invalid: true } : scoreLiteralRecall(s.text, t.checklist.literals);
+  return {
+    label: c.label, transcriptId: t.id, run,
+    literalRecall: recall.recall, misses: recall.misses,
+    judgeScore: judged.score, judgeInvalid: judged.invalid, judgeModel: judged.judgeModel,
+    served: servedCheck.status, servedNote: servedCheck.note,
+    sanityOk: sanity.ok, sanityNote: sanity.note,
+    latencyMs: s.ms, inTok: s.inTok, outTok: s.outTok,
+    stopReason: s.stopReason, judgeStopReason: judged.judgeStopReason,
+    summary: s.text, judgeRaw: judged.judgeRaw,
+    ...(s.error ?? judged.error ? { error: s.error ?? judged.error } : {}),
+  };
+}
+
+function finishMatrix(rows: BenchRow[], referenceLabel: string): BenchMatrix {
+  const byLabel = new Map<string, BenchRow[]>();
+  for (const r of rows) { const arr = byLabel.get(r.label) ?? []; arr.push(r); byLabel.set(r.label, arr); }
+  const refRows = (byLabel.get(referenceLabel) ?? []).filter(isRowValid);
+  const refBench = aggregateBenchRows(byLabel.get(referenceLabel) ?? []);
+  const refAgg = {
+    literalRecall: refBench.literalRecall,
+    judgeMean: refBench.judgeMean,
+    judgeStd: stddev(refRows.map(r => r.judgeScore)),
+    invalid: refBench.invalid,
+  };
+  const aggregates = [...byLabel.entries()].map(([label, rs]) => {
+    const agg = aggregateBenchRows(rs);
+    return { label, agg, verdict: decideFastSlot(agg, refAgg) };
+  });
+  return { timestamp: new Date().toISOString(), referenceLabel, rows, aggregates };
+}
+
+function writeMatrix(matrix: BenchMatrix): { mdPath: string; refInvalid: boolean; barUnresolvable: boolean } {
+  const outDir = join(HERE, 'results');
+  mkdirSync(outDir, { recursive: true });
+  const stamp = matrix.timestamp.replace(/[:.]/g, '-');
+  const mdPath = join(outDir, `fast-bench-${stamp}.md`);
+  const jsonPath = join(outDir, `fast-bench-${stamp}.json`);
+  writeFileSync(mdPath, buildBenchMarkdown(matrix));
+  writeFileSync(jsonPath, JSON.stringify(matrix, null, 2));
+  console.log(`\n${buildBenchMarkdown(matrix)}`);
+  console.log(`Written: ${mdPath}\n         ${jsonPath}`);
+  const ref = matrix.aggregates.find(a => a.label === matrix.referenceLabel);
+  return {
+    mdPath,
+    refInvalid: ref?.agg.invalid ?? true,
+    barUnresolvable: matrix.aggregates.some(a => a.verdict.reasons.some(r => r.includes('unresolvable'))),
+  };
 }
 
 async function main(): Promise<void> {
@@ -185,9 +274,11 @@ async function main(): Promise<void> {
   const only = onlyIdx >= 0 ? argv[onlyIdx + 1] : undefined;
   const trIdx = argv.indexOf('--transcript');
   const onlyTranscript = trIdx >= 0 ? argv[trIdx + 1] : undefined;
+  const rejudgeIdx = argv.indexOf('--rejudge');
+  const rejudgePath = rejudgeIdx >= 0 ? argv[rejudgeIdx + 1] : undefined;
 
   let corpus = loadCorpus();
-  if (onlyTranscript) corpus = corpus.filter(t => t.id.includes(onlyTranscript));
+  if (onlyTranscript && !rejudgePath) corpus = corpus.filter(t => t.id.includes(onlyTranscript));
   if (corpus.length === 0) { console.error('no transcripts matched'); process.exit(1); }
 
   const problems = preflightCorpus(corpus);
@@ -200,6 +291,41 @@ async function main(): Promise<void> {
 
   const keys = loadKeys();
   const reference = FAST_CANDIDATES.find(c => c.reference)!;
+
+  // --rejudge <results.json>: re-score the STORED summaries (recall re-runs for
+  // free against the current checklist/matcher; only the judge calls are paid) —
+  // no candidate calls, so a matcher/checklist/judge fix is re-measurable for
+  // cents instead of a full $10-20 pass. Requires a results file that stored
+  // `summary` per row (this runner does since 2026-08-09; the 21-18 file did not).
+  if (rejudgePath) {
+    const prev = JSON.parse(readFileSync(rejudgePath, 'utf8')) as BenchMatrix;
+    const byId = new Map(corpus.map(t => [t.id, t]));
+    const rows: BenchRow[] = [];
+    for (const old of prev.rows) {
+      const t = byId.get(old.transcriptId);
+      if (!t) continue;
+      if (typeof old.summary !== 'string' || old.summary === '') {
+        console.error(`✗ ${rejudgePath} stores no summary for ${old.label}/${old.transcriptId} run ${old.run} — a full run is required.`);
+        process.exit(1);
+      }
+      const cand = FAST_CANDIDATES.find(c => c.label === old.label);
+      if (!cand) continue;
+      const s = { text: old.summary, served: undefined, stopReason: old.stopReason ?? '', ms: old.latencyMs, inTok: old.inTok, outTok: old.outTok, ...(old.error !== undefined ? { error: old.error } : {}) };
+      const judged = old.error !== undefined
+        ? { score: 0, invalid: true, judgeModel: pickJudgeModel(cand.modelId).modelId, judgeRaw: '', judgeStopReason: '', error: 'run errored' }
+        : await judgeOnce(cand.modelId, t, old.summary, keys);
+      const row = makeRow(cand, t, old.run, s, judged);
+      // Keep the ORIGINAL served evidence — a rejudge has no live response to check.
+      row.served = old.served ?? 'unreported';
+      row.servedNote = old.servedNote ?? 'carried from original run';
+      rows.push(row);
+      console.log(`${old.label.padEnd(30)} ${old.transcriptId.padEnd(28)} run ${old.run}: recall ${(row.literalRecall * 100).toFixed(0)}% judge ${judged.invalid ? 'INVALID' : judged.score + '/' + t.checklist.rubric.length} (rejudged)`);
+    }
+    const { refInvalid, barUnresolvable } = writeMatrix(finishMatrix(rows, reference.label));
+    if (refInvalid || barUnresolvable) process.exit(1);
+    return;
+  }
+
   let candidates = only ? FAST_CANDIDATES.filter(c => c.label.toLowerCase().includes(only.toLowerCase())) : FAST_CANDIDATES;
   // The decision rule is relative to the reference band — a run without the
   // reference is not a measurement (same lesson as replay.ts's control gate).
@@ -212,53 +338,24 @@ async function main(): Promise<void> {
     for (const t of corpus) {
       for (let run = 1; run <= runs; run++) {
         const s = await summarizeOnce(c, t, key);
-        const servedCheck = s.error ? { ok: false, note: 'run errored' } : checkServedModel(c.modelId, s.served);
-        const recall = s.error ? { hits: [], misses: t.checklist.literals, recall: 0, invalid: true } : scoreLiteralRecall(s.text, t.checklist.literals);
-        const judged = s.error ? { score: 0, invalid: true, judgeModel: pickJudgeModel(c.modelId).modelId, error: 'run errored' } : await judgeOnce(c.modelId, t, s.text, keys);
-        rows.push({
-          label: c.label, transcriptId: t.id, run,
-          literalRecall: recall.recall, misses: recall.misses,
-          judgeScore: judged.score, judgeInvalid: judged.invalid, judgeModel: judged.judgeModel,
-          servedOk: servedCheck.ok, servedNote: servedCheck.note,
-          latencyMs: s.ms, inTok: s.inTok, outTok: s.outTok,
-          ...(s.error ?? judged.error ? { error: s.error ?? judged.error } : {}),
-        });
-        const flag = servedCheck.ok ? '' : ' ⚠served';
-        console.log(`${c.label.padEnd(30)} ${t.id.padEnd(28)} run ${run}: recall ${(recall.recall * 100).toFixed(0)}% judge ${judged.invalid ? 'INVALID' : judged.score + '/' + t.checklist.rubric.length} ${(s.ms / 1000).toFixed(1)}s${flag}${s.error ? ` ERROR ${s.error}` : ''}`);
+        const judged = s.error
+          ? { score: 0, invalid: true, judgeModel: pickJudgeModel(c.modelId).modelId, judgeRaw: '', judgeStopReason: '', error: 'run errored' }
+          : await judgeOnce(c.modelId, t, s.text, keys);
+        const row = makeRow(c, t, run, s, judged);
+        rows.push(row);
+        const flags = `${row.served === 'mismatch' ? ' ⚠served' : ''}${row.sanityOk ? '' : ' ⚠sanity'}`;
+        console.log(`${c.label.padEnd(30)} ${t.id.padEnd(28)} run ${run}: recall ${(row.literalRecall * 100).toFixed(0)}% judge ${judged.invalid ? 'INVALID' : judged.score + '/' + t.checklist.rubric.length} ${(s.ms / 1000).toFixed(1)}s${flags}${s.error ? ` ERROR ${s.error}` : ''}`);
       }
     }
   }
 
-  // Aggregate + verdicts
-  const byLabel = new Map<string, BenchRow[]>();
-  for (const r of rows) { const arr = byLabel.get(r.label) ?? []; arr.push(r); byLabel.set(r.label, arr); }
-  const refRows = byLabel.get(reference.label) ?? [];
-  const refAgg = {
-    judgeMean: mean(refRows.filter(r => !r.judgeInvalid).map(r => r.judgeScore)),
-    judgeStd: stddev(refRows.filter(r => !r.judgeInvalid).map(r => r.judgeScore)),
-    invalid: refRows.length === 0 || refRows.some(r => r.judgeInvalid || !r.servedOk || r.error !== undefined),
-  };
-  const aggregates = [...byLabel.entries()].map(([label, rs]) => {
-    const agg = {
-      literalRecall: mean(rs.map(r => r.literalRecall)),
-      judgeMean: mean(rs.filter(r => !r.judgeInvalid).map(r => r.judgeScore)),
-      invalid: rs.some(r => r.judgeInvalid || !r.servedOk || r.error !== undefined),
-    };
-    return { label, agg, verdict: decideFastSlot(agg, refAgg) };
-  });
-
-  const matrix: BenchMatrix = { timestamp: new Date().toISOString(), referenceLabel: reference.label, rows, aggregates };
-  const outDir = join(HERE, 'results');
-  mkdirSync(outDir, { recursive: true });
-  const stamp = matrix.timestamp.replace(/[:.]/g, '-');
-  const mdPath = join(outDir, `fast-bench-${stamp}.md`);
-  const jsonPath = join(outDir, `fast-bench-${stamp}.json`);
-  writeFileSync(mdPath, buildBenchMarkdown(matrix));
-  writeFileSync(jsonPath, JSON.stringify(matrix, null, 2));
-  console.log(`\n${buildBenchMarkdown(matrix)}`);
-  console.log(`Written: ${mdPath}\n         ${jsonPath}`);
-  if (refAgg.invalid) {
+  const { refInvalid, barUnresolvable } = writeMatrix(finishMatrix(rows, reference.label));
+  if (refInvalid) {
     console.error('\n✗ Reference (haiku-4.5) aggregate INVALID — no candidate verdict from this run is quotable.');
+    process.exit(1);
+  }
+  if (barUnresolvable) {
+    console.error('\n✗ Recall bar unresolvable (reference below bar) — recalibrate the checklist/matcher, then rerun (or --rejudge this run\'s stored summaries).');
     process.exit(1);
   }
 }

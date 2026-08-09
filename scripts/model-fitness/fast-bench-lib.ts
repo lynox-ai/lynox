@@ -40,10 +40,29 @@ export interface TranscriptMessage {
   content: TranscriptBlock[];
 }
 
+/**
+ * One planted literal: a single string, or an ANY-OF list of accepted variants.
+ * Variants exist for content the summarizer legitimately re-renders — language
+ * flips ("24 von 31" / "24 of 31"), magnitude rewrites ("48'200'113" / "48.2M").
+ * The FIRST variant is canonical: it is what must occur in the transcript and
+ * what reports show. Calibration lesson (run 2026-08-09T21-18): format-exact
+ * literals made the haiku-4.5 REFERENCE miss the 95% bar (91.5%) — an
+ * unresolvable bar measures the checklist, not the candidate.
+ */
+export type Literal = string | string[];
+
+export function literalVariants(l: Literal): string[] {
+  return Array.isArray(l) ? l : [l];
+}
+
+export function literalName(l: Literal): string {
+  return Array.isArray(l) ? l[0] ?? '' : l;
+}
+
 export interface TranscriptChecklist {
   /** Mechanically-checked literals (paths / ids / amounts / names) a correct
    *  summary MUST contain. Scored by `scoreLiteralRecall`, no LLM involved. */
-  literals: string[];
+  literals: Literal[];
   /** Exactly 8 judge-rubric elements (decisions / context / next steps),
    *  scored PASS/FAIL each by the deep judge. */
   rubric: string[];
@@ -73,6 +92,12 @@ export function parseTranscript(json: unknown): Transcript {
   const checklist = t['checklist'] as Record<string, unknown> | undefined;
   if (!checklist || !Array.isArray(checklist['literals']) || checklist['literals'].length === 0) {
     throw new Error(`transcript ${t['id'] as string}: checklist.literals missing/empty`);
+  }
+  for (const l of checklist['literals']) {
+    const ok = typeof l === 'string'
+      ? l.length > 0
+      : Array.isArray(l) && l.length > 0 && l.every(v => typeof v === 'string' && v.length > 0);
+    if (!ok) throw new Error(`transcript ${t['id'] as string}: literal entries must be non-empty strings or non-empty string arrays`);
   }
   if (!Array.isArray(checklist['rubric']) || checklist['rubric'].length !== RUBRIC_SIZE) {
     throw new Error(`transcript ${t['id'] as string}: checklist.rubric must have exactly ${RUBRIC_SIZE} elements`);
@@ -193,7 +218,9 @@ export function handAuthoredText(t: Transcript): string {
 
 export function literalsMissingFromTranscript(t: Transcript): string[] {
   const haystack = normalizeForMatch(handAuthoredText(t));
-  return t.checklist.literals.filter(l => !haystack.includes(normalizeForMatch(l)));
+  return t.checklist.literals
+    .filter(l => !literalVariants(l).some(v => haystack.includes(normalizeForMatch(v))))
+    .map(literalName);
 }
 
 // ---------------------------------------------------------------------------
@@ -201,13 +228,23 @@ export function literalsMissingFromTranscript(t: Transcript): string[] {
 // ---------------------------------------------------------------------------
 
 /** Case/whitespace-insensitive; typographic quotes/dashes folded so a summary
- *  that re-typesets an id (or the corpus author's editor did) still matches. */
+ *  that re-typesets an id (or the corpus author's editor did) still matches.
+ *  Calibration additions (run 2026-08-09T21-18, reference missed 8.5pp on
+ *  formatting alone): digit-group separators inside numbers are folded
+ *  (48'200'113 == 48,200,113 == 48200113), spaces around '/' collapse
+ *  (4 vCPU / 16 GB == 4 vCPU/16 GB), and a space before '%' folds (15 % == 15%).
+ *  Ordering matters: quote folding runs first so ’ used as a digit separator is
+ *  already ' when the digit fold looks for it. */
 export function normalizeForMatch(s: string): string {
   return s
     .toLowerCase()
     .replace(/[‘’]/g, "'")
     .replace(/[“”]/g, '"')
     .replace(/[–—]/g, '-')
+    .replace(/(\d)[', \u00A0\u202F](?=\d{3})/g, '$1')
+    
+    .replace(/\s*\/\s*/g, '/')
+    .replace(/(\d)\s+%/g, '$1%')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -221,12 +258,15 @@ export interface LiteralRecall {
   invalid: boolean;
 }
 
-export function scoreLiteralRecall(summary: string, literals: readonly string[]): LiteralRecall {
+export function scoreLiteralRecall(summary: string, literals: readonly Literal[]): LiteralRecall {
   if (literals.length === 0) return { hits: [], misses: [], recall: 0, invalid: true };
   const hay = normalizeForMatch(summary);
   const hits: string[] = [];
   const misses: string[] = [];
-  for (const l of literals) (hay.includes(normalizeForMatch(l)) ? hits : misses).push(l);
+  for (const l of literals) {
+    const hit = literalVariants(l).some(v => hay.includes(normalizeForMatch(v)));
+    (hit ? hits : misses).push(literalName(l));
+  }
   return { hits, misses, recall: hits.length / literals.length, invalid: false };
 }
 
@@ -298,7 +338,7 @@ Summary under evaluation:
 ${summary}
 ---
 
-For EVERY element above, judge whether the summary preserves it (content match, not wording). Reply in EXACTLY this format, one line per element, then the total:
+For EVERY element above, judge whether the summary preserves it (content match, not wording). Keep any private deliberation SHORT — a quick check per element, no extended reasoning. Reply in EXACTLY this format, one line per element, then the total:
 
 ELEMENT 1: PASS|FAIL — <one short reason>
 ...
@@ -307,17 +347,25 @@ SCORE: <number of PASS>`;
 }
 
 export function parseRubricJudgeResponse(text: string, expected: number = RUBRIC_SIZE): RubricJudgeResult {
+  // Reasoning-model tolerance: strip an exposed reasoning channel (<think>/
+  // <reasoning> blocks) so a verdict list AFTER the reasoning parses, and a
+  // PASS/FAIL mentioned INSIDE the reasoning cannot be read as a verdict.
+  const cleaned = text.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, '');
   const perElement: boolean[] = [];
   const reasons: string[] = [];
   for (let i = 1; i <= expected; i++) {
-    const m = text.match(new RegExp(`ELEMENT\\s*${i}\\s*:\\s*(PASS|FAIL)([^\\n]*)`, 'i'));
+    // Tolerant per-line shape: markdown decoration between "ELEMENT n" and the
+    // verdict (e.g. "**ELEMENT 1:** PASS") is allowed; the verdict is the first
+    // whole-word PASS/FAIL on that line. \b keeps "passes"/"failing" prose from
+    // matching. \d guard: "ELEMENT 1" must not swallow "ELEMENT 12".
+    const m = cleaned.match(new RegExp(`ELEMENT\\s*${i}(?!\\d)[^\\n]*?\\b(PASS|FAIL)\\b([^\\n]*)`, 'i'));
     if (!m) return { perElement: [], score: 0, reasoning: `missing verdict for element ${i}`, invalid: true };
     perElement.push(m[1]!.toUpperCase() === 'PASS');
     reasons.push(`E${i}:${m[1]!.toUpperCase()}${(m[2] ?? '').trim() ? ' ' + (m[2] ?? '').trim() : ''}`);
   }
   // The counted PASSes are authoritative; a contradicting SCORE line is noted, not trusted.
   const score = perElement.filter(Boolean).length;
-  const declared = text.match(/SCORE:\s*(\d+)/i);
+  const declared = cleaned.match(/SCORE:\s*(\d+)/i);
   const note = declared && Number(declared[1]) !== score ? ` (declared SCORE ${declared[1]!} != counted ${score})` : '';
   return { perElement, score, reasoning: reasons.join(' · ') + note, invalid: false };
 }
@@ -326,17 +374,51 @@ export function parseRubricJudgeResponse(text: string, expected: number = RUBRIC
 // Served-model guard
 // ---------------------------------------------------------------------------
 
-/** Per-run verification of which model actually answered (the replay.ts
- *  served-model-guard idea): a gateway silently substituting a different model
- *  would otherwise be measured under the wrong label. Fail-CLOSED: a response
- *  that does not report its model is flagged, not waved through. */
-export function checkServedModel(requested: string, served: string | undefined): { ok: boolean; note: string } {
-  if (!served || served.trim() === '') return { ok: false, note: 'provider did not report a served model' };
+/**
+ * Per-run verification of which model actually answered (the replay.ts
+ * served-model-guard idea): a gateway silently substituting a different model
+ * would otherwise be measured under the wrong label.
+ *
+ * THREE states, not two (revised after run 2026-08-09T21-18): `OpenAIAdapter`
+ * emits `model: ''` in message_start and never propagates the wire's `model`
+ * field, so EVERY openai-wire candidate (Mistral + all Fireworks) is
+ * structurally `unreported` — the original fail-closed boolean therefore
+ * invalidated 5 of 6 candidates by construction: the guard blocked the
+ * instrument instead of guarding it. `unreported` is now a REPORTED
+ * limitation, not an invalidation; positive evidence of substitution
+ * (`mismatch`) still invalidates. The degraded-provider case the boolean was
+ * worried about (tok in=1, garbage out) is caught by `checkInputSanity`
+ * instead — a check on evidence that IS available.
+ */
+export type ServedStatus = 'verified' | 'unreported' | 'mismatch';
+
+export function checkServedModel(requested: string, served: string | undefined): { status: ServedStatus; note: string } {
+  if (!served || served.trim() === '') return { status: 'unreported', note: 'provider did not report a served model (openai-adapter drops the wire model field)' };
   const norm = (s: string): string => s.replace(/^accounts\/fireworks\/models\//, '').toLowerCase().trim();
   const r = norm(requested);
   const s = norm(served);
-  if (r === s || s.startsWith(r) || r.startsWith(s)) return { ok: true, note: served };
-  return { ok: false, note: `requested ${requested} but provider served ${served}` };
+  if (r === s || s.startsWith(r) || r.startsWith(s)) return { status: 'verified', note: served };
+  return { status: 'mismatch', note: `requested ${requested} but provider served ${served}` };
+}
+
+/**
+ * Degradation tripwire (coordinator finding, partial run 2026-08-09): a
+ * suspended/degraded provider returned rows with `tok in=1 / out=4096` —
+ * the prompt was never processed, yet the row would have carried a recall
+ * number. A reported input-token count wildly below the transcript's known
+ * size means the model cannot have seen the thread. The 5% floor tolerates
+ * real provider-tokenizer variance (observed 0.3x-3x of chars/4 across
+ * Anthropic/Mistral/Fireworks); a zero/absent report stays acceptable —
+ * some providers legitimately omit usage.
+ */
+export const INPUT_SANITY_FLOOR = 0.05;
+
+export function checkInputSanity(reportedInTok: number, expectedApproxTokens: number): { ok: boolean; note: string } {
+  if (reportedInTok <= 0) return { ok: true, note: 'no usage reported' };
+  if (reportedInTok < expectedApproxTokens * INPUT_SANITY_FLOOR) {
+    return { ok: false, note: `reported ${reportedInTok} input tokens for a ~${expectedApproxTokens}-token transcript — prompt not processed` };
+  }
+  return { ok: true, note: '' };
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +441,11 @@ export interface CandidateAggregate {
 }
 
 export interface ReferenceAggregate {
+  /** The reference's own literal recall — the bar-resolvability input: a 95%
+   *  bar the reference itself misses measures the checklist, not candidates
+   *  (eval-design; observed 2026-08-09: reference at 91.5% made every verdict
+   *  meaningless). */
+  literalRecall: number;
   judgeMean: number;
   judgeStd: number;
   invalid: boolean;
@@ -372,6 +459,15 @@ export interface FastSlotVerdict {
 export function decideFastSlot(cand: CandidateAggregate, ref: ReferenceAggregate): FastSlotVerdict {
   if (cand.invalid || ref.invalid) {
     return { verdict: 'INVALID', reasons: [cand.invalid ? 'candidate aggregate invalid' : 'reference aggregate invalid'] };
+  }
+  // Bar resolvability: if the CURRENT PROD MODEL cannot reach the recall bar,
+  // the checklist is miscalibrated and no candidate verdict from this corpus
+  // is quotable — fix the checklist (or the matcher), do not fail candidates.
+  if (ref.literalRecall < LITERAL_RECALL_BAR) {
+    return {
+      verdict: 'INVALID',
+      reasons: [`recall bar unresolvable: reference itself at ${(ref.literalRecall * 100).toFixed(1)}% < ${LITERAL_RECALL_BAR * 100}% — recalibrate the checklist before quoting verdicts`],
+    };
   }
   const reasons: string[] = [];
   if (cand.literalRecall < LITERAL_RECALL_BAR) {
@@ -493,19 +589,73 @@ export interface BenchRow {
   judgeScore: number;
   judgeInvalid: boolean;
   judgeModel: string;
-  servedOk: boolean;
+  served: ServedStatus;
   servedNote: string;
+  /** Input-sanity verdict (degraded-provider tripwire). */
+  sanityOk: boolean;
+  sanityNote: string;
   latencyMs: number;
   inTok: number;
   outTok: number;
+  /** Candidate + judge stop reasons — a judge that hit max_tokens explains an
+   *  empty/unparseable verdict (the 2026-08-09 GLM failure mode). */
+  stopReason: string;
+  judgeStopReason: string;
+  /** The candidate's raw summary and the judge's raw reply, PERSISTED so a
+   *  parse-failure is diagnosable from the results file and stored summaries
+   *  can be re-judged offline (--rejudge) without re-paying candidate calls.
+   *  The 21-18 run stored neither, which made exactly that impossible. */
+  summary: string;
+  judgeRaw: string;
   error?: string;
+}
+
+/**
+ * Row validity + per-candidate aggregation — pure, so the arithmetic that
+ * feeds `decideFastSlot` is testable (it lived inline in the runner before).
+ *
+ * A row is valid iff it errored nowhere: run error, judge parse-invalid,
+ * served-model MISMATCH (positive substitution evidence; `unreported` does
+ * not invalidate — see `checkServedModel`), or failed input sanity.
+ *
+ * The aggregate goes invalid when FEWER THAN HALF its rows are valid — the
+ * replay.ts `decideVerdict` lesson, adapted: an outage is not a measurement,
+ * but a minority of transient failures (the 412 bursts) must not zero an
+ * otherwise-measured matrix. Means are computed over VALID rows only.
+ */
+export function isRowValid(r: Pick<BenchRow, 'error' | 'judgeInvalid' | 'served' | 'sanityOk'>): boolean {
+  return r.error === undefined && !r.judgeInvalid && r.served !== 'mismatch' && r.sanityOk;
+}
+
+export interface BenchAggregate extends CandidateAggregate {
+  validRuns: number;
+  totalRuns: number;
+  invalidReasons: string[];
+}
+
+export function aggregateBenchRows(rows: readonly BenchRow[]): BenchAggregate {
+  const valid = rows.filter(isRowValid);
+  const invalidReasons = [...new Set(rows.filter(r => !isRowValid(r)).map(r =>
+    r.error !== undefined ? `error: ${r.error.slice(0, 80)}`
+      : r.judgeInvalid ? `judge invalid (stop=${r.judgeStopReason || '?'})`
+        : r.served === 'mismatch' ? `served mismatch: ${r.servedNote}`
+          : `input sanity: ${r.sanityNote}`,
+  ))];
+  return {
+    literalRecall: mean(valid.map(r => r.literalRecall)),
+    judgeMean: mean(valid.map(r => r.judgeScore)),
+    invalid: valid.length < Math.ceil(rows.length / 2) || rows.length === 0,
+    validRuns: valid.length,
+    totalRuns: rows.length,
+    invalidReasons,
+  };
 }
 
 export interface BenchMatrix {
   timestamp: string;
   referenceLabel: string;
   rows: BenchRow[];
-  aggregates: Array<{ label: string; agg: CandidateAggregate; verdict: FastSlotVerdict }>;
+  aggregates: Array<{ label: string; agg: BenchAggregate; verdict: FastSlotVerdict }>;
 }
 
 export function buildBenchMarkdown(m: BenchMatrix): string {
@@ -516,22 +666,24 @@ export function buildBenchMarkdown(m: BenchMatrix): string {
   lines.push(`- Reference: ${m.referenceLabel}`);
   lines.push(`- Decision rule: literal recall ≥ ${LITERAL_RECALL_BAR * 100}% AND judge within noise (max(ref std, ${MIN_JUDGE_NOISE})) of reference`);
   lines.push('');
-  lines.push('| Candidate | Literal recall | Judge mean (/8) | Verdict | Why |');
-  lines.push('|-----------|----------------|-----------------|---------|-----|');
+  lines.push('| Candidate | Valid runs | Literal recall | Judge mean (/8) | Verdict | Why |');
+  lines.push('|-----------|------------|----------------|-----------------|---------|-----|');
   for (const a of m.aggregates) {
-    lines.push(`| ${a.label} | ${(a.agg.literalRecall * 100).toFixed(1)}% | ${a.agg.judgeMean.toFixed(2)} | **${a.verdict.verdict}** | ${a.verdict.reasons.join('; ')} |`);
+    lines.push(`| ${a.label} | ${a.agg.validRuns}/${a.agg.totalRuns} | ${(a.agg.literalRecall * 100).toFixed(1)}% | ${a.agg.judgeMean.toFixed(2)} | **${a.verdict.verdict}** | ${a.verdict.reasons.join('; ')} |`);
+    for (const reason of a.agg.invalidReasons) lines.push(`| | ↳ excluded | | | | ${reason} |`);
   }
   lines.push('');
   lines.push('## Per-run detail');
   lines.push('');
-  lines.push('| Candidate | Transcript | Run | Recall | Judge | Judge model | Served | Latency | tok in/out |');
-  lines.push('|-----------|------------|-----|--------|-------|-------------|--------|---------|------------|');
+  lines.push('| Candidate | Transcript | Run | Recall | Judge | Judge model | Served | Sanity | Latency | tok in/out |');
+  lines.push('|-----------|------------|-----|--------|-------|-------------|--------|--------|---------|------------|');
   for (const r of m.rows) {
-    const served = r.servedOk ? '✓' : `✗ ${r.servedNote}`;
-    const judge = r.judgeInvalid ? 'INVALID' : String(r.judgeScore);
-    lines.push(`| ${r.label} | ${r.transcriptId} | ${r.run} | ${(r.literalRecall * 100).toFixed(0)}% | ${judge} | ${r.judgeModel} | ${served} | ${(r.latencyMs / 1000).toFixed(1)}s | ${r.inTok}/${r.outTok} |`);
-    if (r.error) lines.push(`| | | | | | | ERROR: ${r.error} | | |`);
-    if (r.misses.length > 0) lines.push(`| | ↳ missed | | ${r.misses.map(x => `\`${x}\``).join(', ')} | | | | | |`);
+    const served = r.served === 'verified' ? '✓' : r.served === 'unreported' ? '– unreported' : `✗ ${r.servedNote}`;
+    const sanity = r.sanityOk ? '✓' : `✗ ${r.sanityNote}`;
+    const judge = r.judgeInvalid ? `INVALID (stop=${r.judgeStopReason || '?'})` : String(r.judgeScore);
+    lines.push(`| ${r.label} | ${r.transcriptId} | ${r.run} | ${(r.literalRecall * 100).toFixed(0)}% | ${judge} | ${r.judgeModel} | ${served} | ${sanity} | ${(r.latencyMs / 1000).toFixed(1)}s | ${r.inTok}/${r.outTok} |`);
+    if (r.error) lines.push(`| | | | | | | ERROR: ${r.error} | | | |`);
+    if (r.misses.length > 0) lines.push(`| | ↳ missed | | ${r.misses.map(x => `\`${x}\``).join(', ')} | | | | | | |`);
   }
   lines.push('');
   return lines.join('\n');

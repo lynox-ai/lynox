@@ -15,12 +15,13 @@ import { describe, it, expect } from 'vitest';
 import { buildCompactionSummaryPrompt } from '../src/core/compaction-prompt.js';
 import { MODEL_CAPABILITIES } from '../src/types/models.js';
 import {
-  RUBRIC_SIZE, LITERAL_RECALL_BAR, MIN_JUDGE_NOISE,
-  aggregateClassify, buildRubricJudgePrompt, checkServedModel, decideClassifySlot,
-  decideFastSlot, expandPad, expandTranscript, literalsMissingFromTranscript,
-  modelFamily, normalizeForMatch, parseLabelsFile, parseRubricJudgeResponse,
-  parseTranscript, pickJudgeModel, scoreClassification, scoreLiteralRecall, stddev,
-  type PadBlock, type Transcript,
+  RUBRIC_SIZE, LITERAL_RECALL_BAR, MIN_JUDGE_NOISE, INPUT_SANITY_FLOOR,
+  aggregateBenchRows, aggregateClassify, buildRubricJudgePrompt, checkInputSanity,
+  checkServedModel, decideClassifySlot, decideFastSlot, expandPad, expandTranscript,
+  isRowValid, literalsMissingFromTranscript, modelFamily, normalizeForMatch,
+  parseLabelsFile, parseRubricJudgeResponse, parseTranscript, pickJudgeModel,
+  scoreClassification, scoreLiteralRecall, stddev,
+  type BenchRow, type PadBlock, type Transcript,
 } from '../scripts/model-fitness/fast-bench-lib.js';
 import { FAST_CANDIDATES, loadCorpus, preflightCorpus } from '../scripts/model-fitness/fast-bench.js';
 
@@ -109,6 +110,24 @@ describe('scoreLiteralRecall', () => {
     expect(normalizeForMatch('A  B’s — c')).toBe("a b's - c");
   });
 
+  it('folds digit-group separators, so a re-grouped number still matches (2026-08-09 calibration)', () => {
+    // The reference missed 18'114 / 1'891 / 50'000 purely on grouping style.
+    expect(scoreLiteralRecall('activity count 18,114 verified; base now 1891 contacts', ["18'114", "1'891"]).recall).toBe(1);
+    expect(scoreLiteralRecall('penalty capped at CHF 50 000 per year', ["50'000"]).recall).toBe(1);
+    expect(scoreLiteralRecall('order total CHF 3’184.00', ['3184']).recall).toBe(1);
+  });
+
+  it('folds spacing around slashes and before percent signs', () => {
+    expect(scoreLiteralRecall('sized at 4 vCPU/16 GB/100 GB SSD', ['4 vCPU / 16 GB / 100 GB SSD']).recall).toBe(1);
+    expect(scoreLiteralRecall('permanent discount of 15 %', ['15%']).recall).toBe(1);
+  });
+
+  it('accepts ANY variant of an alternates literal and reports the canonical name', () => {
+    const r = scoreLiteralRecall('the audit trail holds 48.2M rows', [["48'200'113", '48.2M'], 'booking_events']);
+    expect(r.hits).toEqual(["48'200'113"]);
+    expect(r.misses).toEqual(['booking_events']);
+  });
+
   it('fails closed on an empty literal list instead of reporting a perfect score', () => {
     const r = scoreLiteralRecall('anything', []);
     expect(r.invalid).toBe(true);
@@ -148,6 +167,29 @@ describe('parseRubricJudgeResponse', () => {
   it('is case-insensitive on pass/fail', () => {
     const r = parseRubricJudgeResponse(Array.from({ length: 8 }, (_, i) => `Element ${i + 1}: pass`).join('\n'));
     expect(r.score).toBe(8);
+  });
+
+  it('strips an exposed reasoning channel so verdicts inside <think> are never read as verdicts', () => {
+    const think = '<think>ELEMENT 1: PASS — no wait, actually FAIL. Let me reconsider all of them…</think>\n';
+    const verdicts = Array.from({ length: 8 }, (_, i) => `ELEMENT ${i + 1}: FAIL — missing`).join('\n');
+    const r = parseRubricJudgeResponse(think + verdicts);
+    expect(r.invalid).toBe(false);
+    expect(r.score).toBe(0);
+    // Reasoning-only reply (the GLM max_tokens failure mode) stays fail-closed:
+    expect(parseRubricJudgeResponse('<think>hmm rubric…</think>').invalid).toBe(true);
+  });
+
+  it('tolerates markdown decoration between the element label and the verdict', () => {
+    const r = parseRubricJudgeResponse(Array.from({ length: 8 }, (_, i) => `**ELEMENT ${i + 1}:** PASS — ok`).join('\n'));
+    expect(r.invalid).toBe(false);
+    expect(r.score).toBe(8);
+  });
+
+  it('does not let prose "passes"/"failing" count as a verdict, and ELEMENT 1 never matches ELEMENT 12', () => {
+    const prose = 'ELEMENT 1: the summary passes over this entirely\n' + Array.from({ length: 7 }, (_, i) => `ELEMENT ${i + 2}: PASS`).join('\n');
+    expect(parseRubricJudgeResponse(prose).invalid).toBe(true);
+    // Element 1's tolerant regex must not bind to an "ELEMENT 12" line.
+    expect(parseRubricJudgeResponse('ELEMENT 12: PASS', 1).invalid).toBe(true);
   });
 
   it('buildRubricJudgePrompt enumerates every rubric element and demands the parseable format', () => {
@@ -199,22 +241,80 @@ describe('FAST_CANDIDATES registry pin', () => {
 // Served-model guard
 // ---------------------------------------------------------------------------
 
-describe('checkServedModel', () => {
-  it('accepts the requested model incl. fireworks prefix and version-suffix variants', () => {
-    expect(checkServedModel('accounts/fireworks/models/gpt-oss-120b', 'gpt-oss-120b').ok).toBe(true);
-    expect(checkServedModel('claude-haiku-4-5-20251001', 'claude-haiku-4-5-20251001').ok).toBe(true);
-    expect(checkServedModel('claude-haiku-4-5', 'claude-haiku-4-5-20251001').ok).toBe(true);
+describe('checkServedModel (three-state)', () => {
+  it('verifies the requested model incl. fireworks prefix and version-suffix variants', () => {
+    expect(checkServedModel('accounts/fireworks/models/gpt-oss-120b', 'gpt-oss-120b').status).toBe('verified');
+    expect(checkServedModel('claude-haiku-4-5-20251001', 'claude-haiku-4-5-20251001').status).toBe('verified');
+    expect(checkServedModel('claude-haiku-4-5', 'claude-haiku-4-5-20251001').status).toBe('verified');
   });
 
-  it('flags a substituted model', () => {
+  it('flags a substituted model as mismatch', () => {
     const r = checkServedModel('accounts/fireworks/models/deepseek-v4-flash', 'deepseek-v3');
-    expect(r.ok).toBe(false);
+    expect(r.status).toBe('mismatch');
     expect(r.note).toContain('deepseek-v3');
   });
 
-  it('fails closed when the provider does not report the served model', () => {
-    expect(checkServedModel('claude-haiku-4-5', undefined).ok).toBe(false);
-    expect(checkServedModel('claude-haiku-4-5', '  ').ok).toBe(false);
+  it('reports a missing model as unreported, NOT as mismatch', () => {
+    // Revised 2026-08-09: OpenAIAdapter never propagates the wire model, so a
+    // fail-closed boolean invalidated every non-Anthropic candidate — the
+    // guard blocked the instrument. Unreported must be distinguishable from
+    // substitution evidence, and only the latter invalidates (isRowValid).
+    expect(checkServedModel('claude-haiku-4-5', undefined).status).toBe('unreported');
+    expect(checkServedModel('claude-haiku-4-5', '  ').status).toBe('unreported');
+  });
+});
+
+describe('checkInputSanity', () => {
+  it('flags the degraded-provider row (tok in=1 for a 30k-token transcript)', () => {
+    const r = checkInputSanity(1, 30_000);
+    expect(r.ok).toBe(false);
+    expect(r.note).toContain('not processed');
+  });
+
+  it('tolerates provider-tokenizer variance and absent usage reports', () => {
+    expect(checkInputSanity(9_000, 30_000).ok).toBe(true);   // 0.3x of chars/4
+    expect(checkInputSanity(101_845, 33_626).ok).toBe(true); // 3x (observed, Mistral)
+    expect(checkInputSanity(0, 30_000).ok).toBe(true);       // no usage reported
+    expect(INPUT_SANITY_FLOOR).toBe(0.05);
+  });
+});
+
+describe('isRowValid + aggregateBenchRows', () => {
+  const base: BenchRow = {
+    label: 'x', transcriptId: 't', run: 1, literalRecall: 1, misses: [],
+    judgeScore: 8, judgeInvalid: false, judgeModel: 'j',
+    served: 'unreported', servedNote: '', sanityOk: true, sanityNote: '',
+    latencyMs: 1, inTok: 10_000, outTok: 500, stopReason: 'end_turn',
+    judgeStopReason: 'end_turn', summary: 's', judgeRaw: 'r',
+  };
+
+  it('unreported served does not invalidate a row; mismatch, judge-invalid, error and sanity do', () => {
+    expect(isRowValid(base)).toBe(true);
+    expect(isRowValid({ ...base, served: 'mismatch' })).toBe(false);
+    expect(isRowValid({ ...base, judgeInvalid: true })).toBe(false);
+    expect(isRowValid({ ...base, error: '412' })).toBe(false);
+    expect(isRowValid({ ...base, sanityOk: false })).toBe(false);
+  });
+
+  it('averages over VALID rows only, so a transient outage cannot drag the mean', () => {
+    const rows: BenchRow[] = [
+      { ...base, literalRecall: 1, judgeScore: 8 },
+      { ...base, literalRecall: 0.9, judgeScore: 7 },
+      { ...base, literalRecall: 0, judgeScore: 0, judgeInvalid: true, error: '412 suspended' },
+    ];
+    const agg = aggregateBenchRows(rows);
+    expect(agg.literalRecall).toBeCloseTo(0.95);
+    expect(agg.judgeMean).toBeCloseTo(7.5);
+    expect(agg.validRuns).toBe(2);
+    expect(agg.invalid).toBe(false);
+    expect(agg.invalidReasons.join(' ')).toContain('412');
+  });
+
+  it('goes invalid when fewer than half the rows are valid — an outage is not a measurement', () => {
+    const bad = { ...base, error: '412' };
+    expect(aggregateBenchRows([base, bad, bad]).invalid).toBe(true);
+    expect(aggregateBenchRows([base, base, bad]).invalid).toBe(false);
+    expect(aggregateBenchRows([]).invalid).toBe(true);
   });
 });
 
@@ -223,7 +323,16 @@ describe('checkServedModel', () => {
 // ---------------------------------------------------------------------------
 
 describe('decideFastSlot', () => {
-  const ref = { judgeMean: 7.0, judgeStd: 0.3, invalid: false };
+  const ref = { literalRecall: 0.98, judgeMean: 7.0, judgeStd: 0.3, invalid: false };
+
+  it('declares the bar unresolvable when the REFERENCE itself misses it (2026-08-09: ref at 91.5%)', () => {
+    const badRef = { ...ref, literalRecall: 0.915 };
+    const v = decideFastSlot({ literalRecall: 1, judgeMean: 8, invalid: false }, badRef);
+    expect(v.verdict).toBe('INVALID');
+    expect(v.reasons.join(' ')).toContain('unresolvable');
+    // A perfect candidate must NOT be held on a miscalibrated checklist either.
+    expect(v.verdict).not.toBe('HOLD');
+  });
 
   it('holds only at or above the 95% literal-recall bar', () => {
     expect(decideFastSlot({ literalRecall: 0.95, judgeMean: 7.0, invalid: false }, ref).verdict).toBe('HOLD');
@@ -242,7 +351,7 @@ describe('decideFastSlot', () => {
   });
 
   it('uses the measured reference std when it exceeds the noise floor', () => {
-    const wideRef = { judgeMean: 7.0, judgeStd: 1.0, invalid: false };
+    const wideRef = { literalRecall: 0.98, judgeMean: 7.0, judgeStd: 1.0, invalid: false };
     expect(decideFastSlot({ literalRecall: 1, judgeMean: 6.0, invalid: false }, wideRef).verdict).toBe('HOLD');
     expect(decideFastSlot({ literalRecall: 1, judgeMean: 5.9, invalid: false }, wideRef).verdict).toBe('FAIL');
     expect(MIN_JUDGE_NOISE).toBe(0.5);
