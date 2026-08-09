@@ -160,10 +160,11 @@ describe('LLM_CATALOG', () => {
       if (!cap) continue; // custom / provider-specific ids not in the registry
       checked++;
       expect(model.context_window, `${model.id} context_window`).toBe(cap.contextWindow);
-      if (model.pricing) {
-        expect(model.pricing.input, `${model.id} pricing.input`).toBe(cap.pricing.input);
-        expect(model.pricing.output, `${model.id} pricing.output`).toBe(cap.pricing.output);
-      }
+      // Registry-backed entries must CARRY pricing — a truthy-guard here let a
+      // deleted pricing field skip the drift check silently (pr-review #1162).
+      expect(model.pricing, `${model.id} must carry pricing`).toBeDefined();
+      expect(model.pricing!.input, `${model.id} pricing.input`).toBe(cap.pricing.input);
+      expect(model.pricing!.output, `${model.id} pricing.output`).toBe(cap.pricing.output);
     }
     expect(checked).toBeGreaterThan(0); // the guard actually exercised the registry-backed entries
   });

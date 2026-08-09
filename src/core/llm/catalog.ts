@@ -73,7 +73,9 @@ export interface CatalogProviderEntry {
    * SLOT is a different promise: it pins exactly one model per band, so the
    * picker needs a short, vetted list instead of a free-text field per tier.
    *
-   * These are therefore only the entry's MEASURED, currently-served models —
+   * These are therefore only the entry's vetted, currently-served models —
+   * either replay-MEASURED preset-slot models or explicitly-marked CANDIDATES
+   * (unmeasured, picker-selectable for canary testing; no preset pins them) —
    * each id registered in MODEL_CAPABILITIES, pricing/context mirrored from
    * there (same drift-guard test as `models`). Entries that ship a `models`
    * catalog never need this: the picker uses `models` directly.

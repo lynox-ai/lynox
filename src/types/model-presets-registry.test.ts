@@ -17,6 +17,9 @@ describe('model-presets Wave 1 — new model registrations', () => {
       'mistral-medium-2604',
       'accounts/fireworks/models/glm-5p2',
       'accounts/fireworks/models/deepseek-v4-pro',
+      'accounts/fireworks/models/kimi-k3',
+      'accounts/fireworks/models/deepseek-v4-flash',
+      'accounts/fireworks/models/qwen3p7-plus',
     ]) {
       expect(MODEL_CAPABILITIES[id], `${id} must be registered`).toBeDefined();
     }

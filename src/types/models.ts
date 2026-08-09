@@ -465,10 +465,13 @@ const MISTRAL_FEATURES_GEN3: ModelFeatures = {
   pdfInput: false,
 };
 
-// Fireworks-hosted openai-compat text models (GLM 5.2, DeepSeek v4 Pro). Text +
-// tool-use + prompt-cache; NO vision (Fireworks model pages state "image input:
-// not supported" for both — so vision:false yields a clean pre-flight throw on an
-// image-attach, never a silent drop). extendedThinking is the Anthropic-specific
+// Fireworks-hosted openai-compat text models. Text + tool-use + prompt-cache;
+// vision:false for ALL consumers, for two different reasons: GLM 5.2 and
+// DeepSeek v4 Pro genuinely have none (their Fireworks pages state "image
+// input: not supported"), while Kimi K3 and Qwen3.7 Plus DO serve image input
+// on Fireworks but stay text-only here until the openai-wire image path is
+// validated. Either way vision:false yields a clean pre-flight throw on an
+// image-attach, never a silent drop. extendedThinking is the Anthropic-specific
 // mechanism → false on the openai wire.
 const FIREWORKS_TEXT_FEATURES: ModelFeatures = {
   vision: false,
@@ -921,17 +924,17 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.50 },
     uiLabel: 'Magistral Small (latest)',
   },
-  // === Fireworks-hosted (openai-compat) — model-presets hybrid deep/big-context ===
+  // === Fireworks-hosted (openai-compat) — preset slots + picker candidates ===
   // CN-provenance weights served from a WESTERN fixed host (Fireworks/US), never a
   // direct CN API — the affirmative sourcing rule (host residency US, weights CN).
-  // Pricing VERIFIED against the Fireworks model pages (2026-07-19): the harness
-  // estimates were ~2.5-4× low. cacheRead = $0.14 is the PUBLISHED Fireworks
-  // cached-input rate for BOTH models (a flat rate, NOT input×0.1) — so DeepSeek's
-  // 0.14 (≠ 1.74×0.1 = 0.174) is correct as read from its page, not a copy of GLM's.
-  // Both are text-only (Fireworks: "image input: not supported"). Reached via
+  // Pricing VERIFIED against each model's own Fireworks page — the cached-input
+  // rate is PER MODEL, never derived: for GLM 5.2 + DeepSeek v4 Pro (read
+  // 2026-07-19) it is a flat $0.14 (so DeepSeek's 0.14 ≠ 1.74×0.1 = 0.174 is
+  // correct as read from its page, not a copy of GLM's), while the 2026-08-09
+  // candidates carry their own published rates (0.30 / 0.028 / 0.08). Reached via
   // provider:'openai' + api_base_url=api.fireworks.ai + the full
-  // `accounts/fireworks/models/*` id; no Fireworks tier map yet (they are preset
-  // -slot models, tier:null — a preset's tier_set pins them explicitly).
+  // `accounts/fireworks/models/*` id; no Fireworks tier map (all are preset-slot
+  // /candidate models, tier:null — a preset's tier_set pins them explicitly).
   'accounts/fireworks/models/glm-5p2': {
     id: 'accounts/fireworks/models/glm-5p2',
     provider: 'openai',
