@@ -1,4 +1,5 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+import { createHmac } from 'node:crypto';
 
 /**
  * The composer must stay at the bottom of the chat, whatever state the column
@@ -27,6 +28,30 @@ import { test, expect } from '@playwright/test';
  * tell a fixed shell from a broken one.
  */
 
+// Same session-mint idiom as lifecycle.spec / inbox-phase2.spec: the smoke
+// stack requires the auth cookie or /app renders the login page (no textarea,
+// no transcript — every assertion below would fail for the wrong reason).
+const SMOKE_SECRET = process.env['SMOKE_HTTP_SECRET'] ?? 'smoke-test-http-secret-ephemeral';
+
+function mintSessionCookie(secret: string): string {
+	const ts = Math.floor(Date.now() / 1000).toString();
+	const key = createHmac('sha256', 'lynox-session').update(secret).digest();
+	return `${ts}.${createHmac('sha256', key).update(ts).digest('hex')}`;
+}
+
+async function authenticate(page: Page): Promise<void> {
+	await page.goto('/login');
+	const origin = new URL(page.url()).origin;
+	await page.context().addCookies([{
+		name: 'lynox_session',
+		value: mintSessionCookie(SMOKE_SECRET),
+		url: origin,
+		httpOnly: true,
+		secure: origin.startsWith('https'),
+		sameSite: 'Lax',
+	}]);
+}
+
 /** Models the real overflow driver: a tall block in the non-transcript stack
  *  (a ChangesetReview with a long file list easily reaches this on a phone). */
 const TALL_SIBLING_PX = 1200;
@@ -47,6 +72,8 @@ async function injectTallStackBlock(page: import('@playwright/test').Page, px: n
 }
 
 test.describe('composer stays pinned', () => {
+	test.beforeEach(async ({ page }) => { await authenticate(page); });
+
 	test('a tall non-transcript block does not push the composer off-screen', async ({ page }) => {
 		await page.setViewportSize({ width: 390, height: 844 });
 		await page.goto('/app');
