@@ -427,6 +427,16 @@ describe('isDangerous', () => {
     it('returns null for a glob inside the agent workspace', () => {
       expect(isDangerous('bash', { command: 'ls ~/.lynox/workspace/*.md' }, 'autonomous')).toBeNull();
     });
+
+    it.each([
+      'cat ~/.lynox/workspace/../http-*',
+      'cat ~/.lynox/workspace/../vault.db',
+    ])('BLOCKS dot-dot laundering through the workspace carve-out: %s', (command) => {
+      const result = isDangerous('bash', { command }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+      expect(result).toContain('path traversal in lynox data dir');
+    });
   });
 
   describe('lynox dir via batch_files', () => {
@@ -465,6 +475,12 @@ describe('isDangerous', () => {
 
     it('BLOCKS batch_files on the workspace-lookalike dir ~/.lynox/workspace-evil', () => {
       const result = isDangerous('batch_files', { directory: '/Users/op/.lynox/workspace-evil', pattern: '*', operation: 'rename', rename_pattern: 'x' }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+    });
+
+    it('BLOCKS batch_files dot-dot traversal out of the workspace (resolve collapses it)', () => {
+      const result = isDangerous('batch_files', { directory: '/Users/op/.lynox/workspace/..', pattern: 'http-*', operation: 'rename', rename_pattern: 'x' }, 'autonomous');
       expect(result).not.toBeNull();
       expect(result).toContain('[BLOCKED');
     });

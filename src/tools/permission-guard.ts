@@ -29,6 +29,10 @@ const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: LYNOX_SECRET_FILES,   label: 'access lynox secret store (secrets)' },
   { pattern: /\bhttp-secret\b/i,   label: 'access lynox secret store (secrets)' },
   { pattern: /\.lynox\/(?!workspace\/)\S*[*?[]/i, label: 'glob into lynox data dir (secrets)' },
+  // The workspace carve-out above is lexical, so `~/.lynox/workspace/../vault.db`
+  // would launder a secret path through it — any dot-dot inside a .lynox path is
+  // flagged instead (the model has no reason to spell workspace paths that way).
+  { pattern: /\.lynox\/\S*\.\.\//i, label: 'path traversal in lynox data dir (secrets)' },
 ];
 
 // batch_files must not operate on the lynox dir outside the workspace subtree — a
