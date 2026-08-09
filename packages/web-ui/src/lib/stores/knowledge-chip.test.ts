@@ -265,6 +265,19 @@ describe('transcript adoption wires the carry-over (source guard)', () => {
 		expect(totalSwaps.length, 'a new adoption site was added without carry-over').toBe(2);
 	});
 
+	it('ChatView counts knowledge chips in the stick-to-bottom stream signal', () => {
+		// A chip arrives near the very END of a turn, appended after the text settled.
+		// If `streamSignal` does not count knowledgeWrites, the pin effect never re-runs
+		// for that late height change and the review chip renders under the composer —
+		// the person approves a capture they never saw (founder-observed 2026-08-09,
+		// reproduced at the pixel: chip bottom 860px vs composer top 797px at 1440x900).
+		const src = readFileSync(fileURLToPath(new URL('../components/ChatView.svelte', import.meta.url)), 'utf-8');
+		const signal = src.match(/const streamSignal = \$derived\.by\(\(\) => \{[\s\S]*?\n\t\}\);/)?.[0];
+		expect(signal, 'streamSignal derivation not found — update this guard').toBeTruthy();
+		expect(signal, 'streamSignal must count knowledgeWrites so a late chip re-anchors the view')
+			.toContain('knowledgeWrites');
+	});
+
 	it('the SSE knowledge_write handler dedups against the whole transcript', () => {
 		const src = readFileSync(fileURLToPath(new URL('./chat.svelte.ts', import.meta.url)), 'utf-8');
 		// Per-message dedup (`projectKnowledgeWrite(msg.knowledgeWrites ?? []`) re-adds a
