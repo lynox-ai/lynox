@@ -1511,6 +1511,29 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     const retryOpts = mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>;
     expect(retryOpts['runTaint']).toEqual({ seeded: 'none', earned: 'external-tool' });
   });
+
+  it('a retry also carries a SEED-armed original run — and builds a fresh accumulator', async () => {
+    // The sibling gap of the earned-carry: a run whose steps were armed by the
+    // caller's taint alone leaves earned='none' by construction (noteStepTaint
+    // ignores the reflected 'conversation'), so an earned-only carry loses it.
+    // Its cached outputs derive from a tainted conversation all the same.
+    const id = seedStoredPipeline();
+    const taintedCaller = makeAutonomyAgent(undefined);
+    (taintedCaller as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: id }, taintedCaller);
+    const firstOpts = mockRunManifest.mock.calls[0]![2] as { runTaint: unknown };
+
+    const cleanCaller = makeAutonomyAgent(undefined);
+    mockRetryManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id, retry: true }, cleanCaller);
+    const retryOpts = mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>;
+    expect(retryOpts['runTaint']).toEqual({ seeded: 'conversation', earned: 'none' });
+    // A fresh object, not the stored one passed through: passing prev.runTaint
+    // by reference would couple the stored record to the retry's mutations and
+    // would also pass the clean-caller case above by accident.
+    expect(retryOpts['runTaint']).not.toBe(firstOpts.runTaint);
+  });
 });
 
 describe('A1: §4.5 drift fixes', () => {

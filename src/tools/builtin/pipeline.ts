@@ -726,9 +726,20 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       // wrapped marker) land a re-run step's durable write as active. Found
       // independently by two review lenses on this PR.
       const retryTaint = newRunTaint(deps.parentAgent);
-      const prevEarned = prev.runTaint?.earned;
-      if (prevEarned === 'marker' || prevEarned === 'external-tool') {
-        retryTaint.earned = prevEarned;
+      if (prev.runTaint) {
+        const prevEarned = prev.runTaint.earned;
+        if (prevEarned === 'marker' || prevEarned === 'external-tool') {
+          retryTaint.earned = prevEarned;
+        }
+        // BOTH halves carry, not just earned: a run whose steps were armed by
+        // the SEED alone (tainted caller, no step read anything itself) leaves
+        // earned='none' by construction — noteStepTaint ignores the reflected
+        // 'conversation'. Its cached outputs are tainted all the same. The
+        // current caller's own cause wins when present (it is more specific
+        // about THIS retry); the carry only fills a clean one.
+        if (retryTaint.seeded === 'none') {
+          retryTaint.seeded = prev.runTaint.seeded;
+        }
       }
       const state = await retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
         autonomy: deps.autonomy,

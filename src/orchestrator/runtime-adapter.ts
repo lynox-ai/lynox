@@ -60,8 +60,9 @@ export const INLINE_CORE_TOOLS = new Set([
  * `earned` is the most specific cause any STEP acquired during the run. The
  * split does two jobs: {@link noteStepTaint} needs it to tell a step's OWN
  * external read apart from our seed reflected back off a fresh agent (only the
- * former escalates), and the retry path carries `earned` forward so a re-run
- * fed the original run's cached outputs stays armed even under a clean caller.
+ * former escalates), and the retry path carries the original run's taint —
+ * BOTH halves — forward so a re-run fed that run's cached outputs stays armed
+ * even under a clean caller.
  * The way back to the caller is NOT this object's job — the `run_workflow`
  * handler already taints the caller unconditionally after every run (H-002).
  */
