@@ -9,6 +9,39 @@ import { detectInjectionAttempt } from '../core/data-boundary.js';
 
 // ── isCriticalTool — moved from pre-approve.ts ─────────────
 
+// lynox-internal secret/DB files — vault + agent-memory + run-history + migration
+// exports + the plaintext engine HTTP secret (`ensureHttpSecret` writes it mode 0600,
+// but a same-uid read still succeeds on self-host). Specific filenames, NOT the whole
+// `~/.lynox/` dir — lynox must still read its own `config.json` and other non-secret
+// files. Prefix is fuzzy (matches macOS /Users/foo AND Linux /home/foo paths).
+// Shared between the file-tool path guard and both bash scan lists so they cannot
+// drift apart. H-003 / L1-011.
+const LYNOX_SECRET_FILES = /\.lynox\/(vault|agent-memory|runs|migration-export|http-secret)/i;
+
+// Bash spellings of the same read that do not name the full path: a glob into the
+// lynox dir (`cat ~/.lynox/http-*`) and the bare filename after a cd
+// (`cd ~/.lynox && cat http-secret`). Path-based matching only raises the bar —
+// co-residency is the accepted root. The bare-name pattern covers only
+// `http-secret` (the one plaintext secret; the DB names are too generic to flag
+// bare without false positives), and `~/.lynox/workspace/` — the agent's default
+// working area — stays globbable.
+const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: LYNOX_SECRET_FILES,   label: 'access lynox secret store (secrets)' },
+  { pattern: /\bhttp-secret\b/i,   label: 'access lynox secret store (secrets)' },
+  { pattern: /\.lynox\/(?!workspace\/)\S*[*?[]/i, label: 'glob into lynox data dir (secrets)' },
+  // The workspace carve-out above is lexical, so `~/.lynox/workspace/../vault.db`
+  // would launder a secret path through it — any dot-dot inside a .lynox path is
+  // flagged instead (the model has no reason to spell workspace paths that way).
+  { pattern: /\.lynox\/\S*\.\.\//i, label: 'path traversal in lynox data dir (secrets)' },
+];
+
+// batch_files must not operate on the lynox dir outside the workspace subtree — a
+// rename/move of a secret file would strip it of the path guards above (checked
+// against the raw directory, which names the dir without a filename, so
+// LYNOX_SECRET_FILES cannot match it). `~/.lynox/workspace/` is the agent's
+// default working area and stays available.
+const LYNOX_DIR = /\.lynox\/?$|\.lynox\/(?!workspace(\/|$))/i;
+
 /** Representative critical commands — used by isCriticalTool to detect dangerous glob patterns */
 const CRITICAL_COMMAND_SAMPLES = [
   'rm -rf /',
@@ -22,6 +55,8 @@ const CRITICAL_COMMAND_SAMPLES = [
   'printenv',
   'env',
   'cat /proc/1/environ',
+  'cat ~/.lynox/vault.db',
+  'cat ~/.lynox/http-secret',
   'declare -x',
   'export -p',
   'set',
@@ -40,6 +75,8 @@ const CRITICAL_REGEXES: RegExp[] = [
   /\/proc\/.*\/environ/i,
   /\b(declare\s+-x|export\s+-p)\b/i,
   /^\s*set\s*$|\bset\b\s*[|>]/im,
+  // A pre-approve glob that would suppress the lynox-secret confirm is itself critical.
+  ...LYNOX_SECRET_BASH.map((entry) => entry.pattern),
 ];
 
 /**
@@ -100,6 +137,7 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bprintenv\b/i,                   label: 'print environment (secrets)' },
   { pattern: /^\s*env\s*$|\benv\b\s*[|>]/im,   label: 'dump environment (secrets)' },
   { pattern: /\/proc\/.*\/environ/i,             label: 'read process environment (secrets)' },
+  ...LYNOX_SECRET_BASH,
   { pattern: /\b(declare\s+-x|export\s+-p)\b/i, label: 'dump exported vars (secrets)' },
   { pattern: /^\s*set\s*$|\bset\b\s*[|>]/im,   label: 'dump all variables (secrets)' },
   { pattern: /\bchroot\b/i,                     label: 'chroot escape' },
@@ -185,6 +223,7 @@ const DANGEROUS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bnc\b\s+\S+\s+\d+/i,        label: 'outbound netcat connection' },
   { pattern: /\b(cat|less|more|head|tail|xxd|strings|od)\b.*\/proc\//i, label: 'read proc filesystem' },
   { pattern: /\b(cat|less|more|head|tail)\b.*\.env\b/i, label: 'read secrets file' },
+  ...LYNOX_SECRET_BASH,
   { pattern: /\bln\s+(-[a-zA-Z]*s|-[a-zA-Z]*\s+-[a-zA-Z]*s|--symbolic)\b/i, label: 'create symlink' },
   { pattern: /\bpython[23]?\s+-c\b/i,       label: 'python code execution' },
   { pattern: /\bnode\s+-e\b/i,              label: 'node code execution' },
@@ -242,11 +281,7 @@ const SENSITIVE_PATHS: RegExp[] = [
   /credentials/i, /\.netrc$/,
   /\.(ssh|gnupg|aws|config|docker|kube|npm)\//,
   /\.token$/, /\.secret$/,
-  // lynox-internal DBs — vault + agent-memory + run-history + migration exports.
-  // Specific filenames, NOT the whole `~/.lynox/` dir — lynox must still read its own
-  // `config.json` and other non-secret files. Prefix is fuzzy (matches macOS /Users/foo
-  // AND Linux /home/foo paths). H-003 / L1-011.
-  /\.lynox\/(vault|agent-memory|runs|migration-export)/i,
+  LYNOX_SECRET_FILES,
   // Shell history files — prime exfil target for env vars, ssh URLs, pasted secrets.
   /\.(bash|zsh|fish|node_repl|python)_?history$/,
   // macOS Keychain — system + user keychains hold credentials, certs, browser passwords.
@@ -647,7 +682,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     const dirPath = dirRaw ? resolveRealPath(dirRaw) : '';
 
     if (dirPath) {
-      for (const pattern of SENSITIVE_PATHS) {
+      for (const pattern of [...SENSITIVE_PATHS, LYNOX_DIR]) {
         if (pattern.test(dirRaw) || pattern.test(dirPath)) {
           if (autonomy === 'autonomous') {
             return `⚠ ${toolName}: operate in sensitive directory — "${dirPath}" [BLOCKED]`;
@@ -660,7 +695,7 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
     if (obj.operation === 'move' && typeof obj.destination === 'string') {
       const destRaw = resolve(obj.destination);
       const destPath = resolveRealPath(destRaw);
-      for (const pattern of SENSITIVE_PATHS) {
+      for (const pattern of [...SENSITIVE_PATHS, LYNOX_DIR]) {
         if (pattern.test(destRaw) || pattern.test(destPath)) {
           if (autonomy === 'autonomous') {
             return `⚠ ${toolName}: move into sensitive path — "${destPath}" [BLOCKED]`;
