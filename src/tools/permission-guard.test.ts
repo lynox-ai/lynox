@@ -374,6 +374,33 @@ describe('isDangerous', () => {
     });
   });
 
+  describe('lynox secret files via bash', () => {
+    // The regex matches the PATH, not a read-verb spelling — `$(<file)`, `python3 -c`,
+    // and any other reader that names the file are caught the same as `cat`.
+    it.each([
+      'cat ~/.lynox/http-secret',
+      'x=$(</Users/op/.lynox/http-secret); echo done',
+      'python3 -c "print(open(\'/home/op/.lynox/http-secret\').read())"',
+      'cat ~/.lynox/vault.db',
+      'strings /home/op/.lynox/agent-memory.db',
+    ])('BLOCKS in autonomous mode: %s', (command) => {
+      const result = isDangerous('bash', { command }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+      expect(result).toContain('lynox secret store');
+    });
+
+    it('flags cat of the HTTP secret in interactive mode', () => {
+      const result = isDangerous('bash', { command: 'cat ~/.lynox/http-secret' });
+      expect(result).not.toBeNull();
+      expect(result).toContain('lynox secret store');
+    });
+
+    it('returns null for bash touching non-secret .lynox files', () => {
+      expect(isDangerous('bash', { command: 'cat ~/.lynox/config.json' }, 'autonomous')).toBeNull();
+    });
+  });
+
   describe('intra-word quote/backslash bypass (danger scan sees the shell-executed form)', () => {
     it.each([
       "r''m -rf /",     // single-quote split
@@ -1171,6 +1198,23 @@ describe('isDangerous', () => {
       const result = isDangerous('read_file', { path: '/home/user/.ssh/id_rsa' });
       expect(result).not.toBeNull();
       expect(result).toContain('read sensitive path');
+    });
+
+    it('BLOCKS read_file on the engine HTTP secret in autonomous mode', () => {
+      const result = isDangerous('read_file', { path: '/Users/op/.lynox/http-secret' }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
+      expect(result).toContain('read sensitive path');
+    });
+
+    it('flags read_file on the engine HTTP secret in interactive mode', () => {
+      const result = isDangerous('read_file', { path: '/home/op/.lynox/http-secret' });
+      expect(result).not.toBeNull();
+      expect(result).toContain('read sensitive path');
+    });
+
+    it('returns null for read_file on lynox config.json (non-secret .lynox file)', () => {
+      expect(isDangerous('read_file', { path: '/home/op/.lynox/config.json' })).toBeNull();
     });
 
     it('flags read_file on /etc/passwd', () => {

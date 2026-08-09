@@ -66,6 +66,15 @@ export function isCriticalTool(tool: string, pattern: string): boolean {
 
 // ── Permission guard ────────────────────────────────────────
 
+// lynox-internal secret/DB files — vault + agent-memory + run-history + migration
+// exports + the plaintext engine HTTP secret (`ensureHttpSecret` writes it mode 0600,
+// but a same-uid read still succeeds on self-host). Specific filenames, NOT the whole
+// `~/.lynox/` dir — lynox must still read its own `config.json` and other non-secret
+// files. Prefix is fuzzy (matches macOS /Users/foo AND Linux /home/foo paths).
+// Shared between the file-tool path guard and both bash scan lists so they cannot
+// drift apart. H-003 / L1-011 / DK decision C 2026-08-09.
+const LYNOX_SECRET_FILES = /\.lynox\/(vault|agent-memory|runs|migration-export|http-secret)/i;
+
 /** Truly destructive — blocked even in autonomous mode */
 export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\brm\s+-rf\s+\//i,                label: 'rm -rf /' },
@@ -100,6 +109,7 @@ export const CRITICAL_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bprintenv\b/i,                   label: 'print environment (secrets)' },
   { pattern: /^\s*env\s*$|\benv\b\s*[|>]/im,   label: 'dump environment (secrets)' },
   { pattern: /\/proc\/.*\/environ/i,             label: 'read process environment (secrets)' },
+  { pattern: LYNOX_SECRET_FILES,                 label: 'access lynox secret store (credentials)' },
   { pattern: /\b(declare\s+-x|export\s+-p)\b/i, label: 'dump exported vars (secrets)' },
   { pattern: /^\s*set\s*$|\bset\b\s*[|>]/im,   label: 'dump all variables (secrets)' },
   { pattern: /\bchroot\b/i,                     label: 'chroot escape' },
@@ -185,6 +195,7 @@ const DANGEROUS_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /\bnc\b\s+\S+\s+\d+/i,        label: 'outbound netcat connection' },
   { pattern: /\b(cat|less|more|head|tail|xxd|strings|od)\b.*\/proc\//i, label: 'read proc filesystem' },
   { pattern: /\b(cat|less|more|head|tail)\b.*\.env\b/i, label: 'read secrets file' },
+  { pattern: LYNOX_SECRET_FILES,            label: 'access lynox secret store (credentials)' },
   { pattern: /\bln\s+(-[a-zA-Z]*s|-[a-zA-Z]*\s+-[a-zA-Z]*s|--symbolic)\b/i, label: 'create symlink' },
   { pattern: /\bpython[23]?\s+-c\b/i,       label: 'python code execution' },
   { pattern: /\bnode\s+-e\b/i,              label: 'node code execution' },
@@ -242,11 +253,7 @@ const SENSITIVE_PATHS: RegExp[] = [
   /credentials/i, /\.netrc$/,
   /\.(ssh|gnupg|aws|config|docker|kube|npm)\//,
   /\.token$/, /\.secret$/,
-  // lynox-internal DBs — vault + agent-memory + run-history + migration exports.
-  // Specific filenames, NOT the whole `~/.lynox/` dir — lynox must still read its own
-  // `config.json` and other non-secret files. Prefix is fuzzy (matches macOS /Users/foo
-  // AND Linux /home/foo paths). H-003 / L1-011.
-  /\.lynox\/(vault|agent-memory|runs|migration-export)/i,
+  LYNOX_SECRET_FILES,
   // Shell history files — prime exfil target for env vars, ssh URLs, pasted secrets.
   /\.(bash|zsh|fish|node_repl|python)_?history$/,
   // macOS Keychain — system + user keychains hold credentials, certs, browser passwords.
