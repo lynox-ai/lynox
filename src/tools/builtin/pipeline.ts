@@ -1,4 +1,4 @@
-import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier } from '../../types/index.js';
+import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier, IAgent } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { randomUUID } from 'node:crypto';
 import { validateManifest, MAX_STEPS } from '../../orchestrator/validate.js';
@@ -11,7 +11,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
-import { undeclaredInlineStepTier, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { undeclaredInlineStepTier, newRunTaint, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import { normalizeTier } from '../../types/index.js';
 import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -422,6 +422,10 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
     }
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
+    // Run-level taint (DK H4, cross-step): seeded from the calling agent, armed
+    // further by any step that reads external content, consumed by every later
+    // step's durable-write routing. See RunTaint in runtime-adapter.ts.
+    const runTaint = newRunTaint(deps.parentAgent);
     const state = await runManifest(manifest, deps.config, buildRunCtx({
       autonomy: deps.autonomy,
       parentTools: deps.tools,
@@ -433,6 +437,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
       secretStore: deps.secretStore,
+      runTaint,
     }));
 
     debitInSessionWorkflowCost(deps, state, steps);
@@ -500,6 +505,17 @@ export interface PipelineDeps {
    * undefined, i.e. unchanged pre-fix behaviour.
    */
   secretStore?: SecretStoreLike | undefined;
+  /**
+   * The calling agent, threaded from the `run_workflow` tool handler (its
+   * second argument) so the run's taint accumulator SEEDS from the caller's own
+   * untrusted state — a workflow started on a tainted turn must not launder a
+   * durable write through a fresh step agent (mirror of spawn.ts's parent→child
+   * seed). Only the SEED direction lives here: the way BACK is already covered,
+   * stronger, by the handler's unconditional `agent.noteUntrustedData?.()`
+   * after every run (H-002/CORE-9 — any delegated run taints the caller).
+   * Absent for headless callers → the run starts clean.
+   */
+  parentAgent?: IAgent | undefined;
 }
 
 /** Outcome of a Saved-Workflows-library "Run" action. */
@@ -636,6 +652,10 @@ export async function runSavedWorkflow(
       capabilityContract: planned.capabilityContract,
       limits: resolveHeadlessLimits(planned.limits),
       workflowId: planned.id,
+      // Headless: no caller to seed from, but the accumulator still carries
+      // taint ACROSS steps — a saved workflow whose step 1 reads external
+      // content must not land step 2's durable write as active.
+      runTaint: newRunTaint(),
     }));
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
     // A2: surface per-step failures + the terminal run error so the trigger UI
@@ -697,6 +717,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       // buildRunCtx restores the two fields the retry path used to drop
       // (parentToolContext + userTimezone) — without them a retried step ran
       // with no tool context / wrong timezone vs its original run (§4.1).
+      const retryTaint = newRunTaint(deps.parentAgent);
       const state = await retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
         autonomy: deps.autonomy,
         parentTools: deps.tools,
@@ -708,6 +729,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         parentSessionCounters: deps.sessionCounters,
         parentMemory: deps.memory ?? null,
         workflowId: planned.id,
+        runTaint: retryTaint,
       }));
 
       recordExecutedState(planned.id, { manifest: prev.manifest, state });
@@ -774,6 +796,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     }
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
+    const runTaint = newRunTaint(deps.parentAgent);
     const state = await runManifest(manifest, deps.config, buildRunCtx({
       autonomy: deps.autonomy,
       parentTools: deps.tools,
@@ -786,6 +809,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       parentMemory: deps.memory ?? null,
       secretStore: deps.secretStore,
       workflowId: planned.id,
+      runTaint,
     }));
 
     recordExecutedState(planned.id, { manifest, state });
@@ -970,6 +994,8 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
           // spawn_agent). `agent.secretStore` is undefined for a headless/no-vault
           // parent → unchanged behaviour.
           secretStore: agent.secretStore,
+          // Seed the run's taint accumulator from the caller (see PipelineDeps).
+          parentAgent: agent,
         })
       : await executeInlineSteps(input, {
           config: pipelineConfig,
@@ -984,6 +1010,8 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
           autonomy: agent.autonomy,
           // Thread the parent agent's SecretStore (see executePipelineById above).
           secretStore: agent.secretStore,
+          // Seed the run's taint accumulator from the caller (see PipelineDeps).
+          parentAgent: agent,
         });
 
     // H-002 parity (CORE-9): a workflow's steps run sub-agents with web/http/

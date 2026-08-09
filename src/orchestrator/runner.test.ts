@@ -642,6 +642,25 @@ describe('runManifest — inline runtime', () => {
     const state = await runManifest(manifest, CONFIG, {});
     expect(state.outputs.get('step-1')?.error).toContain('no parentTools provided');
   });
+
+  it('threads options.runTaint into the inline spawner (the cross-step taint dispatch)', async () => {
+    // Pins the dispatch line itself: dropping `options.runTaint` from the
+    // spawnInline call would leave every step blind to the run's taint while
+    // all the spawner- and tool-level tests stay green.
+    const manifest: Manifest = {
+      ...MANIFEST,
+      agents: [
+        { id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Do something' },
+      ],
+    };
+    const runTaint = { seeded: 'conversation', earned: 'none' } as const;
+    mockSpawnInline.mockClear();
+    const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as import('../types/index.js').ToolEntry[];
+    await runManifest(manifest, CONFIG, { parentTools: tools, runTaint });
+    expect(mockSpawnInline).toHaveBeenCalledTimes(1);
+    // spawnInline's runTaint is the 15th positional argument (index 14).
+    expect(mockSpawnInline.mock.calls[0]![14]).toBe(runTaint);
+  });
 });
 
 // --- retryManifest tests ---

@@ -671,7 +671,14 @@ async function executeThinker(
       // must not hand the parent a marker it never earned.
       const childCause = describeTurnUntrusted(childAgent);
       if (childCause === 'conversation') {
-        parentAgent.restoreConversationTaint?.();
+        // `restoreConversationTaint` is OPTIONAL on IAgent, and an implementation
+        // that omits it would lose the child→parent hand-off SILENTLY — no error,
+        // just a turn that looks clean and is not (pipeline.ts already calls
+        // `noteUntrustedData` optionally, so partial IAgent implementations have
+        // precedent). Fall back to the coarser signal: over-tainting the parent's
+        // run marker is the safe direction; losing the taint is not.
+        if (parentAgent.restoreConversationTaint) parentAgent.restoreConversationTaint();
+        else parentAgent.noteUntrustedData?.();
       } else if (childCause !== 'none') {
         parentAgent.noteUntrustedData?.();
       }

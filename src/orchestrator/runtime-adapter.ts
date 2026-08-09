@@ -13,6 +13,8 @@ import { resolveTools } from '../tools/resolve-tools.js';
 import { isHumanInTheLoopTool } from './human-in-the-loop.js';
 import type { PromptBudget } from './prompt-budget.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../core/prompts.js';
+import { describeTurnUntrusted } from '../core/untrusted-signals.js';
+import type { UntrustedCause, UntrustedSignals } from '../core/untrusted-signals.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 
@@ -43,6 +45,51 @@ export const INLINE_CORE_TOOLS = new Set([
   // opt-in per-step, like memory_block_edit.
   'recall',
 ]);
+
+/**
+ * Run-level untrusted-content accumulator for a pipeline run — the cross-step
+ * counterpart of spawn.ts's parent↔child taint seed. Each step runs as a FRESH
+ * Agent whose latches start clean, and a step's final answer flows into later
+ * steps' input WITHOUT the wrapped-untrusted marker (the marker rides tool
+ * RESULTS inside a step, never its output). Without a run-scoped signal, a
+ * workflow whose step 1 reads external content and whose step 2 records a fact
+ * lands that fact as trusted/active — an H4 pending_review bypass one seam over
+ * from the spawn one that IS closed.
+ *
+ * `seeded` is the caller's cause at run start ('none' for headless runs);
+ * `earned` is the most specific cause any STEP acquired during the run. The two
+ * stay separate because they answer different questions on the way OUT: a run
+ * whose steps earned external content must hand the caller `noteUntrustedData`
+ * (its result really derives from external content), while a run tainted only
+ * by its seed must hand back nothing — the caller already carries that taint,
+ * and re-reporting it as fresh would be the over-claim `restoreConversationTaint`
+ * exists to avoid.
+ */
+export interface RunTaint {
+  seeded: UntrustedCause;
+  earned: UntrustedCause;
+}
+
+/** Build a run's taint accumulator, seeded from the calling agent (or clean when headless). */
+export function newRunTaint(caller?: UntrustedSignals | undefined): RunTaint {
+  return { seeded: caller ? describeTurnUntrusted(caller) : 'none', earned: 'none' };
+}
+
+/** Whether any signal — seed or step-earned — puts this run on the untrusted side. */
+export function runTaintArmed(taint: RunTaint): boolean {
+  return taint.seeded !== 'none' || taint.earned !== 'none';
+}
+
+/**
+ * Fold a finished step's signals into the run accumulator. Only causes the step
+ * EARNED itself (marker / external-tool) escalate; 'conversation' is what our own
+ * seed reflects back off a fresh step agent and carries no new information.
+ */
+export function noteStepTaint(taint: RunTaint, stepAgent: UntrustedSignals): void {
+  const cause = describeTurnUntrusted(stepAgent);
+  if (cause === 'marker') taint.earned = 'marker';
+  else if (cause === 'external-tool' && taint.earned !== 'marker') taint.earned = 'external-tool';
+}
 
 /**
  * F1 (PRD-COST-CONTROLS-V2, D1): a pipeline step that declares no tier runs
@@ -395,6 +442,7 @@ export async function spawnViaAgent(
   stepRunId?: string | undefined,
   recordToolCall?: StepToolRecorder | undefined,
   secretStore?: SecretStoreLike | undefined,
+  runTaint?: RunTaint | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -489,6 +537,12 @@ export async function spawnViaAgent(
     preApproval,
     autonomy,
     capabilityContract,
+    // One flag governs the whole run: a step on a DK-on tenant must stand its
+    // legacy end-of-turn extraction down exactly like the main agent and
+    // spawned children do (spawn.ts threads the same flag). This path builds
+    // the agent without `memory`, so the extractor is inert here either way —
+    // the flag rides along so the two step paths cannot diverge.
+    durableMemoryEnabled: config.durable_memory_enabled === true,
     // Share the parent agent's SecretStore so this step's tools resolve
     // `secret:NAME` refs against the vault AND the fail-loud unresolved-secret
     // guard (agent.ts) fires. Without it the whole secret block is skipped: the
@@ -511,6 +565,16 @@ export async function spawnViaAgent(
   });
 
   activePipelineAgents.add(agent);
+  // Cross-step taint seed (mirror of spawn.ts's parent→child seed): once the
+  // run's accumulator is armed — by the caller's own taint or by an earlier
+  // step reading external content — this step starts with its STICKY latch
+  // armed, so a durable write inside it routes to pending_review instead of
+  // landing active. `restoreConversationTaint`, never `noteUntrustedData`: the
+  // step inherited the taint, it did not read external content itself, and the
+  // run-scoped marker is what the review chip REPORTS as the cause.
+  if (runTaint && runTaintArmed(runTaint)) {
+    agent.restoreConversationTaint();
+  }
   const timeoutMs = step.timeout_ms ?? 1_800_000;
   let timedOut = false;
   const timeoutId = setTimeout(() => {
@@ -538,6 +602,11 @@ export async function spawnViaAgent(
   } finally {
     clearTimeout(timeoutId);
     activePipelineAgents.delete(agent);
+    // Fold what this step SAW into the run accumulator — in finally, because a
+    // step that read external content and then failed/timed out still read it,
+    // and under on_failure:'continue' later steps still run. Over-taints only
+    // in the safe direction.
+    if (runTaint) noteStepTaint(runTaint, agent);
   }
 }
 
@@ -585,6 +654,7 @@ export async function spawnInline(
   stepRunId?: string | undefined,
   recordToolCall?: StepToolRecorder | undefined,
   secretStore?: SecretStoreLike | undefined,
+  runTaint?: RunTaint | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -682,6 +752,11 @@ export async function spawnInline(
     preApproval,
     autonomy,
     capabilityContract,
+    // One flag governs the whole run (mirror of spawn.ts:555): this step shares
+    // the parent's Memory below, so WITHOUT the flag a step on a DK-on tenant
+    // still ran the legacy end-of-turn extraction the main agent stands down —
+    // the one sub-agent path where the decoupling story had a hole.
+    durableMemoryEnabled: config.durable_memory_enabled === true,
     // A2: stamp guard decisions during this inline step onto the audit (see spawnViaAgent).
     currentRunId: stepRunId,
     toolContext: parentToolContext,
@@ -711,6 +786,16 @@ export async function spawnInline(
   });
 
   activePipelineAgents.add(agent);
+  // Cross-step taint seed (mirror of spawn.ts's parent→child seed): once the
+  // run's accumulator is armed — by the caller's own taint or by an earlier
+  // step reading external content — this step starts with its STICKY latch
+  // armed, so a durable write inside it routes to pending_review instead of
+  // landing active. `restoreConversationTaint`, never `noteUntrustedData`: the
+  // step inherited the taint, it did not read external content itself, and the
+  // run-scoped marker is what the review chip REPORTS as the cause.
+  if (runTaint && runTaintArmed(runTaint)) {
+    agent.restoreConversationTaint();
+  }
   const timeoutMs = step.timeout_ms ?? 1_800_000;
   let timedOut = false;
   const timeoutId = setTimeout(() => {
@@ -749,6 +834,11 @@ export async function spawnInline(
   } finally {
     clearTimeout(timeoutId);
     activePipelineAgents.delete(agent);
+    // Fold what this step SAW into the run accumulator — in finally, because a
+    // step that read external content and then failed/timed out still read it,
+    // and under on_failure:'continue' later steps still run. Over-taints only
+    // in the safe direction.
+    if (runTaint) noteStepTaint(runTaint, agent);
   }
 }
 
@@ -786,6 +876,7 @@ export async function spawnPipeline(
   runHistory?: import('../core/run-history.js').RunHistory | null | undefined,
   secretStore?: SecretStoreLike | undefined,
   parentRunId?: string | undefined,
+  runTaint?: RunTaint | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -832,6 +923,10 @@ export async function spawnPipeline(
     userTimezone,
     parentSessionCounters,
     parentMemory,
+    // Share the SAME accumulator with the nested run (not a copy): a nested
+    // workflow's external read must arm the OUTER run's later steps too, and
+    // the outer accumulator is what flows back to the caller at the end.
+    runTaint,
     // Thread the run's posture into the nested sub-pipeline. Without this a
     // `runtime:'pipeline'` step inside a headless `autonomous` workflow re-spawns
     // its inner steps with autonomy=undefined → a benign DANGEROUS_BASH op is

@@ -1296,7 +1296,7 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
 const RUN_CTX_KEYS = [
   'autonomy', 'parentTools', 'parentToolContext', 'parentMemory', 'userTimezone',
   'parentPrompt', 'parentSessionCounters', 'runHistory', 'hooks', 'capabilityContract',
-  'secretStore',
+  'secretStore', 'runTaint',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
@@ -1394,6 +1394,47 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     );
     const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
     expect(opts['secretStore']).toBe(secretStore);
+  });
+
+  it('seeds the run taint accumulator from a tainted caller (value, not just key)', async () => {
+    // A workflow started on a tainted turn must not launder a durable write
+    // through a fresh step agent — the run's accumulator starts armed.
+    const agent = makeAutonomyAgent(undefined);
+    (agent as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'record something')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['runTaint']).toEqual({ seeded: 'conversation', earned: 'none' });
+  });
+
+  it('a clean caller yields a clean (but present) accumulator', async () => {
+    const agent = makeAutonomyAgent(undefined);
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'do thing')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    // Present even when clean: the accumulator is what carries taint ACROSS
+    // steps once any step reads external content mid-run.
+    expect(opts['runTaint']).toEqual({ seeded: 'none', earned: 'none' });
+  });
+
+  it('the headless saved-workflow run carries a clean accumulator (cross-step chain without a caller)', async () => {
+    const id = 'wf-headless-taint';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['runTaint']).toEqual({ seeded: 'none', earned: 'none' });
   });
 
   it('leaves secretStore undefined for a chat agent with no vault (backward-compat)', async () => {
