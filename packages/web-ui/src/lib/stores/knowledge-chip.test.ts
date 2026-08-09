@@ -2,11 +2,13 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
+	carryKnowledgeWrites,
 	knowledgeCauseKey,
 	projectKnowledgeWrite,
 	reviewResolution,
 	retireResolution,
 	type KnowledgeWriteChip,
+	type ChipBearer,
 } from './knowledge-chip.js';
 
 describe('knowledgeCauseKey', () => {
@@ -123,5 +125,94 @@ describe('retireResolution', () => {
 		expect(retireResolution(true)).toBe('undone');
 		// `null` = no transition — the store must not flip the chip to done when the route refused.
 		expect(retireResolution(false)).toBeNull();
+	});
+});
+
+describe('carryKnowledgeWrites', () => {
+	const chip = (id: string, status: 'active' | 'pending_review' = 'pending_review'): KnowledgeWriteChip =>
+		({ id, status, text: `fact ${id}` });
+
+	it('carries a chip onto the adopted message with matching role and content', () => {
+		const local: ChipBearer[] = [
+			{ role: 'user', content: 'hi' },
+			{ role: 'assistant', content: 'done', knowledgeWrites: [chip('k1')] },
+		];
+		const adopted: ChipBearer[] = [
+			{ role: 'user', content: 'hi' },
+			{ role: 'assistant', content: 'done' },
+		];
+		carryKnowledgeWrites(local, adopted);
+		expect(adopted[1]!.knowledgeWrites?.map((w) => w.id)).toEqual(['k1']);
+		expect(adopted[0]!.knowledgeWrites).toBeUndefined();
+	});
+
+	it('falls back to the LAST assistant message when the server reprojected the turn', () => {
+		// Local fragmented shape vs the server's merged projection (the #4 multi-step merge):
+		// no content match exists, so the chip anchors to the last assistant message.
+		const local: ChipBearer[] = [
+			{ role: 'user', content: 'hi' },
+			{ role: 'assistant', content: 'step 1', knowledgeWrites: [chip('k1')] },
+			{ role: 'assistant', content: 'step 2' },
+		];
+		const adopted: ChipBearer[] = [
+			{ role: 'user', content: 'hi' },
+			{ role: 'assistant', content: 'merged answer' },
+		];
+		carryKnowledgeWrites(local, adopted);
+		expect(adopted[1]!.knowledgeWrites?.map((w) => w.id)).toEqual(['k1']);
+	});
+
+	it('never duplicates an id the adopted transcript already carries', () => {
+		const local: ChipBearer[] = [{ role: 'assistant', content: 'done', knowledgeWrites: [chip('k1'), chip('k2')] }];
+		const adopted: ChipBearer[] = [{ role: 'assistant', content: 'done', knowledgeWrites: [chip('k1')] }];
+		carryKnowledgeWrites(local, adopted);
+		expect(adopted[0]!.knowledgeWrites?.map((w) => w.id)).toEqual(['k1', 'k2']);
+	});
+
+	it('pairs duplicate-content messages positionally, not both onto the first', () => {
+		// Two tool-call messages share empty content; the cursor keeps the pairing ordered.
+		const local: ChipBearer[] = [
+			{ role: 'assistant', content: '', knowledgeWrites: [chip('k1')] },
+			{ role: 'assistant', content: '', knowledgeWrites: [chip('k2')] },
+		];
+		const adopted: ChipBearer[] = [
+			{ role: 'assistant', content: '' },
+			{ role: 'assistant', content: '' },
+		];
+		carryKnowledgeWrites(local, adopted);
+		expect(adopted[0]!.knowledgeWrites?.map((w) => w.id)).toEqual(['k1']);
+		expect(adopted[1]!.knowledgeWrites?.map((w) => w.id)).toEqual(['k2']);
+	});
+
+	it('carries resolved chips too — a reviewed chip must keep rendering as done', () => {
+		const resolved: KnowledgeWriteChip = { ...chip('k1'), resolved: 'kept' };
+		const local: ChipBearer[] = [{ role: 'assistant', content: 'done', knowledgeWrites: [resolved] }];
+		const adopted: ChipBearer[] = [{ role: 'assistant', content: 'done' }];
+		carryKnowledgeWrites(local, adopted);
+		expect(adopted[0]!.knowledgeWrites?.[0]?.resolved).toBe('kept');
+	});
+
+	it('drops chips without throwing when the adopted transcript has no assistant message', () => {
+		const local: ChipBearer[] = [{ role: 'assistant', content: 'x', knowledgeWrites: [chip('k1')] }];
+		const adopted: ChipBearer[] = [{ role: 'user', content: 'hi' }];
+		carryKnowledgeWrites(local, adopted);
+		expect(adopted[0]!.knowledgeWrites).toBeUndefined();
+	});
+});
+
+describe('transcript adoption wires the carry-over (source guard)', () => {
+	// `chat.svelte.ts` is a Svelte 5 rune module the root vitest config cannot import
+	// (`$state is not defined`) — the same constraint chat-detach-reset.test.ts documents.
+	// So the two call sites are pinned at source level: BOTH wholesale adoptions
+	// (`messages = serverMessages`) must be immediately preceded by a
+	// `carryKnowledgeWrites(..., serverMessages)` call. Removing either call — the
+	// mutation that re-opens the chip wipe — fails here; the behaviour of the carry
+	// itself is covered by the block above.
+	it('both adoption sites call carryKnowledgeWrites before swapping in serverMessages', () => {
+		const src = readFileSync(fileURLToPath(new URL('./chat.svelte.ts', import.meta.url)), 'utf-8');
+		const swaps = src.match(/carryKnowledgeWrites\((?:localMessages|messages), serverMessages\);[\s\S]{0,220}?messages = serverMessages;/g) ?? [];
+		expect(swaps.length, 'each wholesale adoption must carry knowledgeWrites over').toBe(2);
+		const totalSwaps = src.match(/messages = serverMessages;/g) ?? [];
+		expect(totalSwaps.length, 'a new adoption site was added without carry-over').toBe(2);
 	});
 });
