@@ -1,0 +1,41 @@
+{
+  "schema": "fast-bench-transcript/v1",
+  "id": "t12-pricing-analyse",
+  "title": "Pricing-Review gegen Wettbewerb (DE+EN, Vergleichstabellen, Jahresrabatt-Entscheid)",
+  "targetTokens": 21000,
+  "messages": [
+    { "role": "user", "content": [ { "type": "text", "text": "Wir reviewen das Pricing fuer unser Buchhaltungs-Tool Kontowerk. Aktuell: Solo CHF 29, Team CHF 79, Business CHF 149 pro Monat. Der Vertrieb sagt, wir verlieren Deals gegen zwei guenstigere Anbieter. Schau dir den Markt an und sag mir, ob wir am Preis drehen muessen." } ] },
+    { "role": "assistant", "content": [ { "type": "tool_use", "id": "tu_t12_01", "name": "web_research", "input": { "query": "Buchhaltungssoftware Schweiz KMU Preise 2026 Vergleich monatlich Team-Plan" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t12_01", "content": [ { "type": "text", "text": "Market digest (11 sources): Anbieter A (Zuerich): Team-Plan CHF 59/Mt, Jahreszahlung -20%. Anbieter B (Berlin, CH-Version): Team EUR 49/Mt, aber Lohnbuchhaltung nur als Add-on EUR 25. Anbieter C (Marktfuehrer): CHF 95/Mt Team, seit Jahren stabil. Kontowerk liegt mit CHF 79 in der Mitte. Feature-Vergleich: nur Kontowerk und C haben integrierte Lohnbuchhaltung im Team-Plan; A und B verrechnen sie separat.\n\nSource notes:" }, { "type": "pad", "generator": "maillist", "lines": 550, "seed": 121 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Erste Einordnung: nominal sind A (CHF 59) und B (EUR 49) guenstiger — aber beide OHNE Lohnbuchhaltung, die bei uns im Team-Plan drin ist. Effektiv vergleichbar gerechnet (Team + Lohn): A ~CHF 84, B ~EUR 74, wir CHF 79. Wir sind also gar nicht teurer, wir kommunizieren es nur schlecht. Bevor ich eine Empfehlung gebe: wie sehen unsere eigenen Verlust-Gruende aus?" }, { "type": "tool_use", "id": "tu_t12_02", "name": "run_sql", "input": { "db": "crm", "query": "SELECT lost_reason, COUNT(*) c, AVG(seats) FROM opportunities WHERE status='lost' AND created_at > date('now','-180 day') GROUP BY lost_reason ORDER BY c DESC" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t12_02", "content": [ { "type": "text", "text": "Lost reasons (180d, 74 lost opportunities): 'zu teuer' 31 (42%), 'Funktionsumfang' 12, 'bleibt bei bisherigem Tool' 11, Sonstiges 20. ABER: von den 31 'zu teuer' nannten 24 im Verlust-Call den Vergleich mit Anbieter A oder B OHNE die Lohn-Add-on-Kosten mitzurechnen. Avg seats der 'zu teuer'-Verluste: 4.2.\n\nOpportunity rows:" }, { "type": "pad", "generator": "csv", "lines": 1050, "seed": 122 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Das bestaetigt die These: 24 von 31 Preis-Verlusten vergleichen unseren All-in-Preis mit dem Nackt-Preis der Konkurrenz. Das ist ein Kommunikations-, kein Preisproblem.\n\nMeine Empfehlung:\n1. KEINE Senkung des Team-Preises — CHF 79 ist effektiv wettbewerbsfaehig, eine Senkung wuerde ~CHF 118'000 ARR verschenken (248 Team-Kunden × CHF 20 × 12 — die Rechnung haengt natuerlich an der Senkungshoehe, hier auf CHF 59 gerechnet) fuer ein Problem, das nicht der Preis ist.\n2. Jahresrabatt einfuehren: -15% bei Jahreszahlung (Team effektiv CHF 67.15/Mt). Das beantwortet den Anbieter-A-Vergleich (deren -20% ist deren wichtigstes Sales-Argument) und verbessert unseren Cashflow.\n3. Vergleichsrechner auf die Pricing-Seite: Team-Plan INKLUSIVE Lohnbuchhaltung gegen A/B MIT deren Add-on-Kosten — genau die Rechnung, die in den Verlust-Calls fehlte.\n4. Sales-Battlecard mit der Effektivpreis-Tabelle fuer die Verlust-Situation 'Anbieter A ist guenstiger'.\n\nNicht anfassen wuerde ich Solo (CHF 29) und Business (CHF 149) — beide tauchen in den Verlustgruenden praktisch nicht auf." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Gekauft, alle vier Punkte. Beim Jahresrabatt aber -15% nur im ersten Jahr oder dauerhaft? Und der Vergleichsrechner muss fair bleiben, ich will keine Milchmaedchenrechnung auf der Website." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Zum Rabatt: dauerhaft, nicht nur im ersten Jahr. Ein Erstjahres-Rabatt erzeugt im Jahr 2 eine Preiserhoehungs-Wahrnehmung und Churn-Gespraeche — dauerhafte -15% sind ehrlicher und binden laenger. Anbieter A macht es genauso.\n\nZum Rechner, damit er fair bleibt: wir rechnen mit den oeffentlichen Listenpreisen der Anbieter (Quelle und Abrufdatum sichtbar verlinkt), nehmen deren guenstigste Add-on-Variante, und zeigen auch die Konstellation, in der A guenstiger IST (Teams ohne Lohnbuchhaltungs-Bedarf unter 3 Sitzen). Ein Rechner, der immer uns gewinnen laesst, fliegt auf und schadet mehr als er nuetzt.\n\nUmsetzungsplan:\n- Jahresrabatt -15% dauerhaft: Billing-Aenderung + AGB-Anpassung, Ziel-Livegang 01.10.2026.\n- Vergleichsrechner: Entwurf mit den Quellen-Links bis 20.08. an dich.\n- Battlecard: bis Ende naechster Woche an den Vertrieb, mit der 24-von-31-Auswertung als Kernargument.\n- Messung: Verlustgrund 'zu teuer' soll in 2 Quartalen unter 25% der Verluste liegen (heute 42%) — daran messen wir, ob die Massnahmen wirken." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Sehr gut, genau so. Fuer die AGB-Anpassung haeng dich mit Rechtsanwaeltin Frau Steiner zusammen, die kennt unsere AGB. Livegang 01.10. ist okay." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Zusammenfassung der Entscheide: Team-Preis bleibt CHF 79 (keine Senkung — Kommunikations-, nicht Preisproblem, 24 von 31 Preis-Verlusten verglichen Aepfel mit Birnen). Neu: dauerhafter Jahresrabatt -15% (Team effektiv CHF 67.15), Livegang 01.10.2026, AGB-Anpassung mit Frau Steiner. Fairer Vergleichsrechner (Listenpreise mit Quellen, zeigt auch A-guenstiger-Faelle) — Entwurf bis 20.08. an dich. Battlecard bis Ende naechster Woche. Erfolgsmetrik: 'zu teuer'-Verluste von 42% auf unter 25% in zwei Quartalen. Naechster Schritt bei mir: Termin mit Frau Steiner und der Rechner-Entwurf." } ] }
+  ],
+  "checklist": {
+    "literals": [
+      "79",
+      "67.15",
+      "-15%",
+      "01.10.2026",
+      "24 von 31",
+      "Frau Steiner",
+      "20.08",
+      "42%",
+      "25%"
+    ],
+    "rubric": [
+      "Records the core decision: NO price cut on the Team plan — the finding was a communication problem (competitors compared without their payroll add-on costs), not a price problem.",
+      "Preserves the evidence: 24 of 31 'too expensive' losses compared the all-in price against competitors' base price, and the effective-price math (A ~CHF 84, B ~EUR 74 vs own CHF 79).",
+      "Records the annual-discount decision: -15% PERMANENT (not first-year only) and the churn-perception reasoning behind permanence.",
+      "Preserves the fairness constraints on the comparison calculator: public list prices with visible sources, cheapest add-on variant, and showing cases where competitor A genuinely wins.",
+      "Keeps the delivery deadlines: calculator draft by 20.08 (to the user), battlecard by end of next week, discount go-live 01.10.2026.",
+      "Preserves that the AGB/terms change is done together with the lawyer Frau Steiner.",
+      "Preserves the success metric: 'too expensive' loss share from 42% to under 25% within two quarters.",
+      "Preserves that Solo (CHF 29) and Business (CHF 149) remain untouched because they barely appear in loss reasons."
+    ]
+  }
+}
