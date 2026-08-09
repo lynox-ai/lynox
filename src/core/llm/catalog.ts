@@ -73,7 +73,9 @@ export interface CatalogProviderEntry {
    * SLOT is a different promise: it pins exactly one model per band, so the
    * picker needs a short, vetted list instead of a free-text field per tier.
    *
-   * These are therefore only the entry's MEASURED, currently-served models —
+   * These are therefore only the entry's vetted, currently-served models —
+   * either replay-MEASURED preset-slot models or explicitly-marked CANDIDATES
+   * (unmeasured, picker-selectable for canary testing; no preset pins them) —
    * each id registered in MODEL_CAPABILITIES, pricing/context mirrored from
    * there (same drift-guard test as `models`). Entries that ship a `models`
    * catalog never need this: the picker uses `models` directly.
@@ -475,9 +477,11 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     verification: 'verified',
     notes: 'Model is free-text — pick a tool-capable one.',
     // Per-tier picker options only (`tier_models`, see the interface doc): the
-    // two measured, currently-served models the hybrid presets pin. The TILE
-    // stays free-text (`models: []` above is untouched). No `tier` field — both
-    // are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no tier map).
+    // currently-served preset-slot/candidate models. GLM + DeepSeek are replay
+    // -measured; Kimi K3 is a CANDIDATE (added 2026-08-09 for the rafael canary,
+    // replay measurement owed via the #1112 harness before any preset pins it).
+    // The TILE stays free-text (`models: []` above is untouched). No `tier`
+    // field — all are `tier: null` in MODEL_CAPABILITIES (no measured tier map).
     tier_models: [
       {
         id: 'accounts/fireworks/models/glm-5p2',
@@ -496,6 +500,69 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
         notes: '1M context; alternative deep/big-context model. Text-only (no vision).',
+      },
+      {
+        id: 'accounts/fireworks/models/kimi-k3',
+        label: 'Kimi K3',
+        context_window: 1_000_000,
+        pricing: { input: 3.00, output: 15.00 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '1M context; deep/main candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
+      },
+      {
+        id: 'accounts/fireworks/models/deepseek-v4-flash',
+        label: 'DeepSeek v4 Flash',
+        context_window: 1_000_000,
+        pricing: { input: 0.14, output: 0.28 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '1M context; fast/balanced candidate (unmeasured) at fast-slot cost. Text-only (no vision).',
+      },
+      {
+        id: 'accounts/fireworks/models/qwen3p7-plus',
+        label: 'Qwen3.7 Plus',
+        context_window: 262_144,
+        pricing: { input: 0.40, output: 1.60 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '262k context; balanced candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
+      },
+      {
+        id: 'accounts/fireworks/models/gpt-oss-120b',
+        label: 'GPT-OSS 120B',
+        context_window: 131_072,
+        pricing: { input: 0.15, output: 0.60 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance US (OpenAI open weights)',
+        notes: '131k context; balanced candidate — the one whose tool_use wire the reachability suite has proven. Text-only.',
+      },
+      {
+        id: 'accounts/fireworks/models/kimi-k2p6',
+        label: 'Kimi K2.6',
+        context_window: 262_144,
+        pricing: { input: 0.95, output: 4.00 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '262k context; generalist main-chat candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
+      },
+      {
+        id: 'accounts/fireworks/models/kimi-k2p7-code',
+        label: 'Kimi K2.7 Code',
+        context_window: 262_144,
+        pricing: { input: 0.95, output: 4.00 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '262k context; agentic/coding candidate (unmeasured); reasons on every turn (no non-thinking mode). Text-only for now.',
+      },
+      {
+        id: 'accounts/fireworks/models/minimax-m3',
+        label: 'MiniMax M3',
+        context_window: 524_288,
+        pricing: { input: 0.30, output: 1.20 },
+        capabilities: ['tool_use'],
+        residency: 'US (Fireworks AI) — model provenance CN',
+        notes: '512k context; balanced candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
       },
     ],
   },

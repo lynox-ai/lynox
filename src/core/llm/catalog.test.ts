@@ -160,10 +160,11 @@ describe('LLM_CATALOG', () => {
       if (!cap) continue; // custom / provider-specific ids not in the registry
       checked++;
       expect(model.context_window, `${model.id} context_window`).toBe(cap.contextWindow);
-      if (model.pricing) {
-        expect(model.pricing.input, `${model.id} pricing.input`).toBe(cap.pricing.input);
-        expect(model.pricing.output, `${model.id} pricing.output`).toBe(cap.pricing.output);
-      }
+      // Registry-backed entries must CARRY pricing — a truthy-guard here let a
+      // deleted pricing field skip the drift check silently (pr-review #1162).
+      expect(model.pricing, `${model.id} must carry pricing`).toBeDefined();
+      expect(model.pricing!.input, `${model.id} pricing.input`).toBe(cap.pricing.input);
+      expect(model.pricing!.output, `${model.id} pricing.output`).toBe(cap.pricing.output);
     }
     expect(checked).toBeGreaterThan(0); // the guard actually exercised the registry-backed entries
   });
@@ -271,14 +272,23 @@ describe('LLM_CATALOG', () => {
 });
 
 describe('LLM_CATALOG.tier_models (per-tier picker options on a free-text tile)', () => {
-  it('fireworks pins exactly the two measured preset-slot models — no tier tag', () => {
+  it('fireworks pins exactly the served preset-slot/candidate models — no tier tag', () => {
     const entry = getCatalogEntryByKey('fireworks')!;
     expect((entry.tier_models ?? []).map((m) => m.id)).toEqual([
       'accounts/fireworks/models/glm-5p2',
       'accounts/fireworks/models/deepseek-v4-pro',
+      // Candidates (2026-08-09, rafael canary) — replay measurement owed before
+      // any preset pins them; presence here only makes them picker-selectable.
+      'accounts/fireworks/models/kimi-k3',
+      'accounts/fireworks/models/deepseek-v4-flash',
+      'accounts/fireworks/models/qwen3p7-plus',
+      'accounts/fireworks/models/gpt-oss-120b',
+      'accounts/fireworks/models/kimi-k2p6',
+      'accounts/fireworks/models/kimi-k2p7-code',
+      'accounts/fireworks/models/minimax-m3',
     ]);
     for (const m of entry.tier_models ?? []) {
-      // Both are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no
+      // All are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no
       // measured tier map) — a `tier` tag here would fake a band mapping.
       expect(m.tier, `${m.id} must not fake a tier band`).toBeUndefined();
       expect(m.capabilities).toEqual(['tool_use']);   // text-only on Fireworks
