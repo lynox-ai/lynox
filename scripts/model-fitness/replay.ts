@@ -36,7 +36,9 @@ interface Candidate {
 // listed here: OpenRouter is a different host/version/quant than prod's Fireworks glm-5p2, which
 // would reintroduce exactly the fidelity gap this eval exists to kill — measure those through
 // the real qa-managed engine (tier_set swap) or with a real Fireworks key.
-const CANDIDATES: Candidate[] = [
+// Exported so the suite can pin every Fireworks candidate id against MODEL_CAPABILITIES —
+// a typo'd id here would otherwise fail only at replay time, against the live endpoint.
+export const CANDIDATES: Candidate[] = [
   { label: 'ministral-14b (control)', provider: 'openai', modelId: 'ministral-14b-2512', apiBaseURL: MISTRAL_BASE, keyName: 'mistral', expect: 'inline' },
   { label: 'mistral-medium', provider: 'openai', modelId: 'mistral-medium-2604', apiBaseURL: MISTRAL_BASE, keyName: 'mistral', expect: 'escalate' },
   { label: 'haiku-4.5', provider: 'anthropic', modelId: 'claude-haiku-4-5-20251001', keyName: 'anthropic', expect: 'escalate' },
@@ -46,6 +48,15 @@ const CANDIDATES: Candidate[] = [
   // Kimi K3 (Moonshot, 2.8T MoE, 1M ctx) — new main/deep candidate on the same real Fireworks
   // endpoint. `expect: 'escalate'` is the HYPOTHESIS this replay has to confirm, not a result.
   { label: 'kimi-k3 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/kimi-k3', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
+  // The 2026-08-09 picker-candidate wave (core #1162) — every entry the per-tier picker now
+  // offers must be measurable HERE before a preset may pin it (tier-presets.test.ts guard).
+  // All `expect: 'escalate'` = the same floor hypothesis as above, decided per body via --expect.
+  { label: 'deepseek-v4-flash (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/deepseek-v4-flash', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
+  { label: 'qwen3.7-plus (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/qwen3p7-plus', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
+  { label: 'gpt-oss-120b (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/gpt-oss-120b', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
+  { label: 'kimi-k2.6 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/kimi-k2p6', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
+  { label: 'kimi-k2.7-code (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/kimi-k2p7-code', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
+  { label: 'minimax-m3 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/minimax-m3', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
 ];
 
 interface RawBody {

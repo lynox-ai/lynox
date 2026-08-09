@@ -144,3 +144,20 @@ describe('isDirectInvocation', () => {
     expect(isDirectInvocation(pathToFileURL(SCRIPT).href, new URL(import.meta.url).pathname)).toBe(false);
   });
 });
+
+describe('CANDIDATES stay in lockstep with the model registry', () => {
+  it('every Fireworks candidate id is registered in MODEL_CAPABILITIES', async () => {
+    // A typo'd id in the candidate list would otherwise surface only at replay
+    // time as a live-endpoint 404 — this pins the list to the registry, which is
+    // page-verified (model-presets-registry.test.ts). Mistral/Anthropic ids are
+    // covered by their own registry tests; the Fireworks wave is what grows here.
+    const { CANDIDATES } = await import('../scripts/model-fitness/replay.js');
+    const { MODEL_CAPABILITIES } = await import('../src/types/models.js');
+    const fireworks = CANDIDATES.filter((c) => c.keyName === 'fireworks');
+    // The 2026-08-09 picker wave (core #1162) must be measurable here — 7 entries.
+    expect(fireworks.length).toBeGreaterThanOrEqual(7);
+    for (const c of fireworks) {
+      expect(MODEL_CAPABILITIES[c.modelId], `${c.label}: ${c.modelId} must be registered`).toBeDefined();
+    }
+  });
+});
