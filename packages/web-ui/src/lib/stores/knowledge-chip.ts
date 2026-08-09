@@ -105,13 +105,27 @@ export async function performRetire(
 	let ok = false;
 	try {
 		ok = (await send()).ok;
-	} catch {
-		ok = false;
-	}
+	} catch { /* a thrown send counts as not-ok, same as the route refusing */ }
 	const resolved = retireResolution(ok);
 	if (!resolved) return 'failed';
 	chip.resolved = resolved;
 	return 'resolved';
+}
+
+/** The JSON body the review route expects — `text` only rides along on an edit, so a plain
+ *  approve/reject must not send a `text` key at all. */
+export function reviewRequestBody(
+	action: 'approve' | 'edit_approve' | 'reject',
+	editedText: string | undefined,
+): { action: string; text?: string } {
+	return editedText !== undefined ? { action, text: editedText } : { action };
+}
+
+/** The toast wording for a refused review: the server's own `error` when it sent one,
+ *  else the bare status. `??` (not `||`) on purpose — an explicit empty-string error is
+ *  passed through unchanged, preserving the pre-extraction behaviour byte for byte. */
+export function parseReviewFailure(status: number, body: { error?: string } | null): string {
+	return body?.error ?? `HTTP ${status}`;
 }
 
 /**
@@ -128,8 +142,11 @@ export async function performReview(
 	action: 'approve' | 'edit_approve' | 'reject',
 	editedText: string | undefined,
 	send: () => Promise<{ ok: boolean; errorMessage: string | null }>,
-): Promise<{ outcome: ChipActionOutcome; errorMessage: string | null }> {
-	if (!chip || chip.resolved) return { outcome: 'noop', errorMessage: null };
+	// Discriminated on `outcome` so `errorMessage` only exists where it means something —
+	// the compiler then forces every consumer to narrow before reading it (the same
+	// return-type-over-convention move as SubjectStore's {ok}|{ambiguous}).
+): Promise<{ outcome: 'resolved' | 'noop' } | { outcome: 'failed'; errorMessage: string | null }> {
+	if (!chip || chip.resolved) return { outcome: 'noop' };
 	let res: { ok: boolean; errorMessage: string | null };
 	try {
 		res = await send();
@@ -139,7 +156,7 @@ export async function performReview(
 	if (!res.ok) return { outcome: 'failed', errorMessage: res.errorMessage };
 	if (editedText !== undefined) chip.text = editedText;
 	chip.resolved = reviewResolution(action);
-	return { outcome: 'resolved', errorMessage: null };
+	return { outcome: 'resolved' };
 }
 
 /** The minimal message shape carry-over needs — structural, so the pure module

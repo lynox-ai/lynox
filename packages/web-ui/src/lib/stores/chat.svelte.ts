@@ -19,7 +19,7 @@ import {
 	type ContentBlock,
 } from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
-import { projectKnowledgeWrite, performRetire, performReview, carryKnowledgeWrites, allKnowledgeWrites, type KnowledgeWriteChip } from './knowledge-chip.js';
+import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody, parseReviewFailure, carryKnowledgeWrites, allKnowledgeWrites, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -2232,19 +2232,19 @@ export async function reviewKnowledge(
 	const chip = messages[msgIdx]?.knowledgeWrites?.find((w) => w.id === id);
 	// Success-only transition (incl. "failed edit_approve keeps the editor open") lives in
 	// `performReview` (tested in the ordinary suite); this wrapper is transport + toasts.
-	const { outcome, errorMessage } = await performReview(chip, action, editedText, async () => {
+	const result = await performReview(chip, action, editedText, async () => {
 		const res = await fetch(`${getApiBase()}/knowledge/queue/${id}/review`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(editedText !== undefined ? { action, text: editedText } : { action }),
+			body: JSON.stringify(reviewRequestBody(action, editedText)),
 		});
 		if (res.ok) return { ok: true, errorMessage: null };
 		const body = (await res.json().catch(() => null)) as { error?: string } | null;
-		return { ok: false, errorMessage: body?.error ?? `HTTP ${res.status}` };
+		return { ok: false, errorMessage: parseReviewFailure(res.status, body) };
 	});
-	if (outcome === 'failed') {
-		addToast(errorMessage ?? t('chat.knowledge.review_failed'), 'error', 4000);
-	} else if (outcome === 'resolved') {
+	if (result.outcome === 'failed') {
+		addToast(result.errorMessage ?? t('chat.knowledge.review_failed'), 'error', 4000);
+	} else if (result.outcome === 'resolved') {
 		// One fewer waiting in this thread — the banner must not keep claiming otherwise
 		// after the person has just dealt with it.
 		void refreshThreadPendingCount();

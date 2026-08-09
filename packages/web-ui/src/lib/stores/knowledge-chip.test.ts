@@ -5,9 +5,11 @@ import {
 	allKnowledgeWrites,
 	carryKnowledgeWrites,
 	knowledgeCauseKey,
+	parseReviewFailure,
 	performRetire,
 	performReview,
 	projectKnowledgeWrite,
+	reviewRequestBody,
 	reviewResolution,
 	retireResolution,
 	type KnowledgeWriteChip,
@@ -194,12 +196,12 @@ describe('performReview — success-only transition, editor stays open on failur
 		// The verify-done case: applying `chip.text = editedText` before the ok-check (the
 		// mutation this kills) would render the edit as landed when the server refused it.
 		const chip = pending();
-		const { outcome, errorMessage } = await performReview(
+		const result = await performReview(
 			chip, 'edit_approve', 'edited wording',
 			async () => ({ ok: false, errorMessage: 'text too long' }),
 		);
-		expect(outcome).toBe('failed');
-		expect(errorMessage).toBe('text too long'); // the server's wording reaches the toast
+		// Whole-object equality: pins the outcome AND that the server's wording reaches the toast.
+		expect(result).toEqual({ outcome: 'failed', errorMessage: 'text too long' });
 		expect(chip.text).toBe('original wording');
 		expect(chip.resolved).toBeUndefined();
 	});
@@ -220,6 +222,34 @@ describe('performReview — success-only transition, editor stays open on failur
 		const done: KnowledgeWriteChip = { ...pending(), resolved: 'kept' };
 		expect((await performReview(done, 'reject', undefined, send)).outcome).toBe('noop');
 		expect(calls).toBe(0);
+	});
+});
+
+describe('reviewRequestBody', () => {
+	it('a plain approve/reject sends NO text key — not even an undefined one', () => {
+		// The route treats a present `text` as an edit; `{ action, text: undefined }` would
+		// JSON.stringify away today but the absence is the contract, so pin it structurally.
+		const body = reviewRequestBody('approve', undefined);
+		expect(body).toEqual({ action: 'approve' });
+		expect('text' in body).toBe(false);
+	});
+
+	it('an edit rides the edited text along', () => {
+		expect(reviewRequestBody('edit_approve', 'edited wording')).toEqual({ action: 'edit_approve', text: 'edited wording' });
+	});
+});
+
+describe('parseReviewFailure', () => {
+	it('prefers the server wording, falls back to the bare status', () => {
+		expect(parseReviewFailure(422, { error: 'text too long' })).toBe('text too long');
+		expect(parseReviewFailure(500, null)).toBe('HTTP 500');
+		expect(parseReviewFailure(400, {})).toBe('HTTP 400');
+	});
+
+	it('passes an explicit empty-string error through — the pre-extraction behaviour', () => {
+		// `??`, not `||`: the old inline code let `error: ''` through as the toast text, and
+		// this helper must not silently upgrade it to the status line.
+		expect(parseReviewFailure(400, { error: '' })).toBe('');
 	});
 });
 
@@ -359,23 +389,47 @@ describe('transcript adoption wires the carry-over (source guard)', () => {
 		expect(totalSwaps.length, 'a new adoption site was added without carry-over').toBe(2);
 	});
 
-	it('the store wrappers delegate to performRetire/performReview — not a re-inlined copy', () => {
-		// The dead-wire class: `performRetire`'s own tests stay green even if the store stops
-		// calling it and grows a divergent inline copy. Pinned at source because the rune
-		// module cannot be imported. Line-start anchored so a commented-out call never passes.
-		const src = readFileSync(fileURLToPath(new URL('./chat.svelte.ts', import.meta.url)), 'utf-8');
-		expect(/(?:^|\n)[\t ]*const outcome = await performRetire\(chip, async \(\) => \{/.test(src),
-			'retireKnowledge must delegate its guard/gate/transition to performRetire').toBe(true);
-		expect(/(?:^|\n)[\t ]*const \{ outcome, errorMessage \} = await performReview\(chip, action, editedText, async \(\) => \{/.test(src),
-			'reviewKnowledge must delegate its guard/gate/transition to performReview').toBe(true);
-	});
-
 	it('the SSE knowledge_write handler dedups against the whole transcript', () => {
 		const src = readFileSync(fileURLToPath(new URL('./chat.svelte.ts', import.meta.url)), 'utf-8');
 		// Per-message dedup (`projectKnowledgeWrite(msg.knowledgeWrites ?? []`) re-adds a
 		// replayed id after adoption anchored the carried chip on another message.
 		expect(/(?:^|\n)[\t ]*\[\.\.\.allKnowledgeWrites\(messages\), \.\.\.\(msg\.knowledgeWrites \?\? \[\]\)\], data\)/.test(src),
 			'knowledge_write must dedup transcript-globally via allKnowledgeWrites').toBe(true);
+	});
+});
+
+describe('store wrappers delegate the chip glue (source guard)', () => {
+	// The dead-wire class: `performRetire`/`performReview`'s own tests stay green even if
+	// the store stops calling them or re-inlines a divergent copy. Pinned at source because
+	// the rune module cannot be imported. Line-start anchored so a commented-out line never
+	// passes. Three layers per wrapper, because each can die independently: the delegation
+	// call, the send closure's REAL `res.ok` (an `ok: true` here silently kills the 2xx
+	// gate in production while every unit test stays green), and the outcome consumers
+	// (an assigned-but-ignored result would drop the toast / the pending-count refresh).
+	const src = readFileSync(fileURLToPath(new URL('./chat.svelte.ts', import.meta.url)), 'utf-8');
+
+	it('retireKnowledge: delegation, real res.ok, and the failure toast', () => {
+		expect(/(?:^|\n)[\t ]*const outcome = await performRetire\(chip, async \(\) => \{/.test(src),
+			'retireKnowledge must delegate its guard/gate/transition to performRetire').toBe(true);
+		expect(/(?:^|\n)[\t ]*return \{ ok: res\.ok \};/.test(src),
+			'the retire send closure must report the REAL res.ok').toBe(true);
+		expect(/(?:^|\n)[\t ]*if \(outcome === 'failed'\) addToast\(t\('chat\.knowledge\.undo_failed'\)/.test(src),
+			'a failed retire must surface the undo_failed toast').toBe(true);
+	});
+
+	it('reviewKnowledge: delegation, real res.ok, tested body/parse helpers, both consumers', () => {
+		expect(/(?:^|\n)[\t ]*const result = await performReview\(chip, action, editedText, async \(\) => \{/.test(src),
+			'reviewKnowledge must delegate its guard/gate/transition to performReview').toBe(true);
+		expect(/(?:^|\n)[\t ]*if \(res\.ok\) return \{ ok: true, errorMessage: null \};/.test(src),
+			'the review send closure must gate on the REAL res.ok').toBe(true);
+		expect(/(?:^|\n)[\t ]*body: JSON\.stringify\(reviewRequestBody\(action, editedText\)\),/.test(src),
+			'the request body must come from the tested reviewRequestBody helper').toBe(true);
+		expect(/(?:^|\n)[\t ]*return \{ ok: false, errorMessage: parseReviewFailure\(res\.status, body\) \};/.test(src),
+			'the failure wording must come from the tested parseReviewFailure helper').toBe(true);
+		expect(/(?:^|\n)[\t ]*if \(result\.outcome === 'failed'\) \{\n[\t ]*addToast\(result\.errorMessage \?\? t\('chat\.knowledge\.review_failed'\)/.test(src),
+			'a failed review must surface the server wording (or the generic line) as a toast').toBe(true);
+		expect(/(?:^|\n)[\t ]*\} else if \(result\.outcome === 'resolved'\) \{[\s\S]{0,240}?void refreshThreadPendingCount\(\);/.test(src),
+			'a resolved review must refresh the thread pending count').toBe(true);
 	});
 });
 
