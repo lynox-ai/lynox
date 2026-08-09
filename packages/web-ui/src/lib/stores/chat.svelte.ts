@@ -19,7 +19,7 @@ import {
 	type ContentBlock,
 } from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
-import { projectKnowledgeWrite, reviewResolution, retireResolution, type KnowledgeWriteChip } from './knowledge-chip.js';
+import { projectKnowledgeWrite, reviewResolution, retireResolution, carryKnowledgeWrites, allKnowledgeWrites, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -1771,12 +1771,21 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		case 'knowledge_write': {
 			// DK-UX: a durable-knowledge write happened this turn. Batch onto the assistant
 			// message as an inline chip (trusted → "gemerkt · rückgängig"; untrusted →
-			// keep/discard review). Client-only: never persisted, never re-injected into
-			// model context — so a resume cannot re-surface the untrusted wording.
+			// keep/discard review). Client-side only: persisted with the transcript in
+			// localStorage and carried across transcript adoption, but never re-injected
+			// into model context — the untrusted wording is shown to the person (that is
+			// the chip's purpose), not to the model.
 			// Projection + dedup (Tier-2 replay) is pure — see `projectKnowledgeWrite`. Only
 			// materialise the array when there is a chip to push, so a malformed (no-id) or
 			// duplicate event leaves the message exactly as it was.
-			const chip = projectKnowledgeWrite(msg.knowledgeWrites ?? [], data);
+			// Dedup against the WHOLE transcript, not just this message: after an adoption
+			// anchored a carried chip elsewhere (the reprojection fallback), a Tier-2
+			// replay of the same id would otherwise re-add it here as a second,
+			// unresolved-looking chip.
+			// `msg` is included explicitly in case it is not yet part of `messages`
+			// (duplicates in the existing-list are harmless — the check is a `.some`).
+			const chip = projectKnowledgeWrite(
+				[...allKnowledgeWrites(messages), ...(msg.knowledgeWrites ?? [])], data);
 			if (chip) (msg.knowledgeWrites ??= []).push(chip);
 			break;
 		}
@@ -2965,6 +2974,10 @@ export async function resumeThread(threadId: string): Promise<void> {
 			// loads an equal-or-longer transcript is unaffected.
 			if (serverMessages.length >= localMessages.length
 				|| (!isStreaming && !resumeActiveRun && !hasUnpersistedLocal)) {
+				// Server messages never carry chips — without this, adoption wipes a
+				// pending-review chip at run end (the observed end-of-run flicker) and
+				// loses it for good on a settled reload.
+				carryKnowledgeWrites(localMessages, serverMessages);
 				messages = serverMessages;
 				adoptedServer = true;
 			}
@@ -3105,6 +3118,9 @@ export async function reconcileThread(): Promise<void> {
 		// Never adopt while a turn is in flight.
 		if (tid === sessionId && !isStreaming
 			&& (serverMessages.length >= messages.length || (!data.activeRun && !hasUnpersistedLocal))) {
+			// Same carry-over as resumeThread — a reconcile on remount must not wipe
+			// a pending-review chip either.
+			carryKnowledgeWrites(messages, serverMessages);
 			messages = serverMessages;
 			adopted = true;
 			persistChatNow();

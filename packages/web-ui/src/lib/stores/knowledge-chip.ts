@@ -83,6 +83,84 @@ export function retireResolution(ok: boolean): 'undone' | null {
 	return ok ? 'undone' : null;
 }
 
+/** The minimal message shape carry-over needs — structural, so the pure module
+ *  does not import the store's ChatMessage. */
+export interface ChipBearer {
+	role: string;
+	content: string;
+	knowledgeWrites?: KnowledgeWriteChip[] | undefined;
+}
+
+/** Every chip across the transcript, in message order. The SSE handler feeds this to
+ *  `projectKnowledgeWrite` so replay-dedup is transcript-GLOBAL: after an adoption
+ *  anchored a carried chip onto a different message (the reprojection fallback), a
+ *  Tier-2 replay of the same id must still be recognised as already-present. */
+export function allKnowledgeWrites(messages: readonly ChipBearer[]): KnowledgeWriteChip[] {
+	return messages.flatMap((m) => m.knowledgeWrites ?? []);
+}
+
+/**
+ * Carry `knowledgeWrites` from the local message list onto a freshly adopted server
+ * transcript, IN PLACE on `adopted`.
+ *
+ * Why this exists: both transcript-adoption sites replace `messages` wholesale once the
+ * server has caught up (`server >= local`), and server messages never carry chips — the
+ * chip is a client-side projection of an SSE event. Without carry-over the pending-review
+ * chip is wiped at run end (then resurrected by a Tier-2 replay — the observed flicker)
+ * and lost for good on a settled reload, leaving the fact invisible in the review queue.
+ *
+ * Matching walks both lists with a forward cursor and pairs a chip-bearing local message
+ * with the NEXT adopted message of the same role and content — ordered matching, so two
+ * tool-call messages with identical empty content pair up positionally instead of both
+ * hitting the first. A chip whose message has no counterpart (the server reprojected the
+ * turn, e.g. the multi-step merge) falls back to the LAST assistant message: the chip is a
+ * turn-scoped affordance and the review queue holds the durable truth, so an approximate
+ * anchor beats a dropped chip. Ids already present on `adopted` are never duplicated
+ * (future server-derived chips stay authoritative).
+ */
+export function carryKnowledgeWrites(
+	local: readonly ChipBearer[],
+	adopted: readonly ChipBearer[],
+): void {
+	if (!local.some((m) => m.knowledgeWrites?.length)) return;
+	const seen = new Set<string>();
+	for (const m of adopted) for (const w of m.knowledgeWrites ?? []) seen.add(w.id);
+	let cursor = 0;
+	const unanchored: KnowledgeWriteChip[] = [];
+	for (const src of local) {
+		// Advance the cursor for EVERY local message that has a counterpart, chips or
+		// not — otherwise a chip-less twin earlier in the list (two identical "done"
+		// replies, empty tool-call rows) leaves the cursor behind and a later chip
+		// anchors onto the earlier twin instead of its positional counterpart.
+		let target: ChipBearer | undefined;
+		for (let j = cursor; j < adopted.length; j++) {
+			const cand = adopted[j]!;
+			if (cand.role === src.role && cand.content === src.content) {
+				target = cand;
+				cursor = j + 1;
+				break;
+			}
+		}
+		if (!src.knowledgeWrites || src.knowledgeWrites.length === 0) continue;
+		const fresh = src.knowledgeWrites.filter((w) => !seen.has(w.id));
+		for (const w of fresh) seen.add(w.id);
+		if (fresh.length === 0) continue;
+		if (target) (target.knowledgeWrites ??= []).push(...fresh);
+		else unanchored.push(...fresh);
+	}
+	if (unanchored.length > 0) {
+		for (let j = adopted.length - 1; j >= 0; j--) {
+			const cand = adopted[j]!;
+			if (cand.role === 'assistant') {
+				(cand.knowledgeWrites ??= []).push(...unanchored);
+				break;
+			}
+		}
+		// No assistant message in the adopted transcript: nowhere to anchor. The chips are
+		// dropped here, but the entries stay reviewable in the queue — same as before the fix.
+	}
+}
+
 /**
  * The i18n key naming WHY a write was queued.
  *
