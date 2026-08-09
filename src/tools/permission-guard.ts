@@ -21,17 +21,22 @@ const LYNOX_SECRET_FILES = /\.lynox\/(vault|agent-memory|runs|migration-export|h
 // Bash spellings of the same read that do not name the full path: a glob into the
 // lynox dir (`cat ~/.lynox/http-*`) and the bare filename after a cd
 // (`cd ~/.lynox && cat http-secret`). Path-based matching only raises the bar —
-// co-residency is the accepted root — but these two are the cheap evasions.
+// co-residency is the accepted root. The bare-name pattern covers only
+// `http-secret` (the one plaintext secret; the DB names are too generic to flag
+// bare without false positives), and `~/.lynox/workspace/` — the agent's default
+// working area — stays globbable.
 const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: LYNOX_SECRET_FILES,   label: 'access lynox secret store (secrets)' },
   { pattern: /\bhttp-secret\b/i,   label: 'access lynox secret store (secrets)' },
-  { pattern: /\.lynox\/\S*[*?[]/i, label: 'glob into lynox data dir (secrets)' },
+  { pattern: /\.lynox\/(?!workspace\/)\S*[*?[]/i, label: 'glob into lynox data dir (secrets)' },
 ];
 
-// batch_files must not operate on the lynox dir at all — a rename/move of a secret
-// file would strip it of the path guards above (checked against the raw directory,
-// which names the dir without a filename, so LYNOX_SECRET_FILES cannot match it).
-const LYNOX_DIR = /\.lynox(\/|$)/i;
+// batch_files must not operate on the lynox dir outside the workspace subtree — a
+// rename/move of a secret file would strip it of the path guards above (checked
+// against the raw directory, which names the dir without a filename, so
+// LYNOX_SECRET_FILES cannot match it). `~/.lynox/workspace/` is the agent's
+// default working area and stays available.
+const LYNOX_DIR = /\.lynox\/?$|\.lynox\/(?!workspace(\/|$))/i;
 
 /** Representative critical commands — used by isCriticalTool to detect dangerous glob patterns */
 const CRITICAL_COMMAND_SAMPLES = [

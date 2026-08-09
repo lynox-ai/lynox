@@ -423,6 +423,10 @@ describe('isDangerous', () => {
     it('returns null for the hyphen-free lookalike http_secret', () => {
       expect(isDangerous('bash', { command: 'echo http_secret' }, 'autonomous')).toBeNull();
     });
+
+    it('returns null for a glob inside the agent workspace', () => {
+      expect(isDangerous('bash', { command: 'ls ~/.lynox/workspace/*.md' }, 'autonomous')).toBeNull();
+    });
   });
 
   describe('lynox dir via batch_files', () => {
@@ -451,6 +455,18 @@ describe('isDangerous', () => {
       expect(
         isDangerous('batch_files', { directory: '/tmp/project-a', pattern: '*.txt', operation: 'rename', rename_pattern: 'y-{n}' }, 'autonomous'),
       ).toBeNull();
+    });
+
+    it('returns null for batch_files in the agent workspace (~/.lynox/workspace)', () => {
+      expect(
+        isDangerous('batch_files', { directory: '/Users/op/.lynox/workspace/reports', pattern: '*.md', operation: 'rename', rename_pattern: 'z-{n}' }, 'autonomous'),
+      ).toBeNull();
+    });
+
+    it('BLOCKS batch_files on the workspace-lookalike dir ~/.lynox/workspace-evil', () => {
+      const result = isDangerous('batch_files', { directory: '/Users/op/.lynox/workspace-evil', pattern: '*', operation: 'rename', rename_pattern: 'x' }, 'autonomous');
+      expect(result).not.toBeNull();
+      expect(result).toContain('[BLOCKED');
     });
   });
 
