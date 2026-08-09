@@ -9,15 +9,24 @@ import { tmpdir } from 'node:os';
 // check and model resolution in executeStep, which run BEFORE the spawn — is
 // real, which is the point: the F1 tier-default test below drives that path.
 const mockSpawnInline = vi.fn().mockResolvedValue({ result: 'inline-r', tokensIn: 10, tokensOut: 5, durationMs: 3 });
+// spawnViaAgent is stubbed for the same reason: the taint-dispatch test below
+// must observe the runner's OWN call (a real spawnViaAgent would build a real
+// Agent and hit the network). No pre-existing test reaches it — the agent
+// runtime without an agentsDir fixture dies in loadAgentDef first.
+const mockSpawnViaAgent = vi.fn().mockResolvedValue({ result: 'agent-r', tokensIn: 10, tokensOut: 5, durationMs: 3 });
 vi.mock('./runtime-adapter.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./runtime-adapter.js')>();
-  return { ...actual, spawnInline: (...args: unknown[]) => mockSpawnInline(...args) };
+  return {
+    ...actual,
+    spawnInline: (...args: unknown[]) => mockSpawnInline(...args),
+    spawnViaAgent: (...args: unknown[]) => mockSpawnViaAgent(...args),
+  };
 });
 
 import { runManifest, retryManifest, workflowBoundExceeded } from './runner.js';
 import { RunHistory } from '../core/run-history.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
-import type { LynoxUserConfig } from '../types/index.js';
+import type { LynoxUserConfig, ToolEntry } from '../types/index.js';
 import type { SessionCounters } from '../types/agent.js';
 
 const CONFIG: LynoxUserConfig = { api_key: 'test-key' };
@@ -641,6 +650,67 @@ describe('runManifest — inline runtime', () => {
     };
     const state = await runManifest(manifest, CONFIG, {});
     expect(state.outputs.get('step-1')?.error).toContain('no parentTools provided');
+  });
+
+  it('threads options.runTaint into the inline spawner (the cross-step taint dispatch)', async () => {
+    // Pins the dispatch line itself: dropping `options.runTaint` from the
+    // spawnInline call would leave every step blind to the run's taint while
+    // all the spawner- and tool-level tests stay green.
+    const manifest: Manifest = {
+      ...MANIFEST,
+      agents: [
+        { id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Do something' },
+      ],
+    };
+    const runTaint = { seeded: 'conversation', earned: 'none' } as const;
+    mockSpawnInline.mockClear();
+    const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
+    await runManifest(manifest, CONFIG, { parentTools: tools, runTaint });
+    expect(mockSpawnInline).toHaveBeenCalledTimes(1);
+    // spawnInline's runTaint is the 15th positional argument (index 14).
+    expect(mockSpawnInline.mock.calls[0]![14]).toBe(runTaint);
+  });
+
+  it('a nested pipeline receives the SAME accumulator object (identity across nesting)', async () => {
+    // Pins two lines at once: the spawnPipeline dispatch in the runner, and
+    // spawnPipeline forwarding the object (not a copy) into the nested
+    // runManifest — a `{...runTaint}` there would keep every other test green
+    // while the inner step's taint stopped reaching the outer run's later steps.
+    const manifest: Manifest = {
+      ...MANIFEST,
+      agents: [
+        { id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] },
+      ],
+    };
+    const runTaint = { seeded: 'conversation', earned: 'none' } as const;
+    mockSpawnInline.mockClear();
+    const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
+    await runManifest(manifest, CONFIG, { parentTools: tools, runTaint });
+    // The inner inline step of the REAL spawnPipeline lands on the stub.
+    expect(mockSpawnInline).toHaveBeenCalledTimes(1);
+    expect(mockSpawnInline.mock.calls[0]![14]).toBe(runTaint);
+  });
+
+  it('threads options.runTaint into the named-agent spawner too', async () => {
+    // The third dispatch site: spawnViaAgent's runTaint is the 15th positional
+    // argument (index 14) — dropping it there fails no other test.
+    const dir = mkdtempSync(join(tmpdir(), 'runner-taint-'));
+    try {
+      const { mkdirSync, writeFileSync } = await import('node:fs');
+      mkdirSync(join(dir, 'named'), { recursive: true });
+      writeFileSync(join(dir, 'named', 'index.js'), 'export default { name: "named", description: "", tools: [] };\n');
+      const manifest: Manifest = {
+        ...MANIFEST,
+        agents: [{ id: 'n1', agent: 'named' }],
+      };
+      const runTaint = { seeded: 'external-tool', earned: 'none' } as const;
+      mockSpawnViaAgent.mockClear();
+      await runManifest(manifest, CONFIG, { agentsDir: dir, runTaint });
+      expect(mockSpawnViaAgent).toHaveBeenCalledTimes(1);
+      expect(mockSpawnViaAgent.mock.calls[0]![14]).toBe(runTaint);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

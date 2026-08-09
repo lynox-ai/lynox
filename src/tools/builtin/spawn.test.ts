@@ -997,6 +997,26 @@ describe('spawn_agent tool', () => {
     expect(parentNote).not.toHaveBeenCalled();
   });
 
+  it('S8 fallback: a parent WITHOUT restoreConversationTaint still receives the hand-off via noteUntrustedData', async () => {
+    // `restoreConversationTaint` is optional on IAgent. An implementation that
+    // omits it must not lose the child→parent taint SILENTLY — the failure
+    // direction would be under-tainting, the wrong one. The fallback hands the
+    // coarser (over-claiming) marker instead: safe direction, and observable.
+    const parentNote = vi.fn();
+    const agent = makeAgent({
+      memory: {} as IAgent['memory'],
+      conversationSawUntrusted: true,
+      noteUntrustedData: parentNote,
+      // deliberately NO restoreConversationTaint
+    } as Partial<IAgent>);
+    mockSend.mockImplementationOnce(async function (this: { conversationSawUntrusted?: boolean }) {
+      this.conversationSawUntrusted = true; // inherited only — read nothing itself
+      return 'sub-agent result';
+    });
+    await spawnAgentTool.handler({ agents: [{ name: 'c1', task: 'do work' }] }, agent);
+    expect(parentNote).toHaveBeenCalled();
+  });
+
   it('F5/S8: a clean parent does NOT taint the spawned child', async () => {
     const { Agent: MockAgent } = await import('../../core/agent.js');
     const agent = makeAgent(); // no taint signals

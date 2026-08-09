@@ -1,4 +1,4 @@
-import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier } from '../../types/index.js';
+import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier, IAgent } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { randomUUID } from 'node:crypto';
 import { validateManifest, MAX_STEPS } from '../../orchestrator/validate.js';
@@ -11,7 +11,7 @@ import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
-import { undeclaredInlineStepTier, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { undeclaredInlineStepTier, newRunTaint, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
 import { normalizeTier } from '../../types/index.js';
 import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
@@ -28,7 +28,7 @@ const MAX_EXECUTED_STATES = 50;
 const pipelineStore = new Map<string, PlannedPipeline>();
 
 // Store last executed state per pipeline for retry
-const executedStates = new Map<string, { manifest: Manifest; state: RunState }>();
+const executedStates = new Map<string, { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined }>();
 
 // Non-template reentrancy guard: a non-template (run-once) pipeline currently
 // in-flight. `executePipelineById` marks `planned.executed = true` before the
@@ -126,7 +126,7 @@ export function storePipeline(id: string, pipeline: PlannedPipeline): void {
  *  the original insertion position → FIFO, which would drop a hot entry after N
  *  other executions). Uses its OWN cap, larger than the plan cache, so a burst
  *  of distinct workflows doesn't evict each other's still-retriable state. */
-export function recordExecutedState(id: string, value: { manifest: Manifest; state: RunState }): void {
+export function recordExecutedState(id: string, value: { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined }): void {
   executedStates.delete(id);
   if (executedStates.size >= MAX_EXECUTED_STATES) {
     const oldest = executedStates.keys().next().value;
@@ -422,6 +422,10 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
     }
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
+    // Run-level taint (DK H4, cross-step): seeded from the calling agent, armed
+    // further by any step that reads external content, consumed by every later
+    // step's durable-write routing. See RunTaint in runtime-adapter.ts.
+    const runTaint = newRunTaint(deps.parentAgent);
     const state = await runManifest(manifest, deps.config, buildRunCtx({
       autonomy: deps.autonomy,
       parentTools: deps.tools,
@@ -433,6 +437,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
       secretStore: deps.secretStore,
+      runTaint,
     }));
 
     debitInSessionWorkflowCost(deps, state, steps);
@@ -500,6 +505,17 @@ export interface PipelineDeps {
    * undefined, i.e. unchanged pre-fix behaviour.
    */
   secretStore?: SecretStoreLike | undefined;
+  /**
+   * The calling agent, threaded from the `run_workflow` tool handler (its
+   * second argument) so the run's taint accumulator SEEDS from the caller's own
+   * untrusted state — a workflow started on a tainted turn must not launder a
+   * durable write through a fresh step agent (mirror of spawn.ts's parent→child
+   * seed). Only the SEED direction lives here: the way BACK is already covered,
+   * stronger, by the handler's unconditional `agent.noteUntrustedData?.()`
+   * after every run (H-002/CORE-9 — any delegated run taints the caller).
+   * Absent for headless callers → the run starts clean.
+   */
+  parentAgent?: IAgent | undefined;
 }
 
 /** Outcome of a Saved-Workflows-library "Run" action. */
@@ -636,6 +652,10 @@ export async function runSavedWorkflow(
       capabilityContract: planned.capabilityContract,
       limits: resolveHeadlessLimits(planned.limits),
       workflowId: planned.id,
+      // Headless: no caller to seed from, but the accumulator still carries
+      // taint ACROSS steps — a saved workflow whose step 1 reads external
+      // content must not land step 2's durable write as active.
+      runTaint: newRunTaint(),
     }));
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
     // A2: surface per-step failures + the terminal run error so the trigger UI
@@ -697,6 +717,30 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       // buildRunCtx restores the two fields the retry path used to drop
       // (parentToolContext + userTimezone) — without them a retried step ran
       // with no tool context / wrong timezone vs its original run (§4.1).
+      // Seed from the caller AND carry the ORIGINAL run's earned taint: the
+      // retry feeds re-run steps the cached outputs of the completed steps
+      // (retryManifest's cachedOutputs), and those outputs derive from whatever
+      // the original run read. A fresh accumulator here would let a retry from
+      // a clean caller (another session, or a reloaded conversation whose
+      // sticky latch the rehydration scan cannot re-derive — H4 tools leave no
+      // wrapped marker) land a re-run step's durable write as active. Found
+      // independently by two review lenses on this PR.
+      const retryTaint = newRunTaint(deps.parentAgent);
+      if (prev.runTaint) {
+        const prevEarned = prev.runTaint.earned;
+        if (prevEarned === 'marker' || prevEarned === 'external-tool') {
+          retryTaint.earned = prevEarned;
+        }
+        // BOTH halves carry, not just earned: a run whose steps were armed by
+        // the SEED alone (tainted caller, no step read anything itself) leaves
+        // earned='none' by construction — noteStepTaint ignores the reflected
+        // 'conversation'. Its cached outputs are tainted all the same. The
+        // current caller's own cause wins when present (it is more specific
+        // about THIS retry); the carry only fills a clean one.
+        if (retryTaint.seeded === 'none') {
+          retryTaint.seeded = prev.runTaint.seeded;
+        }
+      }
       const state = await retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
         autonomy: deps.autonomy,
         parentTools: deps.tools,
@@ -708,9 +752,10 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         parentSessionCounters: deps.sessionCounters,
         parentMemory: deps.memory ?? null,
         workflowId: planned.id,
+        runTaint: retryTaint,
       }));
 
-      recordExecutedState(planned.id, { manifest: prev.manifest, state });
+      recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint });
       debitInSessionWorkflowCost(deps, state, prev.manifest.agents);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
@@ -774,6 +819,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     }
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
+    const runTaint = newRunTaint(deps.parentAgent);
     const state = await runManifest(manifest, deps.config, buildRunCtx({
       autonomy: deps.autonomy,
       parentTools: deps.tools,
@@ -786,9 +832,10 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       parentMemory: deps.memory ?? null,
       secretStore: deps.secretStore,
       workflowId: planned.id,
+      runTaint,
     }));
 
-    recordExecutedState(planned.id, { manifest, state });
+    recordExecutedState(planned.id, { manifest, state, runTaint });
     if (!isTemplate) {
       try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
     }
@@ -970,6 +1017,8 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
           // spawn_agent). `agent.secretStore` is undefined for a headless/no-vault
           // parent → unchanged behaviour.
           secretStore: agent.secretStore,
+          // Seed the run's taint accumulator from the caller (see PipelineDeps).
+          parentAgent: agent,
         })
       : await executeInlineSteps(input, {
           config: pipelineConfig,
@@ -984,6 +1033,8 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
           autonomy: agent.autonomy,
           // Thread the parent agent's SecretStore (see executePipelineById above).
           secretStore: agent.secretStore,
+          // Seed the run's taint accumulator from the caller (see PipelineDeps).
+          parentAgent: agent,
         });
 
     // H-002 parity (CORE-9): a workflow's steps run sub-agents with web/http/

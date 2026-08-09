@@ -1296,7 +1296,7 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
 const RUN_CTX_KEYS = [
   'autonomy', 'parentTools', 'parentToolContext', 'parentMemory', 'userTimezone',
   'parentPrompt', 'parentSessionCounters', 'runHistory', 'hooks', 'capabilityContract',
-  'secretStore',
+  'secretStore', 'runTaint',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
@@ -1396,6 +1396,47 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     expect(opts['secretStore']).toBe(secretStore);
   });
 
+  it('seeds the run taint accumulator from a tainted caller (value, not just key)', async () => {
+    // A workflow started on a tainted turn must not launder a durable write
+    // through a fresh step agent — the run's accumulator starts armed.
+    const agent = makeAutonomyAgent(undefined);
+    (agent as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'record something')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['runTaint']).toEqual({ seeded: 'conversation', earned: 'none' });
+  });
+
+  it('a clean caller yields a clean (but present) accumulator', async () => {
+    const agent = makeAutonomyAgent(undefined);
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'do thing')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    // Present even when clean: the accumulator is what carries taint ACROSS
+    // steps once any step reads external content mid-run.
+    expect(opts['runTaint']).toEqual({ seeded: 'none', earned: 'none' });
+  });
+
+  it('the headless saved-workflow run carries a clean accumulator (cross-step chain without a caller)', async () => {
+    const id = 'wf-headless-taint';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['runTaint']).toEqual({ seeded: 'none', earned: 'none' });
+  });
+
   it('leaves secretStore undefined for a chat agent with no vault (backward-compat)', async () => {
     const agent = makeAutonomyAgent(undefined); // no secretStore set
     mockRunManifest.mockResolvedValueOnce(makeRunState());
@@ -1438,6 +1479,60 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     // emits the keys, so a key-only check would not catch a re-introduced drop).
     expect(retryOpts['parentToolContext']).toBe(agent.toolContext);
     expect(retryOpts['userTimezone']).toBe('Europe/Zurich');
+  });
+
+  it('the stored-run path seeds its accumulator from a tainted caller (value, not just key)', async () => {
+    // buildRunCtx emits the runTaint KEY unconditionally, so the RUN_CTX_KEYS
+    // contract cannot catch a by-id path that stops seeding — the VALUE can.
+    const id = seedStoredPipeline();
+    const agent = makeAutonomyAgent(undefined);
+    (agent as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['runTaint']).toEqual({ seeded: 'conversation', earned: 'none' });
+  });
+
+  it('a retry carries the ORIGINAL run\'s earned taint even under a clean caller', async () => {
+    // The retry feeds re-run steps the cached outputs of the original run's
+    // completed steps; a fresh accumulator would let a retry from a clean
+    // caller land a re-run step's durable write as active. Found independently
+    // by two review lenses on this PR.
+    const id = seedStoredPipeline();
+    const agent = makeAutonomyAgent(undefined); // clean caller, both runs
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+    // The original run EARNED taint mid-run: a step read external content.
+    const firstOpts = mockRunManifest.mock.calls[0]![2] as { runTaint: { earned: string } };
+    firstOpts.runTaint.earned = 'external-tool';
+
+    mockRetryManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
+    const retryOpts = mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>;
+    expect(retryOpts['runTaint']).toEqual({ seeded: 'none', earned: 'external-tool' });
+  });
+
+  it('a retry also carries a SEED-armed original run — and builds a fresh accumulator', async () => {
+    // The sibling gap of the earned-carry: a run whose steps were armed by the
+    // caller's taint alone leaves earned='none' by construction (noteStepTaint
+    // ignores the reflected 'conversation'), so an earned-only carry loses it.
+    // Its cached outputs derive from a tainted conversation all the same.
+    const id = seedStoredPipeline();
+    const taintedCaller = makeAutonomyAgent(undefined);
+    (taintedCaller as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: id }, taintedCaller);
+    const firstOpts = mockRunManifest.mock.calls[0]![2] as { runTaint: unknown };
+
+    const cleanCaller = makeAutonomyAgent(undefined);
+    mockRetryManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id, retry: true }, cleanCaller);
+    const retryOpts = mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>;
+    expect(retryOpts['runTaint']).toEqual({ seeded: 'conversation', earned: 'none' });
+    // A fresh object, not the stored one passed through: passing prev.runTaint
+    // by reference would couple the stored record to the retry's mutations and
+    // would also pass the clean-caller case above by accident.
+    expect(retryOpts['runTaint']).not.toBe(firstOpts.runTaint);
   });
 });
 
