@@ -120,7 +120,8 @@ export interface RunManifestOptions {
    * Run-level untrusted-content accumulator (see {@link RunTaint} in
    * runtime-adapter.ts). Created per run by the pipeline entrypoints — seeded
    * from the calling agent in-session, clean for headless runs — and MUTATED by
-   * every step spawner: an armed accumulator arms each step agent's sticky
+   * the real step spawners (inline / named-agent; `spawnMock` never touches
+   * it): an armed accumulator arms each step agent's sticky
    * latch before send, and each finished step folds what it saw back in. This
    * is the cross-STEP counterpart of spawn.ts's parent↔child taint seed; a
    * nested sub-pipeline shares the same object so taint crosses nesting levels.

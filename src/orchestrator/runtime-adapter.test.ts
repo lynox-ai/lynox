@@ -1233,7 +1233,9 @@ describe('RunTaint — cross-step untrusted inheritance', () => {
 
   beforeEach(() => {
     vi.mocked(Agent).mockClear();
-    mockSend.mockClear();
+    // mockReset, not mockClear: a failing test can leak a queued
+    // mockImplementationOnce that the next test would silently consume.
+    mockSend.mockReset();
     mockSend.mockResolvedValue('mock result');
   });
 
@@ -1283,9 +1285,17 @@ describe('RunTaint — cross-step untrusted inheritance', () => {
     const agentDef: AgentDef = { name: 'named', description: '', tools: [] };
     const taint = { seeded: 'external-tool', earned: 'none' } as RunTaint;
     const namedStep: ManifestStep = { id: 'n1', agent: 'named', runtime: 'agent' };
+    // The step itself reads external content — the FOLD half must record it.
+    // (Deleting only spawnViaAgent's finally-fold kept every other test green,
+    // because the mutation probe removed both copies at once.)
+    mockSend.mockImplementationOnce(async function (this: { sawExternalContentTool?: boolean }) {
+      this.sawExternalContentTool = true;
+      return 'named result';
+    });
     await spawnViaAgent(namedStep, agentDef, {}, mockConfig, undefined, 'run-1',
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, taint);
     expect(lastInstance().restoreConversationTaint).toHaveBeenCalled();
+    expect(taint.earned).toBe('external-tool');
   });
 
   it('helpers: marker outranks external-tool; a reflected conversation cause carries nothing', () => {
@@ -1318,7 +1328,9 @@ describe('durableMemoryEnabled rides to step agents (one flag governs the whole 
 
   beforeEach(() => {
     vi.mocked(Agent).mockClear();
-    mockSend.mockClear();
+    // mockReset, not mockClear: a failing test can leak a queued
+    // mockImplementationOnce that the next test would silently consume.
+    mockSend.mockReset();
     mockSend.mockResolvedValue('mock result');
   });
 

@@ -57,13 +57,13 @@ export const INLINE_CORE_TOOLS = new Set([
  * from the spawn one that IS closed.
  *
  * `seeded` is the caller's cause at run start ('none' for headless runs);
- * `earned` is the most specific cause any STEP acquired during the run. The two
- * stay separate because they answer different questions on the way OUT: a run
- * whose steps earned external content must hand the caller `noteUntrustedData`
- * (its result really derives from external content), while a run tainted only
- * by its seed must hand back nothing — the caller already carries that taint,
- * and re-reporting it as fresh would be the over-claim `restoreConversationTaint`
- * exists to avoid.
+ * `earned` is the most specific cause any STEP acquired during the run. The
+ * split does two jobs: {@link noteStepTaint} needs it to tell a step's OWN
+ * external read apart from our seed reflected back off a fresh agent (only the
+ * former escalates), and the retry path carries `earned` forward so a re-run
+ * fed the original run's cached outputs stays armed even under a clean caller.
+ * The way back to the caller is NOT this object's job — the `run_workflow`
+ * handler already taints the caller unconditionally after every run (H-002).
  */
 export interface RunTaint {
   seeded: UntrustedCause;

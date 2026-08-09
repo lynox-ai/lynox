@@ -1480,6 +1480,37 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     expect(retryOpts['parentToolContext']).toBe(agent.toolContext);
     expect(retryOpts['userTimezone']).toBe('Europe/Zurich');
   });
+
+  it('the stored-run path seeds its accumulator from a tainted caller (value, not just key)', async () => {
+    // buildRunCtx emits the runTaint KEY unconditionally, so the RUN_CTX_KEYS
+    // contract cannot catch a by-id path that stops seeding — the VALUE can.
+    const id = seedStoredPipeline();
+    const agent = makeAutonomyAgent(undefined);
+    (agent as unknown as { conversationSawUntrusted: boolean }).conversationSawUntrusted = true;
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    expect(opts['runTaint']).toEqual({ seeded: 'conversation', earned: 'none' });
+  });
+
+  it('a retry carries the ORIGINAL run\'s earned taint even under a clean caller', async () => {
+    // The retry feeds re-run steps the cached outputs of the original run's
+    // completed steps; a fresh accumulator would let a retry from a clean
+    // caller land a re-run step's durable write as active. Found independently
+    // by two review lenses on this PR.
+    const id = seedStoredPipeline();
+    const agent = makeAutonomyAgent(undefined); // clean caller, both runs
+    mockRunManifest.mockResolvedValueOnce(makeRunState({ status: 'failed' }));
+    await runWorkflowTool.handler({ workflow_id: id }, agent);
+    // The original run EARNED taint mid-run: a step read external content.
+    const firstOpts = mockRunManifest.mock.calls[0]![2] as { runTaint: { earned: string } };
+    firstOpts.runTaint.earned = 'external-tool';
+
+    mockRetryManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id, retry: true }, agent);
+    const retryOpts = mockRetryManifest.mock.calls[0]![3] as Record<string, unknown>;
+    expect(retryOpts['runTaint']).toEqual({ seeded: 'none', earned: 'external-tool' });
+  });
 });
 
 describe('A1: §4.5 drift fixes', () => {
