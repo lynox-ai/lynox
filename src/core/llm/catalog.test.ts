@@ -521,7 +521,7 @@ describe('mainChatTierLabelsFromTierSet (hybrid picker — labels follow the tie
     };
     expect(mainChatTierLabelsFromTierSet(tierSet, 'anthropic')).toEqual({
       fast: 'Haiku 4.5 · 200k',
-      balanced: 'Mistral Large 3 · 250k', // NOT the base-provider "Sonnet 5"
+      balanced: 'Mistral Large 3 · 256k', // NOT the base-provider "Sonnet 5"
       deep: 'Sonnet 5 · 1M', // NOT the base-provider "Opus 4.6"
     });
   });
@@ -530,7 +530,7 @@ describe('mainChatTierLabelsFromTierSet (hybrid picker — labels follow the tie
     // Only balanced is overridden; fast/deep fall back to the base (anthropic).
     const tierSet: TierSet = { balanced: { provider: 'mistral', model_id: 'mistral-large-2512' } };
     const out = mainChatTierLabelsFromTierSet(tierSet, 'anthropic');
-    expect(out?.balanced).toBe('Mistral Large 3 · 250k');
+    expect(out?.balanced).toBe('Mistral Large 3 · 256k');
     expect(out?.fast).toBe('Haiku 4.5 · 200k');
     expect(out?.deep).toBe('Opus 4.6 · 1M');
   });
@@ -554,14 +554,15 @@ describe('mainChatTierLabelsFromTierSet (hybrid picker — labels follow the tie
   });
 
   it('formatContextWindow: the shorthand behind every picker label', () => {
-    // Binary-k windows render their conventional size; decimal windows round
-    // to k; exact millions to M. '' for unknown → callers append conditionally.
+    // Decimal-k windows (256_000 → 256k) win over the binary divisor trap; binary
+    // windows render conventionally; exact millions to M. '' for unknown.
     expect(formatContextWindow(1_000_000)).toBe('1M');
     expect(formatContextWindow(262_144)).toBe('256k');
     expect(formatContextWindow(131_072)).toBe('128k');
     expect(formatContextWindow(524_288)).toBe('512k');
     expect(formatContextWindow(200_000)).toBe('200k');
-    expect(formatContextWindow(256_000)).toBe('250k');
+    expect(formatContextWindow(256_000)).toBe('256k');
+    expect(formatContextWindow(128_000)).toBe('128k');
     expect(formatContextWindow(undefined)).toBe('');
     expect(formatContextWindow(0)).toBe('');
   });

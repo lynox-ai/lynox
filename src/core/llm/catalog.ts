@@ -29,6 +29,11 @@ export function formatContextWindow(n: number | undefined): string {
   if (!n || n <= 0) return '';
   if (n % 1_000_000 === 0) return `${n / 1_000_000}M`;
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  // Decimal thousands FIRST: 256_000 is divisible by 1024 too (1024×250), and
+  // the binary branch rendered it "250k" — factually wrong for a model
+  // advertised as 256k (pr-review #1165). Binary windows (262_144, 131_072)
+  // are never divisible by 1000, so they still reach the 1024 branch.
+  if (n % 1000 === 0) return `${n / 1000}k`;
   if (n % 1024 === 0) return `${n / 1024}k`;
   return `${Math.round(n / 1000)}k`;
 }

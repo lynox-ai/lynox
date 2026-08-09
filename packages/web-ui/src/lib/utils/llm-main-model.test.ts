@@ -125,6 +125,8 @@ describe('buildMainModelOptions', () => {
     expect(formatContextWindow(262_144)).toBe('256k');
     expect(formatContextWindow(131_072)).toBe('128k');
     expect(formatContextWindow(200_000)).toBe('200k');
+    expect(formatContextWindow(256_000)).toBe('256k');
+    expect(formatContextWindow(128_000)).toBe('128k');
     expect(formatContextWindow(undefined)).toBe('');
   });
 
