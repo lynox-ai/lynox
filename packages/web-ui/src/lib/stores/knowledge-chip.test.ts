@@ -60,9 +60,13 @@ describe('projectKnowledgeWrite', () => {
 	});
 
 	it('drops a replayed id — a Tier-2 SSE reconnect must not show the capture twice', () => {
-		const existing: KnowledgeWriteChip[] = [{ id: 'k1', status: 'active', text: 'pays net 30' }];
-		// The load-bearing dedup: same id already present → nothing to append.
-		expect(projectKnowledgeWrite(existing, raw)).toBeNull();
+		// The replayed id sits at position TWO, so this also pins that the dedup scans the whole
+		// array (`.some`) — a first-element-only check would let the replay through.
+		const existing: KnowledgeWriteChip[] = [
+			{ id: 'k0', status: 'active', text: 'earlier' },
+			{ id: 'k1', status: 'active', text: 'pays net 30' },
+		];
+		expect(projectKnowledgeWrite(existing, raw)).toBeNull(); // raw.id === 'k1', already present
 		// A DIFFERENT id on the same message is still appended (not a blanket "already have one").
 		expect(projectKnowledgeWrite(existing, { ...raw, id: 'k2' })?.id).toBe('k2');
 	});
@@ -86,6 +90,13 @@ describe('projectKnowledgeWrite', () => {
 		expect(chip?.cause).toBeUndefined();
 		expect(chip?.subject).toBeUndefined();
 		expect(chip?.kind).toBeUndefined();
+	});
+
+	it('narrows cause to the known vocabulary — an out-of-enum string is dropped, not typed as a lie', () => {
+		// An older/newer engine could send a cause this UI does not know; it must become
+		// undefined, not a string cast to the 4-literal union.
+		expect(projectKnowledgeWrite([], { id: 'k9', cause: 'conversation' })?.cause).toBe('conversation');
+		expect(projectKnowledgeWrite([], { id: 'k9', cause: 'something-new' })?.cause).toBeUndefined();
 	});
 });
 

@@ -1773,10 +1773,11 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// message as an inline chip (trusted → "gemerkt · rückgängig"; untrusted →
 			// keep/discard review). Client-only: never persisted, never re-injected into
 			// model context — so a resume cannot re-surface the untrusted wording.
-			msg.knowledgeWrites = msg.knowledgeWrites ?? [];
-			// Projection + dedup (Tier-2 replay) is pure — see `projectKnowledgeWrite`.
-			const chip = projectKnowledgeWrite(msg.knowledgeWrites, data);
-			if (chip) msg.knowledgeWrites.push(chip);
+			// Projection + dedup (Tier-2 replay) is pure — see `projectKnowledgeWrite`. Only
+			// materialise the array when there is a chip to push, so a malformed (no-id) or
+			// duplicate event leaves the message exactly as it was.
+			const chip = projectKnowledgeWrite(msg.knowledgeWrites ?? [], data);
+			if (chip) (msg.knowledgeWrites ??= []).push(chip);
 			break;
 		}
 	}
@@ -2204,9 +2205,11 @@ export async function retireKnowledge(msgIdx: number, id: string): Promise<void>
 	if (!chip || chip.resolved) return;
 	try {
 		const res = await fetch(`${getApiBase()}/knowledge/entries/${id}/retire`, { method: 'POST' });
-		if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		// `retireResolution` IS the 2xx gate: null on a non-2xx drives the throw, so the chip
+		// flips to done only when the route accepted the retire (a failed one stays actionable).
 		const resolved = retireResolution(res.ok);
-		if (resolved) chip.resolved = resolved;
+		if (!resolved) throw new Error(`HTTP ${res.status}`);
+		chip.resolved = resolved;
 	} catch {
 		addToast(t('chat.knowledge.undo_failed'), 'error', 4000);
 	}

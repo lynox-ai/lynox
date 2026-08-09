@@ -9,6 +9,16 @@
 /** The engine's `describeTurnUntrusted` vocabulary, as it arrives on the SSE event. */
 export type KnowledgeWriteCause = 'marker' | 'external-tool' | 'conversation' | 'none';
 
+const KNOWLEDGE_WRITE_CAUSES: readonly KnowledgeWriteCause[] = ['marker', 'external-tool', 'conversation', 'none'];
+
+/** Narrow a raw SSE `cause` to the known vocabulary — a value the engine's enum does not
+ *  contain (an older/newer engine) becomes `undefined` rather than a lie typed as the union. */
+function narrowCause(raw: unknown): KnowledgeWriteCause | undefined {
+	return typeof raw === 'string' && (KNOWLEDGE_WRITE_CAUSES as readonly string[]).includes(raw)
+		? (raw as KnowledgeWriteCause)
+		: undefined;
+}
+
 /**
  * DK-UX inline chip for a durable-knowledge write (from the `knowledge_write` SSE event).
  *
@@ -52,7 +62,7 @@ export function projectKnowledgeWrite(
 		// status must not route a write into the untrusted-review path it did not ask for.
 		status: data['status'] === 'pending_review' ? 'pending_review' : 'active',
 		text: String(data['text'] ?? ''),
-		cause: typeof data['cause'] === 'string' ? (data['cause'] as KnowledgeWriteCause) : undefined,
+		cause: narrowCause(data['cause']),
 	};
 }
 
