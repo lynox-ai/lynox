@@ -1,4 +1,5 @@
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import { toolResultText } from './tool-result-hygiene.js';
 
 /**
  * F5 (PRD-COST-CONTROLS-V2, D4/D5): after an artifact_save SUCCEEDED, the body
@@ -45,28 +46,30 @@ function isToolUse(block: unknown): block is ToolUseBlock {
 /** The save handler's success result starts with `Saved artifact "` or
  *  `Updated artifact "` — anything else (store unavailable, thrown error
  *  formatted by the tool runner) means the body was never persisted and MUST
- *  stay in the conversation, or the content is simply gone. */
-function isSuccessfulSaveResult(result: string): boolean {
+ *  stay in the conversation, or the content is simply gone. The coupling to
+ *  the handler's exact format is pinned by a contract test that runs the REAL
+ *  `artifact_save` handler — rewording the result there fails that test, not
+ *  silently this check. Exported for exactly that test. */
+export function isSuccessfulSaveResult(result: string): boolean {
   return result.startsWith('Saved artifact "') || result.startsWith('Updated artifact "');
 }
 
-/** Collect tool_use_id → result-text for every tool_result in the history. */
+/** Collect tool_use_id → result-text for every tool_result in the history.
+ *  First-wins, and error-marked results are skipped: a crafted external
+ *  history (loadMessages takes migration imports) must not be able to pair a
+ *  failed save with a spoofed duplicate "success" result and evict a body
+ *  that was never persisted. */
 function collectResults(messages: BetaMessageParam[]): Map<string, string> {
   const results = new Map<string, string>();
   for (const msg of messages) {
     if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
     for (const block of msg.content) {
       if (typeof block !== 'object' || block === null) continue;
-      const b = block as { type?: unknown; tool_use_id?: unknown; content?: unknown };
+      const b = block as { type?: unknown; tool_use_id?: unknown; content?: unknown; is_error?: unknown };
       if (b.type !== 'tool_result' || typeof b.tool_use_id !== 'string') continue;
-      if (typeof b.content === 'string') {
-        results.set(b.tool_use_id, b.content);
-      } else if (Array.isArray(b.content)) {
-        const text = b.content
-          .map((c) => (typeof c === 'object' && c !== null && (c as { type?: unknown }).type === 'text' ? String((c as { text?: unknown }).text ?? '') : ''))
-          .join('');
-        results.set(b.tool_use_id, text);
-      }
+      if (b.is_error === true) continue;
+      if (results.has(b.tool_use_id)) continue;
+      results.set(b.tool_use_id, toolResultText(b.content as Parameters<typeof toolResultText>[0]));
     }
   }
   return results;
@@ -95,7 +98,7 @@ export function evictSavedArtifactBodies(messages: BetaMessageParam[]): BetaMess
       if (typeof content !== 'string') continue;
       // Also what makes the transform idempotent: the replacement string is
       // far below the threshold, so an already-evicted input never re-matches
-      // (pinned by a unit test — do not raise the threshold below ~300).
+      // (pinned by a unit test — never LOWER the threshold under ~300).
       if (content.length <= EVICTION_MIN_CHARS) continue;
       const result = results.get(block.id);
       if (result === undefined || !isSuccessfulSaveResult(result)) continue;

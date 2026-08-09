@@ -1311,7 +1311,13 @@ export class Agent implements IAgent {
     // a save keeps its body while the model may still be composing against it.
     // Identity-preserving for unchanged messages, and only ever touches
     // messages BEFORE this turn's user push, so the persisted mark (a count)
-    // stays valid and no evicted form is ever re-persisted.
+    // stays valid. In the ordinary flow nothing evicted is re-persisted (the
+    // end-of-run persist advanced the mark past these messages); the one
+    // narrow exception is a FAILED end-of-run persist whose retry then writes
+    // the evicted form — benign direction, since eviction fires only on a
+    // confirmed save and the result row names the recoverable file. NOT gated
+    // on the mark: for a persistence-less agent (sub-agents, pipeline steps)
+    // the mark never advances and the gate would disable eviction entirely.
     this.messages = evictSavedArtifactBodies(this.messages);
     const snapshot = this.messages.length;
     // Support multimodal content blocks (e.g. vision: image + text)

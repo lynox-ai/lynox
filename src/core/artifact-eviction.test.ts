@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
-import { evictSavedArtifactBodies, EVICTION_MIN_CHARS } from './artifact-eviction.js';
+import { evictSavedArtifactBodies, isSuccessfulSaveResult, EVICTION_MIN_CHARS } from './artifact-eviction.js';
 
 const BIG = 'x'.repeat(EVICTION_MIN_CHARS + 1);
 
@@ -51,9 +51,40 @@ describe('evictSavedArtifactBodies', () => {
   });
 
   it('does NOT evict a failed save — the body is the only copy left', () => {
-    const out = evictSavedArtifactBodies(saveTurn({ result: 'Artifact store not available.' }));
+    const msgs = saveTurn({ result: 'Artifact store not available.' });
+    const out = evictSavedArtifactBodies(msgs);
     expect(inputContentOf(out)).toBe(BIG);
-    expect(out).toBe(out); // and identity: nothing changed
+    expect(out).toBe(msgs); // identity: nothing changed
+  });
+
+  it('skips an error-marked tool_result even if its text looks like success', () => {
+    const msgs = saveTurn();
+    (msgs[2]!.content as Array<{ is_error?: boolean }>)[0]!.is_error = true;
+    const out = evictSavedArtifactBodies(msgs);
+    expect(out).toBe(msgs);
+  });
+
+  it('first result wins: a spoofed duplicate success result cannot force eviction', () => {
+    const msgs = saveTurn({ result: 'Artifact store not available.' });
+    (msgs[2]!.content as unknown[]).push({ type: 'tool_result', tool_use_id: 'tu_1', content: 'Saved artifact "Report" (id: x, v1).' });
+    const out = evictSavedArtifactBodies(msgs);
+    expect(out).toBe(msgs);
+  });
+
+  it('tolerates a missing or non-string input.content (no throw, no change)', () => {
+    const msgs = saveTurn();
+    const block = (msgs[1]!.content as Array<{ type: string; input?: unknown }>).find(b => b.type === 'tool_use')!;
+    block.input = { title: 'Report', content: 42 };
+    expect(evictSavedArtifactBodies(msgs)).toBe(msgs);
+    block.input = { title: 'Report' };
+    expect(evictSavedArtifactBodies(msgs)).toBe(msgs);
+  });
+
+  it('a body exactly AT the threshold stays; one char over is evicted', () => {
+    const atLimit = saveTurn({ content: 'z'.repeat(EVICTION_MIN_CHARS) });
+    expect(evictSavedArtifactBodies(atLimit)).toBe(atLimit);
+    const overLimit = evictSavedArtifactBodies(saveTurn({ content: 'z'.repeat(EVICTION_MIN_CHARS + 1) }));
+    expect(inputContentOf(overLimit)).toContain('[evicted after successful save');
   });
 
   it('does NOT evict when the tool_result is missing (unpaired / in-flight)', () => {
@@ -109,5 +140,37 @@ describe('evictSavedArtifactBodies', () => {
     ];
     const out = evictSavedArtifactBodies(msgs);
     expect(inputContentOf(out)).toContain('[evicted after successful save');
+  });
+});
+
+describe('contract with the real artifact_save handler', () => {
+  // The eviction trigger is the handler's result-string prefix. This test runs
+  // the REAL handler — rewording its result format must fail HERE, not
+  // silently kill the eviction (the wiring tests use a hardcoded result and
+  // cannot catch that).
+  async function runRealSave(input: Record<string, unknown>, store: unknown): Promise<string> {
+    const { artifactSaveTool } = await import('../tools/builtin/artifact.js');
+    const agent = { toolContext: { artifactStore: store } } as never;
+    return artifactSaveTool.handler(input as never, agent);
+  }
+
+  const stubStore = {
+    save: (a: { title: string; id?: string }) => ({ id: a.id ?? 'new1', title: a.title, version: a.id ? 2 : 1 }),
+    pathFor: (id: string) => `/workspace/artifacts/${id}.md`,
+  };
+
+  it('a CREATE result satisfies isSuccessfulSaveResult', async () => {
+    const result = await runRealSave({ title: 'T', content: 'body' }, stubStore);
+    expect(isSuccessfulSaveResult(result)).toBe(true);
+  });
+
+  it('an UPDATE result satisfies isSuccessfulSaveResult', async () => {
+    const result = await runRealSave({ title: 'T', content: 'body', id: 'ab1' }, stubStore);
+    expect(isSuccessfulSaveResult(result)).toBe(true);
+  });
+
+  it('the store-unavailable failure does NOT satisfy it', async () => {
+    const result = await runRealSave({ title: 'T', content: 'body' }, undefined);
+    expect(isSuccessfulSaveResult(result)).toBe(false);
   });
 });
