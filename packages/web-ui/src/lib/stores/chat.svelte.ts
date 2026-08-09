@@ -19,6 +19,7 @@ import {
 	type ContentBlock,
 } from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
+import { projectKnowledgeWrite, reviewResolution, retireResolution, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -63,22 +64,10 @@ export interface ApiCallCost {
 
 export type { ContentBlock } from './chat-attribution.js';
 
-/** DK-UX inline chip for a durable-knowledge write (from the `knowledge_write` SSE event). */
-export interface KnowledgeWriteChip {
-	id: string;
-	subject?: string | undefined;
-	kind?: string | undefined;
-	status: 'active' | 'pending_review';
-	/** Raw wording (for the untrusted review chip). Client-only; never re-enters model context. */
-	text: string;
-	/** WHY this was queued, in the engine's vocabulary. Only set for `pending_review`.
-	 *  `marker` — a tool result this turn carried wrapped external content.
-	 *  `external-tool` — an external-content tool ran this turn.
-	 *  `conversation` — the taint is sticky from an EARLIER turn of this thread. */
-	cause?: 'marker' | 'external-tool' | 'conversation' | 'none' | undefined;
-	/** UI-local once the user resolves the chip, so it renders as done and the buttons retire. */
-	resolved?: 'undone' | 'kept' | 'discarded' | undefined;
-}
+// The DK-UX chip type + its pure projection/resolve logic live in `knowledge-chip.ts` (a
+// `.svelte` store can't be imported from a test). Re-exported so existing consumers that
+// import it from the chat store keep working.
+export type { KnowledgeWriteChip } from './knowledge-chip.js';
 
 export interface ChatMessage {
 	role: 'user' | 'assistant';
@@ -1784,23 +1773,11 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// message as an inline chip (trusted → "gemerkt · rückgängig"; untrusted →
 			// keep/discard review). Client-only: never persisted, never re-injected into
 			// model context — so a resume cannot re-surface the untrusted wording.
-			const id = String(data['id'] ?? '');
-			if (!id) break;
-			const status = data['status'] === 'pending_review' ? 'pending_review' : 'active';
-			msg.knowledgeWrites = msg.knowledgeWrites ?? [];
-			// Dedup by id — a Tier-2 SSE replay on reconnect can re-deliver the event.
-			if (!msg.knowledgeWrites.some((w) => w.id === id)) {
-				msg.knowledgeWrites.push({
-					id,
-					subject: typeof data['subject'] === 'string' ? data['subject'] : undefined,
-					kind: typeof data['kind'] === 'string' ? data['kind'] : undefined,
-					status,
-					text: String(data['text'] ?? ''),
-					cause: typeof data['cause'] === 'string'
-						? (data['cause'] as KnowledgeWriteChip['cause'])
-						: undefined,
-				});
-			}
+			// Projection + dedup (Tier-2 replay) is pure — see `projectKnowledgeWrite`. Only
+			// materialise the array when there is a chip to push, so a malformed (no-id) or
+			// duplicate event leaves the message exactly as it was.
+			const chip = projectKnowledgeWrite(msg.knowledgeWrites ?? [], data);
+			if (chip) (msg.knowledgeWrites ??= []).push(chip);
 			break;
 		}
 	}
@@ -2228,8 +2205,11 @@ export async function retireKnowledge(msgIdx: number, id: string): Promise<void>
 	if (!chip || chip.resolved) return;
 	try {
 		const res = await fetch(`${getApiBase()}/knowledge/entries/${id}/retire`, { method: 'POST' });
-		if (!res.ok) throw new Error(`HTTP ${res.status}`);
-		chip.resolved = 'undone';
+		// `retireResolution` IS the 2xx gate: null on a non-2xx drives the throw, so the chip
+		// flips to done only when the route accepted the retire (a failed one stays actionable).
+		const resolved = retireResolution(res.ok);
+		if (!resolved) throw new Error(`HTTP ${res.status}`);
+		chip.resolved = resolved;
 	} catch {
 		addToast(t('chat.knowledge.undo_failed'), 'error', 4000);
 	}
@@ -2256,8 +2236,10 @@ export async function reviewKnowledge(
 			const body = (await res.json().catch(() => null)) as { error?: string } | null;
 			throw new Error(body?.error ?? `HTTP ${res.status}`);
 		}
+		// Only reached after a 2xx — a failed review threw above, leaving the chip
+		// unresolved and its editor open. `reviewResolution` maps the accepted action.
 		if (editedText !== undefined) chip.text = editedText;
-		chip.resolved = action === 'reject' ? 'discarded' : 'kept';
+		chip.resolved = reviewResolution(action);
 		// One fewer waiting in this thread — the banner must not keep claiming otherwise
 		// after the person has just dealt with it.
 		void refreshThreadPendingCount();
