@@ -5,6 +5,8 @@ import {
 	allKnowledgeWrites,
 	carryKnowledgeWrites,
 	knowledgeCauseKey,
+	performRetire,
+	performReview,
 	projectKnowledgeWrite,
 	reviewResolution,
 	retireResolution,
@@ -126,6 +128,98 @@ describe('retireResolution', () => {
 		expect(retireResolution(true)).toBe('undone');
 		// `null` = no transition — the store must not flip the chip to done when the route refused.
 		expect(retireResolution(false)).toBeNull();
+	});
+});
+
+describe('performRetire — the store glue that used to be untestable', () => {
+	const freshChip = (): KnowledgeWriteChip => ({ id: 'k1', status: 'active', text: 'pays net 30' });
+
+	it('resolves the chip to undone, and only after the route accepted', async () => {
+		const chip = freshChip();
+		const outcome = await performRetire(chip, async () => ({ ok: true }));
+		expect(outcome).toBe('resolved');
+		expect(chip.resolved).toBe('undone');
+	});
+
+	it('a refused retire leaves the chip actionable — resolved must NOT be set', async () => {
+		// The 2xx gate: flipping `chip.resolved = 'undone'` unconditionally (the mutation
+		// this kills) would show "undone" for an entry the server still holds active.
+		const chip = freshChip();
+		const outcome = await performRetire(chip, async () => ({ ok: false }));
+		expect(outcome).toBe('failed');
+		expect(chip.resolved).toBeUndefined();
+	});
+
+	it('a send that throws counts as failed, same as a refusal', async () => {
+		const chip = freshChip();
+		const outcome = await performRetire(chip, async () => { throw new Error('network down'); });
+		expect(outcome).toBe('failed');
+		expect(chip.resolved).toBeUndefined();
+	});
+
+	it('no chip, or an already-resolved chip, is a noop and never hits the route', async () => {
+		// The double-click guard: a second click while resolved must not re-fire the request.
+		let calls = 0;
+		const send = async () => { calls++; return { ok: true }; };
+		expect(await performRetire(undefined, send)).toBe('noop');
+		const done: KnowledgeWriteChip = { ...freshChip(), resolved: 'undone' };
+		expect(await performRetire(done, send)).toBe('noop');
+		expect(calls).toBe(0);
+	});
+});
+
+describe('performReview — success-only transition, editor stays open on failure', () => {
+	const pending = (): KnowledgeWriteChip => ({ id: 'k1', status: 'pending_review', text: 'original wording' });
+
+	it.each([
+		['approve', 'kept'],
+		['reject', 'discarded'],
+	] as const)('%s on a 2xx resolves the chip to %s', async (action, expected) => {
+		const chip = pending();
+		const { outcome } = await performReview(chip, action, undefined, async () => ({ ok: true, errorMessage: null }));
+		expect(outcome).toBe('resolved');
+		expect(chip.resolved).toBe(expected);
+		expect(chip.text).toBe('original wording'); // no edit, no text change
+	});
+
+	it('an accepted edit_approve lands the edited text AND resolves to kept', async () => {
+		const chip = pending();
+		const { outcome } = await performReview(chip, 'edit_approve', 'edited wording', async () => ({ ok: true, errorMessage: null }));
+		expect(outcome).toBe('resolved');
+		expect(chip.text).toBe('edited wording');
+		expect(chip.resolved).toBe('kept');
+	});
+
+	it('a FAILED edit_approve keeps the editor open: text unchanged, chip unresolved', async () => {
+		// The verify-done case: applying `chip.text = editedText` before the ok-check (the
+		// mutation this kills) would render the edit as landed when the server refused it.
+		const chip = pending();
+		const { outcome, errorMessage } = await performReview(
+			chip, 'edit_approve', 'edited wording',
+			async () => ({ ok: false, errorMessage: 'text too long' }),
+		);
+		expect(outcome).toBe('failed');
+		expect(errorMessage).toBe('text too long'); // the server's wording reaches the toast
+		expect(chip.text).toBe('original wording');
+		expect(chip.resolved).toBeUndefined();
+	});
+
+	it('a send that throws fails with the thrown wording; a non-Error throw yields null', async () => {
+		const chip = pending();
+		const thrown = await performReview(chip, 'approve', undefined, async () => { throw new Error('boom'); });
+		expect(thrown).toEqual({ outcome: 'failed', errorMessage: 'boom' });
+		expect(chip.resolved).toBeUndefined();
+		const opaque = await performReview(chip, 'approve', undefined, async () => { throw 'string-throw'; });
+		expect(opaque).toEqual({ outcome: 'failed', errorMessage: null });
+	});
+
+	it('no chip, or an already-resolved chip, is a noop and never hits the route', async () => {
+		let calls = 0;
+		const send = async () => { calls++; return { ok: true, errorMessage: null }; };
+		expect((await performReview(undefined, 'approve', undefined, send)).outcome).toBe('noop');
+		const done: KnowledgeWriteChip = { ...pending(), resolved: 'kept' };
+		expect((await performReview(done, 'reject', undefined, send)).outcome).toBe('noop');
+		expect(calls).toBe(0);
 	});
 });
 
@@ -263,6 +357,17 @@ describe('transcript adoption wires the carry-over (source guard)', () => {
 		expect(swaps.length, 'each wholesale adoption must carry knowledgeWrites over').toBe(2);
 		const totalSwaps = src.match(/messages = serverMessages;/g) ?? [];
 		expect(totalSwaps.length, 'a new adoption site was added without carry-over').toBe(2);
+	});
+
+	it('the store wrappers delegate to performRetire/performReview — not a re-inlined copy', () => {
+		// The dead-wire class: `performRetire`'s own tests stay green even if the store stops
+		// calling it and grows a divergent inline copy. Pinned at source because the rune
+		// module cannot be imported. Line-start anchored so a commented-out call never passes.
+		const src = readFileSync(fileURLToPath(new URL('./chat.svelte.ts', import.meta.url)), 'utf-8');
+		expect(/(?:^|\n)[\t ]*const outcome = await performRetire\(chip, async \(\) => \{/.test(src),
+			'retireKnowledge must delegate its guard/gate/transition to performRetire').toBe(true);
+		expect(/(?:^|\n)[\t ]*const \{ outcome, errorMessage \} = await performReview\(chip, action, editedText, async \(\) => \{/.test(src),
+			'reviewKnowledge must delegate its guard/gate/transition to performReview').toBe(true);
 	});
 
 	it('the SSE knowledge_write handler dedups against the whole transcript', () => {

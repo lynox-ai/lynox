@@ -83,6 +83,65 @@ export function retireResolution(ok: boolean): 'undone' | null {
 	return ok ? 'undone' : null;
 }
 
+/** What a chip action amounted to: `resolved` = the transition happened (and side-effects
+ *  like the pending-count refresh are due), `noop` = nothing to do (no chip, or already
+ *  resolved — the double-click guard), `failed` = the route refused or the request threw,
+ *  so the chip stays actionable and a toast is due. */
+export type ChipActionOutcome = 'resolved' | 'noop' | 'failed';
+
+/**
+ * Drive the retire (undo) flow on a chip, with the transport injected.
+ *
+ * This is the store glue that used to live untestable inside `chat.svelte.ts` (a Runes
+ * module the ordinary suite cannot import): the guard, the 2xx gate, and the in-place
+ * transition. The store's wrapper supplies only I/O (the fetch and the failure toast).
+ * A `send` that throws counts as not-ok — same as the route refusing.
+ */
+export async function performRetire(
+	chip: KnowledgeWriteChip | undefined,
+	send: () => Promise<{ ok: boolean }>,
+): Promise<ChipActionOutcome> {
+	if (!chip || chip.resolved) return 'noop';
+	let ok = false;
+	try {
+		ok = (await send()).ok;
+	} catch {
+		ok = false;
+	}
+	const resolved = retireResolution(ok);
+	if (!resolved) return 'failed';
+	chip.resolved = resolved;
+	return 'resolved';
+}
+
+/**
+ * Drive the review flow (approve / edit_approve / reject) on a chip, transport injected.
+ *
+ * The transition is success-only: `chip.text` and `chip.resolved` change ONLY after the
+ * route accepted the action, so a failed `edit_approve` leaves the chip unresolved with
+ * its original text — which is what keeps the editor open instead of pretending the edit
+ * landed. `errorMessage` carries the server's wording (or the thrown error's) for the
+ * caller's toast; `null` means "no server wording, use the generic line".
+ */
+export async function performReview(
+	chip: KnowledgeWriteChip | undefined,
+	action: 'approve' | 'edit_approve' | 'reject',
+	editedText: string | undefined,
+	send: () => Promise<{ ok: boolean; errorMessage: string | null }>,
+): Promise<{ outcome: ChipActionOutcome; errorMessage: string | null }> {
+	if (!chip || chip.resolved) return { outcome: 'noop', errorMessage: null };
+	let res: { ok: boolean; errorMessage: string | null };
+	try {
+		res = await send();
+	} catch (e) {
+		res = { ok: false, errorMessage: e instanceof Error ? e.message : null };
+	}
+	if (!res.ok) return { outcome: 'failed', errorMessage: res.errorMessage };
+	if (editedText !== undefined) chip.text = editedText;
+	chip.resolved = reviewResolution(action);
+	return { outcome: 'resolved', errorMessage: null };
+}
+
 /** The minimal message shape carry-over needs — structural, so the pure module
  *  does not import the store's ChatMessage. */
 export interface ChipBearer {

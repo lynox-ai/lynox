@@ -19,7 +19,7 @@ import {
 	type ContentBlock,
 } from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
-import { projectKnowledgeWrite, reviewResolution, retireResolution, carryKnowledgeWrites, allKnowledgeWrites, type KnowledgeWriteChip } from './knowledge-chip.js';
+import { projectKnowledgeWrite, performRetire, performReview, carryKnowledgeWrites, allKnowledgeWrites, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -2211,17 +2211,13 @@ export function removeQueuedMessage(target: ChatMessage): void {
  *  agent tool, so the agent can never self-undo; only the person clicking can. */
 export async function retireKnowledge(msgIdx: number, id: string): Promise<void> {
 	const chip = messages[msgIdx]?.knowledgeWrites?.find((w) => w.id === id);
-	if (!chip || chip.resolved) return;
-	try {
+	// The guard, the 2xx gate and the transition live in `performRetire` (tested in the
+	// ordinary suite); this wrapper supplies only the transport and the failure toast.
+	const outcome = await performRetire(chip, async () => {
 		const res = await fetch(`${getApiBase()}/knowledge/entries/${id}/retire`, { method: 'POST' });
-		// `retireResolution` IS the 2xx gate: null on a non-2xx drives the throw, so the chip
-		// flips to done only when the route accepted the retire (a failed one stays actionable).
-		const resolved = retireResolution(res.ok);
-		if (!resolved) throw new Error(`HTTP ${res.status}`);
-		chip.resolved = resolved;
-	} catch {
-		addToast(t('chat.knowledge.undo_failed'), 'error', 4000);
-	}
+		return { ok: res.ok };
+	});
+	if (outcome === 'failed') addToast(t('chat.knowledge.undo_failed'), 'error', 4000);
 }
 
 /** DK-UX: resolve an untrusted durable capture from the inline review chip. Routes to the
@@ -2234,26 +2230,24 @@ export async function reviewKnowledge(
 	editedText?: string,
 ): Promise<void> {
 	const chip = messages[msgIdx]?.knowledgeWrites?.find((w) => w.id === id);
-	if (!chip || chip.resolved) return;
-	try {
+	// Success-only transition (incl. "failed edit_approve keeps the editor open") lives in
+	// `performReview` (tested in the ordinary suite); this wrapper is transport + toasts.
+	const { outcome, errorMessage } = await performReview(chip, action, editedText, async () => {
 		const res = await fetch(`${getApiBase()}/knowledge/queue/${id}/review`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(editedText !== undefined ? { action, text: editedText } : { action }),
 		});
-		if (!res.ok) {
-			const body = (await res.json().catch(() => null)) as { error?: string } | null;
-			throw new Error(body?.error ?? `HTTP ${res.status}`);
-		}
-		// Only reached after a 2xx — a failed review threw above, leaving the chip
-		// unresolved and its editor open. `reviewResolution` maps the accepted action.
-		if (editedText !== undefined) chip.text = editedText;
-		chip.resolved = reviewResolution(action);
+		if (res.ok) return { ok: true, errorMessage: null };
+		const body = (await res.json().catch(() => null)) as { error?: string } | null;
+		return { ok: false, errorMessage: body?.error ?? `HTTP ${res.status}` };
+	});
+	if (outcome === 'failed') {
+		addToast(errorMessage ?? t('chat.knowledge.review_failed'), 'error', 4000);
+	} else if (outcome === 'resolved') {
 		// One fewer waiting in this thread — the banner must not keep claiming otherwise
 		// after the person has just dealt with it.
 		void refreshThreadPendingCount();
-	} catch (e) {
-		addToast(e instanceof Error ? e.message : t('chat.knowledge.review_failed'), 'error', 4000);
 	}
 }
 
