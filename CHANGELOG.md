@@ -1,5 +1,64 @@
 # Changelog
 
+## 2.13.0 — 2026-08-09
+
+A cost release. Its origin is one afternoon of real usage: a customer's
+workflow ran a 2000-contact pagination step on the premium tier with the full
+toolset — including a shell nobody asked for — and an approval dialog could not
+say who was asking. Every default this release changes is one nobody had
+chosen.
+
+### Changed
+- **A workflow step that declares no capability tier runs on `fast`.** The
+  resolution chain is step > role > `fast`; the session default deliberately no
+  longer reaches steps. Measured before shipping on the mechanical shape that
+  prompted it (2000 contacts, 100 per page, stop signal = empty page, three
+  repeats per tier): the fast tier was 3/3 perfect on every gate — all pages,
+  no duplicates, correct total. A declared step tier and a role tier still win.
+  The budget check, the step record, and the plan-time estimate share the same
+  fallback, so none of the four surfaces can disagree about what an undeclared
+  step costs. (#1157)
+- **A generated workflow step declares its tools; `bash` is never granted
+  silently.** The planner (plan_task and the auto-planner) must name the tools
+  each step needs; the step gets exactly those, drawn from the inline-safe
+  pool. A step that declares nothing keeps the pool minus `bash` — a shell now
+  requires a declaration or a role grant, never a default. A typo'd tool name
+  fails loudly at save with the grantable list instead of degrading to a silent
+  "tool not available" mid-run. Validated on the wire across providers: 18/18
+  generated steps declared valid sets, and neither model reached for bash
+  without a reason. (#1157)
+- **A saved artifact's body leaves the conversation on the next turn.** After a
+  successful `artifact_save`, the body in the conversation buys nothing — the
+  artifact is persisted, the result names its id and file path, and the agent
+  can read the file if it needs the content again. Measured on a real thread:
+  134 KB of artifact bodies re-read as cache writes on every subsequent run,
+  19.1% of that thread's cost. The turn that produced the save keeps its body;
+  a failed save keeps it forever (it is the only copy left); the persisted
+  thread history — what the UI renders and debug-export reads — is untouched.
+  (#1158)
+
+### Fixed
+- **The composer stays at the bottom of the chat.** With a tall block between
+  transcript and composer — a changeset review, a batch of approval dialogs, a
+  running workflow's progress — the whole column grew past the shell and the
+  composer rode out of the viewport. The non-transcript stack is now capped
+  and scrolls internally; the conversation keeps at least 40% of the height.
+  Reported from a phone and a Windows PC during a live workflow run. (#1156)
+- **The auto-planner's per-step tier choice reaches the pipeline.** The plan
+  conversion dropped the `model` field, so every auto-planned step ran on the
+  undeclared default despite the planner declaring a tier per step. (#1157)
+- **In-session workflow spend is billed per step under the tier the step ran
+  on.** One aggregated debit under the session tier would have reported
+  fast-tier spend as balanced — the same mis-attribution 2.12.1's predecessor
+  fixed for helper calls, on a new surface. (#1157)
+
+### Upgrade and rollback
+One engine-schema migration (history.db v52, additive: approval prompts carry
+their origin). Two control-plane migrations pending from 2.12.x, both additive
+and idempotent. Rolling back to 2.12.1 is safe: evicted artifact bodies exist
+only in the wire-side conversation, never in stored history, and the new step
+fields are optional everywhere.
+
 ## 2.12.1 — 2026-08-08
 
 A patch for two things the status bar and the composer were getting wrong on a
