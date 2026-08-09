@@ -282,6 +282,10 @@ describe('LLM_CATALOG.tier_models (per-tier picker options on a free-text tile)'
       'accounts/fireworks/models/kimi-k3',
       'accounts/fireworks/models/deepseek-v4-flash',
       'accounts/fireworks/models/qwen3p7-plus',
+      'accounts/fireworks/models/gpt-oss-120b',
+      'accounts/fireworks/models/kimi-k2p6',
+      'accounts/fireworks/models/kimi-k2p7-code',
+      'accounts/fireworks/models/minimax-m3',
     ]);
     for (const m of entry.tier_models ?? []) {
       // All are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no

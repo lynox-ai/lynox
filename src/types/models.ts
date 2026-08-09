@@ -466,13 +466,13 @@ const MISTRAL_FEATURES_GEN3: ModelFeatures = {
 };
 
 // Fireworks-hosted openai-compat text models. Text + tool-use + prompt-cache;
-// vision:false for ALL consumers, for two different reasons: GLM 5.2 and
-// DeepSeek v4 Pro genuinely have none (their Fireworks pages state "image
-// input: not supported"), while Kimi K3 and Qwen3.7 Plus DO serve image input
-// on Fireworks but stay text-only here until the openai-wire image path is
-// validated. Either way vision:false yields a clean pre-flight throw on an
-// image-attach, never a silent drop. extendedThinking is the Anthropic-specific
-// mechanism → false on the openai wire.
+// vision:false for ALL consumers, for two different reasons: GLM 5.2, DeepSeek
+// v4 Pro/Flash and gpt-oss-120b genuinely have none (their Fireworks pages
+// state "image input: not supported"), while the Kimi/Qwen/MiniMax candidates
+// DO serve image input on Fireworks but stay text-only here until the
+// openai-wire image path is validated. Either way vision:false yields a clean
+// pre-flight throw on an image-attach, never a silent drop. extendedThinking
+// is the Anthropic-specific mechanism → false on the openai wire.
 const FIREWORKS_TEXT_FEATURES: ModelFeatures = {
   vision: false,
   extendedThinking: false,
@@ -1012,6 +1012,66 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: FIREWORKS_TEXT_FEATURES,
     pricing: { input: 0.40, output: 1.60, cacheWrite: 0.40, cacheRead: 0.08 },
     uiLabel: 'Qwen3.7 Plus',
+    provenance: 'CN',
+  },
+  // The only non-CN entry in this section: OpenAI's open-weight gpt-oss-120b,
+  // US provenance. Already this catalog's Fireworks tile placeholder AND the
+  // model the provider-preset-reachability suite proved the full tool_use
+  // round-trip on — the one candidate whose WIRE is verified, not just priced.
+  // (gpt-oss-20b was evaluated too and rejected: its Fireworks page lists
+  // function calling as not supported, which disqualifies it for an agent.)
+  'accounts/fireworks/models/gpt-oss-120b': {
+    id: 'accounts/fireworks/models/gpt-oss-120b',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 131_072,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 0.15, output: 0.60, cacheWrite: 0.15, cacheRead: 0.014 },
+    uiLabel: 'GPT-OSS 120B',
+    provenance: 'US',
+  },
+  'accounts/fireworks/models/kimi-k2p6': {
+    id: 'accounts/fireworks/models/kimi-k2p6',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 262_144,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 0.95, output: 4.00, cacheWrite: 0.95, cacheRead: 0.16 },
+    uiLabel: 'Kimi K2.6',
+    provenance: 'CN',
+  },
+  // Coding/agentic-specialized sibling of K2.6 — no non-thinking mode (it
+  // reasons on every turn), so expect per-turn latency as a MAIN candidate.
+  'accounts/fireworks/models/kimi-k2p7-code': {
+    id: 'accounts/fireworks/models/kimi-k2p7-code',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 262_144,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 0.95, output: 4.00, cacheWrite: 0.95, cacheRead: 0.19 },
+    uiLabel: 'Kimi K2.7 Code',
+    provenance: 'CN',
+  },
+  'accounts/fireworks/models/minimax-m3': {
+    id: 'accounts/fireworks/models/minimax-m3',
+    provider: 'openai',
+    tier: null,
+    contextWindow: 524_288,
+    defaultMaxOutput: 16_000,
+    maxContinuations: 10,
+    betaHeaders: [],
+    features: FIREWORKS_TEXT_FEATURES,
+    pricing: { input: 0.30, output: 1.20, cacheWrite: 0.30, cacheRead: 0.059 },
+    uiLabel: 'MiniMax M3',
     provenance: 'CN',
   },
 };

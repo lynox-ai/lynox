@@ -20,6 +20,10 @@ describe('model-presets Wave 1 — new model registrations', () => {
       'accounts/fireworks/models/kimi-k3',
       'accounts/fireworks/models/deepseek-v4-flash',
       'accounts/fireworks/models/qwen3p7-plus',
+      'accounts/fireworks/models/gpt-oss-120b',
+      'accounts/fireworks/models/kimi-k2p6',
+      'accounts/fireworks/models/kimi-k2p7-code',
+      'accounts/fireworks/models/minimax-m3',
     ]) {
       expect(MODEL_CAPABILITIES[id], `${id} must be registered`).toBeDefined();
     }
@@ -107,6 +111,45 @@ describe('model-presets Wave 1 — new model registrations', () => {
     // openai-wire image validation (Fireworks lists image input as supported).
     expect(m.pricing).toEqual({ input: 0.40, output: 1.60, cacheWrite: 0.40, cacheRead: 0.08 });
     expect(m.contextWindow).toBe(262_144);
+    expect(m.features.vision).toBe(false);
+    expect(m.provenance).toBe('CN');
+  });
+
+  // The 2026-08-09 second candidate wave — all read from their Fireworks pages.
+  it('GPT-OSS 120B (Fireworks) — verified $0.15/$0.60 + $0.014 cached, 131k ctx, text-only, US provenance', () => {
+    const m = MODEL_CAPABILITIES['accounts/fireworks/models/gpt-oss-120b']!;
+    expect(m.provider).toBe('openai');
+    expect(m.pricing).toEqual({ input: 0.15, output: 0.60, cacheWrite: 0.15, cacheRead: 0.014 });
+    expect(m.contextWindow).toBe(131_072);
+    expect(m.features.vision).toBe(false);
+    // Non-CN (OpenAI open weights).
+    expect(m.provenance).toBe('US');
+  });
+
+  it('Kimi K2.6 (Fireworks) — verified $0.95/$4.00 + $0.16 cached, 262k ctx, text-only pending vision validation, CN', () => {
+    const m = MODEL_CAPABILITIES['accounts/fireworks/models/kimi-k2p6']!;
+    expect(m.provider).toBe('openai');
+    expect(m.pricing).toEqual({ input: 0.95, output: 4.00, cacheWrite: 0.95, cacheRead: 0.16 });
+    expect(m.contextWindow).toBe(262_144);
+    expect(m.features.vision).toBe(false);
+    expect(m.provenance).toBe('CN');
+  });
+
+  it('Kimi K2.7 Code (Fireworks) — verified $0.95/$4.00 + $0.19 cached, 262k ctx, text-only pending vision validation, CN', () => {
+    const m = MODEL_CAPABILITIES['accounts/fireworks/models/kimi-k2p7-code']!;
+    expect(m.provider).toBe('openai');
+    // Cached rate $0.19 ≠ K2.6's $0.16 — sibling models, separate pages.
+    expect(m.pricing).toEqual({ input: 0.95, output: 4.00, cacheWrite: 0.95, cacheRead: 0.19 });
+    expect(m.contextWindow).toBe(262_144);
+    expect(m.features.vision).toBe(false);
+    expect(m.provenance).toBe('CN');
+  });
+
+  it('MiniMax M3 (Fireworks) — verified $0.30/$1.20 + $0.059 cached, 512k ctx, text-only pending vision validation, CN', () => {
+    const m = MODEL_CAPABILITIES['accounts/fireworks/models/minimax-m3']!;
+    expect(m.provider).toBe('openai');
+    expect(m.pricing).toEqual({ input: 0.30, output: 1.20, cacheWrite: 0.30, cacheRead: 0.059 });
+    expect(m.contextWindow).toBe(524_288);
     expect(m.features.vision).toBe(false);
     expect(m.provenance).toBe('CN');
   });
