@@ -265,7 +265,17 @@ describe('transcript adoption wires the carry-over (source guard)', () => {
 		expect(totalSwaps.length, 'a new adoption site was added without carry-over').toBe(2);
 	});
 
-	it('ChatView counts knowledge chips in the stick-to-bottom stream signal', () => {
+	it('the SSE knowledge_write handler dedups against the whole transcript', () => {
+		const src = readFileSync(fileURLToPath(new URL('./chat.svelte.ts', import.meta.url)), 'utf-8');
+		// Per-message dedup (`projectKnowledgeWrite(msg.knowledgeWrites ?? []`) re-adds a
+		// replayed id after adoption anchored the carried chip on another message.
+		expect(/(?:^|\n)[\t ]*\[\.\.\.allKnowledgeWrites\(messages\), \.\.\.\(msg\.knowledgeWrites \?\? \[\]\)\], data\)/.test(src),
+			'knowledge_write must dedup transcript-globally via allKnowledgeWrites').toBe(true);
+	});
+});
+
+describe('ChatView re-anchors for a late knowledge chip (source guard)', () => {
+	it('streamSignal counts knowledgeWrites', () => {
 		// A chip arrives near the very END of a turn, appended after the text settled.
 		// If `streamSignal` does not count knowledgeWrites, the pin effect never re-runs
 		// for that late height change and the review chip renders under the composer —
@@ -274,15 +284,9 @@ describe('transcript adoption wires the carry-over (source guard)', () => {
 		const src = readFileSync(fileURLToPath(new URL('../components/ChatView.svelte', import.meta.url)), 'utf-8');
 		const signal = src.match(/const streamSignal = \$derived\.by\(\(\) => \{[\s\S]*?\n\t\}\);/)?.[0];
 		expect(signal, 'streamSignal derivation not found — update this guard').toBeTruthy();
+		// The CODE line, not a substring — a comment inside the block naming the
+		// identifier must never satisfy this guard.
 		expect(signal, 'streamSignal must count knowledgeWrites so a late chip re-anchors the view')
-			.toContain('knowledgeWrites');
-	});
-
-	it('the SSE knowledge_write handler dedups against the whole transcript', () => {
-		const src = readFileSync(fileURLToPath(new URL('./chat.svelte.ts', import.meta.url)), 'utf-8');
-		// Per-message dedup (`projectKnowledgeWrite(msg.knowledgeWrites ?? []`) re-adds a
-		// replayed id after adoption anchored the carried chip on another message.
-		expect(/(?:^|\n)[\t ]*\[\.\.\.allKnowledgeWrites\(messages\), \.\.\.\(msg\.knowledgeWrites \?\? \[\]\)\], data\)/.test(src),
-			'knowledge_write must dedup transcript-globally via allKnowledgeWrites').toBe(true);
+			.toMatch(/if \(m\.knowledgeWrites\) s \+= m\.knowledgeWrites\.length;/);
 	});
 });
