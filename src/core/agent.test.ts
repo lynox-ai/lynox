@@ -3293,6 +3293,30 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     expect(agent.sawUntrustedData).toBe(true);
   });
 
+  it('the latch is armed BEFORE the tool_result stream event fires (mid-run fold ordering)', async () => {
+    // The orchestrator's cross-sibling arming (runtime-adapter.ts, noteStepTaintLive)
+    // folds a step's taint into the run accumulator AT the tool_result stream event
+    // and relies on dispatch having armed the latch first (_executeOneInner, before
+    // the tool runs). If that ordering ever flips, the mid-run fold silently
+    // degrades to finally-only and a parallel sibling's durable write can land
+    // active instead of pending_review.
+    const seenAtEvent: boolean[] = [];
+    let agentRef: Agent | undefined;
+    const httpTool = makeTool('http_request', vi.fn().mockResolvedValue('payload'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'http_request', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', tools: [httpTool],
+      onStream: (e) => {
+        if (e.type === 'tool_result') seenAtEvent.push(agentRef!.sawExternalContentTool);
+      },
+    });
+    agentRef = agent;
+    await agent.send('fetch that');
+    expect(seenAtEvent).toEqual([true]);
+  });
+
   it('sets sawExternalContentTool when a stored-read-back tool runs (DK.1 H4 denylist)', async () => {
     // Regression guard (/security-deep-dive S5): a `data_store_query` can surface content a
     // prior tainted turn seeded, so it MUST taint the turn for a later `remember` even though
