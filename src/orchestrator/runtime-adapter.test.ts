@@ -1298,6 +1298,141 @@ describe('RunTaint — cross-step untrusted inheritance', () => {
     expect(taint.earned).toBe('external-tool');
   });
 
+  it('a same-phase PARALLEL sibling is armed MID-RUN by another sibling\'s external read', async () => {
+    // The spawn-time seed cannot cover this: runner.ts spawns a whole phase via
+    // Promise.allSettled before any step folds, so B spawns clean while A is
+    // still reading. The mid-run fold (onToolActivity → noteStepTaintLive) must
+    // arm B AT A's tool_result event — not at A's finally, which for the
+    // store-then-recall chain is after the leaked value is already readable.
+    const taint = newRunTaint();
+    const cfgAt = (i: number) => vi.mocked(Agent).mock.calls[i]![0] as unknown as Record<string, unknown>;
+    const instanceAt = (i: number) => (vi.mocked(Agent).mock.instances as unknown as Array<{
+      restoreConversationTaint: ReturnType<typeof vi.fn>;
+    }>)[i]!;
+
+    let resolveBSpawned!: () => void;
+    const bSpawned = new Promise<void>((r) => { resolveBSpawned = r; });
+    let releaseB!: () => void;
+    const bGate = new Promise<void>((r) => { releaseB = r; });
+    let bCleanAtSpawn: boolean | undefined;
+    let bArmedAtEmit: boolean | undefined;
+
+    // Step A: waits until B is spawned (parallel phase), then reads external
+    // content — the tool_result stream event is where the mid-run fold runs.
+    mockSend.mockImplementationOnce(async function (this: { sawExternalContentTool?: boolean }) {
+      await bSpawned;
+      bCleanAtSpawn = instanceAt(1).restoreConversationTaint.mock.calls.length === 0;
+      this.sawExternalContentTool = true;
+      (cfgAt(0)['onStream'] as (e: StreamEvent) => void)(
+        { type: 'tool_result', name: 'http_request', result: 'external payload', agent: 's1' },
+      );
+      bArmedAtEmit = instanceAt(1).restoreConversationTaint.mock.calls.length > 0;
+      releaseB();
+      return 'A';
+    });
+    // Step B: spawned clean, still mid-send while A reads.
+    mockSend.mockImplementationOnce(async () => {
+      resolveBSpawned();
+      await bGate;
+      return 'B';
+    });
+
+    await Promise.all([runInline(taint), runInline(taint)]);
+    expect(bCleanAtSpawn).toBe(true);      // B did NOT inherit at spawn (phase was clean)
+    expect(taint.earned).toBe('external-tool');
+    expect(bArmedAtEmit).toBe(true);       // …and was armed synchronously at A's event
+  });
+
+  it('a fully-internal parallel phase leaves every sibling clean (no over-taint)', async () => {
+    // Gegenrichtung: the arming must not fire off tool events that carry no
+    // taint — two clean siblings exchanging nothing must both stay clean.
+    const taint = newRunTaint();
+    const cfgAt = (i: number) => vi.mocked(Agent).mock.calls[i]![0] as unknown as Record<string, unknown>;
+    mockSend.mockImplementationOnce(async () => {
+      (cfgAt(0)['onStream'] as (e: StreamEvent) => void)(
+        { type: 'tool_result', name: 'memory_store', result: 'ok', agent: 's1' },
+      );
+      return 'A';
+    });
+    mockSend.mockImplementationOnce(async () => 'B');
+    await Promise.all([runInline(taint), runInline(taint)]);
+    expect(runTaintArmed(taint)).toBe(false);
+    const instances = vi.mocked(Agent).mock.instances as unknown as Array<{ restoreConversationTaint: ReturnType<typeof vi.fn> }>;
+    expect(instances[0]!.restoreConversationTaint).not.toHaveBeenCalled();
+    expect(instances[1]!.restoreConversationTaint).not.toHaveBeenCalled();
+  });
+
+  it('a live registration is removed in finally — later arming does not touch finished steps', async () => {
+    // The live set must not leak agents across steps: after step 1 finishes
+    // clean, an arming caused by step 2 must not call into step 1's agent.
+    const taint = newRunTaint();
+    await runInline(taint);                              // step 1: clean, finishes
+    const first = (vi.mocked(Agent).mock.instances as unknown as Array<{ restoreConversationTaint: ReturnType<typeof vi.fn> }>)[0]!;
+    mockSend.mockImplementationOnce(async function (this: { sawExternalContentTool?: boolean }) {
+      this.sawExternalContentTool = true;
+      return 'step 2';
+    });
+    await runInline(taint);                              // step 2: arms in finally
+    expect(runTaintArmed(taint)).toBe(true);
+    expect(first.restoreConversationTaint).not.toHaveBeenCalled();
+  });
+
+  it('taint that only surfaces at a step\'s finally still arms live siblings', async () => {
+    // Backstop half: an arming source with no tool event (e.g. spawn's child
+    // hand-off) reaches the accumulator only at the finally fold — a sibling
+    // still mid-send must be armed there too, not just by the stream path.
+    const taint = newRunTaint();
+    const instanceAt = (i: number) => (vi.mocked(Agent).mock.instances as unknown as Array<{
+      restoreConversationTaint: ReturnType<typeof vi.fn>;
+    }>)[i]!;
+    let resolveBSpawned!: () => void;
+    const bSpawned = new Promise<void>((r) => { resolveBSpawned = r; });
+    let releaseB!: () => void;
+    const bGate = new Promise<void>((r) => { releaseB = r; });
+    mockSend.mockImplementationOnce(async function (this: { sawExternalContentTool?: boolean }) {
+      await bSpawned;
+      this.sawExternalContentTool = true; // no stream event — finally is the only fold
+      return 'A';
+    });
+    mockSend.mockImplementationOnce(async () => {
+      resolveBSpawned();
+      await bGate;
+      return 'B';
+    });
+    const pA = runInline(taint);
+    const pB = runInline(taint);
+    await pA;
+    expect(instanceAt(1).restoreConversationTaint).toHaveBeenCalled();
+    releaseB();
+    await pB;
+  });
+
+  it('spawnViaAgent wires the same mid-run arming (the two step paths must not diverge)', async () => {
+    const agentDef: AgentDef = { name: 'named', description: '', tools: [] };
+    const namedStep: ManifestStep = { id: 'n1', agent: 'named', runtime: 'agent' };
+    const taint = newRunTaint();
+    const peer = { restoreConversationTaint: vi.fn() };
+    (taint.live ??= new Set()).add(peer);
+    let selfRegistered: boolean | undefined;
+    let peerArmedAtEmit: boolean | undefined;
+    mockSend.mockImplementationOnce(async function (this: { sawExternalContentTool?: boolean }) {
+      selfRegistered = taint.live!.size === 2; // the peer + this step's own agent
+      this.sawExternalContentTool = true;
+      const cfg = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+      (cfg['onStream'] as (e: StreamEvent) => void)(
+        { type: 'tool_result', name: 'http_request', result: 'x', agent: 'n1' },
+      );
+      peerArmedAtEmit = peer.restoreConversationTaint.mock.calls.length > 0;
+      return 'named';
+    });
+    await spawnViaAgent(namedStep, agentDef, {}, mockConfig, undefined, 'run-1',
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, taint);
+    expect(selfRegistered).toBe(true);       // registered itself live at spawn
+    expect(peerArmedAtEmit).toBe(true);      // armed the sibling at its own event
+    expect(taint.live!.has(peer)).toBe(true);
+    expect(taint.live!.size).toBe(1);        // removed itself in finally
+  });
+
   it('helpers: marker outranks external-tool; a reflected conversation cause carries nothing', () => {
     const taint = newRunTaint();
     expect(runTaintArmed(taint)).toBe(false);
