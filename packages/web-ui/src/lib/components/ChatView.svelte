@@ -1885,6 +1885,12 @@
 			s += m.content.length;
 			if (m.blocks) s += m.blocks.length;
 			if (m.toolCalls) s += m.toolCalls.length;
+			// Knowledge chips arrive via SSE near the very END of a turn, appended to the
+			// last assistant message after the text settled. Without them in this signal
+			// the stick-to-bottom effect never re-runs for that late height change and the
+			// review chip renders below the fold, under the composer — the person then
+			// judges an untrusted capture without ever seeing its wording.
+			if (m.knowledgeWrites) s += m.knowledgeWrites.length;
 		}
 		return s;
 	});

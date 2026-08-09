@@ -273,3 +273,20 @@ describe('transcript adoption wires the carry-over (source guard)', () => {
 			'knowledge_write must dedup transcript-globally via allKnowledgeWrites').toBe(true);
 	});
 });
+
+describe('ChatView re-anchors for a late knowledge chip (source guard)', () => {
+	it('streamSignal counts knowledgeWrites', () => {
+		// A chip arrives near the very END of a turn, appended after the text settled.
+		// If `streamSignal` does not count knowledgeWrites, the pin effect never re-runs
+		// for that late height change and the review chip renders under the composer —
+		// the person approves a capture they never saw (founder-observed 2026-08-09,
+		// reproduced at the pixel: chip bottom 860px vs composer top 797px at 1440x900).
+		const src = readFileSync(fileURLToPath(new URL('../components/ChatView.svelte', import.meta.url)), 'utf-8');
+		const signal = src.match(/const streamSignal = \$derived\.by\(\(\) => \{[\s\S]*?\n\t\}\);/)?.[0];
+		expect(signal, 'streamSignal derivation not found — update this guard').toBeTruthy();
+		// The CODE line, not a substring — a comment inside the block naming the
+		// identifier must never satisfy this guard.
+		expect(signal, 'streamSignal must count knowledgeWrites so a late chip re-anchors the view')
+			.toMatch(/if \(m\.knowledgeWrites\) s \+= m\.knowledgeWrites\.length;/);
+	});
+});
