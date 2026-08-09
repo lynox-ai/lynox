@@ -4,6 +4,7 @@ import { validateGraph } from './graph.js';
 import type { Manifest } from '../types/orchestration.js';
 import type { InlinePipelineStep, PipelineMode, PlannedPipeline } from '../types/index.js';
 import { findAutonomousViolations } from './human-in-the-loop.js';
+import { INLINE_CORE_TOOLS } from './runtime-adapter.js';
 
 /**
  * Hard ceiling on workflow steps — single source of truth.
@@ -28,6 +29,9 @@ const ManifestStepSchema = z.object({
   runtime: z.enum(['agent', 'mock', 'inline', 'pipeline']),
   task: z.string().optional(),
   model: z.string().optional(),
+  // Declared tool set (F2/D2) — schema'd so validation preserves it; zod
+  // strips unknown keys, and loadManifestFile USES the validated result.
+  tools: z.array(z.string()).optional(),
   // Deterministic-replay pair — schema'd so validation preserves (not strips)
   // the literal captured call carried on a promoted step.
   tool: z.string().optional(),
@@ -46,6 +50,7 @@ const ManifestStepSchema = z.object({
     id: z.string().min(1),
     task: z.string().min(1),
     model: z.string().optional(),
+    tools: z.array(z.string()).optional(),
     input_from: z.array(z.string()).optional(),
     conditions: z.array(ManifestConditionSchema).optional(),
     timeout_ms: z.number().positive().optional(),
@@ -94,6 +99,20 @@ export function validateManifest(raw: unknown): Manifest {
     if (step.runtime === 'pipeline' && !step.pipeline) {
       throw new Error(`Invalid manifest: agents.${step.id}: "pipeline" is required when runtime is "pipeline"`);
     }
+    // F2/D2: a typo'd declared tool on an inline step must fail HERE, not
+    // degrade to a silent "Tool not available" at dispatch — this is the gate
+    // for YAML manifests and raw run_workflow steps, the same one
+    // assertPlannedPipelineIsValid applies to stored plans.
+    if (step.runtime === 'inline') {
+      const issue = declaredToolIssue(step);
+      if (issue) throw new Error(`Invalid manifest: ${issue}`);
+    }
+    if (step.runtime === 'pipeline' && Array.isArray(step.pipeline)) {
+      for (const nested of step.pipeline) {
+        const issue = declaredToolIssue(nested);
+        if (issue) throw new Error(`Invalid manifest: ${issue}`);
+      }
+    }
   }
 
   // v1.1: validate dependency graph
@@ -140,7 +159,41 @@ export function assertPipelineModeIsValid(steps: InlinePipelineStep[], mode: Pip
   if (issues.length > 0) throw new AutonomousPipelineViolation(issues);
 }
 
+/**
+ * Save-time gate (F2/D2): a declared tool name that is not in the inline pool
+ * is a generator bug — fail LOUD at save, not silently at dispatch ("Tool not
+ * available" mid-run is how four unexplainable approval dialogs reached a
+ * customer). Steps that declare nothing pass (legacy manifests keep working
+ * and get the bash-less default pool at run time). An empty declared array is
+ * valid — it means "no tools". A captured replay step's `tool` is deliberately
+ * NOT pool-checked here: captured workflows legitimately carry non-pool tools,
+ * and the runtime already degrades an ungranted replay to the prose task (the
+ * allowlist stays the boundary — see the replay gate in runtime-adapter). What
+ * IS rejected is a declaration that contradicts its own replay tool: both
+ * fields present but `tool` outside `tools` is a generator bug, new data only.
+ */
+function declaredToolIssue(step: { id: string; tools?: string[] | undefined; tool?: string | undefined }): string | undefined {
+  if (!step.tools) return undefined;
+  const unknown = step.tools.filter(name => !INLINE_CORE_TOOLS.has(name));
+  if (unknown.length > 0) {
+    return `Step "${step.id}" declares unknown tool(s): ${unknown.join(', ')}. ` +
+      `Declarable tools: ${[...INLINE_CORE_TOOLS].join(', ')}.`;
+  }
+  if (step.tool !== undefined && !step.tools.includes(step.tool)) {
+    return `Step "${step.id}" replays tool "${step.tool}" but its declared tools (${step.tools.join(', ') || 'none'}) exclude it.`;
+  }
+  return undefined;
+}
+
+export function assertDeclaredToolsAreValid(steps: InlinePipelineStep[]): void {
+  for (const step of steps) {
+    const issue = declaredToolIssue(step);
+    if (issue) throw new Error(issue);
+  }
+}
+
 /** Convenience overload that takes a stored PlannedPipeline. */
 export function assertPlannedPipelineIsValid(planned: PlannedPipeline): void {
   assertPipelineModeIsValid(planned.steps, planned.mode);
+  assertDeclaredToolsAreValid(planned.steps);
 }

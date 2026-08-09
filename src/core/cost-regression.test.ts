@@ -277,7 +277,15 @@ function measureStaticPrefixTokens(): number {
 // FLAG_GATED_TOOL_NAMES and re-baselining here, in the same commit. And it is not a reason to
 // gate tools for cost — a capability nobody can reach is worth nothing; this one is gated
 // because a calendar feed is externally authored and only a real one proves the read is right.
-const STATIC_PREFIX_BUDGET = 23360;
+// 2026-08-09 (F2/D2, cost-controls v2): +~120 tokens total for the `tools`
+// declaration on BOTH generator surfaces — required on plan_task phases, and
+// declarable (with `model`) on run_workflow ad-hoc steps, which previously had
+// no way to opt into bash at all post-F2. Deliberate: the field is the
+// mechanism that keeps bash (and its approval dialogs) out of every generated
+// workflow step, which buys back far more than the prefix pays. Descriptions
+// were tightened before bumping — neither names a tool list (the caller's own
+// toolset is in context; an invalid name fails loudly at save).
+const STATIC_PREFIX_BUDGET = 23500;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated

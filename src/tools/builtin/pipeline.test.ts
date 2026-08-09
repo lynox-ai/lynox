@@ -427,27 +427,33 @@ describe('run_workflow — in-session cost is billed (money-leak fix)', () => {
     });
   }
 
-  it('reports the AGGREGATED step cost to CP billing for an inline run', async () => {
-    // The core money property: two steps at 0.002 + 0.01 must be billed as 0.012.
-    // Before the fix this spend was written only as excluded pipeline_step rows,
-    // so it escaped the daily/monthly cap and the managed-billing debit entirely.
+  it('reports the FULL step cost to CP billing, one debit per step under its own tier', async () => {
+    // The core money property: two steps at 0.002 + 0.01 must be billed in
+    // full. Since F1 the debit is per-step under the tier the step RAN on: an
+    // undeclared step runs (and bills as) fast, a declared one as declared —
+    // one aggregated debit under the session tier would report fast spend as
+    // balanced, the #1155 mis-attribution on a new surface.
     const { agent, meteredHost } = makeBillableAgent();
     mockRunManifest.mockResolvedValueOnce(twoStepState());
 
-    await runWorkflowTool.handler({ name: 'w', steps: [makeStep('a', 'x'), makeStep('b', 'y')] }, agent);
+    await runWorkflowTool.handler({ name: 'w', steps: [makeStep('a', 'x'), { ...makeStep('b', 'y'), model: 'deep' }] }, agent);
 
-    expect(mockReportMeteredCost).toHaveBeenCalledTimes(1);
-    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.012, 'balanced');
+    expect(mockReportMeteredCost).toHaveBeenCalledTimes(2);
+    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.002, 'fast');
+    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.01, 'deep');
   });
 
-  it('reports a stored-workflow (workflow_id) run too', async () => {
+  it('reports a stored-workflow (workflow_id) run too, under the undeclared-fast tier', async () => {
     const { agent, meteredHost } = makeBillableAgent();
     const pipelineId = seedStoredPipeline([{ id: 'only', task: 'do it' }]);
-    mockRunManifest.mockResolvedValueOnce(makeRunState()); // costUsd 0.001
+    const state = makeRunState();
+    const out = state.outputs.get('step-1')!;
+    state.outputs = new Map([['only', { ...out, stepId: 'only' }]]);
+    mockRunManifest.mockResolvedValueOnce(state); // costUsd 0.001
 
     await runWorkflowTool.handler({ workflow_id: pipelineId }, agent);
 
-    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.001, 'balanced');
+    expect(mockReportMeteredCost).toHaveBeenCalledWith(meteredHost, expect.any(String), 0.001, 'fast');
   });
 
   it('does NOT report on self-host / BYOK (no metered host)', async () => {
@@ -1494,5 +1500,17 @@ describe('A1: §4.5 drift fixes', () => {
 
     resolveRun(makeRunState());
     await inFlight;
+  });
+});
+
+describe('buildManifest carries the declared tool set (F2)', () => {
+  it('copies step.tools onto the manifest agent entry', async () => {
+    const { buildManifest } = await import('./pipeline.js');
+    const manifest = buildManifest('m', [
+      { id: 'a', task: 'fetch', tools: ['http_request'] },
+      { id: 'b', task: 'bare' },
+    ], 'stop');
+    expect(manifest.agents[0]!.tools).toEqual(['http_request']);
+    expect(manifest.agents[1]!.tools).toBeUndefined();
   });
 });

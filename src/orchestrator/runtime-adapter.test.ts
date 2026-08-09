@@ -29,7 +29,7 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
-import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, createStepStreamHandler, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
 import type { AgentDef } from '../types/orchestration.js';
 import type { StreamEvent } from '../types/index.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
@@ -191,7 +191,11 @@ describe('spawnInline with role', () => {
     const tools = agentConfig['tools'] as ToolEntry[];
     expect(tools.find(t => t.definition.name === 'write_file')).toBeUndefined();
     expect(tools.find(t => t.definition.name === 'read_file')).toBeDefined();
-    expect(tools.find(t => t.definition.name === 'bash')).toBeDefined();
+    // F2/D2: a deny-only role never DECLARED bash, so it no longer gets it
+    // silently (pre-F2 this asserted bash present). bash needs step.tools or a
+    // role allowTools grant — for `operator` ("Read-only") this fixes the
+    // role's own stated contract.
+    expect(tools.find(t => t.definition.name === 'bash')).toBeUndefined();
   });
 
   it('role allowTools restricts to whitelist', async () => {
@@ -591,6 +595,124 @@ describe('secretStore propagation into pipeline sub-agents (fail-loud secret res
   });
 });
 
+describe('F1: undeclared step tier defaults to fast (spawn wiring)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  it('an inline step with no model and no role spawns on the fast tier', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'paginate' };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['model']).toContain('haiku');
+  });
+
+  it('the session default_tier does NOT reach an undeclared step', async () => {
+    const cfg = { api_key: 'test-key', default_tier: 'deep' } as unknown as LynoxUserConfig;
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'paginate' };
+    await spawnInline(step, {}, cfg, mockParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['model']).toContain('haiku');
+  });
+
+  it('a declared step.model still wins', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'analyze', model: 'balanced' };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    expect(agentConfig['model']).toContain('sonnet');
+  });
+
+  it('undeclaredInlineStepTier: role tier wins over the fast default', () => {
+    mockGetRole.mockReturnValue({ model: 'balanced', effort: 'high', autonomy: 'guided', description: 'r' });
+    expect(undeclaredInlineStepTier({ role: 'researcher' })).toBe('balanced');
+    mockGetRole.mockReturnValue(undefined);
+    expect(undeclaredInlineStepTier({})).toBe('fast');
+  });
+});
+
+describe('F2: declared step tool sets (spawn wiring)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetRole.mockReturnValue(undefined);
+  });
+
+  const toolNames = (): string[] => {
+    const agentConfig = vi.mocked(Agent).mock.calls[0]![0] as unknown as Record<string, unknown>;
+    return (agentConfig['tools'] as ToolEntry[]).map(t => t.definition.name);
+  };
+
+  it('an undeclared step gets the pool WITHOUT bash', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'do' };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toContain('read_file');
+    expect(toolNames()).toContain('write_file');
+    expect(toolNames()).not.toContain('bash');
+  });
+
+  it('a step gets bash ONLY by declaring it', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'run script', tools: ['bash'] };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual(['bash']);
+  });
+
+  it('a declared set narrows to exactly the declared names', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'read', tools: ['read_file'] };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual(['read_file']);
+  });
+
+  it('a declared name outside the inline pool is not granted', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'spawn', tools: ['spawn_agent', 'read_file'] };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual(['read_file']);
+  });
+
+  it('a captured replay step\'s tool is admitted alongside its declared set', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'replay', tools: ['read_file'], tool: 'bash', input_template: { cmd: 'ls' } };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toContain('bash');
+    expect(toolNames()).toContain('read_file');
+  });
+
+  it('a role allowTools grant still passes the full parent set to the role filter', async () => {
+    mockGetRole.mockReturnValue({ model: 'fast', effort: 'high', autonomy: 'autonomous', allowTools: ['bash'], description: 'op' });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', role: 'operator' };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual(['bash']);
+  });
+
+  it('a declared EMPTY array grants zero tools (declaration, not absence)', async () => {
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'pure reasoning', tools: [] };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual([]);
+  });
+
+  it('role allowTools wins over a step tools declaration (pinned precedence)', async () => {
+    // Both present is YAML-author territory (plan_task steps carry no role).
+    // The role grant is the wider, deliberate surface — pin that it wins so a
+    // refactor can't silently flip the precedence.
+    mockGetRole.mockReturnValue({ model: 'fast', effort: 'high', autonomy: 'autonomous', allowTools: ['bash'], description: 'op' });
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', role: 'operator', tools: ['read_file'] };
+    await spawnInline(step, {}, mockConfig, mockParentTools);
+    expect(toolNames()).toEqual(['bash']);
+  });
+
+  it('declared ask_user is still stripped when no parent prompt callback exists', async () => {
+    // Belt-and-suspenders pin: the validator blocks autonomous+ask_user at
+    // save, but if such a step reaches an autonomous spawn anyway, the strip
+    // must win over the declaration — leaving the step with zero tools beats
+    // a dispatch-time throw inside an unattended run.
+    const withAskUser: ToolEntry[] = [...mockParentTools, {
+      definition: { name: 'ask_user', description: 'Ask', input_schema: { type: 'object' } } as ToolEntry['definition'],
+      handler: async () => 'answer',
+    }];
+    const step: ManifestStep = { id: 's', agent: 's', runtime: 'inline', task: 'confirm', tools: ['ask_user'] };
+    await spawnInline(step, {}, mockConfig, withAskUser);
+    expect(toolNames()).toEqual([]);
+  });
+});
+
 describe('INLINE_CORE_TOOLS membership (regression-gate)', () => {
   // Pins the inline-step sandbox allowlist so a future "let me trim a few
   // tools" refactor can't silently break workflows that depend on memory
@@ -764,6 +886,19 @@ describe('spawnPipeline — autonomy propagation (A1 C1 fix through nesting)', (
     expect(vi.mocked(Agent).mock.calls.length).toBeGreaterThanOrEqual(1);
     const innerConfig = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
     expect(innerConfig['autonomy']).toBe('autonomous');
+  });
+
+  it('carries a nested step\'s declared tools into the sub-manifest (F2)', async () => {
+    const step: ManifestStep = {
+      id: 'nested3', agent: 'nested3', runtime: 'pipeline',
+      pipeline: [{ id: 'inner3', task: 'run a script', tools: ['bash'] }],
+    };
+    await spawnPipeline(step, {}, mockConfig, mockParentTools, 0);
+    // Dropping `tools` in the sub-manifest conversion makes the inner step
+    // undeclared → bash-less default pool → this assert fails.
+    const innerConfig = vi.mocked(Agent).mock.calls.at(-1)![0] as unknown as Record<string, unknown>;
+    const innerNames = (innerConfig['tools'] as ToolEntry[]).map(t => t.definition.name);
+    expect(innerNames).toEqual(['bash']);
   });
 
   it('passes undefined autonomy through unchanged (in-session inheritance)', async () => {

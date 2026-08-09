@@ -11,7 +11,7 @@ import { buildApprovalSet } from '../core/pre-approve.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, resolveTaskTemplate, resolveInputTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
-import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
 import { channels } from '../core/observability.js';
 import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from '../types/orchestration.js';
@@ -554,7 +554,11 @@ function recordStepRow(
       tokensIn: output.tokensIn,
       tokensOut: output.tokensOut,
       costUsd: output.costUsd,
-      modelTier: step.model ?? 'balanced',
+      // F1: record the tier an undeclared step actually RAN on. This row feeds
+      // getAvgStepCostByModelTier — a wrong tier here poisons the per-tier cost
+      // estimate the plan preview shows. Agent/mock runtimes keep the legacy
+      // fallback (their tier lives in the AgentDef, which this record can't see).
+      modelTier: step.model ?? (step.runtime === 'inline' ? undeclaredInlineStepTier(step) : 'balanced'),
     });
     acc.push({
       rowId, result: output.result,
@@ -691,8 +695,9 @@ async function executeStep(
         (resolvedTask !== step.task || resolvedInputTemplate !== step.input_template)
           ? { ...step, task: resolvedTask, input_template: resolvedInputTemplate }
           : step;
-      // Check session budget before spawning step agent
-      const stepModel = resolveModelForCost(step, 'balanced', config);
+      // Check session budget before spawning step agent — same undeclared-tier
+      // default as the spawn (F1), so the budget prices the model that runs.
+      const stepModel = resolveModelForCost(step, undeclaredInlineStepTier(step), config);
       stepModelId = stepModel; // A2: stamp the resolved model on the step run at finalize
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);

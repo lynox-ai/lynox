@@ -342,3 +342,101 @@ describe('assertPlannedPipelineIsValid', () => {
     })).not.toThrow();
   });
 });
+
+describe('assertDeclaredToolsAreValid (F2/D2 save-time gate)', () => {
+  const basePipeline: Omit<PlannedPipeline, 'mode' | 'steps'> = {
+    id: 'p2',
+    name: 'test-tools',
+    goal: 'goal',
+    reasoning: 'r',
+    estimatedCost: 0,
+    createdAt: new Date().toISOString(),
+    executed: false,
+    executionMode: 'orchestrated',
+    template: false,
+  };
+
+  it('rejects a declared tool name outside the inline pool, naming the step', () => {
+    expect(() => assertPlannedPipelineIsValid({
+      ...basePipeline,
+      steps: [{ id: 'bad-step', task: 'do', tools: ['htp_request'] }],
+      mode: 'autonomous',
+    })).toThrow(/bad-step.*htp_request/);
+  });
+
+  it('accepts a declared set drawn from the pool (incl. bash)', () => {
+    expect(() => assertPlannedPipelineIsValid({
+      ...basePipeline,
+      steps: [{ id: 's', task: 'do', tools: ['http_request', 'bash'] }],
+      mode: 'autonomous',
+    })).not.toThrow();
+  });
+
+  it('accepts steps that declare nothing (legacy manifests)', () => {
+    expect(() => assertPlannedPipelineIsValid({
+      ...basePipeline,
+      steps: [{ id: 's', task: 'do' }],
+      mode: 'autonomous',
+    })).not.toThrow();
+  });
+});
+
+describe('validateManifest preserves step.tools (zod strips unknown keys)', () => {
+  it('keeps the declared tool set on the validated result', () => {
+    const manifest = validateManifest({
+      manifest_version: '1.0',
+      name: 'm',
+      triggered_by: 't',
+      agents: [{ id: 'a', agent: 'a', runtime: 'inline', task: 'do', tools: ['http_request'] }],
+    });
+    expect(manifest.agents[0]!.tools).toEqual(['http_request']);
+  });
+});
+
+describe('validateManifest applies the declared-tools gate (F2 fix round)', () => {
+  it('rejects a typo\'d declared tool on an inline manifest step', () => {
+    expect(() => validateManifest({
+      manifest_version: '1.0',
+      name: 'm', triggered_by: 't',
+      agents: [{ id: 'a', agent: 'a', runtime: 'inline', task: 'do', tools: ['htp_request'] }],
+    })).toThrow(/htp_request/);
+  });
+
+  it('rejects a typo\'d declared tool on a NESTED pipeline step', () => {
+    expect(() => validateManifest({
+      manifest_version: '1.1',
+      name: 'm', triggered_by: 't',
+      agents: [{
+        id: 'outer', agent: 'outer', runtime: 'pipeline',
+        pipeline: [{ id: 'inner', task: 'do', tools: ['no_such_tool'] }],
+      }],
+    })).toThrow(/no_such_tool/);
+  });
+
+  it('rejects a declaration that excludes the step\'s own replay tool', () => {
+    expect(() => validateManifest({
+      manifest_version: '1.0',
+      name: 'm', triggered_by: 't',
+      agents: [{ id: 'a', agent: 'a', runtime: 'inline', task: 'replay', tools: ['read_file'], tool: 'bash', input_template: {} }],
+    })).toThrow(/replays tool "bash"/);
+  });
+
+  it('accepts an UNDECLARED replay step with a non-pool tool (captured workflows degrade gracefully)', () => {
+    // Captured workflows legitimately carry non-pool tools; the runtime falls
+    // back to the prose task when the replay tool is not granted. The gate
+    // must not reject stored data that works today.
+    expect(() => validateManifest({
+      manifest_version: '1.0',
+      name: 'm', triggered_by: 't',
+      agents: [{ id: 'a', agent: 'a', runtime: 'inline', task: 'replay artifact save', tool: 'artifact_save', input_template: {} }],
+    })).not.toThrow();
+  });
+
+  it('accepts a declared empty array (a "no tools" declaration)', () => {
+    expect(() => validateManifest({
+      manifest_version: '1.0',
+      name: 'm', triggered_by: 't',
+      agents: [{ id: 'a', agent: 'a', runtime: 'inline', task: 'reason', tools: [] }],
+    })).not.toThrow();
+  });
+});
