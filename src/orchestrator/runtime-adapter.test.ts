@@ -39,7 +39,7 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
-import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, runTaintArmed, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
 import type { AgentDef } from '../types/orchestration.js';
 import type { StreamEvent } from '../types/index.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
@@ -1405,6 +1405,55 @@ describe('RunTaint — cross-step untrusted inheritance', () => {
     expect(instanceAt(1).restoreConversationTaint).toHaveBeenCalled();
     releaseB();
     await pB;
+  });
+
+  it('spawnViaAgent: taint that only surfaces at the finally still arms live siblings', async () => {
+    // Mirror of the spawnInline finally-backstop test above — proven necessary:
+    // mutating ONLY spawnViaAgent's finally fold back to the push-less
+    // noteStepTaint kept every other test green (the same both-copies-at-once
+    // trap the fold test at the top of this describe documents).
+    const agentDef: AgentDef = { name: 'named', description: '', tools: [] };
+    const namedStep: ManifestStep = { id: 'n1', agent: 'named', runtime: 'agent' };
+    const taint = newRunTaint();
+    const peer = { restoreConversationTaint: vi.fn() };
+    (taint.live ??= new Set()).add(peer);
+    mockSend.mockImplementationOnce(async function (this: { sawExternalContentTool?: boolean }) {
+      this.sawExternalContentTool = true; // no stream event — finally is the only fold
+      return 'named';
+    });
+    await spawnViaAgent(namedStep, agentDef, {}, mockConfig, undefined, 'run-1',
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, taint);
+    expect(peer.restoreConversationTaint).toHaveBeenCalled();
+  });
+
+  it('a throwing peer does not leave the remaining siblings unarmed', () => {
+    // The transition fires exactly once (`earned` is set afterwards), so a peer
+    // skipped by an aborted loop would stay clean for good — and the throw
+    // would surface inside the emitting step's stream handler.
+    const taint = newRunTaint();
+    const bad = { restoreConversationTaint: vi.fn(() => { throw new Error('boom'); }) };
+    const good = { restoreConversationTaint: vi.fn() };
+    taint.live = new Set([bad, good]);
+    expect(() => noteStepTaintLive(taint, { sawExternalContentTool: true })).not.toThrow();
+    expect(bad.restoreConversationTaint).toHaveBeenCalled();
+    expect(good.restoreConversationTaint).toHaveBeenCalled();
+  });
+
+  it('spawnPipeline threads the SAME accumulator into the nested run (live arming crosses nesting)', async () => {
+    // A nested `runtime:'pipeline'` step runs the real inner runManifest →
+    // spawnInline → Agent. Dropping `runTaint` from the threading would sever
+    // both the seed AND the live registration for every nested step.
+    const step: ManifestStep = {
+      id: 'nested-taint', agent: 'nested-taint', runtime: 'pipeline',
+      pipeline: [{ id: 'inner-taint', task: 'record something' }],
+    };
+    const taint = { seeded: 'external-tool', earned: 'none' } as RunTaint;
+    await spawnPipeline(step, {}, mockConfig, mockParentTools, 0,
+      undefined, undefined, undefined, null, undefined, undefined, undefined, undefined, undefined, taint);
+    const inner = (vi.mocked(Agent).mock.instances as unknown as Array<{
+      restoreConversationTaint: ReturnType<typeof vi.fn>;
+    }>).at(-1)!;
+    expect(inner.restoreConversationTaint).toHaveBeenCalled();
   });
 
   it('spawnViaAgent wires the same mid-run arming (the two step paths must not diverge)', async () => {

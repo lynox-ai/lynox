@@ -81,7 +81,13 @@ export interface RunTaint {
    * {@link newRunTaint} — which callers and tests compare structurally — is
    * unchanged for runs that never spawn a step.
    */
-  live?: Set<{ restoreConversationTaint(): void }>;
+  live?: Set<TaintPeer>;
+}
+
+/** A live step agent the run can arm mid-flight — the one capability the
+ *  cross-sibling push needs. */
+export interface TaintPeer {
+  restoreConversationTaint(): void;
 }
 
 /** Build a run's taint accumulator, seeded from the calling agent (or clean when headless). */
@@ -126,8 +132,47 @@ export function noteStepTaintLive(taint: RunTaint, stepAgent: UntrustedSignals):
   const wasArmed = runTaintArmed(taint);
   noteStepTaint(taint, stepAgent);
   if (!wasArmed && runTaintArmed(taint) && taint.live) {
-    for (const peer of taint.live) peer.restoreConversationTaint();
+    for (const peer of taint.live) {
+      // Per-peer isolation: a throwing peer must not leave the REMAINING
+      // siblings unarmed — the transition fires exactly once (`earned` is set
+      // now, so `wasArmed` is true on every later call), so a skipped peer
+      // would stay clean for good, and the throw would surface inside the
+      // EMITTING step's stream handler. Unreachable for real Agents (the
+      // restore is a boolean set), guarded because the failure direction is
+      // silent under-tainting.
+      try { peer.restoreConversationTaint(); } catch { /* arm the rest */ }
+    }
   }
+}
+
+/**
+ * Per-step live-taint wiring, shared by `spawnViaAgent` and `spawnInline` so
+ * the two paths cannot diverge: the stream hook that folds mid-run, the live
+ * registration at spawn, and the finally-side release (deregister + the
+ * backstop fold for arming sources that emit no tool event, e.g. spawn's
+ * child hand-off). The holder exists because the stream handler is an Agent-
+ * constructor argument, so the agent binding does not exist yet when the
+ * closure is built; events only fire during send(), after `register` ran.
+ */
+function wireStepTaint(runTaint: RunTaint | undefined): {
+  onToolActivity: (() => void) | undefined;
+  register: (agent: Agent) => void;
+  release: (agent: Agent) => void;
+} {
+  const holder: { agent?: Agent } = {};
+  return {
+    onToolActivity: runTaint
+      ? () => { if (holder.agent) noteStepTaintLive(runTaint, holder.agent); }
+      : undefined,
+    register: (agent) => {
+      holder.agent = agent;
+      if (runTaint) (runTaint.live ??= new Set()).add(agent);
+    },
+    release: (agent) => {
+      runTaint?.live?.delete(agent);
+      if (runTaint) noteStepTaintLive(runTaint, agent);
+    },
+  };
 }
 
 /**
@@ -554,11 +599,7 @@ export async function spawnViaAgent(
     : { type: 'adaptive' };
 
   const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
-
-  // Holder instead of closing over `agent` directly: the stream handler is an
-  // Agent-constructor argument, so the agent binding does not exist yet when
-  // the closure is built. Events only fire during send(), after the assignment.
-  const taintPeer: { agent?: Agent } = {};
+  const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({
     name: step.agent,
@@ -614,18 +655,15 @@ export async function spawnViaAgent(
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
-      onToolActivity: runTaint
-        ? () => { if (taintPeer.agent) noteStepTaintLive(runTaint, taintPeer.agent); }
-        : undefined,
+      onToolActivity: taintWiring.onToolActivity,
     }),
   });
-  taintPeer.agent = agent;
 
   activePipelineAgents.add(agent);
   // Register as a LIVE peer so a same-phase parallel sibling's external read
   // arms this agent mid-run (the spawn-time seed below covers only taint that
   // existed BEFORE this step spawned).
-  if (runTaint) (runTaint.live ??= new Set()).add(agent);
+  taintWiring.register(agent);
   // Cross-step taint seed (mirror of spawn.ts's parent→child seed): once the
   // run's accumulator is armed — by the caller's own taint or by an earlier
   // step reading external content — this step starts with its STICKY latch
@@ -663,13 +701,13 @@ export async function spawnViaAgent(
   } finally {
     clearTimeout(timeoutId);
     activePipelineAgents.delete(agent);
-    runTaint?.live?.delete(agent);
-    // Fold what this step SAW into the run accumulator — in finally, because a
-    // step that read external content and then failed/timed out still read it,
-    // and under on_failure:'continue' later steps still run. Over-taints only
-    // in the safe direction. Kept alongside the mid-run fold as the backstop
-    // for arming sources that emit no tool event (e.g. spawn's child hand-off).
-    if (runTaint) noteStepTaintLive(runTaint, agent);
+    // Deregister + fold what this step SAW into the run accumulator — in
+    // finally, because a step that read external content and then failed/timed
+    // out still read it, and under on_failure:'continue' later steps still
+    // run. Over-taints only in the safe direction. The fold stays alongside
+    // the mid-run one as the backstop for arming sources that emit no tool
+    // event (e.g. spawn's child hand-off).
+    taintWiring.release(agent);
   }
 }
 
@@ -794,9 +832,7 @@ export async function spawnInline(
   const maxIter = 10;
 
   const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
-
-  // Holder instead of closing over `agent` directly — see spawnViaAgent.
-  const taintPeer: { agent?: Agent } = {};
+  const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({
     name: step.id,
@@ -848,17 +884,14 @@ export async function spawnInline(
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
-      onToolActivity: runTaint
-        ? () => { if (taintPeer.agent) noteStepTaintLive(runTaint, taintPeer.agent); }
-        : undefined,
+      onToolActivity: taintWiring.onToolActivity,
     }),
   });
-  taintPeer.agent = agent;
 
   activePipelineAgents.add(agent);
   // Register as a LIVE peer so a same-phase parallel sibling's external read
   // arms this agent mid-run — see spawnViaAgent.
-  if (runTaint) (runTaint.live ??= new Set()).add(agent);
+  taintWiring.register(agent);
   // Cross-step taint seed (mirror of spawn.ts's parent→child seed): once the
   // run's accumulator is armed — by the caller's own taint or by an earlier
   // step reading external content — this step starts with its STICKY latch
@@ -907,13 +940,8 @@ export async function spawnInline(
   } finally {
     clearTimeout(timeoutId);
     activePipelineAgents.delete(agent);
-    runTaint?.live?.delete(agent);
-    // Fold what this step SAW into the run accumulator — in finally, because a
-    // step that read external content and then failed/timed out still read it,
-    // and under on_failure:'continue' later steps still run. Over-taints only
-    // in the safe direction. Kept alongside the mid-run fold as the backstop
-    // for arming sources that emit no tool event (e.g. spawn's child hand-off).
-    if (runTaint) noteStepTaintLive(runTaint, agent);
+    // Deregister + backstop fold — see spawnViaAgent's finally.
+    taintWiring.release(agent);
   }
 }
 
