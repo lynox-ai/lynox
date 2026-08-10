@@ -59,19 +59,28 @@ async function swap(m,orig){
         const s=await (await api('/api/sessions',{method:'POST',body:JSON.stringify({source:'user'})})).json();
         const sid=s.sessionId??s.id??s.threadId;
         const r=await api(`/api/sessions/${sid}/run`,{method:'POST',body:JSON.stringify({task:p.build(nextFact())})});
-        const rd=r.body?.getReader(); if(rd){const dl=Date.now()+200000;try{while(Date.now()<dl){const{done}=await rd.read();if(done)break;}}finally{rd.releaseLock();}}
+        // A run cut off by the deadline exports mid-stream and reads as remember=0 —
+        // indistinguishable from "the model chose not to record". Mark the cell.
+        let timedOut=false;
+        const rd=r.body?.getReader(); if(rd){const dl=Date.now()+200000;try{let done=false;while(!done){if(Date.now()>dl){timedOut=true;break;}({done}=await rd.read());}}finally{rd.releaseLock();}}
         const e=await (await api(`/api/threads/${sid}/debug-export`)).json();
         const served=(e.runs?.[0]?.model_id||'?');
         const tools=(e.messages??[]).flatMap(x=>(x.toolCalls??[]).map(t=>t.name));
         const rem=tools.filter(t=>t==='remember').length;
         const res=(e.messages??[]).flatMap(x=>(x.toolCalls??[]).filter(t=>t.name==='remember').map(t=>String(t.result??'').slice(0,80)));
-        const row={model:m.name, probe:p.key, served:served.split('/').pop(), servedOk:served===m.id, remember:rem, web:tools.includes('web_research'), result:res};
+        const row={model:m.name, probe:p.key, timedOut, served:served.split('/').pop(), servedOk:served===m.id, remember:rem, web:tools.includes('web_research'), result:res};
         out.push(row); console.log(JSON.stringify(row));
       }
     }
   } finally {
-    await api('/api/config',{method:'PUT',body:JSON.stringify({routing_mode:orig.routing_mode??'hybrid',tier_set:orig.tier_set??{}})});
-    console.log('--- config restored ---');
-    console.log('MATRIX:'); for(const r of out) console.log(`  ${r.model.padEnd(15)} ${r.probe.padEnd(11)} remember=${r.remember} web=${r.web?'ja':'nein'} served=${r.servedOk?'ok':'MISMATCH:'+r.served}`);
+    // A silent restore failure leaves a FOREIGN model pinned on a live engine —
+    // check it, say so loudly, and print the original tier_set to restore by hand.
+    const rr=await api('/api/config',{method:'PUT',body:JSON.stringify({routing_mode:orig.routing_mode??'hybrid',tier_set:orig.tier_set??{}})});
+    if(!rr.ok){
+      console.error(`!!! CONFIG RESTORE FAILED (${rr.status}) — the engine is still pinned to the last candidate.`);
+      console.error('restore this tier_set by hand:', JSON.stringify(orig.tier_set??{}));
+      process.exitCode=1;
+    } else { console.log('--- config restored ---'); }
+    console.log('MATRIX:'); for(const r of out) console.log(`  ${r.model.padEnd(15)} ${r.probe.padEnd(11)} remember=${r.remember}${r.timedOut?' (TIMEOUT — Zelle ungültig)':''} web=${r.web?'ja':'nein'} served=${r.servedOk?'ok':'MISMATCH:'+r.served}`);
   }
 })();

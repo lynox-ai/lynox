@@ -42,12 +42,14 @@ async function api(path, init) {
     const sid = s.sessionId ?? s.id ?? s.threadId;
     const run = await api(`/api/sessions/${sid}/run`, { method: 'POST', body: JSON.stringify({ task: p.task }) });
     const rd = run.body?.getReader();
-    if (rd) { const dl = Date.now() + 180000; try { while (Date.now() < dl) { const { done } = await rd.read(); if (done) break; } } finally { rd.releaseLock(); } }
+    // Same trap as the cross-provider sweep: a deadline-cut run reads as remember=0.
+    let timedOut = false;
+    if (rd) { const dl = Date.now() + 180000; try { let done = false; while (!done) { if (Date.now() > dl) { timedOut = true; break; } ({ done } = await rd.read()); } } finally { rd.releaseLock(); } }
     const exp = await (await api(`/api/threads/${sid}/debug-export`)).json();
     const tools = (exp.messages ?? []).flatMap(m => (m.toolCalls ?? []).map(t => t.name));
     const remembered = tools.filter(t => t === 'remember').length;
     const results = (exp.messages ?? []).flatMap(m => (m.toolCalls ?? []).filter(t => t.name === 'remember').map(t => String(t.result ?? '').slice(0, 120)));
     const text = (exp.messages ?? []).filter(m => m.role === 'assistant').flatMap(m => (m.blocks ?? []).filter(b => b.type === 'text').map(b => b.text ?? '')).join(' ').slice(0, 200);
-    console.log(JSON.stringify({ probe: p.key, model: (exp.runs?.[0]?.model_id || '?').split('/').pop(), remember: remembered, tools: [...new Set(tools)], rememberResult: results, text }, null, 1));
+    console.log(JSON.stringify({ probe: p.key, timedOut, model: (exp.runs?.[0]?.model_id || '?').split('/').pop(), remember: remembered, tools: [...new Set(tools)], rememberResult: results, text }, null, 1));
   }
 })();
