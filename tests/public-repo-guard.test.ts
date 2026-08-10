@@ -131,6 +131,21 @@ describe('public-repo-guard — fires on planted leaks', () => {
     expect(runGuard()).not.toBe(0);
   });
 
+  it('scans a file whose NAME contains non-ASCII bytes', () => {
+    // git quotes such a path (`"Gr\303\274\303\237e.md"`), the `[ -f ]` test
+    // failed on that literal, and the loop skipped the file — silently, for EVERY
+    // class including the HARD ones, while the run reported a clean tree. One
+    // `docs/Übersicht.md` was enough to blind a required check.
+    commitFile('Grüße.md', `const h = '${INFRA_HOST}';\n`);
+    expect(runGuard()).not.toBe(0);
+  });
+
+  it('scans a non-ASCII path in --staged mode too', () => {
+    // Same defect, second entry point: the staged listing quotes identically.
+    commitFile('Über.md', `const h = '${INFRA_HOST}';\n`);
+    expect(runStaged()).not.toBe(0);
+  });
+
   it('--staged scans only what is staged, not the committed tree', () => {
     // NOTE: --staged is currently unreachable from lefthook.yml, which runs the
     // guard over the whole tree. Covered anyway because the mode exists and is

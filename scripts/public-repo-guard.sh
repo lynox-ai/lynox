@@ -138,11 +138,25 @@ mode_staged=false
 
 # Candidate files (tracked text files only). Kept as a function + while-read
 # loop rather than `mapfile` so it runs on macOS's stock bash 3.2 too.
+#
+# NUL-separated, because the textual default is a silent hole: git QUOTES any
+# path holding a non-ASCII byte (`docs/Übersicht.md` comes out as
+# `"docs/\303\234bersicht.md"`, quotes included). The `[ -f "$f" ]` test below
+# then fails on that literal, the loop `continue`s, and the file is skipped by
+# EVERY class — including the HARD ones — while the guard reports a clean tree.
+# Measured: a tracked file with an umlaut in its name and `control-staging…` in
+# its body scanned as clean, exit 0.
+#
+# `-z` alone is the fix, and that is worth stating because the first version also
+# passed `-c core.quotePath=false`: a mutation showed the suite green without it,
+# and `git ls-files -z` does emit raw bytes regardless of that setting. The extra
+# option only suggested it was load-bearing. `-z` additionally covers a newline
+# in a filename, which the line-based read could not.
 list_files() {
   if $mode_staged; then
-    git diff --cached --name-only --diff-filter=ACM
+    git diff --cached --name-only -z --diff-filter=ACM
   else
-    git ls-files
+    git ls-files -z
   fi
 }
 
@@ -163,7 +177,7 @@ violations=0
 # PATHS — the content greps below never see file NAMES. A vendored tooling
 # directory could therefore be committed (and enter the Docker build context)
 # while every content scan stays clean. Check the tracked paths themselves.
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
   is_excluded "$f" && continue
   if printf '%s' "$f" | grep -qEi "$HARD_LOCAL_TOOLING"; then
@@ -172,7 +186,7 @@ while IFS= read -r f; do
   fi
 done < <(list_files)
 
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
   [ -f "$f" ] || continue
   is_excluded "$f" && continue
