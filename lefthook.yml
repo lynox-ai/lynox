@@ -26,15 +26,7 @@ pre-push:
       # CP DB schema, SSH-as-root chains) from reaching this PUBLIC repo —
       # the class gitleaks doesn't catch. Scans the whole tracked tree; the
       # CI job re-runs it so `git push --no-verify` can't slip a leak past.
-      #
-      # --allow-missing-names downgrades ONE class — customer/third-party names,
-      # whose pattern deliberately lives outside this repo — to a warning when
-      # LYNOX_PRIVATE_NAMES_RE is not set locally. Without the opt-out that class
-      # fails closed, which is right for CI (where the secret is always present)
-      # and wrong here: a fresh clone would be unable to push at all, and an
-      # unpushable hook teaches --no-verify. Set the variable locally and this
-      # line changes nothing. Every other class runs either way.
-      run: bash scripts/public-repo-guard.sh --allow-missing-names
+      run: bash scripts/public-repo-guard.sh
       skip:
         - merge
         - rebase
@@ -45,10 +37,9 @@ pre-push:
       # without this the class would be enforced nowhere at all locally, since
       # the scan above never looks at a message.
       #
-      # merge-base gives the commits this push actually adds. --allow-missing-names
-      # keeps a fresh clone pushable: without ~/.lynox/private-names.re the class
-      # warns and stands down rather than blocking, and an unpushable hook is how
-      # people learn --no-verify.
+      # merge-base gives the commits this push actually adds. Without
+      # ~/.lynox/private-names.re the class warns and stands down rather than
+      # blocking — an unpushable hook is how people learn --no-verify.
       # The `|| echo HEAD` is load-bearing. Without it, a clone that has no local
       # origin/main — a --single-branch clone, a differently named remote, a repo
       # with no origin at all — makes the substitution empty, the guard sees a
@@ -57,7 +48,7 @@ pre-push:
       # the guard reports as "NO commits" and lets through: it says it checked
       # nothing rather than blocking, which is the right trade for a hook whose
       # CI twin is the actual gate.
-      run: bash scripts/public-repo-guard.sh --allow-missing-names check-meta "$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)" HEAD
+      run: bash scripts/public-repo-guard.sh check-meta "$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)" HEAD
       skip:
         - merge
         - rebase

@@ -122,9 +122,9 @@ pre-push for what actually runs at pre-commit):
   Its pattern deliberately does NOT live in this repo: one regex per line in
   `~/.lynox/private-names.re` (or export `LYNOX_PRIVATE_NAMES_RE`, as one alternation, no line
   breaks). Word boundaries belong in the pattern — a bare surname matches inside unrelated words.
-  **Enforced at pre-push only.** CI passes `--allow-missing-names` and annotates the class as
-  inactive on every run, because the `LYNOX_PRIVATE_NAMES_RE` secret is not set. Setting it
-  (Actions **and** Dependabot — separate stores) arms it in CI with no code change.
+  **Enforced at pre-push only, by design.** There is no CI half and no secret: a GitHub secret
+  is a textarea, and a pasted list arrives with line breaks that GNU and BSD grep read
+  differently. Without the file the class prints a warning and stands down.
 
 Every hook above re-runs as a **required CI check**, so `git commit/push --no-verify` cannot
 bypass any of them — that is what makes them gates rather than suggestions. (`security-scan` and

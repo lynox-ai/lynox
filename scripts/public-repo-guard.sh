@@ -115,39 +115,36 @@ HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0
 #     by its subject line. Actions logs on a public repo are public and here the
 #     match IS the name. GitHub's secret masking does not help: it masks the
 #     pattern's value, not the name the pattern found.
-#  2. A missing pattern FAILS by default; skipping is something a caller has to
-#     ASK for (`--allow-missing-names`). The safe direction belongs in the default,
-#     so dropping the flag somewhere can only make a caller louder, never quieter.
-#
-#     Where it runs today, a deliberate stage rather than an oversight: enforced
-#     at PRE-PUSH, while both CI callers pass the opt-out because the secret is
-#     not set. CI therefore annotates the class as inactive on every run — an
-#     opt-out nobody can see would rot into the permanent state. Setting the
-#     secret arms it with no change to this file or the workflow.
+#  2. An absent pattern is a WARNING, not a failure. There is nothing to fail
+#     closed for: the class runs at pre-push and nowhere else, so refusing to run
+#     would mean refusing to push, and an unpushable hook is how people learn
+#     --no-verify. The warning prints on every push that lacks the file, which is
+#     the visibility that a silent skip would not have.
 #
 # Word boundaries belong IN the pattern, not here. A bare surname matches inside
 # unrelated words, while a coined company name usually SHOULD match as a substring
 # — only whoever writes the list knows which is which, so `-w` is not imposed on
 # it. `scripts/no-ai-attribution.sh` documents what the careless version costs:
 # its first pattern matched a line of prose that was explaining the rule.
-# Two ways in, because a variable alone would have made this class dead locally:
-# the pre-push hook passes no environment, so nobody would ever have exported it
-# and the guard would have skipped itself on every push — worse than not having
-# the class at all. So the file is the ordinary local path and needs no setup
-# beyond existing; the variable is what CI injects and takes precedence.
-# `<VAR>_FILE` mirrors LYNOX_KNOWLEDGE_PROXY_KEY_FILE, the same shape this repo
-# already uses for operator-private material.
+# ONE source, and it is a file outside every repo: ~/.lynox/private-names.re,
+# one regex per line. There used to be an environment variable too, for a GitHub
+# secret in CI. It is gone, and so is a third of this class's defect count with
+# it — the secret was a textarea, so a pasted list arrived with line breaks that
+# GNU and BSD grep read differently, which needed its own check; two sources
+# needed a precedence rule; and the CI half was never armed anyway. What is left
+# is enforced at pre-push and nowhere else, which is what that half was already
+# doing in practice.
 PRIVATE_NAMES_FILE="${LYNOX_PRIVATE_NAMES_RE_FILE:-${HOME:-}/.lynox/private-names.re}"
-PRIVATE_NAMES_RE="${LYNOX_PRIVATE_NAMES_RE:-}"
-if [ -z "$PRIVATE_NAMES_RE" ] && [ -r "$PRIVATE_NAMES_FILE" ]; then
-  # One pattern per line, `#` comments and blanks dropped, surrounding whitespace
-  # and a stray CR trimmed, joined into an alternation — a list is easier to
-  # maintain and review than one long regex.
+PRIVATE_NAMES_RE=""
+if [ -r "$PRIVATE_NAMES_FILE" ]; then
+  # `#` comments and blanks dropped, surrounding whitespace and a stray CR
+  # trimmed, the rest joined into one alternation.
   #
-  # The trim is not cosmetic. Untrimmed, ONE leading space (what happens the first
-  # time somebody indents the list) or a CRLF file leaves the entry syntactically
-  # valid and semantically dead: it silently matches nothing, the guard prints
-  # `clean ✓`, and the name it was supposed to stop walks into the public repo.
+  # The trim is not cosmetic. Untrimmed, ONE leading space — what happens the
+  # first time somebody indents the list — leaves the entry syntactically valid
+  # and semantically dead: it matches nothing, the guard prints `clean`, and the
+  # name it was meant to stop walks into the public repo. Trim BEFORE filtering,
+  # or an indented `#` survives as a literal entry.
   PRIVATE_NAMES_RE="$(
     sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$PRIVATE_NAMES_FILE" \
       | grep -vE '^(#|$)' \
@@ -168,27 +165,6 @@ fi
 # reason — busybox grep echoes the pattern back.
 preflight_names_re() {
   local rc=0
-
-  # A NEWLINE in the pattern, checked first and on its own because the greps
-  # disagree about it. GNU treats each line as an alternative, so a blank line in
-  # the middle turns the pattern into "match everything"; BSD does not, so the
-  # same value behaves differently on a laptop and in CI. Nobody wants a pattern
-  # to mean two things, and there is no legitimate reason for one to be here: the
-  # file source joins its entries into a single alternation before this point, so
-  # a newline means a list was pasted straight into the secret textarea.
-  # `$'\n'` and not `"$(printf '\n')"`: command substitution strips trailing
-  # newlines, so the latter is the EMPTY string and `*""*` matches everything —
-  # a check that rejects every pattern, including the correct ones. Caught by the
-  # suite immediately, which is the only reason it is not in the shipped version.
-  case "$PRIVATE_NAMES_RE" in
-    *$'\n'*)
-      echo "❌ public-repo-guard: the private-name pattern contains a line break." >&2
-      echo "   Enter it as ONE alternation — 'first|second|third' — not as a list." >&2
-      echo "   GNU grep reads a blank line in it as 'match everything'; BSD does not," >&2
-      echo "   so the same value would behave differently locally and in CI." >&2
-      return 1
-      ;;
-  esac
 
   # VALIDITY, judged by the grep that will actually run the scan.
   #
@@ -307,21 +283,19 @@ REF_OPENER="\\[\\[${REF_SLUG_BODY}\$"
 SOFT='engine\.lynox\.cloud|control\.lynox\.cloud'
 
 usage() {
-  echo "usage: public-repo-guard.sh [--staged] [--allow-missing-names]" >&2
+  echo "usage: public-repo-guard.sh [--staged]" >&2
   echo "       public-repo-guard.sh check-meta <base-ref> <head-ref>" >&2
   exit 2
 }
 
 mode_staged=false
 mode_meta=false
-allow_missing_names=false
 meta_base=''
 meta_head=''
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --staged)              mode_staged=true ;;
-    --allow-missing-names) allow_missing_names=true ;;
     check-meta)
       mode_meta=true
       meta_base="${2:-}"
@@ -341,24 +315,16 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# Resolve the private-name pattern. Fails closed unless the caller opted out —
-# see property 2 in the class comment above for why that direction, not the other.
-names_active=false
-if [ -n "$PRIVATE_NAMES_RE" ]; then
-  preflight_names_re || exit 1
-  names_active=true
-elif $allow_missing_names; then
-  echo "⚠️  public-repo-guard: private-name class SKIPPED — no pattern configured."
-  echo "    Every other class still ran. To arm it, put one regex per line in"
-  echo "    ~/.lynox/private-names.re (or export LYNOX_PRIVATE_NAMES_RE)."
-else
-  echo "❌ public-repo-guard: LYNOX_PRIVATE_NAMES_RE is unset or empty." >&2
-  echo "   Refusing to report a clean run for a scan that did not happen." >&2
-  echo "   In CI: set the secret of that name — for Actions AND for Dependabot," >&2
-  echo "   which has its own secret store and would otherwise land here." >&2
-  echo "   Locally: pass --allow-missing-names, as the pre-push hook does." >&2
-  exit 1
-fi
+# Resolve the pattern — and note WHERE this now sits: inside the check-meta path
+# below, not out here. The tree scan no longer touches the name list at all, so
+# letting a malformed ~/.lynox/private-names.re block it would be a hard stop
+# caused by a file with no bearing on what was being checked. That is the same
+# "unpushable hook teaches --no-verify" failure this script warns about
+# elsewhere, and it was live for one round.
+#
+# Absent file, absent pattern: the class stands down with a visible warning
+# rather than failing. There is no CI half to fail closed FOR any more — this
+# runs at pre-push, where refusing to run is refusing to push.
 
 # check-meta — commit messages in base..head, plus the PR title/body when the
 # caller exports them. Mirrors scripts/no-ai-attribution.sh: only the commits a PR
@@ -370,6 +336,15 @@ fi
 if $mode_meta; then
   meta_hits=0
   meta_commits=0
+  names_active=false
+  if [ -n "$PRIVATE_NAMES_RE" ]; then
+    preflight_names_re || exit 1
+    names_active=true
+  else
+    echo "⚠️  public-repo-guard: private-name class SKIPPED — no pattern configured."
+    echo "    To arm it, put one regex per line in ${PRIVATE_NAMES_FILE}."
+  fi
+
   if $names_active; then
     # The range is resolved FIRST, and a failure to resolve it is fatal.
     #

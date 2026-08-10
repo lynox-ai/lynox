@@ -63,6 +63,14 @@ interface Run {
  * failure message would mention.
  */
 function run(args: string[], env: Record<string, string> = {}): Run {
+  // `__PATTERN__` is not an environment variable — it writes the operator-local
+  // list, which is the only source the guard has. Kept as a pseudo-env key so the
+  // call sites read the same as when a variable still existed.
+  const { __PATTERN__: pattern, ...realEnv } = env;
+  if (pattern !== undefined) {
+    mkdirSync(join(dir, '.lynox'), { recursive: true });
+    writeFileSync(join(dir, '.lynox', 'private-names.re'), `${pattern}\n`);
+  }
   try {
     const out = execFileSync('bash', [SCRIPT, ...args], {
       cwd: dir,
@@ -77,9 +85,8 @@ function run(args: string[], env: Record<string, string> = {}): Run {
         // operator is told by CLAUDE.md to export exactly the first one, which
         // would have broken `pnpm test` for the person following the docs, with
         // failures that never mention why.
-        LYNOX_PRIVATE_NAMES_RE: undefined,
         LYNOX_PRIVATE_NAMES_RE_FILE: undefined,
-        ...env,
+        ...realEnv,
       } as NodeJS.ProcessEnv,
     });
     return { code: 0, out };
@@ -89,22 +96,14 @@ function run(args: string[], env: Record<string, string> = {}): Run {
   }
 }
 
-/**
- * The private-name class fails closed when its pattern is absent, so every case
- * that is about one of the OTHER four classes opts out of it — exactly as the
- * pre-push hook does. Without this the whole suite would exit 1 for a reason
- * that has nothing to do with what it is asserting.
- */
-const OPT_OUT = '--allow-missing-names';
-
 /** Run the guard in --staged mode inside `dir`; return the exit code. */
 function runStaged(): number {
-  return run(['--staged', OPT_OUT]).code;
+  return run(['--staged']).code;
 }
 
 /** Run the guard inside `dir`; return the exit code (0 = clean). */
 function runGuard(): number {
-  return run([OPT_OUT]).code;
+  return run([]).code;
 }
 
 /** A name that is unmistakably invented — the list itself never enters this repo. */
@@ -118,11 +117,6 @@ const FICTIONAL_NAME = ['zzqx', 'fictional', 'corp'].join('-');
 const FICTIONAL_NAME_CAPITALISED = FICTIONAL_NAME.split('-')
   .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
   .join('-');
-
-/** Run the guard WITH a private-name pattern, i.e. the way CI runs it. */
-function runWithNames(pattern: string = FICTIONAL_NAME): Run {
-  return run([], { LYNOX_PRIVATE_NAMES_RE: pattern });
-}
 
 function commitFile(relPath: string, content: string): void {
   const abs = join(dir, relPath);
@@ -373,7 +367,7 @@ describe('public-repo-guard — private-name class', () => {
   }
 
   function runMeta(base: string, head: string, env: Record<string, string> = {}): Run {
-    return run(['check-meta', base, head], { LYNOX_PRIVATE_NAMES_RE: FICTIONAL_NAME, ...env });
+    return run(['check-meta', base, head], { __PATTERN__: FICTIONAL_NAME, ...env });
   }
 
   it('fires on a private name in a commit message, naming only the SHA', () => {
@@ -473,7 +467,7 @@ describe('public-repo-guard — private-name class', () => {
     expect(r.code).toBe(1);
     expect(r.out).toContain('cannot resolve');
 
-    const clean = runMeta(base, head, { LYNOX_PRIVATE_NAMES_RE: 'nevermatchesanything' });
+    const clean = runMeta(base, head, { __PATTERN__: 'nevermatchesanything' });
     expect(clean.code).toBe(0);
     expect(clean.out).toContain('1 commit(s) scanned');
   });
@@ -490,27 +484,29 @@ describe('public-repo-guard — private-name class', () => {
   });
 
   it('fails closed without a pattern, and refuses a half-given range', () => {
-    // Distinguishing exit 1 from exit 2 is the point: "not 0" was satisfied by a
-    // usage error just as happily as by the refusal this case is named after.
+    // Absent pattern is a WARNING, not a failure: this runs at pre-push and
+    // nowhere else, so refusing to run would mean refusing to push. The warning
+    // is what keeps the stood-down state from being invisible.
     const base = commit('Add the base file');
 
     const r = run(['check-meta', base, base]);
-    expect(r.code).toBe(1);
-    expect(r.out).toContain('LYNOX_PRIVATE_NAMES_RE');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('SKIPPED');
 
-    expect(run(['check-meta', base], { LYNOX_PRIVATE_NAMES_RE: FICTIONAL_NAME }).code).toBe(2);
+    // A missing head is still a usage error, not an empty range read as clean.
+    expect(run(['check-meta', base], { __PATTERN__: FICTIONAL_NAME }).code).toBe(2);
   });
 
   it('refuses a flag where a ref belongs, in either position', () => {
     const base = commit('Add the base file');
 
-    expect(run(['check-meta', '--staged', base], { LYNOX_PRIVATE_NAMES_RE: FICTIONAL_NAME }).code).toBe(2);
-    expect(run(['check-meta', base, '--allow-missing-names'], { LYNOX_PRIVATE_NAMES_RE: FICTIONAL_NAME }).code).toBe(2);
+    expect(run(['check-meta', '--staged', base], { __PATTERN__: FICTIONAL_NAME }).code).toBe(2);
+    expect(run(['check-meta', base, '--allow-missing-names'], { __PATTERN__: FICTIONAL_NAME }).code).toBe(2);
   });
 
   it('says the class is inactive rather than reporting an empty scan', () => {
     // The current CI path. "0 commits scanned" would be true but ambiguous.
-    const r = run([OPT_OUT, 'check-meta', 'HEAD', 'HEAD']);
+    const r = run(['check-meta', 'HEAD', 'HEAD']);
 
     expect(r.code).toBe(0);
     expect(r.out).toContain('inactive');
@@ -524,7 +520,7 @@ describe('public-repo-guard — private-name class', () => {
     const base = commit('Add the base file');
     const head = commit(`Fix for ${FICTIONAL_NAME}`);
 
-    expect(run([OPT_OUT, 'check-meta', base, head], { LYNOX_PRIVATE_NAMES_RE: FICTIONAL_NAME }).code).toBe(1);
+    expect(run(['check-meta', base, head], { __PATTERN__: FICTIONAL_NAME }).code).toBe(1);
   });
 });
 
@@ -576,7 +572,7 @@ describe('public-repo-guard — private-name pattern source and preflight', () =
     const { base, head } = commitNamed();
     writeList('never-appears-anywhere\n');
 
-    expect(run(['check-meta', base, head], { LYNOX_PRIVATE_NAMES_RE: FICTIONAL_NAME }).code).toBe(1);
+    expect(run(['check-meta', base, head], { __PATTERN__: FICTIONAL_NAME }).code).toBe(1);
   });
 
   it('trims whitespace and CR from file entries, which would silently kill them', () => {
@@ -610,8 +606,11 @@ describe('public-repo-guard — private-name pattern source and preflight', () =
     const { base, head } = commitNamed();
     writeList('# nothing yet\n\n');
 
-    expect(run(['check-meta', base, head]).code).toBe(1); // fails closed…
-    expect(run([OPT_OUT, 'check-meta', base, head]).code).toBe(0); // …and does not match everything
+    // Collapses to an empty alternation, and an empty pattern matches
+    // everything. It has to read as "absent" — a warning and a stand-down.
+    const r = run(['check-meta', base, head]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('SKIPPED');
   });
 
   it('rejects a pattern that matches an empty line', () => {
@@ -632,22 +631,9 @@ describe('public-repo-guard — private-name pattern source and preflight', () =
     // catches it in CI. Left uncovered deliberately rather than papered over:
     // nobody writes `()` as a customer name, and a test that accepted the local
     // behaviour would be asserting the bug.
-    const r = run(['check-meta', base, head], { LYNOX_PRIVATE_NAMES_RE: `(${FICTIONAL_NAME}|)` });
+    const r = run(['check-meta', base, head], { __PATTERN__: `(${FICTIONAL_NAME}|)` });
     expect(r.code).toBe(1);
     expect(r.out).toMatch(/empty line|cannot compile/);
-  });
-
-  it('rejects a pattern containing a line break, which the greps read differently', () => {
-    // GNU reads each line as an alternative, so a blank line in the middle means
-    // "match everything"; BSD does not. The same secret would then behave one
-    // way on a laptop and another in CI — the failure mode hardest to diagnose.
-    // It has no legitimate form: the file source joins entries before this point,
-    // so a newline means a list was pasted into the secret textarea.
-    const { base, head } = commitNamed();
-    const r = run(['check-meta', base, head], { LYNOX_PRIVATE_NAMES_RE: `${FICTIONAL_NAME}\n\nfoo` });
-
-    expect(r.code).toBe(1);
-    expect(r.out).toContain('line break');
   });
 
   it('rejects a PCRE group, which this grep accepts and then never matches', () => {
@@ -656,7 +642,7 @@ describe('public-repo-guard — private-name pattern source and preflight', () =
     // GNU grep and matches NOTHING — the class is dead and reports clean. BSD
     // grep matches it, so it works locally and dies in CI.
     const { base, head } = commitNamed();
-    const r = run(['check-meta', base, head], { LYNOX_PRIVATE_NAMES_RE: `(?i)${FICTIONAL_NAME}` });
+    const r = run(['check-meta', base, head], { __PATTERN__: `(?i)${FICTIONAL_NAME}` });
 
     expect(r.code).toBe(1);
     expect(r.out).toContain('PCRE group');
@@ -668,7 +654,7 @@ describe('public-repo-guard — private-name pattern source and preflight', () =
     const { base, head } = commitNamed();
 
     for (const good of ['Foo (AG|GmbH)', '\\bsmith\\b', '[Nn]ordberg', 'a[|]b', 'van\\s+der\\s+Meer']) {
-      expect(run(['check-meta', base, head], { LYNOX_PRIVATE_NAMES_RE: good }).code).toBe(0);
+      expect(run(['check-meta', base, head], { __PATTERN__: good }).code).toBe(0);
     }
   });
 });
