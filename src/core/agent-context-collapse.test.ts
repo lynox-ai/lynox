@@ -383,3 +383,42 @@ describe('collapse — bounds and block kinds (refutation follow-ups)', () => {
     expect(inner[0]!.text!.length).toBeLessThan(huge.length);
   });
 });
+
+describe('front-drop keeps parked handles nameable', () => {
+  it('names still-recallable handles in the placeholder it leaves behind', () => {
+    // If the collapse cannot free enough, the front-drop discards the stubs —
+    // and those stubs were the only place the ids appeared. Without this note
+    // the payloads sit in the store, reachable in memory, unnameable by the
+    // model. Session.compact lists every retained handle for the same reason.
+    const store = new ToolResultBlobStore();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', toolResultBlobStore: store });
+    // Force the drop: collapse the older results, but leave the protected tail
+    // so big that the re-check still exceeds the ceiling.
+    const history = heavyHistory(8, 60_000);
+    history.push(toolUseMsg('tu-tail'));
+    history.push(toolResultMsg('tu-tail', 'T'.repeat(700_000)));
+    setMessages(agent, history);
+
+    truncate(agent);
+
+    const after = messagesOf(agent);
+    expect(after.length).toBeLessThan(history.length);
+    const placeholder = after[1]!.content as string;
+    expect(placeholder).toContain('were removed');
+    expect(placeholder).toContain('recall_tool_result');
+    expect(placeholder).toMatch(/tr-\d+/);
+  });
+
+  it('leaves the placeholder unchanged when nothing is parked', () => {
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    setMessages(agent, heavyHistory(10, 80_000));
+
+    truncate(agent);
+
+    const placeholder = messagesOf(agent)[1]!.content as string;
+    // Anchored on both ends: nothing appended when there is nothing to name.
+    expect(placeholder).toMatch(
+      /^\[\d+ earlier message\(s\) were removed to stay within the context window\]$/,
+    );
+  });
+});

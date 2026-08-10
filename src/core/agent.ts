@@ -1722,6 +1722,34 @@ export class Agent implements IAgent {
     return this._collapsedToolResults;
   }
 
+  /** How many parked handles the front-drop placeholder names. Enough to stay
+   *  useful, few enough that the note cannot itself become a context problem;
+   *  most-recently-used first, since the store is LRU-ordered. */
+  private static readonly PARKED_HANDLES_IN_NOTE = 12;
+
+  /**
+   * The "…and these results are still recallable" tail of the front-drop
+   * placeholder.
+   *
+   * A collapse replaces a payload with a stub, and that stub is the only place
+   * the id appears. If the front-drop then runs anyway it discards those stubs,
+   * leaving the blobs resident but UNNAMEABLE — the model cannot ask for data
+   * that is sitting right there. `Session.compact` avoids this by listing every
+   * retained handle in the post-compaction seed; the front-drop had no such
+   * list because before the collapse existed there was nothing to lose.
+   *
+   * Empty string when no store is wired or nothing is parked, so the
+   * placeholder is byte-identical to before in the common case.
+   */
+  private _parkedHandleNote(): string {
+    const entries = this.toolResultBlobStore?.entries() ?? [];
+    if (entries.length === 0) return '';
+    const shown = entries.slice(-Agent.PARKED_HANDLES_IN_NOTE).reverse();
+    const list = shown.map(({ id, blob }) => `${id}: ${blob.descriptor}`).join('; ');
+    const more = entries.length > shown.length ? ` (+${entries.length - shown.length} more)` : '';
+    return `\n[Earlier results are still readable via recall_tool_result — ${list}${more}]`;
+  }
+
   private _truncateHistory(overheadTokens: number): void {
     // Hard message count limit — truncate to 60% keeping head + tail
     if (this.messages.length > Agent.MAX_MESSAGE_COUNT) {
@@ -1845,7 +1873,8 @@ export class Agent implements IAgent {
         ...head,
         {
           role: 'user' as const,
-          content: `[${dropped} earlier message(s) were removed to stay within the context window]`,
+          content: `[${dropped} earlier message(s) were removed to stay within the context window]`
+            + this._parkedHandleNote(),
         },
         ...tail,
       ];
