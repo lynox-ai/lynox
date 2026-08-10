@@ -643,9 +643,14 @@ describe.skipIf(!greenmailUp)('GreenMail E2E — testAccount probes both legs', 
   });
 
   it('fails when SMTP is unreachable, even though IMAP is fine', async () => {
-    // One port off the real SMTPS listener: nothing accepts there. This is the
-    // shape of a hosting provider blocking outbound 465 — the read path works
-    // perfectly and only the send path is dead.
+    // One port off the real SMTPS listener: nothing accepts there, so the read
+    // path works perfectly and only the send path is dead — which is the
+    // asymmetry the whole change is about.
+    //
+    // It is NOT a reproduction of a blocked outbound port. A closed local port
+    // answers with ECONNREFUSED, where a DROP firewall answers with silence and
+    // the failure arrives as `timeout` instead. This asserts the asymmetry, not
+    // the error code; the timeout branch stays mock-covered.
     const result = await ctx.testAccount({ config: account(SMTPS_PORT + 1), credentials: CREDS });
 
     expect(result.ok).toBe(false);

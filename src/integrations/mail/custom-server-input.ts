@@ -30,15 +30,41 @@ const IMPLICIT_TLS_SMTP_PORT = 465;
  * 465: outbound 465 is blocked by many hosting providers, ours included, and
  * the failure is a silent send timeout long after setup.
  *
- * When `secure` is omitted it follows the port rather than defaulting to true —
- * an implicit-TLS handshake against a STARTTLS submission port hangs until the
- * timeout. That is nodemailer's own convention.
+ * **Port and `secure` are defaulted from each other, never independently.**
+ * They are two halves of one decision, and filling both in on their own
+ * produces the one combination that is broken on every server in the world:
+ * an implicit-TLS handshake against a STARTTLS submission port, which hangs
+ * until the timeout. So whichever half the client supplied wins, and the other
+ * follows it:
+ *
+ * | given | result |
+ * |---|---|
+ * | nothing | 587 + STARTTLS |
+ * | `secure: true` | **465** + implicit TLS — the port follows the TLS mode |
+ * | `port: 465` | 465 + implicit TLS |
+ * | `port: 587` | 587 + STARTTLS |
+ * | both | both, verbatim — 465 stays available |
+ *
+ * A port that is not a finite number counts as not supplied — missing, a
+ * string, the `null` an emptied number input binds to, or NaN, which is a
+ * `number` and would otherwise be carried through to be rejected downstream as
+ * an out-of-range port the client never sent.
  */
 export function parseCustomServers(raw: unknown): { imap: MailServerConfig; smtp: MailServerConfig } {
   const block = (typeof raw === 'object' && raw !== null ? raw : {}) as CustomServerBlock;
 
-  const imapPort = typeof block.imap?.port === 'number' ? block.imap.port : DEFAULT_IMAP_PORT;
-  const smtpPort = typeof block.smtp?.port === 'number' ? block.smtp.port : DEFAULT_SMTP_PORT;
+  // `Number.isFinite`, not `typeof === 'number'`: NaN is a number and would be
+  // carried straight through to a port field, where the route then rejects it
+  // with a range error about a port the client never sent.
+  const imapPort = Number.isFinite(block.imap?.port) ? block.imap!.port as number : DEFAULT_IMAP_PORT;
+
+  const givenSmtpPort = Number.isFinite(block.smtp?.port) ? block.smtp!.port as number : undefined;
+  const givenSmtpSecure = typeof block.smtp?.secure === 'boolean' ? block.smtp.secure : undefined;
+  const smtpPort = givenSmtpPort ?? (givenSmtpSecure === true ? IMPLICIT_TLS_SMTP_PORT : DEFAULT_SMTP_PORT);
+  // An unsupplied `secure` on an unusual port resolves to STARTTLS, which the
+  // transport then *requires* — implicit TLS on a non-465 port has to be asked
+  // for. The UI always sends both fields, so this only reaches API clients.
+  const smtpSecure = givenSmtpSecure ?? smtpPort === IMPLICIT_TLS_SMTP_PORT;
 
   return {
     imap: {
@@ -50,7 +76,7 @@ export function parseCustomServers(raw: unknown): { imap: MailServerConfig; smtp
     smtp: {
       host: typeof block.smtp?.host === 'string' ? block.smtp.host : '',
       port: smtpPort,
-      secure: typeof block.smtp?.secure === 'boolean' ? block.smtp.secure : smtpPort === IMPLICIT_TLS_SMTP_PORT,
+      secure: smtpSecure,
     },
   };
 }

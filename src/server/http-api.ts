@@ -6415,7 +6415,15 @@ export class LynoxHTTPApi {
         if (!skipTest) {
           const probe = await ctx!.testAccount({ config: account, credentials: { user, pass } });
           if (!probe.ok) {
-            errorResponse(res, 400, `Connection test failed: ${probe.error ?? 'unknown error'} (${probe.code ?? 'unknown'})`);
+            // `code` and `stage` travel with the refusal so the client can say
+            // WHICH leg failed. Without them the save path — the one that
+            // actually blocks — could only print the raw engine string, while
+            // the test button next to it gave real advice.
+            jsonResponse(res, 400, {
+              error: `Connection test failed: ${probe.error ?? 'unknown error'} (${probe.code ?? 'unknown'})`,
+              code: probe.code ?? 'unknown',
+              stage: probe.stage,
+            });
             return;
           }
         }

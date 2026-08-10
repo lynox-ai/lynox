@@ -60,21 +60,47 @@ describe('MailSettings custom-server defaults', () => {
 });
 
 describe('MailSettings surfaces which leg of the connection failed', () => {
-  it('passes the stage through to the error text', () => {
+  // The advice TEXTS are asserted by return value in api/mail-error-text.test.ts.
+  // What is left here is the wiring that file cannot see: whether the component
+  // hands the copy module the context it needs. An earlier version of this block
+  // tried to assert the texts from here by slicing the source, and the slice ran
+  // to end-of-file, so a checkbox label 500 lines below satisfied it — the advice
+  // could be emptied out and the test stayed green.
+
+  it('passes the stage through on both the test path and the save path', () => {
     // Without the stage, a blocked SMTP port renders as the IMAP advice
     // ("check that the IMAP port is open"), which sends the user the wrong way.
     expect(source).toMatch(/friendlyError\(\s*testResult\.code,\s*testResult\.error,\s*testResult\.stage\s*\)/);
-    expect(source).toMatch(/friendlyError\(\s*data\.code,\s*data\.error,\s*data\.stage\s*\)/);
+    expect(source).toMatch(/friendlyError\(\s*err\.code,\s*err\.error,\s*err\.stage\s*\)/);
   });
 
-  it('names the blocked port in the SMTP advice', () => {
-    const smtpBranch = source.slice(source.indexOf("if (stage === 'smtp')"));
-    expect(smtpBranch).toContain('587');
-    expect(smtpBranch).toContain('465');
+  it('gives the copy module the port, so 465 advice can be withheld from 587 users', () => {
+    expect(source).toMatch(/smtpPort:\s*formPreset === 'custom' \? customSmtpPort : undefined/);
   });
 
-  it('does not claim the send path works when it was never probed', () => {
+  it('distinguishes probed-and-passed from never-probed, in that order', () => {
     // ok:true with checked.smtp === false means receive-only, not "sending fine".
-    expect(source).toContain('the send path was not tested');
+    // Asserting the strings alone let the CONDITION be negated silently, which
+    // swaps the two messages and tells a send-capable account it was not tested.
+    const okBranch = source.slice(source.indexOf('{#if testResult.ok}'), source.indexOf('{:else}', source.indexOf('{#if testResult.ok}')));
+    expect(okBranch.length).toBeGreaterThan(0);
+    const positive = okBranch.indexOf('{#if testResult.checked?.smtp}');
+    const accepted = okBranch.indexOf('the SMTP server accepted the login');
+    const notTested = okBranch.indexOf('the send path was not tested');
+    expect(positive).toBeGreaterThanOrEqual(0);
+    // The un-negated condition must guard the "it worked" message, and the
+    // receive-only message must sit in the branch after it.
+    expect(accepted).toBeGreaterThan(positive);
+    expect(notTested).toBeGreaterThan(accepted);
+    expect(okBranch).not.toMatch(/\{#if !testResult\.checked\?\.smtp\}/);
+  });
+
+  it('offers a way to save a mailbox whose send path could not be verified', () => {
+    // Otherwise the new SMTP check takes the read half of the product away from
+    // anyone whose SMTP cannot be verified — an alias with no send rights, a
+    // smarthost wanting different credentials, a provider throttling AUTH.
+    expect(source).toMatch(/canSaveWithoutSending/);
+    expect(source).toMatch(/testResult\.stage === 'smtp'/);
+    expect(source).toMatch(/skipTest:\s*skipConnectionTest/);
   });
 });

@@ -9,6 +9,7 @@
 	import Checkbox from '../primitives/Checkbox.svelte';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildMailAccountPayload } from '../api/mail-accounts.js';
+	import { friendlyMailError } from '../api/mail-error-text.js';
 
 	interface ServerConfig {
 		host: string;
@@ -137,6 +138,7 @@
 		customSmtpPort = 587;
 		customSmtpSecure = false;
 		testResult = null;
+		skipConnectionTest = false;
 	}
 
 	function buildCustomPayload() {
@@ -147,47 +149,15 @@
 	}
 
 	/**
-	 * Translate technical MailError codes to user-friendly messages.
-	 * Keeps the raw error code visible as a small second line for debugging.
+	 * Thin wrapper over the shared copy module — it supplies the form context the
+	 * advice depends on. The texts themselves live in mail-error-text.ts so they
+	 * can be tested by return value instead of by searching this file.
 	 */
-	function friendlyError(
-		code: string | undefined,
-		raw: string | undefined,
-		stage?: 'imap' | 'smtp',
-	): string {
-		// The send leg only runs after the read leg passed, so an SMTP failure
-		// carries different advice: the credentials are already proven good, and
-		// the overwhelmingly common cause is a blocked outbound port.
-		if (stage === 'smtp') {
-			switch (code) {
-				case 'auth_failed':
-					return 'The server accepted your login for reading but refused it for sending. Some providers issue a separate SMTP password, or need the app-password re-generated.';
-				case 'connection_failed':
-					return "Couldn't reach the SMTP server. Outbound port 465 is blocked on many networks — hosted lynox instances included. Try port 587 with implicit TLS switched off.";
-				case 'timeout':
-					return 'The SMTP server never answered. On port 465 that is almost always a blocked outbound port — try 587 with implicit TLS switched off.';
-				case 'tls_failed':
-					return "The SMTP server's certificate couldn't be verified. If this is a custom server with self-signed TLS, contact your admin.";
-				default:
-					return `Sending (SMTP) failed: ${raw ?? 'unknown error'}`;
-			}
-		}
-		switch (code) {
-			case 'auth_failed':
-				return 'Login failed — check your email address and app-password. If you enabled 2FA, make sure you generated a provider-specific app-password (not your account password).';
-			case 'tls_failed':
-				return "The server's certificate couldn't be verified. If this is a custom server with self-signed TLS, contact your admin.";
-			case 'connection_failed':
-				return "Couldn't reach the mail server. Check the hostname and that the IMAP port is open on your network.";
-			case 'timeout':
-				return 'The server took too long to respond. Try again, or check your network.';
-			case 'not_found':
-				return 'No matching mail server found for that address.';
-			case 'rate_limited':
-				return 'Too many test attempts — wait a minute before retrying.';
-			default:
-				return raw ?? 'Unknown error';
-		}
+	function friendlyError(code: string | undefined, raw: string | undefined, stage?: 'imap' | 'smtp'): string {
+		return friendlyMailError(code, raw, {
+			stage,
+			smtpPort: formPreset === 'custom' ? customSmtpPort : undefined,
+		});
 	}
 
 	let autodiscovering = $state(false);
@@ -265,6 +235,17 @@
 		testing = false;
 	}
 
+	/**
+	 * Set once the user has chosen to save past a failed SMTP check. The server
+	 * refuses the save when its own pre-save test fails, and that test now covers
+	 * the send path — so without this, a mailbox that reads fine but cannot be
+	 * verified for sending cannot be added at all, and the read half of the
+	 * product is lost along with it. Reset by resetForm().
+	 */
+	let skipConnectionTest = $state(false);
+	/** Offer the escape only for the leg that can fail without breaking reading. */
+	const canSaveWithoutSending = $derived(testResult?.ok === false && testResult.stage === 'smtp');
+
 	async function saveAccount() {
 		if (!formId || !formDisplayName || !formAddress || !formPassword) {
 			addToast('All fields are required', 'error');
@@ -281,6 +262,7 @@
 				password: formPassword,
 				personaPrompt: formPersonaPrompt,
 				custom: formPreset === 'custom' ? buildCustomPayload() : undefined,
+				skipTest: skipConnectionTest,
 			});
 			const res = await fetch(`${getApiBase()}/mail/accounts`, {
 				method: 'POST',
@@ -288,8 +270,10 @@
 				body: JSON.stringify(payload),
 			});
 			if (!res.ok) {
-				const err = (await res.json().catch(() => ({}))) as { error?: string };
-				addToast(err.error ?? 'Save failed', 'error');
+				const err = (await res.json().catch(() => ({}))) as { error?: string; code?: string; stage?: 'imap' | 'smtp' };
+				// The save path is the one that refuses, so it owes the same
+				// translation the test button gives — not the raw engine string.
+				addToast(err.code ? friendlyError(err.code, err.error, err.stage) : (err.error ?? 'Save failed'), 'error');
 				saving = false;
 				return;
 			}
@@ -707,6 +691,18 @@
 						{:else}
 							<div class="font-medium">✗ {friendlyError(testResult.code, testResult.error, testResult.stage)}</div>
 							<div class="mt-0.5 text-[10px] opacity-60">{testResult.code ?? 'unknown'}</div>
+							{#if canSaveWithoutSending}
+								<!-- Reading works — only sending could not be verified. Refusing the
+								     whole mailbox here would take triage and summaries away too. -->
+								<label class="mt-2 flex items-start gap-2 text-[11px] font-normal">
+									<Checkbox bind:checked={skipConnectionTest} size="sm" />
+									<span>
+										Add it anyway, for receiving only. IMAP worked, so mail will arrive and be
+										read — sending from this account is likely to fail until the SMTP settings
+										are right.
+									</span>
+								</label>
+							{/if}
 						{/if}
 					</div>
 				{/if}

@@ -335,6 +335,24 @@ function wrapImapError(err: unknown, fallback: string): MailError {
 }
 
 /**
+ * SMTP reply codes that mean "not now", not "not you". nodemailer formats every
+ * failure of the AUTH phase as `Invalid login: <server reply>`, so a throttle
+ * arrives wearing the word "login" and `isAuthError` — which matches on that
+ * word — reads it as bad credentials. The user is then told to regenerate an
+ * app-password, retries, and extends the very lockout that caused it.
+ *
+ * 421 service unavailable / closing · 450 mailbox busy · 454 temporary auth
+ * failure, which is what Gmail and Yahoo send for "too many login attempts".
+ */
+const SMTP_THROTTLE_CODES = new Set([421, 450, 454]);
+
+function smtpResponseCode(err: unknown): number | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const code = (err as { responseCode?: unknown }).responseCode;
+  return typeof code === 'number' ? code : undefined;
+}
+
+/**
  * Shared SMTP error mapping for send() and verifySmtp(). The two differ only
  * in the fallback: a send that reaches the server and is refused is
  * `send_rejected`, while a verify that gets that far has nothing to reject —
@@ -342,6 +360,11 @@ function wrapImapError(err: unknown, fallback: string): MailError {
  */
 function wrapSmtpError(err: unknown, op: 'send' | 'verify'): MailError {
   if (err instanceof MailError) return err;
+  // Before isAuthError, which would otherwise swallow these — see above.
+  const responseCode = smtpResponseCode(err);
+  if (responseCode !== undefined && SMTP_THROTTLE_CODES.has(responseCode)) {
+    return new MailError('rate_limited', `SMTP server is throttling this account (${String(responseCode)}) — wait before retrying`, { cause: err });
+  }
   if (isAuthError(err)) return new MailError('auth_failed', 'SMTP authentication failed', { cause: err });
   const message = err instanceof Error ? err.message : String(err);
   const lower = message.toLowerCase();

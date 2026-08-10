@@ -303,14 +303,22 @@ function parseServers(xml: string, kind: 'imap' | 'smtp'): ParsedServer[] {
 
 function pickServer(xml: string, kind: 'imap' | 'smtp'): ParsedServer | null {
   const candidates = parseServers(xml, kind);
-  if (kind === 'imap') return candidates[0] ?? null;
+  const first = candidates[0];
+  if (kind === 'imap' || !first) return first ?? null;
   // SMTP: prefer submission when the payload offers it. Autoconfig lists the
   // provider's own preference first and that is frequently 465, which a hosted
   // instance cannot reach at all — the provider is describing its servers, not
   // our network. Only entries that survived the TLS filter above are eligible,
   // so this never prefers a plaintext 587 over an encrypted 465. A payload with
   // a single entry is returned unchanged.
-  return candidates.find(s => s.port === SUBMISSION_PORT) ?? candidates[0] ?? null;
+  //
+  // Restricted to the FIRST entry's host, because this is a port preference and
+  // not a host preference. The block regex matches across the whole payload, and
+  // a payload may carry several <emailProvider> blocks — a 587 entry on a
+  // different hostname is a different server, quite possibly an ISP relay that
+  // only accepts mail from inside that ISP's network. First-wins still decides
+  // WHICH server; the preference only picks among that server's ports.
+  return candidates.find(s => s.host === first.host && s.port === SUBMISSION_PORT) ?? first;
 }
 
 function innerTag(xml: string, tag: string): string | undefined {
