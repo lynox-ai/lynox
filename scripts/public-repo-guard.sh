@@ -176,6 +176,27 @@ preflight_names_re() {
     echo "❌ public-repo-guard: private-name pattern is not a valid extended regex." >&2
     return 1
   fi
+
+  # The catch-all, and the only one of these checks that is hard to fool: a
+  # pattern that matches an EMPTY LINE matches every line there is.
+  #
+  # The `case` above only sees an empty alternative at the top level. One
+  # parenthesis deep — `(name|)` — it passes, and GNU grep then flags the entire
+  # tree while BSD grep locally calls it an error, so the failure looks like a
+  # platform mystery instead of a typo. The likeliest source of it is not even a
+  # typo: LYNOX_PRIVATE_NAMES_RE is pasted into a GitHub secret textarea, and a
+  # blank line in the middle of that paste produces exactly the same thing.
+  #
+  # `a*`, `a?` and `()` are caught by the same test, which is why it is worth
+  # more than the three special cases it subsumes.
+  rc=0
+  printf '\n' | grep -qE "$PRIVATE_NAMES_RE" 2>/dev/null || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "❌ public-repo-guard: private-name pattern matches an empty line, so it" >&2
+    echo "   would match every line in the repo. Check for a blank entry, a stray" >&2
+    echo "   '|', or an optional-everything form like (name|) or name*." >&2
+    return 1
+  fi
   return 0
 }
 
@@ -319,18 +340,30 @@ if $mode_meta; then
       # job of skipping binary FILES and only adds a way to be silently skipped —
       # one NUL byte ahead of the name and the input counts as binary, i.e. as no
       # match. git refuses NUL in a commit message, but PR text is not git's.
-      if git show -s --format='%B' "$sha" | grep -qEi "$PRIVATE_NAMES_RE"; then
+      # The message is read into a variable FIRST, rather than piped into grep.
+      #
+      # `git show … | grep -q` looks equivalent and is not: grep exits at the
+      # first match, git show keeps writing, and past the pipe buffer it dies of
+      # SIGPIPE. With `pipefail` (set at the top) the pipeline then reports 141
+      # and the `if` reads it as NO MATCH. Measured: a ~2 MB commit message with
+      # the name in its first line was missed on every run, and the clean line
+      # cheerfully certified "1 commit(s) scanned" — the counter added to make
+      # an unwalked range visible, attesting a walk that found nothing because
+      # it was killed. Small messages were unaffected, which is what makes this
+      # the kind of bug that ships.
+      msg="$(git show -s --format='%B' "$sha")"
+      if grep -qEi "$PRIVATE_NAMES_RE" <<<"$msg"; then
         echo "❌ private name in the message of commit $(git show -s --format='%h' "$sha")"
         meta_hits=$((meta_hits + 1))
       fi
     done
     # Title and body arrive through the environment, never interpolated into a
     # command line — the same shape no-ai-attribution.yml uses for its SHAs.
-    if [ -n "${PR_TITLE:-}" ] && printf '%s' "$PR_TITLE" | grep -qEi "$PRIVATE_NAMES_RE"; then
+    if [ -n "${PR_TITLE:-}" ] && grep -qEi "$PRIVATE_NAMES_RE" <<<"$PR_TITLE"; then
       echo "❌ private name in the pull-request TITLE"
       meta_hits=$((meta_hits + 1))
     fi
-    if [ -n "${PR_BODY:-}" ] && printf '%s' "$PR_BODY" | grep -qEi "$PRIVATE_NAMES_RE"; then
+    if [ -n "${PR_BODY:-}" ] && grep -qEi "$PRIVATE_NAMES_RE" <<<"$PR_BODY"; then
       echo "❌ private name in the pull-request BODY"
       meta_hits=$((meta_hits + 1))
     fi
@@ -360,6 +393,15 @@ EOF
   # must not be able to mean two different things, so the inactive case says so
   # rather than reporting a count it never had a chance to reach.
   if $names_active; then
+    # Zero is the one count that means two things: a genuinely empty range (base
+    # == head, or a force-push rollback that leaves `before` ahead of `after`)
+    # looks exactly like a range nothing was read from. The status check above
+    # catches an UNRESOLVABLE range, not an empty one, so say it out loud rather
+    # than let "clean ✓" imply a walk.
+    if [ "$meta_commits" -eq 0 ]; then
+      echo "⚠️  public-repo-guard (check-meta): the range held NO commits — nothing was"
+      echo "    scanned. Check that ${meta_base}..${meta_head} is the range you meant."
+    fi
     echo "public-repo-guard (check-meta): clean ✓ (${meta_commits} commit(s) scanned)"
   else
     echo "public-repo-guard (check-meta): class inactive — nothing scanned."
@@ -407,6 +449,20 @@ emit_line() {
   echo "     ${line}"
 }
 
+# The same restraint for a PATH. Withholding the line while printing the file it
+# came from closed only half the hole: a name lands in a FILENAME just as easily,
+# and then every class that names its file publishes it — including the
+# private-name class itself, whose own comment promises the opposite. The line
+# and the path are two axes of one leak, so they get one treatment.
+safe_path() {
+  local p="$1"
+  if $names_active && printf '%s' "$p" | grep -qEi "$PRIVATE_NAMES_RE" 2>/dev/null; then
+    echo "[path withheld — it contains a private name]"
+    return
+  fi
+  echo "$p"
+}
+
 violations=0
 name_path_hits=0
 
@@ -417,7 +473,7 @@ while IFS= read -r f; do
   [ -n "$f" ] || continue
   is_excluded "$f" && continue
   if printf '%s' "$f" | grep -qEi "$HARD_LOCAL_TOOLING"; then
-    echo "❌ HARD leak marker (operator-local tooling) in PATH: $f"
+    echo "❌ HARD leak marker (operator-local tooling) in PATH: $(safe_path "$f")"
     violations=$((violations + 1))
   fi
   # Counted, not named: printing the path would print the name that is in it.
@@ -443,7 +499,7 @@ while IFS= read -r f; do
   # HARD — no exemptions.
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    echo "❌ HARD leak marker in $f:"
+    echo "❌ HARD leak marker in $(safe_path "$f"):"
     emit_line "$line"
     violations=$((violations + 1))
   done < <(grep -nIE "$HARD" "$f" 2>/dev/null || true)
@@ -455,7 +511,7 @@ while IFS= read -r f; do
   # legitimate LYNOX_MANAGED_* env var (164 false positives when tried).
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    echo "❌ HARD leak marker (operator-local tooling) in $f:"
+    echo "❌ HARD leak marker (operator-local tooling) in $(safe_path "$f"):"
     emit_line "$line"
     violations=$((violations + 1))
   done < <(grep -nIEi "$HARD_LOCAL_TOOLING" "$f" 2>/dev/null || true)
@@ -466,7 +522,7 @@ while IFS= read -r f; do
   if $names_active; then
     while IFS= read -r n; do
       [ -n "$n" ] || continue
-      echo "❌ HARD leak marker (private name) at $f:$n"
+      echo "❌ HARD leak marker (private name) at $(safe_path "$f"):$n"
       violations=$((violations + 1))
     done < <(grep -nIEi "$PRIVATE_NAMES_RE" "$f" 2>/dev/null | cut -d: -f1 || true)
   fi
@@ -486,7 +542,7 @@ while IFS= read -r f; do
     case "$line" in
       *"$PRAGMA"*) continue ;;
     esac
-    echo "❌ internal cross-reference in $f (state the reason inline instead):"
+    echo "❌ internal cross-reference in $(safe_path "$f") (state the reason inline instead):"
     emit_line "$line"
     violations=$((violations + 1))
   done < <(grep -nIE "$INTERNAL_REF" "$f" 2>/dev/null || true)
@@ -506,7 +562,7 @@ while IFS= read -r f; do
     case "$line" in
       *"$PRAGMA"*) continue ;;
     esac
-    echo "❌ internal cross-reference opened in $f and continued on the next line:"
+    echo "❌ internal cross-reference opened in $(safe_path "$f") and continued on the next line:"
     emit_line "$line"
     violations=$((violations + 1))
   done < <(grep -nIE "$REF_OPENER" "$f" 2>/dev/null || true)
@@ -518,7 +574,7 @@ while IFS= read -r f; do
     case "$line" in
       *"$PRAGMA"*) continue ;;  # inline-allowed
     esac
-    echo "⚠️  internal hostname in $f (add '${PRAGMA}' with a reason if intentional):"
+    echo "⚠️  internal hostname in $(safe_path "$f") (add '${PRAGMA}' with a reason if intentional):"
     emit_line "$line"
     violations=$((violations + 1))
   done < <(grep -nIE "$SOFT" "$f" 2>/dev/null || true)

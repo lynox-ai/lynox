@@ -407,6 +407,57 @@ describe('public-repo-guard — private-name class', () => {
     expect(runWithNames().code).toBe(1);
   });
 
+  it('withholds the PATH from every class, not just its own report', () => {
+    // The first fix generalised withholding along the LINE axis and forgot the
+    // FILENAME axis. A name lands in a filename just as easily, and then every
+    // class that names its file publishes it — including this class, whose own
+    // comment promises the opposite. The neighbour here fires on the content.
+    commitFile(`docs/${FICTIONAL_NAME}-notes.md`, `const h = '${SOFT_HOST}';\n`);
+    const r = runWithNames();
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('internal hostname'); // neighbour fired…
+    expect(r.out).toContain('path withheld'); // …naming no path
+    expect(r.out).not.toContain(FICTIONAL_NAME);
+  });
+
+  it('withholds a capitalised name from the line too', () => {
+    // The `-i` on the DETECTION side got a test; the one on the REDACTION side
+    // did not, and dropping it left every test green while the line printed in
+    // full. Prose capitalises company names — that is the realistic spelling.
+    commitFile('src/doc.ts', `// ${FICTIONAL_NAME_CAPITALISED} runs on ${SOFT_HOST}\n`);
+    const r = runWithNames();
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('withheld');
+    expect(r.out).not.toContain(FICTIONAL_NAME_CAPITALISED);
+  });
+
+  it('rejects any pattern that matches an empty line', () => {
+    // The catch-all the first preflight lacked. `(name|)` slips past a top-level
+    // check for an empty alternative, and GNU grep then matches every line while
+    // BSD grep calls it invalid — a platform split that reads as a mystery.
+    // A blank line pasted into the secret textarea produces the same thing, and
+    // that is the likelier source than any typo.
+    commitFile('src/ok.ts', 'export const x = 1;\n');
+
+    for (const bad of [`(${FICTIONAL_NAME}|)`, '()', `${FICTIONAL_NAME}\n\nfoo`]) {
+      const r = run([], { LYNOX_PRIVATE_NAMES_RE: bad });
+      expect(r.code).toBe(1);
+      expect(r.out).toMatch(/empty line|empty alternative|not a valid/);
+    }
+  });
+
+  it('still accepts patterns that legitimately contain a pipe or a quantifier', () => {
+    // The empty-line check must not become a reason the operator cannot express
+    // a real name. All of these are ordinary list entries.
+    commitFile('src/ok.ts', 'export const x = 1;\n');
+
+    for (const good of ['Foo (AG|GmbH)', '\\bsmith\\b', '[Nn]ordberg', 'a[|]b', `${FICTIONAL_NAME}*`]) {
+      expect(run([], { LYNOX_PRIVATE_NAMES_RE: good }).code).toBe(0);
+    }
+  });
+
   it('withholds the line even when another class matches it as well', () => {
     // The class's own restraint was worth nothing while its four neighbours
     // echoed their matching line verbatim: one line can trip two classes, and
@@ -542,6 +593,23 @@ describe('public-repo-guard — private-name class', () => {
     expect(run([], { LYNOX_PRIVATE_NAMES_RE: FICTIONAL_NAME }).code).not.toBe(0);
   });
 
+  it('trims before it filters, so an indented comment is still a comment', () => {
+    // Order matters and nothing held it: filtering before trimming leaves
+    // "   # a comment" in the list as a literal entry and "   " as an empty one,
+    // which joins into an empty alternative and takes the whole guard down with
+    // a message about a malformed pattern. Swapping the two survived every case.
+    mkdirSync(join(dir, '.lynox'), { recursive: true });
+    writeFileSync(
+      join(dir, '.lynox', 'private-names.re'),
+      `   # an indented comment\n   \n${FICTIONAL_NAME}\n`,
+    );
+    commitFile('src/ok.ts', 'export const x = 1;\n');
+
+    const r = run([]);
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain('empty alternative');
+  });
+
   it('treats a comments-only file as no pattern at all', () => {
     // A file holding nothing but comments collapses to an empty alternation, and
     // an empty pattern matches every line. It has to read as "absent" instead.
@@ -663,6 +731,36 @@ describe('public-repo-guard — check-meta', () => {
     const clean = runMeta(base, head, { LYNOX_PRIVATE_NAMES_RE: 'nevermatchesanything' });
     expect(clean.code).toBe(0);
     expect(clean.out).toContain('1 commit(s) scanned');
+  });
+
+  it('reads a commit message far larger than a pipe buffer', () => {
+    // `git show … | grep -q` misses these. grep exits at the first match, git
+    // show keeps writing, SIGPIPE follows, and `pipefail` turns the pipeline
+    // into 141 — which the `if` reads as NO MATCH. Measured at ~2 MB with the
+    // name in line one: missed on every run, while the clean line certified
+    // "1 commit(s) scanned". Small messages pass either way, which is exactly
+    // why this needs its own case.
+    const base = commit('Add the base file');
+    const huge = `Fix for ${FICTIONAL_NAME}\n\n${'x'.repeat(2_000_000)}\n`;
+    execFileSync('git', ['commit', '-q', '--allow-empty', '-F', '-'], {
+      cwd: dir,
+      input: huge,
+      env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t.t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t.t' },
+    });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+
+    expect(runMeta(base, head).code).toBe(1);
+  });
+
+  it('says so when the range held no commits at all', () => {
+    // Zero is the count that means two things: an empty range and a range
+    // nothing was read from. The resolvability check does not separate them —
+    // base == head resolves fine and walks nothing.
+    const base = commit('Add the base file');
+    const r = runMeta(base, base);
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('NO commits');
   });
 
   it('matches a name in a commit message case-insensitively', () => {
