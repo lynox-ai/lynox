@@ -79,12 +79,9 @@ function run(args: string[], env: Record<string, string> = {}): Run {
       env: {
         ...process.env,
         HOME: dir,
-        // Redirecting HOME is not enough on its own: both of these OUTRANK it —
-        // the first replaces the file, the second relocates it — so inheriting
-        // them from the developer's shell would change results here. And the
-        // operator is told by CLAUDE.md to export exactly the first one, which
-        // would have broken `pnpm test` for the person following the docs, with
-        // failures that never mention why.
+        // Redirecting HOME is not enough on its own: this one RELOCATES the file
+        // and so outranks HOME entirely. Inheriting it from the developer's shell
+        // would change results here, with failures that never mention why.
         LYNOX_PRIVATE_NAMES_RE_FILE: undefined,
         ...realEnv,
       } as NodeJS.ProcessEnv,
@@ -341,9 +338,11 @@ describe('public-repo-guard — does NOT fire on benign lines', () => {
  * that echoed the offending line would publish precisely what it exists to stop.
  */
 /**
- * The private-name class — commit messages and PR text only.
+ * The private-name class — commit messages only.
  *
- * It does not scan the tree, deliberately: see the class comment in the script.
+ * Not the tree and not PR text, both deliberately: see the class comment in the
+ * script for what each costs and why the remaining surface is the one worth
+ * covering.
  * Its pattern is supplied from outside the repo, so these cases inject an
  * obviously invented one. No real name appears here or anywhere else in this
  * repo, which is the entire point of the class.
@@ -441,18 +440,11 @@ describe('public-repo-guard — private-name class', () => {
     expect(runMeta(base, head).code).toBe(1);
   });
 
-  it('fires on the PR title and on the PR body', () => {
-    const base = commit('Add the base file');
-
-    expect(runMeta(base, base, { PR_TITLE: `Fix ${FICTIONAL_NAME} export` }).code).toBe(1);
-    expect(runMeta(base, base, { PR_BODY: `reported by ${FICTIONAL_NAME}` }).code).toBe(1);
-  });
-
-  it('passes on clean commits, title and body', () => {
+  it('passes on clean commits', () => {
     const base = commit('Add the base file');
     const head = commit('A perfectly ordinary change');
 
-    expect(runMeta(base, head, { PR_TITLE: 'Ordinary change', PR_BODY: 'Nothing to see.' }).code).toBe(0);
+    expect(runMeta(base, head).code).toBe(0);
   });
 
   it('refuses an unresolvable range instead of reading it as empty', () => {
@@ -483,7 +475,7 @@ describe('public-repo-guard — private-name class', () => {
     expect(r.out).toContain('NO commits');
   });
 
-  it('fails closed without a pattern, and refuses a half-given range', () => {
+  it('stands down without a pattern, and refuses a half-given range', () => {
     // Absent pattern is a WARNING, not a failure: this runs at pre-push and
     // nowhere else, so refusing to run would mean refusing to push. The warning
     // is what keeps the stood-down state from being invisible.
@@ -504,8 +496,9 @@ describe('public-repo-guard — private-name class', () => {
     expect(run(['check-meta', base, '--allow-missing-names'], { __PATTERN__: FICTIONAL_NAME }).code).toBe(2);
   });
 
-  it('says the class is inactive rather than reporting an empty scan', () => {
-    // The current CI path. "0 commits scanned" would be true but ambiguous.
+  it('says the class is inactive rather than reporting an empty scan (pre-push path)', () => {
+    // The path a push takes with no list configured. "0 commits scanned"
+    // would be true but ambiguous — it is also what a real empty range prints.
     const r = run(['check-meta', 'HEAD', 'HEAD']);
 
     expect(r.code).toBe(0);
@@ -546,16 +539,15 @@ describe('public-repo-guard — private-name pattern source and preflight', () =
     writeFileSync(join(dir, '.lynox', 'private-names.re'), content);
   }
 
-  it('reads the pattern from the operator-local file when no variable is set', () => {
-    // Without this path the class is dead locally: the pre-push hook passes no
-    // environment, so the variable would never be set and the guard would skip
-    // itself on every push while still printing "clean".
+  it('reads the pattern from the operator-local file, its only source', () => {
+    // This is the ONLY source. The pre-push hook passes no environment, and there
+    // is no CI half — if the file is not read, the class never runs at all.
     const { base, head } = commitNamed();
     writeList(`# a comment\n\n${FICTIONAL_NAME}\n`);
 
     const r = run(['check-meta', base, head]);
-    // Asserting the HIT, not merely a non-zero exit: without the file path the
-    // guard also exits non-zero, by failing closed.
+    // Asserting the HIT, not merely a non-zero exit: a stood-down class exits 0,
+    // so only the anchor tells "found it" from "did not look".
     expect(r.code).toBe(1);
     expect(r.out).toContain(head.slice(0, 7));
   });
@@ -568,11 +560,14 @@ describe('public-repo-guard — private-name pattern source and preflight', () =
     expect(run(['check-meta', base, head]).code).toBe(1);
   });
 
-  it('lets the environment override the file (that is how CI supplies it)', () => {
+  it('re-reads the list on every run, so an edit takes effect immediately', () => {
     const { base, head } = commitNamed();
     writeList('never-appears-anywhere\n');
+    expect(run(['check-meta', base, head]).code).toBe(0);
 
-    expect(run(['check-meta', base, head], { __PATTERN__: FICTIONAL_NAME }).code).toBe(1);
+    // Same run, list edited: no caching, no restart needed.
+    writeList(`${FICTIONAL_NAME}\n`);
+    expect(run(['check-meta', base, head]).code).toBe(1);
   });
 
   it('trims whitespace and CR from file entries, which would silently kill them', () => {
@@ -626,7 +621,8 @@ describe('public-repo-guard — private-name pattern source and preflight', () =
     // routes — which also means this case cannot pin the empty-line check on
     // macOS: deleting that check leaves the local suite green, because the
     // validity check catches the same input first. Measured on GNU in a
-    // container, deleting it DOES fail this case. CI is where it is pinned. A bare `()` is NOT covered — BSD neither rejects it nor reports it
+    // container, deleting it DOES fail this case. CI runs on ubuntu, so that is
+    // where this defence is actually held. A bare `()` is NOT covered — BSD neither rejects it nor reports it
     // as matching an empty line, so it would slip through locally while GNU
     // catches it in CI. Left uncovered deliberately rather than papered over:
     // nobody writes `()` as a customer name, and a test that accepted the local

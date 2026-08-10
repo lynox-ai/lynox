@@ -37,9 +37,14 @@ pre-push:
       # without this the class would be enforced nowhere at all locally, since
       # the scan above never looks at a message.
       #
-      # merge-base gives the commits this push actually adds. Without
-      # ~/.lynox/private-names.re the class warns and stands down rather than
-      # blocking — an unpushable hook is how people learn --no-verify.
+      # merge-base gives the commits this push adds, relative to HEAD. Known
+      # limit, stated rather than hidden: pushing a branch you are not standing
+      # on (`git push origin other`) computes the range from HEAD, so it walks
+      # nothing. That case prints "NO commits scanned" — visible, not silent —
+      # and this class has no CI twin to catch it afterwards.
+      #
+      # Without ~/.lynox/private-names.re the class warns and stands down rather
+      # than blocking: an unpushable hook is how people learn --no-verify.
       # The `|| echo HEAD` is load-bearing. Without it, a clone that has no local
       # origin/main — a --single-branch clone, a differently named remote, a repo
       # with no origin at all — makes the substitution empty, the guard sees a

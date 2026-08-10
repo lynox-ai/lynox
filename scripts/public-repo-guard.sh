@@ -15,19 +15,19 @@
 # some of those citations are load-bearing (the release script coordinates both
 # repos and would be worse without them). Triaging the rest is tracked separately.
 #
-# Two enforcement points (see lefthook.yml pre-push + the CI workflow):
+# Enforcement:
 #   - pre-push hook   — scans the whole tracked tree, fast local feedback
-#   - CI on PRs       — scans the whole tracked tree (cannot be bypassed
-#                       with `git push --no-verify`)
+#   - CI on PRs       — the same tree scan (cannot be bypassed with --no-verify)
+#   - pre-push, again — `check-meta` over the commits being pushed, for the
+#                       private-name class only. That class has NO CI twin; see
+#                       its comment below for why, and what it therefore misses.
 #
 # Usage:
-#   scripts/public-repo-guard.sh           # scan whole tracked tree (both of the above)
-#   scripts/public-repo-guard.sh --staged  # scan staged files only — MANUAL use;
-#                                          # lefthook.yml:23 invokes the guard with
-#                                          # no argument, so the hook does NOT take
-#                                          # this path.
+#   scripts/public-repo-guard.sh                    # whole tracked tree
+#   scripts/public-repo-guard.sh --staged           # staged files only — MANUAL
+#   scripts/public-repo-guard.sh check-meta A B     # commit messages in A..B
 #
-# Exit 0 = clean, exit 1 = a leak marker was found.
+# Exit 0 = clean, exit 1 = a marker was found, exit 2 = bad usage.
 #
 # ── Escape hatches (for legitimately public mentions) ──────────────────
 #   1. Whole-file allow: add the path to ALLOW_FILES below (only for docs
@@ -83,49 +83,24 @@ _org='router'"-for-"'me'
 _port='83'"17"
 HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0\.1:${_port}|localhost:${_port}"
 
-# The fifth class — names of customers and other real third parties. Unlike the
-# four above it does NOT scan the tree; it scans COMMIT MESSAGES and PR text,
-# via the `check-meta` subcommand.
+# The fifth class — names of customers and other real third parties. It scans
+# COMMIT MESSAGES, via the `check-meta` subcommand, and nothing else.
 #
-# That split is the whole design, and it was arrived at the expensive way. The
-# first version scanned the tree as well. Three review rounds later, every one of
-# its defects lived in that half: it had to withhold matching lines so a public
-# Actions log would not print the name, then withhold file PATHS for the same
-# reason, and the withholding used the same grep as the detection, so it was
-# blind wherever the detection was. Meanwhile the tree carried ZERO occurrences
-# of any known name, while the incident that prompted all of this was a name in a
-# PR body and in commit messages. The scanner covering the real vector produced
-# no findings in any round. So the tree half is gone, and with it three defects
-# — removed by dropping their carrier rather than by patching them a fourth time.
+# That narrowness was arrived at the expensive way, over five review rounds. The
+# first version also scanned the tree, and every defect it had lived in that
+# half: it withheld matching lines so a public Actions log would not print a
+# name, then had to withhold file paths for the same reason, and the withholding
+# used the same grep as the detection, so it was blind wherever the detection
+# was. The tree carried zero occurrences of any known name throughout. It is gone.
 #
-# What the remaining half is worth, and why it is the half to keep: a merged
-# commit message is the one surface here that CANNOT be edited afterwards. A name
-# in tracked code can be found later with `git grep` against the same pattern and
-# corrected; a name in a squashed commit message on a public repo is permanent.
+# What it does NOT cover, stated plainly because the code used to imply otherwise:
+# PR titles and bodies. A CI half could read those, but this class has no CI half
+# — its pattern is operator-private and a GitHub secret is a textarea, which
+# turned out to cost more than it bought. The trade is defensible on its own
+# terms: a PR body is editable after the fact, and in the incident that prompted
+# this class it WAS edited. A commit message, once squashed onto main of a public
+# repo, is not. So the surface left covered is the one that cannot be repaired.
 #
-# The pattern is NOT in this file. Writing the names here would be the leak it
-# exists to prevent, and SELF_EXCLUDE would not help — they would sit in a public
-# file either way. It comes from outside: `LYNOX_PRIVATE_NAMES_RE` from a GitHub
-# secret in CI, `~/.lynox/private-names.re` locally. A reader of this repo learns
-# that the class exists, never who is on the list.
-#
-# Two properties it does not share with the others:
-#
-#  1. It never prints what it matched — a commit is named by its short SHA, never
-#     by its subject line. Actions logs on a public repo are public and here the
-#     match IS the name. GitHub's secret masking does not help: it masks the
-#     pattern's value, not the name the pattern found.
-#  2. An absent pattern is a WARNING, not a failure. There is nothing to fail
-#     closed for: the class runs at pre-push and nowhere else, so refusing to run
-#     would mean refusing to push, and an unpushable hook is how people learn
-#     --no-verify. The warning prints on every push that lacks the file, which is
-#     the visibility that a silent skip would not have.
-#
-# Word boundaries belong IN the pattern, not here. A bare surname matches inside
-# unrelated words, while a coined company name usually SHOULD match as a substring
-# — only whoever writes the list knows which is which, so `-w` is not imposed on
-# it. `scripts/no-ai-attribution.sh` documents what the careless version costs:
-# its first pattern matched a line of prose that was explaining the rule.
 # ONE source, and it is a file outside every repo: ~/.lynox/private-names.re,
 # one regex per line. There used to be an environment variable too, for a GitHub
 # secret in CI. It is gone, and so is a third of this class's defect count with
@@ -153,12 +128,10 @@ if [ -r "$PRIVATE_NAMES_FILE" ]; then
 fi
 
 # PREFLIGHT — the pattern is operator-supplied and is therefore the likeliest
-# thing here to be wrong. Two checks, and the second one is the reason this
-# function survived a round that deleted most of its siblings.
-#
-# Three checks, one per direction a pattern can be wrong: it cannot compile, it
-# matches everything, or it matches nothing. The third had been missed by three
-# review rounds, because every earlier check asked only about the second.
+# thing here to be wrong. Three checks, one per direction it can be wrong: it
+# cannot compile, it matches everything, or it matches nothing. The third had
+# been missed by three review rounds, because every earlier check asked only
+# about the second.
 #
 # Note what is never printed: the pattern. It is the list of names, so an error
 # quoting it would be the leak. grep's own diagnostic is dropped for the same
@@ -315,16 +288,15 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# Resolve the pattern — and note WHERE this now sits: inside the check-meta path
-# below, not out here. The tree scan no longer touches the name list at all, so
-# letting a malformed ~/.lynox/private-names.re block it would be a hard stop
-# caused by a file with no bearing on what was being checked. That is the same
-# "unpushable hook teaches --no-verify" failure this script warns about
-# elsewhere, and it was live for one round.
+# The PREFLIGHT runs inside the check-meta path below, not out here. The tree scan
+# never touches the name list, so letting a malformed ~/.lynox/private-names.re
+# block it would be a hard stop caused by a file with no bearing on what was being
+# checked — the same "unpushable hook teaches --no-verify" failure this script
+# warns about elsewhere, and it was live for one round.
 #
-# Absent file, absent pattern: the class stands down with a visible warning
-# rather than failing. There is no CI half to fail closed FOR any more — this
-# runs at pre-push, where refusing to run is refusing to push.
+# Absent file, absent pattern: the class stands down with a visible warning rather
+# than failing. There is no CI half to fail closed FOR — this runs at pre-push,
+# where refusing to run is refusing to push.
 
 # check-meta — commit messages in base..head, plus the PR title/body when the
 # caller exports them. Mirrors scripts/no-ai-attribution.sh: only the commits a PR
@@ -366,7 +338,8 @@ if $mode_meta; then
       # No -I here (nor below): these greps read a PIPE, where -I cannot do its
       # job of skipping binary FILES and only adds a way to be silently skipped —
       # one NUL byte ahead of the name and the input counts as binary, i.e. as no
-      # match. git refuses NUL in a commit message, but PR text is not git's.
+      # match. git refuses NUL in a commit message, so this is belt-and-braces —
+      # but the flag bought nothing here and could only ever cost.
       # The message is read into a variable FIRST, rather than piped into grep.
       #
       # `git show … | grep -q` looks equivalent and is not: grep exits at the
@@ -384,27 +357,16 @@ if $mode_meta; then
         meta_hits=$((meta_hits + 1))
       fi
     done
-    # Title and body arrive through the environment, never interpolated into a
-    # command line — the same shape no-ai-attribution.yml uses for its SHAs.
-    if [ -n "${PR_TITLE:-}" ] && grep -qEi "$PRIVATE_NAMES_RE" <<<"$PR_TITLE"; then
-      echo "❌ private name in the pull-request TITLE"
-      meta_hits=$((meta_hits + 1))
-    fi
-    if [ -n "${PR_BODY:-}" ] && grep -qEi "$PRIVATE_NAMES_RE" <<<"$PR_BODY"; then
-      echo "❌ private name in the pull-request BODY"
-      meta_hits=$((meta_hits + 1))
-    fi
   fi
 
   if [ "$meta_hits" -gt 0 ]; then
     cat >&2 <<'EOF'
 
-A customer or third-party name reached a commit message or the pull request text.
-This is the PUBLIC repo. Describe the case neutrally instead — "a prod thread",
-"a managed instance" — and keep the name in the private repo or in your notes.
+A customer or third-party name reached a commit message. This is the PUBLIC repo.
+Describe the case neutrally instead — "a prod thread", "a managed instance" — and
+keep the name in the private repo or in your notes.
 
-Title and body are editable and should be edited now. A commit message is not,
-once merged, so rewrite it while the branch is still yours:
+Rewrite the message while the branch is still yours; once merged it is permanent:
 
     git rebase -i <base>          # mark the commits above as `reword`
     git commit --amend            # for the last commit only
