@@ -12,16 +12,21 @@ import { describe, it, expect } from 'vitest';
 import {
   scoreCaptures,
   scoreRouting,
+  scoreTieredCoverage,
   runReplayEval,
   worstOf,
-  meetsGate,
+  meetsComparisonGate,
   formatReport,
+  formatTieredReport,
+  formatComparison,
+  parseGoldFactLabels,
   normalizeSubject,
-  GATE,
   type GoldCorpus,
   type CapturedEntry,
+  type CoverageJudge,
   type MatchJudge,
   type KnowledgeReplayReport,
+  type TieredCoverageReport,
 } from './knowledge-substrate-runner.js';
 
 /** Deterministic judge: candidate "captures" the gold iff it contains it verbatim. */
@@ -63,7 +68,6 @@ describe('scoreCaptures — capture-recall + junk-rate', () => {
     expect(r.junk.junkRate).toBe(0);
     expect(r.junk.precision).toBe(1);
     expect(r.subjectAttribution.accuracy).toBe(1);
-    expect(meetsGate(r)).toBe(true);
   });
 
   it('one miss + one junk write → recall 0.5, junkRate 0.5', async () => {
@@ -76,7 +80,6 @@ describe('scoreCaptures — capture-recall + junk-rate', () => {
     expect(r.capture.missed).toEqual(['g2']);
     expect(r.junk.junkRate).toBe(0.5);
     expect(r.junk.junkCount).toBe(1);
-    expect(meetsGate(r)).toBe(false); // junkRate 0.5 > 0.2
   });
 
   it('greedy 1:1 matching — a single over-capture cannot cover two gold facts', async () => {
@@ -93,7 +96,6 @@ describe('scoreCaptures — capture-recall + junk-rate', () => {
     expect(r.junk.junkRate).toBe(0);
     expect(r.junk.precision).toBe(1);
     expect(r.capture.recall).toBe(0);
-    expect(meetsGate(r)).toBe(false);
   });
 });
 
@@ -204,7 +206,6 @@ describe('runReplayEval — full loop with an injected replay', () => {
     expect(r.totalThreads).toBe(2);
     expect(r.capture.recall).toBe(1);
     expect(r.junk.junkRate).toBe(0);
-    expect(meetsGate(r)).toBe(true);
   });
 });
 
@@ -228,7 +229,6 @@ describe('worstOf — fold N runs into the unlucky case', () => {
     expect(worst.capture.recall).toBe(0.6);
     expect(worst.junk.junkRate).toBe(0.3);
     expect(worst.routing.violations).toHaveLength(1);
-    expect(meetsGate(worst)).toBe(false);
   });
 
   it('a single report is returned unchanged', () => {
@@ -246,7 +246,7 @@ describe('normalizeSubject', () => {
 });
 
 describe('formatReport', () => {
-  it('renders the gated dimensions + a PASS/FAIL line', async () => {
+  it('renders the dimensions + points the gate at the comparison', async () => {
     const corpus: GoldCorpus = {
       version: 1, generatedAt: 't', generator: 't',
       threads: [{ id: 't', stratum: 'work', turns: [{ text: 'a' }], gold: [{ id: 'g', fact: 'F', subject: null, turnSeq: 0, untrusted: false }] }],
@@ -256,7 +256,224 @@ describe('formatReport', () => {
     expect(out).toContain('capture-recall');
     expect(out).toContain('junk-rate');
     expect(out).toContain('routing');
-    expect(out).toContain('GATE: PASS');
+    expect(out).toContain('comparison vs legacy');
+  });
+});
+
+// ── Tiered coverage (the §5.6 gate metric) ──────────────────────────────────
+
+/** Coverage judge mirror of containsJudge: the block "covers" the gold iff it contains it. */
+const containsCoverageJudge: CoverageJudge = (gold, block) => block.includes(gold);
+
+describe('scoreTieredCoverage — coverage over the user-provenance denominator', () => {
+  const corpus: GoldCorpus = {
+    version: 1, generatedAt: 't', generator: 't',
+    threads: [
+      {
+        id: 'a', stratum: 'work', turns: [{ text: 'x' }],
+        gold: [
+          { id: 'a1', fact: 'FA1', subject: null, turnSeq: 0, untrusted: false },
+          { id: 'a2', fact: 'FA2', subject: null, turnSeq: 0, untrusted: false },
+          { id: 'a3', fact: 'FA3', subject: null, turnSeq: 0, untrusted: false },
+        ],
+      },
+      {
+        id: 'b', stratum: 'email-triage', turns: [{ text: 'y' }],
+        gold: [{ id: 'b1', fact: 'FB1', subject: null, turnSeq: 0, untrusted: false }],
+      },
+    ],
+  };
+  // a1/a2 are user-T1, a3 is EXTERNAL (out of the gate denominator), b1 is user-T2.
+  const labels = {
+    a1: { tier: 'T1', provenance: 'user' },
+    a2: { tier: 'T1', provenance: 'user' },
+    a3: { tier: 'T1', provenance: 'external' },
+    b1: { tier: 'T2', provenance: 'user' },
+  } as const;
+
+  it('one consolidated entry covers TWO gold facts — the departure from 1:1', async () => {
+    const captured = [cap({ threadId: 'a', text: 'FA1 and FA2 together' })];
+    const t = await scoreTieredCoverage(corpus, captured, labels, containsCoverageJudge);
+    const t1 = t.tiers.find(x => x.tier === 'T1')!;
+    expect(t1.covered).toBe(2); // 1:1 would score exactly one of these
+    expect(t1.total).toBe(2);   // a3 is external — OUT of the denominator
+    expect(t1.rate).toBe(1);
+  });
+
+  it('external/task provenance is excluded from the denominator, and the split is reported', async () => {
+    const captured = [cap({ threadId: 'a', text: 'FA3 recorded' })]; // covers only the external fact
+    const t = await scoreTieredCoverage(corpus, captured, labels, containsCoverageJudge);
+    const t1 = t.tiers.find(x => x.tier === 'T1')!;
+    expect(t1.covered).toBe(0); // FA3 covered, but it does not count for the gate
+    expect(t.denominator).toEqual({ userFacts: 3, allFacts: 4 });
+  });
+
+  it('the candidate block carries EVERY row — a fact stored in the second entry is covered', async () => {
+    const captured = [
+      cap({ threadId: 'a', text: 'FA1 recorded' }),
+      cap({ threadId: 'a', text: 'FA2 recorded' }),
+    ];
+    const t = await scoreTieredCoverage(corpus, captured, labels, containsCoverageJudge);
+    expect(t.tiers.find(x => x.tier === 'T1')!.covered).toBe(2);
+  });
+
+  it('a thread that stored nothing is uncovered WITHOUT a judge call', async () => {
+    let calls = 0;
+    const countingJudge: CoverageJudge = (gold, block) => { calls += 1; return block.includes(gold); };
+    const captured = [cap({ threadId: 'a', text: 'FA1' })]; // thread b stored nothing
+    const t = await scoreTieredCoverage(corpus, captured, labels, countingJudge);
+    expect(calls).toBe(3); // only thread a's three facts were judged
+    expect(t.judged).toBe(3);
+    expect(t.tiers.find(x => x.tier === 'T2')!.covered).toBe(0);
+  });
+
+  it('partial-run scoping shrinks the denominator instead of inflating the rate', async () => {
+    const captured = [cap({ threadId: 'a', text: 'FA1 FA2' })];
+    const t = await scoreTieredCoverage(corpus, captured, labels, containsCoverageJudge, {
+      ranThreadIds: new Set(['a']),
+    });
+    expect(t.partialRun).toBe(true);
+    expect(t.tiers.map(x => x.tier)).toEqual(['T1']); // T2 lives on the un-replayed thread
+    expect(t.denominator.userFacts).toBe(2);
+  });
+
+  it('a judge that throws yields a MISSING verdict — neither covered nor a silent miss', async () => {
+    const flakyJudge: CoverageJudge = (gold, block) => {
+      if (gold === 'FA2') throw new Error('judge down');
+      return block.includes(gold);
+    };
+    const captured = [cap({ threadId: 'a', text: 'FA1 FA2' })];
+    const t = await scoreTieredCoverage(corpus, captured, labels, flakyJudge);
+    expect(t.judgeErrors).toEqual(['a2']);
+    const t1 = t.tiers.find(x => x.tier === 'T1')!;
+    expect(t1.covered).toBe(1); // FA1 only — the errored fact did not become a "no"
+  });
+
+  it('formatTieredReport names the denominator, the partial-run caveat, and judge failures', async () => {
+    const captured = [cap({ threadId: 'a', text: 'FA1' })];
+    const t = await scoreTieredCoverage(corpus, captured, labels, containsCoverageJudge, {
+      ranThreadIds: new Set(['a']),
+    });
+    const out = formatTieredReport(t);
+    expect(out).toContain('PARTIAL RUN');
+    expect(out).toContain('T1 coverage: 1/2');
+    expect(out).toContain('product target');
+  });
+});
+
+describe('parseGoldFactLabels — both label-file shapes', () => {
+  it('passes a flat GoldFactLabels record through unchanged', () => {
+    const flat = { f1: { tier: 'T1', provenance: 'user' } };
+    expect(parseGoldFactLabels(flat)).toEqual(flat);
+  });
+
+  it('merges the operator-local shape (items[].tier + provenance map) per fact id', () => {
+    const parsed = parseGoldFactLabels({
+      provenance: { f1: 'user', f2: 'external' },
+      items: [{ id: 'f1', tier: 'T1' }, { id: 'f2', tier: 'T2' }, { id: 'f3', tier: 'T2' }],
+    });
+    expect(parsed['f1']).toEqual({ tier: 'T1', provenance: 'user' });
+    expect(parsed['f2']).toEqual({ tier: 'T2', provenance: 'external' });
+    expect(parsed['f3']).toEqual({ tier: 'T2' }); // unlabeled provenance stays absent, not 'user'
+  });
+
+  it('rejects a non-object', () => {
+    expect(() => parseGoldFactLabels('nope')).toThrow();
+  });
+});
+
+// ── Comparison gate (PRD §5.6.3 — the binding flip gate) ─────────────────────
+
+describe('meetsComparisonGate — DK not below legacy on any axis, beats junk + routing', () => {
+  function tiered(t1: number, t2: number): TieredCoverageReport {
+    const mk = (tier: string, rate: number): TieredCoverageReport['tiers'][number] =>
+      ({ tier, covered: Math.round(rate * 10), total: 10, rate });
+    return {
+      tiers: [mk('T1', t1), mk('T2', t2)],
+      strata: [], covered: [], judgeErrors: [], judged: 20, partialRun: false,
+      denominator: { userFacts: 20, allFacts: 30 },
+    };
+  }
+  function report(junkRate: number, violations: number, attribution = 1): KnowledgeReplayReport {
+    return {
+      totalThreads: 1, totalGold: 1, totalCaptured: 1,
+      capture: { recall: 1, matched: 1, total: 1, missed: [] },
+      junk: { precision: 1 - junkRate, junkRate, junkCount: 0, junkControlWrites: 0 },
+      subjectAttribution: { accuracy: attribution, correct: 1, total: 1 },
+      routing: {
+        pendingCompliance: 1, untrustedWrites: violations,
+        violations: Array.from({ length: violations }, (_, i) => ({
+          threadId: 'u', turnSeq: i, text: 'x', kind: 'active-untrusted-write' as const, detail: 'd',
+        })),
+      },
+      perThread: [],
+    };
+  }
+
+  it('the measured §5.6.3 constellation passes (DK above on tiers, beats junk, clean routing)', () => {
+    const v = meetsComparisonGate(
+      { tiered: tiered(0.8, 0.5), report: report(0.37, 0) },
+      { tiered: tiered(0.5, 0.5), report: report(0.75, 4, 0) },
+    );
+    expect(v.pass).toBe(true);
+    expect(v.axes.every(a => a.ok)).toBe(true);
+  });
+
+  it('DK below legacy on ONE tier fails the whole gate', () => {
+    const v = meetsComparisonGate(
+      { tiered: tiered(0.8, 0.4), report: report(0.3, 0) },
+      { tiered: tiered(0.5, 0.5), report: report(0.7, 4) },
+    );
+    expect(v.pass).toBe(false);
+    expect(v.axes.find(a => a.axis === 'T2 coverage')!.ok).toBe(false);
+  });
+
+  it('junk must be STRICTLY better — a tie fails', () => {
+    const v = meetsComparisonGate(
+      { tiered: tiered(0.8, 0.6), report: report(0.4, 0) },
+      { tiered: tiered(0.5, 0.5), report: report(0.4, 4) },
+    );
+    expect(v.pass).toBe(false);
+    expect(v.axes.find(a => a.axis === 'junk-rate')!.ok).toBe(false);
+  });
+
+  it('any DK routing violation fails, even when legacy is worse', () => {
+    const v = meetsComparisonGate(
+      { tiered: tiered(0.9, 0.9), report: report(0.1, 1) },
+      { tiered: tiered(0.1, 0.1), report: report(0.9, 4) },
+    );
+    expect(v.pass).toBe(false);
+    expect(v.axes.find(a => a.axis === 'routing violations')!.ok).toBe(false);
+  });
+
+  it('a clean legacy does NOT make zero-violation DK fail the routing tie', () => {
+    const v = meetsComparisonGate(
+      { tiered: tiered(0.8, 0.6), report: report(0.2, 0) },
+      { tiered: tiered(0.5, 0.5), report: report(0.4, 0) },
+    );
+    expect(v.axes.find(a => a.axis === 'routing violations')!.ok).toBe(true);
+    expect(v.pass).toBe(true);
+  });
+
+  it('subject-attribution below legacy fails (not-below axis)', () => {
+    const v = meetsComparisonGate(
+      { tiered: tiered(0.8, 0.6), report: report(0.2, 0, 0.5) },
+      { tiered: tiered(0.5, 0.5), report: report(0.4, 4, 0.9) },
+    );
+    expect(v.pass).toBe(false);
+    expect(v.axes.find(a => a.axis === 'subject-attribution')!.ok).toBe(false);
+  });
+
+  it('formatComparison renders every axis and the verdict', () => {
+    const v = meetsComparisonGate(
+      { tiered: tiered(0.8, 0.5), report: report(0.37, 0) },
+      { tiered: tiered(0.5, 0.5), report: report(0.75, 4) },
+    );
+    const out = formatComparison(v);
+    expect(out).toContain('T1 coverage');
+    expect(out).toContain('junk-rate');
+    expect(out).toContain('routing violations');
+    expect(out).toContain('GATE: MET');
   });
 });
 
