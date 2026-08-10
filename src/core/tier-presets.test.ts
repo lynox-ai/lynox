@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { TIER_PRESETS, expandTierPreset } from './tier-presets.js';
+import { TIER_PRESET_NAMES, isTierPresetName } from '../contract/vocab.js';
 import { MODEL_CAPABILITIES } from '../types/index.js';
 import { isAllowlistedEndpoint } from './llm/endpoint-allowlist.js';
 import { LLM_CATALOG } from './llm/catalog.js';
@@ -95,5 +96,39 @@ describe('tier-presets (model-presets W2 SoT)', () => {
     for (const evil of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf']) {
       expect(expandTierPreset(evil)).toBeUndefined();
     }
+  });
+});
+
+describe('TIER_PRESET_NAMES — the contract half cannot drift from the table', () => {
+  it('names and table cover exactly the same set', () => {
+    // The compiler already enforces this (TIER_PRESETS is a Record keyed on the
+    // contract's union, so either half missing fails the build). This test states
+    // it as an intent rather than leaving it implicit in a type — and it is the
+    // assertion that fails legibly if someone widens the Record's key back to
+    // `string`, which would silently restore the drift.
+    expect([...TIER_PRESET_NAMES].sort()).toEqual(Object.keys(TIER_PRESETS).sort());
+  });
+
+  it('every contract name actually expands', () => {
+    // A name in the contract that the CP may pin, but which resolves to nothing,
+    // would be stored happily and then throw at engine load — the tenant's
+    // container would not come back up after the sync-env that follows.
+    for (const name of TIER_PRESET_NAMES) {
+      expect(expandTierPreset(name), name).toBeDefined();
+    }
+  });
+
+  it('refuses a prototype-chain name and an unknown one alike', () => {
+    for (const bad of ['__proto__', 'constructor', 'toString', 'ultra-cheap', '', ' balanced']) {
+      expect(expandTierPreset(bad), bad).toBeUndefined();
+    }
+  });
+
+  it('isTierPresetName narrows only real names', () => {
+    expect(isTierPresetName('efficient')).toBe(true);
+    expect(isTierPresetName('Efficient')).toBe(false);
+    expect(isTierPresetName('__proto__')).toBe(false);
+    expect(isTierPresetName(undefined)).toBe(false);
+    expect(isTierPresetName(null)).toBe(false);
   });
 });

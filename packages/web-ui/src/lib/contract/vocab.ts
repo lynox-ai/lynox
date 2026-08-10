@@ -53,6 +53,36 @@ export function cpSuppliesLLMKey(value: string | undefined | null): boolean {
   return t === 'managed' || t === 'managed_pro';
 }
 
+// === Tier presets (which MODEL sits behind each band) ===
+
+/**
+ * The named routing strategies the control plane may pin via `LYNOX_TIER_PRESET`.
+ *
+ * Only the NAMES are contract. The slots — which provider and model each band
+ * resolves to — stay in core's `TIER_PRESETS` table, because they are a curation
+ * decision with their own guards (provenance, registered-model checks) and the CP
+ * has no business carrying them.
+ *
+ * They are here so the CP can REFUSE an unknown name before storing it. Without
+ * that, a typo is written, `sync-env` force-recreates the tenant container, and
+ * the engine then throws at load on the unknown preset — the instance does not
+ * come back up. Validating against a copied list would only move the typo; this
+ * is the same list core expands from.
+ *
+ * ADDING A PRESET: add the name here first. `TIER_PRESETS` is a `Record` keyed on
+ * this type, so the compiler names the missing half at the moment you write it —
+ * a preset without a contract name will not build, and a contract name without a
+ * preset will not either.
+ */
+export const TIER_PRESET_NAMES = ['efficient', 'balanced', 'max-quality'] as const;
+
+export type TierPresetName = (typeof TIER_PRESET_NAMES)[number];
+
+/** Narrow an untrusted string to a known preset name. */
+export function isTierPresetName(value: string | undefined | null): value is TierPresetName {
+  return typeof value === 'string' && (TIER_PRESET_NAMES as readonly string[]).includes(value);
+}
+
 // === Model tier (deep/balanced/fast) — orthogonal to the billing tier ===
 
 export type ModelTier = 'deep' | 'balanced' | 'fast';
