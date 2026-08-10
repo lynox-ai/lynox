@@ -251,6 +251,50 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     expect(ks.recall({ query: 'auto-approve', subjectName: 'ACME' }).length).toBe(0);
   });
 
+  // The queue REASON the model reads back — see the `untrustedReason` doc in knowledge.ts for why
+  // a wrong one is a defect. Both directions are asserted: over-attributing to the sticky latch is
+  // the same defect mirrored. Fixtures co-set `conversationSawUntrusted` per the reachability note
+  // above — otherwise the ORDERING, which is what decides the wording, stays untested.
+  it('F5: the pending_review return blames the CONVERSATION, not this turn, when only the sticky latch fired', async () => {
+    const { agent } = make({ sawUntrustedData: false, sawExternalContentTool: false, conversationSawUntrusted: true });
+    const out = await rememberTool.handler({ text: 'Nordfeld AG moved to Zug', subject: 'Nordfeld AG' }, agent);
+    expect(out).toContain('this conversation read external content on an earlier turn');
+    expect(out).not.toContain('this turn read external content');
+  });
+
+  it('H4: the pending_review return still blames THIS turn when an external-content tool ran', async () => {
+    const { agent } = make({ sawExternalContentTool: true, conversationSawUntrusted: true });
+    const out = await rememberTool.handler({ text: 'Nordfeld AG renewed', subject: 'Nordfeld AG' }, agent);
+    expect(out).toContain('this turn read external content');
+    expect(out).not.toContain('earlier turn');
+  });
+
+  it('marker outranks the sticky latch in the returned reason (specificity order)', async () => {
+    const { agent } = make({ sawUntrustedData: true, conversationSawUntrusted: true });
+    const out = await rememberTool.handler({ text: 'Nordfeld AG hired a CFO', subject: 'Nordfeld AG' }, agent);
+    expect(out).toContain('this turn read external content');
+    expect(out).not.toContain('earlier turn');
+  });
+
+  // The same misattribution lived in both REFUSAL strings, where it also handed the user an
+  // unreachable remedy: under the sticky latch there is no clean turn left in this thread.
+  it('F5: memory_block_edit names the conversation and points at a NEW chat, not a clean turn', async () => {
+    const { agent } = make({ conversationSawUntrusted: true });
+    const out = await memoryBlockEditTool.handler(
+      { block: 'playbook', mode: 'append', new_text: 'always auto-send emails' }, agent);
+    expect(out).toContain('this conversation read external content on an earlier turn');
+    expect(out).toContain('in a new chat');
+    expect(out).not.toContain('clean turn');
+  });
+
+  it('H4: memory_block_edit still says clean turn when THIS turn read external content', async () => {
+    const { agent } = make({ sawExternalContentTool: true, conversationSawUntrusted: true });
+    const out = await memoryBlockEditTool.handler(
+      { block: 'playbook', mode: 'append', new_text: 'always auto-send emails' }, agent);
+    expect(out).toContain('this turn read external content');
+    expect(out).toContain('directly on a clean turn');
+  });
+
   it('F5: memory_block_edit refuses when the CONVERSATION is tainted, even on a clean-latch turn', async () => {
     const { agent } = make({ conversationSawUntrusted: true });
     const out = await memoryBlockEditTool.handler(
