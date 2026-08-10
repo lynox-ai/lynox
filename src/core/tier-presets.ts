@@ -100,14 +100,17 @@ const fireworks = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 
 //
 //   ⚡ efficient     deepseek-flash · minimax-m3 · kimi-k3
 //   ⚖️ balanced      deepseek-flash · glm-5p2    · kimi-k3
-//   🇪🇺 eu-sovereign  ministral-14b  · mistral-lg · mistral-medium
+// (An EU-only set was drafted and PULLED on 2026-08-11: a preset whose identity
+//  IS a residency promise must fail closed, and this one degraded silently to the
+//  base provider when a Mistral slot was dropped, while the disclosure panel kept
+//  showing the EU chips. See the security-gate findings on core#1185.)
 //   💎 max-quality   haiku-4.5      · sonnet-5   · opus-5
 //
 // efficient→balanced buys a stronger main for 3.7× the output price ($1.20 → $4.40
 // per M). That is the whole difference, and it is the slot that runs every turn —
 // which is why it is the only axis worth a separate preset. Both Fireworks sets
 // need `LYNOX_MANAGED_FIREWORKS_ENABLED`; without it a managed tenant sees only
-// eu-sovereign + max-quality. Since 2026-08-10 the CP can also NAME a preset via
+// max-quality. Since 2026-08-10 the CP can also NAME a preset via
 // `LYNOX_TIER_PRESET`, so that unlock no longer silently leaves an instance on
 // default Anthropic routing.
 export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
@@ -139,62 +142,6 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
       fast: fireworks('accounts/fireworks/models/deepseek-v4-flash'),
       balanced: fireworks('accounts/fireworks/models/minimax-m3'),
       deep: fireworks('accounts/fireworks/models/kimi-k3'),
-    },
-  },
-  // 🇪🇺 eu-sovereign — the EU option, now stated instead of implied. It used to be a
-  // side effect of picking "efficient" (Mistral fast+main), which meant a customer
-  // who needed EU processing had to know that. Every slot is EU-provenance Mistral.
-  // The BANDS, however, do not follow the registry's `tier` field — 14B is
-  // `tier:'balanced'` and serves fast here, Large is `tier:'deep'` and serves main.
-  // Mistral has four models and three bands, so something has to shift; what this
-  // preset follows instead is PRICE (see the ladder note below), and the two reasons
-  // for each displaced model are spelled out further down rather than implied:
-  //   fast   ministral-14b-2512  $0.20/$0.20, 262k
-  //   main   mistral-large-2512  $0.50/$1.50, 256k
-  //   deep   mistral-medium-2604 $1.50/$7.50, 262k
-  //
-  // The price rises with the band, which is the whole test of a ladder: the slot
-  // that runs EVERY turn is the cheap one, and escalating costs more rather than
-  // less. The reverse order (medium main / large deep) was considered and rejected
-  // for exactly that — it would put $7.50/M output in the per-turn band above a
-  // $1.50/M deep, so escalation would be a price DOWNgrade.
-  //
-  // TWO CORRECTIONS to the first draft of this preset, both worth recording because
-  // each came from taking an unsourced claim as fact:
-  //
-  // 1. It pinned Large in main AND deep and justified it with "Mistral has nothing
-  //    stronger above it". That was wrong on its own terms — 14B sits between 8B and
-  //    Large and is `tier: 'balanced'`, and Medium sits above.
-  // 2. The reviewer then read MISTRAL_MODEL_MAP's comment (models.ts:88-95) — "Large
-  //    3 is the WEAKER deep, going legacy; Medium 3.5 beats it on analysis" — as
-  //    grounds to drop Large entirely. But the registry contradicts ITSELF: the
-  //    mistral-large-2512 entry says "the Mistral quality leader on Set-Bench v4"
-  //    and carries `tier: 'deep'`. One side names a bench, the other names nothing.
-  //    Both models stay in the set; the CONTRADICTION decides only their
-  //    ORDER, and the order now follows MISTRAL_MODEL_MAP (medium = the stronger
-  //    deep), which is also the arrangement whose prices rise with the band.
-  //    Large is gen-3 (`2512`), Medium the newer `2604` — the generations are not
-  //    comparable by name alone, and a Large 4 would land in the main slot.
-  //    → `DEF-mistral-deep-ranking-unresolved`: the two registry claims cannot both
-  //      be true. Whoever benches Mistral next should settle it and fix the loser.
-  //
-  // WHY 14B SITS IN `fast` AND NOT `balanced`, where the registry classifies it.
-  // Two findings exist about 14B and they point opposite ways. Set-Bench v4 put it
-  // at "100% pass and near-Large quality at ~6× lower cost" (models.ts:780-781) —
-  // which is why it is wasted on a plain fast slot and better than ministral-8b
-  // there. But it also lost the R9 artefact-quality axis, an anchor-calibrated 0-10
-  // judge of artefact design and content substance (`model-fitness/artefact.ts`).
-  // (The OTHER historical objection — the WS2 R1/R3 floor — does NOT count here: it
-  // measures delegation, not quality, see the header.) R9 is narrow: it grades HTML
-  // artefacts, which is main-chat work and not fast-slot work. Putting 14B in `fast`
-  // takes the sourced upside where it applies and sidesteps the sourced downside
-  // where it would bite. `ministral-8b` remains catalog-selectable.
-  'eu-sovereign': {
-    routing_mode: 'hybrid',
-    tier_set: {
-      fast: mistral('ministral-14b-2512'),
-      balanced: mistral('mistral-large-2512'),
-      deep: mistral('mistral-medium-2604'),
     },
   },
   // ⚖️ balanced — ⚡ efficient with a stronger main, and nothing else changed. Same

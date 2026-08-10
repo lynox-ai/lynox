@@ -13,11 +13,11 @@ import { LLM_CATALOG } from './llm/catalog.js';
  * weights ship ONLY via the Western Fireworks host (the affirmative sourcing rule).
  */
 describe('tier-presets (model-presets W2 SoT)', () => {
-  it('ships exactly the four hybrid presets', () => {
+  it('ships exactly the three hybrid presets', () => {
     // eu-sovereign joined 2026-08-10: the EU choice used to be a side effect of
     // picking "efficient", which meant a customer needing EU processing had to
     // know that. Reshaping efficient to open weights would have removed it silently.
-    expect(Object.keys(TIER_PRESETS).sort()).toEqual(['balanced', 'efficient', 'eu-sovereign', 'max-quality']);
+    expect(Object.keys(TIER_PRESETS).sort()).toEqual(['balanced', 'efficient', 'max-quality']);
     for (const p of Object.values(TIER_PRESETS)) expect(p.routing_mode).toBe('hybrid');
   });
 
@@ -99,35 +99,6 @@ describe('tier-presets (model-presets W2 SoT)', () => {
         }
       }
     }
-  });
-
-  it('EVERY eu-sovereign slot is EU-provenance — the one claim the preset exists to make', () => {
-    // Written 2026-08-10 after the whole preset was re-slotted (8B→14B fast, Large
-    // to main, Medium 3.5 to deep) and NOT ONE test failed. Two holes made that
-    // possible: nothing asserted the slots, and nothing asserted provenance — while
-    // `mistral-large-2512` was in fact MISSING `provenance: 'EU'` in the registry,
-    // so `buildTierPresetSignal` (which omits the key when undefined) showed the EU
-    // chip on one of three slots. A preset whose entire purpose is making EU
-    // processing explicit must fail loudly when a slot cannot prove it.
-    const eu = TIER_PRESETS['eu-sovereign']!.tier_set;
-    expect(Object.keys(eu).sort()).toEqual(['balanced', 'deep', 'fast']);
-    for (const [tier, slot] of Object.entries(eu)) {
-      const cap = MODEL_CAPABILITIES[slot!.model_id];
-      expect(cap?.provenance, `eu-sovereign.${tier} → ${slot!.model_id} has no EU provenance`).toBe('EU');
-      expect(slot!.api_base_url, `eu-sovereign.${tier} must route via Mistral`).toContain('mistral.ai');
-    }
-  });
-
-  it('eu-sovereign pins the exact per-band models — provenance alone cannot catch a re-slot', () => {
-    // The FIRST version of this guard asserted only the slot KEYS + provenance, and a
-    // delta review killed it: mutating the preset back to its pre-2026-08-10 slots
-    // (8b/large/large), and even swapping fast with deep so a $1.50/$7.50 model served
-    // the per-turn band, both passed 126/126. Every Mistral is EU on mistral.ai, so
-    // that axis is ORTHOGONAL to which model sits in which band — the one thing the
-    // re-slot changed. Naming the ids is what makes this a test of the decision.
-    expect(TIER_PRESETS['eu-sovereign']!.tier_set.fast?.model_id).toBe('ministral-14b-2512');
-    expect(TIER_PRESETS['eu-sovereign']!.tier_set.balanced?.model_id).toBe('mistral-large-2512');
-    expect(TIER_PRESETS['eu-sovereign']!.tier_set.deep?.model_id).toBe('mistral-medium-2604');
   });
 
   it('EVERY preset prices its bands in ascending order — escalating must never get cheaper', () => {

@@ -44,17 +44,19 @@ describe('buildTierPresetSignal (model-presets W4)', () => {
     for (const p of Object.values(sig)) expect(p.available).toBe(true);
   });
 
-  it('managed without the Fireworks flag: only the Fireworks-free presets remain', () => {
-    // Changed 2026-08-10 and worth stating plainly: `balanced` now pins a Fireworks
-    // main (GLM), so a managed tenant WITHOUT `LYNOX_MANAGED_FIREWORKS_ENABLED` is
-    // left with eu-sovereign and max-quality. That is the cost of the main swap —
-    // enabling Fireworks fleet-wide is a DPA decision, not a code one, and until it
-    // is taken this assertion is the honest picture of what such a tenant can pick.
+  it('managed without the Fireworks flag: ONLY max-quality remains selectable', () => {
+    // State this plainly because it is the sharpest consequence of this PR: both
+    // Fireworks sets need `LYNOX_MANAGED_FIREWORKS_ENABLED`, which is OFF fleet-wide
+    // (a DPA decision, not a code one). A managed tenant without it is therefore left
+    // with exactly ONE preset — the most expensive. An EU-Mistral set would have been
+    // the Fireworks-free middle option; it was pulled on 2026-08-11 because a preset
+    // whose identity is a residency promise must fail closed, and that one degraded
+    // silently. Until either lands, this assertion is the honest picture.
     const sig = buildTierPresetSignal({ isManagedTier: true });
     expect(sig['efficient']!.available).toBe(false);   // all three slots Fireworks
     expect(sig['balanced']!.available).toBe(false);    // Fireworks main
-    expect(sig['eu-sovereign']!.available).toBe(true); // all-Mistral
     expect(sig['max-quality']!.available).toBe(true);  // all-Anthropic
+    expect(Object.values(sig).filter((p) => p.available)).toHaveLength(1);
   });
 
   it('managed WITH the Fireworks flag + CP key: efficient becomes available', () => {
@@ -101,13 +103,6 @@ describe('buildTierPresetSignal (model-presets W4)', () => {
     expect(deep.model_id).toBe('accounts/fireworks/models/kimi-k3');
     expect(deep.provenance).toBe('CN'); // the provenance chip
     expect(deep.residency).toBe('US'); // Fireworks host residency (weights CN, host US)
-  });
-
-  it('resolves an EU Mistral slot host disclosure (eu-sovereign main = mistral-large)', () => {
-    const sig = buildTierPresetSignal({ isManagedTier: false });
-    const bal = sig['eu-sovereign']!.tiers.find((t) => t.tier === 'balanced')!;
-    expect(bal.model_id).toBe('mistral-large-2512');
-    expect(bal.residency).toBe('EU');
   });
 
   it('carries per-tier input/output pricing (the cost feel) from the registry', () => {

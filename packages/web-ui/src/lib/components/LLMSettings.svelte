@@ -536,7 +536,7 @@
 	//
 	// Order = Standard → the contract presets in their vocab order → manual Eigene. `key` is the
 	// i18n stem (hyphenated ids can't be a translation-key segment). Icons are the
-	// monochrome set: ✓ Standard · ⚡ Efficient · ⚖️ Balanced · 📍 EU-souverän ·
+	// monochrome set: ✓ Standard · ⚡ Efficient · ⚖️ Balanced ·
 	// 💎 Max-Quality · sliders for the manual Eigene.
 	// A RECORD over the contract's preset names, not an array literal — a Record must
 	// be TOTAL, so a preset added to the contract without a card here fails to build.
@@ -547,7 +547,6 @@
 	const PRESET_CARDS: Record<TierPresetName, { key: string; icon: IconName }> = {
 		'efficient': { key: 'efficient', icon: 'bolt' },
 		'balanced': { key: 'balanced', icon: 'scale' },
-		'eu-sovereign': { key: 'eu_sovereign', icon: 'pin' },
 		'max-quality': { key: 'max_quality', icon: 'gem' },
 	};
 	// Standard and Eigene bracket the presets: they are routing MODES, not presets, so

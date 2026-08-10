@@ -74,7 +74,7 @@ export function cpSuppliesLLMKey(value: string | undefined | null): boolean {
  * a preset without a contract name will not build, and a contract name without a
  * preset will not either.
  */
-export const TIER_PRESET_NAMES = ['efficient', 'balanced', 'eu-sovereign', 'max-quality'] as const;
+export const TIER_PRESET_NAMES = ['efficient', 'balanced', 'max-quality'] as const;
 
 export type TierPresetName = (typeof TIER_PRESET_NAMES)[number];
 

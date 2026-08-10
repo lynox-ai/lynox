@@ -2938,8 +2938,8 @@ describe('LynoxHTTPApi', () => {
         const presets = body['available_tier_presets'] as Record<string, { available: boolean }>;
         expect(presets['efficient']!.available).toBe(false); // all slots Fireworks
         expect(presets['balanced']!.available).toBe(false);   // Fireworks main since 2026-08-10
-        expect(presets['eu-sovereign']!.available).toBe(true); // all-Mistral
-        expect(presets['max-quality']!.available).toBe(true);  // all-Anthropic
+        expect(presets['max-quality']!.available).toBe(true);  // all-Anthropic — the ONLY one left
+        expect(Object.values(presets).filter((p) => p.available)).toHaveLength(1);
         // The lock mirrors the disabled card + the write-gate 403.
         const locks = body['locks'] as Record<string, Record<string, unknown>>;
         expect(locks['tier_preset']?.['reason']).toBe('managed-tier');
