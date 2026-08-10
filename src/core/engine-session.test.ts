@@ -348,6 +348,28 @@ vi.mock('./run-history.js', () => ({
     this.getCompactionEventsBySession = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.insertToolCall = vi.fn();
+    // @ts-expect-error mock constructor — derives the count from the calls it was
+    // actually handed, mirroring the real store (which counts rows). A stub
+    // returning a constant would let a test pass while nothing was recorded.
+    // De-duplicates on `toolUseId` because the real INSERT does (OR IGNORE): every
+    // Session in the process subscribes to the tool channel, so the same event
+    // arrives once per Session, and a mock that counted each arrival would report
+    // a number the database would never store.
+    this.countToolCalls = vi.fn((runId: string) => {
+      // @ts-expect-error mock constructor
+      const calls = (this.insertToolCall as ReturnType<typeof vi.fn>).mock.calls
+        .map((c: unknown[]) => c[0] as { runId?: string; toolUseId?: string } | undefined)
+        .filter((a): a is { runId?: string; toolUseId?: string } => a?.runId === runId);
+      const seen = new Set<string>();
+      let n = 0;
+      for (const [i, a] of calls.entries()) {
+        const key = a.toolUseId ?? `__anon${i}`;   // no id → not de-duplicable, same as a random row id
+        if (seen.has(key)) continue;
+        seen.add(key);
+        n++;
+      }
+      return n;
+    });
     // @ts-expect-error mock constructor — sub-agent spend rollup (session.ts run-end).
     this.getDescendantCostUsd = mockGetDescendantCostUsd;
     // @ts-expect-error mock constructor
@@ -593,13 +615,12 @@ describe('Engine + Session (Orchestrator)', () => {
       // disproportionately the failed ones, so the field is blank exactly where
       // it is read hardest. It made a 60-http_request run that hit the per-run
       // cost ceiling look like a runaway loop that had done nothing (war,
-      // 2026-08-10). The counter is session-local and only reset at run START,
-      // so its value is intact in the catch block — set it directly here, the
-      // same way the H2 test grows `session.usage`, because what is under test
-      // is the counter→updateRun wiring, not the subscription that increments it.
+      // 2026-08-10).
       const { engine, session } = await createEngineAndSession();
       mockSend.mockImplementationOnce(async () => {
-        (session as unknown as { runToolCallSeq: number }).runToolCallSeq = 3;
+        channels.toolEnd.publish({ name: 'http_request', agent: 'main', duration: 5, success: true, runId: 'run-123', toolUseId: 'tu-f1' });
+        channels.toolEnd.publish({ name: 'http_request', agent: 'main', duration: 7, success: true, runId: 'run-123', toolUseId: 'tu-f2' });
+        channels.toolEnd.publish({ name: 'edit_file', agent: 'main', duration: 1, success: true, runId: 'run-123', toolUseId: 'tu-f3' });
         throw new Error('boom after three tools');
       });
 
@@ -607,32 +628,8 @@ describe('Engine + Session (Orchestrator)', () => {
 
       const rh = engine.getRunHistory()!;
       expect(rh.updateRun).toHaveBeenCalledWith(
-        expect.any(String),
+        'run-123',
         expect.objectContaining({ status: 'failed', toolCallCount: 3 }),
-      );
-    });
-
-    it('the count on a failed run comes from real tool events, not a set field', async () => {
-      // The two tests above set `runToolCallSeq` directly, so they pin the
-      // counter→updateRun half and nothing else: the increment closure at
-      // session.ts:427 could be deleted and they would both still pass. This one
-      // drives the whole path — publish real `tool:end` events mid-run, let the
-      // subscription count them, then fail — so the end-to-end claim ("a failed
-      // run records the tool calls it made") rests on a covered link rather than
-      // on two halves that are each tested against the other's absence.
-      const { engine, session } = await createEngineAndSession();
-      mockSend.mockImplementationOnce(async () => {
-        channels.toolEnd.publish({ name: 'http_request', agent: 'main', duration: 5, success: true });
-        channels.toolEnd.publish({ name: 'http_request', agent: 'main', duration: 7, success: true });
-        throw new Error('boom after two real tool events');
-      });
-
-      await expect(session.run('go')).rejects.toThrow('boom after two real tool events');
-
-      const rh = engine.getRunHistory()!;
-      expect(rh.updateRun).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({ status: 'failed', toolCallCount: 2 }),
       );
     });
 
@@ -642,7 +639,7 @@ describe('Engine + Session (Orchestrator)', () => {
       // hole open for the majority of non-completed runs even with `failed` fixed.
       const { engine, session } = await createEngineAndSession();
       mockSend.mockImplementationOnce(async () => {
-        (session as unknown as { runToolCallSeq: number }).runToolCallSeq = 7;
+        channels.toolEnd.publish({ name: 'http_request', agent: 'main', duration: 5, success: true, runId: 'run-123', toolUseId: 'tu-a1' });
         throw new RunAbortedError();
       });
 
@@ -650,8 +647,54 @@ describe('Engine + Session (Orchestrator)', () => {
 
       const rh = engine.getRunHistory()!;
       expect(rh.updateRun).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({ status: 'aborted', toolCallCount: 7 }),
+        'run-123',
+        expect.objectContaining({ status: 'aborted', toolCallCount: 1 }),
+      );
+    });
+
+    it('a tool event carrying another run\'s id is not counted here', async () => {
+      // The whole point of the id on the event. A WorkerLoop task or a spawned
+      // child publishes while this chat run is open; before the id existed, the
+      // subscriber booked those onto whatever run IT had open, so a run could be
+      // charged with tool calls it never made. The foreign event must still be
+      // RECORDED (against its own run) — it just must not land on this one.
+      const { engine, session } = await createEngineAndSession();
+      mockSend.mockImplementationOnce(async () => {
+        channels.toolEnd.publish({ name: 'http_request', agent: 'main', duration: 5, success: true, runId: 'run-123', toolUseId: 'tu-mine' });
+        channels.toolEnd.publish({ name: 'http_request', agent: 'worker', duration: 9, success: true, runId: 'some-other-run', toolUseId: 'tu-theirs' });
+        throw new Error('boom with a foreign event in flight');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom with a foreign event in flight');
+
+      const rh = engine.getRunHistory()!;
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        'run-123',
+        expect.objectContaining({ status: 'failed', toolCallCount: 1 }),
+      );
+      // and the foreign call went to its own run rather than being dropped
+      expect(rh.insertToolCall).toHaveBeenCalledWith(
+        expect.objectContaining({ runId: 'some-other-run' }),
+      );
+    });
+
+    it('another run\'s ask_user does not add to this run\'s user_wait_ms', async () => {
+      // `user_wait_ms` answers "how long did the human keep THIS run waiting",
+      // and it feeds the wall-clock/attribution view. The wait belongs to the run
+      // that asked; a prompt in a concurrently-running session would otherwise be
+      // added here, making a run that never blocked look like it did.
+      const { engine, session } = await createEngineAndSession();
+      mockSend.mockImplementationOnce(async () => {
+        channels.toolEnd.publish({ name: 'ask_user', agent: 'worker', duration: 90_000, success: true, runId: 'some-other-run', toolUseId: 'tu-ask-theirs' });
+        throw new Error('boom with a foreign prompt in flight');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom with a foreign prompt in flight');
+
+      const rh = engine.getRunHistory()!;
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        'run-123',
+        expect.objectContaining({ status: 'failed', userWaitMs: 0 }),
       );
     });
 

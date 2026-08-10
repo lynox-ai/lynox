@@ -217,6 +217,76 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('the same tool_use_id is recorded once, however often it is delivered', () => {
+    // `lynox:tool:end` is a process-global channel and every live Session
+    // subscribes to it, so one tool call is delivered once PER SESSION — a chat
+    // with a background task running alongside it delivers twice. Keying the row
+    // on the provider's tool_use_id is what keeps that one row instead of N, and
+    // it is why the count below can be trusted as a cost figure.
+    const h = createHistory();
+    const runId = h.insertRun({ taskText: 'T', modelTier: 'fast', modelId: 'm' });
+
+    const call = { runId, toolName: 'http_request', inputJson: '{"url":"a"}', outputJson: 'ok', durationMs: 10, toolUseId: 'toolu_same' };
+    h.insertToolCall(call);
+    h.insertToolCall(call);
+    h.insertToolCall(call);
+
+    expect(h.getRunToolCalls(runId)).toHaveLength(1);
+    expect(h.countToolCalls(runId)).toBe(1);
+    h.close();
+  });
+
+  it('without a tool_use_id every delivery is its own row (unchanged behaviour)', () => {
+    // The id is optional so pre-existing callers keep working. They get the old
+    // semantics — a fresh random row id per call — rather than silent de-duping
+    // that would swallow two genuinely distinct calls to the same tool.
+    const h = createHistory();
+    const runId = h.insertRun({ taskText: 'T', modelTier: 'fast', modelId: 'm' });
+
+    h.insertToolCall({ runId, toolName: 'bash', inputJson: '{}', outputJson: 'ok', durationMs: 1 });
+    h.insertToolCall({ runId, toolName: 'bash', inputJson: '{}', outputJson: 'ok', durationMs: 1 });
+
+    expect(h.countToolCalls(runId)).toBe(2);
+    h.close();
+  });
+
+  it('derives the sequence per run, so a foreign run cannot shift this run\'s order', () => {
+    // The sequence used to come from a counter the CALLER kept per Session. A
+    // background run sharing that Session advanced it, so this run's calls could
+    // be stored as 0, 3, 7 — and `ORDER BY sequence_order` still read fine, which
+    // is why it went unnoticed. Derived from the run's own rows, interleaving
+    // another run's writes cannot move it.
+    const h = createHistory();
+    const mine = h.insertRun({ taskText: 'mine', modelTier: 'fast', modelId: 'm' });
+    const other = h.insertRun({ taskText: 'other', modelTier: 'fast', modelId: 'm' });
+
+    h.insertToolCall({ runId: mine, toolName: 'a', inputJson: '{}', outputJson: '', durationMs: 1 });
+    h.insertToolCall({ runId: other, toolName: 'x', inputJson: '{}', outputJson: '', durationMs: 1 });
+    h.insertToolCall({ runId: other, toolName: 'y', inputJson: '{}', outputJson: '', durationMs: 1 });
+    h.insertToolCall({ runId: mine, toolName: 'b', inputJson: '{}', outputJson: '', durationMs: 1 });
+
+    expect(h.getRunToolCalls(mine).map(c => [c.tool_name, c.sequence_order]))
+      .toEqual([['a', 0], ['b', 1]]);
+    expect(h.getRunToolCalls(other).map(c => [c.tool_name, c.sequence_order]))
+      .toEqual([['x', 0], ['y', 1]]);
+    expect(h.countToolCalls(mine)).toBe(2);
+    h.close();
+  });
+
+  it('countToolCalls counts only the run it was asked about', () => {
+    const h = createHistory();
+    const a = h.insertRun({ taskText: 'a', modelTier: 'fast', modelId: 'm' });
+    const b = h.insertRun({ taskText: 'b', modelTier: 'fast', modelId: 'm' });
+    h.insertToolCall({ runId: a, toolName: 't', inputJson: '{}', outputJson: '', durationMs: 1 });
+    h.insertToolCall({ runId: b, toolName: 't', inputJson: '{}', outputJson: '', durationMs: 1 });
+    h.insertToolCall({ runId: b, toolName: 't', inputJson: '{}', outputJson: '', durationMs: 1 });
+
+    expect(h.countToolCalls(a)).toBe(1);
+    expect(h.countToolCalls(b)).toBe(2);
+    expect(h.countToolCalls('a-run-with-nothing')).toBe(0);
+    h.close();
+  });
+
   it('getSessionToolCalls gathers tool calls across all runs in a session', () => {
     const h = createHistory();
     // Two runs in the SAME session (one conversation, two turns).

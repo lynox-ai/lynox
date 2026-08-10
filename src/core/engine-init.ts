@@ -117,16 +117,28 @@ export function configureBudgetAndRateLimits(
 export function setupHistorySubscriptions(
   history: RunHistory,
   getCurrentRunId: () => string | null,
-  getAndIncrementSeq: () => number,
   addUserWaitMs?: (ms: number) => void,
 ): void {
   // tool:end → fire-and-forget tool call recording
   channels.toolEnd.subscribe((msg: unknown) => {
-    const runId = getCurrentRunId();
+    const data = msg as { name: string; duration: number; success: boolean; error?: string | undefined; input?: string | undefined; runId?: string | undefined; toolUseId?: string | undefined };
+    // The event says which run it belongs to. This used to read the SUBSCRIBING
+    // session's current run instead, which is a different question and gave a
+    // different answer whenever anything else was running: a background
+    // WorkerLoop task's calls were written onto the open chat run, and a spawned
+    // child could never write against its own run row — it has a run id, but the
+    // subscriber never looked at it. Both were invisible, because the number
+    // still looked plausible.
+    //
+    // `?? getCurrentRunId()` covers publishers that predate the id on the event
+    // (and any test that publishes a bare payload): unattributed events keep
+    // landing where they used to rather than being dropped.
+    const runId = data.runId ?? getCurrentRunId();
     if (!runId) return;
-    const data = msg as { name: string; duration: number; success: boolean; error?: string | undefined; input?: string | undefined };
-    // Track user wait time from interactive tools
-    if (data.name === 'ask_user' && addUserWaitMs) {
+    // User wait time belongs to the run that actually waited. Guard it on the
+    // event's own id for the same reason as above — otherwise an `ask_user` in
+    // one session inflates another session's `user_wait_ms`.
+    if (data.name === 'ask_user' && addUserWaitMs && runId === getCurrentRunId()) {
       addUserWaitMs(Math.round(data.duration));
     }
     try {
@@ -136,7 +148,10 @@ export function setupHistorySubscriptions(
         inputJson: data.input ?? '{}',
         outputJson: data.success ? '' : (data.error ?? 'unknown error'),
         durationMs: Math.round(data.duration),
-        sequenceOrder: getAndIncrementSeq(),
+        // No sequence passed: the store derives it per run. Every Session in the
+        // process subscribes to this channel, so N sessions see each event N
+        // times; `toolUseId` makes the write idempotent so that is one row.
+        ...(data.toolUseId ? { toolUseId: data.toolUseId } : {}),
       });
     } catch {
       // Fire-and-forget

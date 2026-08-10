@@ -1553,14 +1553,42 @@ export class RunHistory {
     inputJson: string;
     outputJson: string;
     durationMs: number;
-    sequenceOrder: number;
+    /** Omit to append at the end of this run's calls — the normal path. Only the
+     *  orchestrator, which owns its own per-step ordering, passes one. */
+    sequenceOrder?: number | undefined;
+    /** The provider's `tool_use_id`. Supplying it makes the write IDEMPOTENT for
+     *  that call, which is what lets several subscribers on the global tool
+     *  channel observe the same event without writing it several times. Omit and
+     *  the row gets a fresh random id, i.e. the previous behaviour. */
+    toolUseId?: string | undefined;
   }): string {
-    const id = generateId();
+    const id = params.toolUseId ?? generateId();
+    // Derived, not counted. The caller used to pass a counter it kept per
+    // Session, which broke the moment the event came from anywhere but that
+    // Session's own run: a background task or a spawned child advanced somebody
+    // else's sequence. The table already knows what this run has, and MAX+1 is
+    // correct whichever subscriber gets there first — with `OR IGNORE` below, a
+    // duplicate delivery re-reads the same MAX and then writes nothing.
+    const seq = params.sequenceOrder ?? (
+      (this.db.prepare('SELECT COALESCE(MAX(sequence_order), -1) + 1 AS n FROM run_tool_calls WHERE run_id = ?')
+        .get(params.runId) as { n: number }).n
+    );
+    // OR IGNORE, keyed on the tool_use_id: the same tool call delivered twice is
+    // one row, not two. Without it, every extra Session alive in the process
+    // would duplicate every tool call in the history and inflate the cost view.
     this.db.prepare(`
-      INSERT INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order)
+      INSERT OR IGNORE INTO run_tool_calls (id, run_id, tool_name, input_json, output_json, duration_ms, sequence_order)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, params.sequenceOrder);
+    `).run(id, params.runId, params.toolName, this._enc(params.inputJson), this._enc(params.outputJson), params.durationMs, seq);
     return id;
+  }
+
+  /** How many tool calls this run has recorded. Derived from the rows themselves
+   *  so it cannot drift from them — the previous in-memory counter could, and
+   *  did, because it was fed by a channel that carried no run id. */
+  countToolCalls(runId: string): number {
+    return (this.db.prepare('SELECT count(*) AS n FROM run_tool_calls WHERE run_id = ?')
+      .get(runId) as { n: number }).n;
   }
 
   insertSpawn(params: {

@@ -265,7 +265,6 @@ export class Session {
    *  (Tier-2 resumable re-attach uses it as the replay `?since=`). Stashed for
    *  the run's duration; cleared in the run() finally. */
   private _onPersistCheckpoint: (() => void) | null = null;
-  private runToolCallSeq = 0;
   private _userWaitMs = 0;
   private _runToolNames = new Set<string>();
   private _retrievedMemoryIds: string[] = [];
@@ -417,31 +416,27 @@ export class Session {
     }
     this._createAgent();
 
-    // Each Session subscribes once to record tool calls against its own run.
+    // Each Session subscribes to the process-global tool channel. Several
+    // Sessions are alive at once in normal operation (a WorkerLoop task next to
+    // a chat, a compaction session, a pipeline), so every subscriber sees every
+    // event — that is a property of the channel, not a bug to filter around.
     //
-    // ⚠ This comment used to end "the closures read session-local fields, so
-    // concurrent sessions don't interfere". The closures ARE session-local; their
-    // INVOCATION is not, which is the opposite conclusion. `lynox:tool:end` is a
-    // process-global diagnostics channel, every Session subscribes here and none
-    // ever unsubscribes, and the published payload (agent.ts:2661/2679) carries
-    // no session or run id — so each subscriber counts every tool call in the
-    // process while its own `currentRunId` happens to be set. A WorkerLoop task
-    // running alongside a chat (worker-loop.ts creates its own Session), a
-    // pipeline run, or a spawned child therefore inflates the chat run's count
-    // AND inserts run_tool_calls rows under the wrong run id. A spawned child, in
-    // the same way, can never record calls against its OWN run row.
+    // What used to be a bug is that the subscriber then guessed the event's
+    // owner: it wrote the call onto whatever run ITS OWN session had open. A
+    // background task's calls landed on the chat run, and a spawned child could
+    // never record against its own run row. The event now carries `runId`, so
+    // the subscriber reads the owner instead of guessing it, and `toolUseId`
+    // makes the write idempotent so N subscribers produce one row.
     //
-    // The fix is a run/session id in the payload plus a filter here, or an
-    // injected recorder — the pattern orchestrator/runner.ts:660 already uses
-    // (an explicit per-step recorder instead of the global channel). Not done in
-    // the change that wrote this note, which only stopped the failure path from
-    // dropping the number the success path already kept.
+    // `runToolCallSeq` is gone with it. It was a per-Session counter for a
+    // per-RUN quantity, fed by a channel that spans both — the store derives the
+    // sequence from the rows now, and `tool_call_count` is counted from them at
+    // run end, so neither can drift from what was actually recorded.
     const runHistory = engine.getRunHistory();
     if (runHistory) {
       setupHistorySubscriptions(
         runHistory,
         () => this.currentRunId,
-        () => this.runToolCallSeq++,
         (ms: number) => { this._userWaitMs += ms; },
       );
     }
@@ -772,7 +767,6 @@ export class Session {
     const runSnap = resolveTierModel(this._model, runBaseProvider);
     const model = runSnap.modelId;
     const startTime = Date.now();
-    this.runToolCallSeq = 0;
     this._userWaitMs = 0;
     this._runToolNames.clear();
     this._retrievedMemoryIds = [];
@@ -1030,7 +1024,10 @@ export class Session {
             tokensCacheRead: cacheRead,
             tokensCacheWrite: cacheWrite,
             costUsd: displayCostUsd,
-            toolCallCount: this.runToolCallSeq,
+            // Counted from the rows this run actually recorded, not from a
+            // parallel tally. The tally was per-Session while the quantity is
+            // per-run, so anything else running in the process moved it.
+            toolCallCount: runHistory.countToolCalls(this.currentRunId),
             durationMs,
             userWaitMs: this._userWaitMs,
             stopReason: 'end_turn',
@@ -1229,28 +1226,16 @@ export class Session {
             // Display, like the success path: the helper already debited itself, so this
             // number must include it while `onAfterRun` below must not.
             costUsd: failedCostUsd + (this.agent?.getHelperCostUsd?.() ?? 0),
-            // The tool calls this run made before it failed. The success path has
-            // always stamped this; the failure path did not, so a failed run
-            // reported 0 tools no matter how much work it had done. That reads as
-            // "this run did nothing and still cost money" in exactly the place the
-            // number matters most — a cost review looks at the priciest runs
-            // first, and those are disproportionately the ones that failed. A real
-            // case: a 28-minute run that made 60 http_request calls and died on
-            // the per-run cost ceiling was recorded as 0 tool calls, and the first
-            // reading of the day blamed a runaway loop rather than a ceiling that
-            // cut off genuine work (war, 2026-08-10).
-            //
-            // ⚠ This makes the failure path AS accurate as the success path — not
-            // accurate. `runToolCallSeq` is fed by a subscription on the global
-            // `lynox:tool:end` channel whose payload carries no session or run id
-            // (agent.ts:2661/2679), so under concurrency it counts tool calls
-            // belonging to OTHER sessions — a WorkerLoop task running alongside a
-            // chat, or a spawned child, lands on whichever run has `currentRunId`
-            // set. Both paths have always shared that flaw; stamping it here does
-            // not add it, and leaving the field blank did not avoid it. The
-            // attribution fix belongs in the channel payload, not in this call.
-            // See the note at the subscription site (session.ts:420).
-            toolCallCount: this.runToolCallSeq,
+            // The tool calls this run made before it failed — counted from the
+            // recorded rows, same as the success path. A failed run used to
+            // report 0 tools no matter how much work it had done, which is blank
+            // in the one place the number is read hardest: a cost review sorts by
+            // spend, and the priciest runs are disproportionately the ones that
+            // did not finish. A 28-minute run that made 60 http_request calls and
+            // then hit the per-run cost ceiling was recorded as 0 tool calls, and
+            // the first reading of it blamed a runaway loop rather than a ceiling
+            // cutting off genuine work (war, 2026-08-10).
+            toolCallCount: runHistory.countToolCalls(this.currentRunId),
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
             status: isAbort ? 'aborted' : 'failed',

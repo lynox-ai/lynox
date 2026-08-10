@@ -2658,7 +2658,14 @@ export class Agent implements IAgent {
       const auditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawInput = JSON.stringify(auditInput).slice(0, 2000);
       const safeInput = this.secretStore ? this.secretStore.maskSecrets(rawInput) : rawInput;
-      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: true, input: safeInput });
+      // `runId` is what makes this event attributable. `lynox:tool:end` is a
+      // process-global channel and every Session subscribes to it, so without an
+      // id on the event a subscriber can only guess "whatever run MY session has
+      // open" — which silently books a background WorkerLoop task's calls onto
+      // the chat run, and leaves a spawned child unable to record against its own
+      // run row at all. A child agent carries its own `currentRunId` (set by the
+      // spawn tool), so this is the correct id at both depths.
+      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: true, input: safeInput, runId: this.currentRunId, toolUseId: tc.id });
 
       if (this.onStream) {
         await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name });
@@ -2676,7 +2683,7 @@ export class Agent implements IAgent {
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawErrInput = JSON.stringify(errAuditInput).slice(0, 2000);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
-      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: message, input: safeErrInput });
+      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: message, input: safeErrInput, runId: this.currentRunId, toolUseId: tc.id });
 
       if (this.onStream) {
         // Tool-level error: surface inline via tool_result (UI renders it red on
