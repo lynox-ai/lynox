@@ -203,7 +203,7 @@
 		available: boolean;
 	}
 	// The five strategy cards. 'standard' = one provider, lynox routes per turn;
-	// the three preset names are hybrid tier_presets; 'custom' = manual hybrid.
+	// the contract's preset names are hybrid tier_presets; 'custom' = manual hybrid.
 	// `Strategy` + `buildRoutingUpdate` (the persistence mapping) live in a plain
 	// .ts helper so the body-building is unit-testable (this .svelte has no seam).
 	// From the vendored contract, NOT a literal: a hand-copied list here silently
@@ -536,14 +536,25 @@
 	//
 	// The five cards (order = Standard → cheap → flagship → manual). `key` is the
 	// i18n stem (hyphenated ids can't be a translation-key segment). Icons are the
-	// monochrome set: ✓ Standard · ⚡ Efficient · ⚖️ Balanced · 💎 Max-Quality ·
-	// sliders for the manual Eigene.
+	// monochrome set: ✓ Standard · ⚡ Efficient · ⚖️ Balanced · 📍 EU-souverän ·
+	// 💎 Max-Quality · sliders for the manual Eigene.
+	// A RECORD over the contract's preset names, not an array literal — a Record must
+	// be TOTAL, so a preset added to the contract without a card here fails to build.
+	// The array form typed each element but let the list be one short: a delta review
+	// added a preset to the contract and both `tsc` and `svelte-check` stayed at zero
+	// errors while it rendered no card at all (2026-08-10). Importing TIER_PRESET_NAMES
+	// for `PRESET_NAMES` fixed the data-loss half of that bug and left this half open.
+	const PRESET_CARDS: Record<TierPresetName, { key: string; icon: IconName }> = {
+		'efficient': { key: 'efficient', icon: 'bolt' },
+		'balanced': { key: 'balanced', icon: 'scale' },
+		'eu-sovereign': { key: 'eu_sovereign', icon: 'pin' },
+		'max-quality': { key: 'max_quality', icon: 'gem' },
+	};
+	// Standard and Eigene bracket the presets: they are routing MODES, not presets, so
+	// they are not in the contract list and are named here.
 	const STRATEGY_CARDS: ReadonlyArray<{ id: Strategy; key: string; icon: IconName; recommended?: boolean }> = [
 		{ id: 'standard', key: 'standard', icon: 'check_circle', recommended: true },
-		{ id: 'efficient', key: 'efficient', icon: 'bolt' },
-		{ id: 'balanced', key: 'balanced', icon: 'scale' },
-		{ id: 'eu-sovereign', key: 'eu_sovereign', icon: 'pin' },
-		{ id: 'max-quality', key: 'max_quality', icon: 'gem' },
+		...TIER_PRESET_NAMES.map((n) => ({ id: n as Strategy, key: PRESET_CARDS[n].key, icon: PRESET_CARDS[n].icon })),
 		{ id: 'custom', key: 'custom', icon: 'sliders' },
 	];
 	/** The server preset signal for a card, or undefined for Standard/Custom. */

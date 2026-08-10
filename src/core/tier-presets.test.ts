@@ -118,6 +118,37 @@ describe('tier-presets (model-presets W2 SoT)', () => {
     }
   });
 
+  it('eu-sovereign pins the exact per-band models — provenance alone cannot catch a re-slot', () => {
+    // The FIRST version of this guard asserted only the slot KEYS + provenance, and a
+    // delta review killed it: mutating the preset back to its pre-2026-08-10 slots
+    // (8b/large/large), and even swapping fast with deep so a $1.50/$7.50 model served
+    // the per-turn band, both passed 126/126. Every Mistral is EU on mistral.ai, so
+    // that axis is ORTHOGONAL to which model sits in which band — the one thing the
+    // re-slot changed. Naming the ids is what makes this a test of the decision.
+    expect(TIER_PRESETS['eu-sovereign']!.tier_set.fast?.model_id).toBe('ministral-14b-2512');
+    expect(TIER_PRESETS['eu-sovereign']!.tier_set.balanced?.model_id).toBe('mistral-large-2512');
+    expect(TIER_PRESETS['eu-sovereign']!.tier_set.deep?.model_id).toBe('mistral-medium-2604');
+  });
+
+  it('EVERY preset prices its bands in ascending order — escalating must never get cheaper', () => {
+    // The ladder claim that the eu-sovereign comment spends 25 lines defending
+    // ("the price rises with the band ... the reverse order was considered and
+    // rejected") was backed by nothing until a delta review pointed it out. It is the
+    // one invariant that holds across ALL four presets and the reason a preset is a
+    // ladder rather than three unrelated picks: the band that runs every turn must be
+    // the cheap one, and asking for more must cost more.
+    for (const [name, preset] of Object.entries(TIER_PRESETS)) {
+      const out = (tier: 'fast' | 'balanced' | 'deep'): number => {
+        const id = preset.tier_set[tier]?.model_id;
+        const p = id ? MODEL_CAPABILITIES[id]?.pricing?.output : undefined;
+        expect(p, `${name}.${tier} → ${id} has no output price to rank`).toBeTypeOf('number');
+        return p as number;
+      };
+      expect(out('fast'), `${name}: fast output must not exceed balanced`).toBeLessThanOrEqual(out('balanced'));
+      expect(out('balanced'), `${name}: balanced output must not exceed deep`).toBeLessThanOrEqual(out('deep'));
+    }
+  });
+
   it('the openai-wire slots omit api_key (self-host resolves it from the endpoint)', () => {
     for (const preset of Object.values(TIER_PRESETS)) {
       for (const slot of Object.values(preset.tier_set)) {

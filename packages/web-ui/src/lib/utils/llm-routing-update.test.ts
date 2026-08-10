@@ -1,3 +1,4 @@
+import { TIER_PRESET_NAMES } from '../contract/vocab.js';
 import { describe, it, expect } from 'vitest';
 import { buildRoutingUpdate, isPresetStrategy, type TierSet } from './llm-routing-update.js';
 
@@ -10,7 +11,10 @@ describe('buildRoutingUpdate (model-presets W4)', () => {
   const EXISTING: TierSet = { deep: { provider: 'anthropic', model_id: 'claude-opus-4-8' } };
 
   it('a preset persists by NAME and empties any explicit tier_set (no per-slot shadow)', () => {
-    for (const p of ['efficient', 'balanced', 'max-quality'] as const) {
+    // Over the CONTRACT list, not a literal: this file's own header calls itself the
+    // only proof that the client sends the right PUT body per strategy, and a
+    // hand-written list left `eu-sovereign` unproven the day it was added.
+    for (const p of TIER_PRESET_NAMES) {
       const u = buildRoutingUpdate(p, { existingTierSet: EXISTING, customTierSet: CUSTOM });
       expect(u.tier_preset).toBe(p);
       expect(u.tier_set).toEqual({}); // empty override, so the loader keeps the preset's slots
@@ -40,10 +44,8 @@ describe('buildRoutingUpdate (model-presets W4)', () => {
     expect(u.tier_set).toBe(CUSTOM);
   });
 
-  it('isPresetStrategy is true only for the three named presets', () => {
-    expect(isPresetStrategy('efficient')).toBe(true);
-    expect(isPresetStrategy('balanced')).toBe(true);
-    expect(isPresetStrategy('max-quality')).toBe(true);
+  it('isPresetStrategy is true for EVERY contract preset and false for the two modes', () => {
+    for (const p of TIER_PRESET_NAMES) expect(isPresetStrategy(p), p).toBe(true);
     expect(isPresetStrategy('standard')).toBe(false);
     expect(isPresetStrategy('custom')).toBe(false);
   });

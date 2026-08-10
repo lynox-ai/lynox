@@ -113,7 +113,7 @@ const fireworks = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 
 export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   // ⚡ efficient — the cheapest coherent set, and now genuinely the cheapest: open
   // weights on Fireworks, 1M context in the fast and deep slots (minimax-m3 is 512k
-  // — models.ts:1119; an earlier draft of this comment claimed 1M everywhere and was
+  // — see its registry entry; an earlier draft of this comment claimed 1M everywhere and was
   // contradicted by the catalog note this same PR wrote). The old set paid $7.50/M
   // output for a main (mistral-medium) that the /model-smoke sweep found weakest on
   // open turns, while its deep slot already routed here.
@@ -143,9 +143,12 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   },
   // 🇪🇺 eu-sovereign — the EU option, now stated instead of implied. It used to be a
   // side effect of picking "efficient" (Mistral fast+main), which meant a customer
-  // who needed EU processing had to know that. Every slot is EU-provenance Mistral,
-  // and every slot takes the model the registry already classifies for that band —
-  // this preset invents no ranking of its own:
+  // who needed EU processing had to know that. Every slot is EU-provenance Mistral.
+  // The BANDS, however, do not follow the registry's `tier` field — 14B is
+  // `tier:'balanced'` and serves fast here, Large is `tier:'deep'` and serves main.
+  // Mistral has four models and three bands, so something has to shift; what this
+  // preset follows instead is PRICE (see the ladder note below), and the two reasons
+  // for each displaced model are spelled out further down rather than implied:
   //   fast   ministral-14b-2512  $0.20/$0.20, 262k
   //   main   mistral-large-2512  $0.50/$1.50, 256k
   //   deep   mistral-medium-2604 $1.50/$7.50, 262k
