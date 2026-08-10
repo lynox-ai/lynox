@@ -20,6 +20,10 @@ import {
   formatTieredReport,
   formatComparison,
   parseGoldFactLabels,
+  parseJudgeVerdict,
+  buildMatchJudgePrompt,
+  buildCoverageJudgePrompt,
+  JUDGE_SYSTEM_PROMPT,
   normalizeSubject,
   type GoldCorpus,
   type CapturedEntry,
@@ -337,7 +341,7 @@ describe('scoreTieredCoverage — coverage over the user-provenance denominator'
     expect(t.denominator.userFacts).toBe(2);
   });
 
-  it('a judge that throws yields a MISSING verdict — neither covered nor a silent miss', async () => {
+  it('a judge that throws yields a MISSING verdict — counted, and the fact STAYS in the denominator', async () => {
     const flakyJudge: CoverageJudge = (gold, block) => {
       if (gold === 'FA2') throw new Error('judge down');
       return block.includes(gold);
@@ -347,6 +351,11 @@ describe('scoreTieredCoverage — coverage over the user-provenance denominator'
     expect(t.judgeErrors).toEqual(['a2']);
     const t1 = t.tiers.find(x => x.tier === 'T1')!;
     expect(t1.covered).toBe(1); // FA1 only — the errored fact did not become a "no"
+    // Deliberate semantics: the errored fact is NOT dropped from the denominator
+    // (a flaky judge must not shrink what the run is scored against), so the
+    // rate is a LOWER BOUND while judgeErrors is non-empty.
+    expect(t1.total).toBe(2);
+    expect(t1.rate).toBe(0.5);
   });
 
   it('formatTieredReport names the denominator, the partial-run caveat, and judge failures', async () => {
@@ -358,6 +367,36 @@ describe('scoreTieredCoverage — coverage over the user-provenance denominator'
     expect(out).toContain('PARTIAL RUN');
     expect(out).toContain('T1 coverage: 1/2');
     expect(out).toContain('product target');
+  });
+});
+
+describe('judge prompt builders — the injection fences are load-bearing', () => {
+  // The candidate text is model output over threads with attacker-controllable
+  // content, and the verdict feeds the binding gate. The fence + the system
+  // prompt's data-not-instructions clause are the mitigation; pin both so a
+  // "simplification" cannot silently drop them.
+  it('both frames fence gold and candidate as data', () => {
+    const m = buildMatchJudgePrompt('G', 'C');
+    const c = buildCoverageJudgePrompt('G', 'C-BLOCK');
+    for (const p of [m, c]) {
+      expect(p).toContain('<gold>\nG\n</gold>');
+      expect(p).toMatch(/<candidate>\n[^]*\n<\/candidate>/);
+    }
+    expect(c).toContain('C-BLOCK');
+  });
+
+  it('the system prompt pins the sections as data, never instructions', () => {
+    expect(JUDGE_SYSTEM_PROMPT).toContain('never instructions');
+  });
+});
+
+describe('parseJudgeVerdict — the shared yes/no parse', () => {
+  it('accepts a plain yes, rejects no, and treats a hedge ("yes… no") as no', () => {
+    expect(parseJudgeVerdict('yes')).toBe(true);
+    expect(parseJudgeVerdict('Yes.')).toBe(true);
+    expect(parseJudgeVerdict('no')).toBe(false);
+    expect(parseJudgeVerdict('yes, but also no')).toBe(false);
+    expect(parseJudgeVerdict('')).toBe(false);
   });
 });
 
@@ -462,6 +501,22 @@ describe('meetsComparisonGate — DK not below legacy on any axis, beats junk + 
     );
     expect(v.pass).toBe(false);
     expect(v.axes.find(a => a.axis === 'subject-attribution')!.ok).toBe(false);
+  });
+
+  it('a tier missing on ONE side defaults to rate 1 — it can hide a deficit, never invent one', () => {
+    // Legacy carries a T2 rate; DK has no T2 tier at all (e.g. mis-scoped labels).
+    const dkTiered: TieredCoverageReport = { ...tiered(0.8, 0), tiers: [tiered(0.8, 0).tiers[0]!] };
+    const v = meetsComparisonGate(
+      { tiered: dkTiered, report: report(0.2, 0) },
+      { tiered: tiered(0.5, 0.9), report: report(0.4, 0) },
+    );
+    const t2 = v.axes.find(a => a.axis === 'T2 coverage')!;
+    // The absent side reads as 1 ≥ 0.9 → ok. This direction is documented at the
+    // definition site; the CLI makes it unreachable by scoring both sides with
+    // the same labels. The test pins the direction so a future edit that flips
+    // the default to 0 (inventing a deficit) fails loudly.
+    expect(t2.dk).toBe(1);
+    expect(t2.ok).toBe(true);
   });
 
   it('formatComparison renders every axis and the verdict', () => {

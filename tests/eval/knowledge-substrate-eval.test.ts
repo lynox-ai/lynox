@@ -42,6 +42,7 @@ import {
   type GoldThread,
   type KnowledgeReplayReport,
   type CapturedEntry,
+  type TieredCoverageReport,
 } from './knowledge-substrate-runner.js';
 import { makeRealReplayThread, makeLlmJudge, makeLlmCoverageJudge, replayFailures, resetReplayFailures, type ReplayProviderConfig } from './knowledge-substrate-replay.js';
 import { makeLegacyReplayThread } from './knowledge-substrate-baseline.js';
@@ -156,14 +157,20 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
       reports.push(r);
       // With labels, emit the tiered coverage the GATE is stated in (PRD §5.6.3)
       // — printed AND persisted, so the offline comparison pass has both halves.
-      let tiered = null;
+      // Non-fatal: a scoring failure here must never cost the replay's captures,
+      // which are hours of paid machine time — the persist below still runs.
+      let tiered: TieredCoverageReport | null = null;
       if (LABELS !== null) {
-        const allCaptured = capturedLog.flatMap(c => c.captured);
-        // eslint-disable-next-line no-await-in-loop
-        tiered = await scoreTieredCoverage(corpus, allCaptured, LABELS, coverageJudge, {
-          ranThreadIds: new Set(capturedLog.map(c => c.threadId)),
-        });
-        process.stdout.write(`${formatTieredReport(tiered)}\n`);
+        try {
+          const allCaptured = capturedLog.flatMap(c => c.captured);
+          // eslint-disable-next-line no-await-in-loop
+          tiered = await scoreTieredCoverage(corpus, allCaptured, LABELS, coverageJudge, {
+            ranThreadIds: new Set(capturedLog.map(c => c.threadId)),
+          });
+          process.stdout.write(`${formatTieredReport(tiered)}\n`);
+        } catch (err) {
+          process.stderr.write(`[knowledge-eval] tiered scoring failed (non-fatal, captures persist below): ${String(err).slice(0, 160)}\n`);
+        }
       }
       try {
         const { writeFileSync, mkdirSync } = await import('node:fs');
