@@ -62,7 +62,7 @@ import { evictSavedArtifactBodies } from './artifact-eviction.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
-import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS } from './tool-result-blob-store.js';
+import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
@@ -1745,7 +1745,17 @@ export class Agent implements IAgent {
     const entries = this.toolResultBlobStore?.entries() ?? [];
     if (entries.length === 0) return '';
     const shown = entries.slice(-Agent.PARKED_HANDLES_IN_NOTE).reverse();
-    const list = shown.map(({ id, blob }) => `${id}: ${blob.descriptor}`).join('; ');
+    // Label from `tool` + `ident`, NOT from `descriptor`. The descriptor ends in
+    // an 80-char excerpt of the payload — i.e. bytes an external server chose —
+    // and this note is engine-authored text in a `user` message, so a dozen of
+    // those concatenated would read as instructions the engine appears to be
+    // giving. `ident` is the tool's own call argument and has already been
+    // through `redactIdent`. Dropping the excerpt also keeps the note short,
+    // which matters because it is appended to a context that is already over
+    // the ceiling.
+    const list = shown
+      .map(({ id, blob }) => (blob.ident ? `${id}: ${blob.tool}(${blob.ident})` : `${id}: ${blob.tool}`))
+      .join('; ');
     const more = entries.length > shown.length ? ` (+${entries.length - shown.length} more)` : '';
     return `\n[Earlier results are still readable via recall_tool_result — ${list}${more}]`;
   }
@@ -1808,30 +1818,48 @@ export class Agent implements IAgent {
         ?? DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS;
       // Leave the newest turn intact: the model is reasoning on the result it
       // just received, and stubbing that would only make it re-fetch at once.
-      const { handles, freedChars } = this.toolResultBlobStore.collapseIn(
+      const { handles, freedChars, freedBeforeAnchor } = this.toolResultBlobStore.collapseIn(
         this.messages, threshold, Agent.COLLAPSE_SKIP_TAIL_MESSAGES,
+        DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES,
+        this._lastRealAtMsgCount,
       );
       if (freedChars > 0) {
         this._collapsedToolResults += handles.length;
         // In-place content edits invalidate the incremental length cache.
         this._msgCount = 0;
         this._runningMsgLen = 0;
-        // Bound the store on THIS path too. Compaction prunes after evicting
-        // (`Session.compact`), but a spawned agent has no Session, never
-        // compacts, and shares the parent's store via `spawn.ts` — so without
-        // this a fetch-heavy child grows it without limit.
-        this.toolResultBlobStore.pruneToCap();
-        // Drop the exact-usage anchor: it is the prompt size the API reported
-        // for a context that no longer exists. `_estimateOccupancyTokens`
-        // prefers `_lastRealInputTokens + delta-since-last-call`, and that delta
-        // covers only the newest messages — precisely the ones skipTail
-        // protects. Leaving the anchor set means the re-check below cannot see
-        // a single freed character, the early return never fires, and the
-        // front-drop runs anyway: the collapse would be pure added cost. Same
-        // reasoning as `loadMessages`, which clears it after rehydrating.
-        this._lastRealInputTokens = undefined;
-        this._lastCacheReadTokens = undefined;
-        this._lastRealAtMsgCount = 0;
+        // CORRECT the exact-usage anchor by what was freed — do not discard it.
+        //
+        // It must be corrected at all because `_estimateOccupancyTokens` prefers
+        // `_lastRealInputTokens + delta-since-last-call`, and that delta covers
+        // only the newest messages — precisely the ones skipTail protects. Left
+        // untouched, the re-check below cannot see a single freed character, the
+        // early return never fires, and the front-drop runs anyway.
+        //
+        // But CLEARING it (the obvious move, and what `loadMessages` does) is
+        // wrong here: the fallback is `_estimateMsgLen()/cpt + overheadTokens`,
+        // and the session-level entry point `getEstimatedOccupancyTokens()`
+        // passes overhead 0. Every session reader — the compaction trigger, the
+        // UI meter, `checkTierWindowFit` — would then under-report by the whole
+        // system-prompt + tool-schema overhead, which is the DOMINANT term right
+        // after the message half shrank. `checkTierWindowFit` inverts under
+        // that: a downgrade whose window cannot hold the context reads as fitting.
+        // `snapshotComposition()` also returns undefined without the anchor, so
+        // the run would lose its composition record.
+        //
+        // Subtracting keeps the overhead inside the number and stays true to
+        // what the next call will actually bill. `_lastRealAtMsgCount` stays
+        // valid because a collapse never changes `messages.length`.
+        // When there is no anchor yet, nothing needs correcting — the estimate
+        // is already the char-based one, which sees the freed space directly.
+        if (this._lastRealInputTokens !== undefined) {
+          // Only the part before the anchor: the rest lives in the delta window,
+          // which is re-measured from characters and therefore already shrank.
+          // Subtracting everything would double-count it and could clamp the
+          // anchor to zero, discarding the overhead it carries.
+          const freedTokens = freedBeforeAnchor / this._charsPerToken;
+          this._lastRealInputTokens = Math.max(0, this._lastRealInputTokens - freedTokens);
+        }
         if (this.onStream) {
           void this.onStream({
             type: 'context_pressure', droppedMessages: 0, agent: this.name,

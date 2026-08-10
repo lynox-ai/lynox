@@ -385,6 +385,7 @@ export class ToolResultBlobStore {
     resultBlock: BetaToolResultBlockParam,
     toolCalls: ReturnType<typeof toolCallsById>,
     thresholdChars: number,
+    capacity?: { maxEntries: number; maxBytes: number },
   ): { id: string; descriptor: string; payloadChars: number } | undefined {
     const payload = toolResultText(resultBlock.content);
     if (payload.length <= thresholdChars) return undefined;
@@ -412,6 +413,16 @@ export class ToolResultBlobStore {
           : buildDescriptor(existing.tool, existing.payload, '');
         return { id: existingId, descriptor, payloadChars: payload.length };
       }
+    }
+    // Refuse a mint the store cannot keep. Only reached for a genuinely NEW
+    // blob — a dedup hit above needs no room. The caller that passes `capacity`
+    // is rewriting the context to point AT these ids, so minting one that the
+    // next prune would drop hands the model a handle it can see and cannot
+    // fetch. Better to leave the payload resident and free less.
+    if (capacity !== undefined
+      && (this.blobs.size + 1 > capacity.maxEntries
+        || this.totalBytes + payload.length > capacity.maxBytes)) {
+      return undefined;
     }
     const id = this.nextId();
     const descriptor = buildDescriptor(tool, payload, ident);
@@ -444,10 +455,36 @@ export class ToolResultBlobStore {
     messages: BetaMessageParam[],
     thresholdChars: number,
     skipTailMessages = 0,
-  ): { handles: Array<{ id: string; descriptor: string }>; freedChars: number } {
+    maxEntries: number = DEFAULT_BLOB_STORE_MAX_ENTRIES,
+    maxBytes: number = DEFAULT_BLOB_STORE_MAX_BYTES,
+    anchorIndex = 0,
+  ): {
+    handles: Array<{ id: string; descriptor: string }>;
+    freedChars: number;
+    /**
+     * Of `freedChars`, the part that came from messages BEFORE `anchorIndex`.
+     *
+     * The caller's exact-usage anchor covers `[0, anchorIndex)` as one measured
+     * number and re-measures `[anchorIndex, end)` from characters every time. So
+     * freeing space in the tail already shows up on its own, and only this
+     * figure may be subtracted from the anchor — subtracting all of `freedChars`
+     * double-counts the tail and can drive the anchor to zero, which throws away
+     * the system-prompt overhead baked into it.
+     */
+    freedBeforeAnchor: number;
+  } {
+    // Make room BEFORE minting, never after. `Session.compact` can prune after
+    // evicting because it then lists the survivors; here the stubs are written
+    // into the context as we go, so a prune afterwards would delete blobs the
+    // context already names. With the room made up front and `park` refusing a
+    // mint that does not fit, every id written below stays resolvable.
+    this.pruneToCap(maxEntries, maxBytes);
+    const capacity = { maxEntries, maxBytes };
+
     const toolCalls = toolCallsById(messages);
     const handles: Array<{ id: string; descriptor: string }> = [];
     let freedChars = 0;
+    let freedBeforeAnchor = 0;
 
     const limit = Math.max(0, messages.length - skipTailMessages);
     for (let m = 0; m < limit; m++) {
@@ -458,25 +495,37 @@ export class ToolResultBlobStore {
         const block = content[i]!;
         if (block.type !== 'tool_result') continue;
         const resultBlock = block as BetaToolResultBlockParam;
-        // `park` stores `toolResultText`, which keeps ONLY text blocks. At
-        // compaction that is harmless — the history is reset and images are
-        // carried separately by `evictImagesFrom`. Here the rewrite is in place,
-        // so collapsing a block that holds anything else would delete it from
-        // the context AND leave it out of the blob: unrecallable, gone. Skip
-        // those instead; a text-only payload is the case that costs context.
-        if (!isTextOnlyResult(resultBlock.content)) continue;
-        const parked = this.park(resultBlock, toolCalls, thresholdChars);
+        const parked = this.park(resultBlock, toolCalls, thresholdChars, capacity);
         if (!parked) continue;
         const payloadWasUntrusted = containsUntrustedMarker(toolResultText(resultBlock.content));
         const stub = recallStub(parked.id, parked.descriptor, payloadWasUntrusted);
-        // Preserve `tool_use_id` / `is_error` — dropping either breaks the
+        // `park` stores `toolResultText`, i.e. the TEXT only. So replace only
+        // what was stored and keep every other block byte-identical — an image
+        // here is in no blob and in no `evictImagesFrom` sweep (that one scans
+        // top-level user images and never descends into a tool_result), so
+        // overwriting it would delete it outright. Skipping the whole block
+        // instead is no better: it was measured to turn a partial loss into a
+        // total one, because freeing nothing lets the front-drop take the text
+        // AND the image.
+        // `tool_use_id` / `is_error` are preserved — dropping either breaks the
         // tool_use↔tool_result pairing the API validates on every request.
-        content[i] = { ...resultBlock, content: stub };
-        freedChars += Math.max(0, parked.payloadChars - stub.length);
+        const rc = resultBlock.content;
+        content[i] = Array.isArray(rc)
+          ? {
+            ...resultBlock,
+            content: [
+              { type: 'text' as const, text: stub },
+              ...rc.filter(inner => inner.type !== 'text'),
+            ],
+          }
+          : { ...resultBlock, content: stub };
+        const freed = Math.max(0, parked.payloadChars - stub.length);
+        freedChars += freed;
+        if (m < anchorIndex) freedBeforeAnchor += freed;
         handles.push({ id: parked.id, descriptor: parked.descriptor });
       }
     }
-    return { handles, freedChars };
+    return { handles, freedChars, freedBeforeAnchor };
   }
 }
 
@@ -501,15 +550,6 @@ export function recallStub(id: string, descriptor: string, wasUntrusted = false)
     : stub;
 }
 
-/**
- * Does this tool_result carry text and nothing else? Only then is the blob a
- * complete copy of it — see the call site in `collapseIn`.
- */
-function isTextOnlyResult(content: BetaToolResultBlockParam['content']): boolean {
-  if (typeof content === 'string') return true;
-  if (!Array.isArray(content)) return false;
-  return content.every(block => block.type === 'text');
-}
 
 /**
  * Collect the most-recent user `image` blocks so they can be re-attached inline
