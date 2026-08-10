@@ -617,10 +617,19 @@ async function executeThinker(
     promptSecret: parentAgent.promptSecret,
     promptTabs: parentAgent.promptTabs,
     // T2-X1 part 4: pass the pre-minted runId so the constructor stamps it
-    // onto the child and the child's downstream code (memory writes,
-    // tool-call recording in engine-init's toolEnd subscriber, etc.) can
-    // attribute work to this run.
+    // onto the child and the child's downstream code (memory writes, tool-call
+    // recording) can attribute work to this run.
     currentRunId: childRunId,
+    // Inherit the parent's tool-call sink. Together with `currentRunId` above,
+    // this is what finally puts a child's calls on the CHILD's row: the sink
+    // books whatever run id the caller hands it, and the child hands its own.
+    //
+    // Inheriting rather than building a fresh sink is deliberate — the parent's
+    // closure holds the Session's RunHistory and per-run sequence counters, and
+    // it is also the thing that keeps counting these calls toward the
+    // http_request and mail rate limits. A child with no sink would run its
+    // fan-out unmetered.
+    recordToolCall: parentAgent.recordToolCall,
   };
 
   // Single try wraps both `new Agent(...)` AND `send(...)` so the runs-row
@@ -700,6 +709,13 @@ async function executeThinker(
           tokensOut: snap?.outputTokens ?? 0,
           costUsd: snap?.estimatedCostUSD ?? 0,
           durationMs: Date.now() - childStart,
+          // The child's calls are now written to the child's own run, so this
+          // column has to be written too — otherwise the rows exist while the
+          // count beside them reads 0, and the aggregates that SUM it
+          // (`run-history-analytics.ts`) lose every sub-agent call. Before the
+          // sink they landed in the PARENT's count, so the total was right even
+          // though the attribution was not.
+          toolCallCount: childAgent.getRecordedToolCallCount(),
           status: 'completed',
           stopReason: 'end_turn',
         });
@@ -744,6 +760,10 @@ async function executeThinker(
           tokensOut: snap?.outputTokens ?? 0,
           costUsd: snap?.estimatedCostUSD ?? 0,
           durationMs: Date.now() - childStart,
+          // Same column on the terminal-failure path: a child that made 60 calls
+          // and then died must not read as "0 tools", which is exactly the
+          // misreading that started this whole investigation (war, 2026-08-10).
+          toolCallCount: childAgent?.getRecordedToolCallCount() ?? 0,
           status: childAborted ? 'aborted' : 'failed',
           stopReason: childAborted ? 'aborted' : (err instanceof Error ? err.message.slice(0, 200) : 'error'),
           // Record the FULL structured error so a failed sub-agent is diagnosable
