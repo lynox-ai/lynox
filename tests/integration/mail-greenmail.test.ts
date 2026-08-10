@@ -21,7 +21,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { connect, type Socket } from 'node:net';
 import { ImapSmtpProvider, type CredentialsResolver } from '../../src/integrations/mail/providers/imap-smtp.js';
 import { buildCustomAccount } from '../../src/integrations/mail/providers/presets.js';
-import type { MailAccountType, MailProvider } from '../../src/integrations/mail/provider.js';
+import type { MailAccountConfig, MailAccountType, MailProvider } from '../../src/integrations/mail/provider.js';
 import { InMemoryMailRegistry, createMailTriageTool, createMailSearchTool, createMailSendTool, createMailReplyTool } from '../../src/integrations/mail/tools/index.js';
 import { MailContext } from '../../src/integrations/mail/context.js';
 import { MailStateDb } from '../../src/integrations/mail/state.js';
@@ -599,10 +599,85 @@ describe.skipIf(!greenmailUp)('GreenMail E2E — Phase 0.1 fan-out + receive-onl
   });
 });
 
+// The pre-save connection test, against a real mail server rather than a mock.
+//
+// This is the scenario the unit tests can only approximate: IMAP reachable,
+// SMTP not. It used to pass — testAccount opened an IMAP session and nothing
+// else — and the account was then saved, with the failure surfacing at the
+// first send instead of at setup.
+describe.skipIf(!greenmailUp)('GreenMail E2E — testAccount probes both legs', () => {
+  const CREDS = { user: 'dora@localhost', pass: 'whatever' };
+  let stateDb: MailStateDb;
+  let ctx: MailContext;
+  let previousInsecureTls: string | undefined;
+
+  const account = (smtpPort: number): MailAccountConfig => buildCustomAccount({
+    id: 'gm-dora',
+    displayName: 'Dora',
+    address: 'dora@localhost',
+    type: 'personal',
+    imap: { host: HOST, port: IMAPS_PORT, secure: true },
+    smtp: { host: HOST, port: smtpPort, secure: true },
+  });
+
+  beforeAll(() => {
+    // GreenMail serves a self-signed cert on both ports. testAccount builds its
+    // own provider, so the construction-time escape hatch the rest of this file
+    // uses is out of reach — the env flag is the only way in.
+    previousInsecureTls = process.env['LYNOX_MAIL_INSECURE_TLS'];
+    process.env['LYNOX_MAIL_INSECURE_TLS'] = '1';
+    stateDb = new MailStateDb({ path: ':memory:' });
+    ctx = new MailContext(stateDb, memoryBackend());
+  });
+
+  afterAll(async () => {
+    await ctx.close();
+    stateDb.close();
+    if (previousInsecureTls === undefined) delete process.env['LYNOX_MAIL_INSECURE_TLS'];
+    else process.env['LYNOX_MAIL_INSECURE_TLS'] = previousInsecureTls;
+  });
+
+  it('passes against a real IMAP+SMTP pair, and says both legs ran', async () => {
+    const result = await ctx.testAccount({ config: account(SMTPS_PORT), credentials: CREDS });
+    expect(result).toMatchObject({ ok: true, checked: { imap: true, smtp: true } });
+  });
+
+  it('fails when SMTP is unreachable, even though IMAP is fine', async () => {
+    // One port off the real SMTPS listener: nothing accepts there. This is the
+    // shape of a hosting provider blocking outbound 465 — the read path works
+    // perfectly and only the send path is dead.
+    const result = await ctx.testAccount({ config: account(SMTPS_PORT + 1), credentials: CREDS });
+
+    expect(result.ok).toBe(false);
+    expect(result.stage).toBe('smtp');
+    // IMAP genuinely succeeded first — this is not a total-failure result.
+    expect(result.checked).toEqual({ imap: true, smtp: true });
+  });
+
+  it('skips the SMTP leg for a receive-only type, and says so', async () => {
+    const config: MailAccountConfig = { ...account(SMTPS_PORT + 1), id: 'gm-info', type: 'info' };
+    const result = await ctx.testAccount({ config, credentials: CREDS });
+
+    // Same dead SMTP port as above, and it passes — because it was not probed.
+    expect(result).toMatchObject({ ok: true, checked: { imap: true, smtp: false } });
+  });
+});
+
 if (!greenmailUp) {
   // Surface a single hint on first run so the user knows why the suite was skipped.
   // eslint-disable-next-line no-console
   console.warn(`[mail-greenmail] skipped: no IMAPS service on ${HOST}:${String(IMAPS_PORT)}. Start GreenMail (see file header) to run this suite.`);
+}
+
+/** Map-backed credential vault — the state DB stores config, this stores secrets. */
+function memoryBackend(): MailCredentialBackend {
+  const store = new Map<string, string>();
+  return {
+    set: (name, value) => { store.set(name, value); },
+    get: (name) => store.get(name) ?? null,
+    delete: (name) => store.delete(name),
+    has: (name) => store.has(name),
+  };
 }
 
 async function waitFor(check: () => Promise<boolean>, timeoutMs = 5_000, stepMs = 200): Promise<void> {

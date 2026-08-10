@@ -439,8 +439,6 @@ export class ImapSmtpProvider implements MailProvider {
   }
 
   private getSmtpTransport(creds: MailCredentials): Transporter {
-    if (this.smtpTransport) return this.smtpTransport;
-
     this.smtpTransport = nodemailer.createTransport({
       host: this.account.smtp.host,
       port: this.account.smtp.port,
@@ -465,7 +463,6 @@ export class ImapSmtpProvider implements MailProvider {
    * Resolves on success; throws a MailError otherwise.
    */
   async verifySmtp(): Promise<void> {
-    if (this.closed) throw new MailError('connection_failed', 'Provider closed');
     let creds: MailCredentials;
     try {
       creds = await this.resolveCredentials();
