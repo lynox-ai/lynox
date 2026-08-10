@@ -19,9 +19,11 @@
 //   - HARD: the harness actually captured something (wiring smoke).
 //   - SANITY floors (recall/junk) so the instrument does not false-fail on benign
 //     model drift.
-//   - The FLIP decision (recall ≥ 0.7 AND junk ≤ 0.2, worst of N) is PRINTED via
-//     meetsGate() for the human to read — the canary flip is the operator's call on the
-//     frozen gold-set, not this test's.
+//   - The FLIP decision is NOT decided here: the binding gate is the COMPARISON
+//     against a legacy-baseline run (PRD §5.6.3, `meetsComparisonGate`), scored
+//     offline over the persisted results via `knowledge-substrate-score.ts`.
+//     With LYNOX_KNOWLEDGE_LABELS set (tier/provenance labels), each run also
+//     prints + persists its tiered coverage so the offline pass has both halves.
 
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -31,14 +33,18 @@ import { homedir } from 'node:os';
 import {
   runReplayEval,
   worstOf,
-  meetsGate,
   formatReport,
-  GATE,
+  formatTieredReport,
+  scoreTieredCoverage,
+  parseGoldFactLabels,
   type GoldCorpus,
+  type GoldFactLabels,
   type GoldThread,
   type KnowledgeReplayReport,
+  type CapturedEntry,
+  type TieredCoverageReport,
 } from './knowledge-substrate-runner.js';
-import { makeRealReplayThread, makeLlmJudge, replayFailures, resetReplayFailures, type ReplayProviderConfig } from './knowledge-substrate-replay.js';
+import { makeRealReplayThread, makeLlmJudge, makeLlmCoverageJudge, replayFailures, resetReplayFailures, type ReplayProviderConfig } from './knowledge-substrate-replay.js';
 import { makeLegacyReplayThread } from './knowledge-substrate-baseline.js';
 import { resolveReplayProvider } from './knowledge-substrate-provider.js';
 import { HAIKU } from '../online/setup.js';
@@ -72,6 +78,14 @@ function resolveProvider(): ReplayProviderConfig | null {
 const PROVIDER = resolveProvider();
 const RUN = process.env['LYNOX_EVAL'] === '1' && PROVIDER !== null;
 const RUNS = Math.max(1, Number(process.env['LYNOX_KNOWLEDGE_RUNS'] ?? '2'));
+const LABELS = loadLabels();
+
+/** Optional tier/provenance labels — with them, each run also emits its tiered coverage. */
+function loadLabels(): GoldFactLabels | null {
+  const path = process.env['LYNOX_KNOWLEDGE_LABELS'];
+  if (!path) return null;
+  return parseGoldFactLabels(JSON.parse(readFileSync(path, 'utf8')));
+}
 
 function loadCorpus(): GoldCorpus {
   const override = process.env['LYNOX_KNOWLEDGE_GOLD'];
@@ -91,6 +105,7 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
     const provider = PROVIDER!;
     const corpus = loadCorpus();
     const judge = makeLlmJudge(provider);
+    const coverageJudge = makeLlmCoverageJudge(provider);
     // Turn-level progress to stderr — without it a long replay is a black box
     // (learned on the first real-gold run: 45 minutes of WAL/CPU archaeology to
     // tell a grinding monster thread from a hung one).
@@ -125,7 +140,7 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
       // Persist every captured entry per thread — the throwaway dbs are deleted,
       // and the junk/matched review (the 10% human spot-check + junk-label
       // calibration) needs the actual texts, not just the aggregate counts.
-      const capturedLog: unknown[] = [];
+      const capturedLog: Array<{ threadId: string; stratum: string; captured: CapturedEntry[] }> = [];
       // Per RUN, not per invocation: the counters are module-level, so without this
       // run 2 reports run 1's failures on top of its own and the persisted rate only
       // ever climbs — a worst-of-N verdict built on a cumulative denominator.
@@ -140,6 +155,23 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
       // number below is a measurement rather than a swallowed outage.
       process.stdout.write(`\n[knowledge-eval] run ${run + 1}/${RUNS} (${provider.model}) — turn failures ${replayFailures.sends}/${replayFailures.turns} = ${failPct.toFixed(1)}%${failPct > 5 ? '  ⚠️ THE NUMBERS BELOW ARE NOT A RESULT' : ''}\n${formatReport(r)}\n`);
       reports.push(r);
+      // With labels, emit the tiered coverage the GATE is stated in (PRD §5.6.3)
+      // — printed AND persisted, so the offline comparison pass has both halves.
+      // Non-fatal: a scoring failure here must never cost the replay's captures,
+      // which are hours of paid machine time — the persist below still runs.
+      let tiered: TieredCoverageReport | null = null;
+      if (LABELS !== null) {
+        try {
+          const allCaptured = capturedLog.flatMap(c => c.captured);
+          // eslint-disable-next-line no-await-in-loop
+          tiered = await scoreTieredCoverage(corpus, allCaptured, LABELS, coverageJudge, {
+            ranThreadIds: new Set(capturedLog.map(c => c.threadId)),
+          });
+          process.stdout.write(`${formatTieredReport(tiered)}\n`);
+        } catch (err) {
+          process.stderr.write(`[knowledge-eval] tiered scoring failed (non-fatal, captures persist below): ${String(err).slice(0, 160)}\n`);
+        }
+      }
       try {
         const { writeFileSync, mkdirSync } = await import('node:fs');
         const dir = join(homedir(), '.lynox', 'knowledge-gold', 'results');
@@ -158,7 +190,7 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
           mode, provider: provider.provider, model: provider.model,
           gold: { path: goldPath, sha256: goldHash, threads: corpus.threads.length },
           turnFailures: { sends: replayFailures.sends, turns: replayFailures.turns },
-          report: r, captures: capturedLog,
+          report: r, tiered, captures: capturedLog,
         }, null, 2));
         process.stdout.write(`[knowledge-eval] captures + report persisted → ${file}\n`);
       } catch (err) {
@@ -166,7 +198,10 @@ describe.skipIf(!RUN)('Durable Knowledge Substrate — gold replay (real LLM)', 
       }
     }
     const worst = worstOf(reports);
-    process.stdout.write(`\n[knowledge-eval] WORST OF ${RUNS} — flip gate (recall≥${GATE.recall}, junk≤${GATE.junkRate}): ${meetsGate(worst) ? 'MET ✓ (canary flip is the operator\'s call)' : 'NOT MET (hold flip)'}\n${formatReport(worst)}\n`);
+    // The absolute bars are retired (PRD §5.6.3) — the binding gate is the
+    // COMPARISON against a baseline run, scored offline:
+    //   npx tsx tests/eval/knowledge-substrate-score.ts <dk.json> <baseline.json>
+    process.stdout.write(`\n[knowledge-eval] WORST OF ${RUNS} — binding gate = comparison vs legacy baseline (score the persisted results offline)\n${formatReport(worst)}\n`);
 
     // HARD — deterministic H4 security invariant: no untrusted write may land
     // active/pinned. DK-ONLY, because it asserts a property of the DK write path.
