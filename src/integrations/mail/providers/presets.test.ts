@@ -36,6 +36,25 @@ describe('describePreset / listPresets', () => {
     const slugs = listPresets().map(p => p.slug);
     expect(slugs).toEqual(['gmail', 'icloud', 'fastmail', 'yahoo', 'outlook', 'custom']);
   });
+
+  // The custom slug used to suggest 465/implicit TLS while all five named
+  // presets sat on 587 — the knowledge was in the file, just not in the branch
+  // a customer with their own mail server actually takes.
+  it('suggests submission on 587 for the custom slug, like every named preset', () => {
+    expect(describePreset('custom').smtp).toEqual({ host: '', port: 587, secure: false });
+  });
+
+  it('suggests no SMTP port that any preset avoids', () => {
+    const smtpPorts = new Set(listPresets().map(p => p.smtp.port));
+    expect([...smtpPorts]).toEqual([587]);
+  });
+
+  it('keeps implicit TLS on 993 for IMAP — the preference is per protocol', () => {
+    for (const preset of listPresets()) {
+      expect({ slug: preset.slug, port: preset.imap.port, secure: preset.imap.secure })
+        .toEqual({ slug: preset.slug, port: 993, secure: true });
+    }
+  });
 });
 
 describe('buildPresetAccount', () => {
@@ -135,6 +154,58 @@ describe('parseAutoconfigXml', () => {
       <outgoingServer type="smtp"><hostname>smtp.x.com</hostname><port>465</port><socketType>SSL</socketType></outgoingServer>
     </emailProvider></clientConfig>`;
     expect(() => parseAutoconfigXml(xml)).toThrow(MailError);
+  });
+
+  // Autoconfig lists the provider's own preference first, and for SMTP that is
+  // frequently 465 — a port a hosted instance cannot reach. The provider is
+  // describing its servers, not our network.
+  it('prefers submission on 587 when the payload offers it alongside 465', () => {
+    const xml = `
+      <clientConfig><emailProvider id="x">
+        <incomingServer type="imap"><hostname>imap.x.com</hostname><port>993</port><socketType>SSL</socketType></incomingServer>
+        <outgoingServer type="smtp"><hostname>smtp.x.com</hostname><port>465</port><socketType>SSL</socketType></outgoingServer>
+        <outgoingServer type="smtp"><hostname>smtp.x.com</hostname><port>587</port><socketType>STARTTLS</socketType></outgoingServer>
+      </emailProvider></clientConfig>
+    `;
+    const result = parseAutoconfigXml(xml);
+    expect(result.smtp).toEqual({ host: 'smtp.x.com', port: 587, secure: false });
+  });
+
+  it('leaves a single-entry SMTP payload alone, 465 included', () => {
+    // The preference must not become a requirement: a provider that offers only
+    // implicit TLS still has to be configurable.
+    const xml = `
+      <clientConfig><emailProvider id="x">
+        <incomingServer type="imap"><hostname>imap.x.com</hostname><port>993</port><socketType>SSL</socketType></incomingServer>
+        <outgoingServer type="smtp"><hostname>smtp.x.com</hostname><port>465</port><socketType>SSL</socketType></outgoingServer>
+      </emailProvider></clientConfig>
+    `;
+    expect(parseAutoconfigXml(xml).smtp).toEqual({ host: 'smtp.x.com', port: 465, secure: true });
+  });
+
+  it('never prefers an unencrypted 587 over an encrypted 465', () => {
+    // The TLS filter runs before the port preference, so a plaintext submission
+    // entry is not a candidate at all.
+    const xml = `
+      <clientConfig><emailProvider id="x">
+        <incomingServer type="imap"><hostname>imap.x.com</hostname><port>993</port><socketType>SSL</socketType></incomingServer>
+        <outgoingServer type="smtp"><hostname>plain.x.com</hostname><port>587</port><socketType>plain</socketType></outgoingServer>
+        <outgoingServer type="smtp"><hostname>smtp.x.com</hostname><port>465</port><socketType>SSL</socketType></outgoingServer>
+      </emailProvider></clientConfig>
+    `;
+    expect(parseAutoconfigXml(xml).smtp).toEqual({ host: 'smtp.x.com', port: 465, secure: true });
+  });
+
+  it('does not apply the port preference to IMAP', () => {
+    // 587 is meaningless for IMAP; the incoming side keeps first-wins order.
+    const xml = `
+      <clientConfig><emailProvider id="x">
+        <incomingServer type="imap"><hostname>first.x.com</hostname><port>993</port><socketType>SSL</socketType></incomingServer>
+        <incomingServer type="imap"><hostname>second.x.com</hostname><port>587</port><socketType>STARTTLS</socketType></incomingServer>
+        <outgoingServer type="smtp"><hostname>smtp.x.com</hostname><port>465</port><socketType>SSL</socketType></outgoingServer>
+      </emailProvider></clientConfig>
+    `;
+    expect(parseAutoconfigXml(xml).imap.host).toBe('first.x.com');
   });
 });
 

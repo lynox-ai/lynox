@@ -21,8 +21,17 @@ import {
 // ── Preset table ───────────────────────────────────────────────────────────
 //
 // Source of truth: each preset's published IMAP/SMTP server documentation.
-// Prefer implicit TLS (993 / 465) over STARTTLS where both are offered, since
-// implicit TLS removes the cleartext upgrade race.
+//
+// The TLS preference is per protocol, not global:
+//   IMAP — prefer implicit TLS on 993. It removes the cleartext upgrade race
+//     and no network blocks 993.
+//   SMTP — prefer submission on 587 (STARTTLS + requireTLS), NOT implicit TLS
+//     on 465. Both encrypt; the difference that decides it is reachability.
+//     Outbound 465 is blocked as an anti-spam measure by many hosting
+//     providers, ours included, and the failure is a silent send timeout long
+//     after setup. 587 is the IETF submission port (RFC 6409) and every preset
+//     below supports it. Transports built from these values set
+//     `requireTLS: !secure`, so a 587 entry still refuses to send in the clear.
 
 interface PresetServers {
   imap: MailServerConfig;
@@ -94,7 +103,10 @@ export function describePreset(slug: MailPresetSlug): PresetDescriptor {
       slug: 'custom',
       label: 'Custom IMAP/SMTP',
       imap: { host: '', port: 993, secure: true },
-      smtp: { host: '', port: 465, secure: true },
+      // Suggestion only — the custom form lets the user set any port. 587 is
+      // the default because 465 is unreachable from a hosted instance; a
+      // self-hoster on their own network can still choose 465.
+      smtp: { host: '', port: 587, secure: false },
       appPasswordUrl: undefined,
       requires2FA: false,
       custom: true,
@@ -240,8 +252,8 @@ export async function autodiscover(emailAddress: string, fetchImpl: typeof fetch
  * Exposed for unit tests.
  */
 export function parseAutoconfigXml(xml: string): AutodiscoverResult {
-  const imap = pickFirstServer(xml, 'imap');
-  const smtp = pickFirstServer(xml, 'smtp');
+  const imap = pickServer(xml, 'imap');
+  const smtp = pickServer(xml, 'smtp');
   if (!imap || !smtp) {
     throw new MailError('not_found', 'Autoconfig payload missing IMAP or SMTP server entry');
   }
@@ -259,11 +271,18 @@ interface ParsedServer {
   username: string | undefined;
 }
 
-function pickFirstServer(xml: string, kind: 'imap' | 'smtp'): ParsedServer | null {
+/** IETF mail submission port (RFC 6409). See the TLS note on the preset table. */
+const SUBMISSION_PORT = 587;
+
+/**
+ * All usable servers of one kind, in the order the payload lists them.
+ * Entries without a hostname/port, or offering no TLS at all, are dropped.
+ */
+function parseServers(xml: string, kind: 'imap' | 'smtp'): ParsedServer[] {
   const blockTag = kind === 'imap' ? 'incomingServer' : 'outgoingServer';
   const blockRegex = new RegExp(`<${blockTag}\\s[^>]*type="${kind}"[^>]*>([\\s\\S]*?)<\\/${blockTag}>`, 'gi');
-  const matches = xml.matchAll(blockRegex);
-  for (const match of matches) {
+  const out: ParsedServer[] = [];
+  for (const match of xml.matchAll(blockRegex)) {
     const inner = match[1] ?? '';
     const host = innerTag(inner, 'hostname');
     const portStr = innerTag(inner, 'port');
@@ -272,14 +291,26 @@ function pickFirstServer(xml: string, kind: 'imap' | 'smtp'): ParsedServer | nul
     if (sslType !== 'SSL' && sslType !== 'STARTTLS') continue; // refuse plain
     const port = Number.parseInt(portStr, 10);
     if (!Number.isFinite(port) || port <= 0 || port > 65_535) continue;
-    return {
+    out.push({
       host,
       port,
       secure: sslType === 'SSL',
       username: innerTag(inner, 'username') ?? undefined,
-    };
+    });
   }
-  return null;
+  return out;
+}
+
+function pickServer(xml: string, kind: 'imap' | 'smtp'): ParsedServer | null {
+  const candidates = parseServers(xml, kind);
+  if (kind === 'imap') return candidates[0] ?? null;
+  // SMTP: prefer submission when the payload offers it. Autoconfig lists the
+  // provider's own preference first and that is frequently 465, which a hosted
+  // instance cannot reach at all — the provider is describing its servers, not
+  // our network. Only entries that survived the TLS filter above are eligible,
+  // so this never prefers a plaintext 587 over an encrypted 465. A payload with
+  // a single entry is returned unchanged.
+  return candidates.find(s => s.port === SUBMISSION_PORT) ?? candidates[0] ?? null;
 }
 
 function innerTag(xml: string, tag: string): string | undefined {

@@ -334,6 +334,24 @@ function wrapImapError(err: unknown, fallback: string): MailError {
   return new MailError('connection_failed', `${fallback}: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
 }
 
+/**
+ * Shared SMTP error mapping for send() and verifySmtp(). The two differ only
+ * in the fallback: a send that reaches the server and is refused is
+ * `send_rejected`, while a verify that gets that far has nothing to reject —
+ * anything left over is a connection problem.
+ */
+function wrapSmtpError(err: unknown, op: 'send' | 'verify'): MailError {
+  if (err instanceof MailError) return err;
+  if (isAuthError(err)) return new MailError('auth_failed', 'SMTP authentication failed', { cause: err });
+  const message = err instanceof Error ? err.message : String(err);
+  const lower = message.toLowerCase();
+  if (lower.includes('timeout')) return new MailError('timeout', 'SMTP timeout', { cause: err });
+  if (lower.includes('certificate')) return new MailError('tls_failed', 'SMTP TLS verification failed', { cause: err });
+  return op === 'send'
+    ? new MailError('send_rejected', `SMTP send failed: ${message}`, { cause: err })
+    : new MailError('connection_failed', `SMTP connection failed: ${message}`, { cause: err });
+}
+
 // ── Provider ───────────────────────────────────────────────────────────────
 
 export class ImapSmtpProvider implements MailProvider {
@@ -435,6 +453,30 @@ export class ImapSmtpProvider implements MailProvider {
       socketTimeout: SOCKET_TIMEOUT_MS,
     });
     return this.smtpTransport;
+  }
+
+  /**
+   * Open an SMTP session — connect, STARTTLS/implicit TLS, AUTH — and send
+   * nothing. This is what a pre-save connection test needs: `list()` proves
+   * IMAP works and says nothing about the send path, so an account whose
+   * outbound SMTP port is blocked shows no symptom until the first send, hours
+   * or days after setup.
+   *
+   * Resolves on success; throws a MailError otherwise.
+   */
+  async verifySmtp(): Promise<void> {
+    if (this.closed) throw new MailError('connection_failed', 'Provider closed');
+    let creds: MailCredentials;
+    try {
+      creds = await this.resolveCredentials();
+    } catch (err) {
+      throw new MailError('auth_failed', 'Could not resolve mail credentials', { cause: err });
+    }
+    try {
+      await this.getSmtpTransport(creds).verify();
+    } catch (err) {
+      throw wrapSmtpError(err, 'verify');
+    }
   }
 
   // ── list ────────────────────────────────────────────────────────────────
@@ -684,11 +726,7 @@ export class ImapSmtpProvider implements MailProvider {
         rejected: (result.rejected ?? []).map(addrToPlain),
       };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (isAuthError(err)) throw new MailError('auth_failed', 'SMTP authentication failed', { cause: err });
-      if (message.toLowerCase().includes('timeout')) throw new MailError('timeout', 'SMTP timeout', { cause: err });
-      if (message.toLowerCase().includes('certificate')) throw new MailError('tls_failed', 'SMTP TLS verification failed', { cause: err });
-      throw new MailError('send_rejected', `SMTP send failed: ${message}`, { cause: err });
+      throw wrapSmtpError(err, 'send');
     }
   }
 

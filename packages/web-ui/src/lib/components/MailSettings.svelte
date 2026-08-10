@@ -52,6 +52,10 @@
 		ok: boolean;
 		error?: string;
 		code?: string;
+		/** Which leg failed. Absent on success and on pre-connection failures. */
+		stage?: 'imap' | 'smtp';
+		/** Which legs actually ran — smtp is false for receive-only account types. */
+		checked?: { imap: boolean; smtp: boolean };
 	}
 
 	/** Grouping for the type-picker dropdown — semantic ordering. */
@@ -77,13 +81,16 @@
 	let formPersonaPrompt = $state('');
 	let formPassword = $state('');
 
-	// Custom-only fields
+	// Custom-only fields. SMTP defaults to submission (587 + STARTTLS), not
+	// implicit TLS on 465: many hosting providers block outbound 465, so it is
+	// the one suggestion that can be unreachable no matter what the user types.
+	// Both fields stay editable — a self-hoster on their own network can set 465.
 	let customImapHost = $state('');
 	let customImapPort = $state(993);
 	let customImapSecure = $state(true);
 	let customSmtpHost = $state('');
-	let customSmtpPort = $state(465);
-	let customSmtpSecure = $state(true);
+	let customSmtpPort = $state(587);
+	let customSmtpSecure = $state(false);
 
 	let testing = $state(false);
 	let saving = $state(false);
@@ -127,8 +134,8 @@
 		customImapPort = 993;
 		customImapSecure = true;
 		customSmtpHost = '';
-		customSmtpPort = 465;
-		customSmtpSecure = true;
+		customSmtpPort = 587;
+		customSmtpSecure = false;
 		testResult = null;
 	}
 
@@ -143,7 +150,28 @@
 	 * Translate technical MailError codes to user-friendly messages.
 	 * Keeps the raw error code visible as a small second line for debugging.
 	 */
-	function friendlyError(code: string | undefined, raw: string | undefined): string {
+	function friendlyError(
+		code: string | undefined,
+		raw: string | undefined,
+		stage?: 'imap' | 'smtp',
+	): string {
+		// The send leg only runs after the read leg passed, so an SMTP failure
+		// carries different advice: the credentials are already proven good, and
+		// the overwhelmingly common cause is a blocked outbound port.
+		if (stage === 'smtp') {
+			switch (code) {
+				case 'auth_failed':
+					return 'The server accepted your login for reading but refused it for sending. Some providers issue a separate SMTP password, or need the app-password re-generated.';
+				case 'connection_failed':
+					return "Couldn't reach the SMTP server. Outbound port 465 is blocked on many networks — hosted lynox instances included. Try port 587 with implicit TLS switched off.";
+				case 'timeout':
+					return 'The SMTP server never answered. On port 465 that is almost always a blocked outbound port — try 587 with implicit TLS switched off.';
+				case 'tls_failed':
+					return "The SMTP server's certificate couldn't be verified. If this is a custom server with self-signed TLS, contact your admin.";
+				default:
+					return `Sending (SMTP) failed: ${raw ?? 'unknown error'}`;
+			}
+		}
 		switch (code) {
 			case 'auth_failed':
 				return 'Login failed — check your email address and app-password. If you enabled 2FA, make sure you generated a provider-specific app-password (not your account password).';
@@ -228,7 +256,7 @@
 			if (data.ok) {
 				addToast('Connection successful', 'success');
 			} else {
-				addToast(`Connection failed: ${friendlyError(data.code, data.error)}`, 'error');
+				addToast(`Connection failed: ${friendlyError(data.code, data.error, data.stage)}`, 'error');
 			}
 		} catch (err) {
 			testResult = { ok: false, error: err instanceof Error ? err.message : 'Network error', code: 'unknown' };
@@ -661,7 +689,7 @@
 						</div>
 						<label class="flex items-center gap-2 text-xs">
 							<Checkbox bind:checked={customSmtpSecure} size="sm" />
-							SMTP implicit TLS (465)
+							SMTP implicit TLS (465) — leave off for submission on 587
 						</label>
 					</div>
 				{/if}
@@ -669,9 +697,15 @@
 				{#if testResult}
 					<div class="rounded-[var(--radius-sm)] border p-2 text-xs {testResult.ok ? 'border-success/30 bg-success/5 text-success' : 'border-danger/30 bg-danger/5 text-danger'}">
 						{#if testResult.ok}
-							✓ Connection successful — IMAP login + mailbox open succeeded.
+							{#if testResult.checked?.smtp}
+								✓ Connection successful — IMAP login + mailbox open succeeded, and the SMTP server accepted the login.
+							{:else if testResult.checked}
+								✓ Connection successful — IMAP login + mailbox open succeeded. This account type is receive-only, so the send path was not tested.
+							{:else}
+								✓ Connection successful — IMAP login + mailbox open succeeded.
+							{/if}
 						{:else}
-							<div class="font-medium">✗ {friendlyError(testResult.code, testResult.error)}</div>
+							<div class="font-medium">✗ {friendlyError(testResult.code, testResult.error, testResult.stage)}</div>
 							<div class="mt-0.5 text-[10px] opacity-60">{testResult.code ?? 'unknown'}</div>
 						{/if}
 					</div>
