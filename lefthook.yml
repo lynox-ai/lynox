@@ -38,6 +38,21 @@ pre-push:
       skip:
         - merge
         - rebase
+    public-repo-guard-meta:
+      # The customer-name class does NOT scan the tree — it scans commit
+      # messages, which is where that leak actually happens and the one surface
+      # that cannot be edited after a merge. So it needs its own invocation:
+      # without this the class would be enforced nowhere at all locally, since
+      # the scan above never looks at a message.
+      #
+      # merge-base gives the commits this push actually adds. --allow-missing-names
+      # keeps a fresh clone pushable: without ~/.lynox/private-names.re the class
+      # warns and stands down rather than blocking, and an unpushable hook is how
+      # people learn --no-verify.
+      run: bash scripts/public-repo-guard.sh --allow-missing-names check-meta "$(git merge-base origin/main HEAD)" HEAD
+      skip:
+        - merge
+        - rebase
     drift-guard:
       # Catch the mechanizable slices of doc/code drift gitleaks + public-repo-
       # guard don't: committed merge-conflict markers, removed features (Telegram

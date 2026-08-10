@@ -83,37 +83,47 @@ _org='router'"-for-"'me'
 _port='83'"17"
 HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0\.1:${_port}|localhost:${_port}"
 
-# HARD, third class — names of customers and other real third parties.
+# The fifth class — names of customers and other real third parties. Unlike the
+# four above it does NOT scan the tree; it scans COMMIT MESSAGES and PR text,
+# via the `check-meta` subcommand.
 #
-# Unlike the two classes above, the pattern is NOT in this file. Writing the names
-# here would be the leak it exists to prevent, and SELF_EXCLUDE would not help: the
-# names would sit in a public file either way. It comes from outside the repo
-# instead — `LYNOX_PRIVATE_NAMES_RE`, from a GitHub secret in CI and from a file
-# under the operator's home directory locally. A reader of this repo learns that
-# the class exists, never who is on the list.
+# That split is the whole design, and it was arrived at the expensive way. The
+# first version scanned the tree as well. Three review rounds later, every one of
+# its defects lived in that half: it had to withhold matching lines so a public
+# Actions log would not print the name, then withhold file PATHS for the same
+# reason, and the withholding used the same grep as the detection, so it was
+# blind wherever the detection was. Meanwhile the tree carried ZERO occurrences
+# of any known name, while the incident that prompted all of this was a name in a
+# PR body and in commit messages. The scanner covering the real vector produced
+# no findings in any round. So the tree half is gone, and with it three defects
+# — removed by dropping their carrier rather than by patching them a fourth time.
 #
-# Three properties this class does not share with the others, all deliberate:
+# What the remaining half is worth, and why it is the half to keep: a merged
+# commit message is the one surface here that CANNOT be edited afterwards. A name
+# in tracked code can be found later with `git grep` against the same pattern and
+# corrected; a name in a squashed commit message on a public repo is permanent.
 #
-#  1. It never prints the matching line — only `file:lineno`. Actions logs on a
-#     public repo are public, and here the match IS the name, so echoing the line
-#     would publish exactly what the guard exists to keep out. GitHub's secret
-#     masking does not save it: that masks the pattern's value, not the name the
-#     pattern found. Path hits print no path either — there the name is the path.
+# The pattern is NOT in this file. Writing the names here would be the leak it
+# exists to prevent, and SELF_EXCLUDE would not help — they would sit in a public
+# file either way. It comes from outside: `LYNOX_PRIVATE_NAMES_RE` from a GitHub
+# secret in CI, `~/.lynox/private-names.re` locally. A reader of this repo learns
+# that the class exists, never who is on the list.
+#
+# Two properties it does not share with the others:
+#
+#  1. It never prints what it matched — a commit is named by its short SHA, never
+#     by its subject line. Actions logs on a public repo are public and here the
+#     match IS the name. GitHub's secret masking does not help: it masks the
+#     pattern's value, not the name the pattern found.
 #  2. A missing pattern FAILS by default; skipping is something a caller has to
-#     ASK for (`--allow-missing-names`). The safe direction belongs in the default
-#     so that dropping the flag somewhere can only ever make a caller louder, never
-#     quieter.
+#     ASK for (`--allow-missing-names`). The safe direction belongs in the default,
+#     so dropping the flag somewhere can only make a caller louder, never quieter.
 #
-#     Where it actually runs today, and this is a deliberate stage rather than an
-#     oversight: the class is enforced at PRE-PUSH, and both CI callers pass the
-#     opt-out, because the secret holding the pattern is not set yet. So CI checks
-#     the four other classes and annotates this one as inactive on every run — an
+#     Where it runs today, a deliberate stage rather than an oversight: enforced
+#     at PRE-PUSH, while both CI callers pass the opt-out because the secret is
+#     not set. CI therefore annotates the class as inactive on every run — an
 #     opt-out nobody can see would rot into the permanent state. Setting the
-#     secret arms it with no change to this file or the workflow, since the flag
-#     only decides what happens when the pattern is ABSENT.
-#  3. It scans commit messages and PR text too, via the `check-meta` subcommand.
-#     That is where this particular leak has actually happened; a merged commit
-#     message is also the one surface that cannot be edited afterwards.
+#     secret arms it with no change to this file or the workflow.
 #
 # Word boundaries belong IN the pattern, not here. A bare surname matches inside
 # unrelated words, while a coined company name usually SHOULD match as a substring
@@ -145,51 +155,65 @@ if [ -z "$PRIVATE_NAMES_RE" ] && [ -r "$PRIVATE_NAMES_FILE" ]; then
   )"
 fi
 
-# PREFLIGHT — the pattern is operator-supplied and therefore the likeliest thing
-# in this file to be wrong. Every failure mode below used to end in `clean ✓`,
-# because every grep in the class swallows stderr and drops its exit code:
+# PREFLIGHT — the pattern is operator-supplied and is therefore the likeliest
+# thing here to be wrong. Two checks, and the second one is the reason this
+# function survived a round that deleted most of its siblings.
 #
-#   - an unbalanced parenthesis (`Nordberg AG (CH`) — grep exits 2, the loop never
-#     runs, nothing is printed, CI is green and the name stays in the repo
-#   - an empty alternative (`a||b`, from one trailing `|` in the list) — GNU grep
-#     accepts it and matches EVERY line, so CI goes red on the whole tree while
-#     BSD grep locally calls it an error and stays green. Diagnosing that from a
-#     CI log is nobody's good afternoon, and the obvious way out is to disable
-#     the class.
+# Three checks, one per direction a pattern can be wrong: it cannot compile, it
+# matches everything, or it matches nothing. The third had been missed by three
+# review rounds, because every earlier check asked only about the second.
 #
-# So validate once, up front, and fail LOUDLY. Note what is not printed: the
-# pattern itself. It is the list of names — an error message quoting it would be
-# the leak. grep's own diagnostic is dropped for the same reason (busybox grep
-# echoes the pattern back).
+# Note what is never printed: the pattern. It is the list of names, so an error
+# quoting it would be the leak. grep's own diagnostic is dropped for the same
+# reason — busybox grep echoes the pattern back.
 preflight_names_re() {
-  case "$PRIVATE_NAMES_RE" in
-    '|'*|*'|') echo "❌ public-repo-guard: private-name pattern has an empty alternative (leading or trailing '|')." >&2; return 1 ;;
-    *'||'*)    echo "❌ public-repo-guard: private-name pattern has an empty alternative ('||')." >&2; return 1 ;;
-  esac
-  # grep exits 1 on "no match" — expected against empty input — and >=2 on a bad
-  # regex. Only the latter is a problem. The status has to be captured on the
-  # command itself: read inside an `if` body it would be the condition's status,
-  # and left bare it would trip `set -e` on the perfectly normal no-match.
   local rc=0
+
+  # A NEWLINE in the pattern, checked first and on its own because the greps
+  # disagree about it. GNU treats each line as an alternative, so a blank line in
+  # the middle turns the pattern into "match everything"; BSD does not, so the
+  # same value behaves differently on a laptop and in CI. Nobody wants a pattern
+  # to mean two things, and there is no legitimate reason for one to be here: the
+  # file source joins its entries into a single alternation before this point, so
+  # a newline means a list was pasted straight into the secret textarea.
+  # `$'\n'` and not `"$(printf '\n')"`: command substitution strips trailing
+  # newlines, so the latter is the EMPTY string and `*""*` matches everything —
+  # a check that rejects every pattern, including the correct ones. Caught by the
+  # suite immediately, which is the only reason it is not in the shipped version.
+  case "$PRIVATE_NAMES_RE" in
+    *$'\n'*)
+      echo "❌ public-repo-guard: the private-name pattern contains a line break." >&2
+      echo "   Enter it as ONE alternation — 'first|second|third' — not as a list." >&2
+      echo "   GNU grep reads a blank line in it as 'match everything'; BSD does not," >&2
+      echo "   so the same value would behave differently locally and in CI." >&2
+      return 1
+      ;;
+  esac
+
+  # VALIDITY, judged by the grep that will actually run the scan.
+  #
+  # This was briefly dropped as a false positive, because BSD grep rejects
+  # `Name( AG| GmbH|)` while GNU accepts it. Dropping it was wrong: on BSD that
+  # pattern IS invalid, so the scan there would fail on every file into a
+  # swallowed stderr and report a clean tree. The refusal is correct; only the
+  # message was, claiming a universal verdict for a local one.
   printf '' | grep -qE "$PRIVATE_NAMES_RE" 2>/dev/null || rc=$?
   if [ "$rc" -gt 1 ]; then
-    echo "❌ public-repo-guard: private-name pattern is not a valid extended regex." >&2
+    echo "❌ public-repo-guard: the grep on THIS machine cannot compile the" >&2
+    echo "   private-name pattern, so the scan here would find nothing." >&2
+    echo "   BSD grep (macOS) and GNU grep (CI) disagree on some forms — an empty" >&2
+    echo "   trailing alternative like 'Name( X| Y|)' is one. Prefer a form both" >&2
+    echo "   accept: 'Name( X| Y)?'." >&2
     return 1
   fi
 
-  # The catch-all, and the only one of these checks that is hard to fool: a
-  # pattern that matches an EMPTY LINE matches every line there is.
-  #
-  # The `case` above only sees an empty alternative at the top level. One
-  # parenthesis deep — `(name|)` — it passes, and GNU grep then flags the entire
-  # tree while BSD grep locally calls it an error, so the failure looks like a
-  # platform mystery instead of a typo. The likeliest source of it is not even a
-  # typo: LYNOX_PRIVATE_NAMES_RE is pasted into a GitHub secret textarea, and a
-  # blank line in the middle of that paste produces exactly the same thing.
-  #
-  # `a*`, `a?` and `()` are caught by the same test, which is why it is worth
-  # more than the three special cases it subsumes.
-  rc=0
+  # OVER-matching. A pattern that matches an EMPTY LINE matches every line there
+  # is. A trailing `|` does it, and so does one parenthesis deeper — `(name|)` —
+  # which a check for a top-level empty alternative cannot see. The likeliest
+  # source is not a typo at all: the value is pasted into a GitHub secret
+  # textarea, and a blank line in that paste produces exactly this. `a*`, `a?`
+  # and `()` fall out of the same test, which is why it replaced three special
+  # cases rather than joining them.
   printf '\n' | grep -qE "$PRIVATE_NAMES_RE" 2>/dev/null || rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "❌ public-repo-guard: private-name pattern matches an empty line, so it" >&2
@@ -197,6 +221,25 @@ preflight_names_re() {
     echo "   '|', or an optional-everything form like (name|) or name*." >&2
     return 1
   fi
+
+  # UNDER-matching, which is the direction that fails silently and was missed by
+  # three review rounds. Every check before this one asked "does the pattern match
+  # too much?". None asked "does it match anything at all?".
+  #
+  # The concrete way it goes wrong: `(?i)Name` is the most common PCRE habit
+  # there is. GNU grep accepts it as a valid ERE and it then matches NOTHING —
+  # the class is dead, and it reports `clean ✓` for every run. BSD grep matches
+  # it, so it works locally and dies in CI. These constructs mean something else
+  # in ERE or nothing at all, so refusing them is refusing a mistake, not a style.
+  case "$PRIVATE_NAMES_RE" in
+    *'(?'*)
+      echo "❌ public-repo-guard: private-name pattern uses a PCRE group like (?i) or (?:)." >&2
+      echo "   This is an EXTENDED regex (grep -E). GNU grep accepts those and then" >&2
+      echo "   matches nothing at all, which reads as a clean scan. For case, rely on" >&2
+      echo "   the guard's own -i; for grouping use a plain ( )." >&2
+      return 1
+      ;;
+  esac
   return 0
 }
 
@@ -431,40 +474,7 @@ is_allow_file() {
   return 1
 }
 
-# Print an offending line — the only place any class is allowed to do so.
-#
-# The private-name class withholds its own matches, but that alone was worth
-# nothing: the four older classes each echoed their line verbatim, and one line
-# can trip two classes at once. "Customer X runs on <service host>" is the SOFT
-# class's whole reason to exist, and it would have published the name into a
-# public Actions log while the private-name class dutifully printed a bare line
-# number for the very same line. A guard that leaks what it guards is worse than
-# no guard, so the withholding belongs at the single exit, not in one class.
-emit_line() {
-  local line="$1"
-  if $names_active && printf '%s' "$line" | grep -qEi "$PRIVATE_NAMES_RE" 2>/dev/null; then
-    echo "     [line withheld — it contains a private name; see the private-name hit above]"
-    return
-  fi
-  echo "     ${line}"
-}
-
-# The same restraint for a PATH. Withholding the line while printing the file it
-# came from closed only half the hole: a name lands in a FILENAME just as easily,
-# and then every class that names its file publishes it — including the
-# private-name class itself, whose own comment promises the opposite. The line
-# and the path are two axes of one leak, so they get one treatment.
-safe_path() {
-  local p="$1"
-  if $names_active && printf '%s' "$p" | grep -qEi "$PRIVATE_NAMES_RE" 2>/dev/null; then
-    echo "[path withheld — it contains a private name]"
-    return
-  fi
-  echo "$p"
-}
-
 violations=0
-name_path_hits=0
 
 # PATHS — the content greps below never see file NAMES. A vendored tooling
 # directory could therefore be committed (and enter the Docker build context)
@@ -473,21 +483,10 @@ while IFS= read -r f; do
   [ -n "$f" ] || continue
   is_excluded "$f" && continue
   if printf '%s' "$f" | grep -qEi "$HARD_LOCAL_TOOLING"; then
-    echo "❌ HARD leak marker (operator-local tooling) in PATH: $(safe_path "$f")"
-    violations=$((violations + 1))
-  fi
-  # Counted, not named: printing the path would print the name that is in it.
-  if $names_active && printf '%s' "$f" | grep -qEi "$PRIVATE_NAMES_RE"; then
-    name_path_hits=$((name_path_hits + 1))
+    echo "❌ HARD leak marker (operator-local tooling) in PATH: $f"
     violations=$((violations + 1))
   fi
 done < <(list_files)
-
-if [ "$name_path_hits" -gt 0 ]; then
-  echo "❌ HARD leak marker (private name) in ${name_path_hits} tracked PATH(s)."
-  echo "   Paths withheld — the name IS the path here, so naming them would leak it."
-  echo "   To locate: git ls-files | grep -Ei \"\$LYNOX_PRIVATE_NAMES_RE\" on your machine."
-fi
 
 while IFS= read -r f; do
   [ -n "$f" ] || continue
@@ -499,8 +498,8 @@ while IFS= read -r f; do
   # HARD — no exemptions.
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    echo "❌ HARD leak marker in $(safe_path "$f"):"
-    emit_line "$line"
+    echo "❌ HARD leak marker in $f:"
+    echo "     ${line}"
     violations=$((violations + 1))
   done < <(grep -nIE "$HARD" "$f" 2>/dev/null || true)
 
@@ -511,21 +510,10 @@ while IFS= read -r f; do
   # legitimate LYNOX_MANAGED_* env var (164 false positives when tried).
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    echo "❌ HARD leak marker (operator-local tooling) in $(safe_path "$f"):"
-    emit_line "$line"
+    echo "❌ HARD leak marker (operator-local tooling) in $f:"
+    echo "     ${line}"
     violations=$((violations + 1))
   done < <(grep -nIEi "$HARD_LOCAL_TOOLING" "$f" 2>/dev/null || true)
-
-  # HARD (private names) — `cut` keeps the line NUMBER and drops the line, which is
-  # the whole point: the matched text is the name. Sits above the whole-file allow
-  # with the other HARD classes, so no file can exempt itself from it.
-  if $names_active; then
-    while IFS= read -r n; do
-      [ -n "$n" ] || continue
-      echo "❌ HARD leak marker (private name) at $(safe_path "$f"):$n"
-      violations=$((violations + 1))
-    done < <(grep -nIEi "$PRIVATE_NAMES_RE" "$f" 2>/dev/null | cut -d: -f1 || true)
-  fi
 
   # Whole-file allow applies from here down. It sits ABOVE the reference loops on
   # purpose: those match a bracket shape that legal content can produce, and an
@@ -542,8 +530,8 @@ while IFS= read -r f; do
     case "$line" in
       *"$PRAGMA"*) continue ;;
     esac
-    echo "❌ internal cross-reference in $(safe_path "$f") (state the reason inline instead):"
-    emit_line "$line"
+    echo "❌ internal cross-reference in $f (state the reason inline instead):"
+    echo "     ${line}"
     violations=$((violations + 1))
   done < <(grep -nIE "$INTERNAL_REF" "$f" 2>/dev/null || true)
 
@@ -562,8 +550,8 @@ while IFS= read -r f; do
     case "$line" in
       *"$PRAGMA"*) continue ;;
     esac
-    echo "❌ internal cross-reference opened in $(safe_path "$f") and continued on the next line:"
-    emit_line "$line"
+    echo "❌ internal cross-reference opened in $f and continued on the next line:"
+    echo "     ${line}"
     violations=$((violations + 1))
   done < <(grep -nIE "$REF_OPENER" "$f" 2>/dev/null || true)
 
@@ -574,8 +562,8 @@ while IFS= read -r f; do
     case "$line" in
       *"$PRAGMA"*) continue ;;  # inline-allowed
     esac
-    echo "⚠️  internal hostname in $(safe_path "$f") (add '${PRAGMA}' with a reason if intentional):"
-    emit_line "$line"
+    echo "⚠️  internal hostname in $f (add '${PRAGMA}' with a reason if intentional):"
+    echo "     ${line}"
     violations=$((violations + 1))
   done < <(grep -nIE "$SOFT" "$f" 2>/dev/null || true)
 done < <(list_files)
