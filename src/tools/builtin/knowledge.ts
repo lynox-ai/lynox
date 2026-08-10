@@ -93,10 +93,13 @@ export const rememberTool: ToolEntry<RememberInput> = {
     const sourceUntrusted = deriveTurnUntrusted(agent);
     // Record WHICH signal fired. The gate needs only the boolean; the review queue needs the
     // attribution, or the cost of the sticky (F5) half of the union stays unmeasurable.
+    // Derived ONCE and reused by the cause-log, the SSE chip, and the model-visible return
+    // string below, so the three can never disagree about why this write was queued.
+    const untrustedCause = describeTurnUntrusted(agent);
     void appendUntrustedCauseLog(agent.toolContext.userConfig?.retrieval_shadow_log === true, {
       ts: Date.now(),
       site: 'remember',
-      cause: describeTurnUntrusted(agent),
+      cause: untrustedCause,
       untrusted: sourceUntrusted,
       threadId: agent.currentThreadId,
       runId: agent.currentRunId,
@@ -158,13 +161,22 @@ export const rememberTool: ToolEntry<RememberInput> = {
         agent: agent.name,
         // Only for a queued write: on a trusted one there is no cause to name, and sending
         // 'none' would invite the UI to render an empty reason.
-        ...(result.status === 'pending_review' ? { cause: describeTurnUntrusted(agent) } : {}),
+        ...(result.status === 'pending_review' ? { cause: untrustedCause } : {}),
       });
     }
 
     if (result.status === 'pending_review') {
       // Do NOT echo the (possibly injected) text back into context.
-      return 'Recorded for review: this turn read external content, so it is queued for your approval before it becomes active knowledge.';
+      // Name the ACTUAL cause. The union ORs a run-scoped signal with the conversation-sticky
+      // F5 latch, so a turn that ran no external tool at all still queues once anything earlier
+      // in the thread tainted it. Claiming "this turn read external content" there is false to
+      // the model AND to the user it relays the reason to — and a return string is prompt
+      // surface: it teaches a rule about the runtime, so a wrong one mis-teaches every later
+      // turn. Observed 2026-08-10 on prod (thread `…auszug…`, engine 2.13.0): the model quoted
+      // this sentence verbatim to explain a queue on a turn whose only tool call was `remember`.
+      return untrustedCause === 'conversation'
+        ? 'Recorded for review: this conversation read external content on an earlier turn, so it is queued for your approval before it becomes active knowledge.'
+        : 'Recorded for review: this turn read external content, so it is queued for your approval before it becomes active knowledge.';
     }
     if (result.deduped === true) {
       // A near-duplicate of an existing active entry — nothing new was stored. Tell the model so

@@ -251,6 +251,33 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     expect(ks.recall({ query: 'auto-approve', subjectName: 'ACME' }).length).toBe(0);
   });
 
+  // The queue REASON the model reads back. A tool return is prompt surface: it teaches a rule
+  // about the runtime, so naming the wrong cause mis-teaches every later turn — and the model
+  // relays it verbatim to the user (observed on prod 2026-08-10, engine 2.13.0: it told the
+  // operator "this turn read external content" on a turn whose only tool call was `remember`).
+  // Both directions are asserted: over-attributing to the sticky latch is the same defect
+  // mirrored, so the H4 case must keep saying "this turn".
+  it('F5: the pending_review return blames the CONVERSATION, not this turn, when only the sticky latch fired', async () => {
+    const { agent } = make({ sawUntrustedData: false, sawExternalContentTool: false, conversationSawUntrusted: true });
+    const out = await rememberTool.handler({ text: 'lynox GmbH UID is CHE-404.853.736', subject: 'lynox GmbH' }, agent);
+    expect(out).toContain('this conversation read external content on an earlier turn');
+    expect(out).not.toContain('this turn read external content');
+  });
+
+  it('H4: the pending_review return still blames THIS turn when an external-content tool ran', async () => {
+    const { agent } = make({ sawExternalContentTool: true, conversationSawUntrusted: false });
+    const out = await rememberTool.handler({ text: 'ACME moved to Zug', subject: 'ACME' }, agent);
+    expect(out).toContain('this turn read external content');
+    expect(out).not.toContain('earlier turn');
+  });
+
+  it('marker outranks the sticky latch in the returned reason (specificity order)', async () => {
+    const { agent } = make({ sawUntrustedData: true, conversationSawUntrusted: true });
+    const out = await rememberTool.handler({ text: 'ACME renewed', subject: 'ACME' }, agent);
+    expect(out).toContain('this turn read external content');
+    expect(out).not.toContain('earlier turn');
+  });
+
   it('F5: memory_block_edit refuses when the CONVERSATION is tainted, even on a clean-latch turn', async () => {
     const { agent } = make({ conversationSawUntrusted: true });
     const out = await memoryBlockEditTool.handler(
