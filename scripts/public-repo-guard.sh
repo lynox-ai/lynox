@@ -83,7 +83,103 @@ _org='router'"-for-"'me'
 _port='83'"17"
 HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0\.1:${_port}|localhost:${_port}"
 
-# Third class — internal cross-reference slugs in the doubled-bracket link form.
+# HARD, third class — names of customers and other real third parties.
+#
+# Unlike the two classes above, the pattern is NOT in this file. Writing the names
+# here would be the leak it exists to prevent, and SELF_EXCLUDE would not help: the
+# names would sit in a public file either way. It comes from outside the repo
+# instead — `LYNOX_PRIVATE_NAMES_RE`, from a GitHub secret in CI and from a file
+# under the operator's home directory locally. A reader of this repo learns that
+# the class exists, never who is on the list.
+#
+# Three properties this class does not share with the others, all deliberate:
+#
+#  1. It never prints the matching line — only `file:lineno`. Actions logs on a
+#     public repo are public, and here the match IS the name, so echoing the line
+#     would publish exactly what the guard exists to keep out. GitHub's secret
+#     masking does not save it: that masks the pattern's value, not the name the
+#     pattern found. Path hits print no path either — there the name is the path.
+#  2. A missing pattern FAILS by default; skipping is something a caller has to
+#     ASK for (`--allow-missing-names`). The safe direction belongs in the default
+#     so that dropping the flag somewhere can only ever make a caller louder, never
+#     quieter.
+#
+#     Where it actually runs today, and this is a deliberate stage rather than an
+#     oversight: the class is enforced at PRE-PUSH, and both CI callers pass the
+#     opt-out, because the secret holding the pattern is not set yet. So CI checks
+#     the four other classes and annotates this one as inactive on every run — an
+#     opt-out nobody can see would rot into the permanent state. Setting the
+#     secret arms it with no change to this file or the workflow, since the flag
+#     only decides what happens when the pattern is ABSENT.
+#  3. It scans commit messages and PR text too, via the `check-meta` subcommand.
+#     That is where this particular leak has actually happened; a merged commit
+#     message is also the one surface that cannot be edited afterwards.
+#
+# Word boundaries belong IN the pattern, not here. A bare surname matches inside
+# unrelated words, while a coined company name usually SHOULD match as a substring
+# — only whoever writes the list knows which is which, so `-w` is not imposed on
+# it. `scripts/no-ai-attribution.sh` documents what the careless version costs:
+# its first pattern matched a line of prose that was explaining the rule.
+# Two ways in, because a variable alone would have made this class dead locally:
+# the pre-push hook passes no environment, so nobody would ever have exported it
+# and the guard would have skipped itself on every push — worse than not having
+# the class at all. So the file is the ordinary local path and needs no setup
+# beyond existing; the variable is what CI injects and takes precedence.
+# `<VAR>_FILE` mirrors LYNOX_KNOWLEDGE_PROXY_KEY_FILE, the same shape this repo
+# already uses for operator-private material.
+PRIVATE_NAMES_FILE="${LYNOX_PRIVATE_NAMES_RE_FILE:-${HOME:-}/.lynox/private-names.re}"
+PRIVATE_NAMES_RE="${LYNOX_PRIVATE_NAMES_RE:-}"
+if [ -z "$PRIVATE_NAMES_RE" ] && [ -r "$PRIVATE_NAMES_FILE" ]; then
+  # One pattern per line, `#` comments and blanks dropped, surrounding whitespace
+  # and a stray CR trimmed, joined into an alternation — a list is easier to
+  # maintain and review than one long regex.
+  #
+  # The trim is not cosmetic. Untrimmed, ONE leading space (what happens the first
+  # time somebody indents the list) or a CRLF file leaves the entry syntactically
+  # valid and semantically dead: it silently matches nothing, the guard prints
+  # `clean ✓`, and the name it was supposed to stop walks into the public repo.
+  PRIVATE_NAMES_RE="$(
+    sed -e 's/\r$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$PRIVATE_NAMES_FILE" \
+      | grep -vE '^(#|$)' \
+      | paste -sd'|' - || true
+  )"
+fi
+
+# PREFLIGHT — the pattern is operator-supplied and therefore the likeliest thing
+# in this file to be wrong. Every failure mode below used to end in `clean ✓`,
+# because every grep in the class swallows stderr and drops its exit code:
+#
+#   - an unbalanced parenthesis (`Nordberg AG (CH`) — grep exits 2, the loop never
+#     runs, nothing is printed, CI is green and the name stays in the repo
+#   - an empty alternative (`a||b`, from one trailing `|` in the list) — GNU grep
+#     accepts it and matches EVERY line, so CI goes red on the whole tree while
+#     BSD grep locally calls it an error and stays green. Diagnosing that from a
+#     CI log is nobody's good afternoon, and the obvious way out is to disable
+#     the class.
+#
+# So validate once, up front, and fail LOUDLY. Note what is not printed: the
+# pattern itself. It is the list of names — an error message quoting it would be
+# the leak. grep's own diagnostic is dropped for the same reason (busybox grep
+# echoes the pattern back).
+preflight_names_re() {
+  case "$PRIVATE_NAMES_RE" in
+    '|'*|*'|') echo "❌ public-repo-guard: private-name pattern has an empty alternative (leading or trailing '|')." >&2; return 1 ;;
+    *'||'*)    echo "❌ public-repo-guard: private-name pattern has an empty alternative ('||')." >&2; return 1 ;;
+  esac
+  # grep exits 1 on "no match" — expected against empty input — and >=2 on a bad
+  # regex. Only the latter is a problem. The status has to be captured on the
+  # command itself: read inside an `if` body it would be the condition's status,
+  # and left bare it would trip `set -e` on the perfectly normal no-match.
+  local rc=0
+  printf '' | grep -qE "$PRIVATE_NAMES_RE" 2>/dev/null || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    echo "❌ public-repo-guard: private-name pattern is not a valid extended regex." >&2
+    return 1
+  fi
+  return 0
+}
+
+# Fourth class — internal cross-reference slugs in the doubled-bracket link form.
 # The private repo and the maintainer's own notes address items by slug that way.
 # Such an id resolves to nothing a reader of THIS repo can open, and the slug names
 # themselves expose how private material is filed — so they are noise here at best.
@@ -126,15 +222,150 @@ REF_OPENER="\\[\\[${REF_SLUG_BODY}\$"
 # (allow-file or inline pragma), but flagged everywhere else to catch the
 # recurring "hardcode the staging host as a script/test default" mistake.
 #
-# NOT covered here: the operator's name used as a deployment identifier
-# ("canary rafael", "rafael prod"). ~16 such mentions predate this guard in
-# code comments documenting real incidents; adding the pattern would paint the
-# guard permanently red, which teaches bypassing rather than fixing. Track that
-# cleanup separately — the name itself is legitimately public (LICENSE, README).
+# NOT covered here, and NOT covered by the private-name class above either: the
+# OPERATOR's own name used as a deployment identifier ("canary <name>", "<name>
+# prod"). The header of this class used to estimate ~16 such mentions; measured
+# against the tree on 2026-08-10 it is 32 in that phrasing, out of 251 mentions of
+# the name overall. Adding the pattern would paint the guard permanently red,
+# which teaches bypassing rather than fixing, so that cleanup is tracked
+# separately. The name is legitimately public in its own right (LICENSE,
+# TRADEMARK.md, README, package.json) — what does not belong here is a customer's,
+# and that is what the class above covers.
 SOFT='engine\.lynox\.cloud|control\.lynox\.cloud'
 
+usage() {
+  echo "usage: public-repo-guard.sh [--staged] [--allow-missing-names]" >&2
+  echo "       public-repo-guard.sh check-meta <base-ref> <head-ref>" >&2
+  exit 2
+}
+
 mode_staged=false
-[ "${1:-}" = "--staged" ] && mode_staged=true
+mode_meta=false
+allow_missing_names=false
+meta_base=''
+meta_head=''
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --staged)              mode_staged=true ;;
+    --allow-missing-names) allow_missing_names=true ;;
+    check-meta)
+      mode_meta=true
+      meta_base="${2:-}"
+      meta_head="${3:-}"
+      [ -n "$meta_base" ] && [ -n "$meta_head" ] || usage
+      # A flag where a ref belongs means the caller got the argument order wrong.
+      # Taken literally it becomes an unresolvable ref, and an unresolvable ref
+      # used to read as an empty range, i.e. as "clean".
+      # Checked separately: concatenating them would only ever see the first one's
+      # leading character, so a flag in the HEAD position would slip through.
+      case "$meta_base" in -*) usage ;; esac
+      case "$meta_head" in -*) usage ;; esac
+      shift 2
+      ;;
+    *) usage ;;
+  esac
+  shift
+done
+
+# Resolve the private-name pattern. Fails closed unless the caller opted out —
+# see property 2 in the class comment above for why that direction, not the other.
+names_active=false
+if [ -n "$PRIVATE_NAMES_RE" ]; then
+  preflight_names_re || exit 1
+  names_active=true
+elif $allow_missing_names; then
+  echo "⚠️  public-repo-guard: private-name class SKIPPED — no pattern configured."
+  echo "    Every other class still ran. To arm it, put one regex per line in"
+  echo "    ~/.lynox/private-names.re (or export LYNOX_PRIVATE_NAMES_RE)."
+else
+  echo "❌ public-repo-guard: LYNOX_PRIVATE_NAMES_RE is unset or empty." >&2
+  echo "   Refusing to report a clean run for a scan that did not happen." >&2
+  echo "   In CI: set the secret of that name — for Actions AND for Dependabot," >&2
+  echo "   which has its own secret store and would otherwise land here." >&2
+  echo "   Locally: pass --allow-missing-names, as the pre-push hook does." >&2
+  exit 1
+fi
+
+# check-meta — commit messages in base..head, plus the PR title/body when the
+# caller exports them. Mirrors scripts/no-ai-attribution.sh: only the commits a PR
+# ADDS are scanned, never the whole history, so a name already merged (there are
+# none today) could not turn every future PR red.
+#
+# As everywhere in this class, no matched text is printed: a commit is named by
+# its short SHA alone, never by its subject line.
+if $mode_meta; then
+  meta_hits=0
+  meta_commits=0
+  if $names_active; then
+    # The range is resolved FIRST, and a failure to resolve it is fatal.
+    #
+    # Written as `for sha in $(git rev-list … 2>/dev/null)` this could not fail:
+    # a base that is not in the clone (force-push, GC, an odd fork shape) made
+    # rev-list exit non-zero into a swallowed stderr, `set -e` does not fire on a
+    # command substitution inside a for-list, and the empty result read exactly
+    # like "no commits carry a name". Green, for a scan that never ran.
+    meta_revs=''
+    if ! meta_revs="$(git rev-list "${meta_base}..${meta_head}" 2>/dev/null)"; then
+      echo "❌ public-repo-guard: cannot resolve ${meta_base}..${meta_head}." >&2
+      echo "   Refusing to report a clean range that was never walked. In CI this" >&2
+      echo "   usually means the checkout is too shallow — it needs fetch-depth: 0." >&2
+      exit 1
+    fi
+
+    for sha in $meta_revs; do
+      meta_commits=$((meta_commits + 1))
+      # No -I here (nor below): these greps read a PIPE, where -I cannot do its
+      # job of skipping binary FILES and only adds a way to be silently skipped —
+      # one NUL byte ahead of the name and the input counts as binary, i.e. as no
+      # match. git refuses NUL in a commit message, but PR text is not git's.
+      if git show -s --format='%B' "$sha" | grep -qEi "$PRIVATE_NAMES_RE"; then
+        echo "❌ private name in the message of commit $(git show -s --format='%h' "$sha")"
+        meta_hits=$((meta_hits + 1))
+      fi
+    done
+    # Title and body arrive through the environment, never interpolated into a
+    # command line — the same shape no-ai-attribution.yml uses for its SHAs.
+    if [ -n "${PR_TITLE:-}" ] && printf '%s' "$PR_TITLE" | grep -qEi "$PRIVATE_NAMES_RE"; then
+      echo "❌ private name in the pull-request TITLE"
+      meta_hits=$((meta_hits + 1))
+    fi
+    if [ -n "${PR_BODY:-}" ] && printf '%s' "$PR_BODY" | grep -qEi "$PRIVATE_NAMES_RE"; then
+      echo "❌ private name in the pull-request BODY"
+      meta_hits=$((meta_hits + 1))
+    fi
+  fi
+
+  if [ "$meta_hits" -gt 0 ]; then
+    cat >&2 <<'EOF'
+
+A customer or third-party name reached a commit message or the pull request text.
+This is the PUBLIC repo. Describe the case neutrally instead — "a prod thread",
+"a managed instance" — and keep the name in the private repo or in your notes.
+
+Title and body are editable and should be edited now. A commit message is not,
+once merged, so rewrite it while the branch is still yours:
+
+    git rebase -i <base>          # mark the commits above as `reword`
+    git commit --amend            # for the last commit only
+
+Do NOT bypass this check.
+EOF
+    exit 1
+  fi
+
+  # The count is the point, not decoration: it is the one visible difference
+  # between "walked N commits, found nothing" and "walked nothing at all".
+  # no-ai-attribution.sh:104 prints it for the same reason. And "0 scanned"
+  # must not be able to mean two different things, so the inactive case says so
+  # rather than reporting a count it never had a chance to reach.
+  if $names_active; then
+    echo "public-repo-guard (check-meta): clean ✓ (${meta_commits} commit(s) scanned)"
+  else
+    echo "public-repo-guard (check-meta): class inactive — nothing scanned."
+  fi
+  exit 0
+fi
 
 # Candidate files (tracked text files only). Kept as a function + while-read
 # loop rather than `mapfile` so it runs on macOS's stock bash 3.2 too.
@@ -158,7 +389,26 @@ is_allow_file() {
   return 1
 }
 
+# Print an offending line — the only place any class is allowed to do so.
+#
+# The private-name class withholds its own matches, but that alone was worth
+# nothing: the four older classes each echoed their line verbatim, and one line
+# can trip two classes at once. "Customer X runs on <service host>" is the SOFT
+# class's whole reason to exist, and it would have published the name into a
+# public Actions log while the private-name class dutifully printed a bare line
+# number for the very same line. A guard that leaks what it guards is worse than
+# no guard, so the withholding belongs at the single exit, not in one class.
+emit_line() {
+  local line="$1"
+  if $names_active && printf '%s' "$line" | grep -qEi "$PRIVATE_NAMES_RE" 2>/dev/null; then
+    echo "     [line withheld — it contains a private name; see the private-name hit above]"
+    return
+  fi
+  echo "     ${line}"
+}
+
 violations=0
+name_path_hits=0
 
 # PATHS — the content greps below never see file NAMES. A vendored tooling
 # directory could therefore be committed (and enter the Docker build context)
@@ -170,7 +420,18 @@ while IFS= read -r f; do
     echo "❌ HARD leak marker (operator-local tooling) in PATH: $f"
     violations=$((violations + 1))
   fi
+  # Counted, not named: printing the path would print the name that is in it.
+  if $names_active && printf '%s' "$f" | grep -qEi "$PRIVATE_NAMES_RE"; then
+    name_path_hits=$((name_path_hits + 1))
+    violations=$((violations + 1))
+  fi
 done < <(list_files)
+
+if [ "$name_path_hits" -gt 0 ]; then
+  echo "❌ HARD leak marker (private name) in ${name_path_hits} tracked PATH(s)."
+  echo "   Paths withheld — the name IS the path here, so naming them would leak it."
+  echo "   To locate: git ls-files | grep -Ei \"\$LYNOX_PRIVATE_NAMES_RE\" on your machine."
+fi
 
 while IFS= read -r f; do
   [ -n "$f" ] || continue
@@ -183,7 +444,7 @@ while IFS= read -r f; do
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     echo "❌ HARD leak marker in $f:"
-    echo "     ${line}"
+    emit_line "$line"
     violations=$((violations + 1))
   done < <(grep -nIE "$HARD" "$f" 2>/dev/null || true)
 
@@ -195,9 +456,20 @@ while IFS= read -r f; do
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     echo "❌ HARD leak marker (operator-local tooling) in $f:"
-    echo "     ${line}"
+    emit_line "$line"
     violations=$((violations + 1))
   done < <(grep -nIEi "$HARD_LOCAL_TOOLING" "$f" 2>/dev/null || true)
+
+  # HARD (private names) — `cut` keeps the line NUMBER and drops the line, which is
+  # the whole point: the matched text is the name. Sits above the whole-file allow
+  # with the other HARD classes, so no file can exempt itself from it.
+  if $names_active; then
+    while IFS= read -r n; do
+      [ -n "$n" ] || continue
+      echo "❌ HARD leak marker (private name) at $f:$n"
+      violations=$((violations + 1))
+    done < <(grep -nIEi "$PRIVATE_NAMES_RE" "$f" 2>/dev/null | cut -d: -f1 || true)
+  fi
 
   # Whole-file allow applies from here down. It sits ABOVE the reference loops on
   # purpose: those match a bracket shape that legal content can produce, and an
@@ -215,7 +487,7 @@ while IFS= read -r f; do
       *"$PRAGMA"*) continue ;;
     esac
     echo "❌ internal cross-reference in $f (state the reason inline instead):"
-    echo "     ${line}"
+    emit_line "$line"
     violations=$((violations + 1))
   done < <(grep -nIE "$INTERNAL_REF" "$f" 2>/dev/null || true)
 
@@ -235,7 +507,7 @@ while IFS= read -r f; do
       *"$PRAGMA"*) continue ;;
     esac
     echo "❌ internal cross-reference opened in $f and continued on the next line:"
-    echo "     ${line}"
+    emit_line "$line"
     violations=$((violations + 1))
   done < <(grep -nIE "$REF_OPENER" "$f" 2>/dev/null || true)
 
@@ -247,7 +519,7 @@ while IFS= read -r f; do
       *"$PRAGMA"*) continue ;;  # inline-allowed
     esac
     echo "⚠️  internal hostname in $f (add '${PRAGMA}' with a reason if intentional):"
-    echo "     ${line}"
+    emit_line "$line"
     violations=$((violations + 1))
   done < <(grep -nIE "$SOFT" "$f" 2>/dev/null || true)
 done < <(list_files)
@@ -259,6 +531,10 @@ if [ "$violations" -gt 0 ]; then
   echo "state the reason inline instead of citing an id. If the mention is genuinely"
   echo "public-safe, annotate the line with '${PRAGMA}: <reason>' — accepted for the"
   echo "hostname and cross-reference classes, never for a HARD leak marker."
+  echo ""
+  echo "For a private-name hit: describe the case neutrally — 'a prod thread', 'a"
+  echo "managed instance' — and keep the name in the private repo or your notes."
+  echo "Fixtures and examples take an unmistakably fictional name, not a plausible one."
   exit 1
 fi
 

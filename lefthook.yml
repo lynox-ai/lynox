@@ -26,7 +26,15 @@ pre-push:
       # CP DB schema, SSH-as-root chains) from reaching this PUBLIC repo —
       # the class gitleaks doesn't catch. Scans the whole tracked tree; the
       # CI job re-runs it so `git push --no-verify` can't slip a leak past.
-      run: bash scripts/public-repo-guard.sh
+      #
+      # --allow-missing-names downgrades ONE class — customer/third-party names,
+      # whose pattern deliberately lives outside this repo — to a warning when
+      # LYNOX_PRIVATE_NAMES_RE is not set locally. Without the opt-out that class
+      # fails closed, which is right for CI (where the secret is always present)
+      # and wrong here: a fresh clone would be unable to push at all, and an
+      # unpushable hook teaches --no-verify. Set the variable locally and this
+      # line changes nothing. Every other class runs either way.
+      run: bash scripts/public-repo-guard.sh --allow-missing-names
       skip:
         - merge
         - rebase

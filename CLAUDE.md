@@ -115,8 +115,14 @@ pre-push for what actually runs at pre-commit):
 - **pre-commit**: gitleaks, pattern-scan, typecheck, hex-guard, token-contract, shape-contract.
   gitleaks/pattern-scan belong here, not pre-push: they read the *index*, which is empty at
   push time — at pre-push they were no-ops.
-- **pre-push**: security-scan, public-repo-guard (internal-infra leaks), drift-guard (doc/code
-  drift), positioning-guard (copy vs POSITIONING.md).
+- **pre-push**: security-scan, public-repo-guard (internal-infra leaks + customer names),
+  drift-guard (doc/code drift), positioning-guard (copy vs POSITIONING.md).
+  The guard's customer-name class needs a pattern that deliberately does NOT live in this repo:
+  put one regex per line in `~/.lynox/private-names.re` (or export `LYNOX_PRIVATE_NAMES_RE`).
+  Word boundaries belong in the pattern — a bare surname matches inside unrelated words.
+  **That class is enforced at pre-push only.** CI passes `--allow-missing-names` and annotates
+  it as inactive on every run, because the `LYNOX_PRIVATE_NAMES_RE` secret is not set. Setting
+  it (Actions **and** Dependabot — separate stores) arms the class in CI with no code change.
 
 Every hook above re-runs as a **required CI check**, so `git commit/push --no-verify` cannot
 bypass any of them — that is what makes them gates rather than suggestions. (`security-scan` and
