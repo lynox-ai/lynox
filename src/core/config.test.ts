@@ -51,6 +51,7 @@ describe('Config', () => {
     delete process.env['LYNOX_NETWORK_POLICY'];
     delete process.env['LYNOX_NETWORK_ALLOWED_HOSTS'];
     delete process.env['LYNOX_TIER_SET_JSON'];
+    delete process.env['LYNOX_TIER_PRESET'];
     delete process.env['LYNOX_BILLING_TIER'];
     delete process.env['LYNOX_BLOCKED_MODEL_IDS'];
     // Renamed vars (canonical + legacy) — keep both clean so alias tests don't leak
@@ -192,6 +193,50 @@ describe('Config', () => {
       const config = loadConfig();
       expect(config.tier_set?.deep?.model_id).toBe('my-own-model'); // env slot won
       expect(config.tier_set?.balanced?.model_id).toBe('mistral-medium-2604'); // preset slot kept
+    });
+
+    it('a CP-pinned LYNOX_TIER_PRESET expands like a config.json one', async () => {
+      // The reason this var exists: `LYNOX_MANAGED_FIREWORKS_ENABLED` only UNLOCKS
+      // the Fireworks slot — nothing activated it, and the control plane had no way
+      // to name a preset at all. A tenant therefore sat on the default Anthropic
+      // routing while a paid-for, DPA-disclosed provider went unused.
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.routing_mode).toBe('hybrid');
+      expect(config.tier_set?.deep?.api_base_url).toContain('fireworks');
+    });
+
+    it('the CP pin OVERRIDES a config.json preset — it is a lock, not a seed', async () => {
+      // Deliberately unlike `default_tier`, which only seeds an empty field. The
+      // preset picks the PROVIDER, and on the CP-keyed tiers the provider set is
+      // both DPA-disclosed and CP-paid, so a tenant cannot quietly route around it.
+      writeUserConfig({ tier_preset: 'balanced' });
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      // `efficient` puts Mistral in fast; `balanced` would have put Anthropic there.
+      expect(config.tier_set?.fast?.provider).toBe('openai');
+      expect(config.tier_set?.deep?.api_base_url).toContain('fireworks');
+    });
+
+    it('an unset or blank LYNOX_TIER_PRESET leaves the config.json preset alone', async () => {
+      // Absence must be the pre-change path exactly — an older engine ignoring the
+      // var and a newer one seeing it empty have to agree, or a rollout drifts.
+      writeUserConfig({ tier_preset: 'balanced' });
+      process.env['LYNOX_TIER_PRESET'] = '   ';
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_set?.deep).toEqual({ provider: 'anthropic', model_id: 'claude-sonnet-5' });
+    });
+
+    it('an unknown CP-pinned preset FAILS CLOSED too', async () => {
+      // The pin goes through the same validation as a config.json name. If the CP
+      // could name a preset that does not exist and get a silent standard boot, a
+      // fleet-wide rollout would look successful while routing nothing.
+      process.env['LYNOX_TIER_PRESET'] = 'ultra-cheap';
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/Unknown tier_preset "ultra-cheap"/);
     });
 
     it('an unknown tier_preset name FAILS CLOSED (throws, not a silent standard boot)', async () => {
