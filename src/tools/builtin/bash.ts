@@ -3,6 +3,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { IsolationConfig } from '../../types/security.js';
 import { getWorkspaceCwd } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES, DEFAULT_BASH_TIMEOUT_MS } from '../../core/constants.js';
+import { assertBashEgressAllowed } from './bash-egress.js';
 
 interface BashInput {
   command: string;
@@ -146,6 +147,15 @@ export const bashTool: ToolEntry<BashInput> = {
   // Input comes from the LLM agent, not untrusted external users.
   handler: async (input: BashInput, agent: IAgent): Promise<string> => {
     const safeEnv = buildSafeEnv(agent.isolation);
+
+    // The shell is an egress surface like any other. Refusals are returned as
+    // text rather than thrown so the agent reads them and adapts, which is the
+    // same shape every other blocked tool uses.
+    try {
+      assertBashEgressAllowed(input.command, agent.toolContext);
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
 
     try {
       const output = execSync(input.command, {

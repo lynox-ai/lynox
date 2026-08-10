@@ -93,6 +93,55 @@ describe('bashTool', () => {
       expect(((e as Error).cause as Error).message).toBe('string error');
     }
   });
+
+  // The egress rules themselves are covered in bash-egress.test.ts. What these
+  // cover is only that the handler CALLS them — a module full of green tests
+  // proves nothing if nothing is wired to it. The strongest available fact is
+  // that a refused command never reaches execSync at all.
+  describe('network policy is enforced before the shell runs', () => {
+    const agentWith = (networkPolicy: string) => ({
+      toolContext: {
+        networkPolicy,
+        allowedHosts: undefined,
+        allowedWildcards: [],
+        enforceHttps: false,
+      },
+    }) as never;
+
+    it('refuses a network client under deny-all without executing it', async () => {
+      mockedExecSync.mockReturnValue('should never run');
+      const result = await bashTool.handler(
+        { command: 'curl https://example.com' }, agentWith('deny-all'),
+      );
+      expect(result).toMatch(/air-gapped isolation/);
+      expect(mockedExecSync).not.toHaveBeenCalled();
+    });
+
+    it('refuses a TLS bypass even under allow-all, without executing it', async () => {
+      mockedExecSync.mockReturnValue('should never run');
+      const result = await bashTool.handler(
+        { command: 'curl -sk https://example.com' }, agentWith('allow-all'),
+      );
+      expect(result).toMatch(/disables TLS certificate verification/);
+      expect(mockedExecSync).not.toHaveBeenCalled();
+    });
+
+    it('runs an ordinary command untouched under allow-all', async () => {
+      mockedExecSync.mockReturnValue('ok');
+      const result = await bashTool.handler(
+        { command: 'curl https://example.com' }, agentWith('allow-all'),
+      );
+      expect(result).toBe('ok');
+      expect(mockedExecSync).toHaveBeenCalledOnce();
+    });
+
+    it('returns the refusal as text rather than throwing', async () => {
+      mockedExecSync.mockReturnValue('should never run');
+      await expect(bashTool.handler(
+        { command: 'curl https://example.com' }, agentWith('deny-all'),
+      )).resolves.toContain('Blocked:');
+    });
+  });
 });
 
 describe('buildSafeEnv', () => {
