@@ -449,6 +449,22 @@ export function loadConfig(): LynoxUserConfig {
   // key-custody flag (managed/managed_pro) so the managed tier_set allowlist can
   // gate on it. Canonical LYNOX_BILLING_TIER, legacy LYNOX_MANAGED_MODE alias.
   if (cpSuppliesLLMKey(readEnvAlias('LYNOX_BILLING_TIER'))) merged.cp_supplied = true;
+  // CP-pinned preset (`LYNOX_TIER_PRESET`) — a LOCK, not a seed: it overwrites a
+  // config.json `tier_preset` rather than only filling an empty one. That is the
+  // opposite of `default_tier` above and deliberate. The preset decides WHICH
+  // PROVIDER serves each band, and on the CP-keyed tiers the provider set is both
+  // DPA-disclosed (sub-processors) and paid for by the control plane — so it is an
+  // operator decision, not a tenant preference. The CP emits it only for those
+  // tiers; unset leaves routing exactly as it was, which is what makes an older
+  // engine ignoring this var the pre-change behaviour rather than a silent drift.
+  //
+  // Placed BEFORE the expansion below so a pinned name goes through the same
+  // fail-closed validation as a config.json one — an unknown preset must throw
+  // for the CP too, not resolve to something else.
+  const envPreset = process.env['LYNOX_TIER_PRESET'];
+  if (envPreset !== undefined && envPreset.trim() !== '') {
+    merged.tier_preset = envPreset.trim();
+  }
   // Named hybrid strategy (model-presets, W2): a `tier_preset` from config.json
   // materializes to {routing_mode:'hybrid', tier_set} from the shared TIER_PRESETS
   // SoT. This is the config.json SOURCE path — placed BEFORE the LYNOX_TIER_SET_JSON
