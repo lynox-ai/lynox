@@ -418,7 +418,24 @@ export class Session {
     this._createAgent();
 
     // Each Session subscribes once to record tool calls against its own run.
-    // The closures read session-local fields, so concurrent sessions don't interfere.
+    //
+    // ⚠ This comment used to end "the closures read session-local fields, so
+    // concurrent sessions don't interfere". The closures ARE session-local; their
+    // INVOCATION is not, which is the opposite conclusion. `lynox:tool:end` is a
+    // process-global diagnostics channel, every Session subscribes here and none
+    // ever unsubscribes, and the published payload (agent.ts:2661/2679) carries
+    // no session or run id — so each subscriber counts every tool call in the
+    // process while its own `currentRunId` happens to be set. A WorkerLoop task
+    // running alongside a chat (worker-loop.ts creates its own Session), a
+    // pipeline run, or a spawned child therefore inflates the chat run's count
+    // AND inserts run_tool_calls rows under the wrong run id. A spawned child, in
+    // the same way, can never record calls against its OWN run row.
+    //
+    // The fix is a run/session id in the payload plus a filter here, or an
+    // injected recorder — the pattern orchestrator/runner.ts:660 already uses
+    // (an explicit per-step recorder instead of the global channel). Not done in
+    // the change that wrote this note, which only stopped the failure path from
+    // dropping the number the success path already kept.
     const runHistory = engine.getRunHistory();
     if (runHistory) {
       setupHistorySubscriptions(
@@ -1212,6 +1229,28 @@ export class Session {
             // Display, like the success path: the helper already debited itself, so this
             // number must include it while `onAfterRun` below must not.
             costUsd: failedCostUsd + (this.agent?.getHelperCostUsd?.() ?? 0),
+            // The tool calls this run made before it failed. The success path has
+            // always stamped this; the failure path did not, so a failed run
+            // reported 0 tools no matter how much work it had done. That reads as
+            // "this run did nothing and still cost money" in exactly the place the
+            // number matters most — a cost review looks at the priciest runs
+            // first, and those are disproportionately the ones that failed. A real
+            // case: a 28-minute run that made 60 http_request calls and died on
+            // the per-run cost ceiling was recorded as 0 tool calls, and the first
+            // reading of the day blamed a runaway loop rather than a ceiling that
+            // cut off genuine work (war, 2026-08-10).
+            //
+            // ⚠ This makes the failure path AS accurate as the success path — not
+            // accurate. `runToolCallSeq` is fed by a subscription on the global
+            // `lynox:tool:end` channel whose payload carries no session or run id
+            // (agent.ts:2661/2679), so under concurrency it counts tool calls
+            // belonging to OTHER sessions — a WorkerLoop task running alongside a
+            // chat, or a spawned child, lands on whichever run has `currentRunId`
+            // set. Both paths have always shared that flaw; stamping it here does
+            // not add it, and leaving the field blank did not avoid it. The
+            // attribution fix belongs in the channel payload, not in this call.
+            // See the note at the subscription site (session.ts:420).
+            toolCallCount: this.runToolCallSeq,
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
             status: isAbort ? 'aborted' : 'failed',
