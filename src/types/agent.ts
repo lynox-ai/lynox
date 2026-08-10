@@ -72,6 +72,28 @@ export interface PromptText {
 export type PromptUserFn = (question: string | PromptText, options?: string[], meta?: PromptMeta) => Promise<string>;
 export type PromptTabsFn = (questions: TabQuestion[], meta?: PromptMeta) => Promise<string[]>;
 
+/**
+ * Sink for one completed tool call — see {@link AgentConfig.recordToolCall}.
+ *
+ * `runId` is the run the CALLER was working under when it made the call, which
+ * is why it travels with the call instead of being read from ambient state: a
+ * spawned child runs concurrently with its parent, so anything the sink looked
+ * up at write time would already be the wrong answer. Absent (a bare Agent with
+ * no run) means the sink decides — the Session substitutes its own open run so
+ * an unattributed call keeps landing where it always did.
+ *
+ * Recording is best-effort throughout: a sink that throws must never break the
+ * run it is observing.
+ */
+export type ToolCallRecorder = (call: {
+  runId?: string | undefined;
+  toolName: string;
+  inputJson: string;
+  outputJson: string;
+  durationMs: number;
+  isError: boolean;
+}) => void;
+
 /** Four distinct outcomes for an ask_secret prompt:
  *  - 'saved'           : user submitted, vault accepted
  *  - 'canceled'        : user clicked cancel
@@ -224,6 +246,10 @@ export interface IAgent {
   promptMailConnect?: PromptMailConnectFn | undefined;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
+  /** Sink this agent's finished tool calls are handed to — read by `spawn_agent`
+   *  so a child inherits it and books onto its own run. See
+   *  {@link ToolCallRecorder}. */
+  recordToolCall?: ToolCallRecorder | undefined;
   /** Wave 1.2: has this run seen wrapped untrusted content? Read by the memory tools
    *  (`sourceUntrusted` evidence) and by spawn to propagate a child's taint to a parent
    *  that shares its Memory. */

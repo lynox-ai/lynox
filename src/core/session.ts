@@ -24,6 +24,7 @@ import type {
   MailConnectPromptData,
   PromptMeta,
   PromptText,
+  ToolCallRecorder,
 } from '../types/index.js';
 import { effectiveContextWindow } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
@@ -266,6 +267,15 @@ export class Session {
    *  the run's duration; cleared in the run() finally. */
   private _onPersistCheckpoint: (() => void) | null = null;
   private runToolCallSeq = 0;
+  /** Per-run sequence numbers for calls booked onto a run that is NOT this
+   *  Session's own — today that means spawned children, each numbering its own
+   *  row from 0. Bounded by the number of children in one run and cleared with
+   *  the run. */
+  private _foreignRunSeq = new Map<string, number>();
+  /** The one sink for this Session's tool-call persistence, injected into the
+   *  agent (and inherited by any child it spawns). Null when no RunHistory is
+   *  configured. See the construction site for why this replaced a subscriber. */
+  private _toolCallRecorder: ToolCallRecorder | null = null;
   private _userWaitMs = 0;
   private _runToolNames = new Set<string>();
   private _retrievedMemoryIds: string[] = [];
@@ -417,34 +427,63 @@ export class Session {
     }
     this._createAgent();
 
-    // Each Session subscribes once to record tool calls against its own run.
+    // Tool-call persistence is INJECTED into the agent, not subscribed from a
+    // channel. The agent hands each finished call to this sink together with the
+    // run it was working under, which is the one thing a listener could never
+    // determine for itself.
     //
-    // ⚠ This comment used to end "the closures read session-local fields, so
-    // concurrent sessions don't interfere". The closures ARE session-local; their
-    // INVOCATION is not, which is the opposite conclusion — `lynox:tool:end` is a
-    // process-global channel, so every Session's callback runs for every tool
-    // call in the process. The thread id on the event is what now separates them
-    // (see the filter in engine-init); before it existed, a background task's
-    // calls were recorded against whatever run this Session had open.
+    // What this replaced, and why it had to: `lynox:tool:end` is a
+    // `node:diagnostics_channel`, so every Session's callback ran for every tool
+    // call in the PROCESS. Each Session then booked whatever arrived onto its own
+    // open run. A thread-id filter narrowed that to one conversation, but could
+    // not fix a spawned child — a child shares its parent's thread by design, so
+    // no filter can tell the two apart, and its calls landed on the parent's run.
+    // Nothing ever unsubscribed either, so the callback outlived the Session.
     //
-    // Still true and NOT fixed here: nothing unsubscribes, so a Session's
-    // callback outlives the Session, and a spawned child's calls are counted on
-    // the parent's run rather than its own.
-    //
-    // Both of those want one owner for the event stream instead of N listeners
-    // filtering it — an injected recorder, the way orchestrator/runner.ts:660
-    // already does it. That is a change with its own consumers (the orchestrator
-    // writes step calls explicitly, and spawn would have to start stamping the
-    // child's count), so it is deliberately not bundled with this filter.
+    // The sink resolves neither problem by guessing: the child arrives carrying
+    // its own run id, and the closure dies with the Session that made it.
     const runHistory = engine.getRunHistory();
     if (runHistory) {
-      setupHistorySubscriptions(
-        runHistory,
-        () => this.currentRunId,
-        () => this.runToolCallSeq++,
-        (ms: number) => { this._userWaitMs += ms; },
-        () => this.agent?.currentThreadId,
-      );
+      this._toolCallRecorder = (call): void => {
+        // `call.runId` is the CALLER's run — a spawned child's own row. Absent
+        // means an agent with no run of its own, which keeps landing on this
+        // Session's open run exactly as it did before.
+        const runId = call.runId ?? this.currentRunId;
+        if (!runId) return;
+        // ask_user blocks on a human. The wall-clock is subtracted from this
+        // run's duration even when a CHILD raised the prompt, because this run
+        // really did sit idle waiting for the same answer.
+        if (call.toolName === 'ask_user') this._userWaitMs += call.durationMs;
+        // Sequence numbers are per-run, so a child starts at 0 on its own row
+        // instead of continuing the parent's numbering.
+        //
+        // `runToolCallSeq` advances ONLY for this Session's own run because it
+        // is also `runs.tool_call_count`. Now that a child's calls live on the
+        // child's row, counting them here too would claim them twice — once as
+        // rows under the child, once as a number under the parent. A run's own
+        // count plus its descendants' is how spend is already reported
+        // (`getDescendantCostUsd`); the two now agree.
+        let sequenceOrder: number;
+        if (runId === this.currentRunId) {
+          sequenceOrder = this.runToolCallSeq++;
+        } else {
+          sequenceOrder = this._foreignRunSeq.get(runId) ?? 0;
+          this._foreignRunSeq.set(runId, sequenceOrder + 1);
+        }
+        try {
+          runHistory.insertToolCall({
+            runId,
+            toolName: call.toolName,
+            inputJson: call.inputJson || '{}',
+            outputJson: call.outputJson,
+            durationMs: call.durationMs,
+            sequenceOrder,
+          });
+        } catch {
+          // Fire-and-forget
+        }
+      };
+      setupHistorySubscriptions(runHistory);
     }
 
     // Create persistent thread record (idempotent — OR IGNORE)
@@ -774,6 +813,7 @@ export class Session {
     const model = runSnap.modelId;
     const startTime = Date.now();
     this.runToolCallSeq = 0;
+    this._foreignRunSeq.clear();
     this._userWaitMs = 0;
     this._runToolNames.clear();
     this._retrievedMemoryIds = [];
@@ -833,6 +873,10 @@ export class Session {
     // Thread run ID and session ID to agent so spawn tool and memory extraction can use them
     this.agent.currentRunId = this.currentRunId ?? undefined;
     this.agent.currentThreadId = this.sessionId;
+    // Same reason as `currentRunId` below/above: set HERE rather than at agent
+    // construction, so an agent rebuilt mid-session (`_recreateAgent`, e.g. on a
+    // model switch) does not silently stop recording its tool calls.
+    this.agent.recordToolCall = this._toolCallRecorder ?? undefined;
     // Wave 1.2 replay (c): mark an internal (compaction summary) run so its end-of-run
     // extraction abstains — the summary is machinery, not user knowledge. Threaded HERE,
     // after every `_recreateAgent` above, so a rebuilt agent still carries it (mirrors
@@ -1241,16 +1285,11 @@ export class Session {
             // reading of the day blamed a runaway loop rather than a ceiling that
             // cut off genuine work (war, 2026-08-10).
             //
-            // ⚠ This makes the failure path AS accurate as the success path — not
-            // accurate. `runToolCallSeq` is fed by a subscription on the global
-            // `lynox:tool:end` channel whose payload carries no session or run id
-            // (agent.ts:2661/2679), so under concurrency it counts tool calls
-            // belonging to OTHER sessions — a WorkerLoop task running alongside a
-            // chat, or a spawned child, lands on whichever run has `currentRunId`
-            // set. Both paths have always shared that flaw; stamping it here does
-            // not add it, and leaving the field blank did not avoid it. The
-            // attribution fix belongs in the channel payload, not in this call.
-            // See the note at the subscription site (session.ts:420).
+            // This is now this run's OWN tool calls and nothing else. The
+            // caveat that stood here — that the count came off a process-global
+            // channel and so could include another session's or a child's calls
+            // — was resolved by moving persistence to the injected sink: it
+            // advances this counter only for calls carrying this run's id.
             toolCallCount: this.runToolCallSeq,
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,

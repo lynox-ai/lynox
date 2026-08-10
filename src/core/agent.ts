@@ -22,6 +22,7 @@ import type {
   PromptTabsFn,
   PromptSecretFn,
   PromptMailConnectFn,
+  ToolCallRecorder,
   CacheProfile,
 } from '../types/index.js';
 import { getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile } from '../types/index.js';
@@ -228,6 +229,8 @@ export class Agent implements IAgent {
   promptMailConnect?: PromptMailConnectFn | undefined;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
+  /** See `AgentConfig.recordToolCall` — the one owner of tool-call persistence. */
+  recordToolCall?: ToolCallRecorder | undefined;
   readonly spawnDepth: number;
 
   /**
@@ -805,6 +808,7 @@ export class Agent implements IAgent {
     this.maxContextWindowTokens = config.maxContextWindowTokens;
     this.nativeContextWindow = config.nativeContextWindow;
     this.currentRunId = config.currentRunId;
+    this.recordToolCall = config.recordToolCall;
     this.spawnDepth = config.spawnDepth ?? 0;
     this.briefing = config.briefing;
     this.autonomy = config.autonomy;
@@ -2399,6 +2403,33 @@ export class Agent implements IAgent {
     return result;
   }
 
+  /**
+   * Hand one finished tool call to the injected sink, stamped with the run this
+   * agent is working under.
+   *
+   * The `??` is what makes a child land on its own run: a spawned Agent is
+   * constructed with its own `currentRunId`, while an ad-hoc Agent has none and
+   * falls through to whatever the sink decides. Reading the id here — at call
+   * time, from the agent that made the call — is the whole point of the sink
+   * over a broadcast channel, where the reader could only ever consult its own
+   * ambient run and guess.
+   *
+   * Swallows sink failures: observability must never break the run it observes.
+   */
+  private _recordToolCall(toolName: string, inputJson: string, outputJson: string, durationMs: number, isError: boolean): void {
+    if (!this.recordToolCall) return;
+    try {
+      this.recordToolCall({
+        runId: this.currentRunId,
+        toolName,
+        inputJson,
+        outputJson,
+        durationMs: Math.round(durationMs),
+        isError,
+      });
+    } catch { /* fire-and-forget */ }
+  }
+
   private async _executeOneInner(tc: BetaToolUseBlock): Promise<BetaToolResultBlockParam> {
     // Defense-in-depth: even if a prompt-injected tool_use block names an
     // excluded tool, refuse here. The LLM-facing tool list already strips
@@ -2658,13 +2689,13 @@ export class Agent implements IAgent {
       const auditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawInput = JSON.stringify(auditInput).slice(0, 2000);
       const safeInput = this.secretStore ? this.secretStore.maskSecrets(rawInput) : rawInput;
-      // `threadId` says which conversation this call belongs to. `lynox:tool:end`
-      // is process-global and every Session subscribes, so without it a
-      // subscriber cannot tell its own agent's calls from anyone else's and books
-      // whatever arrives onto its own open run — see the filter in engine-init.
-      // A spawned child inherits the parent's `currentThreadId`, so it stays on
-      // the parent's side of that filter, which is where its calls have always
-      // been counted.
+      // Persist through the injected sink, which knows the run because WE tell
+      // it: `currentRunId` is this agent's own run, so a spawned child books
+      // onto its own row instead of its parent's. The channel below stays for
+      // diagnostics only (Bugsink breadcrumbs, the debug subscriber) — it no
+      // longer writes history, so its process-global reach stops being a
+      // correctness problem. `threadId` remains on it for those consumers.
+      this._recordToolCall(tc.name, safeInput, '', duration, false);
       channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: true, input: safeInput, threadId: this.currentThreadId });
 
       if (this.onStream) {
@@ -2683,6 +2714,9 @@ export class Agent implements IAgent {
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawErrInput = JSON.stringify(errAuditInput).slice(0, 2000);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
+      // A failed call is recorded like a successful one — it consumed the same
+      // budget and counts against the same rate limits.
+      this._recordToolCall(tc.name, safeErrInput, message, duration, true);
       channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: message, input: safeErrInput, threadId: this.currentThreadId });
 
       if (this.onStream) {

@@ -5,7 +5,7 @@ import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 import type { ModelTier, ThinkingMode, EffortLevel, LLMProvider, ModelProfile } from './models.js';
 import type { ProviderKey } from './provider-registry.js';
 import type { ToolEntry, StreamHandler } from './tools.js';
-import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMailConnectFn } from './agent.js';
+import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMailConnectFn, ToolCallRecorder } from './agent.js';
 import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';
 import type { AutonomyLevel, PreApprovalSet, CostGuardConfig } from './modes.js';
@@ -54,6 +54,23 @@ export interface AgentConfig {
   gcpProjectId?:       string | undefined;
   gcpRegion?:          string | undefined;
   currentRunId?:       string | undefined;
+  /**
+   * Sink for this agent's own tool calls — the ONE owner of tool-call
+   * persistence. The agent calls it with the run id it is currently working
+   * under, so a spawned child (which carries its OWN `currentRunId`) books onto
+   * its own run instead of the parent's.
+   *
+   * This replaces a process-global `lynox:tool:end` subscriber per Session.
+   * `node:diagnostics_channel` broadcasts to every subscriber in the process,
+   * so N Sessions each saw all N Sessions' calls and each had to filter by
+   * thread id to guess which were its own — a guess that could not be right for
+   * a child, which shares its parent's thread by design. Injecting the sink
+   * removes the guess: whoever makes the call already knows where it belongs.
+   *
+   * The channel itself stays, for diagnostics with no persistence role
+   * (Bugsink breadcrumbs, the debug subscriber).
+   */
+  recordToolCall?:     ToolCallRecorder | undefined;
   spawnDepth?:         number | undefined;
   briefing?:           string | undefined;
   autonomy?:           AutonomyLevel | undefined;

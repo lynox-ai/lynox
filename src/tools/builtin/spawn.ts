@@ -617,10 +617,19 @@ async function executeThinker(
     promptSecret: parentAgent.promptSecret,
     promptTabs: parentAgent.promptTabs,
     // T2-X1 part 4: pass the pre-minted runId so the constructor stamps it
-    // onto the child and the child's downstream code (memory writes,
-    // tool-call recording in engine-init's toolEnd subscriber, etc.) can
-    // attribute work to this run.
+    // onto the child and the child's downstream code (memory writes, tool-call
+    // recording) can attribute work to this run.
     currentRunId: childRunId,
+    // Inherit the parent's tool-call sink. Together with `currentRunId` above,
+    // this is what finally puts a child's calls on the CHILD's row: the sink
+    // books whatever run id the caller hands it, and the child hands its own.
+    //
+    // Inheriting rather than building a fresh sink is deliberate — the parent's
+    // closure holds the Session's RunHistory and per-run sequence counters, and
+    // it is also the thing that keeps counting these calls toward the
+    // http_request and mail rate limits. A child with no sink would run its
+    // fan-out unmetered.
+    recordToolCall: parentAgent.recordToolCall,
   };
 
   // Single try wraps both `new Agent(...)` AND `send(...)` so the runs-row
