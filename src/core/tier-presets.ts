@@ -36,6 +36,8 @@
  * the main runs every turn.
  */
 import type { ModelTier, TierSet, TierSlot } from '../types/index.js';
+import type { TierPresetName } from '../contract/vocab.js';
+import { isTierPresetName } from '../contract/vocab.js';
 import { MISTRAL_API_BASE } from '../types/index.js';
 
 /** Canonical Fireworks endpoint — mirrors the catalog `base_url_default`
@@ -69,7 +71,13 @@ const anthropic = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 
 const mistral = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'openai', model_id, api_base_url: MISTRAL_API_BASE });
 const fireworks = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'openai', model_id, api_base_url: FIREWORKS_API_BASE });
 
-export const TIER_PRESETS: Record<string, TierPreset> = {
+// Keyed on the CONTRACT's name type, not `string`: that is what makes the two
+// halves impossible to drift. A preset added here without a name in
+// `TIER_PRESET_NAMES` fails to build, and a name added there without a preset
+// here fails too (a Record must be total). The control plane validates incoming
+// names against that same list, so a typo is a 400 rather than a tenant whose
+// container will not boot.
+export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   // ⚡ efficient — cheapest coherent set: EU Mistral fast + the cheapest R1/R3+R9
   // floor-clearing main (mistral-medium; Ministral 14B was BELOW the floor — WS2), a
   // cheap 1M-context CN-via-Fireworks model for deep/big-context.
@@ -116,7 +124,12 @@ export function expandTierPreset(name: string): { routing_mode: 'hybrid'; tier_s
   // via bracket access, which would slip past an unknown-name guard and expand to a
   // garbage `{routing_mode: undefined, tier_set: undefined}` (a silent routing wipe).
   if (!Object.hasOwn(TIER_PRESETS, name)) return undefined;
+  // `isTierPresetName` narrows to the contract's union, which is what lets the
+  // lookup below be a typed index instead of a `string` one. `Object.hasOwn`
+  // stays: the two answer different questions — hasOwn keeps a prototype-chain
+  // name out, the narrowing keeps the table's key type honest — and the
+  // prototype guard is the one with the security reason above.
+  if (!isTierPresetName(name)) return undefined;
   const preset = TIER_PRESETS[name];
-  if (!preset) return undefined;
   return { routing_mode: preset.routing_mode, tier_set: preset.tier_set };
 }
