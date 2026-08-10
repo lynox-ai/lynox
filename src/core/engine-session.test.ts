@@ -612,6 +612,76 @@ describe('Engine + Session (Orchestrator)', () => {
       );
     });
 
+    it('a tool call from another conversation is not recorded on this run', async () => {
+      // `lynox:tool:end` is process-global and every Session subscribes, so a
+      // WorkerLoop task running next to a chat used to have its calls written
+      // onto the chat's run — inflating that run's tool_call_count and putting
+      // rows in its history that it never made. The thread id on the event is
+      // what separates them.
+      const { engine, session } = await createEngineAndSession();
+      mockSend.mockImplementationOnce(async () => {
+        channels.toolEnd.publish({ name: 'http_request', agent: 'worker', duration: 9, success: true, threadId: 'a-different-conversation' });
+        throw new Error('boom with a foreign call in flight');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom with a foreign call in flight');
+
+      const rh = engine.getRunHistory()!;
+      expect(rh.insertToolCall).not.toHaveBeenCalled();
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'failed', toolCallCount: 0 }),
+      );
+    });
+
+    it('a sub-agent\'s tool call IS still recorded — it shares the parent\'s thread', async () => {
+      // The filter must not drop sub-agent calls. A spawned child inherits the
+      // parent's `currentThreadId`, so it stays on this side of the filter and
+      // keeps being counted on the parent's run, exactly as before this change.
+      //
+      // This is a rate-limit invariant, not a cosmetic one: the same rows feed
+      // `getToolCallCountSince`, which ENFORCES the http_request (200/hr,
+      // 2000/day) and mail send limits. If a fan-out of sub-agents stopped being
+      // counted, a spawn batch could run straight past a limit that still looked
+      // intact from the outside.
+      const { engine, session } = await createEngineAndSession();
+      const threadId = (session as unknown as { agent?: { currentThreadId?: string } }).agent?.currentThreadId;
+      mockSend.mockImplementationOnce(async () => {
+        channels.toolEnd.publish({ name: 'http_request', agent: 'triage-child', duration: 4, success: true, threadId });
+        throw new Error('boom with a child call in flight');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom with a child call in flight');
+
+      const rh = engine.getRunHistory()!;
+      expect(rh.insertToolCall).toHaveBeenCalledWith(
+        expect.objectContaining({ toolName: 'http_request' }),
+      );
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'failed', toolCallCount: 1 }),
+      );
+    });
+
+    it('an event with no thread id is recorded as before', async () => {
+      // Ad-hoc Agents outside a Session have no thread, and a publisher that
+      // predates this field sends none. Absence is not evidence of foreignness,
+      // so those keep landing where they always did rather than being dropped.
+      const { engine, session } = await createEngineAndSession();
+      mockSend.mockImplementationOnce(async () => {
+        channels.toolEnd.publish({ name: 'bash', agent: 'main', duration: 2, success: true });
+        throw new Error('boom with an unattributed call in flight');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom with an unattributed call in flight');
+
+      const rh = engine.getRunHistory()!;
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'failed', toolCallCount: 1 }),
+      );
+    });
+
     it('the count on a failed run comes from real tool events, not a set field', async () => {
       // The two tests above set `runToolCallSeq` directly, so they pin the
       // counter→updateRun half and nothing else: the increment closure at
