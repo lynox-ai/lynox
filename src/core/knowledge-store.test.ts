@@ -1032,3 +1032,173 @@ describe('the always-loaded profile block and who may reach into it', () => {
     expect(ks.getBlock('profile')?.content ?? '').not.toContain(LINE);
   });
 });
+
+describe('kind-agnostic subject resolution on the durable surface', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  function make(): { ks: KnowledgeStore; subjects: SubjectStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-kind-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    return { ks: new KnowledgeStore(engine, subjects), subjects };
+  }
+
+  function countSubjects(subjects: SubjectStore, name: string): number {
+    let n = 0;
+    for (const kind of ['person', 'organization', 'product', 'service', 'engagement'] as const) {
+      const r = subjects.findByNameAnyKind(name, { kinds: [kind] });
+      if (r.ambiguous) n += r.candidateIds.length;
+      else if (r.row) n += 1;
+    }
+    return n;
+  }
+
+  it('remember about an existing PRODUCT reuses it instead of minting an organization twin', () => {
+    const { ks, subjects } = make();
+    const product = subjects.findOrCreate({ kind: 'product', name: 'VSkin' });
+    expect(product.ambiguous).toBe(false);
+
+    const res = ks.write({ text: 'VSkin launches in Q4', subjectName: 'VSkin', sourceChannel: 'agent', sourceUntrusted: false });
+
+    expect(res.subjectId).toBe(product.ambiguous ? null : product.id);
+    // The twin-mint IS the measured live defect (3 of 573 subjects on the first
+    // audited instance): the old kind-scoped findOrCreate could not see the product.
+    expect(countSubjects(subjects, 'VSkin')).toBe(1);
+  });
+
+  it('remember about an existing PERSON reuses the person', () => {
+    const { ks, subjects } = make();
+    const person = subjects.findOrCreate({ kind: 'person', name: 'Ada Fischer' });
+
+    const res = ks.write({ text: 'Ada Fischer prefers morning calls', subjectName: 'Ada Fischer', sourceChannel: 'agent', sourceUntrusted: false });
+
+    expect(res.subjectId).toBe(person.ambiguous ? null : person.id);
+    expect(countSubjects(subjects, 'Ada Fischer')).toBe(1);
+  });
+
+  it('an unknown name still mints an organization (the unchanged default)', () => {
+    const { ks, subjects } = make();
+    const res = ks.write({ text: 'Fresh client', subjectName: 'Neuland GmbH', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(res.subjectId).not.toBeNull();
+    const found = subjects.findByNameAnyKind('Neuland GmbH', { kinds: ['organization'] });
+    expect(!found.ambiguous && found.row?.id).toBe(res.subjectId);
+  });
+
+  it('a name already living under TWO kinds is ambiguous: hint-only, no third twin', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'product', name: 'Wikipedia' });
+    subjects.findOrCreate({ kind: 'organization', name: 'Wikipedia' });
+
+    const res = ks.write({ text: 'Wikipedia fact', subjectName: 'Wikipedia', sourceChannel: 'agent', sourceUntrusted: false });
+
+    expect(res.subjectId).toBeNull();
+    expect(res.subjectAmbiguous).toBe(true);
+    expect(countSubjects(subjects, 'Wikipedia')).toBe(2); // no third row minted
+  });
+
+  it('an explicit subjectKind still binds kind-scoped (the caller said what it means)', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'product', name: 'Orion' });
+    const res = ks.write({ text: 'Orion the company', subjectName: 'Orion', subjectKind: 'organization', sourceChannel: 'agent', sourceUntrusted: false });
+    const org = subjects.findByNameAnyKind('Orion', { kinds: ['organization'] });
+    expect(!org.ambiguous && org.row?.id).toBe(res.subjectId); // a deliberate org twin — kind was explicit
+  });
+
+  it('approving a queued entry whose hint names a product links the product, mints nothing', () => {
+    const { ks, subjects } = make();
+    const product = subjects.findOrCreate({ kind: 'product', name: 'VSkin' });
+
+    const queued = ks.write({ text: 'VSkin pricing changes', subjectName: 'VSkin', sourceChannel: 'agent', sourceUntrusted: true });
+    expect(queued.status).toBe('pending_review');
+
+    const approved = ks.reviewEntry(queued.id, 'approve');
+    expect(approved.subjectId).toBe(product.ambiguous ? null : product.id);
+    expect(countSubjects(subjects, 'VSkin')).toBe(1);
+  });
+
+  it('recall by name reaches an entry linked to a product', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'product', name: 'VSkin' });
+    ks.write({ text: 'VSkin launches in Q4', subjectName: 'VSkin', sourceChannel: 'agent', sourceUntrusted: false });
+
+    const hits = ks.recall({ query: 'When does it launch?', subjectName: 'VSkin' });
+    expect(hits.map(h => h.text)).toContain('VSkin launches in Q4');
+  });
+
+  it('recall by name reaches an entry linked to an engagement — via the ENGAGEMENT, not a twin', () => {
+    const { ks, subjects } = make();
+    // findOrCreateEngagement stores the NORMALIZED name ("Projekt Orion" → "Orion",
+    // surface form as alias). The first cut of this test was green for the wrong
+    // reason: the raw-name probe missed, write minted an org twin "Projekt Orion",
+    // and recall found THAT — the very defect class this PR removes, recurring for
+    // every "Projekt X". The subjectId assert is what makes the test honest.
+    const eng = subjects.findOrCreateEngagement('Projekt Orion', null);
+    const res = ks.write({ text: 'Orion go-live is in March', subjectName: 'Projekt Orion', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(res.subjectId).toBe(eng.id);
+    expect(countSubjects(subjects, 'Projekt Orion')).toBe(1); // no org twin minted
+
+    const hits = ks.recall({ query: 'go-live?', subjectName: 'Projekt Orion' });
+    expect(hits.map(h => h.text)).toContain('Orion go-live is in March');
+  });
+
+  it('an ambiguous PERSON alias stops the chain — the tail must not pick a same-named product', () => {
+    const { ks, subjects } = make();
+    // Two persons answer to "Nimbus"; a product "Nimbus" exists with a real entry.
+    // The pre-tail chain refused this name (findByAlias → null → empty scope); with
+    // the tail appended, that refusal must survive — falling through would read the
+    // product's facts while the name is genuinely three-way ambiguous.
+    subjects.findOrCreate({ kind: 'person', name: 'Nina Nimbus-Keller', aliases: ['Nimbus'] });
+    subjects.findOrCreate({ kind: 'person', name: 'Norbert Nimbus', aliases: ['Nimbus'] });
+    subjects.findOrCreate({ kind: 'product', name: 'Nimbus' });
+    ks.write({ text: 'Nimbus product fact', subjectName: 'Nimbus', subjectKind: 'product', sourceChannel: 'agent', sourceUntrusted: false });
+
+    const hits = ks.recall({ query: 'fact?', subjectName: 'Nimbus' });
+    expect(hits.map(h => h.text)).not.toContain('Nimbus product fact');
+  });
+
+  it('recall via a PERSON alias still works (the resolved form did not lose the row)', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'person', name: 'Ada Fischer', aliases: ['Ada'] });
+    ks.write({ text: 'Ada prefers morning calls', subjectName: 'Ada Fischer', sourceChannel: 'agent', sourceUntrusted: false });
+    const hits = ks.recall({ query: 'calls?', subjectName: 'Ada' });
+    expect(hits.map(h => h.text)).toContain('Ada prefers morning calls');
+  });
+
+  it('org precedence is untouched: a name that is BOTH org and product still reads the org scope', () => {
+    const { ks, subjects } = make();
+    const org = subjects.findOrCreate({ kind: 'organization', name: 'Meridian' });
+    subjects.findOrCreate({ kind: 'product', name: 'Meridian' });
+    // Link via explicit kind so the entry sits on the ORG (the pre-existing twin case).
+    const res = ks.write({ text: 'Meridian org fact', subjectName: 'Meridian', subjectKind: 'organization', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(res.subjectId).toBe(org.ambiguous ? null : org.id);
+
+    // The read chain hits org-canonical FIRST — the product never shadows it.
+    const hits = ks.recall({ query: 'fact?', subjectName: 'Meridian' });
+    expect(hits.map(h => h.text)).toContain('Meridian org fact');
+  });
+
+  it('an ambiguous remaining-kind name with a REAL entry behind it still reads as a miss, not a pick', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'product', name: 'Nimbus' });
+    subjects.findOrCreate({ kind: 'service', name: 'Nimbus' });
+    // The entry exists and sits on the product — a resolver that "picks the first
+    // candidate" WOULD find it, which is exactly the silent wrong-scope read the
+    // ambiguity stop exists to prevent. A miss here must be a refusal, not luck.
+    ks.write({ text: 'Nimbus fact', subjectName: 'Nimbus', subjectKind: 'product', sourceChannel: 'agent', sourceUntrusted: false });
+    const hits = ks.recall({ query: 'fact?', subjectName: 'Nimbus' });
+    expect(hits.map(h => h.text)).not.toContain('Nimbus fact');
+  });
+
+  it('an ambiguous remaining-kind name (two engagements) reads as a miss, not a pick', () => {
+    const { ks, subjects } = make();
+    const clientA = subjects.findOrCreate({ kind: 'organization', name: 'Alpha AG' });
+    const clientB = subjects.findOrCreate({ kind: 'organization', name: 'Beta AG' });
+    subjects.findOrCreateEngagement('Website', clientA.ambiguous ? null : clientA.id);
+    subjects.findOrCreateEngagement('Website', clientB.ambiguous ? null : clientB.id);
+
+    const hits = ks.recall({ query: 'status?', subjectName: 'Website' });
+    expect(hits).toHaveLength(0);
+  });
+});

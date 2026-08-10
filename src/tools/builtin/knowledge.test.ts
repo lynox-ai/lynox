@@ -566,3 +566,46 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
     expect(seen[0]).toContain('ask before sending invoices');
   });
 });
+
+describe('memory_focus — kind-agnostic tail behind the org→person chain', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  function make(): { agent: IAgent; subjects: SubjectStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-k3-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    const ks = new KnowledgeStore(engine, subjects);
+    const ctx = createToolContext({} as never);
+    ctx.knowledgeStore = ks;
+    ctx.subjectStore = subjects;
+    const agent = { toolContext: ctx } as unknown as IAgent;
+    return { agent, subjects };
+  }
+
+  it('focuses a PRODUCT by name (previously "no known subject")', async () => {
+    const { agent, subjects } = make();
+    subjects.findOrCreate({ kind: 'product', name: 'VSkin' });
+    const out = await memoryFocusTool.handler({ subject: 'VSkin' }, agent);
+    expect(out).toMatch(/Focus set to VSkin/);
+  });
+
+  it('says the ambiguity when the name lives under several remaining kinds', async () => {
+    const { agent, subjects } = make();
+    const a = subjects.findOrCreate({ kind: 'organization', name: 'Alpha AG' });
+    const b = subjects.findOrCreate({ kind: 'organization', name: 'Beta AG' });
+    subjects.findOrCreateEngagement('Website', a.ambiguous ? null : a.id);
+    subjects.findOrCreateEngagement('Website', b.ambiguous ? null : b.id);
+    const out = await memoryFocusTool.handler({ subject: 'Website' }, agent);
+    expect(out).toMatch(/matches more than one subject/);
+  });
+
+  it('an org still shadows a same-named product (chain precedence untouched)', async () => {
+    const { agent, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian' });
+    subjects.findOrCreate({ kind: 'product', name: 'Meridian' });
+    const out = await memoryFocusTool.handler({ subject: 'Meridian' }, agent);
+    expect(out).toMatch(/Focus set to Meridian/);
+  });
+});

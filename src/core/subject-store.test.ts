@@ -578,3 +578,94 @@ describe('SubjectStore.findOrCreateEngagement (M4 subject-dedup)', () => {
     engine.close();
   });
 });
+
+describe('findByNameAnyKind — one name, any kind', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  function make(): SubjectStore {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-anykind-'));
+    tmpDirs.push(dir);
+    return new SubjectStore(new EngineDb(join(dir, 'engine.db'), ''));
+  }
+
+  it('unknown name → null, single product → its row with its kind', () => {
+    const s = make();
+    expect(s.findByNameAnyKind('Nobody')).toEqual({ ambiguous: false, row: null });
+    s.findOrCreate({ kind: 'product', name: 'VSkin' });
+    const r = s.findByNameAnyKind('VSkin');
+    expect(!r.ambiguous && r.row?.kind).toBe('product');
+  });
+
+  it('the same name under two kinds is AMBIGUOUS with both candidates', () => {
+    const s = make();
+    const p = s.findOrCreate({ kind: 'product', name: 'Wikipedia' });
+    const o = s.findOrCreate({ kind: 'organization', name: 'Wikipedia' });
+    const r = s.findByNameAnyKind('Wikipedia');
+    expect(r.ambiguous).toBe(true);
+    if (r.ambiguous) {
+      const want = [p, o].map(x => (x.ambiguous ? '' : x.id)).sort();
+      expect([...r.candidateIds].sort()).toEqual(want);
+    }
+  });
+
+  it('an alias hit counts — and canonical shadows alias WITHIN a kind (no double count)', () => {
+    const s = make();
+    s.findOrCreate({ kind: 'person', name: 'Ada Fischer', aliases: ['Ada'] });
+    const viaAlias = s.findByNameAnyKind('Ada');
+    expect(!viaAlias.ambiguous && viaAlias.row?.kind).toBe('person');
+    // Canonical + its own alias on ONE subject must resolve, not read as ambiguous.
+    s.findOrCreate({ kind: 'organization', name: 'Meridian', aliases: ['Meridian'] });
+    const r = s.findByNameAnyKind('Meridian');
+    expect(!r.ambiguous && r.row?.kind).toBe('organization');
+  });
+
+  it('two same-named engagements under different parents are ambiguous', () => {
+    const s = make();
+    const a = s.findOrCreate({ kind: 'organization', name: 'Alpha AG' });
+    const b = s.findOrCreate({ kind: 'organization', name: 'Beta AG' });
+    s.findOrCreateEngagement('Website', a.ambiguous ? null : a.id);
+    s.findOrCreateEngagement('Website', b.ambiguous ? null : b.id);
+    const r = s.findByNameAnyKind('Website');
+    expect(r.ambiguous).toBe(true);
+  });
+
+  it('canonical shadows a same-kind alias on ANOTHER subject — no false ambiguity', () => {
+    const s = make();
+    const a = s.findOrCreate({ kind: 'organization', name: 'Meridian' });
+    s.findOrCreate({ kind: 'organization', name: 'Meridian Group', aliases: ['Meridian'] });
+    const r = s.findByNameAnyKind('Meridian');
+    // Within a kind the canonical owner of the name wins outright (same order as
+    // findOrCreate); the alias on the sibling must not turn this into a question.
+    expect(!r.ambiguous && r.row?.id).toBe(a.ambiguous ? '' : a.id);
+  });
+
+  it('normalizes the probe: "Projekt Orion" finds an engagement stored plainly as "Orion"', () => {
+    const s = make();
+    s.findOrCreateEngagement('Orion', null); // no "Projekt Orion" surface form ever stored
+    const r = s.findByNameAnyKind('Projekt Orion');
+    expect(!r.ambiguous && r.row?.kind).toBe('engagement');
+  });
+
+  it('matches an engagement through its ALIAS, JS-folded (non-ASCII survives)', () => {
+    const s = make();
+    s.findOrCreateEngagement('Orion', null, { aliases: ['Projekt Örion-Launch'] });
+    const r = s.findByNameAnyKind('projekt örion-launch');
+    expect(!r.ambiguous && r.row?.kind).toBe('engagement');
+  });
+
+  it('finds a RAW-named engagement (backfilled rows are not normalized at create)', () => {
+    const s = make();
+    // findOrCreate does not name-dedup engagements — it inserts the raw name,
+    // exactly like the legacy backfill does.
+    s.findOrCreate({ kind: 'engagement', name: 'Projekt Raw' });
+    const r = s.findByNameAnyKind('Raw');
+    expect(!r.ambiguous && r.row?.kind).toBe('engagement');
+  });
+
+  it('kinds option narrows the probe', () => {
+    const s = make();
+    s.findOrCreate({ kind: 'product', name: 'VSkin' });
+    expect(s.findByNameAnyKind('VSkin', { kinds: ['organization'] })).toEqual({ ambiguous: false, row: null });
+  });
+});
