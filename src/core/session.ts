@@ -421,21 +421,21 @@ export class Session {
     //
     // ⚠ This comment used to end "the closures read session-local fields, so
     // concurrent sessions don't interfere". The closures ARE session-local; their
-    // INVOCATION is not, which is the opposite conclusion. `lynox:tool:end` is a
-    // process-global diagnostics channel, every Session subscribes here and none
-    // ever unsubscribes, and the published payload (agent.ts:2661/2679) carries
-    // no session or run id — so each subscriber counts every tool call in the
-    // process while its own `currentRunId` happens to be set. A WorkerLoop task
-    // running alongside a chat (worker-loop.ts creates its own Session), a
-    // pipeline run, or a spawned child therefore inflates the chat run's count
-    // AND inserts run_tool_calls rows under the wrong run id. A spawned child, in
-    // the same way, can never record calls against its OWN run row.
+    // INVOCATION is not, which is the opposite conclusion — `lynox:tool:end` is a
+    // process-global channel, so every Session's callback runs for every tool
+    // call in the process. The thread id on the event is what now separates them
+    // (see the filter in engine-init); before it existed, a background task's
+    // calls were recorded against whatever run this Session had open.
     //
-    // The fix is a run/session id in the payload plus a filter here, or an
-    // injected recorder — the pattern orchestrator/runner.ts:660 already uses
-    // (an explicit per-step recorder instead of the global channel). Not done in
-    // the change that wrote this note, which only stopped the failure path from
-    // dropping the number the success path already kept.
+    // Still true and NOT fixed here: nothing unsubscribes, so a Session's
+    // callback outlives the Session, and a spawned child's calls are counted on
+    // the parent's run rather than its own.
+    //
+    // Both of those want one owner for the event stream instead of N listeners
+    // filtering it — an injected recorder, the way orchestrator/runner.ts:660
+    // already does it. That is a change with its own consumers (the orchestrator
+    // writes step calls explicitly, and spawn would have to start stamping the
+    // child's count), so it is deliberately not bundled with this filter.
     const runHistory = engine.getRunHistory();
     if (runHistory) {
       setupHistorySubscriptions(
@@ -443,6 +443,7 @@ export class Session {
         () => this.currentRunId,
         () => this.runToolCallSeq++,
         (ms: number) => { this._userWaitMs += ms; },
+        () => this.agent?.currentThreadId,
       );
     }
 

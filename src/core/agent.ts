@@ -2658,7 +2658,14 @@ export class Agent implements IAgent {
       const auditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawInput = JSON.stringify(auditInput).slice(0, 2000);
       const safeInput = this.secretStore ? this.secretStore.maskSecrets(rawInput) : rawInput;
-      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: true, input: safeInput });
+      // `threadId` says which conversation this call belongs to. `lynox:tool:end`
+      // is process-global and every Session subscribes, so without it a
+      // subscriber cannot tell its own agent's calls from anyone else's and books
+      // whatever arrives onto its own open run — see the filter in engine-init.
+      // A spawned child inherits the parent's `currentThreadId`, so it stays on
+      // the parent's side of that filter, which is where its calls have always
+      // been counted.
+      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: true, input: safeInput, threadId: this.currentThreadId });
 
       if (this.onStream) {
         await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name });
@@ -2676,7 +2683,7 @@ export class Agent implements IAgent {
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawErrInput = JSON.stringify(errAuditInput).slice(0, 2000);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
-      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: message, input: safeErrInput });
+      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: message, input: safeErrInput, threadId: this.currentThreadId });
 
       if (this.onStream) {
         // Tool-level error: surface inline via tool_result (UI renders it red on
