@@ -469,7 +469,16 @@ export const memoryFocusTool: ToolEntry<FocusInput> = {
     if (!certain && (orgAlias?.ambiguous || personAlias?.ambiguous)) {
       return `"${clip(name)}" matches more than one subject. Use the full name to say which one.`;
     }
-    const hit = certain ?? personAlias?.row;
+    // Behind the org→person chain: the remaining kinds the write path can link to
+    // (product/service/engagement) — same tail as `_resolveRecallScope`, and unlike
+    // there the ambiguity is SAID, because this caller can answer with a fuller name.
+    const rest = certain || personAlias?.row
+      ? null
+      : subjects.findByNameAnyKind(name, { kinds: ['product', 'service', 'engagement'] });
+    if (rest?.ambiguous) {
+      return `"${clip(name)}" matches more than one subject. Use the full name to say which one.`;
+    }
+    const hit = certain ?? personAlias?.row ?? rest?.row;
     if (!hit) return `No known subject named "${clip(name)}". Use the exact client/company/project name (or \`remember\` a fact about it first).`;
     ks.setFocusOverride(subjects.resolveActiveSubject(hit.id));
     return `Focus set to ${clip(name)} for this session.`;

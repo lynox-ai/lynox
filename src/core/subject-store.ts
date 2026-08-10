@@ -222,6 +222,12 @@ export const ENTITY_MAPPABLE_SUBJECT_KINDS: readonly SubjectKind[] =
 export const NAME_DEDUPED_SUBJECT_KINDS = ['person', 'organization', 'product', 'service'] as const;
 const NAME_DEDUP_KINDS: ReadonlySet<string> = new Set(NAME_DEDUPED_SUBJECT_KINDS);
 
+/** The kinds {@link SubjectStore.findByNameAnyKind} probes by default: every kind a
+ *  name can identify — the dedup kinds plus exact-name `engagement`; `other` is
+ *  unstructured and stays out. */
+export const ANY_KIND_RESOLUTION_KINDS: readonly SubjectKind[] =
+  [...NAME_DEDUPED_SUBJECT_KINDS, 'engagement'];
+
 /** Leading generic project word (+ separator) stripped from an engagement name. */
 const ENGAGEMENT_LEADING_GENERIC_RE = /^(?:projekt|project|projet)[\s:]+/iu;
 
@@ -654,6 +660,48 @@ export class SubjectStore {
    */
   findByAlias(alias: string, kind: string, ownerUserId = DEFAULT_OWNER): SubjectRow | null {
     return this.findByAliasResolved(alias, kind, ownerUserId).row;
+  }
+
+  /**
+   * Resolve a name across KINDS — for callers that carry no kind at all (the durable
+   * `remember`/recall surface names a subject, never its kind). A kind-scoped
+   * find-or-create there mints a same-named twin under its default kind whenever the
+   * graph already knows the name under a DIFFERENT kind (measured live: 3 of 573
+   * subjects on the first audited instance were exactly such product/organization
+   * twins) — and a kind-scoped read leaves every entry linked outside its two probed
+   * kinds unreachable by name.
+   *
+   * Same contract as {@link findOrCreate}'s ambiguous arm: one candidate is an answer,
+   * several are a question handed back to the caller, never a pick. Candidates are the
+   * UNION over the probed kinds of the canonical hit (or, per kind, the alias hits when
+   * no canonical exists — mirroring the canonical-shadows-alias order inside each kind).
+   * `engagement` matches by exact name only and may itself contribute several rows (two
+   * clients each have a "Website" project — identity is (name, parent), so a bare name
+   * over multiple engagements is genuinely ambiguous). `other` is unstructured and
+   * never probed.
+   */
+  findByNameAnyKind(
+    name: string,
+    opts?: { kinds?: readonly SubjectKind[] | undefined; ownerUserId?: string | undefined },
+  ): { ambiguous: false; row: SubjectRow | null } | { ambiguous: true; candidateIds: readonly string[] } {
+    const owner = opts?.ownerUserId ?? DEFAULT_OWNER;
+    const kinds = opts?.kinds ?? ANY_KIND_RESOLUTION_KINDS;
+    const ids = new Set<string>();
+    for (const kind of kinds) {
+      if (NAME_DEDUP_KINDS.has(kind)) {
+        const canonical = this.findCanonical(name, kind, owner);
+        if (canonical) { ids.add(canonical.id); continue; }
+        for (const id of this.findByAliasResolved(name, kind, owner).ids) ids.add(id);
+      } else if (kind === 'engagement') {
+        const rows = this.db.prepare(
+          `SELECT id FROM subjects WHERE kind = 'engagement' AND LOWER(name) = LOWER(?) AND owner_user_id = ? AND archived_at IS NULL`,
+        ).all(name, owner) as Array<{ id: string }>;
+        for (const r of rows) ids.add(r.id);
+      }
+    }
+    if (ids.size > 1) return { ambiguous: true, candidateIds: [...ids] };
+    const only = [...ids][0];
+    return { ambiguous: false, row: only !== undefined ? this.getSubject(only) : null };
   }
 
   // ── Self-person + assignee resolution (S4a task-cutover) ──────

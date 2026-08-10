@@ -120,6 +120,24 @@ export class KnowledgeStore {
    * link, H1); untrusted turn → `pending_review` (+ `subject_hint` only, H4). Pin is a
    * store invariant (H6). Returns the persisted row's routing outcome.
    */
+  /**
+   * Kind-agnostic subject link for the durable write surface, which carries a NAME and
+   * no kind: reuse the one existing subject of ANY kind bearing it (a `remember` about
+   * a known product/person/engagement must not mint a same-named organization twin —
+   * the graph fragmentation this store measurably produced), mint an `organization`
+   * only for a name the graph does not know at all, and hand a multi-candidate name
+   * back as ambiguous exactly like {@link SubjectStore.findOrCreate} does.
+   */
+  private _resolveWriteSubject(name: string):
+    | { ambiguous: false; id: string }
+    | { ambiguous: true } {
+    const existing = this.subjects.findByNameAnyKind(name);
+    if (existing.ambiguous) return { ambiguous: true };
+    if (existing.row) return { ambiguous: false, id: existing.row.id };
+    const minted = this.subjects.findOrCreate({ kind: 'organization', name });
+    return minted.ambiguous ? { ambiguous: true } : { ambiguous: false, id: minted.id };
+  }
+
   write(params: KnowledgeWriteParams): KnowledgeWriteResult {
     // Store-level size backstop (defense in depth; the `remember` tool bounds at a lower,
     // friendlier limit first). A single knowledge entry is one concise fact — refuse a
@@ -150,7 +168,9 @@ export class KnowledgeStore {
         // An unidentifying name routes to the SAME place a pending entry does: keep the
         // text as a hint and leave the link unmade. The write is not lost and nothing is
         // bound to a guess; whoever resolves the hint later has the full name to work with.
-        const r = this.subjects.findOrCreate({ kind: params.subjectKind ?? 'organization', name });
+        const r = params.subjectKind !== undefined
+          ? this.subjects.findOrCreate({ kind: params.subjectKind, name })
+          : this._resolveWriteSubject(name);
         if (r.ambiguous) { subjectId = null; subjectHint = name; subjectAmbiguous = true; } else { subjectId = r.id; }
       } else {
         // Pending-entry hygiene (acceptance §2): link by hint; findOrCreate on approval only,
@@ -619,8 +639,10 @@ export class KnowledgeStore {
     const hint = row.subject_hint?.trim();
     if (!subjectId && hint) {
       // Approval path: an unidentifying hint stays a hint rather than becoming a wrong
-      // link — the entry still activates, it simply keeps no subject edge.
-      const r = this.subjects.findOrCreate({ kind: 'organization', name: hint });
+      // link — the entry still activates, it simply keeps no subject edge. Kind-agnostic
+      // like the write path: approval of a fact about a known product/person must not
+      // mint the organization twin the queue deliberately avoided creating.
+      const r = this._resolveWriteSubject(hint);
       subjectId = r.ambiguous ? null : r.id;
     }
 
@@ -933,7 +955,15 @@ export class KnowledgeStore {
         ?? orgAlias?.row
         ?? this.subjects.findCanonical(explicit, 'person');
       if (!certain && orgAlias?.ambiguous) return [];
-      const hit = certain ?? this.subjects.findByAlias(explicit, 'person');
+      // After the org→person chain: the remaining kinds a durable entry can be linked to
+      // (product/service/engagement). The write path can produce such links since it
+      // resolves kind-agnostically, so a name-scoped read must reach them — an entry
+      // filed under a product would otherwise be unreachable by the very name that
+      // filed it. Appended BEHIND the existing chain, not replacing it, so org/person
+      // precedence (and its documented ambiguity semantics) is byte-identical.
+      const hit = certain
+        ?? this.subjects.findByAlias(explicit, 'person')
+        ?? this._resolveRemainingKinds(explicit);
       // Named an explicit subject we don't know → return an EMPTY scope, NOT a global scan.
       // A scoped query that fell back to global would surface OTHER clients' facts — the exact
       // cross-client bleed the substrate exists to prevent (§1). No match ⇒ no results.
@@ -946,6 +976,16 @@ export class KnowledgeStore {
     const all = new Set<string>();
     for (const id of derived) for (const a of this._withAncestors(id)) all.add(a);
     return [...all];
+  }
+
+  /** The tail of the recall chain: product/service/engagement by name. Ambiguous
+   *  (several candidates) reads as a miss — the silent read path cannot ask back,
+   *  and a wrong-scope answer is worse than an empty one (same rule as the
+   *  org-ambiguity stop above). */
+  private _resolveRemainingKinds(name: string): { id: string } | null {
+    const rest = this.subjects.findByNameAnyKind(name, { kinds: ['product', 'service', 'engagement'] });
+    if (rest.ambiguous || rest.row === null) return null;
+    return { id: rest.row.id };
   }
 
   private _withAncestors(subjectId: string): string[] {
