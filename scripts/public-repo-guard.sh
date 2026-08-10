@@ -214,6 +214,11 @@ preflight_names_re() {
   # textarea, and a blank line in that paste produces exactly this. `a*`, `a?`
   # and `()` fall out of the same test, which is why it replaced three special
   # cases rather than joining them.
+  # rc MUST be reset here. `|| rc=$?` only fires when grep FAILS, so on a match it
+  # leaves whatever the validity probe above put there — which is always 1, since
+  # grep on empty input cannot match. Dropping this line while rewriting the block
+  # made the whole check unreachable, silently, and only a mutation caught it.
+  rc=0
   printf '\n' | grep -qE "$PRIVATE_NAMES_RE" 2>/dev/null || rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "❌ public-repo-guard: private-name pattern matches an empty line, so it" >&2
@@ -231,8 +236,12 @@ preflight_names_re() {
   # the class is dead, and it reports `clean ✓` for every run. BSD grep matches
   # it, so it works locally and dies in CI. These constructs mean something else
   # in ERE or nothing at all, so refusing them is refusing a mistake, not a style.
+  # Matched on the concrete PCRE openers rather than a bare `(?`: an escaped
+  # literal paren followed by a quantifier — `Acme \(?AG\)?`, a perfectly good
+  # way to write a name with an optional bracket — contains `(?` too, and the
+  # broad form rejected it.
   case "$PRIVATE_NAMES_RE" in
-    *'(?'*)
+    *'(?i'*|*'(?:'*|*'(?='*|*'(?!'*|*'(?<'*|*'(?P'*|*'(?#'*)
       echo "❌ public-repo-guard: private-name pattern uses a PCRE group like (?i) or (?:)." >&2
       echo "   This is an EXTENDED regex (grep -E). GNU grep accepts those and then" >&2
       echo "   matches nothing at all, which reads as a clean scan. For case, rely on" >&2

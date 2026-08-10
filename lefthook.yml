@@ -49,7 +49,15 @@ pre-push:
       # keeps a fresh clone pushable: without ~/.lynox/private-names.re the class
       # warns and stands down rather than blocking, and an unpushable hook is how
       # people learn --no-verify.
-      run: bash scripts/public-repo-guard.sh --allow-missing-names check-meta "$(git merge-base origin/main HEAD)" HEAD
+      # The `|| echo HEAD` is load-bearing. Without it, a clone that has no local
+      # origin/main — a --single-branch clone, a differently named remote, a repo
+      # with no origin at all — makes the substitution empty, the guard sees a
+      # missing argument and exits 2, and the push is BLOCKED for a reason its
+      # message never mentions. Falling back to HEAD yields an empty range, which
+      # the guard reports as "NO commits" and lets through: it says it checked
+      # nothing rather than blocking, which is the right trade for a hook whose
+      # CI twin is the actual gate.
+      run: bash scripts/public-repo-guard.sh --allow-missing-names check-meta "$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)" HEAD
       skip:
         - merge
         - rebase
