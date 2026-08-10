@@ -592,8 +592,8 @@ describe('findByNameAnyKind — one name, any kind', () => {
   it('unknown name → null, single product → its row with its kind', () => {
     const s = make();
     expect(s.findByNameAnyKind('Nobody')).toEqual({ ambiguous: false, row: null });
-    s.findOrCreate({ kind: 'product', name: 'VSkin' });
-    const r = s.findByNameAnyKind('VSkin');
+    s.findOrCreate({ kind: 'product', name: 'Vireo' });
+    const r = s.findByNameAnyKind('Vireo');
     expect(!r.ambiguous && r.row?.kind).toBe('product');
   });
 
@@ -665,7 +665,7 @@ describe('findByNameAnyKind — one name, any kind', () => {
 
   it('kinds option narrows the probe', () => {
     const s = make();
-    s.findOrCreate({ kind: 'product', name: 'VSkin' });
-    expect(s.findByNameAnyKind('VSkin', { kinds: ['organization'] })).toEqual({ ambiguous: false, row: null });
+    s.findOrCreate({ kind: 'product', name: 'Vireo' });
+    expect(s.findByNameAnyKind('Vireo', { kinds: ['organization'] })).toEqual({ ambiguous: false, row: null });
   });
 });

@@ -586,9 +586,9 @@ describe('memory_focus — kind-agnostic tail behind the org→person chain', ()
 
   it('focuses a PRODUCT by name (previously "no known subject")', async () => {
     const { agent, subjects } = make();
-    subjects.findOrCreate({ kind: 'product', name: 'VSkin' });
-    const out = await memoryFocusTool.handler({ subject: 'VSkin' }, agent);
-    expect(out).toMatch(/Focus set to VSkin/);
+    subjects.findOrCreate({ kind: 'product', name: 'Vireo' });
+    const out = await memoryFocusTool.handler({ subject: 'Vireo' }, agent);
+    expect(out).toMatch(/Focus set to Vireo/);
   });
 
   it('says the ambiguity when the name lives under several remaining kinds', async () => {
