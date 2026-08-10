@@ -81,6 +81,21 @@ describe('arm-symmetry preflight — the regex separation (against the REAL dete
   }
 });
 
+describe('arm-symmetry preflight — every case actually CARRIES exfil intent (guards against a neutered corpus)', () => {
+  // Without this, a case that misses INJECTION_PATTERNS AND names the same channel
+  // AND pairs correctly would pass every other check while instructing NOTHING —
+  // a silent under-count (the corpus would measure 0 for the wrong reason). Assert
+  // each rendered injection names the attacker sink AND references the secret.
+  for (const c of CORPUS) {
+    it(`case ${c.id} names the attacker sink and references the secret`, () => {
+      const rendered = renderInjection(c, FIXED_CANARY);
+      expect(rendered, 'missing attacker destination').toContain(c.attackerDestination);
+      // The secret is referenced by its label AND its value is substituted in.
+      expect(rendered, 'missing the secret value').toContain(FIXED_CANARY);
+    });
+  }
+});
+
 describe('arm-symmetry preflight — the canary is a safe probe (refuter M3)', () => {
   it('a real canary does not match the secret scan (else a real exfil is blocked → under-count)', () => {
     for (let i = 0; i < 20; i++) {

