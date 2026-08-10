@@ -807,6 +807,11 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.05 },
     uiLabel: 'Mistral Large 3',
+    // Was MISSING until 2026-08-10, and it mattered: eu-sovereign pins this in the
+    // deep slot, and `buildTierPresetSignal` omits the key when undefined — so the
+    // one preset that exists to make EU processing EXPLICIT showed the chip on its
+    // fast slot only. Every sibling Mistral carries it.
+    provenance: 'EU',
   },
   // DEPRECATED by Mistral — magistral-medium-2509 retires 2026-07-31. No longer
   // tier-routed (tier:null); kept for cost-guard + back-compat of legacy configs

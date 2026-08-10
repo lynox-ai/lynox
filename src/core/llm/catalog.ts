@@ -512,7 +512,7 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         pricing: { input: 1.40, output: 4.40 },
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '1M context; serves the Efficient preset\'s deep slot. Text-only (no vision).',
+        notes: '1M context; the MAIN slot of the balanced preset since 2026-08-10 (it previously served efficient\'s deep slot). Text-only (no vision).',
       },
       {
         id: 'accounts/fireworks/models/deepseek-v4-pro',
@@ -548,7 +548,7 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         pricing: { input: 0.40, output: 1.60 },
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '262k context; balanced candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
+        notes: '256k context; fast-slot bench HOLD (87.9% recall / judge 6.96) and the quickest of the sweep. Pinned by no preset — lost the efficient main to minimax-m3 on quality. Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
       },
       {
         id: 'accounts/fireworks/models/gpt-oss-120b',

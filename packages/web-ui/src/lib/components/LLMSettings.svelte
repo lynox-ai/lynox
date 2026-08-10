@@ -34,6 +34,7 @@
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
 	import Icon from '../primitives/Icon.svelte';
 	import type { IconName } from '../primitives/icons.js';
+	import { TIER_PRESET_NAMES, type TierPresetName } from '$lib/contract/vocab.js';
 	import { buildRoutingUpdate, type Strategy } from '../utils/llm-routing-update.js';
 	import { tierPickerModels, defaultTierModelId, isHybridTierOption, presetTierSeed } from '../utils/llm-tier-picker.js';
 	// Shared vocabulary from the vendored wire-contract copy (byte-identical to
@@ -205,7 +206,10 @@
 	// the three preset names are hybrid tier_presets; 'custom' = manual hybrid.
 	// `Strategy` + `buildRoutingUpdate` (the persistence mapping) live in a plain
 	// .ts helper so the body-building is unit-testable (this .svelte has no seam).
-	const PRESET_NAMES: ReadonlyArray<'efficient' | 'balanced' | 'max-quality'> = ['efficient', 'balanced', 'max-quality'];
+	// From the vendored contract, NOT a literal: a hand-copied list here silently
+	// dropped `eu-sovereign` on 2026-08-10 (no card, load fell through to 'custom',
+	// next save CLEARED the preset). See the note on `Strategy`.
+	const PRESET_NAMES: ReadonlyArray<TierPresetName> = TIER_PRESET_NAMES;
 
 	let providers = $state<CatalogProvider[]>([]);
 	let config = $state<UserConfig>({});
@@ -538,6 +542,7 @@
 		{ id: 'standard', key: 'standard', icon: 'check_circle', recommended: true },
 		{ id: 'efficient', key: 'efficient', icon: 'bolt' },
 		{ id: 'balanced', key: 'balanced', icon: 'scale' },
+		{ id: 'eu-sovereign', key: 'eu_sovereign', icon: 'pin' },
 		{ id: 'max-quality', key: 'max_quality', icon: 'gem' },
 		{ id: 'custom', key: 'custom', icon: 'sliders' },
 	];

@@ -13,12 +13,26 @@
 // `tier_preset: null` is why the schema is `.nullable()` — both `''` and omission
 // fail to clear it (the former 400s, the latter preserves the stale value).
 
+import type { TierPresetName } from '../contract/vocab.js';
+
 /** One tier's provider+model assignment (no api_key — keys live in the vault). */
 export interface TierSlot { provider: string; model_id: string; api_key?: string; api_base_url?: string }
 export type TierSet = Partial<Record<'fast' | 'balanced' | 'deep', TierSlot>>;
 
-/** The five strategy cards: Standard · three hybrid presets · manual Custom. */
-export type Strategy = 'standard' | 'efficient' | 'balanced' | 'max-quality' | 'custom';
+/**
+ * Strategy cards: Standard · every hybrid preset · manual Custom.
+ *
+ * The preset names come from the VENDORED CONTRACT, never a hand-written list.
+ * They used to be spelled out here and in LLMSettings' `PRESET_NAMES`, and that
+ * drifted the moment core added `eu-sovereign` (2026-08-10): core's `TIER_PRESETS`
+ * is keyed on `TierPresetName` and cannot compile without the name, but that
+ * guarantee stops at the package boundary. web-ui copied the list by hand, so
+ * `svelte-check` stayed green while the new preset had NO card, fell through to
+ * 'custom' on load, and was then CLEARED to null on the next save (see
+ * buildRoutingUpdate below) — silent data loss for a CP-pinned preset.
+ * Importing the type makes the compiler that guards core guard this file too.
+ */
+export type Strategy = 'standard' | TierPresetName | 'custom';
 
 export interface RoutingUpdate {
   routing_mode?: 'standard' | 'hybrid';

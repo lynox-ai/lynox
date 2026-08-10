@@ -39,7 +39,7 @@ describe('tier-presets (model-presets W2 SoT)', () => {
     }
   });
 
-  it('presets pin ONLY replay-measured Fireworks models — candidates stay picker-only', () => {
+  it('presets pin ONLY Fireworks models with NAMED evidence — candidates stay picker-only', () => {
     // The 2026-08-09 candidates are picker-selectable but UNMEASURED — this guard is
     // the mechanism behind the "no preset pins them before a measurement" invariant,
     // which was otherwise only a comment (pr-review #1162). Extend the set ONLY
@@ -84,7 +84,7 @@ describe('tier-presets (model-presets W2 SoT)', () => {
       for (const [tier, slot] of Object.entries(preset.tier_set)) {
         if (slot!.api_base_url?.includes('fireworks.ai')) {
           expect(MEASURED_FIREWORKS.has(slot!.model_id),
-            `${name}.${tier} pins ${slot!.model_id} — Fireworks preset slots require a replay measurement first`).toBe(true);
+            `${name}.${tier} pins ${slot!.model_id} — a Fireworks preset slot needs a NAMED basis in MEASURED_FIREWORKS (BENCH / SWEEP / OPERATOR), not merely a catalog entry`).toBe(true);
         }
       }
     }
@@ -98,6 +98,23 @@ describe('tier-presets (model-presets W2 SoT)', () => {
           expect(slot!.api_base_url, `${name}.${tier} is CN — must route via Fireworks`).toContain('fireworks.ai');
         }
       }
+    }
+  });
+
+  it('EVERY eu-sovereign slot is EU-provenance — the one claim the preset exists to make', () => {
+    // Written 2026-08-10 after the whole preset was re-slotted (8B→14B fast, Large
+    // to main, Medium 3.5 to deep) and NOT ONE test failed. Two holes made that
+    // possible: nothing asserted the slots, and nothing asserted provenance — while
+    // `mistral-large-2512` was in fact MISSING `provenance: 'EU'` in the registry,
+    // so `buildTierPresetSignal` (which omits the key when undefined) showed the EU
+    // chip on one of three slots. A preset whose entire purpose is making EU
+    // processing explicit must fail loudly when a slot cannot prove it.
+    const eu = TIER_PRESETS['eu-sovereign']!.tier_set;
+    expect(Object.keys(eu).sort()).toEqual(['balanced', 'deep', 'fast']);
+    for (const [tier, slot] of Object.entries(eu)) {
+      const cap = MODEL_CAPABILITIES[slot!.model_id];
+      expect(cap?.provenance, `eu-sovereign.${tier} → ${slot!.model_id} has no EU provenance`).toBe('EU');
+      expect(slot!.api_base_url, `eu-sovereign.${tier} must route via Mistral`).toContain('mistral.ai');
     }
   });
 
