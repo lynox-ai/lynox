@@ -70,6 +70,8 @@ services:
     # Without it, all data and encryption keys are lost on container restart.
     volumes:
       - ${HOME}/.lynox:/home/lynox/.lynox
+    networks:
+      - internal
 
   # ── SearXNG — free web search ──────────────────────
   searxng:
@@ -90,10 +92,23 @@ services:
         max-file: "2"
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      - internal
 
-# No `networks:` block on purpose. Compose already puts both services on a
-# private per-project bridge, which is exactly what the removed `internal`
-# network was — a NAME, not Docker's `internal: true`. Egress was never
-# restricted by it, and calling it "internal" invited the opposite reading.
-# Setting `internal: true` here would cut the containers off from the LLM API
-# and break the engine, so it is deliberately not set.
+# What this network is, and what it is not — measured 2026-08-10, because the
+# docs used to call it "network isolation" and it is not that.
+#
+# It is NOT `internal: true`. Outbound from both containers is unrestricted;
+# the engine needs it to reach the LLM API, so `internal: true` would break it.
+#
+# What it DOES buy is opt-in membership. A service added to this file without
+# a `networks:` key lands on Compose's implicit `default` network instead, and
+# then has no route and no DNS to SearXNG — verified by running a third
+# container both ways. That matters here: the Docker page tells users to add a
+# Watchtower service with no `networks:` key. Do not "simplify" this block
+# away; dropping it puts every such addition on the same network as SearXNG,
+# which runs with `limiter: false` on the strength of a narrow reachability
+# set (see searxng/settings.yml).
+networks:
+  internal:
+    driver: bridge

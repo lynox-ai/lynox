@@ -155,7 +155,7 @@ The Docker image and Compose file include production-grade hardening out of the 
 | tmpfs for temp storage | `/tmp` and `/workspace` are memory-backed |
 | Process limits | `pids_limit: 512` prevents fork bombs |
 | Log rotation | `max-size: 20m, max-file: 3` prevents disk filling |
-| No exposed side services | SearXNG publishes no port — reachable only from the lynox container. Not an egress boundary: outbound is unrestricted |
+| No published side services | SearXNG publishes no host port — unreachable off the machine, but reachable from the Linux host itself. Not an egress boundary: outbound is unrestricted at the network layer |
 | Health checks | Built-in Docker `HEALTHCHECK` on `/health` |
 
 See [Docker Deployment](/setup/docker/) for the full hardened setup.
