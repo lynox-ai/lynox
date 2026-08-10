@@ -530,7 +530,7 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         pricing: { input: 3.00, output: 15.00 },
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '1M context; deep/main candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
+        notes: '1M context; deep slot of the efficient + balanced presets — operator decision on the chat sweep, no deep bench exists. Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
       },
       {
         id: 'accounts/fireworks/models/deepseek-v4-flash',
@@ -539,7 +539,7 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         pricing: { input: 0.14, output: 0.28 },
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '1M context; fast/balanced candidate (unmeasured) at fast-slot cost. Text-only (no vision).',
+        notes: '1M context; FAST slot only — benched there (89.1% recall, best judge of the field), never as a main. Text-only (no vision).',
       },
       {
         id: 'accounts/fireworks/models/qwen3p7-plus',
@@ -584,7 +584,7 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         pricing: { input: 0.30, output: 1.20 },
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '512k context; balanced candidate (unmeasured). Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
+        notes: '512k context; main slot of the efficient preset — chat sweep, no main-slot bench. Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
       },
     ],
   },

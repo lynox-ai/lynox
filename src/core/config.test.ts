@@ -174,15 +174,25 @@ describe('Config', () => {
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
       expect(config.routing_mode).toBe('hybrid');
-      // ⚖️ balanced main-chat slot = GLM 5.2 via Fireworks. (mistral-medium held this
-      // until 2026-08-10: $7.50/M output against GLM's $4.40, and weakest of the
-      // sweep on open turns — in the band that runs every turn.)
+      // ⚖️ balanced is ⚡ efficient with a stronger main and NOTHING else changed —
+      // assert all three slots, because that identity is the point of the pair: a
+      // future edit that "upgrades" balanced's fast or deep slot silently reintroduces
+      // the multi-variable difference this ladder was reshaped to remove (2026-08-10).
+      expect(config.tier_set?.fast).toEqual({
+        provider: 'openai',
+        model_id: 'accounts/fireworks/models/deepseek-v4-flash',
+        api_base_url: 'https://api.fireworks.ai/inference/v1',
+      });
       expect(config.tier_set?.balanced).toEqual({
         provider: 'openai',
         model_id: 'accounts/fireworks/models/glm-5p2',
         api_base_url: 'https://api.fireworks.ai/inference/v1',
       });
-      expect(config.tier_set?.deep).toEqual({ provider: 'anthropic', model_id: 'claude-sonnet-5' });
+      expect(config.tier_set?.deep).toEqual({
+        provider: 'openai',
+        model_id: 'accounts/fireworks/models/kimi-k3',
+        api_base_url: 'https://api.fireworks.ai/inference/v1',
+      });
     });
 
     it('an env LYNOX_TIER_SET_JSON slot overrides the preset per-slot (env wins)', async () => {
@@ -228,7 +238,11 @@ describe('Config', () => {
       process.env['LYNOX_TIER_PRESET'] = '   ';
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
-      expect(config.tier_set?.deep).toEqual({ provider: 'anthropic', model_id: 'claude-sonnet-5' });
+      expect(config.tier_set?.deep).toEqual({
+        provider: 'openai',
+        model_id: 'accounts/fireworks/models/kimi-k3',
+        api_base_url: 'https://api.fireworks.ai/inference/v1',
+      });
     });
 
     it('an unknown CP-pinned preset FAILS CLOSED too', async () => {
@@ -290,7 +304,7 @@ describe('Config', () => {
         model_id: 'accounts/fireworks/models/kimi-k3',
         api_base_url: 'https://api.fireworks.ai/inference/v1',
       });
-      expect(config.tier_set?.balanced?.model_id).toBe('accounts/fireworks/models/qwen3p7-plus');
+      expect(config.tier_set?.balanced?.model_id).toBe('accounts/fireworks/models/minimax-m3');
       expect(config.tier_set?.fast?.model_id).toBe('accounts/fireworks/models/deepseek-v4-flash');
       for (const tier of ['fast', 'balanced', 'deep'] as const) {
         expect(config.tier_set?.[tier]?.api_base_url).toBe('https://api.fireworks.ai/inference/v1');
