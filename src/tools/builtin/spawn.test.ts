@@ -1681,6 +1681,40 @@ describe('spawn_agent tool', () => {
       expect(ctorArg.currentRunId).toBe(MINTED_ID);
     });
 
+    it('the child inherits the parent\'s tool-call sink, so its calls are still recorded', async () => {
+      // Half of the attribution fix, and the half that fails SILENTLY. The
+      // child's own run id (asserted above) only reaches history if the child
+      // also has somewhere to hand its calls. Drop this one line in spawn.ts and
+      // nothing errors — a fan-out simply stops writing tool-call rows.
+      //
+      // That is a rate-limit hole, not a reporting gap: these rows feed
+      // `getToolCallCountSince`, which ENFORCES the http_request (200/hr,
+      // 2000/day) and mail-send limits. Twenty unmetered children are exactly
+      // the shape that outruns a limit which still looks intact.
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const parentSink = vi.fn();
+      const runHistory = { insertRun: vi.fn().mockReturnValue('run-child-1'), updateRun: vi.fn() };
+      const parentToolContext = {
+        sessionCounters: testCounters,
+        runHistory,
+      } as unknown as import('../../core/tool-context.js').ToolContext;
+
+      const agent = makeAgent({
+        currentRunId: 'parent-run',
+        currentThreadId: 'thread-1',
+        toolContext: parentToolContext,
+      });
+      (agent as unknown as { recordToolCall?: unknown }).recordToolCall = parentSink;
+
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'worker', task: 'Do the work' }] },
+        agent,
+      );
+
+      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as { recordToolCall?: unknown };
+      expect(ctorArg.recordToolCall, 'the child must be given the parent\'s sink').toBe(parentSink);
+    });
+
     it('records the resolved provider on the spawn run (no more provider="")', async () => {
       // #6: spawn's insertRun omitted `provider` → every child row stored '' (the
       // recording gap that made the hybrid 404s show provider=""). It now records
