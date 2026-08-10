@@ -709,6 +709,13 @@ async function executeThinker(
           tokensOut: snap?.outputTokens ?? 0,
           costUsd: snap?.estimatedCostUSD ?? 0,
           durationMs: Date.now() - childStart,
+          // The child's calls are now written to the child's own run, so this
+          // column has to be written too — otherwise the rows exist while the
+          // count beside them reads 0, and the aggregates that SUM it
+          // (`run-history-analytics.ts`) lose every sub-agent call. Before the
+          // sink they landed in the PARENT's count, so the total was right even
+          // though the attribution was not.
+          toolCallCount: childAgent.getRecordedToolCallCount(),
           status: 'completed',
           stopReason: 'end_turn',
         });
@@ -753,6 +760,10 @@ async function executeThinker(
           tokensOut: snap?.outputTokens ?? 0,
           costUsd: snap?.estimatedCostUSD ?? 0,
           durationMs: Date.now() - childStart,
+          // Same column on the terminal-failure path: a child that made 60 calls
+          // and then died must not read as "0 tools", which is exactly the
+          // misreading that started this whole investigation (war, 2026-08-10).
+          toolCallCount: childAgent?.getRecordedToolCallCount() ?? 0,
           status: childAborted ? 'aborted' : 'failed',
           stopReason: childAborted ? 'aborted' : (err instanceof Error ? err.message.slice(0, 200) : 'error'),
           // Record the FULL structured error so a failed sub-agent is diagnosable

@@ -2087,6 +2087,47 @@ describe('Agent', () => {
       expect(recorded.find(c => c.toolName === 'my_tool')?.runId).toBeUndefined();
     });
 
+    it('counts what it handed to the sink, so the column can agree with the rows', async () => {
+      // `getRecordedToolCallCount` exists so spawn can stamp the CHILD's
+      // `runs.tool_call_count`. It must count the same events the sink received
+      // — not `_loopToolCount`, which excludes turn-ending tools for the
+      // memory-extraction heuristic and would undercount here.
+      const recorded: unknown[] = [];
+      const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          { id: 'a', name: 'my_tool', input: {} },
+          { id: 'b', name: 'my_tool', input: {} },
+        ]))
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'c', name: 'my_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        recordToolCall: (c) => { recorded.push(c); },
+      });
+      await agent.send('go');
+
+      expect(agent.getRecordedToolCallCount()).toBe(3);
+      expect(agent.getRecordedToolCallCount(), 'the count IS the number of rows caused').toBe(recorded.length);
+    });
+
+    it('counts nothing when there is no sink, so the column matches the absent rows', async () => {
+      const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'a', name: 'my_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+      await agent.send('go');
+
+      expect(agent.getRecordedToolCallCount()).toBe(0);
+    });
+
     it('a throwing sink never breaks the run it observes', async () => {
       // Recording is best-effort. A history write that fails must not take the
       // user's turn down with it.

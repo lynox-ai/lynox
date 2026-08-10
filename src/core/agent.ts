@@ -540,6 +540,8 @@ export class Agent implements IAgent {
   }
 
   private _loopToolCount = 0;
+  /** Tool calls handed to {@link recordToolCall} — see `getRecordedToolCallCount`. */
+  private _recordedToolCalls = 0;
   /** Run-scoped breaker for identical, output-unchanging tool-call loops. */
   private readonly _repeatGuard = new RepeatCallGuard();
   private _pendingMemory: Promise<void>[] = [];
@@ -2427,7 +2429,21 @@ export class Agent implements IAgent {
         durationMs: Math.round(durationMs),
         isError,
       });
+      this._recordedToolCalls++;
     } catch { /* fire-and-forget */ }
+  }
+
+  /**
+   * How many tool calls this agent has handed to the sink — i.e. how many rows
+   * it caused. Read by `spawn_agent` to stamp `runs.tool_call_count` on the
+   * child's own row, so that column agrees with `COUNT(run_tool_calls)` for the
+   * same run instead of being left at 0 while the rows exist.
+   *
+   * Deliberately NOT `_loopToolCount`, which excludes turn-ending tools for the
+   * memory-extraction heuristic and would undercount here.
+   */
+  getRecordedToolCallCount(): number {
+    return this._recordedToolCalls;
   }
 
   private async _executeOneInner(tc: BetaToolUseBlock): Promise<BetaToolResultBlockParam> {

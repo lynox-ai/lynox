@@ -30,7 +30,11 @@ interface MockedAgentShape {
   noteUntrustedData: ReturnType<typeof vi.fn>;
   restoreConversationTaint: ReturnType<typeof vi.fn>;
   getCostSnapshot: () => import('../../types/index.js').CostSnapshot | null;
+  getRecordedToolCallCount: () => number;
 }
+
+/** How many tool calls each constructed child reports having recorded. */
+let mockRecordedToolCalls = 0;
 
 vi.mock('../../core/agent.js', () => ({
   Agent: vi.fn().mockImplementation(function (this: MockedAgentShape, config: {
@@ -60,6 +64,10 @@ vi.mock('../../core/agent.js', () => ({
     // that needs per-child cost would be asserting the fixture, not the code.
     const queued = mockCostSnapshotQueue?.shift();
     this.getCostSnapshot = queued !== undefined ? () => queued : () => mockCostSnapshot;
+    // spawn stamps the child's own `runs.tool_call_count` from this. Default 0
+    // so existing assertions are unaffected; a test that cares sets
+    // `mockRecordedToolCalls` and then asserts the value REACHED updateRun.
+    this.getRecordedToolCallCount = () => mockRecordedToolCalls;
   }),
   // spawn.ts does `err instanceof RunAbortedError` in the failure catch; the
   // factory mock replaces the whole module, so this export must exist or the
@@ -159,6 +167,7 @@ describe('spawn_agent tool', () => {
     // this to a concrete value to assert it flows into RunHistory.updateRun.
     mockCostSnapshot = null;
     mockCostSnapshotQueue = null;
+    mockRecordedToolCalls = 0;
     testCounters = {
       httpRequests: 0,
       writeBytes: 0,
@@ -1713,6 +1722,56 @@ describe('spawn_agent tool', () => {
 
       const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as { recordToolCall?: unknown };
       expect(ctorArg.recordToolCall, 'the child must be given the parent\'s sink').toBe(parentSink);
+    });
+
+    it('stamps the child\'s own tool_call_count, so the column agrees with the rows', async () => {
+      // Once a child's calls go to the CHILD's run, this column has to be
+      // written there too. Leaving it at 0 puts the rows and the count beside
+      // them in contradiction, and every aggregate that SUMs the column
+      // (`run-history-analytics.ts`) silently loses all sub-agent calls —
+      // before the sink they were counted on the PARENT, so the total was right
+      // even though the attribution was not.
+      mockRecordedToolCalls = 12;
+      const updateRun = vi.fn();
+      const parentToolContext = {
+        sessionCounters: testCounters,
+        runHistory: { insertRun: vi.fn().mockReturnValue('run-child-x'), updateRun },
+      } as unknown as import('../../core/tool-context.js').ToolContext;
+
+      const agent = makeAgent({ currentRunId: 'parent-run', currentThreadId: 't', toolContext: parentToolContext });
+
+      await spawnAgentTool.handler({ agents: [{ name: 'worker', task: 'Do the work' }] }, agent);
+
+      const completed = updateRun.mock.calls.find(c => (c[1] as { status?: string }).status === 'completed');
+      expect(completed, 'the child run is finalised').toBeDefined();
+      expect((completed![1] as { toolCallCount?: number }).toolCallCount).toBe(12);
+    });
+
+    it('stamps tool_call_count on a FAILED child too — "0 tools" is the misreading that started this', async () => {
+      // The failure path is where the field is read hardest: a cost review sorts
+      // by spend and the priciest runs are disproportionately the failed ones. A
+      // child that made 60 calls and then died must not read as a runaway loop
+      // that did nothing (war, 2026-08-10).
+      mockRecordedToolCalls = 60;
+      const updateRun = vi.fn();
+      const parentToolContext = {
+        sessionCounters: testCounters,
+        runHistory: { insertRun: vi.fn().mockReturnValue('run-child-y'), updateRun },
+      } as unknown as import('../../core/tool-context.js').ToolContext;
+      mockSend.mockRejectedValueOnce(new Error('child exploded'));
+
+      const agent = makeAgent({ currentRunId: 'parent-run', currentThreadId: 't', toolContext: parentToolContext });
+
+      // A single-agent spawn that fails throws AggregateError, but the catch in
+      // executeThinker flushes the failed-row updateRun first — so the
+      // assertion below is reachable.
+      await expect(
+        spawnAgentTool.handler({ agents: [{ name: 'worker', task: 'Do the work' }] }, agent),
+      ).rejects.toThrow(/All sub-agents failed|child exploded/);
+
+      const failed = updateRun.mock.calls.find(c => (c[1] as { status?: string }).status === 'failed');
+      expect(failed, 'the failed child run is finalised').toBeDefined();
+      expect((failed![1] as { toolCallCount?: number }).toolCallCount).toBe(60);
     });
 
     it('records the resolved provider on the spawn run (no more provider="")', async () => {
