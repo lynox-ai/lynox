@@ -16,9 +16,10 @@ import { assertHostPolicy, type HostPolicyContext } from '../../core/network-gua
  *
  * It is NOT a sandbox and must never be described as one. You cannot reliably
  * stop egress from a shell by reading the command string — `python3 -c
- * "urllib..."`, `node -e`, `/dev/tcp`, a base64'd script, or a URL assembled
- * from variables all walk past it. Real enforcement is a network namespace, and
- * that is a different piece of work.
+ * "urllib..."`, `node -e`, `/dev/tcp`, a base64'd script, a URL assembled from
+ * variables, or deliberate obfuscation (`curl$IFS-k`, ANSI-C `$'\x63url'`) all
+ * walk past it. Real enforcement is a network namespace, and that is a
+ * different piece of work.
  *
  * What it does stop is the case actually observed: an agent taking the easy
  * path. The observed run reached for `curl`, and when that 404'd reached for
@@ -49,26 +50,30 @@ import { assertHostPolicy, type HostPolicyContext } from '../../core/network-gua
  *
  * `firstQuotedAt` is the index of the first character that came out of quotes
  * or a backslash escape (`Infinity` when the word is entirely bare). Only an
- * assignment needs it: `NODE_TLS_REJECT_UNAUTHORIZED=0` is an assignment,
- * `"NODE_TLS_REJECT_UNAUTHORIZED=0"` as a single quoted word is an argument
- * (the string a `grep` is searching FOR), and the two must not be confused —
- * the withdrawn version blocked the search and missed the assignment.
+ * assignment needs it: `NODE_TLS_REJECT_UNAUTHORIZED=0` in leading position is
+ * an assignment, while `"NODE_TLS_REJECT_UNAUTHORIZED=0"` fully quoted is a
+ * command word, and the two must not be confused.
  */
-interface Word {
+export interface Word {
   text: string;
   firstQuotedAt: number;
+  /** Operand of a `<`/`>` redirection — a filename, never a request target. */
+  isRedirectTarget: boolean;
 }
 
 /** One simple command: the words between two control operators. */
-interface SimpleCommand {
+export interface SimpleCommand {
   words: Word[];
 }
 
 /** Splits one command into simple commands. Also `;`, `&&`, `||`, newline. */
 const SEGMENT_BREAK = new Set(['|', '&', ';', '\n', '(', ')', '{', '}']);
 
-/** Redirections break a word but not the command. */
-const WORD_BREAK = new Set(['<', '>', ' ', '\t', '\r']);
+/** Whitespace breaks a word but not the command. */
+const WORD_BREAK = new Set([' ', '\t', '\r']);
+
+/** Redirections break a word and make the NEXT word a filename. */
+const REDIRECT = new Set(['<', '>']);
 
 /**
  * Lex a command line into simple commands, resolving quotes and escapes.
@@ -84,12 +89,16 @@ export function lexCommand(command: string): SimpleCommand[] {
   let buf = '';
   let firstQuotedAt = Infinity;
   let open = false;
+  let nextIsRedirectTarget = false;
 
   const markQuoted = (): void => {
     if (firstQuotedAt === Infinity) firstQuotedAt = buf.length;
   };
   const endWord = (): void => {
-    if (open) words.push({ text: buf, firstQuotedAt });
+    if (open) {
+      words.push({ text: buf, firstQuotedAt, isRedirectTarget: nextIsRedirectTarget });
+      nextIsRedirectTarget = false;
+    }
     buf = '';
     firstQuotedAt = Infinity;
     open = false;
@@ -165,7 +174,19 @@ export function lexCommand(command: string): SimpleCommand[] {
       continue;
     }
 
+    // A `#` only starts a comment at the START of a word, which is why this
+    // tests `open`: `curl https://x#frag` is one word, not a comment. Without
+    // it, `curl -sS https://x # -k not needed` reads the comment's `-k` as an
+    // argument and refuses the command — a false positive on the DEFAULT
+    // policy, i.e. exactly what withdrew core#1122.
+    if (c === '#' && !open) {
+      while (i < command.length && command[i] !== '\n') i++;
+      i--;
+      continue;
+    }
+
     if (SEGMENT_BREAK.has(c)) { endSegment(); continue; }
+    if (REDIRECT.has(c)) { endWord(); nextIsRedirectTarget = true; continue; }
     if (WORD_BREAK.has(c)) { endWord(); continue; }
 
     open = true;
@@ -196,6 +217,13 @@ const WRAPPERS = new Set([
 
 /** Wrappers that consume one non-flag operand of their own before the command. */
 const WRAPPERS_WITH_OPERAND = new Set(['timeout']);
+
+/**
+ * Builtins whose arguments are assignments. `export FOO=0` sets the same
+ * variable as a bare `FOO=0` prefix and is the more natural spelling in a
+ * multi-line script, so it has to reach the same check.
+ */
+const EXPORT_LIKE = new Set(['export', 'declare', 'typeset', 'readonly', 'local']);
 
 /** Shell keywords that may precede a command inside a compound statement. */
 const KEYWORDS = new Set(['do', 'then', 'else', 'elif', 'if', 'while', 'until', '!', 'in']);
@@ -232,9 +260,11 @@ function basename(text: string): string {
   return slash === -1 ? noEscape : noEscape.slice(slash + 1);
 }
 
-interface ResolvedCommand {
+export interface ResolvedCommand {
   /** The real head binary, wrappers and assignments peeled off. */
   head: string;
+  /** The word the head came from — it can itself be a URL (see resolveCommand). */
+  headWord: Word | null;
   /** Arguments belonging to THIS command — never a neighbour's. */
   args: Word[];
   /** Assignments in this command's own environment prefix. */
@@ -257,6 +287,25 @@ export function resolveCommand(cmd: SimpleCommand): ResolvedCommand | null {
 
     const head = basename(word.text);
     if (KEYWORDS.has(head)) { i++; continue; }
+
+    if (EXPORT_LIKE.has(head)) {
+      for (let j = i + 1; j < cmd.words.length; j++) {
+        const arg = cmd.words[j];
+        if (arg !== undefined && assignmentName(arg) !== null) assignments.push(arg);
+      }
+      return { head, headWord: word, args: cmd.words.slice(i + 1), assignments };
+    }
+
+    // `command -v curl` / `command -V curl` LOOK UP curl, they do not run it —
+    // and `if ! command -v curl` is the single most common line in an install
+    // script. Peeling the wrapper here would resolve the head to `curl` and
+    // refuse a capability probe that opens no socket.
+    if (head === 'command') {
+      const flag = cmd.words[i + 1];
+      if (flag !== undefined && (flag.text === '-v' || flag.text === '-V')) {
+        return { head, headWord: word, args: cmd.words.slice(i + 1), assignments };
+      }
+    }
 
     if (WRAPPERS.has(head) || WRAPPERS_WITH_OPERAND.has(head)) {
       const valueFlags = WRAPPER_VALUE_FLAGS.get(head) ?? new Set<string>();
@@ -283,20 +332,63 @@ export function resolveCommand(cmd: SimpleCommand): ResolvedCommand | null {
       continue;
     }
 
-    return { head, args: cmd.words.slice(i + 1), assignments };
+    return { head, headWord: word, args: cmd.words.slice(i + 1), assignments };
   }
 
   // Nothing but assignments (`FOO=bar`) — still carries an environment.
-  return assignments.length > 0 ? { head: '', args: [], assignments } : null;
+  return assignments.length > 0
+    ? { head: '', headWord: null, args: [], assignments }
+    : null;
 }
 
 /**
- * Options whose VALUE is the next word. Without this, `curl -o -k` would read
- * `-k` as a flag when it is a filename.
+ * Network clients `deny-all` refuses outright — tools whose PURPOSE is the
+ * network, so invoking one at all contradicts "no network at all".
+ */
+const NETWORK_CLIENTS = new Set([
+  'curl', 'wget', 'wget2', 'nc', 'ncat', 'netcat', 'telnet', 'ssh', 'scp',
+  'sftp', 'rsync', 'ftp', 'lynx', 'links', 'links2', 'w3m', 'aria2c', 'httpie',
+  'http', 'https', 'xh', 'socat', 'ping', 'ping6', 'dig', 'nslookup', 'host',
+  'traceroute', 'whois',
+]);
+
+/**
+ * Clients for which EVERY positional operand is a request target. curl and
+ * wget treat each non-option operand as a URL and will resolve a scheme-less
+ * one, so `curl example.com/x` is a fetch and must be checked like any other —
+ * otherwise omitting `https://` is a one-word bypass of `allow-list` and
+ * `guarded`.
+ */
+const POSITIONAL_URL_CLIENTS = new Set([
+  'curl', 'wget', 'wget2', 'aria2c', 'httpie', 'xh',
+]);
+
+/**
+ * Commands that FETCH a URL passed to them, beyond the pure network clients.
+ * These take ordinary non-URL operands too (`git status`), so only an explicit
+ * `http(s)://` argument counts.
+ *
+ * Everything NOT in this set has its URLs ignored, and that distinction is the
+ * point: `echo https://x`, `git commit -m "fix https://x/issues/42"`,
+ * `grep -rn "https://api.stripe.com" src/` and a `sed` replacement all MENTION
+ * a URL without requesting it. An earlier version of this file checked every
+ * URL in every command and refused all four under `guarded` — which is the live
+ * fleet posture, so it would have broken ordinary work on real instances. That
+ * is the same mistake that withdrew core#1122, pointing the other way: a rule
+ * applied without regard for which command owns the thing it is reading.
+ */
+const URL_FETCHING_COMMANDS = new Set([
+  ...NETWORK_CLIENTS,
+  'git', 'pip', 'pip3', 'npm', 'pnpm', 'yarn', 'npx', 'docker', 'podman',
+  'go', 'cargo', 'gem', 'composer', 'bundle', 'brew', 'apt', 'apt-get',
+  'terraform', 'helm', 'kubectl', 'gh', 'glab',
+]);
+
+/**
+ * Long options whose value is the next word. Without these, `curl -o -k` and
+ * `curl --output -k` would read `-k` as a flag when it is a filename.
  */
 const CURL_VALUE_OPTIONS = new Set([
-  '-o', '-d', '-H', '-X', '-u', '-A', '-e', '-b', '-c', '-F', '-T', '-x',
-  '-w', '-m', '-K', '-E', '-Y', '-y', '-C', '-D', '-U', '-t', '-z', '-Z',
   '--output', '--data', '--data-raw', '--data-binary', '--data-urlencode',
   '--header', '--request', '--user', '--user-agent', '--referer', '--cookie',
   '--cookie-jar', '--form', '--upload-file', '--proxy', '--write-out',
@@ -304,11 +396,18 @@ const CURL_VALUE_OPTIONS = new Set([
   '--retry', '--range', '--resolve', '--interface',
 ]);
 
-/** Network clients `deny-all` refuses outright. */
-const NETWORK_CLIENTS = new Set([
-  'curl', 'wget', 'nc', 'ncat', 'netcat', 'telnet', 'ssh', 'scp', 'sftp',
-  'rsync', 'ftp', 'lynx', 'links', 'links2', 'w3m', 'aria2c', 'httpie', 'http',
-  'https', 'xh', 'wget2', 'socat',
+/**
+ * Short-option letters that consume the next word. Checked against the LAST
+ * letter of a bundle, because that is the one that takes the value: in
+ * `curl -so -k url` the `-k` is the output filename for `-o`, not a TLS flag.
+ */
+const CURL_SHORT_VALUE_LETTERS = 'odHXuAebcFTxwmKEYyCDUtzZ';
+
+const WGET_VALUE_OPTIONS = new Set([
+  '-O', '-o', '-P', '-a', '-i', '-t', '-T', '-w', '-Q', '-l', '-A', '-R',
+  '-D', '-U', '--output-document', '--output-file', '--directory-prefix',
+  '--input-file', '--tries', '--timeout', '--wait', '--user-agent',
+  '--header', '--post-data', '--post-file', '--user', '--password',
 ]);
 
 /**
@@ -344,13 +443,17 @@ export function findTlsBypass(cmd: ResolvedCommand): string | null {
   if (cmd.head === 'curl') {
     for (let i = 0; i < cmd.args.length; i++) {
       const arg = cmd.args[i];
-      if (arg === undefined) continue;
+      if (arg === undefined || arg.isRedirectTarget) continue;
       const text = arg.text;
+      if (text === '--') break; // everything after is an operand, not an option
       if (CURL_VALUE_OPTIONS.has(text)) { i++; continue; }
       if (text === '--insecure') return '--insecure';
       if (text.startsWith('--')) continue;
+      if (!/^-[A-Za-z0-9#]+$/.test(text)) continue;
       // Bundled or single short options: -k, -sk, -ks, -fsSLk.
-      if (/^-[A-Za-z0-9#]+$/.test(text) && text.includes('k')) return text;
+      if (text.includes('k')) return text;
+      const last = text[text.length - 1] ?? '';
+      if (CURL_SHORT_VALUE_LETTERS.includes(last)) i++;
     }
     return null;
   }
@@ -362,7 +465,31 @@ export function findTlsBypass(cmd: ResolvedCommand): string | null {
     return null;
   }
 
+  if (cmd.head === 'git') {
+    for (const arg of cmd.args) {
+      if (/^http\.sslverify=(false|0|no)$/i.test(arg.text)) return 'http.sslVerify=false';
+    }
+    return null;
+  }
+
   return null;
+}
+
+/** True iff `text` is an explicit http(s) URL. */
+function isExplicitUrl(text: string): boolean {
+  return /^https?:\/\//i.test(text);
+}
+
+/**
+ * Does this command REQUEST the URLs it carries, or merely mention them?
+ *
+ * A head that is itself a URL means a command substitution produced the binary
+ * name (`$(which curl) https://…`) — the binary is unknowable, so treat it as
+ * fetching rather than let the URL through unchecked.
+ */
+function isFetchingCommand(cmd: ResolvedCommand): boolean {
+  if (URL_FETCHING_COMMANDS.has(cmd.head)) return true;
+  return isExplicitUrl(cmd.head);
 }
 
 /**
@@ -375,17 +502,55 @@ export function findTlsBypass(cmd: ResolvedCommand): string | null {
  * raw form is what made that an exfiltration channel.
  */
 export function extractUrls(cmd: ResolvedCommand): string[] {
+  if (!isFetchingCommand(cmd)) return [];
+
   const out: string[] = [];
-  for (const word of cmd.args) {
-    for (const match of word.text.matchAll(/https?:\/\/[^\s'"`;|&<>]+/gi)) {
-      const raw = (match[0] ?? '').replace(/[.,)\]}]+$/, '');
-      if (raw.length === 0) continue;
+  const push = (raw: string): void => {
+    const trimmed = raw.replace(/[.,)\]}]+$/, '');
+    if (trimmed.length === 0) return;
+    try {
+      new URL(trimmed);
+      out.push(trimmed);
+    } catch {
+      // Not parseable (a `$VAR` fragment, say) — nothing to check here; the
+      // deny-all client rule is what covers those.
+    }
+  };
+
+  // The head itself, when a substitution left a URL in command position.
+  if (cmd.headWord !== null && isExplicitUrl(cmd.head)) push(cmd.headWord.text);
+
+  const positional = POSITIONAL_URL_CLIENTS.has(cmd.head);
+  const wgetLike = cmd.head === 'wget' || cmd.head === 'wget2';
+  let optionsEnded = false;
+
+  for (let i = 0; i < cmd.args.length; i++) {
+    const word = cmd.args[i];
+    if (word === undefined || word.isRedirectTarget) continue;
+    const text = word.text;
+
+    if (!optionsEnded && text === '--') { optionsEnded = true; continue; }
+
+    if (!optionsEnded && text.startsWith('-') && text.length > 1) {
+      if (wgetLike && WGET_VALUE_OPTIONS.has(text)) { i++; continue; }
+      if (!wgetLike && CURL_VALUE_OPTIONS.has(text)) { i++; continue; }
+      if (!wgetLike && /^-[A-Za-z0-9#]+$/.test(text)) {
+        const last = text[text.length - 1] ?? '';
+        if (CURL_SHORT_VALUE_LETTERS.includes(last)) i++;
+      }
+      continue;
+    }
+
+    if (isExplicitUrl(text)) { push(text); continue; }
+
+    // For curl/wget every remaining operand is a target, scheme or not.
+    if (positional && text.length > 0 && !text.startsWith('@')) {
       try {
-        new URL(raw);
-        out.push(raw);
+        const candidate = new URL(`https://${text}`);
+        const host = candidate.hostname;
+        if (host.includes('.') || host === 'localhost') push(`https://${text}`);
       } catch {
-        // Not parseable (a `$VAR` fragment, say). The deny-all client check and
-        // the ambiguity check below are what cover those.
+        // Not host-shaped — a local filename or an option value we did not model.
       }
     }
   }
@@ -420,10 +585,17 @@ function hasAmbiguousAuthority(url: string): boolean {
  * `assertHostPolicy` unconditionally would also inherit its private-IP check
  * and break `curl localhost:3000` in a dev shell — a regression against a
  * promise `allow-all` never made.
+ *
+ * `guardedAckHosts` mirrors `http_request`: the hosts a user connected as an
+ * api_profile and accepted responsibility for. Omitting it would make the shell
+ * STRICTER than `http_request` for the same host, which buys nothing (the agent
+ * could just use `http_request`) and contradicts the refusal text, which tells
+ * the user to connect the host as an API — something they already did.
  */
 export function assertBashEgressAllowed(
   command: string,
   ctx: HostPolicyContext | undefined,
+  guardedAckHosts?: ReadonlySet<string> | undefined,
 ): void {
   const commands = lexCommand(command)
     .map(resolveCommand)
@@ -445,8 +617,8 @@ export function assertBashEgressAllowed(
 
   for (const cmd of commands) {
     // `deny-all` promises no network at all, so it cannot wait to find a
-    // literal URL — a bare host (`curl example.com`), a variable, or a URL on
-    // stdin would all slip past. Refuse the client itself.
+    // literal URL — a bare host, a variable, or a URL on stdin would all slip
+    // past. Refuse the client itself.
     if (policy === 'deny-all' && NETWORK_CLIENTS.has(cmd.head)) {
       throw new Error(
         'Blocked: network access denied (air-gapped isolation). This command invokes a network '
@@ -464,7 +636,7 @@ export function assertBashEgressAllowed(
       // The same gate `http_request` faces. 'full-control' is the correct
       // surface: a shell command is arbitrary-target and credential-capable,
       // which is precisely what that surface means.
-      assertHostPolicy(url, 'full-control', ctx);
+      assertHostPolicy(url, 'full-control', ctx, guardedAckHosts);
     }
   }
 }
