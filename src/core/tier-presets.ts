@@ -10,7 +10,9 @@
  *
  * Slot shape — {provider, model_id, api_base_url?}:
  *  - Anthropic slots name the native provider only (default endpoint).
- *  - Mistral + Fireworks (openai-compat) slots pin `provider:'openai'` + an
+ *  - Fireworks (openai-compat) slots pin `provider:'openai'` + an
+ *    (Mistral slots did the same; the `mistral()` helper was dropped with the EU
+ *    preset on 2026-08-11 rather than kept unused — it returns with that preset.)
  *    explicit `api_base_url`: the openai wire needs the endpoint to reach the
  *    right host (an omitted base URL defaults to OpenAI), and the self-host key
  *    resolves from that endpoint via `pinnedVaultSlotForEndpoint` (catalog.ts) —
@@ -55,7 +57,6 @@
 import type { ModelTier, TierSet, TierSlot } from '../types/index.js';
 import type { TierPresetName } from '../contract/vocab.js';
 import { isTierPresetName } from '../contract/vocab.js';
-import { MISTRAL_API_BASE } from '../types/index.js';
 
 /** Canonical Fireworks endpoint — mirrors the catalog `base_url_default`
  *  (catalog.ts). Exported so the managed write-gate + load-hardening (W3) pin the
@@ -85,7 +86,6 @@ export interface TierPreset {
 }
 
 const anthropic = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'anthropic', model_id });
-const mistral = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'openai', model_id, api_base_url: MISTRAL_API_BASE });
 const fireworks = (model_id: string): Omit<TierSlot, 'api_key'> => ({ provider: 'openai', model_id, api_base_url: FIREWORKS_API_BASE });
 
 // Keyed on the CONTRACT's name type, not `string`: that is what makes the two
