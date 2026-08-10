@@ -1057,15 +1057,15 @@ describe('kind-agnostic subject resolution on the durable surface', () => {
 
   it('remember about an existing PRODUCT reuses it instead of minting an organization twin', () => {
     const { ks, subjects } = make();
-    const product = subjects.findOrCreate({ kind: 'product', name: 'VSkin' });
+    const product = subjects.findOrCreate({ kind: 'product', name: 'Vireo' });
     expect(product.ambiguous).toBe(false);
 
-    const res = ks.write({ text: 'VSkin launches in Q4', subjectName: 'VSkin', sourceChannel: 'agent', sourceUntrusted: false });
+    const res = ks.write({ text: 'Vireo launches in Q4', subjectName: 'Vireo', sourceChannel: 'agent', sourceUntrusted: false });
 
     expect(res.subjectId).toBe(product.ambiguous ? null : product.id);
     // The twin-mint IS the measured live defect (3 of 573 subjects on the first
     // audited instance): the old kind-scoped findOrCreate could not see the product.
-    expect(countSubjects(subjects, 'VSkin')).toBe(1);
+    expect(countSubjects(subjects, 'Vireo')).toBe(1);
   });
 
   it('remember about an existing PERSON reuses the person', () => {
@@ -1108,23 +1108,23 @@ describe('kind-agnostic subject resolution on the durable surface', () => {
 
   it('approving a queued entry whose hint names a product links the product, mints nothing', () => {
     const { ks, subjects } = make();
-    const product = subjects.findOrCreate({ kind: 'product', name: 'VSkin' });
+    const product = subjects.findOrCreate({ kind: 'product', name: 'Vireo' });
 
-    const queued = ks.write({ text: 'VSkin pricing changes', subjectName: 'VSkin', sourceChannel: 'agent', sourceUntrusted: true });
+    const queued = ks.write({ text: 'Vireo pricing changes', subjectName: 'Vireo', sourceChannel: 'agent', sourceUntrusted: true });
     expect(queued.status).toBe('pending_review');
 
     const approved = ks.reviewEntry(queued.id, 'approve');
     expect(approved.subjectId).toBe(product.ambiguous ? null : product.id);
-    expect(countSubjects(subjects, 'VSkin')).toBe(1);
+    expect(countSubjects(subjects, 'Vireo')).toBe(1);
   });
 
   it('recall by name reaches an entry linked to a product', () => {
     const { ks, subjects } = make();
-    subjects.findOrCreate({ kind: 'product', name: 'VSkin' });
-    ks.write({ text: 'VSkin launches in Q4', subjectName: 'VSkin', sourceChannel: 'agent', sourceUntrusted: false });
+    subjects.findOrCreate({ kind: 'product', name: 'Vireo' });
+    ks.write({ text: 'Vireo launches in Q4', subjectName: 'Vireo', sourceChannel: 'agent', sourceUntrusted: false });
 
-    const hits = ks.recall({ query: 'When does it launch?', subjectName: 'VSkin' });
-    expect(hits.map(h => h.text)).toContain('VSkin launches in Q4');
+    const hits = ks.recall({ query: 'When does it launch?', subjectName: 'Vireo' });
+    expect(hits.map(h => h.text)).toContain('Vireo launches in Q4');
   });
 
   it('recall by name reaches an entry linked to an engagement — via the ENGAGEMENT, not a twin', () => {
