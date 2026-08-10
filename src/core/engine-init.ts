@@ -114,57 +114,24 @@ export function configureBudgetAndRateLimits(
   process.stderr.write(`${guardedCapableBootLine(resolvedPolicy)}\n`);
 }
 
+/**
+ * Genealogy recording for a Session.
+ *
+ * Tool calls used to be recorded here too, from a `lynox:tool:end` subscriber.
+ * They are not any more: that channel is process-global, so every Session's
+ * callback ran for every tool call in the process and each booked what arrived
+ * onto its own open run. A thread-id filter narrowed it to one conversation but
+ * could not separate a spawned child from its parent — they share a thread by
+ * design — so a child's calls landed on the parent's run. Persistence now goes
+ * through a sink the agent is given (`AgentConfig.recordToolCall`), which
+ * receives the caller's own run id instead of inferring one.
+ *
+ * `spawn:end` stays on the channel because its payload already names both runs
+ * it is relating, so a listener needs nothing from its own ambient state.
+ */
 export function setupHistorySubscriptions(
   history: RunHistory,
-  getCurrentRunId: () => string | null,
-  getAndIncrementSeq: () => number,
-  addUserWaitMs?: (ms: number) => void,
-  getCurrentThreadId?: () => string | undefined,
 ): void {
-  // tool:end → fire-and-forget tool call recording
-  channels.toolEnd.subscribe((msg: unknown) => {
-    const runId = getCurrentRunId();
-    if (!runId) return;
-    const data = msg as { name: string; duration: number; success: boolean; error?: string | undefined; input?: string | undefined; threadId?: string | undefined };
-    // Only record what happened in THIS session's conversation.
-    //
-    // `lynox:tool:end` is a process-global diagnostics channel and every Session
-    // subscribes to it, so each subscriber sees every tool call in the process.
-    // With no way to tell them apart it recorded all of them against its own open
-    // run: a WorkerLoop background task running next to a chat wrote its calls
-    // onto the chat's run, inflating that run's `tool_call_count` and putting
-    // rows in its history that it never made. Found while reading a customer's
-    // cost data, where the numbers stayed plausible enough to be believed.
-    //
-    // A spawned child inherits the parent's `currentThreadId`, so its calls
-    // remain on this side of the filter and keep being counted here, exactly as
-    // before. That is deliberate: those calls also feed `getToolCallCountSince`,
-    // which ENFORCES the http_request and mail rate limits — dropping them would
-    // let a fan-out of sub-agents run past a limit that looked intact. Giving a
-    // child its own run row is a separate change with its own consumers to fix.
-    //
-    // Both ids undefined (an ad-hoc Agent with no thread, or a publisher that
-    // predates this field) → no evidence of foreignness, so record as before.
-    const myThreadId = getCurrentThreadId?.();
-    if (data.threadId !== undefined && myThreadId !== undefined && data.threadId !== myThreadId) return;
-    // Track user wait time from interactive tools
-    if (data.name === 'ask_user' && addUserWaitMs) {
-      addUserWaitMs(Math.round(data.duration));
-    }
-    try {
-      history.insertToolCall({
-        runId,
-        toolName: data.name,
-        inputJson: data.input ?? '{}',
-        outputJson: data.success ? '' : (data.error ?? 'unknown error'),
-        durationMs: Math.round(data.duration),
-        sequenceOrder: getAndIncrementSeq(),
-      });
-    } catch {
-      // Fire-and-forget
-    }
-  });
-
   // spawn:end → genealogy tracking
   channels.spawnEnd.subscribe((msg: unknown) => {
     const data = msg as {

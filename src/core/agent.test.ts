@@ -2010,6 +2010,144 @@ describe('Agent', () => {
     });
   });
 
+  describe('recordToolCall sink', () => {
+    type RecordedCall = { runId?: string | undefined; toolName: string; inputJson: string; outputJson: string; durationMs: number; isError: boolean };
+
+    it('stamps the call with the run the agent is working under', async () => {
+      // The link the whole attribution change rests on. A spawned child is
+      // constructed with its OWN `currentRunId`; if the agent did not put that
+      // id on the call, every child's calls would land back on whatever run the
+      // sink defaulted to — which is exactly the behaviour being replaced.
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu1', name: 'my_tool', input: { key: 'value' } }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'child',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        currentRunId: 'child-run-42',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const call = recorded.find(c => c.toolName === 'my_tool');
+      expect(call, 'the sink must receive the call').toBeDefined();
+      expect(call!.runId, 'the call carries THIS agent\'s run, not the sink\'s default').toBe('child-run-42');
+      expect(call!.isError).toBe(false);
+      expect(call!.inputJson).toContain('value');
+    });
+
+    it('records a failed tool call too — it spent the same budget', async () => {
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('fail_tool', vi.fn().mockRejectedValue(new Error('oops')));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu2', name: 'fail_tool', input: { cmd: 'bad' } }]))
+        .mockResolvedValueOnce(endTurnResponse('handled'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        currentRunId: 'run-7',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const call = recorded.find(c => c.toolName === 'fail_tool');
+      expect(call, 'a failed call still counts against the rate limits').toBeDefined();
+      expect(call!.runId).toBe('run-7');
+      expect(call!.isError).toBe(true);
+      expect(call!.outputJson, 'the error text is what the row records as output').toContain('oops');
+    });
+
+    it('leaves the run id absent when the agent has none, rather than inventing one', async () => {
+      // An ad-hoc Agent has no run. The sink decides where those land; the agent
+      // must not guess, or an unattributed call would be indistinguishable from
+      // one that genuinely belongs to a run.
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu3', name: 'my_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'adhoc',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      expect(recorded.find(c => c.toolName === 'my_tool')?.runId).toBeUndefined();
+    });
+
+    it('counts what it handed to the sink, so the column can agree with the rows', async () => {
+      // `getRecordedToolCallCount` exists so spawn can stamp the CHILD's
+      // `runs.tool_call_count`. It must count the same events the sink received
+      // — not `_loopToolCount`, which excludes turn-ending tools for the
+      // memory-extraction heuristic and would undercount here.
+      const recorded: unknown[] = [];
+      const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          { id: 'a', name: 'my_tool', input: {} },
+          { id: 'b', name: 'my_tool', input: {} },
+        ]))
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'c', name: 'my_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        recordToolCall: (c) => { recorded.push(c); },
+      });
+      await agent.send('go');
+
+      expect(agent.getRecordedToolCallCount()).toBe(3);
+      expect(agent.getRecordedToolCallCount(), 'the count IS the number of rows caused').toBe(recorded.length);
+    });
+
+    it('counts nothing when there is no sink, so the column matches the absent rows', async () => {
+      const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'a', name: 'my_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+      await agent.send('go');
+
+      expect(agent.getRecordedToolCallCount()).toBe(0);
+    });
+
+    it('a throwing sink never breaks the run it observes', async () => {
+      // Recording is best-effort. A history write that fails must not take the
+      // user's turn down with it.
+      const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu4', name: 'my_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        recordToolCall: () => { throw new Error('history is down'); },
+      });
+
+      await expect(agent.send('go')).resolves.toContain('done');
+    });
+  });
+
   describe('ABSOLUTE_MAX_ITERATIONS', () => {
     it('terminates loop at 500 iterations with error event', async () => {
       const tool = makeTool('loop_tool');

@@ -249,6 +249,31 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('getSessionToolCalls keeps a spawned child\'s call at the point it ran, not at the end', () => {
+    // `save_workflow` turns this list into the STEPS of a saved pipeline, so an
+    // out-of-place call is a wrong pipeline, not a cosmetic sort.
+    //
+    // Ordering by the run first (`created_at, rowid`) held only while one turn's
+    // calls all lived on one run. Once a child books onto its own run — which is
+    // always younger than its parent's — every child call sorted after every
+    // call the parent made that turn, however early the child actually ran.
+    // `sequence_order` cannot repair it: it restarts per run.
+    const h = createHistory();
+    const parent = h.insertRun({ sessionId: 'thread-1', taskText: 'turn', modelTier: 'balanced', modelId: 'm' });
+    h.insertToolCall({ runId: parent, toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 0 });
+
+    // Mid-turn: the parent spawns a child, which makes a call of its own...
+    const child = h.insertRun({ sessionId: 'thread-1', taskText: 'child', modelTier: 'fast', modelId: 'm', runType: 'single', spawnParentId: parent, spawnDepth: 1 });
+    h.insertToolCall({ runId: child, toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 0 });
+
+    // ...and only afterwards does the parent make its next call.
+    h.insertToolCall({ runId: parent, toolName: 'write_file', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 1 });
+
+    expect(h.getSessionToolCalls('thread-1').map(c => c.tool_name))
+      .toEqual(['read_file', 'http_request', 'write_file']);
+    h.close();
+  });
+
   it('getRunsBySession returns every run for a thread (ALL statuses), chronological + isolated', () => {
     const h = createHistory();
     const r1 = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 1', modelTier: 'balanced', modelId: 'm' });
@@ -2667,14 +2692,43 @@ describe('RunHistory', () => {
       h.close();
     });
 
-    it('getToolCallCountSince excludes pipeline_step calls — A2 must not change tool rate-limiting', () => {
+    it('getToolCallCountSince counts a pipeline_step call — the rate limit sees every recorded call', () => {
+      // This used to assert the opposite, on the stated grounds that a workflow
+      // step's calls were "unrecorded, so uncounted" and counting them would
+      // retroactively tighten the limit. The premise was wrong: they WERE
+      // recorded a second time, by the process-global `lynox:tool:end`
+      // subscriber, onto whatever run the listening Session had open. The
+      // exclusion was therefore not keeping step calls out of the count — it was
+      // cancelling a double count.
+      //
+      // With the duplicate write gone, keeping the exclusion would have left
+      // every workflow step's calls counted by nothing at all — a rate limit
+      // silently un-enforced for a whole execution path. The two are one change.
       const h = createHistory();
       const chat = h.insertRun({ sessionId: 's', taskText: 't', modelTier: 'balanced', modelId: 'm' });
       h.insertToolCall({ runId: chat, toolName: 'http', inputJson: '{}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
       const step = h.insertRun({ taskText: 'step', modelTier: 'balanced', modelId: 'm', runType: 'pipeline_step', spawnParentId: 'p', spawnDepth: 1 });
       h.insertToolCall({ runId: step, toolName: 'http', inputJson: '{}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
 
-      expect(h.getToolCallCountSince('http', 24)).toBe(1); // only the chat turn's call counts
+      expect(h.getToolCallCountSince('http', 24)).toBe(2);
+      h.close();
+    });
+
+    it('a spawned child\'s calls count toward the rate limit from the child\'s own run', () => {
+      // The enforcement half of moving a child's calls onto its own row. A
+      // spawn fan-out is exactly the shape that can outrun a limit — twenty
+      // children issuing http_request in parallel — so the count must follow the
+      // calls to wherever they are now attributed. A child run is `single`, not
+      // `pipeline_step`, and is joined like any other.
+      const h = createHistory();
+      const parent = h.insertRun({ sessionId: 's', taskText: 't', modelTier: 'balanced', modelId: 'm' });
+      h.insertToolCall({ runId: parent, toolName: 'http_request', inputJson: '{}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
+      for (let i = 0; i < 5; i++) {
+        const child = h.insertRun({ sessionId: 's', taskText: `child ${i}`, modelTier: 'fast', modelId: 'm', runType: 'single', spawnParentId: parent, spawnDepth: 1 });
+        h.insertToolCall({ runId: child, toolName: 'http_request', inputJson: '{}', outputJson: 'ok', durationMs: 1, sequenceOrder: 0 });
+      }
+
+      expect(h.getToolCallCountSince('http_request', 24), 'the parent call plus all five children').toBe(6);
       h.close();
     });
 
