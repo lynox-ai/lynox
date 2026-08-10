@@ -1788,6 +1788,22 @@ export class Agent implements IAgent {
         // In-place content edits invalidate the incremental length cache.
         this._msgCount = 0;
         this._runningMsgLen = 0;
+        // Bound the store on THIS path too. Compaction prunes after evicting
+        // (`Session.compact`), but a spawned agent has no Session, never
+        // compacts, and shares the parent's store via `spawn.ts` — so without
+        // this a fetch-heavy child grows it without limit.
+        this.toolResultBlobStore.pruneToCap();
+        // Drop the exact-usage anchor: it is the prompt size the API reported
+        // for a context that no longer exists. `_estimateOccupancyTokens`
+        // prefers `_lastRealInputTokens + delta-since-last-call`, and that delta
+        // covers only the newest messages — precisely the ones skipTail
+        // protects. Leaving the anchor set means the re-check below cannot see
+        // a single freed character, the early return never fires, and the
+        // front-drop runs anyway: the collapse would be pure added cost. Same
+        // reasoning as `loadMessages`, which clears it after rehydrating.
+        this._lastRealInputTokens = undefined;
+        this._lastCacheReadTokens = undefined;
+        this._lastRealAtMsgCount = 0;
         if (this.onStream) {
           void this.onStream({
             type: 'context_pressure', droppedMessages: 0, agent: this.name,
@@ -1879,12 +1895,32 @@ export class Agent implements IAgent {
             }
           } else if (block.type === 'tool_result') {
             const resultBlock = block as BetaToolResultBlockParam;
-            if (typeof resultBlock.content !== 'string') continue;
-            if (resultBlock.content.length > TARGET_CHARS_PER_MSG) {
+            const rc = resultBlock.content;
+            if (typeof rc === 'string') {
+              if (rc.length > TARGET_CHARS_PER_MSG) {
+                msg.content[b] = {
+                  ...resultBlock,
+                  content: rc.slice(0, TARGET_CHARS_PER_MSG) +
+                    '\n[…content truncated to fit context window]',
+                };
+              }
+            } else if (Array.isArray(rc)) {
+              // A tool_result's own content can itself be an array of text/image
+              // blocks. No core tool emits that today (handlers return strings),
+              // but stopping at the string case would leave the same blind spot
+              // one layer down — which is the bug this pass is being fixed for.
+              // Images are left alone: they are already token-counted by pixels,
+              // not by their base64 length (`imageAwareSerializedLen`).
               msg.content[b] = {
                 ...resultBlock,
-                content: resultBlock.content.slice(0, TARGET_CHARS_PER_MSG) +
-                  '\n[…content truncated to fit context window]',
+                content: rc.map(inner =>
+                  inner.type === 'text' && inner.text.length > TARGET_CHARS_PER_MSG
+                    ? {
+                      ...inner,
+                      text: inner.text.slice(0, TARGET_CHARS_PER_MSG) +
+                        '\n[…content truncated to fit context window]',
+                    }
+                    : inner),
               };
             }
           }

@@ -5,6 +5,7 @@ import type {
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { contentKey, toolResultText, toolCallsById } from './tool-result-hygiene.js';
 import { maskSecretPatterns } from './secret-store.js';
+import { containsUntrustedMarker, wrapUntrustedData } from './data-boundary.js';
 
 /**
  * Phase 2 — Context Hygiene. Default blob threshold in characters.
@@ -457,9 +458,17 @@ export class ToolResultBlobStore {
         const block = content[i]!;
         if (block.type !== 'tool_result') continue;
         const resultBlock = block as BetaToolResultBlockParam;
+        // `park` stores `toolResultText`, which keeps ONLY text blocks. At
+        // compaction that is harmless — the history is reset and images are
+        // carried separately by `evictImagesFrom`. Here the rewrite is in place,
+        // so collapsing a block that holds anything else would delete it from
+        // the context AND leave it out of the blob: unrecallable, gone. Skip
+        // those instead; a text-only payload is the case that costs context.
+        if (!isTextOnlyResult(resultBlock.content)) continue;
         const parked = this.park(resultBlock, toolCalls, thresholdChars);
         if (!parked) continue;
-        const stub = recallStub(parked.id, parked.descriptor);
+        const payloadWasUntrusted = containsUntrustedMarker(toolResultText(resultBlock.content));
+        const stub = recallStub(parked.id, parked.descriptor, payloadWasUntrusted);
         // Preserve `tool_use_id` / `is_error` — dropping either breaks the
         // tool_use↔tool_result pairing the API validates on every request.
         content[i] = { ...resultBlock, content: stub };
@@ -477,9 +486,29 @@ export class ToolResultBlobStore {
  * place the model learns the handle exists — unlike the compaction path, there
  * is no synthetic seed listing every handle.
  */
-export function recallStub(id: string, descriptor: string): string {
-  return `[Full result set aside to free context — ${descriptor}. `
+export function recallStub(id: string, descriptor: string, wasUntrusted = false): string {
+  const stub = `[Full result set aside to free context — ${descriptor}. `
     + `Call recall_tool_result with id "${id}" to read it again.]`;
+  // Carry the trust boundary into the replacement. The descriptor happens to
+  // start with the payload's first 80 chars, so a wrap that sits at offset 0
+  // would survive by accident — but several producers put engine framing first
+  // (`mail_read`'s Date/UID/Folder header, `web_research`'s title block), which
+  // pushes the marker out of the excerpt. Re-deriving the taint from context
+  // (`loadMessages`, reached mid-thread via `setModel`) would then read a
+  // collapsed history as clean and disarm the durable-write gate.
+  return wasUntrusted && !containsUntrustedMarker(stub)
+    ? wrapUntrustedData(stub, 'parked-tool-result')
+    : stub;
+}
+
+/**
+ * Does this tool_result carry text and nothing else? Only then is the blob a
+ * complete copy of it — see the call site in `collapseIn`.
+ */
+function isTextOnlyResult(content: BetaToolResultBlockParam['content']): boolean {
+  if (typeof content === 'string') return true;
+  if (!Array.isArray(content)) return false;
+  return content.every(block => block.type === 'text');
 }
 
 /**

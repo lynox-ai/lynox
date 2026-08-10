@@ -43,6 +43,29 @@ function setMessages(agent: Agent, messages: BetaMessageParam[]): void {
   (agent as unknown as { messages: BetaMessageParam[] }).messages = messages;
 }
 
+/**
+ * Put the agent in the state EVERY agent is in from its second API call onward:
+ * an exact prompt size reported by the API, plus the message index that figure
+ * was measured at.
+ *
+ * This matters more than it looks. `_estimateOccupancyTokens` prefers
+ * `_lastRealInputTokens + delta-since-that-index`, and the delta covers only the
+ * newest messages — exactly the ones `COLLAPSE_SKIP_TAIL_MESSAGES` protects. So
+ * with the anchor set, freeing 700K chars of older history moves the estimate by
+ * ZERO. A fixture that omits this tests only the first call of a fresh agent, a
+ * state that never recurs, and would stay green while the feature does nothing
+ * in production.
+ */
+function seedRealUsage(agent: Agent, promptTokens: number): void {
+  const internals = agent as unknown as {
+    _lastRealInputTokens: number;
+    _lastRealAtMsgCount: number;
+  };
+  internals._lastRealInputTokens = promptTokens;
+  // Mirrors `_lastRealAtMsgCount = msgCountBeforeRecovery - 1` at the call site.
+  internals._lastRealAtMsgCount = Math.max(0, messagesOf(agent).length - 1);
+}
+
 /** First tool_result payload of a message, '' when there is none. */
 function resultTextOf(msg: BetaMessageParam): string {
   const content = msg.content;
@@ -69,6 +92,7 @@ describe('_truncateHistory — collapse before front-drop', () => {
     // 10 × 80K chars ≈ 228K tokens — comfortably past the 85% mark of a 200K window.
     const history = heavyHistory(10, 80_000);
     setMessages(agent, history);
+    seedRealUsage(agent, 190_000);
     const before = history.length;
 
     truncate(agent);
@@ -255,5 +279,107 @@ describe('collapse and the untrusted-data taint', () => {
     const id = store.entries()[0]!.id;
     const recalled = await recallToolResultTool.handler({ id }, agent);
     expect(containsUntrustedMarker(recalled)).toBe(true);
+  });
+});
+
+describe('collapse — bounds and block kinds (refutation follow-ups)', () => {
+  it('prunes the store on the mint path, not only at compaction', async () => {
+    // `pruneToCap` used to be called only from `Session.compact`. A spawned
+    // agent shares the parent's store (spawn.ts) but has no Session, so it
+    // never compacts — an unbounded writer into someone else's store.
+    const { vi } = await import('vitest');
+    const store = new ToolResultBlobStore();
+    const spy = vi.spyOn(store, 'pruneToCap');
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', toolResultBlobStore: store });
+    setMessages(agent, heavyHistory(10, 80_000));
+    seedRealUsage(agent, 190_000);
+
+    truncate(agent);
+
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('does not collapse a tool_result that carries a non-text block', () => {
+    // `park` stores `toolResultText`, which keeps text and drops everything
+    // else. Collapsing such a block in place would remove the image from the
+    // context AND leave it out of the blob — unrecallable, permanently gone.
+    const store = new ToolResultBlobStore();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', toolResultBlobStore: store });
+    const history = heavyHistory(10, 80_000);
+    history[2] = {
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'tu-0',
+        content: [
+          { type: 'text', text: 'i'.repeat(50_000) },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+        ],
+      }],
+    };
+    setMessages(agent, history);
+    seedRealUsage(agent, 190_000);
+
+    truncate(agent);
+
+    const content = messagesOf(agent)[2]!.content as Array<{ type: string; content?: unknown }>;
+    const block = content[0]!;
+    // Untouched: still the original array, image included.
+    expect(Array.isArray(block.content)).toBe(true);
+    const inner = block.content as Array<{ type: string }>;
+    expect(inner.some(b => b.type === 'image')).toBe(true);
+  });
+
+  it('keeps the untrusted boundary when engine framing precedes the wrap', async () => {
+    // `buildDescriptor` copies the payload's first 80 chars into the stub, so a
+    // wrap at offset 0 survives by accident. Real producers put framing first —
+    // mail_read emits Date/UID/Folder lines before the wrapped envelope — which
+    // pushes the marker out of the excerpt entirely.
+    const { wrapUntrustedData, containsUntrustedMarker } = await import('./data-boundary.js');
+    const store = new ToolResultBlobStore();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', toolResultBlobStore: store });
+
+    const framed = `Date: 2026-08-11T09:15:22.000Z\nUID: 184213\nFolder: INBOX\n`
+      + `Message-ID: <CAF9x8k2m0@mail.example>\n`
+      + wrapUntrustedData('m'.repeat(80_000), 'mail_read');
+    const history = heavyHistory(10, 80_000);
+    history[2] = {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'tu-0', content: framed }],
+    };
+    setMessages(agent, history);
+    seedRealUsage(agent, 190_000);
+
+    truncate(agent);
+
+    const stub = resultTextOf(messagesOf(agent)[2]!);
+    expect(stub).toContain('recall_tool_result');
+    expect(containsUntrustedMarker(stub)).toBe(true);
+  });
+
+  it('trims a tool_result whose own content is an array of text blocks', () => {
+    // One layer below the fix above: the block itself holds [text], not a
+    // string. Stopping at the string case would leave the same blind spot.
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    const huge = 'v'.repeat(700_000);
+    setMessages(agent, [
+      toolUseMsg('tu-1'),
+      {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'tu-1',
+          content: [{ type: 'text', text: huge }],
+        }],
+      },
+      { role: 'assistant', content: 'ok' },
+    ]);
+
+    truncate(agent);
+
+    const content = messagesOf(agent)[1]!.content as Array<{ content?: unknown }>;
+    const inner = content[0]!.content as Array<{ type: string; text?: string }>;
+    expect(inner[0]!.text!.length).toBeLessThan(huge.length);
   });
 });
