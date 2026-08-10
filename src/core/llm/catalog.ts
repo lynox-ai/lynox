@@ -239,7 +239,7 @@ const ANTHROPIC_MODELS: ReadonlyArray<CatalogModel> = [
     pricing: { input: 10, output: 50 },
     capabilities: ['vision', 'tool_use', 'extended_thinking'],
     residency: 'US (Anthropic; DPA + GDPR)',
-    notes: 'Flagship — most capable model for demanding reasoning + long-horizon agentic work (1M context, up to 128k output). Priciest tier at $10/$50 per M — the max-quality deep slot; reserve for deliberate deep escalation, not the main chat.',
+    notes: 'Flagship — most capable model for demanding reasoning + long-horizon agentic work (1M context, up to 128k output). Priciest tier at $10/$50 per M. NOT in any preset since 2026-08-10 (max-quality deep is opus-5 at $5/$25) — a preset is what someone lands on, and an escalation can enter that slot without a deliberate choice. Selectable here for anyone who wants it explicitly.',
   },
   {
     id: 'claude-haiku-4-5-20251001',

@@ -202,7 +202,7 @@
 		tiers: PresetTierInfo[];
 		available: boolean;
 	}
-	// The five strategy cards. 'standard' = one provider, lynox routes per turn;
+	// The strategy cards: Standard, one per contract preset, and Eigene. 'standard' = one provider, lynox routes per turn;
 	// the contract's preset names are hybrid tier_presets; 'custom' = manual hybrid.
 	// `Strategy` + `buildRoutingUpdate` (the persistence mapping) live in a plain
 	// .ts helper so the body-building is unit-testable (this .svelte has no seam).
@@ -534,7 +534,7 @@
 	// controls show (provider picker for Standard, per-tier editor for Eigene, the
 	// inline detail for a preset); what persists is decided in runSaveConfig from it.
 	//
-	// The five cards (order = Standard → cheap → flagship → manual). `key` is the
+	// Order = Standard → the contract presets in their vocab order → manual Eigene. `key` is the
 	// i18n stem (hyphenated ids can't be a translation-key segment). Icons are the
 	// monochrome set: ✓ Standard · ⚡ Efficient · ⚖️ Balanced · 📍 EU-souverän ·
 	// 💎 Max-Quality · sliders for the manual Eigene.

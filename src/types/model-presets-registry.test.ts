@@ -39,7 +39,7 @@ describe('model-presets Wave 1 — new model registrations', () => {
     expect(m.provenance).toBe('US');
   });
 
-  it('Claude Fable 5 — verified $10/$50, 1M ctx, vision, US, deep (max-quality deep slot)', () => {
+  it('Claude Fable 5 — verified $10/$50, 1M ctx, vision, US, deep (catalog-only, in no preset)', () => {
     const m = MODEL_CAPABILITIES['claude-fable-5']!;
     expect(m.provider).toBe('anthropic');
     expect(m.tier).toBe('deep');

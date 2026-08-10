@@ -14,6 +14,9 @@ describe('buildRoutingUpdate (model-presets W4)', () => {
     // Over the CONTRACT list, not a literal: this file's own header calls itself the
     // only proof that the client sends the right PUT body per strategy, and a
     // hand-written list left `eu-sovereign` unproven the day it was added.
+    // The length assert is not ceremony — with an empty list every loop below is
+    // VACUOUSLY green, which a delta review demonstrated (5/5 passing, 0 iterations).
+    expect(TIER_PRESET_NAMES.length).toBeGreaterThan(0);
     for (const p of TIER_PRESET_NAMES) {
       const u = buildRoutingUpdate(p, { existingTierSet: EXISTING, customTierSet: CUSTOM });
       expect(u.tier_preset).toBe(p);

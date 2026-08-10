@@ -40,7 +40,7 @@ export interface RoutingUpdate {
   tier_preset?: string | null;
 }
 
-/** True for the three named hybrid presets (not Standard, not the manual Custom). */
+/** True for every named hybrid preset (not Standard, not the manual Custom). */
 export function isPresetStrategy(strategy: Strategy): boolean {
   return strategy !== 'standard' && strategy !== 'custom';
 }

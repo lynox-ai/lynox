@@ -144,8 +144,13 @@ describe('tier-presets (model-presets W2 SoT)', () => {
         expect(p, `${name}.${tier} → ${id} has no output price to rank`).toBeTypeOf('number');
         return p as number;
       };
-      expect(out('fast'), `${name}: fast output must not exceed balanced`).toBeLessThanOrEqual(out('balanced'));
-      expect(out('balanced'), `${name}: balanced output must not exceed deep`).toBeLessThanOrEqual(out('deep'));
+      // STRICTLY ascending, not `<=`: a delta review mutated haiku's output price to
+      // equal sonnet's, flattening max-quality's fast and main bands, and the `<=`
+      // version stayed green. The comment this test backs says the price RISES with
+      // the band — a flat pair means the cheaper band bought nothing, which is the
+      // failure the ladder exists to prevent.
+      expect(out('fast'), `${name}: fast output must be BELOW balanced`).toBeLessThan(out('balanced'));
+      expect(out('balanced'), `${name}: balanced output must be BELOW deep`).toBeLessThan(out('deep'));
     }
   });
 
