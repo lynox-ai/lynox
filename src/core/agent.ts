@@ -62,6 +62,7 @@ import { evictSavedArtifactBodies } from './artifact-eviction.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
+import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS } from './tool-result-blob-store.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
@@ -407,6 +408,10 @@ export class Agent implements IAgent {
   private _msgLenVersion = -1;
   private _msgCount = 0;
   private _runningMsgLen = 0;
+  /** How many tool results this agent has collapsed into recall stubs under
+   *  context pressure. Observability for the truncation path: a run with a high
+   *  count did heavy fetching, one with zero never approached the ceiling. */
+  private _collapsedToolResults = 0;
   /** Exact prompt-token count of the most recent API call (input + cache_read
    *  + cache_creation). undefined before the first call of the session. */
   private _lastRealInputTokens: number | undefined;
@@ -1703,6 +1708,20 @@ export class Agent implements IAgent {
    */
   private static readonly MAX_MESSAGE_COUNT = 500;
 
+  /**
+   * How many trailing messages `collapseIn` leaves untouched under context
+   * pressure. Two covers the newest assistant(tool_use) + user(tool_result)
+   * pair, i.e. the exchange the model is actively reasoning about. Collapsing
+   * that would hand it a stub for the very result it just asked for, and it
+   * would recall it again immediately — spending a turn to save nothing.
+   */
+  private static readonly COLLAPSE_SKIP_TAIL_MESSAGES = 2;
+
+  /** Tool results collapsed into recall stubs under context pressure. */
+  getCollapsedToolResultCount(): number {
+    return this._collapsedToolResults;
+  }
+
   private _truncateHistory(overheadTokens: number): void {
     // Hard message count limit — truncate to 60% keeping head + tail
     if (this.messages.length > Agent.MAX_MESSAGE_COUNT) {
@@ -1739,6 +1758,48 @@ export class Agent implements IAgent {
     const maxCtx = this._effectiveContextWindow();
     // Budget for messages = total context minus overhead, with 15% safety margin
     if (totalTokens < maxCtx * 0.85) return;
+
+    // Park oversized tool results BEFORE dropping anything. Both this and the
+    // front-drop below invalidate the cached prefix identically — the API
+    // caches by prefix, so any edit at position k re-bills everything from k.
+    // The difference is what the invalidation BUYS: a front-drop frees only the
+    // messages it discards (and loses them), whereas collapsing frees the bulk
+    // of a tool-heavy context in one pass and leaves every payload recallable.
+    //
+    // On a run that fetches repeatedly this is the whole cost story: measured on
+    // a live 17-turn run, tool results were 1.45M chars of a ~490K-token context
+    // and the flat front-drop re-truncated almost every turn, so the prefix was
+    // re-written ~8×. Collapsing turns that into one deep cut.
+    //
+    // NOT a reversal of the "eviction only at compaction" rule in
+    // `Session.compact` — that rule protects a WARM cache between turns, and it
+    // still holds: nothing here runs until the context is already at 85%, i.e.
+    // only where the alternative is a front-drop that costs the same cache.
+    if (this.toolResultBlobStore) {
+      const threshold = this.toolContext.userConfig?.tool_result_blob_threshold_chars
+        ?? DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS;
+      // Leave the newest turn intact: the model is reasoning on the result it
+      // just received, and stubbing that would only make it re-fetch at once.
+      const { handles, freedChars } = this.toolResultBlobStore.collapseIn(
+        this.messages, threshold, Agent.COLLAPSE_SKIP_TAIL_MESSAGES,
+      );
+      if (freedChars > 0) {
+        this._collapsedToolResults += handles.length;
+        // In-place content edits invalidate the incremental length cache.
+        this._msgCount = 0;
+        this._runningMsgLen = 0;
+        if (this.onStream) {
+          void this.onStream({
+            type: 'context_pressure', droppedMessages: 0, agent: this.name,
+            usagePercent: Math.round(
+              (this._estimateMsgLen() / this._charsPerToken + overheadTokens) / maxCtx * 100,
+            ),
+          });
+        }
+        // Enough headroom recovered — skip the lossy front-drop entirely.
+        if (this._estimateOccupancyTokens(overheadTokens) < maxCtx * 0.85) return;
+      }
+    }
 
     // Try dropping middle messages first (keep first + last N).
     // Adjust boundary so we never split a tool_use/tool_result pair.
@@ -1782,15 +1843,51 @@ export class Agent implements IAgent {
 
     // Second pass: truncate large content blocks if still oversized.
     // Keep the last user message intact; trim from oldest to newest.
+    //
+    // This pass USED TO test `typeof msg.content !== 'string'` and skip
+    // everything else — which meant it never touched a tool_result, because
+    // those always arrive as a content ARRAY. The last-resort shrink was blind
+    // to exactly the message kind that overflows the window in practice: on the
+    // measured run, tool results were 1.45M of ~1.55M total chars, all of it in
+    // array content, so this pass ran and freed nothing and the request went
+    // out oversized anyway.
     const afterDrop = this._estimateMsgLen() / this._charsPerToken + overheadTokens;
     if (afterDrop >= maxCtx * 0.85) {
       const TARGET_CHARS_PER_MSG = 8000 * ctxScale;
       for (let i = 0; i < this.messages.length - 1; i++) {
         const msg = this.messages[i]!;
-        if (typeof msg.content !== 'string') continue;
-        if (msg.content.length > TARGET_CHARS_PER_MSG) {
-          msg.content = msg.content.slice(0, TARGET_CHARS_PER_MSG) +
-            '\n[…content truncated to fit context window]';
+        if (typeof msg.content === 'string') {
+          if (msg.content.length > TARGET_CHARS_PER_MSG) {
+            msg.content = msg.content.slice(0, TARGET_CHARS_PER_MSG) +
+              '\n[…content truncated to fit context window]';
+          }
+          continue;
+        }
+        // Array content: trim the two payload-carrying block kinds. `thinking`
+        // and `redacted_thinking` are signature-verified by the API and MUST
+        // stay byte-exact; `tool_use.input` is structured JSON that would stop
+        // parsing if sliced. Neither is touched.
+        for (let b = 0; b < msg.content.length; b++) {
+          const block = msg.content[b]!;
+          if (block.type === 'text') {
+            if (block.text.length > TARGET_CHARS_PER_MSG) {
+              msg.content[b] = {
+                ...block,
+                text: block.text.slice(0, TARGET_CHARS_PER_MSG) +
+                  '\n[…content truncated to fit context window]',
+              };
+            }
+          } else if (block.type === 'tool_result') {
+            const resultBlock = block as BetaToolResultBlockParam;
+            if (typeof resultBlock.content !== 'string') continue;
+            if (resultBlock.content.length > TARGET_CHARS_PER_MSG) {
+              msg.content[b] = {
+                ...resultBlock,
+                content: resultBlock.content.slice(0, TARGET_CHARS_PER_MSG) +
+                  '\n[…content truncated to fit context window]',
+              };
+            }
+          }
         }
       }
       // Invalidate cached message length after in-place content truncation

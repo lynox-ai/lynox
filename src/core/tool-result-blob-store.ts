@@ -365,46 +365,121 @@ export class ToolResultBlobStore {
       if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
       for (const block of msg.content) {
         if (block.type !== 'tool_result') continue;
-        const resultBlock = block as BetaToolResultBlockParam;
-        const payload = toolResultText(resultBlock.content);
-        if (payload.length <= thresholdChars) continue;
-        const call = toolCalls.get(resultBlock.tool_use_id);
-        const tool = call?.name ?? 'tool';
-        // Dedup: an identical payload already resident reuses its handle instead
-        // of minting a second blob. This is what breaks the cross-compaction
-        // amplifier — the same file dump re-parked at each compaction now maps
-        // to ONE id. `this.get()` promotes the reused blob to most-recently-used
-        // (it is being referenced again). The `payload ===` guard makes a hash
-        // clash cost only a missed dedup, never a wrong reuse.
-        const ident = identifyingArg(call?.input);
-        const key = contentKey(payload);
-        const existingId = this.idByContent.get(key);
-        if (existingId !== undefined) {
-          const existing = this.get(existingId);
-          if (existing !== undefined && existing.payload === payload) {
-            // ONE blob now stands for TWO different calls (a mirror page, two
-            // URLs answering the same 404). Keeping the first call's argument
-            // would label this handle with a URL it did not come from — a
-            // confidently WRONG label is worse than none, so drop the argument
-            // and fall back to the bare tool label when they disagree.
-            const descriptor = ident === existing.ident
-              ? existing.descriptor
-              : buildDescriptor(existing.tool, existing.payload, '');
-            handles.push({ id: existingId, descriptor });
-            continue;
-          }
-        }
-        const id = this.nextId();
-        const descriptor = buildDescriptor(tool, payload, ident);
-        this.blobs.set(id, { tool, descriptor, payload, ident });
-        this.totalBytes += payload.length;
-        this.idByContent.set(key, id);
-        this.contentById.set(id, key);
-        handles.push({ id, descriptor });
+        const parked = this.park(block as BetaToolResultBlockParam, toolCalls, thresholdChars);
+        if (parked) handles.push({ id: parked.id, descriptor: parked.descriptor });
       }
     }
     return handles;
   }
+
+  /**
+   * Park one oversized tool_result into the store and return its handle, or
+   * undefined when the payload is under `thresholdChars`.
+   *
+   * Extracted so `evictFrom` (read-only, compaction) and `collapseIn`
+   * (rewrites in place, mid-run) mint handles through ONE code path — the
+   * dedup index and the byte accounting must not diverge between them.
+   */
+  private park(
+    resultBlock: BetaToolResultBlockParam,
+    toolCalls: ReturnType<typeof toolCallsById>,
+    thresholdChars: number,
+  ): { id: string; descriptor: string; payloadChars: number } | undefined {
+    const payload = toolResultText(resultBlock.content);
+    if (payload.length <= thresholdChars) return undefined;
+    const call = toolCalls.get(resultBlock.tool_use_id);
+    const tool = call?.name ?? 'tool';
+    // Dedup: an identical payload already resident reuses its handle instead
+    // of minting a second blob. This is what breaks the cross-compaction
+    // amplifier — the same file dump re-parked at each compaction now maps
+    // to ONE id. `this.get()` promotes the reused blob to most-recently-used
+    // (it is being referenced again). The `payload ===` guard makes a hash
+    // clash cost only a missed dedup, never a wrong reuse.
+    const ident = identifyingArg(call?.input);
+    const key = contentKey(payload);
+    const existingId = this.idByContent.get(key);
+    if (existingId !== undefined) {
+      const existing = this.get(existingId);
+      if (existing !== undefined && existing.payload === payload) {
+        // ONE blob now stands for TWO different calls (a mirror page, two
+        // URLs answering the same 404). Keeping the first call's argument
+        // would label this handle with a URL it did not come from — a
+        // confidently WRONG label is worse than none, so drop the argument
+        // and fall back to the bare tool label when they disagree.
+        const descriptor = ident === existing.ident
+          ? existing.descriptor
+          : buildDescriptor(existing.tool, existing.payload, '');
+        return { id: existingId, descriptor, payloadChars: payload.length };
+      }
+    }
+    const id = this.nextId();
+    const descriptor = buildDescriptor(tool, payload, ident);
+    this.blobs.set(id, { tool, descriptor, payload, ident });
+    this.totalBytes += payload.length;
+    this.idByContent.set(key, id);
+    this.contentById.set(id, key);
+    return { id, descriptor, payloadChars: payload.length };
+  }
+
+  /**
+   * Park oversized tool results AND replace them in place with a one-line
+   * recall stub. Unlike `evictFrom` this MUTATES `messages`, because the caller
+   * keeps running on the same array instead of resetting it.
+   *
+   * Why this exists as a distinct entry point: compaction evicts and then wipes
+   * the history, so it never needed to rewrite blocks. A run that is about to
+   * overflow mid-turn has no such reset — without an in-place rewrite the only
+   * remaining lever is `_truncateHistory`'s front-drop, which discards the data
+   * outright AND invalidates the cached prefix just the same. Collapsing keeps
+   * the payload recallable and frees far more context per prefix invalidation.
+   *
+   * `skipTailMessages` leaves the newest N messages untouched — the model is
+   * mid-reasoning on those, and stubbing the result it just received would make
+   * it re-fetch immediately.
+   *
+   * @returns handles minted plus how many characters were freed.
+   */
+  collapseIn(
+    messages: BetaMessageParam[],
+    thresholdChars: number,
+    skipTailMessages = 0,
+  ): { handles: Array<{ id: string; descriptor: string }>; freedChars: number } {
+    const toolCalls = toolCallsById(messages);
+    const handles: Array<{ id: string; descriptor: string }> = [];
+    let freedChars = 0;
+
+    const limit = Math.max(0, messages.length - skipTailMessages);
+    for (let m = 0; m < limit; m++) {
+      const msg = messages[m]!;
+      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
+      const content = msg.content;
+      for (let i = 0; i < content.length; i++) {
+        const block = content[i]!;
+        if (block.type !== 'tool_result') continue;
+        const resultBlock = block as BetaToolResultBlockParam;
+        const parked = this.park(resultBlock, toolCalls, thresholdChars);
+        if (!parked) continue;
+        const stub = recallStub(parked.id, parked.descriptor);
+        // Preserve `tool_use_id` / `is_error` — dropping either breaks the
+        // tool_use↔tool_result pairing the API validates on every request.
+        content[i] = { ...resultBlock, content: stub };
+        freedChars += Math.max(0, parked.payloadChars - stub.length);
+        handles.push({ id: parked.id, descriptor: parked.descriptor });
+      }
+    }
+    return { handles, freedChars };
+  }
+}
+
+/**
+ * The text left behind where a collapsed payload was. It must state the id in
+ * the exact shape `recall_tool_result` expects, because this stub is the ONLY
+ * place the model learns the handle exists — unlike the compaction path, there
+ * is no synthetic seed listing every handle.
+ */
+export function recallStub(id: string, descriptor: string): string {
+  return `[Full result set aside to free context — ${descriptor}. `
+    + `Call recall_tool_result with id "${id}" to read it again.]`;
 }
 
 /**
