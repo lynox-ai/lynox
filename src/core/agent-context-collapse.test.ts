@@ -53,10 +53,10 @@ function resultTextOf(msg: BetaMessageParam): string {
 }
 
 /** N tool_use/tool_result pairs, each result `chars` long and unique. */
-function heavyHistory(pairs: number, chars: number): BetaMessageParam[] {
+function heavyHistory(pairs: number, chars: number, tool = 'http_request'): BetaMessageParam[] {
   const messages: BetaMessageParam[] = [{ role: 'user', content: 'Triage every contact' }];
   for (let i = 0; i < pairs; i++) {
-    messages.push(toolUseMsg(`tu-${i}`));
+    messages.push(toolUseMsg(`tu-${i}`, tool));
     messages.push(toolResultMsg(`tu-${i}`, `${i}:${'x'.repeat(chars)}`));
   }
   return messages;
@@ -182,5 +182,78 @@ describe('_truncateHistory — last-resort pass reaches array content', () => {
     // subsequent request 400, which bricks the thread rather than shrinking it.
     expect(block.thinking).toBe(thought);
     expect(block.signature).toBe('sig-abc');
+  });
+});
+
+describe('collapse and the untrusted-data taint', () => {
+  it('keeps the conversation taint armed across a collapse', () => {
+    // `_conversationSawUntrusted` is a LATCH. It is re-derived from context only
+    // in `loadMessages` (resume / post-compaction) — never mid-run. Wiring a
+    // re-derivation into the truncation path would silently disarm the
+    // durable-write gate on exactly the long, tool-heavy threads most likely to
+    // have ingested external content.
+    //
+    // The fixture is doing real work here, so it is spelled out: the history
+    // must hold NO context-derivable taint signal at all, or the assertion
+    // passes for the wrong reason. Two traps, both hit while writing this:
+    //   - a marker-carrying payload does not work, because `buildDescriptor`
+    //     copies the payload's first 80 chars into the stub, so an outer
+    //     <untrusted-data …> tag survives the collapse in the descriptor;
+    //   - neither does the default `http_request` tool name, because
+    //     `_contextHoldsUntrustedMarker` returns true for any tool_use named in
+    //     EXTERNAL_CONTENT_TOOLS, whatever the payload says.
+    // `plan_task` is in neither set, so the latch is the ONLY thing keeping the
+    // gate armed — which is exactly the property under test.
+    const store = new ToolResultBlobStore();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', toolResultBlobStore: store });
+    setMessages(agent, heavyHistory(10, 80_000, 'plan_task'));
+    agent.noteUntrustedData();
+
+    truncate(agent);
+
+    expect(agent.getCollapsedToolResultCount()).toBeGreaterThan(0);
+    expect(agent.conversationSawUntrusted).toBe(true);
+  });
+
+  it('carries a marked payload\'s boundary into the stub that replaces it', async () => {
+    // The complement of the test above, and the reason a collapse does not
+    // launder external content on RESUME: `loadMessages` re-derives the taint
+    // from whatever the context holds, so the stub must still testify that
+    // untrusted data passed through here.
+    const { wrapUntrustedData, containsUntrustedMarker } = await import('./data-boundary.js');
+    const store = new ToolResultBlobStore();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', toolResultBlobStore: store });
+
+    const history: BetaMessageParam[] = [{ role: 'user', content: 'Triage every contact' }];
+    history.push(toolUseMsg('tu-0'));
+    history.push(toolResultMsg('tu-0', wrapUntrustedData('x'.repeat(80_000), 'http_request')));
+    for (let i = 1; i < 10; i++) {
+      history.push(toolUseMsg(`tu-${i}`));
+      history.push(toolResultMsg(`tu-${i}`, `${i}:${'y'.repeat(80_000)}`));
+    }
+    setMessages(agent, history);
+
+    truncate(agent);
+
+    const stub = resultTextOf(messagesOf(agent)[2]!);
+    expect(stub).toContain('recall_tool_result');
+    expect(containsUntrustedMarker(stub)).toBe(true);
+  });
+
+  it('re-wraps a recalled payload as untrusted', async () => {
+    // Complements the above: the payload comes BACK through recall_tool_result,
+    // which re-wraps it. Collapsing must not become a laundering path that
+    // returns external content stripped of its boundary.
+    const { recallToolResultTool } = await import('../tools/builtin/recall-tool-result.js');
+    const { containsUntrustedMarker } = await import('./data-boundary.js');
+    const store = new ToolResultBlobStore();
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', toolResultBlobStore: store });
+    setMessages(agent, heavyHistory(10, 80_000));
+
+    truncate(agent);
+
+    const id = store.entries()[0]!.id;
+    const recalled = await recallToolResultTool.handler({ id }, agent);
+    expect(containsUntrustedMarker(recalled)).toBe(true);
   });
 });
