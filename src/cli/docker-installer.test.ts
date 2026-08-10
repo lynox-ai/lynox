@@ -542,7 +542,9 @@ describe('compose files match the hardening the docs and settings.yml claim', ()
       });
 
       it('declares no external network (that would be cross-project reachable)', () => {
-        for (const [name, net] of Object.entries(doc.networks ?? {})) {
+        const nets = Object.entries(doc.networks ?? {});
+        expect(nets.length).toBeGreaterThan(0); // else the loop asserts nothing
+        for (const [name, net] of nets) {
           expect(net?.external, `network ${name} is external`).toBeFalsy();
         }
       });
@@ -560,6 +562,45 @@ describe('compose files match the hardening the docs and settings.yml claim', ()
     });
   }
 
+  // The cut that bites: because both compose files declare a network, ANY
+  // service the docs tell users to paste in needs a `networks:` key or it lands
+  // on Compose's implicit `default` and cannot reach the engine. Compose
+  // accepts the file and the containers start, so the failure is silent —
+  // which is how the cloudflared sidecar in remote-access.md shipped broken for
+  // every git-clone install (the repo file has declared a network all along).
+  //
+  // Watchtower is deliberately exempt: it talks to the Docker socket, not to
+  // lynox over the network, and the docs give it no networks key on purpose.
+  it('every compose snippet in the docs puts its services on a network', () => {
+    const EXEMPT = new Set(['watchtower', 'lynox']); // socket-only; lynox is the anchor shown for context
+    const pages = ['setup/remote-access.md', 'setup/docker.md'];
+    let checked = 0;
+    for (const page of pages) {
+      const md = readFileSync(join(REPO_ROOT, 'docs/src/content/docs', page), 'utf-8');
+      for (const [, block] of md.matchAll(/```ya?ml\n([\s\S]*?)```/g)) {
+        let doc: unknown;
+        try {
+          doc = parseYaml(block);
+        } catch {
+          continue; // fragments that are not standalone YAML
+        }
+        const services = (doc as ComposeDoc | null)?.services;
+        if (!services) continue;
+        for (const [name, svc] of Object.entries(services)) {
+          if (EXEMPT.has(name)) continue;
+          checked += 1;
+          expect(
+            svc?.networks,
+            `${page}: service "${name}" has no networks key — it will land on the default network and cannot reach lynox`,
+          ).toBeDefined();
+        }
+      }
+    }
+    // Without this the test passes when the extractor finds nothing — a
+    // renamed page or a changed fence would silently disarm it.
+    expect(checked, 'no docs compose services were checked at all').toBeGreaterThan(0);
+  });
+
   // The prose half. Narrow on purpose: it pins the one retracted sentence
   // rather than counting words, so restoring it fails here instead of shipping.
   it('neither docs page restates the retracted isolation claim', () => {
@@ -568,6 +609,17 @@ describe('compose files match the hardening the docs and settings.yml claim', ()
       expect(md, `${page} restates the retracted claim`).not.toMatch(
         /Internal Docker network between services/,
       );
+
+      // "outbound is unrestricted" must stay qualified. Both pages also list
+      // application-layer egress controls (SSRF blocking, HTTP rate limits),
+      // so the unqualified sentence contradicts its own neighbours.
+      const claims = [...md.matchAll(/outbound[^.\n]*unrestricted[^.\n]*/gi)].map((m) => m[0]);
+      expect(claims.length, `${page}: no "outbound … unrestricted" sentence found`).toBeGreaterThan(0);
+      for (const sentence of claims) {
+        expect(sentence, `${page}: unqualified "outbound … unrestricted"`).toMatch(
+          /at the network layer/,
+        );
+      }
     }
   });
 });

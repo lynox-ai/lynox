@@ -101,14 +101,16 @@ services:
 # It is NOT `internal: true`. Outbound from both containers is unrestricted;
 # the engine needs it to reach the LLM API, so `internal: true` would break it.
 #
-# What it DOES buy is opt-in membership. A service added to this file without
-# a `networks:` key lands on Compose's implicit `default` network instead, and
-# then has no route and no DNS to SearXNG — verified by running a third
-# container both ways. That matters here: the Docker page tells users to add a
-# Watchtower service with no `networks:` key. Do not "simplify" this block
-# away; dropping it puts every such addition on the same network as SearXNG,
-# which runs with `limiter: false` on the strength of a narrow reachability
-# set (see searxng/settings.yml).
+# What it DOES buy is opt-in membership: a service added without a `networks:`
+# key joins Compose's implicit `default` network instead and gets no route and
+# no DNS to the services here — measured both ways with real containers.
+#
+# ⚠ Two limits, both measured, so nobody mistakes this for a boundary:
+#   - A sidecar with the Docker socket defeats it in one command
+#     (`docker network connect`), so it stops accidents, not adversaries.
+#   - It cuts BOTH ways. Anything you add that must reach `lynox` — the
+#     cloudflared sidecar in setup/remote-access.md is the live example — needs
+#     `networks: [internal]`, or it starts happily and silently cannot connect.
 networks:
   internal:
     driver: bridge
