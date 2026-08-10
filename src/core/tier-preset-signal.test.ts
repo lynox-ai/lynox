@@ -44,11 +44,17 @@ describe('buildTierPresetSignal (model-presets W4)', () => {
     for (const p of Object.values(sig)) expect(p.available).toBe(true);
   });
 
-  it('managed without the Fireworks flag: efficient unavailable, balanced + max-quality available', () => {
+  it('managed without the Fireworks flag: only the Fireworks-free presets remain', () => {
+    // Changed 2026-08-10 and worth stating plainly: `balanced` now pins a Fireworks
+    // main (GLM), so a managed tenant WITHOUT `LYNOX_MANAGED_FIREWORKS_ENABLED` is
+    // left with eu-sovereign and max-quality. That is the cost of the main swap —
+    // enabling Fireworks fleet-wide is a DPA decision, not a code one, and until it
+    // is taken this assertion is the honest picture of what such a tenant can pick.
     const sig = buildTierPresetSignal({ isManagedTier: true });
-    expect(sig['efficient']!.available).toBe(false); // deep slot is Fireworks → dropped without the opt-in
-    expect(sig['balanced']!.available).toBe(true);
-    expect(sig['max-quality']!.available).toBe(true);
+    expect(sig['efficient']!.available).toBe(false);   // all three slots Fireworks
+    expect(sig['balanced']!.available).toBe(false);    // Fireworks main
+    expect(sig['eu-sovereign']!.available).toBe(true); // all-Mistral
+    expect(sig['max-quality']!.available).toBe(true);  // all-Anthropic
   });
 
   it('managed WITH the Fireworks flag + CP key: efficient becomes available', () => {
@@ -92,22 +98,25 @@ describe('buildTierPresetSignal (model-presets W4)', () => {
   it('carries provenance + host disclosure for a CN-via-Fireworks slot (⚡ efficient deep)', () => {
     const sig = buildTierPresetSignal({ isManagedTier: false });
     const deep = sig['efficient']!.tiers.find((t) => t.tier === 'deep')!;
-    expect(deep.model_id).toBe('accounts/fireworks/models/glm-5p2');
+    expect(deep.model_id).toBe('accounts/fireworks/models/kimi-k3');
     expect(deep.provenance).toBe('CN'); // the provenance chip
     expect(deep.residency).toBe('US'); // Fireworks host residency (weights CN, host US)
   });
 
-  it('resolves an EU Mistral slot host disclosure (balanced tier = mistral-medium)', () => {
+  it('resolves an EU Mistral slot host disclosure (eu-sovereign main = mistral-large)', () => {
     const sig = buildTierPresetSignal({ isManagedTier: false });
-    const bal = sig['balanced']!.tiers.find((t) => t.tier === 'balanced')!;
-    expect(bal.model_id).toBe('mistral-medium-2604');
+    const bal = sig['eu-sovereign']!.tiers.find((t) => t.tier === 'balanced')!;
+    expect(bal.model_id).toBe('mistral-large-2512');
     expect(bal.residency).toBe('EU');
   });
 
   it('carries per-tier input/output pricing (the cost feel) from the registry', () => {
     const sig = buildTierPresetSignal({ isManagedTier: false });
     const bal = sig['balanced']!.tiers.find((t) => t.tier === 'balanced')!;
-    expect(bal.pricing).toEqual({ input: 1.50, output: 7.50 }); // mistral-medium (R8: pricier than Ministral 14B's 0.20/0.20 — the main runs every turn)
+    // GLM 5.2. It replaced mistral-medium ($1.50/$7.50) in this slot on 2026-08-10 —
+    // cheaper per output token in the band that runs every turn (the R8 concern,
+    // now the other way round) and stronger on open turns in the sweep.
+    expect(bal.pricing).toEqual({ input: 1.40, output: 4.40 });
     const deep = sig['balanced']!.tiers.find((t) => t.tier === 'deep')!;
     expect(deep.pricing).toEqual({ input: 3, output: 15 }); // Sonnet 5 — visibly pricier
   });
