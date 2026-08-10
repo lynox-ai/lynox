@@ -12,15 +12,16 @@
  * fix probe C recorded nothing; after it, C must record while A/B are unchanged.
  * A prompt change is a behaviour change and gets validated like code.
  *
- * Usage (staging):
- *   LYNOX_COOKIE=$(LYNOX_STAGING_INSTANCE=engine bash pro/scripts/mint-staging-cookie.sh | tail -1) \
+ * Usage — point it at any engine with `durable_memory_enabled` on:
+ *   LYNOX_BASE=http://127.0.0.1:3000 LYNOX_TOKEN=<engine http secret> \\
  *     node scripts/model-fitness/dk-capture-repro.mjs
- *   # or against any engine: LYNOX_BASE=http://127.0.0.1:3100 LYNOX_TOKEN=<secret> node …
+ *   # a hosted engine takes a session cookie instead: LYNOX_COOKIE=<lynox_session value>
  *
  * Requires `durable_memory_enabled` on the target (check GET /api/tools/available
  * lists `remember`) — otherwise every probe reports 0 and proves nothing.
  */
-const BASE = process.env.LYNOX_BASE ?? 'https://engine.lynox.cloud';
+const BASE = process.env.LYNOX_BASE;
+if (!BASE) { console.error('set LYNOX_BASE to the engine you want to probe (plus LYNOX_TOKEN, or LYNOX_COOKIE for a session cookie)'); process.exit(1); }
 const COOKIE = process.env.LYNOX_COOKIE;
 const TOKEN = process.env.LYNOX_TOKEN;
 const FACT = 'Die Nordberg Treuhand AG hat die UID CHE-221.554.887 und ist seit dem 12.03.2019 im Handelsregister Zug eingetragen, Aktienkapital CHF 150 000.';
