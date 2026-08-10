@@ -579,7 +579,6 @@ describe('SubjectStore.findOrCreateEngagement (M4 subject-dedup)', () => {
   });
 });
 
-
 describe('findByNameAnyKind — one name, any kind', () => {
   const tmpDirs: string[] = [];
   afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
@@ -639,6 +638,29 @@ describe('findByNameAnyKind — one name, any kind', () => {
     // Within a kind the canonical owner of the name wins outright (same order as
     // findOrCreate); the alias on the sibling must not turn this into a question.
     expect(!r.ambiguous && r.row?.id).toBe(a.ambiguous ? '' : a.id);
+  });
+
+  it('normalizes the probe: "Projekt Orion" finds an engagement stored plainly as "Orion"', () => {
+    const s = make();
+    s.findOrCreateEngagement('Orion', null); // no "Projekt Orion" surface form ever stored
+    const r = s.findByNameAnyKind('Projekt Orion');
+    expect(!r.ambiguous && r.row?.kind).toBe('engagement');
+  });
+
+  it('matches an engagement through its ALIAS, JS-folded (non-ASCII survives)', () => {
+    const s = make();
+    s.findOrCreateEngagement('Orion', null, { aliases: ['Projekt Örion-Launch'] });
+    const r = s.findByNameAnyKind('projekt örion-launch');
+    expect(!r.ambiguous && r.row?.kind).toBe('engagement');
+  });
+
+  it('finds a RAW-named engagement (backfilled rows are not normalized at create)', () => {
+    const s = make();
+    // findOrCreate does not name-dedup engagements — it inserts the raw name,
+    // exactly like the legacy backfill does.
+    s.findOrCreate({ kind: 'engagement', name: 'Projekt Raw' });
+    const r = s.findByNameAnyKind('Raw');
+    expect(!r.ambiguous && r.row?.kind).toBe('engagement');
   });
 
   it('kinds option narrows the probe', () => {

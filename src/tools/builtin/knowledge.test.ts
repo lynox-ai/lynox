@@ -567,7 +567,6 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
   });
 });
 
-
 describe('memory_focus — kind-agnostic tail behind the org→person chain', () => {
   const tmpDirs: string[] = [];
   afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });

@@ -115,12 +115,6 @@ export class KnowledgeStore {
   // ── Write path (req 2/3, D-2/D-3, H1/H4/H6) ──
 
   /**
-   * Record a durable knowledge entry. A direct insert — never publishes
-   * `channels.memoryStore`. Trusted turn → `active` (+ deliberate `findOrCreate` subject
-   * link, H1); untrusted turn → `pending_review` (+ `subject_hint` only, H4). Pin is a
-   * store invariant (H6). Returns the persisted row's routing outcome.
-   */
-  /**
    * Kind-agnostic subject link for the durable write surface, which carries a NAME and
    * no kind: reuse the one existing subject of ANY kind bearing it (a `remember` about
    * a known product/person/engagement must not mint a same-named organization twin —
@@ -138,6 +132,12 @@ export class KnowledgeStore {
     return minted.ambiguous ? { ambiguous: true } : { ambiguous: false, id: minted.id };
   }
 
+  /**
+   * Record a durable knowledge entry. A direct insert — never publishes
+   * `channels.memoryStore`. Trusted turn → `active` (+ deliberate `findOrCreate` subject
+   * link, H1); untrusted turn → `pending_review` (+ `subject_hint` only, H4). Pin is a
+   * store invariant (H6). Returns the persisted row's routing outcome.
+   */
   write(params: KnowledgeWriteParams): KnowledgeWriteResult {
     // Store-level size backstop (defense in depth; the `remember` tool bounds at a lower,
     // friendlier limit first). A single knowledge entry is one concise fact — refuse a
@@ -960,9 +960,15 @@ export class KnowledgeStore {
       // resolves kind-agnostically, so a name-scoped read must reach them — an entry
       // filed under a product would otherwise be unreachable by the very name that
       // filed it. Appended BEHIND the existing chain, not replacing it, so org/person
-      // precedence (and its documented ambiguity semantics) is byte-identical.
+      // precedence (and its documented ambiguity semantics) is byte-identical — which
+      // requires the RESOLVED person-alias form here: the old `findByAlias` collapsed
+      // an ambiguous person alias to null and the chain ENDED on it; with a tail
+      // behind it, that null must stay a stop (two persons sharing the alias is a
+      // question), not become a fall-through that picks a same-named product.
+      const personAlias = certain ? null : this.subjects.findByAliasResolved(explicit, 'person');
+      if (!certain && personAlias?.ambiguous) return [];
       const hit = certain
-        ?? this.subjects.findByAlias(explicit, 'person')
+        ?? personAlias?.row
         ?? this._resolveRemainingKinds(explicit);
       // Named an explicit subject we don't know → return an EMPTY scope, NOT a global scan.
       // A scoped query that fell back to global would surface OTHER clients' facts — the exact

@@ -225,7 +225,7 @@ const NAME_DEDUP_KINDS: ReadonlySet<string> = new Set(NAME_DEDUPED_SUBJECT_KINDS
 /** The kinds {@link SubjectStore.findByNameAnyKind} probes by default: every kind a
  *  name can identify — the dedup kinds plus exact-name `engagement`; `other` is
  *  unstructured and stays out. */
-export const ANY_KIND_RESOLUTION_KINDS: readonly SubjectKind[] =
+const ANY_KIND_RESOLUTION_KINDS: readonly SubjectKind[] =
   [...NAME_DEDUPED_SUBJECT_KINDS, 'engagement'];
 
 /** Leading generic project word (+ separator) stripped from an engagement name. */
@@ -693,10 +693,24 @@ export class SubjectStore {
         if (canonical) { ids.add(canonical.id); continue; }
         for (const id of this.findByAliasResolved(name, kind, owner).ids) ids.add(id);
       } else if (kind === 'engagement') {
+        // Engagements created through `findOrCreateEngagement` store the NORMALIZED
+        // name ("Projekt Orion" → "Orion", the surface form kept as an alias) — but
+        // backfilled rows carry the RAW legacy name, so BOTH sides are normalized
+        // here (a raw comparison subsumes into this: normalize is idempotent on an
+        // already-normalized name). Aliases are folded in JS, never SQL `lower()`
+        // (ASCII-only — the `findByAliasResolved` trap).
+        const probe = normalizeSubjectName('engagement', name).toLowerCase();
+        const rawLower = name.toLowerCase();
         const rows = this.db.prepare(
-          `SELECT id FROM subjects WHERE kind = 'engagement' AND LOWER(name) = LOWER(?) AND owner_user_id = ? AND archived_at IS NULL`,
-        ).all(name, owner) as Array<{ id: string }>;
-        for (const r of rows) ids.add(r.id);
+          `SELECT id, name, aliases FROM subjects WHERE kind = 'engagement' AND owner_user_id = ? AND archived_at IS NULL`,
+        ).all(owner) as Array<{ id: string; name: string; aliases: string }>;
+        for (const r of rows) {
+          const stored = normalizeSubjectName('engagement', r.name).toLowerCase();
+          if (stored === probe
+            || this._parseAliases(r.aliases).some(a => a.toLowerCase() === rawLower)) {
+            ids.add(r.id);
+          }
+        }
       }
     }
     if (ids.size > 1) return { ambiguous: true, candidateIds: [...ids] };

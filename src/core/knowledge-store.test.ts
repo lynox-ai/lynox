@@ -1127,14 +1127,43 @@ describe('kind-agnostic subject resolution on the durable surface', () => {
     expect(hits.map(h => h.text)).toContain('VSkin launches in Q4');
   });
 
-  it('recall by name reaches an entry linked to an engagement', () => {
+  it('recall by name reaches an entry linked to an engagement — via the ENGAGEMENT, not a twin', () => {
     const { ks, subjects } = make();
+    // findOrCreateEngagement stores the NORMALIZED name ("Projekt Orion" → "Orion",
+    // surface form as alias). The first cut of this test was green for the wrong
+    // reason: the raw-name probe missed, write minted an org twin "Projekt Orion",
+    // and recall found THAT — the very defect class this PR removes, recurring for
+    // every "Projekt X". The subjectId assert is what makes the test honest.
     const eng = subjects.findOrCreateEngagement('Projekt Orion', null);
-    expect(eng).not.toBeNull();
-    ks.write({ text: 'Orion go-live is in March', subjectName: 'Projekt Orion', sourceChannel: 'agent', sourceUntrusted: false });
+    const res = ks.write({ text: 'Orion go-live is in March', subjectName: 'Projekt Orion', sourceChannel: 'agent', sourceUntrusted: false });
+    expect(res.subjectId).toBe(eng.id);
+    expect(countSubjects(subjects, 'Projekt Orion')).toBe(1); // no org twin minted
 
     const hits = ks.recall({ query: 'go-live?', subjectName: 'Projekt Orion' });
     expect(hits.map(h => h.text)).toContain('Orion go-live is in March');
+  });
+
+  it('an ambiguous PERSON alias stops the chain — the tail must not pick a same-named product', () => {
+    const { ks, subjects } = make();
+    // Two persons answer to "Nimbus"; a product "Nimbus" exists with a real entry.
+    // The pre-tail chain refused this name (findByAlias → null → empty scope); with
+    // the tail appended, that refusal must survive — falling through would read the
+    // product's facts while the name is genuinely three-way ambiguous.
+    subjects.findOrCreate({ kind: 'person', name: 'Nina Nimbus-Keller', aliases: ['Nimbus'] });
+    subjects.findOrCreate({ kind: 'person', name: 'Norbert Nimbus', aliases: ['Nimbus'] });
+    subjects.findOrCreate({ kind: 'product', name: 'Nimbus' });
+    ks.write({ text: 'Nimbus product fact', subjectName: 'Nimbus', subjectKind: 'product', sourceChannel: 'agent', sourceUntrusted: false });
+
+    const hits = ks.recall({ query: 'fact?', subjectName: 'Nimbus' });
+    expect(hits.map(h => h.text)).not.toContain('Nimbus product fact');
+  });
+
+  it('recall via a PERSON alias still works (the resolved form did not lose the row)', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'person', name: 'Ada Fischer', aliases: ['Ada'] });
+    ks.write({ text: 'Ada prefers morning calls', subjectName: 'Ada Fischer', sourceChannel: 'agent', sourceUntrusted: false });
+    const hits = ks.recall({ query: 'calls?', subjectName: 'Ada' });
+    expect(hits.map(h => h.text)).toContain('Ada prefers morning calls');
   });
 
   it('org precedence is untouched: a name that is BOTH org and product still reads the org scope', () => {
