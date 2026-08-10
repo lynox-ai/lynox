@@ -771,6 +771,58 @@ describe('Engine + Session (Orchestrator)', () => {
       );
     });
 
+    it('an ask_user call adds its wall-clock to the run\'s user wait', async () => {
+      // `duration_ms − user_wait_ms` is rendered as "AI time" in the history
+      // view, so a prompt the human sat on for minutes would otherwise be
+      // charged to the model. The sink is the only place this is now tallied.
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ toolName: 'ask_user', inputJson: '{}', outputJson: '', durationMs: 60_000, isError: false });
+        agent?.recordToolCall?.({ toolName: 'bash', inputJson: '{}', outputJson: '', durationMs: 5, isError: false });
+        throw new Error('boom after a long human pause');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom after a long human pause');
+
+      const rh = engine.getRunHistory()!;
+      // Only the ask_user duration counts — bash is machine time.
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'failed', userWaitMs: 60_000 }),
+      );
+    });
+
+    it('per-run sequence numbers are cleared between runs, not carried into the next', async () => {
+      // `_foreignRunSeq` is reset at run start. Without that reset it would grow
+      // for the life of the Session and — worse — a child in a LATER run would
+      // continue the numbering of a same-id child from an earlier one. The
+      // boundedness argument in the field's own doc rests on this clear.
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ runId: 'child-x', toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        agent?.recordToolCall?.({ runId: 'child-x', toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        throw new Error('first run done');
+      });
+      await expect(session.run('one')).rejects.toThrow('first run done');
+
+      const rh = engine.getRunHistory()!;
+      (rh.insertToolCall as unknown as { mockClear: () => void }).mockClear();
+
+      // A second run, same child run id — it must start over at 0.
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ runId: 'child-x', toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        throw new Error('second run done');
+      });
+      await expect(session.run('two')).rejects.toThrow('second run done');
+
+      const seqs = (rh.insertToolCall as unknown as { mock: { calls: Array<[{ sequenceOrder: number }]> } }).mock.calls
+        .map(c => c[0].sequenceOrder);
+      expect(seqs, 'the second run restarts the numbering rather than continuing at 2').toEqual([0]);
+    });
+
     it('an aborted run records its tool calls too', async () => {
       // Same field, the other terminal status. `aborted` is the commoner of the
       // two (every stop-button press), so leaving it blank here would keep the

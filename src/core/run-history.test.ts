@@ -249,6 +249,31 @@ describe('RunHistory', () => {
     h.close();
   });
 
+  it('getSessionToolCalls keeps a spawned child\'s call at the point it ran, not at the end', () => {
+    // `save_workflow` turns this list into the STEPS of a saved pipeline, so an
+    // out-of-place call is a wrong pipeline, not a cosmetic sort.
+    //
+    // Ordering by the run first (`created_at, rowid`) held only while one turn's
+    // calls all lived on one run. Once a child books onto its own run — which is
+    // always younger than its parent's — every child call sorted after every
+    // call the parent made that turn, however early the child actually ran.
+    // `sequence_order` cannot repair it: it restarts per run.
+    const h = createHistory();
+    const parent = h.insertRun({ sessionId: 'thread-1', taskText: 'turn', modelTier: 'balanced', modelId: 'm' });
+    h.insertToolCall({ runId: parent, toolName: 'read_file', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 0 });
+
+    // Mid-turn: the parent spawns a child, which makes a call of its own...
+    const child = h.insertRun({ sessionId: 'thread-1', taskText: 'child', modelTier: 'fast', modelId: 'm', runType: 'single', spawnParentId: parent, spawnDepth: 1 });
+    h.insertToolCall({ runId: child, toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 0 });
+
+    // ...and only afterwards does the parent make its next call.
+    h.insertToolCall({ runId: parent, toolName: 'write_file', inputJson: '{}', outputJson: '', durationMs: 1, sequenceOrder: 1 });
+
+    expect(h.getSessionToolCalls('thread-1').map(c => c.tool_name))
+      .toEqual(['read_file', 'http_request', 'write_file']);
+    h.close();
+  });
+
   it('getRunsBySession returns every run for a thread (ALL statuses), chronological + isolated', () => {
     const h = createHistory();
     const r1 = h.insertRun({ sessionId: 'thread-1', taskText: 'turn 1', modelTier: 'balanced', modelId: 'm' });

@@ -1717,7 +1717,17 @@ export class RunHistory {
         -- A2 capture-pollution guard: never re-surface a workflow step's
         -- REPLAYED tool calls to save_workflow / pattern analysis.
         AND r.run_type != 'pipeline_step'
-      ORDER BY r.created_at, r.rowid, tc.sequence_order
+      -- Insertion order IS execution order: rows are written as each call
+      -- finishes. Ordering by the RUN first (created_at, rowid) breaks as soon
+      -- as one turn's calls live on more than one run -- a spawned child's run
+      -- is always younger than its parent's, so every child call sorted AFTER
+      -- every call the parent made that turn, however early the child ran.
+      --
+      -- The only consumer is save_workflow, which turns this list into the
+      -- steps of a saved pipeline, so a call landing at the wrong point is a
+      -- wrong pipeline. sequence_order cannot fix it either: it is per-run, so
+      -- two runs both start at 0.
+      ORDER BY tc.rowid
     `).all(sessionId) as ToolCallRecord[];
     return rows.map(tc => this._decToolCall(tc));
   }
