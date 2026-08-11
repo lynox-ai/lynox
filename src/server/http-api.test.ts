@@ -2530,9 +2530,15 @@ describe('LynoxHTTPApi', () => {
       // Anthropic default map (Sonnet/Opus) while the preset routes mistral-medium —
       // the exact stale-label class the composer picker hit. Real expandTierPreset +
       // catalog run here (not mocked).
-      const { readUserConfig } = await import('../core/config.js');
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      const { expandTierPreset } = await import('../core/tier-presets.js');
       (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
         .mockReturnValueOnce({ tier_preset: 'balanced', provider: 'anthropic', default_tier: 'balanced' });
+      // The handler reads the LOADER's output, not the raw file: a tier_preset is
+      // sugar the loader materialises (config.ts:476-486), and the CP can pin it by
+      // env entirely outside config.json. So the fixture is what the loader yields.
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ ...expandTierPreset('balanced') });
       const res = await jsonFetch('/api/config');
       expect(res.status).toBe(200);
       const body = await res.json() as Record<string, unknown>;
@@ -2575,33 +2581,47 @@ describe('LynoxHTTPApi', () => {
 
     it('GET active_model names the tier_set slot, not the base provider map', async () => {
       // Measured on staging 2026-08-11 (build b3b6727c): `active_model` reported
-      // `claude-sonnet-5` / provider `anthropic` with Sonnet's 1M window AND
-      // Sonnet's feature matrix, while `main_chat_tiers` in the SAME response body
-      // correctly said "GLM 5.2" and the run actually executed
-      // `accounts/fireworks/models/glm-5p2`. Two fields of one response disagreeing
-      // is worse than either being wrong alone: a reader cannot tell which is true.
+      // `claude-sonnet-5` / provider `anthropic` with Sonnet's FEATURE MATRIX,
+      // while `main_chat_tiers` in the SAME response body correctly said "GLM 5.2"
+      // and the run actually executed `accounts/fireworks/models/glm-5p2`. Two
+      // fields of one response disagreeing is worse than either being wrong alone:
+      // a reader cannot tell which is true.
       //
-      // The features assertion is the severity, not decoration — the drift shipped
+      // (The context window was NOT part of the observed defect — both models are
+      // registered at 1M, models.ts:670 and :1001. An earlier version of this
+      // comment claimed a 1M-vs-500k mismatch; the 500k was the session's user cap,
+      // a different field. The real drift was id / provider / uiLabel / features.)
+      //
+      // The features assertion is the severity: the response shipped
       // `extendedThinking`/`vision`/`pdfInput` = true for a model that has none of
       // them, so any consumer gating on capability read a model that wasn't running.
+      //
+      // The raw file deliberately carries NO tier_set here — only the loader does.
+      // That is the CP-pinned channel (`LYNOX_TIER_PRESET`/`LYNOX_TIER_SET_JSON`,
+      // config.ts:464/504), and reading `readUserConfig()` instead of the loader
+      // would report the base provider's model on every such tenant.
       //
       // NOTE the neighbouring 'under Mistral tier-set' case does NOT cover this: it
       // flips the BASE provider + its model map (setOpenAIModelResolver), never a
       // hybrid tier_set. That naming is why this path went uncovered.
-      const { readUserConfig } = await import('../core/config.js');
-      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
-        .mockReturnValueOnce({
-          provider: 'anthropic',
-          default_tier: 'balanced',
-          routing_mode: 'hybrid',
-          tier_set: {
-            balanced: {
-              provider: 'openai',
-              model_id: 'accounts/fireworks/models/glm-5p2',
-              api_base_url: 'https://api.fireworks.ai/inference/v1',
-            },
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      const hybrid = {
+        routing_mode: 'hybrid' as const,
+        tier_set: {
+          balanced: {
+            provider: 'openai',
+            model_id: 'accounts/fireworks/models/glm-5p2',
+            api_base_url: 'https://api.fireworks.ai/inference/v1',
           },
-        });
+        },
+      };
+      // File: no tier_set at all — the CP pinned it by env, which is the channel
+      // `readUserConfig()` cannot see.
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      // Loader: the resolved set the engine actually routes on.
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce(hybrid);
       const res = await jsonFetch('/api/config');
       expect(res.status).toBe(200);
       const body = await res.json() as Record<string, unknown>;
@@ -2630,14 +2650,15 @@ describe('LynoxHTTPApi', () => {
       const llmClient = await import('../core/llm-client.js');
       const providerSpy = vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('openai');
       try {
-        const { readUserConfig } = await import('../core/config.js');
+        const { readUserConfig, loadConfig } = await import('../core/config.js');
+        const hybrid = {
+          routing_mode: 'hybrid' as const,
+          tier_set: { balanced: { provider: 'anthropic', model_id: 'claude-sonnet-5' } },
+        };
         (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
-          .mockReturnValueOnce({
-            provider: 'openai',
-            default_tier: 'balanced',
-            routing_mode: 'hybrid',
-            tier_set: { balanced: { provider: 'anthropic', model_id: 'claude-sonnet-5' } },
-          });
+          .mockReturnValueOnce({ provider: 'openai', default_tier: 'balanced', ...hybrid });
+        (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+          .mockReturnValueOnce(hybrid);
         const res = await jsonFetch('/api/config');
         expect(res.status).toBe(200);
         const body = await res.json() as Record<string, unknown>;
