@@ -56,12 +56,18 @@ vi.mock('imapflow', () => {
   };
 });
 
+const verifyMock = vi.fn();
+/** Every transport this mock has handed out, so callers can be counted. */
+const createdTransports: unknown[] = [];
+
 vi.mock('nodemailer', () => {
   return {
     default: {
       createTransport: vi.fn().mockImplementation((opts: unknown) => {
         lastTransportOptions = opts;
-        return { sendMail: sendMailMock, close: transportCloseMock };
+        const transport = { sendMail: sendMailMock, close: transportCloseMock, verify: verifyMock };
+        createdTransports.push(transport);
+        return transport;
       }),
     },
   };
@@ -91,6 +97,9 @@ beforeEach(() => {
   lastTransportOptions = null;
   sendMailMock.mockReset();
   transportCloseMock.mockReset();
+  verifyMock.mockReset();
+  verifyMock.mockResolvedValue(true);
+  createdTransports.length = 0;
 });
 
 afterEach(() => {
@@ -513,6 +522,137 @@ describe('ImapSmtpProvider — send', () => {
     const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
     const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
     expect(err.code).toBe('auth_failed');
+  });
+
+  it('maps a refused message to send_rejected — the fallback the shared mapper owes send()', async () => {
+    // The error mapping is shared with verifySmtp now, and the two differ only
+    // in this fallback. Only the verify direction was covered, so a mutation
+    // that made send() fall back to connection_failed survived.
+    sendMailMock.mockRejectedValue(new Error('550 5.7.1 Message rejected as spam'));
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
+    expect(err.code).toBe('send_rejected');
+    expect(err.message).toContain('550');
+  });
+
+  it('reads an AUTH throttle as rate_limited, not as bad credentials', async () => {
+    // nodemailer formats every AUTH-phase failure as "Invalid login: <reply>",
+    // so a 454 throttle arrives wearing the word "login" — and the user was then
+    // told to regenerate an app-password, retried, and extended the lockout.
+    const throttled = Object.assign(new Error('Invalid login: 454 4.7.0 Too many login attempts'), { code: 'EAUTH', responseCode: 454 });
+    sendMailMock.mockRejectedValue(throttled);
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
+    expect(err.code).toBe('rate_limited');
+  });
+
+  it('does NOT read a greylisted recipient as an account throttle', async () => {
+    // nodemailer attaches responseCode to any reply starting with digits, so the
+    // same numbers appear far from AUTH. A greylisted recipient is 450 with
+    // code EENVELOPE — the account is fine and the message is the problem.
+    // Calling that "your account is throttled" replaces a correct diagnosis with
+    // a wrong one, and send-core hands the text straight to the model.
+    const greylisted = Object.assign(
+      new Error("Can't send mail - all recipients were rejected: 450 4.2.0 Recipient address rejected: Greylisted"),
+      { code: 'EENVELOPE', responseCode: 450 },
+    );
+    sendMailMock.mockRejectedValue(greylisted);
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
+    expect(err.code).toBe('send_rejected');
+    expect(err.message).toContain('recipients were rejected');
+  });
+
+  it('does NOT read a refused STARTTLS as an account throttle', async () => {
+    // RFC 3207: "454 TLS not available due to temporary reason", raised as ETLS.
+    // Making 587 the default made this path MORE likely, not less.
+    const tlsRefused = Object.assign(
+      new Error('Error upgrading connection with STARTTLS'),
+      { code: 'ETLS', responseCode: 454 },
+    );
+    sendMailMock.mockRejectedValue(tlsRefused);
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
+    expect(err.code).not.toBe('rate_limited');
+  });
+
+  it('still calls a genuine credential rejection auth_failed', async () => {
+    // The other direction of the same predicate: 535 is really about the
+    // credentials, and a new app-password is really the answer.
+    const rejected = Object.assign(new Error('Invalid login: 535 5.7.8 Username and Password not accepted'), { responseCode: 535 });
+    sendMailMock.mockRejectedValue(rejected);
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
+    expect(err.code).toBe('auth_failed');
+  });
+});
+
+describe('ImapSmtpProvider — verifySmtp', () => {
+  it('opens an SMTP session and sends nothing', async () => {
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.verifySmtp();
+
+    expect(verifyMock).toHaveBeenCalledTimes(1);
+    expect(sendMailMock).not.toHaveBeenCalled();
+  });
+
+  it('reuses one transport across verify and send', async () => {
+    // Without the memoization in getSmtpTransport, every send builds a new
+    // transport and overwrites the field, so close() only ever reaches the last
+    // one and the rest leak with their listeners — once per sent mail. The whole
+    // mail suite stayed green while that guard was missing.
+    sendMailMock.mockResolvedValue({ messageId: 'x', accepted: [], rejected: [] });
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+
+    await provider.verifySmtp();
+    await provider.send({ to: [{ address: 'a@example.com' }], subject: 's', text: 't' });
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' });
+
+    expect(createdTransports).toHaveLength(1);
+  });
+
+  it('refuses to open a socket after close()', async () => {
+    // The invariant send() and getClient() both hold; verifySmtp has to hold it
+    // too, or a closed provider can still reach the network.
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.close();
+
+    const err = await provider.verifySmtp().catch(e => e as MailError);
+    expect(err).toBeInstanceOf(MailError);
+    expect(err.message).toMatch(/closed/i);
+    expect(verifyMock).not.toHaveBeenCalled();
+  });
+
+  it('reports an unreachable server as connection_failed, never send_rejected', async () => {
+    verifyMock.mockRejectedValue(new Error('connect ECONNREFUSED 10.0.0.1:587'));
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.verifySmtp().catch(e => e as MailError);
+    expect(err.code).toBe('connection_failed');
+  });
+
+  it('requires STARTTLS on a submission port — the flip to 587 rests on this', async () => {
+    // `requireTLS: !secure` is what makes 587 safe to default to. Nothing
+    // asserted it for the secure:false case, which is the case this change made
+    // the default; the only existing assertion covered secure:true, where
+    // requireTLS is moot.
+    const provider = new ImapSmtpProvider(
+      { ...ACCOUNT, smtp: { host: 'smtp.example.com', port: 587, secure: false } },
+      credResolver,
+    );
+    await provider.verifySmtp();
+
+    const transport = lastTransportOptions as { port: number; secure: boolean; requireTLS: boolean; tls: { rejectUnauthorized: boolean; minVersion: string } };
+    expect(transport.port).toBe(587);
+    expect(transport.secure).toBe(false);
+    expect(transport.requireTLS).toBe(true);
+    expect(transport.tls.rejectUnauthorized).toBe(true);
+    expect(transport.tls.minVersion).toBe('TLSv1.2');
   });
 });
 

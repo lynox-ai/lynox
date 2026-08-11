@@ -61,6 +61,8 @@ vi.mock('imapflow', () => {
 
 const sendMailMock = vi.fn();
 const transportCloseMock = vi.fn();
+/** nodemailer's pre-flight: connect + STARTTLS/TLS + AUTH, sending nothing. */
+const verifyMock = vi.fn();
 
 vi.mock('nodemailer', () => {
   return {
@@ -68,6 +70,7 @@ vi.mock('nodemailer', () => {
       createTransport: vi.fn().mockImplementation(() => ({
         sendMail: sendMailMock,
         close: transportCloseMock,
+        verify: verifyMock,
       })),
     },
   };
@@ -120,6 +123,8 @@ beforeEach(() => {
   ctx = new MailContext(stateDb, backend);
   sendMailMock.mockReset();
   transportCloseMock.mockReset();
+  verifyMock.mockReset();
+  verifyMock.mockResolvedValue(true);
 });
 
 afterEach(async () => {
@@ -259,6 +264,97 @@ describe('MailContext — testAccount', () => {
     await ctx.testAccount(INPUT_GMAIL);
     expect(stateDb.listAccounts()).toHaveLength(0);
     expect(ctx.credStore.has('rafael-gmail')).toBe(false);
+  });
+});
+
+// The defect this suite exists for: testAccount used to run the IMAP leg only,
+// so a mailbox whose outbound SMTP port is blocked passed the pre-save check and
+// failed silently on the first send, hours later, with nothing pointing at the
+// port. Every test below fails if the SMTP leg is removed again.
+describe('MailContext — testAccount probes the send path, not only the read path', () => {
+  it('reports ok:false when IMAP is reachable but SMTP is not', async () => {
+    verifyMock.mockRejectedValue(new Error('connect ETIMEDOUT 142.250.1.1:465'));
+
+    const result = await ctx.testAccount(INPUT_GMAIL);
+
+    // IMAP was fine — the mailbox listed — and the account is still refused.
+    expect(probe.getMailboxLock).toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    expect(result.stage).toBe('smtp');
+  });
+
+  it('actually opens the SMTP session rather than trusting the config', async () => {
+    await ctx.testAccount(INPUT_GMAIL);
+    expect(verifyMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps a blocked SMTP port to timeout, which the UI turns into port advice', async () => {
+    verifyMock.mockRejectedValue(new Error('Connection timeout'));
+    const result = await ctx.testAccount(INPUT_GMAIL);
+    expect(result.code).toBe('timeout');
+    expect(result.stage).toBe('smtp');
+  });
+
+  it('maps an SMTP-only auth rejection to auth_failed on the smtp stage', async () => {
+    verifyMock.mockRejectedValue(new Error('535 5.7.8 Authentication credentials invalid'));
+    const result = await ctx.testAccount(INPUT_GMAIL);
+    expect(result.code).toBe('auth_failed');
+    expect(result.stage).toBe('smtp');
+  });
+
+  it('anything else on the SMTP leg is connection_failed, not send_rejected', async () => {
+    // verifySmtp sends nothing, so there is no message for a server to reject.
+    verifyMock.mockRejectedValue(new Error('ECONNREFUSED'));
+    const result = await ctx.testAccount(INPUT_GMAIL);
+    expect(result.code).toBe('connection_failed');
+  });
+
+  it('attributes an IMAP failure to the imap stage and never reaches SMTP', async () => {
+    probe.connect.mockRejectedValue(Object.assign(new Error('LOGIN failed'), { name: 'AuthenticationFailure' }));
+    const result = await ctx.testAccount(INPUT_GMAIL);
+    expect(result.stage).toBe('imap');
+    expect(verifyMock).not.toHaveBeenCalled();
+    // `checked` reports what ran, not what was planned.
+    expect(result.checked).toEqual({ imap: true, smtp: false });
+  });
+
+  it('reports both legs as checked on a passing send-capable account', async () => {
+    const result = await ctx.testAccount(INPUT_GMAIL);
+    expect(result.ok).toBe(true);
+    expect(result.checked).toEqual({ imap: true, smtp: true });
+    expect(result.stage).toBeUndefined();
+  });
+
+  it('skips the SMTP leg for a receive-only account type', async () => {
+    // An info@ mailbox is refused at the send path anyway, so demanding a
+    // working submission server for it would reject a valid setup.
+    const receiveOnly: AddAccountInput = {
+      config: { ...GMAIL_ACCOUNT, id: 'info', address: 'info@example.com', type: 'info' },
+      credentials: { user: 'info@example.com', pass: 'pw' },
+    };
+    verifyMock.mockRejectedValue(new Error('connect ETIMEDOUT'));
+
+    const result = await ctx.testAccount(receiveOnly);
+
+    expect(result.ok).toBe(true);
+    expect(verifyMock).not.toHaveBeenCalled();
+    // ok:true must not be readable as "sending works" — it was never tried.
+    expect(result.checked).toEqual({ imap: true, smtp: false });
+  });
+
+  it('still probes SMTP for a send-capable non-personal type', async () => {
+    // Guards the receive-only skip against widening into "skip unless personal".
+    // support@ is not in RECEIVE_ONLY_TYPES — it answers mail, so it must send.
+    const supportAccount: AddAccountInput = {
+      config: { ...GMAIL_ACCOUNT, id: 'support', address: 'support@example.com', type: 'support' },
+      credentials: { user: 'support@example.com', pass: 'pw' },
+    };
+    verifyMock.mockRejectedValue(new Error('connect ETIMEDOUT'));
+
+    const result = await ctx.testAccount(supportAccount);
+
+    expect(result.ok).toBe(false);
+    expect(result.stage).toBe('smtp');
   });
 });
 

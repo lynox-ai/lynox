@@ -7153,4 +7153,178 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
   });
+
+});
+
+// The two routes that accept a custom IMAP/SMTP block parsed it independently.
+// That is how one of them could be corrected and the other silently left on
+// 465 — a connection test that passes against different defaults than the save
+// uses is worth nothing. These drive BOTH routes with the SAME body and compare
+// what each one actually built, which a source-text guard cannot do: a re-inlined
+// default under a different variable name reads as clean and behaves as broken.
+describe('mail custom-server defaults are the same on both routes', () => {
+  function swapEngine(overrides: Record<string, (...args: unknown[]) => unknown>, test: () => Promise<void>): Promise<void> {
+    const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+    const origs: Record<string, unknown> = {};
+    for (const k of Object.keys(overrides)) { origs[k] = engineRef[k]; engineRef[k] = overrides[k]; }
+    return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
+  }
+
+  interface Seen { smtp: { host: string; port: number; secure: boolean }; imap: { host: string; port: number; secure: boolean } }
+
+  /**
+   * Run one request body through one route and return the server config the
+   * engine was handed. Both routes reach the mail context — `/test` through
+   * testAccount, the save route through addAccount after its own probe — so
+   * recording in both places catches either.
+   */
+  async function serverSaw(path: string, body: Record<string, unknown>): Promise<Seen> {
+    let seen: Seen | undefined;
+    const record = (input: { config: Seen }): void => { seen = { smtp: input.config.smtp, imap: input.config.imap }; };
+    await swapEngine({
+      getMailContext: () => ({
+        testAccount: (input: { config: Seen }) => { record(input); return Promise.resolve({ ok: true }); },
+        addAccount: (input: { config: Seen }) => { record(input); return Promise.resolve(undefined); },
+        listAccounts: () => [],
+      }),
+    }, async () => {
+      const res = await jsonFetch(path, { method: 'POST', body: JSON.stringify(body) });
+      expect(res.status).toBe(200);
+    });
+    expect(seen, `no config reached the mail context for ${path}`).toBeDefined();
+    return seen!;
+  }
+
+  const BASE = {
+    id: 'drift', displayName: 'Drift', address: 'drift@example.com',
+    preset: 'custom', type: 'personal',
+    credentials: { user: 'drift@example.com', pass: 'pw' },
+  };
+  const ROUTES = ['/api/mail/accounts', '/api/mail/accounts/test'];
+
+  /**
+   * Sequential on purpose. swapEngine mutates shared engine state, so two
+   * concurrent swaps restore each other's original mid-request — which showed
+   * up as a 500 rather than a wrong value, i.e. loudly, which is the only
+   * reason it did not become a false green.
+   */
+  async function bothRoutes(body: Record<string, unknown>): Promise<Seen[]> {
+    const out: Seen[] = [];
+    for (const route of ROUTES) out.push(await serverSaw(route, body));
+    return out;
+  }
+
+  it('fills in submission on 587 on both routes when the client omits the port', async () => {
+    const results = await bothRoutes({
+      ...BASE, custom: { imap: { host: 'imap.example.com' }, smtp: { host: 'smtp.example.com' } },
+    });
+    for (const [i, seen] of results.entries()) {
+      expect(seen.smtp, `route ${ROUTES[i]!}`).toEqual({ host: 'smtp.example.com', port: 587, secure: false });
+    }
+    expect(results[0]!.smtp).toEqual(results[1]!.smtp);
+  });
+
+  it('agrees where port and TLS are defaulted from each other', async () => {
+    // Deliberately a SUBSET. The full matrix belongs to the parser's own unit
+    // test (custom-server-input.test.ts) — what only a route test can show is
+    // that both routes reach the same parser, so these are the cases where the
+    // two halves of the decision interact. /api/mail/accounts/test is rate
+    // limited to 10 probes a minute, which this file shares; adding cases here
+    // costs one of those and buys nothing the unit test does not already cover.
+    const cases: ReadonlyArray<{ smtp: Record<string, unknown>; port: number; secure: boolean }> = [
+      // secure given, port not: the PORT follows, or we hand the user an
+      // implicit-TLS handshake against a STARTTLS port, which hangs.
+      { smtp: { host: 'h', secure: true }, port: 465, secure: true },
+      { smtp: { host: 'h', port: 465 }, port: 465, secure: true },
+      { smtp: { host: 'h', port: 587 }, port: 587, secure: false },
+      // Explicit both ways survives — the default is a suggestion, not a ban.
+      { smtp: { host: 'h', port: 2525, secure: true }, port: 2525, secure: true },
+    ];
+    for (const c of cases) {
+      const label = JSON.stringify(c.smtp);
+      const seen = await bothRoutes({ ...BASE, custom: { imap: { host: 'imap.example.com' }, smtp: c.smtp } });
+      expect({ label, ...seen[0]!.smtp }).toEqual({ label, host: 'h', port: c.port, secure: c.secure });
+      expect(seen[0]!.smtp, `routes disagree for ${label}`).toEqual(seen[1]!.smtp);
+    }
+  });
+
+  it('keeps IMAP on implicit TLS 993 on both routes', async () => {
+    const results = await bothRoutes({
+      ...BASE, custom: { imap: { host: 'imap.example.com' }, smtp: { host: 'smtp.example.com' } },
+    });
+    for (const seen of results) {
+      expect(seen.imap).toEqual({ host: 'imap.example.com', port: 993, secure: true });
+    }
+    // The SMTP suggestion moving must not have dragged IMAP with it.
+    expect(results[0]!.imap).toEqual(results[1]!.imap);
+  });
+
+  it('refuses a private SMTP host on both routes, before touching the network', async () => {
+    // The guard that carries the whole outbound-connection surface. It has to
+    // hold for the SMTP host, not only the IMAP one, and it has to run before
+    // the probe — so the mail context must never be reached at all.
+    for (const path of ROUTES) {
+      let reached = false;
+      await swapEngine({
+        getMailContext: () => ({
+          testAccount: () => { reached = true; return Promise.resolve({ ok: true }); },
+          addAccount: () => { reached = true; return Promise.resolve(undefined); },
+          listAccounts: () => [],
+        }),
+      }, async () => {
+        const res = await jsonFetch(path, {
+          method: 'POST',
+          body: JSON.stringify({
+            ...BASE,
+            custom: { imap: { host: 'imap.example.com' }, smtp: { host: '127.0.0.1' } },
+          }),
+        });
+        expect(res.status, `route ${path}`).toBe(400);
+        expect((await res.json() as { error?: string }).error).toMatch(/private IP/i);
+      });
+      expect(reached, `route ${path} probed a private host`).toBe(false);
+    }
+  });
+
+  it('names the failing leg in the save refusal, not just a raw string', async () => {
+    // The save route is the one that BLOCKS. Before it carried code+stage the
+    // client could only print the engine's own sentence, while the test button
+    // beside it gave real advice.
+    await swapEngine({
+      getMailContext: () => ({
+        testAccount: () => Promise.resolve({ ok: false, error: 'SMTP timeout', code: 'timeout', stage: 'smtp' }),
+        addAccount: () => Promise.resolve(undefined),
+        listAccounts: () => [],
+      }),
+    }, async () => {
+      const res = await jsonFetch('/api/mail/accounts', {
+        method: 'POST',
+        body: JSON.stringify({ ...BASE, custom: { imap: { host: 'imap.example.com' }, smtp: { host: 'smtp.example.com' } } }),
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ code: 'timeout', stage: 'smtp' });
+    });
+  });
+
+  it('lets skipTest save a mailbox whose send path cannot be verified', async () => {
+    // Reading still works; refusing the whole mailbox would take triage and
+    // summaries with it. The probe must not run at all.
+    let probed = false;
+    let added = false;
+    await swapEngine({
+      getMailContext: () => ({
+        testAccount: () => { probed = true; return Promise.resolve({ ok: false, code: 'timeout', stage: 'smtp' }); },
+        addAccount: () => { added = true; return Promise.resolve(undefined); },
+        listAccounts: () => [],
+      }),
+    }, async () => {
+      const res = await jsonFetch('/api/mail/accounts', {
+        method: 'POST',
+        body: JSON.stringify({ ...BASE, skipTest: true, custom: { imap: { host: 'imap.example.com' }, smtp: { host: 'smtp.example.com' } } }),
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(probed).toBe(false);
+    expect(added).toBe(true);
+  });
 });

@@ -6358,6 +6358,7 @@ export class LynoxHTTPApi {
 
       try {
         const { buildPresetAccount, buildCustomAccount } = await import('../integrations/mail/providers/presets.js');
+        const { parseCustomServers } = await import('../integrations/mail/custom-server-input.js');
         const { isValidAccountType } = await import('../integrations/mail/provider.js');
         const id = typeof b['id'] === 'string' ? b['id'] : '';
         const displayName = typeof b['displayName'] === 'string' ? b['displayName'] : '';
@@ -6379,13 +6380,12 @@ export class LynoxHTTPApi {
 
         let account;
         if (preset === 'custom') {
-          const custom = b['custom'] as { imap?: { host?: unknown; port?: unknown; secure?: unknown }; smtp?: { host?: unknown; port?: unknown; secure?: unknown } } | undefined;
-          const imapHost = typeof custom?.imap?.host === 'string' ? custom.imap.host : '';
-          const imapPort = typeof custom?.imap?.port === 'number' ? custom.imap.port : 993;
-          const imapSecure = custom?.imap?.secure !== false;
-          const smtpHost = typeof custom?.smtp?.host === 'string' ? custom.smtp.host : '';
-          const smtpPort = typeof custom?.smtp?.port === 'number' ? custom.smtp.port : 465;
-          const smtpSecure = custom?.smtp?.secure !== false;
+          // Defaults live in parseCustomServers so this route and the test
+          // route cannot drift apart. See its doc comment for why SMTP
+          // defaults to submission on 587.
+          const { imap: customImap, smtp: customSmtp } = parseCustomServers(b['custom']);
+          const { host: imapHost, port: imapPort, secure: imapSecure } = customImap;
+          const { host: smtpHost, port: smtpPort, secure: smtpSecure } = customSmtp;
           if (!imapHost || !smtpHost) {
             errorResponse(res, 400, 'custom preset requires non-empty imap.host and smtp.host'); return;
           }
@@ -6415,7 +6415,15 @@ export class LynoxHTTPApi {
         if (!skipTest) {
           const probe = await ctx!.testAccount({ config: account, credentials: { user, pass } });
           if (!probe.ok) {
-            errorResponse(res, 400, `Connection test failed: ${probe.error ?? 'unknown error'} (${probe.code ?? 'unknown'})`);
+            // `code` and `stage` travel with the refusal so the client can say
+            // WHICH leg failed. Without them the save path — the one that
+            // actually blocks — could only print the raw engine string, while
+            // the test button next to it gave real advice.
+            jsonResponse(res, 400, {
+              error: `Connection test failed: ${probe.error ?? 'unknown error'} (${probe.code ?? 'unknown'})`,
+              code: probe.code ?? 'unknown',
+              stage: probe.stage,
+            });
             return;
           }
         }
@@ -6468,6 +6476,7 @@ export class LynoxHTTPApi {
 
       try {
         const { buildPresetAccount, buildCustomAccount } = await import('../integrations/mail/providers/presets.js');
+        const { parseCustomServers } = await import('../integrations/mail/custom-server-input.js');
         const { isValidAccountType } = await import('../integrations/mail/provider.js');
         const id = typeof b['id'] === 'string' ? b['id'] : 'draft';
         const displayName = typeof b['displayName'] === 'string' ? b['displayName'] : 'Draft';
@@ -6485,13 +6494,12 @@ export class LynoxHTTPApi {
 
         let account;
         if (preset === 'custom') {
-          const custom = b['custom'] as { imap?: { host?: unknown; port?: unknown; secure?: unknown }; smtp?: { host?: unknown; port?: unknown; secure?: unknown } } | undefined;
-          const imapHost = typeof custom?.imap?.host === 'string' ? custom.imap.host : '';
-          const imapPort = typeof custom?.imap?.port === 'number' ? custom.imap.port : 993;
-          const imapSecure = custom?.imap?.secure !== false;
-          const smtpHost = typeof custom?.smtp?.host === 'string' ? custom.smtp.host : '';
-          const smtpPort = typeof custom?.smtp?.port === 'number' ? custom.smtp.port : 465;
-          const smtpSecure = custom?.smtp?.secure !== false;
+          // Defaults live in parseCustomServers so this route and the test
+          // route cannot drift apart. See its doc comment for why SMTP
+          // defaults to submission on 587.
+          const { imap: customImap, smtp: customSmtp } = parseCustomServers(b['custom']);
+          const { host: imapHost, port: imapPort, secure: imapSecure } = customImap;
+          const { host: smtpHost, port: smtpPort, secure: smtpSecure } = customSmtp;
           if (!imapHost || !smtpHost) { errorResponse(res, 400, 'custom preset requires imap.host + smtp.host'); return; }
           if (!isValidMailPort(imapPort) || !isValidMailPort(smtpPort)) {
             errorResponse(res, 400, 'imap.port and smtp.port must be 1..65535'); return;
