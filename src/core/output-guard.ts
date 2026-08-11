@@ -101,11 +101,61 @@ export function checkWriteContent(content: string, filePath: string): WriteCheck
 // === Tool result injection scanning ===
 
 /**
+ * The wrapper's OWN terminal closing tag — ours, not the content's.
+ *
+ * `wrapUntrustedData` emits `<untrusted_data …>\n{body}\n</untrusted_data>`, and
+ * `detectInjectionAttempt` flags a literal `</untrusted_data>` as a boundary
+ * escape. Scanning the finished block therefore flagged the block's own last
+ * line, so EVERY wrapped external tool result came back prefixed with
+ * "resembles prompt injection" — measured on a harmless page. A warning that is
+ * always on carries no information, and this one reaches both the model context
+ * and the audit table, so it was loudest exactly where a real escape would be.
+ *
+ * It costs no detection the body could have produced: `neutralizeBoundaryTags`
+ * runs BEFORE wrapping and rewrites a literal closing tag in the body to
+ * `&lt;/untrusted_data&gt;`, the entity forms to `[blocked:boundary_escape]`. So
+ * in a well-formed block the terminal tag is the only literal one, and a
+ * complete tag anywhere earlier stays inside the scanned region.
+ *
+ * Two things it does NOT claim, both measured:
+ *  - An UNTERMINATED `&lt;/untrusted_data` (no `&gt;`) passes the neutralizer
+ *    untouched and is not detected in the region either. That is a pre-existing
+ *    gap in the neutralizer's own pattern, not one this opens — and what it
+ *    removes here is the always-on warning, not information.
+ *  - This is a SHAPE check, not a provenance check. A tool returning raw
+ *    external text can forge an envelope and buy the exemption. Contained by
+ *    construction: the head test is strictly stronger than
+ *    `containsUntrustedMarker`, so anything exempted is necessarily already
+ *    marked untrusted — forging costs the attacker taint rather than buying
+ *    trust, and a forgery carrying a real injection is still flagged on its body.
+ *
+ * Deliberately strict: byte-exact tail, and the head must be the tag itself
+ * (`&lt;untrusted_data` followed by a space or `&gt;` — a plain prefix test also
+ * matched `&lt;untrusted_database…`). Anything else is scanned whole, because a
+ * missed exemption costs a spurious warning while a loose one costs a real
+ * detection.
+ */
+const OWN_WRAPPER_HEAD = /^<untrusted_data[ >]/;
+const OWN_WRAPPER_TAIL = /\n<\/untrusted_data>$/;
+
+function scanRegionOf(result: string): string {
+  // Replaced by the newline it consumed, NOT by nothing. That newline is the
+  // last character of the body, and three patterns need it: `role
+  // impersonation` (/^(assistant|human):\s/im) and both `provenance marker
+  // forgery` variants match only when the body's final token is followed by
+  // whitespace. Dropping it silently disarmed all three for any wrapped result
+  // whose body ENDS in `assistant:`, `human:`, `<fact` or `&lt;fact` —
+  // measured, and doubly silent because `wrapUntrustedData`'s own inner scan
+  // runs on the raw body, where that trailing whitespace does not exist either.
+  return OWN_WRAPPER_HEAD.test(result) ? result.replace(OWN_WRAPPER_TAIL, '\n') : result;
+}
+
+/**
  * Scan a tool result for prompt injection attempts.
  * Returns the result with a warning prefix if injection is detected.
  */
 export function scanToolResult(result: string, toolName: string): string {
-  const injection = detectInjectionAttempt(result);
+  const injection = detectInjectionAttempt(scanRegionOf(result));
   if (injection.detected) {
     if (channels.securityInjection.hasSubscribers) {
       channels.securityInjection.publish({
