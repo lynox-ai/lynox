@@ -101,11 +101,40 @@ export function checkWriteContent(content: string, filePath: string): WriteCheck
 // === Tool result injection scanning ===
 
 /**
+ * The wrapper's OWN terminal closing tag — ours, not the content's.
+ *
+ * `wrapUntrustedData` emits `<untrusted_data …>\n{body}\n</untrusted_data>`, and
+ * `detectInjectionAttempt` flags a literal `</untrusted_data>` as a boundary
+ * escape. Scanning the finished block therefore flagged the block's own last
+ * line, so EVERY wrapped external tool result came back prefixed with
+ * "resembles prompt injection" — measured on a harmless page. A warning that is
+ * always on carries no information, and this one reaches both the model context
+ * and the audit table, so it was loudest exactly where a real escape would be.
+ *
+ * Removing it costs no detection, because the content cannot contribute this
+ * shape: `neutralizeBoundaryTags` rewrites a literal closing tag in the body to
+ * `&lt;/untrusted_data&gt;` and the entity forms to `[blocked:boundary_escape]`
+ * BEFORE wrapping. So in a well-formed block the terminal tag is the only
+ * literal one, an entity-escaped attempt still trips the entity pattern, and any
+ * literal that somehow reached the body is still inside the scanned region.
+ *
+ * Deliberately strict: byte-exact tail, and only when the text opens as a
+ * wrapper. A hand-built or concatenated variant does not match and is scanned
+ * whole — the conservative direction, since a missed exemption costs a spurious
+ * warning while a loose one costs a real detection.
+ */
+const OWN_WRAPPER_TAIL = /\n<\/untrusted_data>$/;
+
+function scanRegionOf(result: string): string {
+  return result.startsWith('<untrusted_data') ? result.replace(OWN_WRAPPER_TAIL, '') : result;
+}
+
+/**
  * Scan a tool result for prompt injection attempts.
  * Returns the result with a warning prefix if injection is detected.
  */
 export function scanToolResult(result: string, toolName: string): string {
-  const injection = detectInjectionAttempt(result);
+  const injection = detectInjectionAttempt(scanRegionOf(result));
   if (injection.detected) {
     if (channels.securityInjection.hasSubscribers) {
       channels.securityInjection.publish({
