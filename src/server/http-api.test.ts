@@ -2658,8 +2658,15 @@ describe('LynoxHTTPApi', () => {
         routing_mode: 'hybrid' as const,
         tier_set: {
           balanced: {
+            // Deliberately NOT a MODEL_MAP tier default. With `claude-opus-4-6`
+            // here every assert was also satisfied by the default fixture
+            // (`default_tier: 'deep'` + `MODEL_MAP.deep === 'claude-opus-4-6'`),
+            // so the case passed with both mocks removed — green without ever
+            // resolving a slot. `claude-fable-5` is 1M / anthropic like Opus 4.6
+            // but belongs to no tier map, which makes the `id` assert a real
+            // guard that the fixture actually arrived.
             provider: 'custom',
-            model_id: 'claude-opus-4-6',
+            model_id: 'claude-fable-5',
             api_base_url: 'https://proxy.internal/v1',
           },
         },
@@ -2673,7 +2680,7 @@ describe('LynoxHTTPApi', () => {
       const body = await res.json() as Record<string, unknown>;
       const am = body['active_model'] as Record<string, unknown> | undefined;
       expect(am).toBeDefined();
-      expect(am!['id']).toBe('claude-opus-4-6');
+      expect(am!['id']).toBe('claude-fable-5');
       expect(am!['provider']).toBe('anthropic');
       expect(am!['contextWindow']).toBe(1_000_000);
     });
