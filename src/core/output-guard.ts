@@ -111,18 +111,31 @@ export function checkWriteContent(content: string, filePath: string): WriteCheck
  * always on carries no information, and this one reaches both the model context
  * and the audit table, so it was loudest exactly where a real escape would be.
  *
- * Removing it costs no detection, because the content cannot contribute this
- * shape: `neutralizeBoundaryTags` rewrites a literal closing tag in the body to
- * `&lt;/untrusted_data&gt;` and the entity forms to `[blocked:boundary_escape]`
- * BEFORE wrapping. So in a well-formed block the terminal tag is the only
- * literal one, an entity-escaped attempt still trips the entity pattern, and any
- * literal that somehow reached the body is still inside the scanned region.
+ * It costs no detection the body could have produced: `neutralizeBoundaryTags`
+ * runs BEFORE wrapping and rewrites a literal closing tag in the body to
+ * `&lt;/untrusted_data&gt;`, the entity forms to `[blocked:boundary_escape]`. So
+ * in a well-formed block the terminal tag is the only literal one, and a
+ * complete tag anywhere earlier stays inside the scanned region.
  *
- * Deliberately strict: byte-exact tail, and only when the text opens as a
- * wrapper. A hand-built or concatenated variant does not match and is scanned
- * whole — the conservative direction, since a missed exemption costs a spurious
- * warning while a loose one costs a real detection.
+ * Two things it does NOT claim, both measured:
+ *  - An UNTERMINATED `&lt;/untrusted_data` (no `&gt;`) passes the neutralizer
+ *    untouched and is not detected in the region either. That is a pre-existing
+ *    gap in the neutralizer's own pattern, not one this opens — and what it
+ *    removes here is the always-on warning, not information.
+ *  - This is a SHAPE check, not a provenance check. A tool returning raw
+ *    external text can forge an envelope and buy the exemption. Contained by
+ *    construction: the head test is strictly stronger than
+ *    `containsUntrustedMarker`, so anything exempted is necessarily already
+ *    marked untrusted — forging costs the attacker taint rather than buying
+ *    trust, and a forgery carrying a real injection is still flagged on its body.
+ *
+ * Deliberately strict: byte-exact tail, and the head must be the tag itself
+ * (`&lt;untrusted_data` followed by a space or `&gt;` — a plain prefix test also
+ * matched `&lt;untrusted_database…`). Anything else is scanned whole, because a
+ * missed exemption costs a spurious warning while a loose one costs a real
+ * detection.
  */
+const OWN_WRAPPER_HEAD = /^<untrusted_data[ >]/;
 const OWN_WRAPPER_TAIL = /\n<\/untrusted_data>$/;
 
 function scanRegionOf(result: string): string {
@@ -134,7 +147,7 @@ function scanRegionOf(result: string): string {
   // whose body ENDS in `assistant:`, `human:`, `<fact` or `&lt;fact` —
   // measured, and doubly silent because `wrapUntrustedData`'s own inner scan
   // runs on the raw body, where that trailing whitespace does not exist either.
-  return result.startsWith('<untrusted_data') ? result.replace(OWN_WRAPPER_TAIL, '\n') : result;
+  return OWN_WRAPPER_HEAD.test(result) ? result.replace(OWN_WRAPPER_TAIL, '\n') : result;
 }
 
 /**
