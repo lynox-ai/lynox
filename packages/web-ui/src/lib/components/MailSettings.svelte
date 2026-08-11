@@ -333,6 +333,11 @@
 						checked: err.stage ? { imap: true, smtp: err.stage === 'smtp' } : undefined,
 					};
 					testedFingerprint = connectionFingerprint();
+					// And the consent goes with it. Without this the flag survived
+					// "tick for config A → edit a field → save (refused, stamps B)",
+					// and the box came back already ticked for a configuration the
+					// user had never agreed to skip.
+					skipConnectionTest = false;
 				}
 				saving = false;
 				return;

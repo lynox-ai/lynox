@@ -104,17 +104,19 @@ describe('MailSettings surfaces which leg of the connection failed', () => {
   });
 
   /**
-   * Body of a top-level function, from its declaration to the next one. Both
-   * ends are required to exist: an open-ended slice runs to end of file and
-   * gets satisfied by anything further down the file — which is exactly how the
-   * predecessor of this suite passed while the code it named was empty.
+   * Body of one top-level function, ending at ITS OWN closing brace.
+   *
+   * Not "up to the next named thing": that leaves everything in between inside
+   * the slice, so extracting a helper right after the function and forgetting a
+   * call site reads as covered. Every function in this component sits at one
+   * tab of indentation, so its close is the first line that is exactly `\t}`.
    */
-  function functionBody(decl: string, nextDecl: string): string {
+  function functionBody(decl: string): string {
     const start = source.indexOf(decl);
-    const end = source.indexOf(nextDecl);
     expect(start, `"${decl}" not found — renamed?`).toBeGreaterThanOrEqual(0);
-    expect(end, `"${nextDecl}" not found — renamed or moved?`).toBeGreaterThan(start);
-    return source.slice(start, end);
+    const close = source.indexOf('\n\t}\n', start);
+    expect(close, `no closing brace found for "${decl}"`).toBeGreaterThan(start);
+    return source.slice(start, close);
   }
 
   it('ties the escape to the configuration that was actually probed', () => {
@@ -129,14 +131,14 @@ describe('MailSettings surfaces which leg of the connection failed', () => {
   it('fingerprints every input the probe actually exercises', () => {
     // A field missing here is a field the user can change while the escape
     // stays armed — which is the whole defect, one input narrower.
-    const fp = functionBody('function connectionFingerprint()', 'let testedFingerprint');
+    const fp = functionBody('function connectionFingerprint()');
     for (const field of ['formAddress', 'formPassword', 'formPreset', 'buildCustomPayload()']) {
       expect(fp, `connectionFingerprint ignores ${field}`).toContain(field);
     }
   });
 
   it('a fresh probe invalidates the decision made about the previous one', () => {
-    const testFn = functionBody('async function testConnection()', 'function connectionFingerprint()');
+    const testFn = functionBody('async function testConnection()');
     expect(testFn).toMatch(/skipConnectionTest = false/);
     expect(testFn).toMatch(/testedFingerprint = connectionFingerprint\(\)/);
   });
@@ -145,10 +147,14 @@ describe('MailSettings surfaces which leg of the connection failed', () => {
     // friendlyError alone was not enough: the escape hung off testResult, which
     // only the test button ever set, so the one path that actually blocks had
     // no way past it.
-    const saveFn = functionBody('async function saveAccount()', 'async function deleteAccount(');
-    expect(saveFn).toMatch(/testResult = \{/);
+    const saveFn = functionBody('async function saveAccount()');
+    expect(saveFn).toMatch(/testResult = \{\s*ok: false/);
     expect(saveFn).toMatch(/stage: err\.stage/);
     expect(saveFn).toMatch(/testedFingerprint = connectionFingerprint\(\)/);
+    // Re-stamping the fingerprint without clearing the consent brings the box
+    // back ALREADY TICKED for a configuration the user never agreed to skip.
+    // Every place that stamps a fingerprint must also clear the consent.
+    expect(saveFn).toMatch(/skipConnectionTest = false/);
     // Not a fabricated `imap: true` on a refusal whose IMAP leg is what failed.
     expect(saveFn).toMatch(/checked: err\.stage \?/);
   });
