@@ -70,9 +70,11 @@ export const FIREWORKS_CONTRACT_CONFIRMED = true;
 export const UNCONFIRMED_POSTURE = 'retention/security not yet contractually confirmed';
 
 /**
- * Private raw table — carries the CONFIRMED posture text a host WOULD show once
- * its contract is pinned. NOT exported: the raw confirmed claim must never escape
- * except through the gate (`gatePosture`), so an unconfirmed claim can't leak.
+ * Shape of the private raw table, which carries the CONFIRMED posture text a host
+ * WOULD show once its contract is pinned. The TYPE is exported (`gatePosture` and
+ * `buildDisclosures` take it, and both are exported for their tests); the `RAW`
+ * CONST below is not, and that is the invariant — the raw confirmed claim must
+ * never escape except through the gate, so an unconfirmed claim can't leak.
  */
 export interface RawDisclosure {
   host: string;
@@ -82,7 +84,19 @@ export interface RawDisclosure {
   postureConfirmed: boolean;
 }
 
-const RAW: Record<string, RawDisclosure> = {
+/**
+ * The raw table, built and discarded in one expression on purpose.
+ *
+ * While every host is confirmed, the raw `confirmedPosture` and the gated posture
+ * are byte-identical — so a reader pointed back at the raw text is right today and
+ * WRONG the moment a host ships unconfirmed, and no black-box test can tell the
+ * difference in between. It has to be closed by construction, and it has to be a
+ * CLOSURE: a module-level const, or a named `rawTable()` factory, both leave the
+ * bypass one call away (a mutation doing exactly that survived the suite green).
+ * With no name bound after this expression, there is nothing left to point at.
+ */
+export const HOST_DISCLOSURES: Record<string, HostDisclosure> = buildDisclosures((() => {
+  const raw: Record<string, RawDisclosure> = {
   'api.anthropic.com': {
     host: 'api.anthropic.com',
     residency: 'US',
@@ -108,8 +122,10 @@ const RAW: Record<string, RawDisclosure> = {
     transferBasis: 'SCC',
     confirmedPosture: 'US · zero-retention · SOC2',
     postureConfirmed: FIREWORKS_CONTRACT_CONFIRMED,
-  },
-};
+    },
+  };
+  return raw;
+})());
 
 /**
  * The R2 gate: the confirmed claim only when confirmed, else the neutral fallback.
@@ -126,21 +142,33 @@ export function gatePosture(d: RawDisclosure): string {
 }
 
 /**
- * The public disclosure table — every `posture` is already R2-gated, so no
- * exported path can surface an unconfirmed claim.
+ * Build the public table from a raw one, applying the gate to every row.
+ *
+ * EXPORTED FOR ITS OWN TEST, for the same reason `gatePosture` is — and this one
+ * was learned the hard way. With the gate function tested but the CONSTRUCTION
+ * untested, replacing `gatePosture(d)` below with a plain `d.confirmedPosture`
+ * survived the whole suite green: the gate stayed intact and correct, and the
+ * table simply stopped going through it. That is the exact bypass the structural
+ * test claims to catch, and it was invisible because every row is confirmed today,
+ * so gated and ungated produce identical strings. Only a build over a SYNTHETIC
+ * unconfirmed row can tell them apart.
  */
-export const HOST_DISCLOSURES: Record<string, HostDisclosure> = Object.fromEntries(
-  Object.entries(RAW).map(([host, d]) => [
-    host,
-    {
-      host: d.host,
-      residency: d.residency,
-      transferBasis: d.transferBasis,
-      posture: gatePosture(d),
-      postureConfirmed: d.postureConfirmed,
-    },
-  ]),
-);
+export function buildDisclosures(raw: Record<string, RawDisclosure>): Record<string, HostDisclosure> {
+  return Object.fromEntries(
+    Object.entries(raw).map(([host, d]) => [
+      host,
+      {
+        host: d.host,
+        residency: d.residency,
+        transferBasis: d.transferBasis,
+        posture: gatePosture(d),
+        postureConfirmed: d.postureConfirmed,
+      },
+    ]),
+  );
+}
+
+
 
 /** Disclosure for a host, or `undefined` if the host carries no disclosure entry. */
 export function hostDisclosure(host: string): HostDisclosure | undefined {

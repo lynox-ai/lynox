@@ -125,9 +125,30 @@ describe('buildTierPresetSignal (model-presets W4)', () => {
     // literal, so this keeps holding the day a host ships unconfirmed — a literal
     // would only re-state the current flag and would go quiet exactly when it matters.
     expect(deep.posture).toBeDefined();
-    expect(deep.posture).toBe(displayPosture('api.fireworks.ai'));
-    // Fireworks' DPA is pinned since 2026-08-11, so today that IS the asserted claim,
-    // matching SUBPROCESSORS.md and the website DPA page.
+    // Every Fireworks-hosted slot in every preset must carry the SAME forwarded
+    // string. A hardcoded literal at the emit site would satisfy a single-slot
+    // equality check, so the assertion spans slots AND compares against a host whose
+    // posture differs — mistral, whose EU string a Fireworks-shaped literal cannot
+    // also produce. Equality against displayPosture alone could not tell forwarding
+    // from a coincidentally-equal constant.
+    const hostOf = (id: string): string =>
+      id.startsWith('accounts/fireworks/') ? 'api.fireworks.ai'
+      : id.startsWith('claude-') ? 'api.anthropic.com'
+      : 'api.mistral.ai';
+    const seen = new Set<string>();
+    for (const [name, preset] of Object.entries(sig)) {
+      for (const t of preset!.tiers) {
+        const host = hostOf(t.model_id);
+        seen.add(host);
+        expect(t.posture, `${name}.${t.tier} (${host})`).toBe(displayPosture(host));
+      }
+    }
+    // Spanning presets is what gives the loop teeth: max-quality is Anthropic-hosted
+    // and Anthropic's posture differs from Fireworks'. A single hardcoded literal at
+    // the emit site satisfies one host and fails the other — comparing only Fireworks
+    // slots could not tell forwarding from a coincidentally-equal constant.
+    expect(seen.size, 'need ≥2 distinct hosts or the loop cannot refute a literal').toBeGreaterThan(1);
+    expect(displayPosture('api.fireworks.ai')).not.toBe(displayPosture('api.anthropic.com'));
     expect(deep.posture).toBe('US · zero-retention · SOC2');
   });
 });

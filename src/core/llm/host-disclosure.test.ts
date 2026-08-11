@@ -5,6 +5,7 @@ import {
   hostDisclosure,
   displayPosture,
   gatePosture,
+  buildDisclosures,
   UNCONFIRMED_POSTURE,
 } from './host-disclosure.js';
 
@@ -77,7 +78,38 @@ describe('host-disclosure (model-presets P1b)', () => {
     expect(displayPosture('api.anthropic.com')).toBe('US · zero-retention (API default) · SOC2');
   });
 
-  it('R2 gate is STRUCTURAL: every exported surface carries the GATED posture', () => {
+  it('R2 gate is STRUCTURAL: the TABLE is built through the gate, not around it', () => {
+    // The one that matters, and the one the previous version of this file missed.
+    // Asserting over the real table cannot catch a build that skips the gate while
+    // every row is confirmed — gated and ungated then produce the same string, so
+    // `posture: gatePosture(d)` → `posture: d.confirmedPosture` shipped green. A
+    // build over a SYNTHETIC unconfirmed row is the only thing that separates them.
+    const built = buildDisclosures({
+      'api.confirmed.example': {
+        host: 'api.confirmed.example',
+        residency: 'US',
+        transferBasis: 'SCC',
+        confirmedPosture: 'US · zero-retention · SOC2',
+        postureConfirmed: true,
+      },
+      'api.unconfirmed.example': {
+        host: 'api.unconfirmed.example',
+        residency: 'US',
+        transferBasis: 'SCC',
+        confirmedPosture: 'US · zero-retention · SOC2',
+        postureConfirmed: false,
+      },
+    });
+    expect(built['api.confirmed.example']!.posture).toBe('US · zero-retention · SOC2');
+    expect(built['api.unconfirmed.example']!.posture).toContain(UNCONFIRMED_POSTURE);
+    expect(built['api.unconfirmed.example']!.posture).not.toContain('zero-retention');
+    expect(built['api.unconfirmed.example']!.posture).not.toContain('SOC2');
+    // The other fields must pass through untouched — the gate covers the posture only.
+    expect(built['api.unconfirmed.example']!.transferBasis).toBe('SCC');
+    expect(built['api.unconfirmed.example']!.postureConfirmed).toBe(false);
+  });
+
+  it('every exported surface returns the same posture for a host', () => {
     // The gate must live in the DATA, not only in displayPosture — a W3/W4 consumer
     // reading .posture off the object/map directly must still get the gated value.
     // Driven off the PUBLIC table, so it keeps holding when a future host ships
