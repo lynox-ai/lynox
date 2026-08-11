@@ -203,3 +203,64 @@ export function expandTierPreset(name: string): { routing_mode: 'hybrid'; tier_s
   const preset = TIER_PRESETS[name];
   return { routing_mode: preset.routing_mode, tier_set: preset.tier_set };
 }
+
+/** One band where the live `tier_set` does not run what its `tier_preset` names.
+ *  `null` on either side means "no slot for this band" — the preset does not
+ *  pin it, or the managed constraints dropped the one it did. */
+export interface TierPresetSlotDeviation {
+  expected: string | null;
+  actual: string | null;
+}
+
+/** A `tier_preset` name that no longer describes the set it labels. */
+export interface TierPresetDeviation {
+  /** The preset still named by `tier_preset` — kept, not nulled (see below). */
+  preset: string;
+  /** ONLY the bands that differ. Never empty: no differences ⇒ no deviation. */
+  slots: Partial<Record<ModelTier, TierPresetSlotDeviation>>;
+}
+
+/**
+ * Which bands of `effectiveTierSet` disagree with the preset `presetName` claims.
+ *
+ * A `tier_preset` is not a lock: an explicit `tier_set` slot overrides it
+ * per-band by design, and the managed constraints may drop a band the CP cannot
+ * back (`config.ts:485`, `:491`). That is correct behaviour — the defect is that
+ * the NAME survives the override unchanged, so `tier_preset: "efficient"` can
+ * label a hand mixture and nothing says so. Measured on a hosted test instance
+ * 2026-08-11: the field read `efficient` (canonically three Fireworks models)
+ * while the live set ran Mistral / Fireworks / **Anthropic** — and that last slot
+ * pointed at a provider with no credit, so every deep escalation died. An
+ * outage the label could not have shown.
+ *
+ * Direction (b) of the two the register weighed: keep the name and state the
+ * deviation beside it. (a) — null the field on the first override — is more
+ * honest in isolation but destroys the provenance the settings preset-cards need
+ * to render at all, and a card that cannot name its preset is a worse regression
+ * than a name that needs a footnote.
+ *
+ * Returns `undefined` when there is nothing to report: no preset named, an
+ * unknown name (unreachable through `loadConfig`, which throws — defensive
+ * here), or a set that matches its preset band for band. Absence is therefore
+ * the machine-readable "this label is faithful", which is what keeps the caller
+ * from having to diff two fields itself.
+ *
+ * Compares MODEL IDS only. The slot objects carry per-slot `api_key`s and this
+ * result is serialized into `GET /api/config`, whose redaction pass only ever
+ * sees the RAW file config — never the loader output this reads.
+ */
+export function tierPresetDeviation(
+  presetName: string | undefined,
+  effectiveTierSet: TierSet | undefined,
+): TierPresetDeviation | undefined {
+  if (!presetName) return undefined;
+  const expanded = expandTierPreset(presetName);
+  if (!expanded) return undefined;
+  const slots: Partial<Record<ModelTier, TierPresetSlotDeviation>> = {};
+  for (const tier of ['fast', 'balanced', 'deep'] as const) {
+    const expected = expanded.tier_set[tier]?.model_id ?? null;
+    const actual = effectiveTierSet?.[tier]?.model_id ?? null;
+    if (expected !== actual) slots[tier] = { expected, actual };
+  }
+  return Object.keys(slots).length > 0 ? { preset: presetName, slots } : undefined;
+}

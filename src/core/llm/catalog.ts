@@ -15,7 +15,62 @@ import {
   SERVED_BALANCED_SONNET_IDS,
   getModelId,
   modelCapability,
+  resolveNativeContextWindow,
+  getProviderDescriptor,
 } from '../../types/models.js';
+
+/**
+ * What a per-tier LABEL needs in order to state the SAME context window
+ * `active_model.contextWindow` states.
+ *
+ * Both numbers describe one quantity — the native window the engine trims
+ * against — but until now the label read `modelCapability(id).contextWindow`
+ * (the bare registry value) while `active_model` read
+ * `resolveNativeContextWindow(id, provider, declaredWindow)`. Two resolvers for
+ * one quantity in one response body, which is the same defect class #1194
+ * closed for the model id itself: a reader cannot tell which field is true.
+ * They diverge in BOTH directions and both are reachable:
+ *   - a self-host operator who declares `openai_context_window` gets that window
+ *     in `active_model` and the registry's in the label;
+ *   - a Claude id resolved under an openai/custom provider is capped to the
+ *     200k fallback in `active_model` (the Anthropic-fallback trap,
+ *     models.ts:1204-1207) while the label still advertises 1M.
+ * Optional so every existing 2-arg caller keeps its exact behaviour: with no
+ * context the resolver sees `undefined` for both and falls through to the
+ * registry value the label used before.
+ */
+export interface TierLabelWindowContext {
+  /** The wire the model actually runs on; gates the Anthropic-fallback trap. */
+  provider?: LLMProvider | undefined;
+  /** A self-host operator's declared native window; wins when > 0. */
+  declaredWindow?: number | undefined;
+}
+
+/**
+ * The window a per-tier label may STATE, or `undefined` for "say nothing".
+ *
+ * Deliberately NOT a bare `resolveNativeContextWindow` call. That resolver
+ * always answers, returning `FALLBACK_CAPABILITY.contextWindow` for an id it
+ * does not know — correct for `active_model.contextWindow`, whose consumer (the
+ * radio filter) needs *a* number and reads the accompanying all-false `features`
+ * as "unverified". A LABEL has no such companion: appending "· 200k" to an
+ * unregistered model asserts a capability nobody measured, in the one place a
+ * user reads as fact. So the registry-presence check stays as the gate, and only
+ * a KNOWN id (or an explicitly declared window, which `active_model` honours the
+ * same way) gets a suffix. Two callers, one resolver, different honest silences.
+ */
+function labelContextWindow(
+  modelId: string,
+  ctx: TierLabelWindowContext | undefined,
+): number | undefined {
+  const declared = ctx?.declaredWindow;
+  // A declared window is the operator's own statement about THEIR endpoint, so
+  // it outranks the registry — and applies even to an id we do not know, which
+  // is exactly the self-host openai-compat case `active_model` also covers.
+  if (declared !== undefined && declared > 0) return declared;
+  if (!modelCapability(modelId)) return undefined;
+  return resolveNativeContextWindow(modelId, ctx?.provider, declared);
+}
 
 /**
  * Human context-window shorthand for picker labels: 1_000_000 → "1M",
@@ -1042,15 +1097,18 @@ function buildMainChatModels(entry: CatalogProviderEntry): MainChatModel[] | und
 export function mainChatTierLabels(
   entry: CatalogProviderEntry,
   resolvedBalanced: string,
+  windowCtx?: TierLabelWindowContext | undefined,
 ): Partial<Record<ModelTier, string>> | undefined {
   const models = entry.main_chat_models;
   if (!models || models.length === 0) return undefined;
   // Context window rides the label ("Haiku 4.5 · 200k") — rafael 2026-08-09:
-  // every model picker states the window. Registry-sourced (not the catalog
-  // row) so the number matches what the engine actually trims against.
+  // every model picker states the window. The number comes from
+  // `resolveNativeContextWindow`, the SAME resolver `active_model.contextWindow`
+  // uses, so one response cannot state two windows for one model (see
+  // TierLabelWindowContext).
   const labelForId = (id: string): string => {
     const base = entry.models.find((m) => m.id === id)?.label ?? id;
-    const ctx = formatContextWindow(modelCapability(id)?.contextWindow);
+    const ctx = formatContextWindow(labelContextWindow(id, windowCtx));
     return ctx ? `${base} · ${ctx}` : base;
   };
   const out: Partial<Record<ModelTier, string>> = {};
@@ -1089,6 +1147,7 @@ export function mainChatTierLabelsFromTierSet(
   tierSet: TierSet,
   baseProvider: LLMProvider,
   catalog: LLMCatalog = LLM_CATALOG,
+  windowCtx?: Pick<TierLabelWindowContext, 'declaredWindow'> | undefined,
 ): Partial<Record<ModelTier, string>> | undefined {
   const out: Partial<Record<ModelTier, string>> = {};
   const pickedIds: string[] = [];
@@ -1106,8 +1165,20 @@ export function mainChatTierLabelsFromTierSet(
     const base = catalog
       .flatMap((e) => [...e.models, ...(e.tier_models ?? [])])
       .find((m) => m.id === modelId)?.label ?? modelId;
-    // Same window suffix as mainChatTierLabels — registry-sourced.
-    const ctx = formatContextWindow(modelCapability(modelId)?.contextWindow);
+    // Same window suffix as mainChatTierLabels, and the same RESOLVER — with
+    // this slot's OWN wire, exactly as `active_model` derives it (#1194). The
+    // provider matters here and the old comment above was wrong to dismiss it:
+    // `resolveNativeContextWindow` refuses a Claude window when the provider
+    // reads openai/custom (the Anthropic-fallback trap, models.ts:1207), so a
+    // per-tier label that omits the provider can advertise 1M for a slot the
+    // engine caps at the 200k fallback. No slot ⇒ the base provider, mirroring
+    // the handler.
+    const slotProvider: LLMProvider = slot
+      ? (getProviderDescriptor(slot.provider)?.wireClient ?? 'anthropic')
+      : baseProvider;
+    const ctx = formatContextWindow(
+      labelContextWindow(modelId, { provider: slotProvider, declaredWindow: windowCtx?.declaredWindow }),
+    );
     pickedIds.push(modelId);
     out[tier] = ctx ? `${base} · ${ctx}` : base;
   }

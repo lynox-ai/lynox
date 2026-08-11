@@ -27,7 +27,7 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
-import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
+import { expandTierPreset, tierPresetDeviation, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
 import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
@@ -4505,7 +4505,17 @@ export class LynoxHTTPApi {
       // values ≤ contextWindow; show-all-grayed (Item 8) reads `features` to
       // disable settings that don't apply to the active model.
       const activeProvider = getActiveProvider();
-      const activeTier = config.default_tier ?? 'balanced';
+      // Loader, not the raw file — the same correction #1194 made for the
+      // tier_set, applied to the tier that INDEXES it. `default_tier` is
+      // env-SEEDED (`LYNOX_DEFAULT_MODEL_TIER`, legacy `LYNOX_DEFAULT_TIER`,
+      // config.ts:357): the env only fills an unset value, so on a
+      // CP-provisioned tenant whose config.json carries no `default_tier` the
+      // raw file says nothing and this fell back to `'balanced'` while the
+      // engine routed on the CP's seed. Reading the file also skipped the
+      // project-config layer, which `loadConfig()` merges and `readUserConfig()`
+      // by contract does not. Getting the tier_set right and then indexing it
+      // with the wrong tier reports the wrong slot just as surely.
+      const activeTier = effectiveConfig.default_tier ?? 'balanced';
       // The tier_set the ENGINE routes on, taken from the loader instead of
       // re-derived here. `readUserConfig()` is file-only (config.ts:640), while
       // `loadConfig()` also merges the CP-pinned `LYNOX_TIER_PRESET` — whose own
@@ -4620,13 +4630,23 @@ export class LynoxHTTPApi {
       // managed constraints (the runtime drops any slot the CP can't back), so the
       // picker cannot label a model that never routes — and sharing the one value
       // is what keeps these labels and `active_model` from disagreeing.
+      // …and the window inside those labels comes from the SAME resolver that
+      // produced `active_model.contextWindow` above, fed the same declared
+      // window. Sharing the tier_set stopped the two fields naming different
+      // MODELS; sharing the resolver stops them stating different WINDOWS for
+      // the one model they now agree on.
       if (resolvedTierSet) {
-        const tierLabels = mainChatTierLabelsFromTierSet(resolvedTierSet, activeProvider);
+        const tierLabels = mainChatTierLabelsFromTierSet(resolvedTierSet, activeProvider, undefined, {
+          declaredWindow: config.openai_context_window,
+        });
         if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
       } else {
         const mainChatEntry = getCatalogEntryByKey(resolveCatalogKey(activeProvider, config.api_base_url));
         if (mainChatEntry) {
-          const tierLabels = mainChatTierLabels(mainChatEntry, resolveBalancedModel(config));
+          const tierLabels = mainChatTierLabels(mainChatEntry, resolveBalancedModel(config), {
+            provider: activeProvider,
+            declaredWindow: config.openai_context_window,
+          });
           if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
         }
       }
@@ -4636,6 +4656,18 @@ export class LynoxHTTPApi {
       // the CP can't back. Server-authoritative so the client needs no
       // @lynox-ai/core import and the disclosure gate stays honest.
       redacted['available_tier_presets'] = tierPresetSignal;
+      // `tier_preset` above (spread from the raw config, and overwritten by the
+      // CP pin at load) names a preset; the set the engine routes on may no
+      // longer BE that preset, because an explicit slot overrides per band and
+      // the managed constraints can drop one. Present only when they disagree,
+      // so its ABSENCE is the affirmative "this name is faithful" — the reader
+      // never has to diff `tier_preset` against `main_chat_tiers` to find out.
+      // Reads the LOADER's set (same value `active_model` resolved from), and
+      // `tierPresetDeviation` projects model-id STRINGS out of it: the slot
+      // objects carry per-slot `api_key`s, and `redactConfigForResponse` above
+      // only ever scrubbed the raw file config, never this.
+      const presetDeviation = tierPresetDeviation(effectiveConfig.tier_preset, effectiveConfig.tier_set);
+      if (presetDeviation) redacted['tier_preset_deviation'] = presetDeviation;
       // Bugsink-toggle UX requires the page to know whether a DSN is
       // configured (env or vault) without leaking the DSN itself.
       redacted['bugsink_dsn_configured'] = !!(process.env['LYNOX_BUGSINK_DSN'] || secretNames.has('LYNOX_BUGSINK_DSN') || config.bugsink_dsn);
