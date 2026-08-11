@@ -14,7 +14,6 @@
  */
 
 import type { ToolEntry, IAgent } from '../../types/index.js';
-import { containsUntrustedMarker, wrapUntrustedData } from '../../core/data-boundary.js';
 import { RECALL_TOOL_NAME, recalledPayload } from '../../core/tool-result-blob-store.js';
 
 interface RecallToolResultInput {
