@@ -15,6 +15,7 @@
 
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { containsUntrustedMarker, wrapUntrustedData } from '../../core/data-boundary.js';
+import { RECALL_TOOL_NAME, recalledPayload } from '../../core/tool-result-blob-store.js';
 
 interface RecallToolResultInput {
   /** The recall handle id, e.g. `tr-3`, from the post-compaction context. */
@@ -23,7 +24,7 @@ interface RecallToolResultInput {
 
 export const recallToolResultTool: ToolEntry<RecallToolResultInput> = {
   definition: {
-    name: 'recall_tool_result',
+    name: RECALL_TOOL_NAME,
     description:
       'Re-fetch a large tool result that was set aside during a context compaction. ' +
       'After the conversation is summarized, big tool outputs (API responses, file ' +
@@ -59,8 +60,6 @@ export const recallToolResultTool: ToolEntry<RecallToolResultInput> = {
     // replay is a fail-open hole: memory extracted after a recall would look clean). Most
     // wrapping tools' markers survive eviction verbatim; re-wrap only when absent so the
     // signal is guaranteed without double-wrapping an already-marked payload.
-    return containsUntrustedMarker(blob.payload)
-      ? blob.payload
-      : wrapUntrustedData(blob.payload, `recalled:${blob.tool}`);
+    return recalledPayload(blob);
   },
 };

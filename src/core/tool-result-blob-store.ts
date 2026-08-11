@@ -160,6 +160,52 @@ function redactIdent(raw: string): string {
  * no recognised identifying key — the descriptor then degrades to the bare
  * tool label rather than guessing.
  */
+/**
+ * The tool that reads a parked payload back.
+ *
+ * One constant, two readers: the stub text tells the model what to call, and
+ * `park` recognises that call's result so it is not stored twice. Naming it in
+ * both places as a literal is how those two silently disagree — rename the tool
+ * and the stub still instructs correctly while the dedup stops firing, which
+ * shows up only as a store that fills faster than it should.
+ */
+export const RECALL_TOOL_NAME = 'recall_tool_result';
+
+/**
+ * The exact text {@link RECALL_TOOL_NAME} hands back for `blob`.
+ *
+ * ONE owner, two readers: the tool returns this, and `park` compares against it
+ * to recognise its own output coming back. Written twice, the two drift the day
+ * the wrapper changes — and the failure is silent, because a mismatch just
+ * degrades to minting a duplicate.
+ *
+ * The re-wrap carries the trust boundary: a recalled payload is external content
+ * re-injected on a later turn, so the marker must ride with it or the durable-
+ * write gate reads the turn as clean.
+ */
+export function recalledPayload(blob: { payload: string; tool: string }): string {
+  return containsUntrustedMarker(blob.payload)
+    ? blob.payload
+    : wrapUntrustedData(blob.payload, `recalled:${blob.tool}`);
+}
+
+/**
+ * The blob id a `recall_tool_result` call names, or undefined when the input is
+ * not the shape the tool declares. Deliberately strict: a wrong id here would
+ * make `park` return someone else's handle, so anything unexpected falls
+ * through to the content path rather than guessing.
+ */
+function recalledBlobId(input: unknown): string | undefined {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return undefined;
+  const id = (input as Record<string, unknown>)['id'];
+  // `.trim()` mirrors the tool handler, which trims before its own lookup. Skip
+  // it and a padded id resolves THERE but not here, so the payload comes back
+  // real and is then stored a second time — the exact duplicate this closes.
+  // No empty-string special case: '' names no blob, so the lookup below already
+  // answers undefined, and a branch no test can distinguish is one to delete.
+  return typeof id === 'string' ? id.trim() : undefined;
+}
+
 function identifyingArg(input: unknown): string {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) return '';
   const rec = input as Record<string, unknown>;
@@ -391,6 +437,46 @@ export class ToolResultBlobStore {
     if (payload.length <= thresholdChars) return undefined;
     const call = toolCalls.get(resultBlock.tool_use_id);
     const tool = call?.name ?? 'tool';
+
+    // Provenance beats content, and only for this one tool.
+    //
+    // A result produced by `recall_tool_result` IS the blob its input names. The
+    // content check below cannot establish that, because the recall handler
+    // re-wraps a payload that carries no untrusted marker, and
+    // `wrapUntrustedData` REWRITES the body on the way out — it neutralizes
+    // boundary tags and prepends a `⚠ WARNING:` line when it detects injection
+    // patterns. So the text coming back is not the text that was stored, the
+    // content key differs, and a second blob gets minted for data already held.
+    // Measured before this existed: one recall of an unmarked payload took the
+    // store from 9 blobs to 16 where 15 was the honest count. The duplicate is
+    // silent and it is not free — `pruneToCap` evicts by capacity, so the twin
+    // pushes an unrelated blob out and that one's handle stops resolving.
+    //
+    // Unwrapping the text to recover the key is not an option: the rewrite is
+    // lossy by design, so it is not invertible. The tool call is the exact
+    // answer that the bytes cannot give.
+    //
+    // A named blob that is GONE falls through deliberately: the data is no
+    // longer stored, so storing it again is correct.
+    //
+    // The id alone is NOT enough, hence the corroboration. `clear()` leaves
+    // `seq` untouched, so a handle is never re-issued within one store — but a
+    // FRESH store (a reloaded session) starts at tr-1 again while the loaded
+    // history may still carry an old `recall_tool_result(tr-1)` naming different
+    // data. Trusting the id there would replace a real payload with a stub
+    // pointing at someone else's content: silent loss plus a confidently wrong
+    // label. Comparing against what a recall of THIS blob would return costs one
+    // string compare and removes the whole class.
+    if (call?.name === RECALL_TOOL_NAME) {
+      const recalledId = recalledBlobId(call.input);
+      const existing = recalledId === undefined ? undefined : this.get(recalledId);
+      if (recalledId !== undefined && existing !== undefined && payload === recalledPayload(existing)) {
+        // `payloadChars` is what leaves the CONTEXT, so it is the recalled
+        // text's length (wrapper included) — not the stored blob's.
+        return { id: recalledId, descriptor: existing.descriptor, payloadChars: payload.length };
+      }
+    }
+
     // Dedup: an identical payload already resident reuses its handle instead
     // of minting a second blob. This is what breaks the cross-compaction
     // amplifier — the same file dump re-parked at each compaction now maps
@@ -537,7 +623,7 @@ export class ToolResultBlobStore {
  */
 export function recallStub(id: string, descriptor: string, wasUntrusted = false): string {
   const stub = `[Full result set aside to free context — ${descriptor}. `
-    + `Call recall_tool_result with id "${id}" to read it again.]`;
+    + `Call ${RECALL_TOOL_NAME} with id "${id}" to read it again.]`;
   // Carry the trust boundary into the replacement. The descriptor happens to
   // start with the payload's first 80 chars, so a wrap that sits at offset 0
   // would survive by accident — but several producers put engine framing first

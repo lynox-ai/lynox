@@ -8,7 +8,10 @@ import {
   DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS,
   evictImagesFrom,
   DEFAULT_CARRIED_IMAGE_COUNT,
+  RECALL_TOOL_NAME,
 } from './tool-result-blob-store.js';
+import { recallToolResultTool } from '../tools/builtin/recall-tool-result.js';
+import type { IAgent } from '../types/index.js';
 
 const T = DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS;
 
@@ -185,10 +188,13 @@ describe('ToolResultBlobStore — carry-forward across compactions (W5)', () => 
   it('dedups an identical payload re-evicted across windows into ONE blob (amplifier fix)', () => {
     const store = new ToolResultBlobStore();
     const dump = 'X'.repeat(5_000);
-    // Same payload parked in two compaction windows — a file dump re-evicted, or
-    // a recalled payload re-parked. Pre-fix this minted tr-1 AND tr-2 for the
-    // same bytes (the cross-compaction duplicate-resident amplifier); now the
-    // second eviction reuses the first handle.
+    // Same payload parked in two compaction windows — a file dump re-evicted.
+    // Pre-fix this minted tr-1 AND tr-2 for the same bytes (the cross-compaction
+    // duplicate-resident amplifier); now the second eviction reuses the handle.
+    // NOTE: this covers BYTE-IDENTICAL re-eviction only. A *recalled* payload is
+    // not byte-identical when the handler re-wraps it, which is why that case
+    // needs the provenance path below — this test used to claim it too, and did
+    // not cover it.
     const h1 = store.evictFrom([toolUseMsg('tu-1', 'read_file'), toolResultMsg('tu-1', dump)], T);
     const h2 = store.evictFrom([toolUseMsg('tu-2', 'read_file'), toolResultMsg('tu-2', dump)], T);
     expect(h2[0]!.id).toBe(h1[0]!.id); // same handle reused
@@ -216,6 +222,99 @@ describe('ToolResultBlobStore — carry-forward across compactions (W5)', () => 
     const second = store.evictFrom([toolUseMsg('tu-2', 'read_file'), toolResultMsg('tu-2', dump)], T)[0]!.id;
     expect(store.get(second)?.payload).toBe(dump);
     expect(store.size).toBe(1);
+  });
+
+  /**
+   * A RECALLED payload comes back through the tool, and the tool re-wraps a
+   * payload that carries no untrusted marker. `wrapUntrustedData` rewrites the
+   * body on the way out (boundary-tag neutralisation, plus a `⚠ WARNING:` line
+   * when it detects injection patterns), so the returned text is not the stored
+   * text and the content key misses. Measured on the real code before this
+   * existed: one recall of an unmarked payload took a store from 9 blobs to 16
+   * where 15 was the honest count, and the twin is not free — `pruneToCap`
+   * evicts by capacity, so it pushes an unrelated blob out and that handle stops
+   * resolving. The fixture drives the REAL handler for exactly this reason: a
+   * hand-built "what I think a recall returns" would have hidden the rewrite.
+   */
+  it('re-parks a RECALLED payload under its original handle, wrapper and all', async () => {
+    const store = new ToolResultBlobStore();
+    const dump = 'Z'.repeat(5_000);
+    const first = store.evictFrom([toolUseMsg('tu-1', 'read_file'), toolResultMsg('tu-1', dump)], T)[0]!.id;
+
+    const recalled = await recallToolResultTool.handler(
+      { id: first }, { toolResultBlobStore: store } as unknown as IAgent);
+    // The premise of the whole fix, asserted rather than assumed.
+    expect(recalled).not.toBe(dump);
+    expect(recalled.length).toBeGreaterThan(T);
+
+    const again = store.evictFrom(
+      [toolUseMsg('tu-2', RECALL_TOOL_NAME, { id: first }), toolResultMsg('tu-2', recalled)], T);
+    expect(again[0]!.id).toBe(first);
+    expect(store.size).toBe(1);
+    // The stored bytes stay the ORIGINAL payload — the wrapper is re-applied on
+    // each recall, never accumulated into the blob.
+    expect(store.get(first)?.payload).toBe(dump);
+  });
+
+  it('mints a fresh blob when the recalled handle no longer resolves', () => {
+    const store = new ToolResultBlobStore();
+    const dump = 'Q'.repeat(5_000);
+    const first = store.evictFrom([toolUseMsg('tu-1', 'read_file'), toolResultMsg('tu-1', dump)], T)[0]!.id;
+    store.pruneToCap(0, 0);
+    expect(store.get(first)).toBeUndefined();
+    // The data is genuinely gone, so re-storing it is the correct answer.
+    const again = store.evictFrom(
+      [toolUseMsg('tu-2', RECALL_TOOL_NAME, { id: first }), toolResultMsg('tu-2', 'R'.repeat(5_000))], T);
+    expect(again).toHaveLength(1);
+    expect(store.size).toBe(1);
+  });
+
+  /**
+   * The direction that would turn this fix into data loss. `clear()` leaves the
+   * counter alone, so a handle is never re-issued within one store — but a fresh
+   * store (a reloaded session) starts at tr-1 again while the loaded history can
+   * still carry an old `recall_tool_result(tr-1)` naming different data. Trusting
+   * the id alone would replace a real payload with a stub pointing at someone
+   * else's content: silent loss AND a confidently wrong label.
+   */
+  it('refuses to reuse a handle whose content is not what a recall of it returns', () => {
+    const store = new ToolResultBlobStore();
+    const mine = store.evictFrom([toolUseMsg('tu-1', 'read_file'), toolResultMsg('tu-1', 'M'.repeat(5_000))], T)[0]!.id;
+    // Same handle named, entirely unrelated payload — the stale-id case.
+    const other = store.evictFrom(
+      [toolUseMsg('tu-2', RECALL_TOOL_NAME, { id: mine }), toolResultMsg('tu-2', 'OTHER'.repeat(1_000))], T);
+    expect(other[0]!.id).not.toBe(mine);
+    expect(store.size).toBe(2);
+    expect(store.get(mine)?.payload).toBe('M'.repeat(5_000));
+  });
+
+  it('resolves a padded id the same way the tool handler does', async () => {
+    // The handler trims before ITS lookup, so a padded id fetches real data.
+    // If park did not trim, that payload would come back real and then be stored
+    // a second time — the duplicate this whole path exists to prevent.
+    const store = new ToolResultBlobStore();
+    const dump = 'W'.repeat(5_000);
+    const first = store.evictFrom([toolUseMsg('tu-1', 'read_file'), toolResultMsg('tu-1', dump)], T)[0]!.id;
+    const recalled = await recallToolResultTool.handler(
+      { id: `  ${first}  ` }, { toolResultBlobStore: store } as unknown as IAgent);
+    expect(recalled).not.toContain('no longer available');
+
+    const again = store.evictFrom(
+      [toolUseMsg('tu-2', RECALL_TOOL_NAME, { id: `  ${first}  ` }), toolResultMsg('tu-2', recalled)], T);
+    expect(again[0]!.id).toBe(first);
+    expect(store.size).toBe(1);
+  });
+
+  it('ignores a recall call whose input names no usable id', () => {
+    const store = new ToolResultBlobStore();
+    for (const bad of [{}, { id: '' }, { id: '   ' }, { id: 42 }, null, []]) {
+      const s = new ToolResultBlobStore();
+      const h = s.evictFrom(
+        [toolUseMsg('tu-1', RECALL_TOOL_NAME, bad), toolResultMsg('tu-1', 'P'.repeat(5_000))], T);
+      expect(h, JSON.stringify(bad)).toHaveLength(1);
+      expect(s.size, JSON.stringify(bad)).toBe(1);
+    }
+    expect(store.size).toBe(0);
   });
 
   it('lists carried-forward blobs in entries() so they stay discoverable', () => {
