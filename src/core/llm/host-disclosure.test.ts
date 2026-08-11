@@ -72,10 +72,24 @@ describe('host-disclosure (model-presets P1b)', () => {
 
   it('a confirmed host shows its posture verbatim — including a sensitive one', () => {
     expect(displayPosture('api.mistral.ai')).toBe('EU-resident (France)');
-    // Anthropic's posture IS contract-confirmed, so the sensitive claim passes
-    // through verbatim — proving the gate lets a confirmed claim show, not just
-    // that it blocks (Mistral's posture has no sensitive token to prove that).
-    expect(displayPosture('api.anthropic.com')).toBe('US · zero-retention (API default) · SOC2');
+    // Fireworks carries the sensitive token now, and it is the one that is actually
+    // earned: §4.5 of its DPA. Passing it through verbatim proves the gate LETS a
+    // confirmed claim show, not merely that it blocks.
+    expect(displayPosture('api.fireworks.ai')).toBe('US · zero-retention · SOC2');
+  });
+
+  it('Anthropic is disclosed as 30-day retention — it has no zero-retention agreement', () => {
+    // The regression this pins is a FALSE claim that shipped, not a missing one.
+    // The entry read 'zero-retention (API default)' — the inverse of Anthropic's
+    // published policy (inputs and outputs deleted within 30 days of receipt or
+    // generation; zero retention only under a separate agreement, which lynox does
+    // not hold). Anthropic is the default provider for every managed instance, so
+    // this string is on the hot path in a way the Fireworks one is not.
+    const shown = displayPosture('api.anthropic.com')!;
+    expect(shown).toBe('US · 30-day retention · SOC2');
+    expect(shown).not.toContain('zero-retention');
+    // …and it must not creep back via the raw table either.
+    expect(HOST_DISCLOSURES['api.anthropic.com']!.posture).not.toContain('zero-retention');
   });
 
   it('R2 gate is STRUCTURAL: the TABLE is built through the gate, not around it', () => {
@@ -113,8 +127,8 @@ describe('host-disclosure (model-presets P1b)', () => {
     // The gate must live in the DATA, not only in displayPosture — a W3/W4 consumer
     // reading .posture off the object/map directly must still get the gated value.
     // Driven off the PUBLIC table, so it keeps holding when a future host ships
-    // unconfirmed. RAW stays private on purpose — exporting it for a test would
-    // open the very path the module exists to close.
+    // unconfirmed. the raw table is never bound to a name, so there is
+    // nothing to export for a test even if one wanted to.
     expect(Object.keys(HOST_DISCLOSURES).length).toBeGreaterThan(0);
     for (const [host, d] of Object.entries(HOST_DISCLOSURES)) {
       expect(hostDisclosure(host)!.posture, host).toBe(d.posture);

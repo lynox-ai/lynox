@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildTierPresetSignal } from './tier-preset-signal.js';
 import { TIER_PRESETS } from './tier-presets.js';
-import { displayPosture } from './llm/host-disclosure.js';
+import { displayPosture, hostDisclosure } from './llm/host-disclosure.js';
 
 // model-presets W4 — the `available_tier_presets` signal that the settings cards
 // + header picker render. The one behaviour with a seam worth pinning: a preset's
@@ -140,13 +140,28 @@ describe('buildTierPresetSignal (model-presets W4)', () => {
       for (const t of preset!.tiers) {
         const host = hostOf(t.model_id);
         seen.add(host);
-        expect(t.posture, `${name}.${t.tier} (${host})`).toBe(displayPosture(host));
+        const disc = hostDisclosure(host)!;
+        // All three forwarded fields, not just posture. transferBasis is the one an
+        // earlier round had to correct IN the table ('SCC/DPF' was copied onto
+        // Fireworks, which has no DPF) — leaving the forwarding site unguarded let
+        // the same wrong string back in one layer down, measured green.
+        expect(t.posture, `${name}.${t.tier} posture (${host})`).toBe(disc.posture);
+        expect(t.transferBasis, `${name}.${t.tier} transferBasis (${host})`).toBe(disc.transferBasis);
+        // ⚠ residency is asserted but NOT effectively guarded today: every slot in
+        // every preset is US-hosted since the EU set was pulled (tier-presets.ts),
+        // so hardcoding 'US' at the emit site passes — measured. It becomes a real
+        // guard the moment one EU-hosted slot returns, which is why it is written
+        // this way rather than as a literal. Stated because a silently inert
+        // assertion reads exactly like a live one.
+        expect(t.residency, `${name}.${t.tier} residency (${host})`).toBe(disc.residency);
       }
     }
     // Spanning presets is what gives the loop teeth: max-quality is Anthropic-hosted
     // and Anthropic's posture differs from Fireworks'. A single hardcoded literal at
     // the emit site satisfies one host and fails the other — comparing only Fireworks
-    // slots could not tell forwarding from a coincidentally-equal constant.
+    // slots could not tell forwarding from a coincidentally-equal constant. (The
+    // hosts actually met are fireworks and anthropic; the mistral branch in hostOf is
+    // a fallback that no current slot reaches.)
     expect(seen.size, 'need ≥2 distinct hosts or the loop cannot refute a literal').toBeGreaterThan(1);
     expect(displayPosture('api.fireworks.ai')).not.toBe(displayPosture('api.anthropic.com'));
     expect(deep.posture).toBe('US · zero-retention · SOC2');

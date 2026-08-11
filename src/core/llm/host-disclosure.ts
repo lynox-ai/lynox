@@ -13,8 +13,8 @@
  *
  * R2 GATE (PRD §S5): a host's retention/security posture ('zero-retention',
  * 'SOC2', …) is only a factual claim once the provider contract is pinned. The
- * gate is STRUCTURAL: the raw confirmed-posture text lives in the private `RAW`
- * table and never escapes the module while unconfirmed — every exported surface
+ * gate is STRUCTURAL: the raw confirmed-posture text is passed straight into the
+ * builder below and never escapes the module while unconfirmed — every exported surface
  * (`HOST_DISCLOSURES`, `hostDisclosure`, `displayPosture`) carries the already
  * -gated posture, so a consumer that reads `.posture` directly still can't assert
  * an un-pinned contract. See {@link FIREWORKS_CONTRACT_CONFIRMED}.
@@ -72,8 +72,8 @@ export const UNCONFIRMED_POSTURE = 'retention/security not yet contractually con
 /**
  * Shape of the private raw table, which carries the CONFIRMED posture text a host
  * WOULD show once its contract is pinned. The TYPE is exported (`gatePosture` and
- * `buildDisclosures` take it, and both are exported for their tests); the `RAW`
- * CONST below is not, and that is the invariant — the raw confirmed claim must
+ * `buildDisclosures` take it, and both are exported for their tests); the raw table itself
+ * is never bound to a name, and that is the invariant — the raw confirmed claim must
  * never escape except through the gate, so an unconfirmed claim can't leak.
  */
 export interface RawDisclosure {
@@ -85,23 +85,42 @@ export interface RawDisclosure {
 }
 
 /**
- * The raw table, built and discarded in one expression on purpose.
+ * The raw table, passed straight into the builder and never bound to a name.
  *
  * While every host is confirmed, the raw `confirmedPosture` and the gated posture
  * are byte-identical — so a reader pointed back at the raw text is right today and
  * WRONG the moment a host ships unconfirmed, and no black-box test can tell the
- * difference in between. It has to be closed by construction, and it has to be a
- * CLOSURE: a module-level const, or a named `rawTable()` factory, both leave the
- * bypass one call away (a mutation doing exactly that survived the suite green).
- * With no name bound after this expression, there is nothing left to point at.
+ * difference in between. It has to be closed by construction. Two weaker shapes
+ * were tried and measured first: a module-level const, and a named `rawTable()`
+ * factory — a mutation redirecting `displayPosture` at either survived the suite
+ * green. With no name at all, that redirect is a compile error.
+ *
+ * Honest limit, since an earlier commit message overstated this as "unwritable":
+ * inlining `buildDisclosures` back into this expression still compiles and still
+ * passes, because `raw` is in scope INSIDE the initializer. What is closed is
+ * every path AFTER it. A reviewer inlining a single-use helper is the remaining
+ * way in, and no test catches that one.
  */
-export const HOST_DISCLOSURES: Record<string, HostDisclosure> = buildDisclosures((() => {
-  const raw: Record<string, RawDisclosure> = {
+export const HOST_DISCLOSURES: Record<string, HostDisclosure> = buildDisclosures({
   'api.anthropic.com': {
     host: 'api.anthropic.com',
     residency: 'US',
     transferBasis: 'SCC/DPF',
-    confirmedPosture: 'US · zero-retention (API default) · SOC2',
+    // NOT zero-retention, and this entry said the opposite until 2026-08-11 — it
+    // read 'zero-retention (API default)', which is the exact inverse of Anthropic's
+    // published policy: "For Anthropic API users, we automatically delete inputs and
+    // outputs on our backend within 30 days of receipt or generation"
+    // (privacy.claude.com/en/articles/7996866). Zero retention exists there only
+    // "when you and we have agreed otherwise (e.g. zero data retention agreement)",
+    // a separate contract lynox does not hold (rafael, 2026-08-11). The DPA's 30 days
+    // (§H.1) is deletion after TERMINATION and is a different clock — neither is the
+    // per-request non-retention the old string claimed.
+    //
+    // Worth keeping in view: the R2 gate below was built to stop unconfirmed retention
+    // claims from rendering, and it was pointed at Fireworks — whose claim turned out
+    // to be true AND contractual. The false one sat here, waved through by a hand-set
+    // `postureConfirmed: true`. A gate only guards the host someone aimed it at.
+    confirmedPosture: 'US · 30-day retention · SOC2',
     postureConfirmed: true,
   },
   'api.mistral.ai': {
@@ -122,10 +141,8 @@ export const HOST_DISCLOSURES: Record<string, HostDisclosure> = buildDisclosures
     transferBasis: 'SCC',
     confirmedPosture: 'US · zero-retention · SOC2',
     postureConfirmed: FIREWORKS_CONTRACT_CONFIRMED,
-    },
-  };
-  return raw;
-})());
+  },
+});
 
 /**
  * The R2 gate: the confirmed claim only when confirmed, else the neutral fallback.
