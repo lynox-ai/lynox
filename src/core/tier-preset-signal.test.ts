@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { buildTierPresetSignal } from './tier-preset-signal.js';
 import { TIER_PRESETS } from './tier-presets.js';
+import { displayPosture } from './llm/host-disclosure.js';
 
 // model-presets W4 — the `available_tier_presets` signal that the settings cards
 // + header picker render. The one behaviour with a seam worth pinning: a preset's
@@ -116,12 +117,17 @@ describe('buildTierPresetSignal (model-presets W4)', () => {
     expect(deep.pricing).toEqual({ input: 3, output: 15 }); // Sonnet 5 — visibly pricier
   });
 
-  it('never emits an unconfirmed Fireworks posture as a confirmed claim (R2 gate)', () => {
+  it('emits exactly the GATED posture — never a raw claim of its own (R2 gate)', () => {
     const sig = buildTierPresetSignal({ isManagedTier: false });
     const deep = sig['efficient']!.tiers.find((t) => t.tier === 'deep')!;
-    // The gate leaves the posture as a residency-prefixed "unconfirmed" string,
-    // never an asserted retention claim.
+    // The signal must not compose its own posture string: it forwards whatever the
+    // gate produced. Asserted as EQUALITY against displayPosture rather than as a
+    // literal, so this keeps holding the day a host ships unconfirmed — a literal
+    // would only re-state the current flag and would go quiet exactly when it matters.
     expect(deep.posture).toBeDefined();
-    expect(deep.posture!.toLowerCase()).not.toContain('zero-retention');
+    expect(deep.posture).toBe(displayPosture('api.fireworks.ai'));
+    // Fireworks' DPA is pinned since 2026-08-11, so today that IS the asserted claim,
+    // matching SUBPROCESSORS.md and the website DPA page.
+    expect(deep.posture).toBe('US · zero-retention · SOC2');
   });
 });

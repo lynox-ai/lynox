@@ -44,11 +44,27 @@ export interface HostDisclosure {
 }
 
 /**
- * R2 gate for the Fireworks host (PRD §S5). Flip to `true` ONLY when the Fireworks
- * DPA / sub-processor contract is pinned — that is what makes 'zero-retention ·
- * SOC2' a claim we may show. Until then the disclosure shows the neutral fallback.
+ * R2 gate for the Fireworks host (PRD §S5). `true` since 2026-08-11: the Fireworks
+ * DPA is pinned, and it is what makes 'zero-retention · SOC2' a claim we may show.
+ *
+ * WHAT PINNED IT. <https://fireworks.ai/dpa> is incorporated automatically into the
+ * agreement of any customer bound by the terms of service — no signature, so there
+ * is no counter-signed artefact to point at; the document itself is the pin. It
+ * carries the two claims below as obligations, not marketing:
+ *   - §4.5  no retention of prompt inputs or model outputs beyond the request
+ *           lifecycle, conditioned on using the ZDR configuration (which is the
+ *           default for open models — the opt-in turns prompt LOGGING on).
+ *   - Sch.2 SOC 2 Type II, ISO 27001 / 27701 / 42001.
+ * §4.3(f) additionally prohibits training or fine-tuning on the data. The customer
+ * -facing wording lives in `SUBPROCESSORS.md` and the website's DPA page; both were
+ * corrected in the same change, so the screen and the disclosure now agree.
+ *
+ * ⚠️ Do NOT read this flag as "the transfer basis is settled". It gates the
+ * RETENTION/SECURITY posture only. `transferBasis` is a separate field, and the
+ * Fireworks DPA completes SCC **Module Two only** (Schedule 3 §1.1) — whether that
+ * carries a processor-to-processor onward transfer is an open legal question.
  */
-export const FIREWORKS_CONTRACT_CONFIRMED = false;
+export const FIREWORKS_CONTRACT_CONFIRMED = true;
 
 /** The neutral posture shown while a host's posture is not yet contract-confirmed. */
 export const UNCONFIRMED_POSTURE = 'retention/security not yet contractually confirmed';
@@ -58,7 +74,7 @@ export const UNCONFIRMED_POSTURE = 'retention/security not yet contractually con
  * its contract is pinned. NOT exported: the raw confirmed claim must never escape
  * except through the gate (`gatePosture`), so an unconfirmed claim can't leak.
  */
-interface RawDisclosure {
+export interface RawDisclosure {
   host: string;
   residency: HostResidency;
   transferBasis: string | null;
@@ -84,14 +100,28 @@ const RAW: Record<string, RawDisclosure> = {
   'api.fireworks.ai': {
     host: 'api.fireworks.ai',
     residency: 'US',
-    transferBasis: 'SCC/DPF',
+    // SCC only — NOT 'SCC/DPF'. The Fireworks DPA's Schedule 3 is SCCs plus the UK
+    // and Swiss addenda; it never invokes the Data Privacy Framework, and Fireworks
+    // is not asserted to be DPF-certified anywhere we have checked. The sibling
+    // entries earn their 'DPF' from their own contracts; this one did not, and the
+    // string was copied.
+    transferBasis: 'SCC',
     confirmedPosture: 'US · zero-retention · SOC2',
     postureConfirmed: FIREWORKS_CONTRACT_CONFIRMED,
   },
 };
 
-/** The R2 gate: the confirmed claim only when confirmed, else the neutral fallback. */
-function gatePosture(d: RawDisclosure): string {
+/**
+ * The R2 gate: the confirmed claim only when confirmed, else the neutral fallback.
+ *
+ * EXPORTED FOR ITS OWN TEST, and that is not incidental. The gate used to be proven
+ * by asserting on Fireworks, the only unconfirmed host — so confirming Fireworks
+ * would have left the mechanism with no subject and a test that passes vacuously.
+ * The next host added unconfirmed would then have shipped its raw claim with a
+ * green suite. Testing the function directly keeps the proof independent of whatever
+ * the table happens to hold.
+ */
+export function gatePosture(d: RawDisclosure): string {
   return d.postureConfirmed ? d.confirmedPosture : `${d.residency} · ${UNCONFIRMED_POSTURE}`;
 }
 
