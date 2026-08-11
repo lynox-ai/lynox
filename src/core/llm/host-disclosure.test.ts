@@ -48,6 +48,12 @@ describe('host-disclosure (model-presets P1b)', () => {
     // Data Privacy Framework. Its siblings earn 'DPF' from their own contracts.
     expect(HOST_DISCLOSURES['api.fireworks.ai']!.transferBasis).toBe('SCC');
     expect(HOST_DISCLOSURES['api.fireworks.ai']!.transferBasis).not.toContain('DPF');
+    // Anthropic is not a DPF participant either — verified against the US Department
+    // of Commerce register, not inferred. No US host here has earned 'DPF'.
+    expect(HOST_DISCLOSURES['api.anthropic.com']!.transferBasis).toBe('SCC');
+    for (const [host, d] of Object.entries(HOST_DISCLOSURES)) {
+      expect(d.transferBasis ?? '', `${host} claims DPF`).not.toContain('DPF');
+    }
   });
 
   it('the gate MECHANISM still refuses an unconfirmed posture', () => {

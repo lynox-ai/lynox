@@ -105,7 +105,12 @@ export const HOST_DISCLOSURES: Record<string, HostDisclosure> = buildDisclosures
   'api.anthropic.com': {
     host: 'api.anthropic.com',
     residency: 'US',
-    transferBasis: 'SCC/DPF',
+    // SCC only. 'DPF' was here and is false: Anthropic does not appear in the US
+    // Department of Commerce Data Privacy Framework register (checked 2026-08-11 —
+    // absent from the full A-listing, and its own privacy policy names adequacy
+    // decisions and SCCs as its Chapter V mechanisms, nothing else). Same copied
+    // -string defect as the Fireworks entry below, on the row that runs every turn.
+    transferBasis: 'SCC',
     // NOT zero-retention, and this entry said the opposite until 2026-08-11 — it
     // read 'zero-retention (API default)', which is the exact inverse of Anthropic's
     // published policy: "For Anthropic API users, we automatically delete inputs and
