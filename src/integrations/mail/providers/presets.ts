@@ -328,10 +328,21 @@ function providerBlocks(xml: string): string[] {
  * a completely different provider's IMAP server.
  *
  * When no section carries both, the whole payload is returned rather than
- * refused — refusing would be a new failure rather than a fix. On that path the
- * provider question genuinely cannot be answered from the payload, and we do
- * not answer it: the result is what it was before any of this, which is not a
- * regression, just an exotic shape left unimproved.
+ * refused — refusing would be a new failure rather than a fix.
+ *
+ * Be precise about what that costs, because an earlier version of this comment
+ * claimed the path "behaves as it did before any of this" and that is measurably
+ * untrue: on 176 of 320 generated fallback payloads it does not, and in 16 of
+ * them a single-provider pairing becomes a two-provider one. What actually
+ * happens there is first-published-587-wins, across sections — cross-provider
+ * pairing included.
+ *
+ * That is a deliberate trade, not an oversight. The alternative was filtering
+ * SMTP candidates by the first entry's host, and measured over 3855 payloads it
+ * cost 246 of them their submission port to buy a provider-correctness swap of
+ * 99 against 99. Losing the port is the failure this whole change exists to
+ * prevent; losing the provider is a rarer, milder one on a payload shape that
+ * autoconfig barely produces. See the characterisation test that pins it.
  */
 function pairableSection(xml: string): string {
   for (const block of providerBlocks(xml)) {

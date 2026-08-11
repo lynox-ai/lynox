@@ -285,7 +285,28 @@ describe('parseAutoconfigXml', () => {
     expect(parseAutoconfigXml(xml).smtp).toEqual({ host: 'smtp-tls.example.com', port: 587, secure: false });
   });
 
-  it('never returns a 465 when a usable 587 is present anywhere in scope', () => {
+  it('CHARACTERISES the cross-provider pairing the fallback still allows', () => {
+    // Not an endorsement — a pin. On this shape (protocols split across
+    // sections, so no section can be scoped) the choice falls back to
+    // first-published-587-wins and pairs the primary IMAP server with an ISP
+    // relay. Three separate attempts to close this from inside the port
+    // preference each cost more than they bought, so the trade stands; what
+    // must not happen is it changing unnoticed, which is exactly what happened
+    // the last three times. If this assertion fails, the behaviour moved —
+    // decide deliberately, do not just update the expectation.
+    const xml = `
+      <clientConfig>
+        <emailProvider id="in"><incomingServer type="imap"><hostname>imap.primary.com</hostname><port>993</port><socketType>SSL</socketType></incomingServer></emailProvider>
+        <emailProvider id="out-primary"><outgoingServer type="smtp"><hostname>smtp.primary.com</hostname><port>465</port><socketType>SSL</socketType></outgoingServer></emailProvider>
+        <emailProvider id="out-isp"><outgoingServer type="smtp"><hostname>relay.isp.example</hostname><port>587</port><socketType>STARTTLS</socketType></outgoingServer></emailProvider>
+      </clientConfig>
+    `;
+    const result = parseAutoconfigXml(xml);
+    expect(result.imap.host).toBe('imap.primary.com');
+    expect(result.smtp).toEqual({ host: 'relay.isp.example', port: 587, secure: false });
+  });
+
+  it('never returns a 465 when the chosen provider also publishes a 587', () => {
     // The invariant the four attempts at this line kept breaking, stated once so
     // it cannot be lost again: filtering candidates can only remove a 587.
     const shapes = [

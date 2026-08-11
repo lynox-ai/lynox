@@ -104,19 +104,38 @@ describe('MailSettings surfaces which leg of the connection failed', () => {
   });
 
   /**
-   * Body of one top-level function, ending at ITS OWN closing brace.
+   * Body of one top-level function — bounded at BOTH candidates for its end.
    *
-   * Not "up to the next named thing": that leaves everything in between inside
-   * the slice, so extracting a helper right after the function and forgetting a
-   * call site reads as covered. Every function in this component sits at one
-   * tab of indentation, so its close is the first line that is exactly `\t}`.
+   * Neither bound is sufficient alone, and each failed on its own once:
+   *
+   * - "up to the next named thing" leaves everything between the function and
+   *   that name inside the slice, so a helper extracted just below with a call
+   *   site forgotten reads as covered.
+   * - "up to the closing brace" is defeated by a comment — or a space — after
+   *   that brace, because it stops matching a `\t}` followed by a newline. The
+   *   slice then jumps to the next candidate and grows twentyfold, swallowing
+   *   whole neighbouring functions. Every assertion here is `toContain`, so a
+   *   slice that is too long is silently satisfied while a slice that is too
+   *   short fails loudly — the failure mode is one-directional and quiet.
+   *
+   * So: whichever comes first, plus an explicit check that no second
+   * declaration ended up inside. Every function in this component sits at one
+   * tab, so its own close is a line starting `\t}` and nested closes are deeper.
    */
   function functionBody(decl: string): string {
     const start = source.indexOf(decl);
     expect(start, `"${decl}" not found — renamed?`).toBeGreaterThanOrEqual(0);
-    const close = source.indexOf('\n\t}\n', start);
-    expect(close, `no closing brace found for "${decl}"`).toBeGreaterThan(start);
-    return source.slice(start, close);
+    const after = start + decl.length;
+    const brace = source.indexOf('\n\t}', after);
+    const nextDecl = source.slice(after).search(/\n\t(?:async function|function|const|let) /);
+    const ends = [brace, nextDecl >= 0 ? after + nextDecl : -1].filter(i => i >= 0);
+    expect(ends.length, `no end found for "${decl}"`).toBeGreaterThan(0);
+    const body = source.slice(start, Math.min(...ends));
+    expect(
+      body.match(/\n\t(?:async function|function) /g) ?? [],
+      `slice for "${decl}" swallowed a neighbouring function`,
+    ).toHaveLength(0);
+    return body;
   }
 
   it('ties the escape to the configuration that was actually probed', () => {
