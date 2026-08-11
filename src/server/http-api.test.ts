@@ -2530,9 +2530,15 @@ describe('LynoxHTTPApi', () => {
       // Anthropic default map (Sonnet/Opus) while the preset routes mistral-medium —
       // the exact stale-label class the composer picker hit. Real expandTierPreset +
       // catalog run here (not mocked).
-      const { readUserConfig } = await import('../core/config.js');
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      const { expandTierPreset } = await import('../core/tier-presets.js');
       (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
         .mockReturnValueOnce({ tier_preset: 'balanced', provider: 'anthropic', default_tier: 'balanced' });
+      // The handler reads the LOADER's output, not the raw file: a tier_preset is
+      // sugar the loader materialises (config.ts:476-486), and the CP can pin it by
+      // env entirely outside config.json. So the fixture is what the loader yields.
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ ...expandTierPreset('balanced') });
       const res = await jsonFetch('/api/config');
       expect(res.status).toBe(200);
       const body = await res.json() as Record<string, unknown>;
@@ -2572,6 +2578,146 @@ describe('LynoxHTTPApi', () => {
       // silently drop it.
       expect(features['pdfInput']).toBe(true);
     });
+
+    it('GET active_model names the tier_set slot, not the base provider map', async () => {
+      // Measured on staging 2026-08-11 (build b3b6727c): `active_model` reported
+      // `claude-sonnet-5` / provider `anthropic` with Sonnet's FEATURE MATRIX,
+      // while `main_chat_tiers` in the SAME response body correctly said "GLM 5.2"
+      // and the run actually executed `accounts/fireworks/models/glm-5p2`. Two
+      // fields of one response disagreeing is worse than either being wrong alone:
+      // a reader cannot tell which is true.
+      //
+      // (The context window was NOT part of the observed defect — both models are
+      // registered at 1M, models.ts:670 and :1001. An earlier version of this
+      // comment claimed a 1M-vs-500k mismatch; the 500k was the session's user cap,
+      // a different field. The real drift was id / provider / uiLabel / features.)
+      //
+      // The features assertion is the severity: the response shipped
+      // `extendedThinking`/`vision`/`pdfInput` = true for a model that has none of
+      // them, so any consumer gating on capability read a model that wasn't running.
+      //
+      // The raw file deliberately carries NO tier_set here — only the loader does.
+      // That is the CP-pinned channel (`LYNOX_TIER_PRESET`/`LYNOX_TIER_SET_JSON`,
+      // config.ts:464/504), and reading `readUserConfig()` instead of the loader
+      // would report the base provider's model on every such tenant.
+      //
+      // NOTE the neighbouring 'under Mistral tier-set' case does NOT cover this: it
+      // flips the BASE provider + its model map (setOpenAIModelResolver), never a
+      // hybrid tier_set. That naming is why this path went uncovered.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      const hybrid = {
+        routing_mode: 'hybrid' as const,
+        tier_set: {
+          balanced: {
+            provider: 'openai',
+            model_id: 'accounts/fireworks/models/glm-5p2',
+            api_base_url: 'https://api.fireworks.ai/inference/v1',
+          },
+        },
+      };
+      // File: no tier_set at all — the CP pinned it by env, which is the channel
+      // `readUserConfig()` cannot see.
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      // Loader: the resolved set the engine actually routes on.
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce(hybrid);
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown> | undefined;
+      expect(am).toBeDefined();
+      expect(am!['id']).toBe('accounts/fireworks/models/glm-5p2');
+      expect(am!['provider']).toBe('openai');
+      expect(am!['uiLabel']).toBe('GLM 5.2');
+      const slotFeatures = am!['features'] as Record<string, boolean>;
+      expect(slotFeatures['extendedThinking']).toBe(false);
+      expect(slotFeatures['vision']).toBe(false);
+      expect(slotFeatures['pdfInput']).toBe(false);
+      // Same body, same model — the invariant the shared derivation buys.
+      const tiers = body['main_chat_tiers'] as Record<string, string> | undefined;
+      expect(tiers!['balanced']).toContain('GLM 5.2');
+    });
+
+    it('GET active_model resolves a `custom` slot to the Anthropic wire', async () => {
+      // `custom` is registered `wireClient: 'anthropic'` (models.ts:340) — an
+      // Anthropic-compatible proxy. It and an unregistered key are the ONLY inputs
+      // where the registry lookup and a hand-rolled
+      // "anything-but-anthropic/vertex is openai" disagree, so this is the case
+      // that has to exist: without it, reverting to the hand-rolled narrowing
+      // survives the whole suite.
+      //
+      // The window assert is the second-order consequence, not decoration: reading
+      // the slot as `openai` trips the Anthropic-fallback trap in
+      // `resolveNativeContextWindow` (models.ts:1204-1207), which caps a registered
+      // Claude model at the 200k fallback. That trap exists for a tier RESOLVER
+      // that fell back to a Claude id; a slot `model_id` is an explicit pin, so it
+      // must not fire here.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      const hybrid = {
+        routing_mode: 'hybrid' as const,
+        tier_set: {
+          balanced: {
+            // Deliberately NOT a MODEL_MAP tier default. With `claude-opus-4-6`
+            // here every assert was also satisfied by the default fixture
+            // (`default_tier: 'deep'` + `MODEL_MAP.deep === 'claude-opus-4-6'`),
+            // so the case passed with both mocks removed — green without ever
+            // resolving a slot. `claude-fable-5` is 1M / anthropic like Opus 4.6
+            // but belongs to no tier map, which makes the `id` assert a real
+            // guard that the fixture actually arrived.
+            provider: 'custom',
+            model_id: 'claude-fable-5',
+            api_base_url: 'https://proxy.internal/v1',
+          },
+        },
+      };
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce(hybrid);
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown> | undefined;
+      expect(am).toBeDefined();
+      expect(am!['id']).toBe('claude-fable-5');
+      expect(am!['provider']).toBe('anthropic');
+      expect(am!['contextWindow']).toBe(1_000_000);
+    });
+
+    it('GET active_model reports an Anthropic slot on a non-Anthropic base honestly', async () => {
+      // Two regressions in one case, both found by mutating the changed lines:
+      //  · collapsing the slot-provider narrowing to a blanket 'openai' would
+      //    mislabel every max-quality slot running on a Mistral/Fireworks base;
+      //  · `resolveNativeContextWindow` refuses a Claude window when the provider
+      //    reads openai/custom (models.ts:1207 — the Anthropic-fallback trap).
+      //    Handing it the BASE provider caps a genuine Sonnet slot at the 200k
+      //    fallback instead of its real 1M, which is the window the UI filters on.
+      const llmClient = await import('../core/llm-client.js');
+      const providerSpy = vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('openai');
+      try {
+        const { readUserConfig, loadConfig } = await import('../core/config.js');
+        const hybrid = {
+          routing_mode: 'hybrid' as const,
+          tier_set: { balanced: { provider: 'anthropic', model_id: 'claude-sonnet-5' } },
+        };
+        (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+          .mockReturnValueOnce({ provider: 'openai', default_tier: 'balanced', ...hybrid });
+        (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+          .mockReturnValueOnce(hybrid);
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        const am = body['active_model'] as Record<string, unknown> | undefined;
+        expect(am).toBeDefined();
+        expect(am!['id']).toBe('claude-sonnet-5');
+        expect(am!['provider']).toBe('anthropic');
+        expect(am!['contextWindow']).toBe(1_000_000);
+      } finally {
+        providerSpy.mockRestore();
+      }
+    });
+
 
     it('capabilities.durable_memory_capture_degraded is TRUE for DK-on + Mistral balanced (the wiring)', async () => {
       // The WIRING test (DEF-dk-capture-tool-dependence): the pure couple is
