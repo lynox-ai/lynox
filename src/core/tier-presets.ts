@@ -225,7 +225,8 @@ export interface TierPresetDeviation {
  *
  * A `tier_preset` is not a lock: an explicit `tier_set` slot overrides it
  * per-band by design, and the managed constraints may drop a band the CP cannot
- * back (`config.ts:485`, `:491`). That is correct behaviour — the defect is that
+ * back (the per-band override at `config.ts:485`; the drop is
+ * `applyManagedTierSetConstraints`, `:526`). That is correct behaviour — the defect is that
  * the NAME survives the override unchanged, so `tier_preset: "efficient"` can
  * label a hand mixture and nothing says so. Measured on a hosted test instance
  * 2026-08-11: the field read `efficient` (canonically three Fireworks models)

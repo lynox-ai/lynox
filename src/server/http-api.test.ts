@@ -2288,8 +2288,19 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('GET surfaces a persisted Sonnet 5 selection', async () => {
-      const { readUserConfig } = await import('../core/config.js');
+      // Both mocks carry it, because in production they cannot disagree in this
+      // direction: `loadConfig()` starts from `{ ...userConfig }` (config.ts:149)
+      // and layers project + env ON TOP, so the loader is a superset of the file
+      // for every key. The loader-only mock this case used to have described a
+      // state that cannot occur, and it was the sole thing keeping
+      // `balanced_model` on the raw file after `LYNOX_BALANCED_MODEL` (env-merged,
+      // config.ts:363) turned out to reach `active_model` and this field by
+      // different routes.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
       (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce({
+        default_tier: 'deep', thinking_mode: 'adaptive', balanced_model: 'claude-sonnet-5',
+      });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce({
         default_tier: 'deep', thinking_mode: 'adaptive', balanced_model: 'claude-sonnet-5',
       });
       const res = await jsonFetch('/api/config');
@@ -2782,6 +2793,102 @@ describe('LynoxHTTPApi', () => {
       const tiers = body['main_chat_tiers'] as Record<string, string>;
       expect(am['contextWindow']).toBe(32_000);
       expect(tiers['balanced']).toContain('32k');
+    });
+
+    it('GET clamps the reported tier to max_tier, like the engine does', async () => {
+      // Source was only half the defect. `max_tier` is env-WINS — a cost LOCK
+      // (config.ts:369) — and the engine decides its main chat tier through
+      // `resolveDefaultChatTier` (engine.ts:304/394/765), which clamps. Taking
+      // `default_tier` straight off the loader still reported the deep band on a
+      // tenant capped at balanced: the right tier_set, indexed where nothing
+      // routes. Found by review, not by the first mutation round.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({
+          default_tier: 'deep',
+          max_tier: 'balanced',
+          routing_mode: 'hybrid',
+          tier_set: {
+            balanced: { provider: 'openai', model_id: 'accounts/fireworks/models/glm-5p2', api_base_url: 'https://api.fireworks.ai/inference/v1' },
+            deep: { provider: 'anthropic', model_id: 'claude-opus-4-6' },
+          },
+        });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown>;
+      expect(am['tier']).toBe('balanced');
+      // The id is what separates "clamped the label" from "clamped the lookup".
+      expect(am['id']).toBe('accounts/fireworks/models/glm-5p2');
+    });
+
+    it('GET resolves balanced_model and its LABEL from the loader, not the file', async () => {
+      // `LYNOX_BALANCED_MODEL` is env-merged (config.ts:363) and the engine seeds
+      // its own resolver from that layer (engine.ts:880), so `active_model` — via
+      // getModelId when no slot pins the band — already named the env's Sonnet
+      // while `balanced_model` and the picker label named the file's. Standard
+      // routing (no tier_set), which is also the ONLY coverage of the
+      // `mainChatTierLabels` call site: a review pass showed the entire
+      // window-context argument could be deleted there with 528 tests still green.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ default_tier: 'balanced', balanced_model: 'claude-sonnet-5' });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['balanced_model']).toBe('claude-sonnet-5');
+      const tiers = body['main_chat_tiers'] as Record<string, string>;
+      // The label must follow the resolved variant, and carry a window — which is
+      // what fails if the window-context argument is dropped from that call.
+      expect(tiers['balanced']).toContain('Sonnet 5');
+      expect(tiers['balanced']).toMatch(/·\s*\d+[kM]/);
+    });
+
+    it('GET carries a declared window into the STANDARD-routing labels too', async () => {
+      // The `mainChatTierLabels` branch (no tier_set). Deleting its window-context
+      // argument leaves every other test green, so this is the case that pins it.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', openai_context_window: 48_000 });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ default_tier: 'balanced', openai_context_window: 48_000 });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown>;
+      const tiers = body['main_chat_tiers'] as Record<string, string>;
+      expect(am['contextWindow']).toBe(48_000);
+      // Every band states the declared window — the same one active_model states.
+      for (const label of Object.values(tiers)) expect(label).toContain('48k');
+    });
+
+    it('GET reports a CP-PINNED tier_preset name, not the file that lacks it', async () => {
+      // `LYNOX_TIER_PRESET` is a LOCK (config.ts:452-466) and lands only in the
+      // merged config, so on the normal CP shape the raw file has no preset key
+      // at all. Emitting the deviation from the loader while the name came from
+      // the file shipped one body that named a preset in one field and nothing in
+      // the other.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({
+          default_tier: 'balanced',
+          tier_preset: 'efficient',
+          routing_mode: 'hybrid',
+          tier_set: {
+            ...TIER_PRESETS['efficient'].tier_set,
+            deep: { provider: 'anthropic', model_id: 'claude-sonnet-5' },
+          },
+        });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['tier_preset']).toBe('efficient');
+      const dev = body['tier_preset_deviation'] as { preset: string };
+      // Both fields name the same preset — the reader is never handed a
+      // deviation against a preset the body does not admit to.
+      expect(dev.preset).toBe(body['tier_preset']);
     });
 
     it('GET flags a tier_preset whose set no longer matches it — and leaks no slot key', async () => {

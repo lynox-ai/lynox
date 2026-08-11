@@ -32,7 +32,7 @@ import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
 import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
 import { getActiveProvider } from '../core/llm-client.js';
-import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
+import { getActiveRoutingMode, effectiveTierModelId, resolveDefaultChatTier } from '../core/tier-resolver.js';
 import type { RunRecord } from '../core/run-history.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
 import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
@@ -4505,17 +4505,28 @@ export class LynoxHTTPApi {
       // values ≤ contextWindow; show-all-grayed (Item 8) reads `features` to
       // disable settings that don't apply to the active model.
       const activeProvider = getActiveProvider();
-      // Loader, not the raw file — the same correction #1194 made for the
-      // tier_set, applied to the tier that INDEXES it. `default_tier` is
-      // env-SEEDED (`LYNOX_DEFAULT_MODEL_TIER`, legacy `LYNOX_DEFAULT_TIER`,
-      // config.ts:357): the env only fills an unset value, so on a
-      // CP-provisioned tenant whose config.json carries no `default_tier` the
-      // raw file says nothing and this fell back to `'balanced'` while the
-      // engine routed on the CP's seed. Reading the file also skipped the
-      // project-config layer, which `loadConfig()` merges and `readUserConfig()`
-      // by contract does not. Getting the tier_set right and then indexing it
-      // with the wrong tier reports the wrong slot just as surely.
-      const activeTier = effectiveConfig.default_tier ?? 'balanced';
+      // The tier that INDEXES the set, resolved the way the ENGINE resolves it —
+      // `engine.ts:304/394/765` calls exactly this function to decide the main
+      // chat tier. #1194 corrected the tier_set's SOURCE and left the tier that
+      // indexes it reading `config.default_tier ?? 'balanced'`, which was wrong
+      // twice over:
+      //   - SOURCE: `default_tier` is env-SEEDED (`LYNOX_DEFAULT_MODEL_TIER`,
+      //     legacy `LYNOX_DEFAULT_TIER`, config.ts:357). The env fills only an
+      //     unset value, so on a CP-provisioned tenant whose config.json never
+      //     carried one the raw file says nothing and this answered 'balanced'
+      //     while the engine routed the seed. It also skipped the project-config
+      //     layer that `loadConfig()` merges and `readUserConfig()` by contract
+      //     does not.
+      //   - CLAMP: `max_tier` is env-WINS, a cost LOCK (config.ts:369), and
+      //     `resolveDefaultChatTier` applies `clampTier` + `normalizeTier` +
+      //     the model blocklist on top. Reading the field raw reported the deep
+      //     slot on a tenant capped at balanced — the right set, indexed at a
+      //     band the engine never routes.
+      // Deliberately the engine's own resolver rather than a re-derivation, so
+      // this field mirrors what runs INCLUDING the resolver's own quirks (it
+      // clamps against the base provider's map even under a hybrid tier_set).
+      // A quirk faithfully reported beats a second opinion that disagrees.
+      const activeTier = resolveDefaultChatTier(effectiveConfig);
       // The tier_set the ENGINE routes on, taken from the loader instead of
       // re-derived here. `readUserConfig()` is file-only (config.ts:640), while
       // `loadConfig()` also merges the CP-pinned `LYNOX_TIER_PRESET` — whose own
@@ -4601,7 +4612,15 @@ export class LynoxHTTPApi {
       // (resolveBalancedModel falls it back to the default). The redaction
       // spread already carries the raw stored value; overriding it with the
       // resolver guarantees the UI never sees `undefined` or a non-served id.
-      redacted['balanced_model'] = resolveBalancedModel(config);
+      //
+      // From the LOADER: `LYNOX_BALANCED_MODEL` is env-merged (config.ts:363)
+      // and the engine seeds its own resolver from the same layer
+      // (engine.ts:880), so `getModelId('balanced', …)` — which `active_model`
+      // falls back to when no slot pins the band — already answers with the
+      // env's model. Reading the raw file here made this field, and the label
+      // below, name Sonnet 4.6 while `active_model` named Sonnet 5.
+      const effectiveBalanced = resolveBalancedModel(effectiveConfig);
+      redacted['balanced_model'] = effectiveBalanced;
 
       // main_chat_tiers (DEF-0082): the active provider's per-tier model LABEL,
       // for the composer picker's two follow-ups —
@@ -4636,14 +4655,14 @@ export class LynoxHTTPApi {
       // MODELS; sharing the resolver stops them stating different WINDOWS for
       // the one model they now agree on.
       if (resolvedTierSet) {
-        const tierLabels = mainChatTierLabelsFromTierSet(resolvedTierSet, activeProvider, undefined, {
+        const tierLabels = mainChatTierLabelsFromTierSet(resolvedTierSet, activeProvider, {
           declaredWindow: config.openai_context_window,
         });
         if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
       } else {
         const mainChatEntry = getCatalogEntryByKey(resolveCatalogKey(activeProvider, config.api_base_url));
         if (mainChatEntry) {
-          const tierLabels = mainChatTierLabels(mainChatEntry, resolveBalancedModel(config), {
+          const tierLabels = mainChatTierLabels(mainChatEntry, effectiveBalanced, {
             provider: activeProvider,
             declaredWindow: config.openai_context_window,
           });
@@ -4656,8 +4675,18 @@ export class LynoxHTTPApi {
       // the CP can't back. Server-authoritative so the client needs no
       // @lynox-ai/core import and the disclosure gate stays honest.
       redacted['available_tier_presets'] = tierPresetSignal;
-      // `tier_preset` above (spread from the raw config, and overwritten by the
-      // CP pin at load) names a preset; the set the engine routes on may no
+      // The preset NAME itself, from the loader. `LYNOX_TIER_PRESET` is a LOCK,
+      // not a seed (config.ts:452-466) and lands only in the merged config, so
+      // the redaction spread — raw file — omits it entirely on the normal
+      // CP-provisioned shape. Emitting the deviation from the loader while the
+      // name beside it came from the file would have shipped a body naming a
+      // preset in one field and nothing in the other: the very raw-vs-loader
+      // split this PR exists to close, one field over. Guarded so an absent
+      // loader value cannot delete a name the file did carry.
+      if (effectiveConfig.tier_preset !== undefined) {
+        redacted['tier_preset'] = effectiveConfig.tier_preset;
+      }
+      // `tier_preset` names a preset; the set the engine routes on may no
       // longer BE that preset, because an explicit slot overrides per band and
       // the managed constraints can drop one. Present only when they disagree,
       // so its ABSENCE is the affirmative "this name is faithful" — the reader
