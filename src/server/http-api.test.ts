@@ -2639,6 +2639,45 @@ describe('LynoxHTTPApi', () => {
       expect(tiers!['balanced']).toContain('GLM 5.2');
     });
 
+    it('GET active_model resolves a `custom` slot to the Anthropic wire', async () => {
+      // `custom` is registered `wireClient: 'anthropic'` (models.ts:340) — an
+      // Anthropic-compatible proxy. It and an unregistered key are the ONLY inputs
+      // where the registry lookup and a hand-rolled
+      // "anything-but-anthropic/vertex is openai" disagree, so this is the case
+      // that has to exist: without it, reverting to the hand-rolled narrowing
+      // survives the whole suite.
+      //
+      // The window assert is the second-order consequence, not decoration: reading
+      // the slot as `openai` trips the Anthropic-fallback trap in
+      // `resolveNativeContextWindow` (models.ts:1204-1207), which caps a registered
+      // Claude model at the 200k fallback. That trap exists for a tier RESOLVER
+      // that fell back to a Claude id; a slot `model_id` is an explicit pin, so it
+      // must not fire here.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      const hybrid = {
+        routing_mode: 'hybrid' as const,
+        tier_set: {
+          balanced: {
+            provider: 'custom',
+            model_id: 'claude-opus-4-6',
+            api_base_url: 'https://proxy.internal/v1',
+          },
+        },
+      };
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce(hybrid);
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown> | undefined;
+      expect(am).toBeDefined();
+      expect(am!['id']).toBe('claude-opus-4-6');
+      expect(am!['provider']).toBe('anthropic');
+      expect(am!['contextWindow']).toBe(1_000_000);
+    });
+
     it('GET active_model reports an Anthropic slot on a non-Anthropic base honestly', async () => {
       // Two regressions in one case, both found by mutating the changed lines:
       //  · collapsing the slot-provider narrowing to a blanket 'openai' would
