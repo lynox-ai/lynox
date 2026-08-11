@@ -4501,23 +4501,53 @@ export class LynoxHTTPApi {
       // disable settings that don't apply to the active model.
       const activeProvider = getActiveProvider();
       const activeTier = config.default_tier ?? 'balanced';
-      const activeModelId = getModelId(activeTier, activeProvider);
+      // The effective tier_set — preset sugar expanded, explicit slots winning,
+      // managed constraints applied. Hoisted ABOVE `active_model` because it and
+      // `main_chat_tiers` (below) must name the SAME model: they ship in one
+      // response, so a reader that sees them disagree cannot tell which is true.
+      // Measured on staging 2026-08-11: `active_model` reported `claude-sonnet-5`
+      // (provider `anthropic`) with Sonnet's 1M window and feature matrix, while
+      // `main_chat_tiers` in the same body correctly said "GLM 5.2" and the run
+      // actually executed `accounts/fireworks/models/glm-5p2` in a 500k window.
+      const effectiveTierSet = config.tier_preset
+        ? { ...expandTierPreset(config.tier_preset)?.tier_set, ...(config.tier_set ?? {}) }
+        : (config.routing_mode === 'hybrid' ? config.tier_set : undefined);
+      const constrainedTierSet = effectiveTierSet
+        ? (isManagedTier ? applyManagedTierSetConstraints(effectiveTierSet, effectiveBlockedModelIds) : effectiveTierSet)
+        : undefined;
+      // A hybrid slot pins BOTH the model and its wire. `getModelId` only knows
+      // the BASE provider's tier map, so on any hybrid tenant it answers for a
+      // model that does not run — and everything downstream (capability lookup,
+      // native window, feature flags) inherits that wrong answer.
+      const activeSlot = constrainedTierSet?.[activeTier];
+      const activeModelId = activeSlot?.model_id ?? getModelId(activeTier, activeProvider);
+      // Slot providers are registry keys (`ProviderKey`); every key that is not
+      // Anthropic/Vertex rides the openai wire — the same mapping
+      // `hybridSlotClientConfig` applies. With no slot, keep reporting the
+      // runtime-active provider for the reason documented in `active_model`.
+      const activeSlotProvider: string | undefined = activeSlot?.provider;
+      const activeModelProvider: LLMProvider =
+        activeSlotProvider === undefined ? activeProvider
+          : activeSlotProvider === 'anthropic' ? 'anthropic'
+            : activeSlotProvider === 'vertex' ? 'vertex'
+              : 'openai';
       const activeCap = modelCapability(activeModelId);
       // SSOT window resolution: a declared `openai_context_window` (self-host)
       // wins; else the registry; else an honest default — and crucially NOT a
       // Claude window when an openai/custom tier resolver fell back to an
       // Anthropic id. Same helper the agent + /api/sessions use, so the radio
       // filter can't drift from what the engine actually trims against.
-      const activeNativeWindow = resolveNativeContextWindow(activeModelId, activeProvider, config.openai_context_window);
+      const activeNativeWindow = resolveNativeContextWindow(activeModelId, activeModelProvider, config.openai_context_window);
       if (activeCap) {
         redacted['active_model'] = {
           id: activeCap.id,
           tier: activeTier,
-          // Use the runtime-active provider, not `activeCap.provider`, so an
+          // Use the resolved wire provider, not `activeCap.provider`, so an
           // openai-compat instance whose tier resolver fell back to an
           // Anthropic id (no MISTRAL_MODEL_MAP bootstrap) still reports
-          // `'openai'` to the UI for tier-awareness gating.
-          provider: activeProvider,
+          // `'openai'` to the UI for tier-awareness gating — and so a hybrid
+          // slot reports ITS wire rather than the base provider's.
+          provider: activeModelProvider,
           // Resolver, not `activeCap.contextWindow`: honours a declared
           // self-host window and dodges the Anthropic-fallback Claude window.
           contextWindow: activeNativeWindow,
@@ -4535,7 +4565,7 @@ export class LynoxHTTPApi {
         redacted['active_model'] = {
           id: activeModelId,
           tier: activeTier,
-          provider: activeProvider,
+          provider: activeModelProvider,
           contextWindow: activeNativeWindow,
           defaultMaxOutput: FALLBACK_CAPABILITY.defaultMaxOutput,
           maxContinuations: FALLBACK_CAPABILITY.maxContinuations,
@@ -4580,15 +4610,13 @@ export class LynoxHTTPApi {
       // Mirror the loader's explicit-over-preset precedence (config.ts: `{...expanded,
       // ...config.tier_set}`) so a hand-edited config carrying BOTH a preset and an
       // explicit tier_set slot labels what actually routes, not the bare preset.
-      const effectiveTierSet = config.tier_preset
-        ? { ...expandTierPreset(config.tier_preset)?.tier_set, ...(config.tier_set ?? {}) }
-        : (config.routing_mode === 'hybrid' ? config.tier_set : undefined);
-      if (effectiveTierSet) {
-        // On a managed tenant the runtime drops any tier_set slot the CP can't back (no key for
-        // that provider), so the picker must label the CONSTRAINED set — otherwise it shows a
-        // model that never routes (e.g. "Ausgewogen (Mistral Large)" while it routes Sonnet).
-        const constrained = isManagedTier ? applyManagedTierSetConstraints(effectiveTierSet, effectiveBlockedModelIds) : effectiveTierSet;
-        const tierLabels = mainChatTierLabelsFromTierSet(constrained, activeProvider);
+      // Derived once, above `active_model`, and reused here — on a managed tenant the
+      // runtime drops any tier_set slot the CP can't back (no key for that provider), so
+      // the picker must label the CONSTRAINED set, otherwise it shows a model that never
+      // routes (e.g. "Ausgewogen (Mistral Large)" while it routes Sonnet). Sharing the one
+      // derivation is what keeps `active_model` and these labels from disagreeing.
+      if (constrainedTierSet) {
+        const tierLabels = mainChatTierLabelsFromTierSet(constrainedTierSet, activeProvider);
         if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
       } else {
         const mainChatEntry = getCatalogEntryByKey(resolveCatalogKey(activeProvider, config.api_base_url));

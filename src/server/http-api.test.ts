@@ -2573,6 +2573,52 @@ describe('LynoxHTTPApi', () => {
       expect(features['pdfInput']).toBe(true);
     });
 
+    it('GET active_model names the tier_set slot, not the base provider map', async () => {
+      // Measured on staging 2026-08-11 (build b3b6727c): `active_model` reported
+      // `claude-sonnet-5` / provider `anthropic` with Sonnet's 1M window AND
+      // Sonnet's feature matrix, while `main_chat_tiers` in the SAME response body
+      // correctly said "GLM 5.2" and the run actually executed
+      // `accounts/fireworks/models/glm-5p2`. Two fields of one response disagreeing
+      // is worse than either being wrong alone: a reader cannot tell which is true.
+      //
+      // The features assertion is the severity, not decoration — the drift shipped
+      // `extendedThinking`/`vision`/`pdfInput` = true for a model that has none of
+      // them, so any consumer gating on capability read a model that wasn't running.
+      //
+      // NOTE the neighbouring 'under Mistral tier-set' case does NOT cover this: it
+      // flips the BASE provider + its model map (setOpenAIModelResolver), never a
+      // hybrid tier_set. That naming is why this path went uncovered.
+      const { readUserConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({
+          provider: 'anthropic',
+          default_tier: 'balanced',
+          routing_mode: 'hybrid',
+          tier_set: {
+            balanced: {
+              provider: 'openai',
+              model_id: 'accounts/fireworks/models/glm-5p2',
+              api_base_url: 'https://api.fireworks.ai/inference/v1',
+            },
+          },
+        });
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown> | undefined;
+      expect(am).toBeDefined();
+      expect(am!['id']).toBe('accounts/fireworks/models/glm-5p2');
+      expect(am!['provider']).toBe('openai');
+      expect(am!['uiLabel']).toBe('GLM 5.2');
+      const slotFeatures = am!['features'] as Record<string, boolean>;
+      expect(slotFeatures['extendedThinking']).toBe(false);
+      expect(slotFeatures['vision']).toBe(false);
+      expect(slotFeatures['pdfInput']).toBe(false);
+      // Same body, same model — the invariant the shared derivation buys.
+      const tiers = body['main_chat_tiers'] as Record<string, string> | undefined;
+      expect(tiers!['balanced']).toContain('GLM 5.2');
+    });
+
     it('capabilities.durable_memory_capture_degraded is TRUE for DK-on + Mistral balanced (the wiring)', async () => {
       // The WIRING test (DEF-dk-capture-tool-dependence): the pure couple is
       // unit-tested in models.test.ts; what is only checkable here is that the
