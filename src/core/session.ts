@@ -1552,8 +1552,12 @@ export class Session {
 
     // Evict large tool results into the blob store BEFORE the reset, so the
     // verbatim payloads survive the history wipe and stay recallable via
-    // `recall_tool_result`. Eviction runs only here (O4/O5) — never
-    // mid-conversation — so the warm prompt cache is untouched between turns.
+    // `recall_tool_result`. Eviction never runs against a WARM cache — that
+    // would cost a prefix invalidation between turns for nothing. Here (O4/O5)
+    // the history is about to be reset anyway; the other entry point,
+    // `Agent._truncateHistory`, collapses in place but only once the context is
+    // already at 85%, i.e. only where a front-drop would have run and paid the
+    // same invalidation.
     const thresholdChars = this.engine.getUserConfig().tool_result_blob_threshold_chars
       ?? DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS;
     this._toolResultBlobStore.evictFrom(preCompactionMessages, thresholdChars);

@@ -62,6 +62,7 @@ import { evictSavedArtifactBodies } from './artifact-eviction.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
+import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
@@ -407,6 +408,10 @@ export class Agent implements IAgent {
   private _msgLenVersion = -1;
   private _msgCount = 0;
   private _runningMsgLen = 0;
+  /** How many tool results this agent has collapsed into recall stubs under
+   *  context pressure. Observability for the truncation path: a run with a high
+   *  count did heavy fetching, one with zero never approached the ceiling. */
+  private _collapsedToolResults = 0;
   /** Exact prompt-token count of the most recent API call (input + cache_read
    *  + cache_creation). undefined before the first call of the session. */
   private _lastRealInputTokens: number | undefined;
@@ -1703,6 +1708,58 @@ export class Agent implements IAgent {
    */
   private static readonly MAX_MESSAGE_COUNT = 500;
 
+  /**
+   * How many trailing messages `collapseIn` leaves untouched under context
+   * pressure. Two covers the newest assistant(tool_use) + user(tool_result)
+   * pair, i.e. the exchange the model is actively reasoning about. Collapsing
+   * that would hand it a stub for the very result it just asked for, and it
+   * would recall it again immediately — spending a turn to save nothing.
+   */
+  private static readonly COLLAPSE_SKIP_TAIL_MESSAGES = 2;
+
+  /** Tool results collapsed into recall stubs under context pressure. */
+  getCollapsedToolResultCount(): number {
+    return this._collapsedToolResults;
+  }
+
+  /** How many parked handles the front-drop placeholder names. Enough to stay
+   *  useful, few enough that the note cannot itself become a context problem;
+   *  most-recently-used first, since the store is LRU-ordered. */
+  private static readonly PARKED_HANDLES_IN_NOTE = 12;
+
+  /**
+   * The "…and these results are still recallable" tail of the front-drop
+   * placeholder.
+   *
+   * A collapse replaces a payload with a stub, and that stub is the only place
+   * the id appears. If the front-drop then runs anyway it discards those stubs,
+   * leaving the blobs resident but UNNAMEABLE — the model cannot ask for data
+   * that is sitting right there. `Session.compact` avoids this by listing every
+   * retained handle in the post-compaction seed; the front-drop had no such
+   * list because before the collapse existed there was nothing to lose.
+   *
+   * Empty string when no store is wired or nothing is parked, so the
+   * placeholder is byte-identical to before in the common case.
+   */
+  private _parkedHandleNote(): string {
+    const entries = this.toolResultBlobStore?.entries() ?? [];
+    if (entries.length === 0) return '';
+    const shown = entries.slice(-Agent.PARKED_HANDLES_IN_NOTE).reverse();
+    // Label from `tool` + `ident`, NOT from `descriptor`. The descriptor ends in
+    // an 80-char excerpt of the payload — i.e. bytes an external server chose —
+    // and this note is engine-authored text in a `user` message, so a dozen of
+    // those concatenated would read as instructions the engine appears to be
+    // giving. `ident` is the tool's own call argument and has already been
+    // through `redactIdent`. Dropping the excerpt also keeps the note short,
+    // which matters because it is appended to a context that is already over
+    // the ceiling.
+    const list = shown
+      .map(({ id, blob }) => (blob.ident ? `${id}: ${blob.tool}(${blob.ident})` : `${id}: ${blob.tool}`))
+      .join('; ');
+    const more = entries.length > shown.length ? ` (+${entries.length - shown.length} more)` : '';
+    return `\n[Earlier results are still readable via recall_tool_result — ${list}${more}]`;
+  }
+
   private _truncateHistory(overheadTokens: number): void {
     // Hard message count limit — truncate to 60% keeping head + tail
     if (this.messages.length > Agent.MAX_MESSAGE_COUNT) {
@@ -1740,6 +1797,82 @@ export class Agent implements IAgent {
     // Budget for messages = total context minus overhead, with 15% safety margin
     if (totalTokens < maxCtx * 0.85) return;
 
+    // Park oversized tool results BEFORE dropping anything. Both this and the
+    // front-drop below invalidate the cached prefix identically — the API
+    // caches by prefix, so any edit at position k re-bills everything from k.
+    // The difference is what the invalidation BUYS: a front-drop frees only the
+    // messages it discards (and loses them), whereas collapsing frees the bulk
+    // of a tool-heavy context in one pass and leaves every payload recallable.
+    //
+    // On a run that fetches repeatedly this is the whole cost story: measured on
+    // a live 17-turn run, tool results were 1.45M chars of a ~490K-token context
+    // and the flat front-drop re-truncated almost every turn, so the prefix was
+    // re-written ~8×. Collapsing turns that into one deep cut.
+    //
+    // NOT a reversal of the "eviction only at compaction" rule in
+    // `Session.compact` — that rule protects a WARM cache between turns, and it
+    // still holds: nothing here runs until the context is already at 85%, i.e.
+    // only where the alternative is a front-drop that costs the same cache.
+    if (this.toolResultBlobStore) {
+      const threshold = this.toolContext.userConfig?.tool_result_blob_threshold_chars
+        ?? DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS;
+      // Leave the newest turn intact: the model is reasoning on the result it
+      // just received, and stubbing that would only make it re-fetch at once.
+      const { handles, freedChars, freedBeforeAnchor } = this.toolResultBlobStore.collapseIn(
+        this.messages, threshold, Agent.COLLAPSE_SKIP_TAIL_MESSAGES,
+        DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES,
+        this._lastRealAtMsgCount,
+      );
+      if (freedChars > 0) {
+        this._collapsedToolResults += handles.length;
+        // In-place content edits invalidate the incremental length cache.
+        this._msgCount = 0;
+        this._runningMsgLen = 0;
+        // CORRECT the exact-usage anchor by what was freed — do not discard it.
+        //
+        // It must be corrected at all because `_estimateOccupancyTokens` prefers
+        // `_lastRealInputTokens + delta-since-last-call`, and that delta covers
+        // only the newest messages — precisely the ones skipTail protects. Left
+        // untouched, the re-check below cannot see a single freed character, the
+        // early return never fires, and the front-drop runs anyway.
+        //
+        // But CLEARING it (the obvious move, and what `loadMessages` does) is
+        // wrong here: the fallback is `_estimateMsgLen()/cpt + overheadTokens`,
+        // and the session-level entry point `getEstimatedOccupancyTokens()`
+        // passes overhead 0. Every session reader — the compaction trigger, the
+        // UI meter, `checkTierWindowFit` — would then under-report by the whole
+        // system-prompt + tool-schema overhead, which is the DOMINANT term right
+        // after the message half shrank. `checkTierWindowFit` inverts under
+        // that: a downgrade whose window cannot hold the context reads as fitting.
+        // `snapshotComposition()` also returns undefined without the anchor, so
+        // the run would lose its composition record.
+        //
+        // Subtracting keeps the overhead inside the number and stays true to
+        // what the next call will actually bill. `_lastRealAtMsgCount` stays
+        // valid because a collapse never changes `messages.length`.
+        // When there is no anchor yet, nothing needs correcting — the estimate
+        // is already the char-based one, which sees the freed space directly.
+        if (this._lastRealInputTokens !== undefined) {
+          // Only the part before the anchor: the rest lives in the delta window,
+          // which is re-measured from characters and therefore already shrank.
+          // Subtracting everything would double-count it and could clamp the
+          // anchor to zero, discarding the overhead it carries.
+          const freedTokens = freedBeforeAnchor / this._charsPerToken;
+          this._lastRealInputTokens = Math.max(0, this._lastRealInputTokens - freedTokens);
+        }
+        if (this.onStream) {
+          void this.onStream({
+            type: 'context_pressure', droppedMessages: 0, agent: this.name,
+            usagePercent: Math.round(
+              (this._estimateMsgLen() / this._charsPerToken + overheadTokens) / maxCtx * 100,
+            ),
+          });
+        }
+        // Enough headroom recovered — skip the lossy front-drop entirely.
+        if (this._estimateOccupancyTokens(overheadTokens) < maxCtx * 0.85) return;
+      }
+    }
+
     // Try dropping middle messages first (keep first + last N).
     // Adjust boundary so we never split a tool_use/tool_result pair.
     // Reduce keep count dynamically based on overshoot severity.
@@ -1768,7 +1901,8 @@ export class Agent implements IAgent {
         ...head,
         {
           role: 'user' as const,
-          content: `[${dropped} earlier message(s) were removed to stay within the context window]`,
+          content: `[${dropped} earlier message(s) were removed to stay within the context window]`
+            + this._parkedHandleNote(),
         },
         ...tail,
       ];
@@ -1782,15 +1916,71 @@ export class Agent implements IAgent {
 
     // Second pass: truncate large content blocks if still oversized.
     // Keep the last user message intact; trim from oldest to newest.
+    //
+    // This pass USED TO test `typeof msg.content !== 'string'` and skip
+    // everything else — which meant it never touched a tool_result, because
+    // those always arrive as a content ARRAY. The last-resort shrink was blind
+    // to exactly the message kind that overflows the window in practice: on the
+    // measured run, tool results were 1.45M of ~1.55M total chars, all of it in
+    // array content, so this pass ran and freed nothing and the request went
+    // out oversized anyway.
     const afterDrop = this._estimateMsgLen() / this._charsPerToken + overheadTokens;
     if (afterDrop >= maxCtx * 0.85) {
       const TARGET_CHARS_PER_MSG = 8000 * ctxScale;
       for (let i = 0; i < this.messages.length - 1; i++) {
         const msg = this.messages[i]!;
-        if (typeof msg.content !== 'string') continue;
-        if (msg.content.length > TARGET_CHARS_PER_MSG) {
-          msg.content = msg.content.slice(0, TARGET_CHARS_PER_MSG) +
-            '\n[…content truncated to fit context window]';
+        if (typeof msg.content === 'string') {
+          if (msg.content.length > TARGET_CHARS_PER_MSG) {
+            msg.content = msg.content.slice(0, TARGET_CHARS_PER_MSG) +
+              '\n[…content truncated to fit context window]';
+          }
+          continue;
+        }
+        // Array content: trim the two payload-carrying block kinds. `thinking`
+        // and `redacted_thinking` are signature-verified by the API and MUST
+        // stay byte-exact; `tool_use.input` is structured JSON that would stop
+        // parsing if sliced. Neither is touched.
+        for (let b = 0; b < msg.content.length; b++) {
+          const block = msg.content[b]!;
+          if (block.type === 'text') {
+            if (block.text.length > TARGET_CHARS_PER_MSG) {
+              msg.content[b] = {
+                ...block,
+                text: block.text.slice(0, TARGET_CHARS_PER_MSG) +
+                  '\n[…content truncated to fit context window]',
+              };
+            }
+          } else if (block.type === 'tool_result') {
+            const resultBlock = block as BetaToolResultBlockParam;
+            const rc = resultBlock.content;
+            if (typeof rc === 'string') {
+              if (rc.length > TARGET_CHARS_PER_MSG) {
+                msg.content[b] = {
+                  ...resultBlock,
+                  content: rc.slice(0, TARGET_CHARS_PER_MSG) +
+                    '\n[…content truncated to fit context window]',
+                };
+              }
+            } else if (Array.isArray(rc)) {
+              // A tool_result's own content can itself be an array of text/image
+              // blocks. No core tool emits that today (handlers return strings),
+              // but stopping at the string case would leave the same blind spot
+              // one layer down — which is the bug this pass is being fixed for.
+              // Images are left alone: they are already token-counted by pixels,
+              // not by their base64 length (`imageAwareSerializedLen`).
+              msg.content[b] = {
+                ...resultBlock,
+                content: rc.map(inner =>
+                  inner.type === 'text' && inner.text.length > TARGET_CHARS_PER_MSG
+                    ? {
+                      ...inner,
+                      text: inner.text.slice(0, TARGET_CHARS_PER_MSG) +
+                        '\n[…content truncated to fit context window]',
+                    }
+                    : inner),
+              };
+            }
+          }
         }
       }
       // Invalidate cached message length after in-place content truncation
