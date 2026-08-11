@@ -174,14 +174,25 @@ describe('Config', () => {
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
       expect(config.routing_mode).toBe('hybrid');
-      // ⚖️ balanced main-chat slot = mistral-medium via the Mistral endpoint
-      // (WS2 wire-replay: Ministral 14B was below the R1/R3 orchestration floor).
+      // ⚖️ balanced is ⚡ efficient with a stronger main and NOTHING else changed —
+      // assert all three slots, because that identity is the point of the pair: a
+      // future edit that "upgrades" balanced's fast or deep slot silently reintroduces
+      // the multi-variable difference this ladder was reshaped to remove (2026-08-10).
+      expect(config.tier_set?.fast).toEqual({
+        provider: 'openai',
+        model_id: 'accounts/fireworks/models/deepseek-v4-flash',
+        api_base_url: 'https://api.fireworks.ai/inference/v1',
+      });
       expect(config.tier_set?.balanced).toEqual({
         provider: 'openai',
-        model_id: 'mistral-medium-2604',
-        api_base_url: 'https://api.mistral.ai/v1',
+        model_id: 'accounts/fireworks/models/glm-5p2',
+        api_base_url: 'https://api.fireworks.ai/inference/v1',
       });
-      expect(config.tier_set?.deep).toEqual({ provider: 'anthropic', model_id: 'claude-sonnet-5' });
+      expect(config.tier_set?.deep).toEqual({
+        provider: 'openai',
+        model_id: 'accounts/fireworks/models/kimi-k3',
+        api_base_url: 'https://api.fireworks.ai/inference/v1',
+      });
     });
 
     it('an env LYNOX_TIER_SET_JSON slot overrides the preset per-slot (env wins)', async () => {
@@ -192,7 +203,7 @@ describe('Config', () => {
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
       expect(config.tier_set?.deep?.model_id).toBe('my-own-model'); // env slot won
-      expect(config.tier_set?.balanced?.model_id).toBe('mistral-medium-2604'); // preset slot kept
+      expect(config.tier_set?.balanced?.model_id).toBe('accounts/fireworks/models/glm-5p2'); // preset slot kept
     });
 
     it('a CP-pinned LYNOX_TIER_PRESET expands like a config.json one', async () => {
@@ -227,7 +238,11 @@ describe('Config', () => {
       process.env['LYNOX_TIER_PRESET'] = '   ';
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
-      expect(config.tier_set?.deep).toEqual({ provider: 'anthropic', model_id: 'claude-sonnet-5' });
+      expect(config.tier_set?.deep).toEqual({
+        provider: 'openai',
+        model_id: 'accounts/fireworks/models/kimi-k3',
+        api_base_url: 'https://api.fireworks.ai/inference/v1',
+      });
     });
 
     it('an unknown CP-pinned preset FAILS CLOSED too', async () => {
@@ -265,7 +280,7 @@ describe('Config', () => {
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
       expect(config.tier_set?.deep?.model_id).toBe('claude-opus-4-8'); // config override won over the preset's sonnet-5
-      expect(config.tier_set?.balanced?.model_id).toBe('mistral-medium-2604'); // preset slot kept
+      expect(config.tier_set?.balanced?.model_id).toBe('accounts/fireworks/models/glm-5p2'); // preset slot kept
     });
 
     it('a config tier_set override with an UNREGISTERED model FAILS CLOSED (post-merge guard)', async () => {
@@ -277,16 +292,23 @@ describe('Config', () => {
       expect(() => loadConfig()).toThrow(/unregistered model "ghost-override-model"/);
     });
 
-    it('expands the ⚡ efficient preset (Fireworks deep slot) end-to-end', async () => {
+    it('expands the ⚡ efficient preset (all-Fireworks slots) end-to-end', async () => {
+      // Reshaped 2026-08-10: every slot is an open-weight model on Fireworks with a
+      // 1M window, so the expansion has to carry the endpoint on all three, not just
+      // on deep as it did when fast/main were Mistral.
       writeUserConfig({ tier_preset: 'efficient' });
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
       expect(config.tier_set?.deep).toEqual({
         provider: 'openai',
-        model_id: 'accounts/fireworks/models/glm-5p2',
+        model_id: 'accounts/fireworks/models/kimi-k3',
         api_base_url: 'https://api.fireworks.ai/inference/v1',
       });
-      expect(config.tier_set?.fast?.model_id).toBe('ministral-8b-2512');
+      expect(config.tier_set?.balanced?.model_id).toBe('accounts/fireworks/models/minimax-m3');
+      expect(config.tier_set?.fast?.model_id).toBe('accounts/fireworks/models/deepseek-v4-flash');
+      for (const tier of ['fast', 'balanced', 'deep'] as const) {
+        expect(config.tier_set?.[tier]?.api_base_url).toBe('https://api.fireworks.ai/inference/v1');
+      }
     });
 
     it('tier_preset in a PROJECT config is IGNORED (not in PROJECT_SAFE_KEYS — no escalation)', async () => {

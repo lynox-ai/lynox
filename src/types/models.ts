@@ -559,7 +559,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // === Anthropic Claude (direct + custom proxy) ===
   // Claude Opus 5 — the new flagship deep model (GA 2026-07; Opus 4.8 is now
   // Legacy). Additive OPT-IN only: MODEL_MAP.deep stays opus-4-6, and the
-  // max-quality deep preset stays fable-5 — re-pointing either is a deliberate
+  // max-quality deep preset is opus-5 since 2026-08-10 (fable stays catalog-selectable) — re-pointing either is a deliberate
   // behavior change gated on a bench/canary pass, NOT this catalog wave. Pricing
   // $5/$25 (= Opus 4.8), 1M native ctx, vision (CLAUDE_FEATURES). TTL contract:
   // cacheWrite=input×2=10, cacheRead=input×0.1=0.50 (models.test.ts pins it).
@@ -807,6 +807,14 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     features: MISTRAL_FEATURES_GEN3,
     pricing: { input: 0.50, output: 1.50, cacheWrite: 0.50, cacheRead: 0.05 },
     uiLabel: 'Mistral Large 3',
+    // Was MISSING until 2026-08-10, and it mattered: eu-sovereign pins this model,
+    // and `buildTierPresetSignal` omits the key when undefined — so the one preset
+    // that exists to make EU processing EXPLICIT could not show the chip on the slot
+    // this model serves. NOT every Mistral entry carries the field — `ministral-3b`
+    // and the older/legacy entries still lack it, so the same gap is open wherever
+    // they are catalog-selectable. Nothing enforces it registry-wide; the guard that
+    // exists covers preset slots only (tier-presets.test.ts).
+    provenance: 'EU',
   },
   // DEPRECATED by Mistral — magistral-medium-2509 retires 2026-07-31. No longer
   // tier-routed (tier:null); kept for cost-guard + back-compat of legacy configs

@@ -14,6 +14,9 @@ import { LLM_CATALOG } from './llm/catalog.js';
  */
 describe('tier-presets (model-presets W2 SoT)', () => {
   it('ships exactly the three hybrid presets', () => {
+    // eu-sovereign joined 2026-08-10: the EU choice used to be a side effect of
+    // picking "efficient", which meant a customer needing EU processing had to
+    // know that. Reshaping efficient to open weights would have removed it silently.
     expect(Object.keys(TIER_PRESETS).sort()).toEqual(['balanced', 'efficient', 'max-quality']);
     for (const p of Object.values(TIER_PRESETS)) expect(p.routing_mode).toBe('hybrid');
   });
@@ -36,21 +39,52 @@ describe('tier-presets (model-presets W2 SoT)', () => {
     }
   });
 
-  it('presets pin ONLY replay-measured Fireworks models — candidates stay picker-only', () => {
-    // The 2026-08-09 candidates (kimi-k3, deepseek-v4-flash, qwen3p7-plus) are
-    // picker-selectable but UNMEASURED — this guard is the mechanism behind the
-    // "no preset pins them before a replay measurement" invariant, which was
-    // otherwise only a comment (pr-review #1162). Extend the set ONLY together
-    // with the measurement.
+  it('presets pin ONLY Fireworks models with NAMED evidence — candidates stay picker-only', () => {
+    // The 2026-08-09 candidates are picker-selectable but UNMEASURED — this guard is
+    // the mechanism behind the "no preset pins them before a measurement" invariant,
+    // which was otherwise only a comment (pr-review #1162). Extend the set ONLY
+    // together with the evidence, and NAME the evidence.
+    //
+    // The guard's job is to make the DIFFERENCE visible, not to let an unmeasured
+    // model in quietly. Read the labels literally:
+    //   BENCH    — a repeatable scored run exists in the repo.
+    //   SWEEP    — /model-smoke chat probes, read and judged by hand.
+    //   OPERATOR — rafael decided; no measurement backs this slot.
+    // What is deliberately NOT accepted as evidence any more: the R1/R3 replay floor
+    // as a POSITIVE signal. It scores delegation behaviour, not answer quality, and
+    // per-model rates below n≈8 are noise (glm measured 0/2, 1/2 and 2/8 on the same
+    // body on 2026-08-10). It remains a valid negative signal at adequate n.
     const MEASURED_FIREWORKS = new Set([
+      // SWEEP + WS2 replay. The replay is what put it here originally; today it is
+      // the sweep (correct task-state grounding, 1M window) plus rafael's decision
+      // 2026-08-10 ("glm main auch") that carries the balanced main slot.
       'accounts/fireworks/models/glm-5p2',
-      'accounts/fireworks/models/deepseek-v4-pro',
+      'accounts/fireworks/models/deepseek-v4-pro', // WS2 replay
+      // BENCH — fast-slot compaction 2026-08-10: 89.1% literal recall vs a 90.4%
+      // haiku-4.5 reference, best judge score of the field (7.83 vs 7.13) → HOLD.
+      // Benched as a FAST slot only; it is not a measured main (rafael 2026-08-10).
+      'accounts/fireworks/models/deepseek-v4-flash',
+      // BENCH — fast-slot compaction 2026-08-10: HOLD at 87.9% recall / judge 6.96,
+      // and the quickest model of the sweep in every probe that did not stall on an
+      // ask_user question. No longer pinned by any preset (lost the efficient main
+      // to minimax-m3 on quality); kept here because the bench result stands.
+      'accounts/fireworks/models/qwen3p7-plus',
+      // SWEEP — one of only two models that re-verified figures against the web
+      // before answering, at $0.30/$1.20 (cheaper than qwen, which it beat on sweep
+      // quality). Carries the efficient main slot. No main-slot bench exists.
+      'accounts/fireworks/models/minimax-m3',
+      // OPERATOR DECISION 2026-08-10, not a bench result: rafael pinned it as the
+      // deep slot on the strength of the /model-smoke sweep (best grounding of nine
+      // models; it re-verified figures against the web before answering) plus its 1M
+      // window. There is no deep-tier bench in the repo to measure it against — if
+      // one is ever built, this line is the first thing it should check.
+      'accounts/fireworks/models/kimi-k3',
     ]);
     for (const [name, preset] of Object.entries(TIER_PRESETS)) {
       for (const [tier, slot] of Object.entries(preset.tier_set)) {
         if (slot!.api_base_url?.includes('fireworks.ai')) {
           expect(MEASURED_FIREWORKS.has(slot!.model_id),
-            `${name}.${tier} pins ${slot!.model_id} — Fireworks preset slots require a replay measurement first`).toBe(true);
+            `${name}.${tier} pins ${slot!.model_id} — a Fireworks preset slot needs a NAMED basis in MEASURED_FIREWORKS (BENCH / SWEEP / OPERATOR), not merely a catalog entry`).toBe(true);
         }
       }
     }
@@ -64,6 +98,30 @@ describe('tier-presets (model-presets W2 SoT)', () => {
           expect(slot!.api_base_url, `${name}.${tier} is CN — must route via Fireworks`).toContain('fireworks.ai');
         }
       }
+    }
+  });
+
+  it('EVERY preset prices its bands in ascending order — escalating must never get cheaper', () => {
+    // The ladder claim that the eu-sovereign comment spends 25 lines defending
+    // ("the price rises with the band ... the reverse order was considered and
+    // rejected") was backed by nothing until a delta review pointed it out. It is the
+    // one invariant that holds across ALL four presets and the reason a preset is a
+    // ladder rather than three unrelated picks: the band that runs every turn must be
+    // the cheap one, and asking for more must cost more.
+    for (const [name, preset] of Object.entries(TIER_PRESETS)) {
+      const out = (tier: 'fast' | 'balanced' | 'deep'): number => {
+        const id = preset.tier_set[tier]?.model_id;
+        const p = id ? MODEL_CAPABILITIES[id]?.pricing?.output : undefined;
+        expect(p, `${name}.${tier} → ${id} has no output price to rank`).toBeTypeOf('number');
+        return p as number;
+      };
+      // STRICTLY ascending, not `<=`: a delta review mutated haiku's output price to
+      // equal sonnet's, flattening max-quality's fast and main bands, and the `<=`
+      // version stayed green. The comment this test backs says the price RISES with
+      // the band — a flat pair means the cheaper band bought nothing, which is the
+      // failure the ladder exists to prevent.
+      expect(out('fast'), `${name}: fast output must be BELOW balanced`).toBeLessThan(out('balanced'));
+      expect(out('balanced'), `${name}: balanced output must be BELOW deep`).toBeLessThan(out('deep'));
     }
   });
 
@@ -84,7 +142,7 @@ describe('tier-presets (model-presets W2 SoT)', () => {
   it('expandTierPreset: known → {routing_mode, tier_set}; unknown → undefined', () => {
     const expanded = expandTierPreset('balanced');
     expect(expanded?.routing_mode).toBe('hybrid');
-    expect(expanded?.tier_set.balanced?.model_id).toBe('mistral-medium-2604');
+    expect(expanded?.tier_set.balanced?.model_id).toBe('accounts/fireworks/models/glm-5p2');
     expect(expandTierPreset('does-not-exist')).toBeUndefined();
   });
 

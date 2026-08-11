@@ -2518,7 +2518,7 @@ describe('LynoxHTTPApi', () => {
       // Per-tier enrichment is server-side (web-ui has no @lynox-ai/core import):
       // the ⚡ efficient deep slot resolves to the CN-via-Fireworks model + its host disclosure.
       const efficientDeep = presets!['efficient']!.tiers.find((t) => t['tier'] === 'deep')!;
-      expect(efficientDeep['model_id']).toBe('accounts/fireworks/models/glm-5p2');
+      expect(efficientDeep['model_id']).toBe('accounts/fireworks/models/kimi-k3');
       expect(efficientDeep['provenance']).toBe('CN');
       expect(efficientDeep['residency']).toBe('US');
     });
@@ -2543,7 +2543,7 @@ describe('LynoxHTTPApi', () => {
       // match 'Mistral Medium 3.1' (128k, below the context floor) and 'Mistral Medium
       // (latest)' (the forbidden -latest tag). Labels carry the registry context
       // window since 2026-08-09 ("· 256k").
-      expect(tiers!['balanced']).toBe('Mistral Medium 3.5 · 256k');
+      expect(tiers!['balanced']).toBe('GLM 5.2 · 1M');
       expect(tiers!['balanced']).not.toContain('Sonnet');
     });
 
@@ -2936,9 +2936,10 @@ describe('LynoxHTTPApi', () => {
         expect(res.status).toBe(200);
         const body = await res.json() as Record<string, unknown>;
         const presets = body['available_tier_presets'] as Record<string, { available: boolean }>;
-        expect(presets['efficient']!.available).toBe(false); // Fireworks deep dropped
-        expect(presets['balanced']!.available).toBe(true);
-        expect(presets['max-quality']!.available).toBe(true);
+        expect(presets['efficient']!.available).toBe(false); // all slots Fireworks
+        expect(presets['balanced']!.available).toBe(false);   // Fireworks main since 2026-08-10
+        expect(presets['max-quality']!.available).toBe(true);  // all-Anthropic — the ONLY one left
+        expect(Object.values(presets).filter((p) => p.available)).toHaveLength(1);
         // The lock mirrors the disabled card + the write-gate 403.
         const locks = body['locks'] as Record<string, Record<string, unknown>>;
         expect(locks['tier_preset']?.['reason']).toBe('managed-tier');
@@ -5097,6 +5098,56 @@ describe('LynoxHTTPApi', () => {
 
       // --- PUT /api/config ----------------------------------------------------
 
+      it('GET /api/voice/info reports the picker as locked exactly when the write gate would 403', async () => {
+        // The UI used to decide this itself and got it wrong: on managed the STT
+        // picker rendered enabled and every save 403'd — a control that looks live
+        // and is not. `locked` must therefore be derived from the SAME set the gate
+        // enforces, so the two cannot drift. Asserted as the EQUIVALENCE, not as a
+        // literal true: the day a second voice provider makes the field writable,
+        // this test follows instead of having to be edited.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const info = await (await jsonFetch('/api/voice/info')).json() as {
+            stt: { locked?: boolean }; tts: { locked?: boolean };
+          };
+          for (const [field, locked, probe] of [
+            ['transcription_provider', info.stt.locked, 'whisper'],
+            ['tts_provider', info.tts.locked, 'mistral'],
+          ] as const) {
+            // What the gate actually does with that field, measured rather than assumed.
+            const put = await jsonFetch('/api/config', {
+              method: 'PUT',
+              body: JSON.stringify({ [field]: probe }),
+            });
+            // Guard the instrument: a 400 means the probe value is not schema-valid
+            // for this field, so the request never reached the gate and the
+            // comparison below would be measuring the validator instead. Caught
+            // exactly that on the first run — 'whisper' is not a TTS provider.
+            expect(put.status, `${field}: probe "${probe}" was rejected by the schema, not the gate`)
+              .not.toBe(400);
+            const gateRefuses = put.status === 403;
+            expect(locked, `${field}: picker says locked=${String(locked)}, gate returned ${String(put.status)}`)
+              .toBe(gateRefuses);
+          }
+        } finally {
+          vi.unstubAllEnvs();
+        }
+
+        // …and the SELF-HOST side, without which "locked: true" hardcoded would pass:
+        // the assertion has to meet both states or it only pins today's tier.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        try {
+          const info = await (await jsonFetch('/api/voice/info')).json() as {
+            stt: { locked?: boolean }; tts: { locked?: boolean };
+          };
+          expect(info.stt.locked, 'self-host must never lock the STT picker').toBe(false);
+          expect(info.tts.locked, 'self-host must never lock the TTS picker').toBe(false);
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      });
+
       it('PUT /api/config accepts user-scope in managed mode for allowlisted fields', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
@@ -5429,12 +5480,15 @@ describe('LynoxHTTPApi', () => {
       it('PUT /api/config REJECTS a tier_preset whose expanded slot uses a blocked model', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
-        // ⚖️ balanced preset expands to a claude-sonnet-5 deep slot → blocked.
+        // 💎 max-quality expands to a claude-sonnet-5 MAIN slot → blocked. (This used
+        // to drive ⚖️ balanced, whose deep slot was Sonnet; balanced now pins a
+        // Fireworks main, so the write-gate would refuse it for the wrong reason and
+        // the assertion would pass without exercising the blocklist path at all.)
         vi.mocked(loadConfig).mockReturnValue({ default_tier: 'deep', blocked_model_ids: ['claude-sonnet-'] });
         try {
           const res = await jsonFetch('/api/config', {
             method: 'PUT',
-            body: JSON.stringify({ tier_preset: 'balanced' }),
+            body: JSON.stringify({ tier_preset: 'max-quality' }),
           });
           expect(res.status).toBe(403);
           const body = await res.json() as { error: string };
