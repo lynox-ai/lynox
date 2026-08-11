@@ -139,6 +139,7 @@
 		customSmtpSecure = false;
 		testResult = null;
 		skipConnectionTest = false;
+		testedFingerprint = null;
 	}
 
 	function buildCustomPayload() {
@@ -225,6 +226,8 @@
 			}
 			const data = (await res.json()) as TestResult;
 			testResult = data;
+			// Stamp what this result describes, so editing a field disarms it.
+			testedFingerprint = connectionFingerprint();
 			if (data.ok) {
 				addToast('Connection successful', 'success');
 			} else {
@@ -232,6 +235,7 @@
 			}
 		} catch (err) {
 			testResult = { ok: false, error: err instanceof Error ? err.message : 'Network error', code: 'unknown' };
+			testedFingerprint = connectionFingerprint();
 			addToast('Connection test failed', 'error');
 		}
 		testing = false;
@@ -245,8 +249,37 @@
 	 * product is lost along with it. Reset by resetForm().
 	 */
 	let skipConnectionTest = $state(false);
-	/** Offer the escape only for the leg that can fail without breaking reading. */
-	const canSaveWithoutSending = $derived(testResult?.ok === false && testResult.stage === 'smtp');
+
+	/**
+	 * Exactly the inputs the server probe exercises. Anything else on the form —
+	 * display name, account type, persona — cannot change what a probe would find.
+	 */
+	function connectionFingerprint(): string {
+		return JSON.stringify([
+			formAddress,
+			formPassword,
+			formPreset,
+			formPreset === 'custom' ? buildCustomPayload() : null,
+		]);
+	}
+	/** The fingerprint the currently-displayed result was produced from. */
+	let testedFingerprint = $state<string | null>(null);
+
+	/**
+	 * Offer the escape only for the leg that can fail without breaking reading —
+	 * AND only while the form still holds the configuration that was probed.
+	 *
+	 * The fingerprint is what makes this safe. Keying on `testResult` alone was
+	 * not enough: nothing clears a result when a field is edited, so a user could
+	 * fail the SMTP check, tick the box, correct the password, and save — sending
+	 * skipTest, which bypasses the WHOLE probe including IMAP, and storing
+	 * credentials nothing had ever verified. Being `$derived`, this re-evaluates
+	 * on every keystroke, so the box disappears the moment the form diverges from
+	 * what was tested; no manual invalidation to forget.
+	 */
+	const canSaveWithoutSending = $derived(
+		testResult?.ok === false && testResult.stage === 'smtp' && testedFingerprint === connectionFingerprint(),
+	);
 
 	async function saveAccount() {
 		if (!formId || !formDisplayName || !formAddress || !formPassword) {
@@ -287,7 +320,19 @@
 				// Before this, the escape existed only on the test-button path —
 				// missing from the one path that actually blocks.
 				if (err.code) {
-					testResult = { ok: false, error: err.error, code: err.code, stage: err.stage, checked: { imap: true, smtp: err.stage === 'smtp' } };
+					testResult = {
+						ok: false,
+						error: err.error,
+						code: err.code,
+						stage: err.stage,
+						// Only claim a leg ran when the stage says so. `imap: true`
+						// unconditionally would have been a fabrication on a refusal
+						// whose IMAP leg is exactly what failed — harmless today
+						// because nothing renders `checked` on a failed result, and
+						// a lie waiting for the first thing that does.
+						checked: err.stage ? { imap: true, smtp: err.stage === 'smtp' } : undefined,
+					};
+					testedFingerprint = connectionFingerprint();
 				}
 				saving = false;
 				return;

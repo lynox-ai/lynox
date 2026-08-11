@@ -253,9 +253,9 @@ export async function autodiscover(emailAddress: string, fetchImpl: typeof fetch
  */
 export function parseAutoconfigXml(xml: string): AutodiscoverResult {
   // One section for both, so the two halves always describe the same provider.
-  const section = pairableSection(xml);
-  const imap = pickServer(section, 'imap');
-  const smtp = pickServer(section, 'smtp');
+  const { section, scoped } = pairableSection(xml);
+  const imap = pickServer(section, 'imap', scoped);
+  const smtp = pickServer(section, 'smtp', scoped);
   if (!imap || !smtp) {
     throw new MailError('not_found', 'Autoconfig payload missing IMAP or SMTP server entry');
   }
@@ -319,24 +319,29 @@ function providerBlocks(xml: string): string[] {
 }
 
 /**
- * The first provider section that can supply BOTH an IMAP and an SMTP server,
- * or the whole payload when none can.
+ * The first provider section that can supply BOTH an IMAP and an SMTP server —
+ * and whether such a section was found at all.
  *
  * Choosing the section once, for both kinds together, is the point. Picking per
  * kind independently is what a whole-payload scan does, and it lets an
  * ISP-legacy section that happens to be listed first supply the SMTP server for
- * a completely different provider's IMAP server. The fallback keeps payloads
- * that split the two across sections behaving exactly as they did before, since
- * refusing them outright would be a new failure rather than a fix.
+ * a completely different provider's IMAP server.
+ *
+ * `scoped: false` means no section carried both, so the caller falls back to
+ * the whole payload rather than refusing it — which would be a new failure
+ * rather than a fix. On that path there is no section boundary to rely on, and
+ * the caller has to keep its own weaker guard.
  */
-function pairableSection(xml: string): string {
+function pairableSection(xml: string): { section: string; scoped: boolean } {
   for (const block of providerBlocks(xml)) {
-    if (parseServers(block, 'imap').length > 0 && parseServers(block, 'smtp').length > 0) return block;
+    if (parseServers(block, 'imap').length > 0 && parseServers(block, 'smtp').length > 0) {
+      return { section: block, scoped: true };
+    }
   }
-  return xml;
+  return { section: xml, scoped: false };
 }
 
-function pickServer(xml: string, kind: 'imap' | 'smtp'): ParsedServer | null {
+function pickServer(xml: string, kind: 'imap' | 'smtp', scoped: boolean): ParsedServer | null {
   const candidates = parseServers(xml, kind);
   const first = candidates[0];
   if (kind === 'imap' || !first) return first ?? null;
@@ -344,14 +349,18 @@ function pickServer(xml: string, kind: 'imap' | 'smtp'): ParsedServer | null {
   // provider's own preference first and that is frequently 465, which a hosted
   // instance cannot reach at all — the provider is describing its servers, not
   // our network. Only entries that survived the TLS filter are eligible, so this
-  // never prefers a plaintext 587 over an encrypted 465, and a section with a
-  // single entry is returned unchanged.
+  // never prefers a plaintext 587 over an encrypted 465, and a single entry is
+  // returned unchanged.
   //
-  // The preference ranges over the whole section, hostnames included: one
-  // provider may publish submission on a second name (smtp-tls.example.com),
-  // and that is still the same provider. Crossing to a DIFFERENT provider is
-  // prevented one level up, by scoping to the section, not by comparing hosts.
-  return candidates.find(s => s.port === SUBMISSION_PORT) ?? first;
+  // Inside a section the preference ranges over hostnames too: one provider may
+  // publish submission under a second name (smtp-tls.example.com), and that is
+  // still the same provider. On the unscoped fallback there is no such
+  // guarantee, so the host restriction stays there — it is a weaker guard than
+  // section scoping, and dropping it along with the stronger one is how a
+  // payload that splits the protocols across sections started pairing a primary
+  // IMAP server with an ISP relay again.
+  const eligible = scoped ? candidates : candidates.filter(s => s.host === first.host);
+  return eligible.find(s => s.port === SUBMISSION_PORT) ?? first;
 }
 
 function innerTag(xml: string, tag: string): string | undefined {

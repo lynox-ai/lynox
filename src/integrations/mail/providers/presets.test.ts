@@ -264,6 +264,23 @@ describe('parseAutoconfigXml', () => {
     expect(result.smtp.host).toBe('smtp.x.com');
   });
 
+  it('keeps the weaker host guard ON that fallback, where there is no section', () => {
+    // Section scoping cannot help when no section carries both protocols, and
+    // dropping the host restriction along with it re-opened cross-provider
+    // pairing on exactly this shape: the ISP relay wins on port preference and
+    // gets married to a different provider's IMAP server. Two guards, two
+    // different situations — the stronger one replacing the weaker one is what
+    // let this back in.
+    const xml = `
+      <clientConfig>
+        <emailProvider id="in"><incomingServer type="imap"><hostname>imap.primary.com</hostname><port>993</port><socketType>SSL</socketType></incomingServer></emailProvider>
+        <emailProvider id="out-primary"><outgoingServer type="smtp"><hostname>smtp.primary.com</hostname><port>465</port><socketType>SSL</socketType></outgoingServer></emailProvider>
+        <emailProvider id="out-isp"><outgoingServer type="smtp"><hostname>relay.isp.example</hostname><port>587</port><socketType>STARTTLS</socketType></outgoingServer></emailProvider>
+      </clientConfig>
+    `;
+    expect(parseAutoconfigXml(xml).smtp).toEqual({ host: 'smtp.primary.com', port: 465, secure: true });
+  });
+
   it('does not apply the port preference to IMAP', () => {
     // 587 is meaningless for IMAP; the incoming side keeps first-wins order.
     const xml = `

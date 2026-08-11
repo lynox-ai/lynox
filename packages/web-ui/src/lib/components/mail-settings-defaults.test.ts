@@ -103,24 +103,53 @@ describe('MailSettings surfaces which leg of the connection failed', () => {
     expect(source).toMatch(/testResult\.stage === 'smtp'/);
   });
 
-  it('cannot send skipTest on the strength of a checkbox that is no longer shown', () => {
-    // The escape skips the WHOLE probe, the IMAP leg included. Its checkbox
-    // unmounts whenever testResult is cleared, but the boolean behind it did
-    // not reset — so ticking it, then correcting the password and saving,
-    // stored credentials nothing had ever verified, under "Account saved".
+  /**
+   * Body of a top-level function, from its declaration to the next one. Both
+   * ends are required to exist: an open-ended slice runs to end of file and
+   * gets satisfied by anything further down the file — which is exactly how the
+   * predecessor of this suite passed while the code it named was empty.
+   */
+  function functionBody(decl: string, nextDecl: string): string {
+    const start = source.indexOf(decl);
+    const end = source.indexOf(nextDecl);
+    expect(start, `"${decl}" not found — renamed?`).toBeGreaterThanOrEqual(0);
+    expect(end, `"${nextDecl}" not found — renamed or moved?`).toBeGreaterThan(start);
+    return source.slice(start, end);
+  }
+
+  it('ties the escape to the configuration that was actually probed', () => {
+    // The escape skips the WHOLE probe, the IMAP leg included. Keying it on the
+    // presence of a test result was not enough: nothing clears that result when
+    // a field is edited, so failing the SMTP check, ticking the box, correcting
+    // the password and saving stored credentials nothing had ever verified.
     expect(source).toMatch(/skipTest:\s*skipConnectionTest && canSaveWithoutSending/);
-    // And a fresh probe must invalidate the decision made about the old one.
-    const testFn = source.slice(source.indexOf('async function testConnection()'), source.indexOf('async function saveAccount()'));
-    expect(testFn.length).toBeGreaterThan(0);
+    expect(source).toMatch(/testedFingerprint === connectionFingerprint\(\)/);
+  });
+
+  it('fingerprints every input the probe actually exercises', () => {
+    // A field missing here is a field the user can change while the escape
+    // stays armed — which is the whole defect, one input narrower.
+    const fp = functionBody('function connectionFingerprint()', 'let testedFingerprint');
+    for (const field of ['formAddress', 'formPassword', 'formPreset', 'buildCustomPayload()']) {
+      expect(fp, `connectionFingerprint ignores ${field}`).toContain(field);
+    }
+  });
+
+  it('a fresh probe invalidates the decision made about the previous one', () => {
+    const testFn = functionBody('async function testConnection()', 'function connectionFingerprint()');
     expect(testFn).toMatch(/skipConnectionTest = false/);
+    expect(testFn).toMatch(/testedFingerprint = connectionFingerprint\(\)/);
   });
 
   it('shows the refusal — and the escape — to someone who never pressed Test', () => {
     // friendlyError alone was not enough: the escape hung off testResult, which
     // only the test button ever set, so the one path that actually blocks had
     // no way past it.
-    const saveFn = source.slice(source.indexOf('async function saveAccount()'));
-    expect(saveFn).toMatch(/testResult = \{\s*ok: false/);
+    const saveFn = functionBody('async function saveAccount()', 'async function deleteAccount(');
+    expect(saveFn).toMatch(/testResult = \{/);
     expect(saveFn).toMatch(/stage: err\.stage/);
+    expect(saveFn).toMatch(/testedFingerprint = connectionFingerprint\(\)/);
+    // Not a fabricated `imap: true` on a refusal whose IMAP leg is what failed.
+    expect(saveFn).toMatch(/checked: err\.stage \?/);
   });
 });
