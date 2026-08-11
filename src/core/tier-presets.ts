@@ -65,13 +65,28 @@ import { isTierPresetName } from '../contract/vocab.js';
 export const FIREWORKS_API_BASE = 'https://api.fireworks.ai/inference/v1';
 
 /**
- * Canary opt-in (model-presets W3): a MANAGED instance may route a preset's
- * Fireworks-hosted slot (⚡ efficient's deep model) ONLY when the operator sets
- * `LYNOX_MANAGED_FIREWORKS_ENABLED` in the CP env. Default OFF → broad managed
- * stays Anthropic/Mistral-only (Fireworks is a new sub-processor, DPA-gated); ON =
- * the rafael canary. Read via direct `process.env` (mirrors the config.ts boolean
- * -flag cluster); it is NOT a config field, so a tenant's project config cannot
- * self-grant it. Self-host is unaffected — this gate only runs on cp_supplied.
+ * Operator opt-in (model-presets W3): a MANAGED instance may route a preset's
+ * Fireworks-hosted slots ONLY when `LYNOX_MANAGED_FIREWORKS_ENABLED` is in its env.
+ * Read via direct `process.env` (mirrors the config.ts boolean-flag cluster); it is
+ * NOT a config field, so a tenant's project config cannot self-grant it. Self-host is
+ * unaffected — this gate only runs on cp_supplied.
+ *
+ * ⚠️ THIS IS NOT A PER-INSTANCE CANARY, whatever this comment used to say. It read
+ * "ON = the rafael canary", which described the intent and not the mechanism. The CP
+ * emits the flag from a single `if (input.credentials.fireworksApiKey)` in
+ * `config-generator.ts` — so the moment a Fireworks key is in the credential pool,
+ * EVERY instance the CP generates config for gets it. There is no per-instance
+ * switch on this axis, and reading one into the old wording is how the 30-day
+ * sub-processor notice in pro's `subprocessor-notification.md` §4.1 came to be
+ * skipped: the credential is the activation, not the first request.
+ *
+ * Verified 2026-08-11 against all three production instances, the two customer ones
+ * included — the flag is present in every running container.
+ *
+ * What the flag still genuinely gates: a tenant with it OFF cannot select a
+ * Fireworks-routed preset at all, and nothing reaches Fireworks until a tenant
+ * actively selects one. The default managed setup pins no preset and routes to
+ * Anthropic and Mistral only.
  */
 export function managedFireworksEnabled(): boolean {
   const v = process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'];
@@ -134,8 +149,10 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   //           pin it without a deep bench — see the guard note in
   //           tier-presets.test.ts; the evidence is the chat sweep, not a replay.
   // Everything here is CN-provenance served from the US Fireworks host — the
-  // affirmative sourcing rule holds, and eu-sovereign below exists so that choice
-  // stays explicit rather than hidden inside "efficient".
+  // affirmative sourcing rule holds. ⚠️ An earlier version of this line pointed at
+  // "eu-sovereign below" as the explicit EU alternative. There is no such preset:
+  // `eu-sovereign` was dropped on 2026-08-10 and TIER_PRESET_NAMES holds exactly
+  // three names. (It survives as an `llm_mode` value, a different axis entirely.)
   efficient: {
     routing_mode: 'hybrid',
     tier_set: {
@@ -158,11 +175,20 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   //
   // ⚠️ CONSEQUENCE, stated because it is not obvious: like ⚡ efficient this is an
   // all-Fireworks set, so it requires `LYNOX_MANAGED_FIREWORKS_ENABLED` (a DPA-gated
-  // sub-processor, OFF unless the CP opts an instance in). A managed tenant without
-  // it sees only 🇪🇺 eu-sovereign and 💎 max-quality. Mistral Large 3 was the drafted
-  // Fireworks-free alternative and was rejected on quality (rafael 2026-08-10:
-  // "mistral large ist kein starker main"); no measurement of it as a main exists
-  // either way — it was never in the sweep.
+  // sub-processor). A managed tenant without the flag therefore sees **exactly one**
+  // preset — 💎 max-quality — because it is the only set here with no Fireworks slot.
+  //
+  // That sentence used to read "sees only 🇪🇺 eu-sovereign and 💎 max-quality", which
+  // was wrong on both counts by the time it was written: eu-sovereign had been
+  // dropped the day before (2026-08-10), and the count is one, not two. Worth the
+  // correction rather than a quiet delete, because "there is still an EU-routed
+  // fallback" is precisely the wrong thing to believe when deciding whether a tenant
+  // can be left without the Fireworks flag. They cannot: the choice is Fireworks or
+  // an all-Anthropic set.
+  //
+  // Mistral Large 3 was the drafted Fireworks-free alternative and was rejected on
+  // quality (rafael 2026-08-10: "mistral large ist kein starker main"); no
+  // measurement of it as a main exists either way — it was never in the sweep.
   balanced: {
     routing_mode: 'hybrid',
     tier_set: {

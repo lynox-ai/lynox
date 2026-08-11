@@ -101,6 +101,23 @@ describe('tier-presets (model-presets W2 SoT)', () => {
     }
   });
 
+  it('EXACTLY ONE preset is reachable without the Fireworks flag, and it is max-quality', () => {
+    // Welds a comment to the code. The `balanced` note claimed a managed tenant
+    // without `LYNOX_MANAGED_FIREWORKS_ENABLED` "sees only 🇪🇺 eu-sovereign and
+    // 💎 max-quality" — wrong on both counts: eu-sovereign had been dropped the day
+    // before, and the count is one. Prose cannot hold that claim; this can.
+    //
+    // It matters beyond tidiness. "There is still an EU-routed fallback" is exactly
+    // the wrong belief when deciding whether a tenant can be left without the flag —
+    // without it the only choice is an all-Anthropic set. If a Fireworks-free
+    // alternative is ever added, this test fails and the comment gets rewritten with
+    // it, which is the point.
+    const fireworksFree = Object.entries(TIER_PRESETS)
+      .filter(([, p]) => !Object.values(p.tier_set).some((s) => s?.api_base_url?.includes('fireworks.ai')))
+      .map(([name]) => name);
+    expect(fireworksFree).toEqual(['max-quality']);
+  });
+
   it('EVERY preset prices its bands in ascending order — escalating must never get cheaper', () => {
     // The ladder claim that the eu-sovereign comment spends 25 lines defending
     // ("the price rises with the band ... the reverse order was considered and
