@@ -332,17 +332,15 @@ function providerBlocks(xml: string): string[] {
  *
  * Be precise about what that costs, because an earlier version of this comment
  * claimed the path "behaves as it did before any of this" and that is measurably
- * untrue: on 176 of 320 generated fallback payloads it does not, and in 16 of
- * them a single-provider pairing becomes a two-provider one. What actually
+ * untrue: roughly half of generated fallback payloads differ, and a small
+ * fraction turn a single-provider pairing into a two-provider one. What actually
  * happens there is first-published-587-wins, across sections — cross-provider
  * pairing included.
  *
- * That is a deliberate trade, not an oversight. The alternative was filtering
- * SMTP candidates by the first entry's host, and measured over 3855 payloads it
- * cost 246 of them their submission port to buy a provider-correctness swap of
- * 99 against 99. Losing the port is the failure this whole change exists to
- * prevent; losing the provider is a rarer, milder one on a payload shape that
- * autoconfig barely produces. See the characterisation test that pins it.
+ * That is a deliberate trade, not an oversight; the reasoning and the
+ * measurement behind rejecting the alternative are on `pickServer` below. See
+ * also the characterisation test, which pins this behaviour rather than
+ * endorsing it.
  */
 function pairableSection(xml: string): string {
   for (const block of providerBlocks(xml)) {
@@ -370,13 +368,20 @@ function pairableSection(xml: string): string {
  * This line has now been written four ways, and the three that failed all tried
  * to answer the provider question here — by comparing the candidate's host
  * against the first SMTP entry's. That restricts the wrong thing: the first SMTP
- * entry has no relation to the chosen IMAP server, and since the filtered set is
- * a subset, the comparison can only ever LOSE a 587, never gain a correct pair.
- * Measured across 3855 generated payloads it cost 246 payloads their submission
- * port and traded provider-correctness 99 against 99 — a pure loss dressed as a
- * guard. Where the caller cannot scope (a payload that splits the protocols
- * across sections), the honest answer is that we cannot tell providers apart
- * there, not a heuristic that reads as if we could.
+ * entry has no relation to the chosen IMAP server. And because the filtered set
+ * is a subset, the comparison can only ever LOSE a 587 — it can still change
+ * WHICH server is chosen, so it does sometimes land on a better-matched
+ * provider, just as often as on a worse one.
+ *
+ * Two independent measurements over generated payloads agreed on the shape:
+ * the filter costs a few hundred payloads their submission port, and its effect
+ * on provider-matching is a wash — as many pairings improved as regressed. (The
+ * exact split comes out symmetric because a payload generator with
+ * interchangeable provider labels forces it to; treat the symmetry as an
+ * artefact and the direction as the finding.) Losing the port is the failure
+ * this whole change exists to prevent. Where the caller cannot scope (a payload
+ * that splits the protocols across sections), the honest answer is that we
+ * cannot tell providers apart there, not a heuristic that reads as if we could.
  */
 function pickServer(xml: string, kind: 'imap' | 'smtp'): ParsedServer | null {
   const candidates = parseServers(xml, kind);

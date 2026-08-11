@@ -306,9 +306,36 @@ describe('parseAutoconfigXml', () => {
     expect(result.smtp).toEqual({ host: 'relay.isp.example', port: 587, secure: false });
   });
 
-  it('never returns a 465 when the chosen provider also publishes a 587', () => {
-    // The invariant the four attempts at this line kept breaking, stated once so
-    // it cannot be lost again: filtering candidates can only remove a 587.
+  it('takes the FIRST published 587, which is the half of that nobody pinned', () => {
+    // "first-published-587-wins" is the phrase the code comments and this
+    // suite's own wording rest on, and until this payload existed no test held
+    // it: every other fixture has at most one usable 587, so swapping find()
+    // for a last-wins search passed everything.
+    const xml = `
+      <clientConfig>
+        <emailProvider id="in"><incomingServer type="imap"><hostname>imap.primary.com</hostname><port>993</port><socketType>SSL</socketType></incomingServer></emailProvider>
+        <emailProvider id="out-a"><outgoingServer type="smtp"><hostname>first.relay.example</hostname><port>587</port><socketType>STARTTLS</socketType></outgoingServer></emailProvider>
+        <emailProvider id="out-b"><outgoingServer type="smtp"><hostname>second.relay.example</hostname><port>587</port><socketType>STARTTLS</socketType></outgoingServer></emailProvider>
+      </clientConfig>
+    `;
+    expect(parseAutoconfigXml(xml).smtp.host).toBe('first.relay.example');
+  });
+
+  it('never returns a 465 when a usable 587 is present in the same scope', () => {
+    // What the four attempts at this line kept breaking: filtering candidates
+    // can only ever remove a 587.
+    //
+    // "Scope" means the section the caller settled on, or the whole payload
+    // when it could not settle on one — NOT "the chosen provider". Shape 3
+    // below is exactly the difference: its IMAP section publishes no SMTP at
+    // all, so the 587 necessarily comes from elsewhere. Naming the provider
+    // here would make this read as a promise about pairing, which it is not —
+    // pairing is characterised, deliberately, in the test above.
+    //
+    // And this is a description, not a law. A later change that refuses to pair
+    // SMTP across section boundaries would fail shape 3 and could well be
+    // right; move the shape up to the characterisation test rather than reading
+    // a red assertion here as proof of a broken invariant.
     const shapes = [
       // single section, second hostname
       '<emailProvider id="a"><incomingServer type="imap"><hostname>i.a.com</hostname><port>993</port><socketType>SSL</socketType></incomingServer><outgoingServer type="smtp"><hostname>s1.a.com</hostname><port>465</port><socketType>SSL</socketType></outgoingServer><outgoingServer type="smtp"><hostname>s2.a.com</hostname><port>587</port><socketType>STARTTLS</socketType></outgoingServer></emailProvider>',
