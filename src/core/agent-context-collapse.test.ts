@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import type { BetaMessageParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
+import type { BetaMessageParam, BetaToolResultBlockParam } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from './agent.js';
-import { ToolResultBlobStore } from './tool-result-blob-store.js';
+import { ToolResultBlobStore, RECALL_TOOL_NAME } from './tool-result-blob-store.js';
+import { recallToolResultTool } from '../tools/builtin/recall-tool-result.js';
 
 /**
  * Context pressure on a tool-heavy run.
@@ -18,8 +19,8 @@ import { ToolResultBlobStore } from './tool-result-blob-store.js';
  */
 
 /** Assistant message with one tool_use block. */
-function toolUseMsg(id: string, name = 'http_request'): BetaMessageParam {
-  return { role: 'assistant', content: [{ type: 'tool_use', id, name, input: {} }] };
+function toolUseMsg(id: string, name = 'http_request', input: unknown = {}): BetaMessageParam {
+  return { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] };
 }
 
 /** User message with one tool_result block carrying `payload`. */
@@ -572,5 +573,60 @@ describe('collapse — anchor arithmetic and note contents', () => {
     expect(placeholder).toContain('recall_tool_result');
     expect(placeholder).not.toContain(marker);
     expect(placeholder).not.toContain('</untrusted_data>');
+  });
+});
+
+/**
+ * The dispatcher, not the handler, decides what lands in history.
+ *
+ * These run the recall through `Agent._executeOne`, the real path: masking, the
+ * injection scan, and the size cap all apply there. A previous revision of this
+ * fix asserted against the HANDLER's return value and was green while being a
+ * complete no-op in production — the scan rewrote every recall (the wrapper
+ * closes with `</untrusted_data>`, which reads as a boundary escape), so the
+ * store's provenance compare never matched and the duplicate was minted anyway.
+ * Test the text that actually reaches `messages`, or this passes while dead.
+ */
+describe('recall through the real dispatcher', () => {
+  function agentWithRecall(store: ToolResultBlobStore): Agent {
+    return new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [recallToolResultTool], toolResultBlobStore: store });
+  }
+  function execute(agent: Agent, id: string, input: unknown): Promise<BetaToolResultBlockParam> {
+    return (agent as unknown as {
+      _executeOne(tc: { type: 'tool_use'; id: string; name: string; input: unknown }): Promise<BetaToolResultBlockParam>;
+    })._executeOne({ type: 'tool_use', id, name: RECALL_TOOL_NAME, input });
+  }
+
+  it('does not stack an injection warning onto its own wrapper', async () => {
+    const store = new ToolResultBlobStore();
+    const handles = store.evictFrom(
+      [toolUseMsg('tu-0', 'read_file'), toolResultMsg('tu-0', 'Z'.repeat(5_000))], 4_096);
+    const agent = agentWithRecall(store);
+
+    const block = await execute(agent, 'tu-r', { id: handles[0]!.id });
+    const text = typeof block.content === 'string' ? block.content : '';
+    // The scan reads the wrapper's own closing tag as a boundary escape, so
+    // before this tool was treated as internal EVERY recall came back with a
+    // fresh warning — and they stack across repeated recalls of one blob.
+    expect(text).not.toContain('⚠ WARNING');
+    // The taint still rides along: the flag is seated on the content marker.
+    expect(text).toContain('<untrusted_data');
+  });
+
+  it('re-parks under the original handle on the path production actually takes', async () => {
+    const store = new ToolResultBlobStore();
+    const dump = 'Z'.repeat(5_000);
+    const first = store.evictFrom(
+      [toolUseMsg('tu-0', 'read_file'), toolResultMsg('tu-0', dump)], 4_096)[0]!.id;
+    const agent = agentWithRecall(store);
+
+    const block = await execute(agent, 'tu-r', { id: first });
+    const text = typeof block.content === 'string' ? block.content : '';
+    const again = store.evictFrom(
+      [toolUseMsg('tu-r', RECALL_TOOL_NAME, { id: first }), toolResultMsg('tu-r', text)], 4_096);
+
+    expect(again[0]!.id, 'a twin blob was minted for data already held').toBe(first);
+    expect(store.size).toBe(1);
+    expect(store.get(first)?.payload).toBe(dump);
   });
 });

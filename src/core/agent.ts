@@ -62,7 +62,7 @@ import { evictSavedArtifactBodies } from './artifact-eviction.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
-import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
+import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES, RECALL_TOOL_NAME } from './tool-result-blob-store.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
@@ -2443,6 +2443,16 @@ export class Agent implements IAgent {
    * `src/tools/registry.ts`.
    */
   private static readonly INTERNAL_TOOLS = new Set([
+    // `recall_tool_result` hands back a payload this engine itself stored, and it
+    // stored it FROM THIS HISTORY — i.e. after this very scan already ran on it.
+    // Re-scanning is not a second opinion, it is the same opinion twice, and it
+    // is not free: `wrapUntrustedData` closes with `</untrusted_data>`, which the
+    // scanner reads as a `boundary escape`, so every recall came back carrying a
+    // fresh `⚠ WARNING:` prefix — measured, and they STACK across repeated
+    // recalls of the same blob. The taint signal does not depend on this scan:
+    // it is seated on `containsUntrustedMarker(scanned)` below, a CONTENT
+    // predicate, and `recalledPayload` guarantees the marker is present.
+    RECALL_TOOL_NAME,
     'write_file', 'edit_file', 'batch_files',
     'memory_store', 'memory_recall', 'memory_update', 'memory_delete', 'memory_list', 'memory_promote',
     // DK.1: `remember` + `memory_block_edit` return FIXED status strings (no stored content),
