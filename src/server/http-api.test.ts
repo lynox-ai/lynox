@@ -2619,6 +2619,39 @@ describe('LynoxHTTPApi', () => {
       expect(tiers!['balanced']).toContain('GLM 5.2');
     });
 
+    it('GET active_model reports an Anthropic slot on a non-Anthropic base honestly', async () => {
+      // Two regressions in one case, both found by mutating the changed lines:
+      //  · collapsing the slot-provider narrowing to a blanket 'openai' would
+      //    mislabel every max-quality slot running on a Mistral/Fireworks base;
+      //  · `resolveNativeContextWindow` refuses a Claude window when the provider
+      //    reads openai/custom (models.ts:1207 — the Anthropic-fallback trap).
+      //    Handing it the BASE provider caps a genuine Sonnet slot at the 200k
+      //    fallback instead of its real 1M, which is the window the UI filters on.
+      const llmClient = await import('../core/llm-client.js');
+      const providerSpy = vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('openai');
+      try {
+        const { readUserConfig } = await import('../core/config.js');
+        (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+          .mockReturnValueOnce({
+            provider: 'openai',
+            default_tier: 'balanced',
+            routing_mode: 'hybrid',
+            tier_set: { balanced: { provider: 'anthropic', model_id: 'claude-sonnet-5' } },
+          });
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        const am = body['active_model'] as Record<string, unknown> | undefined;
+        expect(am).toBeDefined();
+        expect(am!['id']).toBe('claude-sonnet-5');
+        expect(am!['provider']).toBe('anthropic');
+        expect(am!['contextWindow']).toBe(1_000_000);
+      } finally {
+        providerSpy.mockRestore();
+      }
+    });
+
+
     it('capabilities.durable_memory_capture_degraded is TRUE for DK-on + Mistral balanced (the wiring)', async () => {
       // The WIRING test (DEF-dk-capture-tool-dependence): the pure couple is
       // unit-tested in models.test.ts; what is only checkable here is that the
