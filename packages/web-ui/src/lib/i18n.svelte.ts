@@ -917,8 +917,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.speak_failed_empty': { de: 'Vorlesen fehlgeschlagen — keine Audio-Daten erhalten.', en: 'Voice failed — no audio received.' },
 	'chat.speak_failed_blocked': { de: 'Vorlesen blockiert — der Browser hat die automatische Wiedergabe verhindert. Klicke das Lautsprecher-Symbol einmal manuell an.', en: 'Voice blocked — the browser prevented autoplay. Click the speaker button once manually.' },
 	'chat.tts_privacy_hint': {
-		de: 'Vorgelesene Antworten werden zur Sprachausgabe an Mistral (Paris, EU) gesendet. Keine Speicherung durch den Anbieter.',
-		en: 'Read-aloud audio is synthesized by Mistral (Paris, EU). The provider stores nothing.',
+		de: 'Vorgelesene Antworten gehen zur Sprachausgabe an Mistral (Paris, EU): kein Training, 30 rollende Tage zur Missbrauchsüberwachung.',
+		en: 'Read-aloud audio is synthesized by Mistral (Paris, EU): no training, kept 30 rolling days to monitor abuse.',
 	},
 	'status.engine_version': { de: 'lynox Engine Version', en: 'lynox engine version' },
 	'status.stale_bundle': {
