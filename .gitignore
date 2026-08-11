@@ -35,3 +35,20 @@ test-results/
 .claude/settings.local.json
 .audits/
 audits/
+
+# Real thread content, kept out of a public repo by a mechanism rather than a
+# comment. `scripts/gold-propose-sonnet.mjs` writes `<draft>.sonnet.jsonl` and
+# warns twice in its own source that input and output hold real conversations —
+# but a warning does not survive `git add -A`. The gold/replay drafts, DK
+# curation sets and knowledge exports all use this extension.
+# The kg-bench corpora are synthetic fixtures (see their `fixtureId` field) and
+# stay tracked.
+#
+# ⚠️ This is deliberately broad, and the cost is that a NEW synthetic fixture
+# also disappears silently — `git add` will not complain, the file just never
+# arrives. If you add one, allow it with its own `!` line below and say in the
+# commit why it carries no real content. Silence is the safe default here: a
+# missing fixture fails a test, a committed transcript cannot be taken back.
+*.jsonl
+!scripts/kg-bench/corpus/*.jsonl
+!scripts/kg-bench/queries/*.jsonl
