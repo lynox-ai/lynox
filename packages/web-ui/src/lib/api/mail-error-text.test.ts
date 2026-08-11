@@ -63,6 +63,20 @@ describe('friendlyMailError — the 465 advice only reaches people on 465', () =
 	});
 });
 
+describe('friendlyMailError — advice a managed tenant cannot act on', () => {
+	it('does not tell anyone to disable certificate checking', () => {
+		// An earlier draft named LYNOX_MAIL_INSECURE_TLS here. A managed tenant
+		// sets no env vars, so it reads as an instruction to lynox ops — to turn
+		// verification off for IMAP *and* SMTP across the whole instance, to fix
+		// one server. Both legs give the same, role-neutral advice instead.
+		for (const stage of ['imap', 'smtp'] as const) {
+			const msg = friendlyMailError('tls_failed', undefined, { stage });
+			expect(msg).not.toMatch(/LYNOX_MAIL_INSECURE_TLS/);
+			expect(msg).toMatch(/contact your admin/);
+		}
+	});
+});
+
 describe('friendlyMailError — the IMAP branch is untouched', () => {
 	it('keeps its own wording for every code it handled before', () => {
 		expect(friendlyMailError('auth_failed', undefined)).toMatch(/app-password/);

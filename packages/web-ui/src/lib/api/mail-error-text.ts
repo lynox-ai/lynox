@@ -44,8 +44,13 @@ export function friendlyMailError(
 				return `Couldn't reach the SMTP server. Check the hostname and port.${portHint}`;
 			case 'timeout':
 				return `The SMTP server never answered. Check the hostname and port, and any firewall between this machine and it.${portHint}`;
+			// Deliberately the same advice as the IMAP branch below. An earlier
+			// draft named the env flag that disables certificate checking; that
+			// is useless to a managed tenant, who sets no env vars, and it reads
+			// as an instruction to turn off verification for BOTH protocols on
+			// the whole instance to fix one server.
 			case 'tls_failed':
-				return "The SMTP server's certificate couldn't be verified. If it uses self-signed TLS, an operator can allow that with LYNOX_MAIL_INSECURE_TLS=1.";
+				return "The SMTP server's certificate couldn't be verified. If this is a custom server with self-signed TLS, contact your admin.";
 			default:
 				return `Sending (SMTP) failed: ${raw ?? 'unknown error'}`;
 		}

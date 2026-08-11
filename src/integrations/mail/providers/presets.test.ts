@@ -196,12 +196,11 @@ describe('parseAutoconfigXml', () => {
     expect(parseAutoconfigXml(xml).smtp).toEqual({ host: 'smtp.x.com', port: 465, secure: true });
   });
 
-  it('will not cross to a different host to find 587', () => {
-    // The block regex matches the whole payload, so a second <emailProvider>
-    // block is a candidate too. Preferring its 587 entry would silently pair a
-    // primary IMAP server with some other provider's relay — frequently an ISP
-    // relay that only accepts mail from inside that ISP's network. First-wins
-    // decides WHICH server; the preference only picks among its ports.
+  // A payload may describe several providers for one domain — a current one and
+  // an ISP-legacy one is the usual pair. Mixing servers between them yields a
+  // setup that reads fine and cannot send, because that relay typically only
+  // accepts mail from inside its own ISP's network.
+  it('will not take the SMTP server from a different provider section', () => {
     const xml = `
       <clientConfig>
         <emailProvider id="primary">
@@ -216,18 +215,53 @@ describe('parseAutoconfigXml', () => {
     expect(parseAutoconfigXml(xml).smtp).toEqual({ host: 'smtp.primary.com', port: 465, secure: true });
   });
 
-  it('still prefers 587 when the same host offers both, which is the common case', () => {
-    // The other direction: restricting to one host must not disable the
-    // preference for the providers that publish both ports on one hostname.
+  it('will not do it in the other order either — the ISP section listed first', () => {
+    // The direction a host-equality rule misses entirely: with no preference
+    // involved, plain first-wins already paired the primary IMAP server with the
+    // ISP relay. Section scoping is what actually closes this, not host equality.
+    const xml = `
+      <clientConfig>
+        <emailProvider id="isp-legacy">
+          <outgoingServer type="smtp"><hostname>relay.isp.example</hostname><port>587</port><socketType>STARTTLS</socketType></outgoingServer>
+        </emailProvider>
+        <emailProvider id="primary">
+          <incomingServer type="imap"><hostname>imap.primary.com</hostname><port>993</port><socketType>SSL</socketType></incomingServer>
+          <outgoingServer type="smtp"><hostname>smtp.primary.com</hostname><port>465</port><socketType>SSL</socketType></outgoingServer>
+        </emailProvider>
+      </clientConfig>
+    `;
+    const result = parseAutoconfigXml(xml);
+    expect(result.imap.host).toBe('imap.primary.com');
+    expect(result.smtp.host).toBe('smtp.primary.com');
+  });
+
+  it('prefers 587 on a second hostname within the SAME provider', () => {
+    // The other direction: one provider may publish submission under its own
+    // second name. Restricting the preference to the first entry's host would
+    // hand a hosted instance the 465 entry — the port this whole change exists
+    // because it cannot reach.
     const xml = `
       <clientConfig><emailProvider id="x">
         <incomingServer type="imap"><hostname>imap.x.com</hostname><port>993</port><socketType>SSL</socketType></incomingServer>
-        <outgoingServer type="smtp"><hostname>smtp.x.com</hostname><port>465</port><socketType>SSL</socketType></outgoingServer>
-        <outgoingServer type="smtp"><hostname>other.x.com</hostname><port>587</port><socketType>STARTTLS</socketType></outgoingServer>
-        <outgoingServer type="smtp"><hostname>smtp.x.com</hostname><port>587</port><socketType>STARTTLS</socketType></outgoingServer>
+        <outgoingServer type="smtp"><hostname>smtp-ssl.x.com</hostname><port>465</port><socketType>SSL</socketType></outgoingServer>
+        <outgoingServer type="smtp"><hostname>smtp-tls.x.com</hostname><port>587</port><socketType>STARTTLS</socketType></outgoingServer>
       </emailProvider></clientConfig>
     `;
-    expect(parseAutoconfigXml(xml).smtp).toEqual({ host: 'smtp.x.com', port: 587, secure: false });
+    expect(parseAutoconfigXml(xml).smtp).toEqual({ host: 'smtp-tls.x.com', port: 587, secure: false });
+  });
+
+  it('falls back to the whole payload when no section carries both kinds', () => {
+    // Refusing such a payload would be a new failure rather than a fix, so the
+    // pre-existing behaviour is kept for it.
+    const xml = `
+      <clientConfig>
+        <emailProvider id="in"><incomingServer type="imap"><hostname>imap.x.com</hostname><port>993</port><socketType>SSL</socketType></incomingServer></emailProvider>
+        <emailProvider id="out"><outgoingServer type="smtp"><hostname>smtp.x.com</hostname><port>587</port><socketType>STARTTLS</socketType></outgoingServer></emailProvider>
+      </clientConfig>
+    `;
+    const result = parseAutoconfigXml(xml);
+    expect(result.imap.host).toBe('imap.x.com');
+    expect(result.smtp.host).toBe('smtp.x.com');
   });
 
   it('does not apply the port preference to IMAP', () => {

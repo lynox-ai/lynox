@@ -252,8 +252,10 @@ export async function autodiscover(emailAddress: string, fetchImpl: typeof fetch
  * Exposed for unit tests.
  */
 export function parseAutoconfigXml(xml: string): AutodiscoverResult {
-  const imap = pickServer(xml, 'imap');
-  const smtp = pickServer(xml, 'smtp');
+  // One section for both, so the two halves always describe the same provider.
+  const section = pairableSection(xml);
+  const imap = pickServer(section, 'imap');
+  const smtp = pickServer(section, 'smtp');
   if (!imap || !smtp) {
     throw new MailError('not_found', 'Autoconfig payload missing IMAP or SMTP server entry');
   }
@@ -301,24 +303,55 @@ function parseServers(xml: string, kind: 'imap' | 'smtp'): ParsedServer[] {
   return out;
 }
 
+/**
+ * The `<emailProvider>` sections of an autoconfig payload, in order. A payload
+ * may describe several providers for one domain — a current one and an
+ * ISP-legacy one is the usual pair — and servers must never be mixed between
+ * them: pairing a primary IMAP host with some other provider's relay produces a
+ * setup that reads fine and cannot send, frequently because that relay only
+ * accepts mail from inside its own ISP's network.
+ *
+ * Payloads without the wrapper are returned whole, so they behave as before.
+ */
+function providerBlocks(xml: string): string[] {
+  const blocks = [...xml.matchAll(/<emailProvider\b[^>]*>([\s\S]*?)<\/emailProvider>/gi)].map(m => m[1] ?? '');
+  return blocks.length > 0 ? blocks : [xml];
+}
+
+/**
+ * The first provider section that can supply BOTH an IMAP and an SMTP server,
+ * or the whole payload when none can.
+ *
+ * Choosing the section once, for both kinds together, is the point. Picking per
+ * kind independently is what a whole-payload scan does, and it lets an
+ * ISP-legacy section that happens to be listed first supply the SMTP server for
+ * a completely different provider's IMAP server. The fallback keeps payloads
+ * that split the two across sections behaving exactly as they did before, since
+ * refusing them outright would be a new failure rather than a fix.
+ */
+function pairableSection(xml: string): string {
+  for (const block of providerBlocks(xml)) {
+    if (parseServers(block, 'imap').length > 0 && parseServers(block, 'smtp').length > 0) return block;
+  }
+  return xml;
+}
+
 function pickServer(xml: string, kind: 'imap' | 'smtp'): ParsedServer | null {
   const candidates = parseServers(xml, kind);
   const first = candidates[0];
   if (kind === 'imap' || !first) return first ?? null;
-  // SMTP: prefer submission when the payload offers it. Autoconfig lists the
+  // SMTP: prefer submission when this provider offers it. Autoconfig lists the
   // provider's own preference first and that is frequently 465, which a hosted
   // instance cannot reach at all — the provider is describing its servers, not
-  // our network. Only entries that survived the TLS filter above are eligible,
-  // so this never prefers a plaintext 587 over an encrypted 465. A payload with
-  // a single entry is returned unchanged.
+  // our network. Only entries that survived the TLS filter are eligible, so this
+  // never prefers a plaintext 587 over an encrypted 465, and a section with a
+  // single entry is returned unchanged.
   //
-  // Restricted to the FIRST entry's host, because this is a port preference and
-  // not a host preference. The block regex matches across the whole payload, and
-  // a payload may carry several <emailProvider> blocks — a 587 entry on a
-  // different hostname is a different server, quite possibly an ISP relay that
-  // only accepts mail from inside that ISP's network. First-wins still decides
-  // WHICH server; the preference only picks among that server's ports.
-  return candidates.find(s => s.host === first.host && s.port === SUBMISSION_PORT) ?? first;
+  // The preference ranges over the whole section, hostnames included: one
+  // provider may publish submission on a second name (smtp-tls.example.com),
+  // and that is still the same provider. Crossing to a DIFFERENT provider is
+  // prevented one level up, by scoping to the section, not by comparing hosts.
+  return candidates.find(s => s.port === SUBMISSION_PORT) ?? first;
 }
 
 function innerTag(xml: string, tag: string): string | undefined {

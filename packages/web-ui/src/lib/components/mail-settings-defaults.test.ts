@@ -101,6 +101,26 @@ describe('MailSettings surfaces which leg of the connection failed', () => {
     // smarthost wanting different credentials, a provider throttling AUTH.
     expect(source).toMatch(/canSaveWithoutSending/);
     expect(source).toMatch(/testResult\.stage === 'smtp'/);
-    expect(source).toMatch(/skipTest:\s*skipConnectionTest/);
+  });
+
+  it('cannot send skipTest on the strength of a checkbox that is no longer shown', () => {
+    // The escape skips the WHOLE probe, the IMAP leg included. Its checkbox
+    // unmounts whenever testResult is cleared, but the boolean behind it did
+    // not reset — so ticking it, then correcting the password and saving,
+    // stored credentials nothing had ever verified, under "Account saved".
+    expect(source).toMatch(/skipTest:\s*skipConnectionTest && canSaveWithoutSending/);
+    // And a fresh probe must invalidate the decision made about the old one.
+    const testFn = source.slice(source.indexOf('async function testConnection()'), source.indexOf('async function saveAccount()'));
+    expect(testFn.length).toBeGreaterThan(0);
+    expect(testFn).toMatch(/skipConnectionTest = false/);
+  });
+
+  it('shows the refusal — and the escape — to someone who never pressed Test', () => {
+    // friendlyError alone was not enough: the escape hung off testResult, which
+    // only the test button ever set, so the one path that actually blocks had
+    // no way past it.
+    const saveFn = source.slice(source.indexOf('async function saveAccount()'));
+    expect(saveFn).toMatch(/testResult = \{\s*ok: false/);
+    expect(saveFn).toMatch(/stage: err\.stage/);
   });
 });

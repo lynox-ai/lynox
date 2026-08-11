@@ -335,21 +335,31 @@ function wrapImapError(err: unknown, fallback: string): MailError {
 }
 
 /**
- * SMTP reply codes that mean "not now", not "not you". nodemailer formats every
- * failure of the AUTH phase as `Invalid login: <server reply>`, so a throttle
- * arrives wearing the word "login" and `isAuthError` — which matches on that
- * word — reads it as bad credentials. The user is then told to regenerate an
- * app-password, retries, and extends the very lockout that caused it.
+ * SMTP reply codes that mean "not now", not "not you" — but ONLY when they came
+ * out of the AUTH phase. nodemailer formats every failure there as
+ * `Invalid login: <server reply>`, so a throttle arrives wearing the word
+ * "login" and `isAuthError` — which matches on that word — reads it as bad
+ * credentials. The user is then told to regenerate an app-password, retries,
+ * and extends the very lockout that caused it.
  *
- * 421 service unavailable / closing · 450 mailbox busy · 454 temporary auth
- * failure, which is what Gmail and Yahoo send for "too many login attempts".
+ * 421 service unavailable / closing · 454 temporary authentication failure,
+ * which is what Gmail and Yahoo send for "too many login attempts".
+ *
+ * The phase check is not decoration. nodemailer attaches `responseCode` to any
+ * reply that starts with digits, so the same numbers turn up far from AUTH:
+ * a greylisted recipient is `450 … Recipient address rejected` (EENVELOPE), and
+ * a server refusing STARTTLS answers `454 TLS not available` (ETLS). Reading
+ * either as "your account is throttled" would replace a correct diagnosis with
+ * a wrong one — and the STARTTLS case got MORE likely with this change, which
+ * makes 587 the default.
  */
-const SMTP_THROTTLE_CODES = new Set([421, 450, 454]);
+const SMTP_AUTH_THROTTLE_CODES = new Set([421, 454]);
 
-function smtpResponseCode(err: unknown): number | undefined {
-  if (typeof err !== 'object' || err === null) return undefined;
-  const code = (err as { responseCode?: unknown }).responseCode;
-  return typeof code === 'number' ? code : undefined;
+/** True only for a throttle reply raised while authenticating. */
+function isSmtpAuthThrottle(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const { code, responseCode } = err as { code?: unknown; responseCode?: unknown };
+  return code === 'EAUTH' && typeof responseCode === 'number' && SMTP_AUTH_THROTTLE_CODES.has(responseCode);
 }
 
 /**
@@ -361,8 +371,8 @@ function smtpResponseCode(err: unknown): number | undefined {
 function wrapSmtpError(err: unknown, op: 'send' | 'verify'): MailError {
   if (err instanceof MailError) return err;
   // Before isAuthError, which would otherwise swallow these — see above.
-  const responseCode = smtpResponseCode(err);
-  if (responseCode !== undefined && SMTP_THROTTLE_CODES.has(responseCode)) {
+  if (isSmtpAuthThrottle(err)) {
+    const { responseCode } = err as { responseCode: number };
     return new MailError('rate_limited', `SMTP server is throttling this account (${String(responseCode)}) — wait before retrying`, { cause: err });
   }
   if (isAuthError(err)) return new MailError('auth_failed', 'SMTP authentication failed', { cause: err });

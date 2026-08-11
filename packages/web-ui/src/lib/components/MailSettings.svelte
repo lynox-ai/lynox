@@ -199,6 +199,8 @@
 		}
 		testing = true;
 		testResult = null;
+		// A new probe invalidates the decision that was made about the old one.
+		skipConnectionTest = false;
 		try {
 			const payload = buildMailAccountPayload({
 				id: formId || formAddress,
@@ -262,7 +264,13 @@
 				password: formPassword,
 				personaPrompt: formPersonaPrompt,
 				custom: formPreset === 'custom' ? buildCustomPayload() : undefined,
-				skipTest: skipConnectionTest,
+				// Tied to the result currently on screen, not to the checkbox
+				// alone. The box unmounts whenever testResult is cleared, and a
+				// bare `skipConnectionTest` stayed true through that — so a user
+				// who ticked it, then edited the password and saved, skipped the
+				// probe ENTIRELY (skipTest bypasses the IMAP leg too) and stored
+				// credentials nothing had ever verified, under "Account saved".
+				skipTest: skipConnectionTest && canSaveWithoutSending,
 			});
 			const res = await fetch(`${getApiBase()}/mail/accounts`, {
 				method: 'POST',
@@ -274,6 +282,13 @@
 				// The save path is the one that refuses, so it owes the same
 				// translation the test button gives — not the raw engine string.
 				addToast(err.code ? friendlyError(err.code, err.error, err.stage) : (err.error ?? 'Save failed'), 'error');
+				// Show the refusal where the test result goes, so a user who never
+				// pressed Test still gets the explanation AND the way past it.
+				// Before this, the escape existed only on the test-button path —
+				// missing from the one path that actually blocks.
+				if (err.code) {
+					testResult = { ok: false, error: err.error, code: err.code, stage: err.stage, checked: { imap: true, smtp: err.stage === 'smtp' } };
+				}
 				saving = false;
 				return;
 			}

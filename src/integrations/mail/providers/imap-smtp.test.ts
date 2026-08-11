@@ -536,16 +536,48 @@ describe('ImapSmtpProvider — send', () => {
     expect(err.message).toContain('550');
   });
 
-  it('reads a throttle as rate_limited, not as bad credentials', async () => {
+  it('reads an AUTH throttle as rate_limited, not as bad credentials', async () => {
     // nodemailer formats every AUTH-phase failure as "Invalid login: <reply>",
     // so a 454 throttle arrives wearing the word "login" — and the user was then
     // told to regenerate an app-password, retried, and extended the lockout.
-    const throttled = Object.assign(new Error('Invalid login: 454 4.7.0 Too many login attempts'), { responseCode: 454 });
+    const throttled = Object.assign(new Error('Invalid login: 454 4.7.0 Too many login attempts'), { code: 'EAUTH', responseCode: 454 });
     sendMailMock.mockRejectedValue(throttled);
 
     const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
     const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
     expect(err.code).toBe('rate_limited');
+  });
+
+  it('does NOT read a greylisted recipient as an account throttle', async () => {
+    // nodemailer attaches responseCode to any reply starting with digits, so the
+    // same numbers appear far from AUTH. A greylisted recipient is 450 with
+    // code EENVELOPE — the account is fine and the message is the problem.
+    // Calling that "your account is throttled" replaces a correct diagnosis with
+    // a wrong one, and send-core hands the text straight to the model.
+    const greylisted = Object.assign(
+      new Error("Can't send mail - all recipients were rejected: 450 4.2.0 Recipient address rejected: Greylisted"),
+      { code: 'EENVELOPE', responseCode: 450 },
+    );
+    sendMailMock.mockRejectedValue(greylisted);
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
+    expect(err.code).toBe('send_rejected');
+    expect(err.message).toContain('recipients were rejected');
+  });
+
+  it('does NOT read a refused STARTTLS as an account throttle', async () => {
+    // RFC 3207: "454 TLS not available due to temporary reason", raised as ETLS.
+    // Making 587 the default made this path MORE likely, not less.
+    const tlsRefused = Object.assign(
+      new Error('Error upgrading connection with STARTTLS'),
+      { code: 'ETLS', responseCode: 454 },
+    );
+    sendMailMock.mockRejectedValue(tlsRefused);
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
+    expect(err.code).not.toBe('rate_limited');
   });
 
   it('still calls a genuine credential rejection auth_failed', async () => {
