@@ -169,6 +169,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'voice.default':       { de: 'Standard',                                                         en: 'Default' },
 	'voice.unavailable':   { de: 'nicht verfügbar',                                                  en: 'unavailable' },
 	'voice.env_override':  { de: 'Vom Server überschrieben:',                                        en: 'Overridden by server:' },
+	'voice.managed_locked': { de: 'Auf Managed-Instanzen von lynox verwaltet — die Sprachverarbeitung läuft über Mistral (EU). Kommt ein weiterer Anbieter dazu, wird dieses Feld wieder wählbar.', en: 'Managed by lynox on managed instances — voice runs on Mistral (EU). This becomes selectable again if a second provider is added.' },
 	'voice.loading':       { de: 'Lädt …',                                                           en: 'Loading …' },
 	'voice.load_failed':   { de: 'Sprach-Einstellungen konnten nicht geladen werden.',               en: 'Could not load voice settings.' },
 	'voice.save':          { de: 'Speichern',                                                        en: 'Save' },

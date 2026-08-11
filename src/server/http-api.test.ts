@@ -5098,6 +5098,56 @@ describe('LynoxHTTPApi', () => {
 
       // --- PUT /api/config ----------------------------------------------------
 
+      it('GET /api/voice/info reports the picker as locked exactly when the write gate would 403', async () => {
+        // The UI used to decide this itself and got it wrong: on managed the STT
+        // picker rendered enabled and every save 403'd — a control that looks live
+        // and is not. `locked` must therefore be derived from the SAME set the gate
+        // enforces, so the two cannot drift. Asserted as the EQUIVALENCE, not as a
+        // literal true: the day a second voice provider makes the field writable,
+        // this test follows instead of having to be edited.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const info = await (await jsonFetch('/api/voice/info')).json() as {
+            stt: { locked?: boolean }; tts: { locked?: boolean };
+          };
+          for (const [field, locked, probe] of [
+            ['transcription_provider', info.stt.locked, 'whisper'],
+            ['tts_provider', info.tts.locked, 'mistral'],
+          ] as const) {
+            // What the gate actually does with that field, measured rather than assumed.
+            const put = await jsonFetch('/api/config', {
+              method: 'PUT',
+              body: JSON.stringify({ [field]: probe }),
+            });
+            // Guard the instrument: a 400 means the probe value is not schema-valid
+            // for this field, so the request never reached the gate and the
+            // comparison below would be measuring the validator instead. Caught
+            // exactly that on the first run — 'whisper' is not a TTS provider.
+            expect(put.status, `${field}: probe "${probe}" was rejected by the schema, not the gate`)
+              .not.toBe(400);
+            const gateRefuses = put.status === 403;
+            expect(locked, `${field}: picker says locked=${String(locked)}, gate returned ${String(put.status)}`)
+              .toBe(gateRefuses);
+          }
+        } finally {
+          vi.unstubAllEnvs();
+        }
+
+        // …and the SELF-HOST side, without which "locked: true" hardcoded would pass:
+        // the assertion has to meet both states or it only pins today's tier.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        try {
+          const info = await (await jsonFetch('/api/voice/info')).json() as {
+            stt: { locked?: boolean }; tts: { locked?: boolean };
+          };
+          expect(info.stt.locked, 'self-host must never lock the STT picker').toBe(false);
+          expect(info.tts.locked, 'self-host must never lock the TTS picker').toBe(false);
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      });
+
       it('PUT /api/config accepts user-scope in managed mode for allowlisted fields', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');

@@ -5703,6 +5703,17 @@ export class LynoxHTTPApi {
       let voices: Awaited<ReturnType<typeof speakMod.listMistralVoices>> = [];
       try { voices = await speakMod.listMistralVoices(); } catch { /* keep empty */ }
 
+      // Whether the tenant may CHANGE the provider, decided by the same set the
+      // write gate enforces (MANAGED_USER_WRITABLE_CONFIG) rather than by the UI
+      // guessing. On a managed instance neither field is in it, so the picker was
+      // rendered enabled and every save 403'd — a control that looks live and is
+      // not. Deriving it here means the day a field becomes managed-writable (a
+      // second voice provider would be the reason), the gate and the UI change
+      // together instead of drifting apart.
+      const cfgLocked = (field: string): boolean =>
+        requiresConfigLockGate(readEnvAlias('LYNOX_BILLING_TIER')) &&
+        !MANAGED_USER_WRITABLE_CONFIG.has(field);
+
       jsonResponse(res, 200, {
         stt: {
           available: transcribeMod.hasTranscribeProvider(),
@@ -5710,6 +5721,7 @@ export class LynoxHTTPApi {
           providers: sttProviders,
           config_value: userConfig.transcription_provider ?? null,
           env_override: sttEnvOverride,
+          locked: cfgLocked('transcription_provider'),
         },
         tts: {
           available: speakMod.hasSpeakProvider(),
@@ -5719,6 +5731,7 @@ export class LynoxHTTPApi {
           config_value: userConfig.tts_provider ?? null,
           config_voice: userConfig.tts_voice ?? null,
           env_override: ttsEnvOverride,
+          locked: cfgLocked('tts_provider'),
         },
       });
     });
