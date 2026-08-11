@@ -126,7 +126,15 @@ export function checkWriteContent(content: string, filePath: string): WriteCheck
 const OWN_WRAPPER_TAIL = /\n<\/untrusted_data>$/;
 
 function scanRegionOf(result: string): string {
-  return result.startsWith('<untrusted_data') ? result.replace(OWN_WRAPPER_TAIL, '') : result;
+  // Replaced by the newline it consumed, NOT by nothing. That newline is the
+  // last character of the body, and three patterns need it: `role
+  // impersonation` (/^(assistant|human):\s/im) and both `provenance marker
+  // forgery` variants match only when the body's final token is followed by
+  // whitespace. Dropping it silently disarmed all three for any wrapped result
+  // whose body ENDS in `assistant:`, `human:`, `<fact` or `&lt;fact` —
+  // measured, and doubly silent because `wrapUntrustedData`'s own inner scan
+  // runs on the raw body, where that trailing whitespace does not exist either.
+  return result.startsWith('<untrusted_data') ? result.replace(OWN_WRAPPER_TAIL, '\n') : result;
 }
 
 /**

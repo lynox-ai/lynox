@@ -324,6 +324,24 @@ describe('scanToolResult — the untrusted wrapper must not flag itself', () => 
     expect(scanToolResult(notAWrapper, 'http_request')).toContain('WARNING');
   });
 
+  /**
+   * The tail is replaced by the newline it consumed, and that newline is the
+   * body's last character. Three patterns key on whitespace AFTER the body's
+   * final token, so removing it outright disarmed them — and doubly silently,
+   * because `wrapUntrustedData`'s own inner scan runs on the raw body where the
+   * trailing newline does not exist either. Each case below warns on
+   * origin/main; a bare `''` replacement makes all four go quiet.
+   */
+  it.each([
+    ['assistant:', 'role impersonation'],
+    ['human:', 'role impersonation'],
+    ['<fact', 'provenance marker forgery'],
+    ['&lt;fact', 'provenance marker forgery (entity)'],
+  ])('keeps the body-final newline so %s is still detected', (tail) => {
+    const wrapped = wrapUntrustedData(`Transcript:\n${tail}`, 'web_page');
+    expect(scanToolResult(wrapped, 'http_request')).toContain('WARNING');
+  });
+
   it('does not exempt a tag that only looks terminal', () => {
     // Trailing whitespace after the tag means this is not the byte-exact shape
     // the wrapper emits, so it is scanned whole.
