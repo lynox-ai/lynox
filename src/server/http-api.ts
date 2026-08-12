@@ -4523,9 +4523,12 @@ export class LynoxHTTPApi {
       //     slot on a tenant capped at balanced — the right set, indexed at a
       //     band the engine never routes.
       // Deliberately the engine's own resolver rather than a re-derivation, so
-      // this field mirrors what runs INCLUDING the resolver's own quirks (it
-      // clamps against the base provider's map even under a hybrid tier_set).
-      // A quirk faithfully reported beats a second opinion that disagrees.
+      // this field mirrors what runs. `resolveDefaultChatTier` returns a TIER
+      // ('fast'/'balanced'/'deep'), clamped by `TIER_ORDER` against `max_tier`
+      // — it does not consult a model map, so hybrid routing does not change
+      // its answer. The band it returns is then indexed into the tier_set
+      // below, which IS hybrid-aware, so a clamped band still names the slot
+      // the engine routes.
       const activeTier = resolveDefaultChatTier(effectiveConfig);
       // The tier_set the ENGINE routes on, taken from the loader instead of
       // re-derived here. `readUserConfig()` is file-only (config.ts:640), while
@@ -4680,12 +4683,10 @@ export class LynoxHTTPApi {
       // the redaction spread — raw file — omits it entirely on the normal
       // CP-provisioned shape. Emitting the deviation from the loader while the
       // name beside it came from the file would have shipped a body naming a
-      // preset in one field and nothing in the other: the very raw-vs-loader
-      // split this PR exists to close, one field over. Guarded so an absent
-      // loader value cannot delete a name the file did carry.
-      if (effectiveConfig.tier_preset !== undefined) {
-        redacted['tier_preset'] = effectiveConfig.tier_preset;
-      }
+      // preset in one field and nothing in the other. Unconditional: the loader
+      // never deletes `tier_preset`, so when it is absent the file is too, and
+      // assigning `undefined` is a no-op (`JSON.stringify` omits it).
+      redacted['tier_preset'] = effectiveConfig.tier_preset;
       // `tier_preset` names a preset; the set the engine routes on may no
       // longer BE that preset, because an explicit slot overrides per band and
       // the managed constraints can drop one. Present only when they disagree,

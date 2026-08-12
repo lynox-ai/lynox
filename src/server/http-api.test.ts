@@ -2289,13 +2289,16 @@ describe('LynoxHTTPApi', () => {
 
     it('GET surfaces a persisted Sonnet 5 selection', async () => {
       // Both mocks carry it, because in production they cannot disagree in this
-      // direction: `loadConfig()` starts from `{ ...userConfig }` (config.ts:149)
-      // and layers project + env ON TOP, so the loader is a superset of the file
-      // for every key. The loader-only mock this case used to have described a
-      // state that cannot occur, and it was the sole thing keeping
-      // `balanced_model` on the raw file after `LYNOX_BALANCED_MODEL` (env-merged,
-      // config.ts:363) turned out to reach `active_model` and this field by
-      // different routes.
+      // direction for THIS key: `loadConfig()` starts from `{ ...userConfig }`
+      // (config.ts:149) and layers project + env on top, and nothing in the
+      // loader drops or transforms `balanced_model` (project layer only overrides
+      // non-null, env only sets). The loader is NOT a general superset of the
+      // file — it deletes `api_key`, can null `worker_profile`, and can drop
+      // `tier_set` slots — but for `balanced_model` specifically the two cannot
+      // diverge, so the loader-only mock this case used to have described a state
+      // that cannot occur. It was the sole thing keeping `balanced_model` on the
+      // raw file after `LYNOX_BALANCED_MODEL` (env-merged, config.ts:363) reached
+      // `active_model` and this field by different routes.
       const { readUserConfig, loadConfig } = await import('../core/config.js');
       (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce({
         default_tier: 'deep', thinking_mode: 'adaptive', balanced_model: 'claude-sonnet-5',
@@ -2840,10 +2843,11 @@ describe('LynoxHTTPApi', () => {
       const body = await res.json() as Record<string, unknown>;
       expect(body['balanced_model']).toBe('claude-sonnet-5');
       const tiers = body['main_chat_tiers'] as Record<string, string>;
-      // The label must follow the resolved variant, and carry a window — which is
-      // what fails if the window-context argument is dropped from that call.
+      // The label follows the resolved variant. (The window-CONTEXT argument at
+      // this call site is pinned by the dedicated 'declared window into the
+      // STANDARD-routing labels' case below, NOT here: Sonnet 5 is registered at
+      // 1M, so the suffix appears whether or not windowCtx is passed.)
       expect(tiers['balanced']).toContain('Sonnet 5');
-      expect(tiers['balanced']).toMatch(/·\s*\d+[kM]/);
     });
 
     it('GET carries a declared window into the STANDARD-routing labels too', async () => {
