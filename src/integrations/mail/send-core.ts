@@ -345,7 +345,8 @@ ${bodyPreview}`;
 **Cc:** ${previewAddressList(ctx.cc)}` : ''}${ctx.bcc.length > 0 ? pv`
 **Bcc:** ${previewAddressList(ctx.bcc)}` : ''}
 **Subject:** ${singleLine(ctx.subject)}
-**From:** ${ctx.provider.accountId}${personaLine ? pv` · _${truncate(personaFor(ctx.accountConfig!), 80)}_` : ''}
+**From:** ${ctx.provider.accountId}${personaLine ? pv`
+**Persona:** ${truncate(personaFor(ctx.accountConfig!), 120)}` : ''}
 
 ${bodyPreview}`;
 }
