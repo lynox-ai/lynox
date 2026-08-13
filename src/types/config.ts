@@ -354,6 +354,12 @@ export interface LynoxUserConfig {
    */
   balanced_model?: string | undefined;
   max_session_cost_usd?: number | undefined;
+  /** Policy ceiling on workflow steps (overrides the MAX_STEPS=20 default). A
+   *  tenant running large bulk workflows (e.g. a 2000-contact triage needing
+   *  >20 batch steps) raises this so the workflow isn't rejected at validation.
+   *  Enforced on the run paths in pipeline.ts via maxStepsFor; the manifest
+   *  schema keeps an absolute 1000-step sanity ceiling regardless. */
+  max_workflow_steps?: number | undefined;
   /** Max chat runs executing concurrently across all threads (Tier-2 run
    *  executor). Bounds LLM-cost blast + run-buffer memory from many parallel
    *  headless runs. A fresh dispatch past this is refused with HTTP 429

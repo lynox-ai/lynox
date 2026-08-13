@@ -1,7 +1,7 @@
 import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier, IAgent } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { randomUUID } from 'node:crypto';
-import { validateManifest, MAX_STEPS } from '../../orchestrator/validate.js';
+import { validateManifest, maxStepsFor } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
@@ -381,8 +381,9 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
   if (steps.length === 0) {
     return 'Error: Workflow must have at least one step.';
   }
-  if (steps.length > MAX_STEPS) {
-    return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps (got ${steps.length}).`;
+  const maxSteps = maxStepsFor(deps.config);
+  if (steps.length > maxSteps) {
+    return `Error: Workflow exceeds maximum of ${maxSteps} steps (got ${steps.length}).`;
   }
 
   // Validate unique IDs
@@ -652,8 +653,9 @@ export async function runSavedWorkflow(
   if (steps.length === 0) {
     return { ok: false, error: 'Workflow has no steps to execute.' };
   }
-  if (steps.length > MAX_STEPS) {
-    return { ok: false, error: `Workflow exceeds maximum of ${MAX_STEPS} steps.` };
+  const maxSteps = maxStepsFor(config);
+  if (steps.length > maxSteps) {
+    return { ok: false, error: `Workflow exceeds maximum of ${maxSteps} steps.` };
   }
 
   try {
@@ -834,8 +836,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return 'Error: All steps were removed. Nothing to execute.';
   }
 
-  if (steps.length > MAX_STEPS) {
-    return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps.`;
+  const maxSteps = maxStepsFor(deps.config);
+  if (steps.length > maxSteps) {
+    return `Error: Workflow exceeds maximum of ${maxSteps} steps.`;
   }
 
   try {
