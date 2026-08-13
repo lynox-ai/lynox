@@ -468,6 +468,29 @@ describe('encodeMimeHeader', () => {
     const out = encodeMimeHeader('a = b über'); // ü forces an encoded-word
     expect(out).toContain('=3D'); // '=' must not terminate the encoded-word early
   });
+  it('splits a >75-char subject into multiple encoded-words, each ≤75', () => {
+    const out = encodeMimeHeader('Grüße aus München — Protokoll der Besprechung');
+    const words = out.split(' ');
+    expect(words.length).toBeGreaterThan(1); // no longer fits one encoded-word
+    for (const w of words) {
+      expect(w.length).toBeLessThanOrEqual(75);
+      expect(w).toMatch(/^=\?UTF-8\?Q\?/);
+      expect(w).toMatch(/\?=$/);
+    }
+  });
+  it('never leaves a dangling multi-byte sequence at an encoded-word boundary', () => {
+    // each char's UTF-8 hex (=XX…) is atomic; no encoded-word may end mid-byte (e.g. =C3 without its =B6)
+    const out = encodeMimeHeader('über Grüße München — '.repeat(8));
+    for (const w of out.split(' ')) {
+      const body = w.replace(/^=\?UTF-8\?Q\?/, '').replace(/\?=$/, '');
+      // after stripping every well-formed =XX, no '=' (dangling escape) may remain
+      expect(body.replace(/=[0-9A-F]{2}/g, '')).not.toContain('=');
+    }
+  });
+  it('keeps a short non-ASCII value as a single encoded-word (no needless split)', () => {
+    const out = encodeMimeHeader('BVG-Anschluss — lynox');
+    expect(out.split(' ').filter((s) => s.startsWith('=?')).length).toBe(1);
+  });
 });
 
 describe('OAuthGmailProvider — UID map LRU', () => {
