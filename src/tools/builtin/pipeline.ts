@@ -437,6 +437,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
       secretStore: deps.secretStore,
+      limits: resolveInSessionLimits(undefined),
       runTaint,
     }));
 
@@ -554,6 +555,34 @@ function resolveHeadlessLimits(stored: WorkflowLimits | undefined): WorkflowLimi
   return {
     maxWallClockMs: stored?.maxWallClockMs ?? DEFAULT_HEADLESS_WALL_CLOCK_MS,
     maxIterations: stored?.maxIterations ?? DEFAULT_HEADLESS_MAX_ITERATIONS,
+    maxSpendUsd: stored?.maxSpendUsd,
+  };
+}
+
+/**
+ * In-session default limits — the bounds an *attended* (chat-started) pipeline
+ * runs under when it declares none. Unlike {@link resolveHeadlessLimits}
+ * (unattended: a 30-min wall-clock backstop), an in-session run is attended —
+ * the user can cancel — so wall-clock stays opt-in and the Session-level cost
+ * cap ($50 default, tenant-tunable) already bounds spend. The two defaults that
+ * DO apply:
+ *  - `maxIterations` — a runaway-step backstop (catches the subagent-loop shape
+ *    a live user would not necessarily notice mid-run);
+ *  - `maxParallelSteps` — backpressure. Without it a bulk workflow (e.g. a
+ *    2000-contact triage fanning into ~40 batch subagents) launches every step
+ *    of a phase at once and exhausts the instance.
+ *
+ * Both default-merge with any the workflow explicitly stored; `maxWallClockMs`
+ * and `maxSpendUsd` pass through only when set.
+ */
+const DEFAULT_INSESSION_MAX_ITERATIONS = 50; // backstop above MAX_STEPS (== headless)
+const DEFAULT_INSESSION_MAX_PARALLEL_STEPS = 5; // backpressure — bounds fan-out
+
+function resolveInSessionLimits(stored: WorkflowLimits | undefined): WorkflowLimits {
+  return {
+    maxIterations: stored?.maxIterations ?? DEFAULT_INSESSION_MAX_ITERATIONS,
+    maxParallelSteps: stored?.maxParallelSteps ?? DEFAULT_INSESSION_MAX_PARALLEL_STEPS,
+    maxWallClockMs: stored?.maxWallClockMs,
     maxSpendUsd: stored?.maxSpendUsd,
   };
 }
@@ -751,6 +780,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         userTimezone: deps.userTimezone,
         parentSessionCounters: deps.sessionCounters,
         parentMemory: deps.memory ?? null,
+        limits: resolveInSessionLimits(planned.limits),
         workflowId: planned.id,
         runTaint: retryTaint,
       }));
@@ -831,6 +861,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
       secretStore: deps.secretStore,
+      limits: resolveInSessionLimits(planned.limits),
       workflowId: planned.id,
       runTaint,
     }));

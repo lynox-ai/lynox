@@ -1296,7 +1296,7 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
 const RUN_CTX_KEYS = [
   'autonomy', 'parentTools', 'parentToolContext', 'parentMemory', 'userTimezone',
   'parentPrompt', 'parentSessionCounters', 'runHistory', 'hooks', 'capabilityContract',
-  'secretStore', 'runTaint',
+  'limits', 'secretStore', 'runTaint',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
@@ -1377,6 +1377,27 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     // Value assertion: the agent's tool context + tools actually flow through.
     expect(opts['parentToolContext']).toBe(agent.toolContext);
     expect(opts['parentTools']).toBe(agent.toolContext.tools);
+  });
+
+  it('in-session inline run applies default limits (backpressure + iteration backstop)', async () => {
+    // T4: in-session runs ran with limits===undefined — so the DoS guards
+    // (workflowBoundExceeded) AND the backpressure cap (maxParallelSteps, T2)
+    // never fired for a chat-started workflow. resolveInSessionLimits now
+    // supplies defaults: an iteration backstop + a parallelism cap. Wall-clock
+    // + spend stay opt-in (attended run; Session cost cap + cancel bound them).
+    const agent = makeAutonomyAgent('autonomous');
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'do thing')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxIterations?: number; maxParallelSteps?: number; maxWallClockMs?: number; maxSpendUsd?: number } | undefined;
+    expect(limits).toBeDefined(); // pipeline.test.ts:<this line> — kills the limits-less in-session path
+    expect(limits?.maxIterations).toBe(50);    // backstop
+    expect(limits?.maxParallelSteps).toBe(5);  // backpressure (T2 activator)
+    expect(limits?.maxWallClockMs).toBeUndefined(); // opt-in (attended)
+    expect(limits?.maxSpendUsd).toBeUndefined();    // opt-in (Session cap bounds it)
   });
 
   it('threads the parent agent secretStore into the run options (value, not just key)', async () => {
