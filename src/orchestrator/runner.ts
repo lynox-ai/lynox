@@ -469,6 +469,44 @@ async function runSequential(
 
 // --- Parallel phase-based execution (v1.1) ---
 
+/**
+ * Run `fn` over `items` with at most `concurrency` in flight at once, returning
+ * `PromiseSettledResult`s in INPUT order — a drop-in for
+ * `Promise.allSettled(items.map(fn))` that bounds simultaneous execution.
+ *
+ * This is the backpressure seam for `runParallel`: a phase with N steps and
+ * `limits.maxParallelSteps = K` launches at most K step agents at a time.
+ *
+ * Mirrors `Promise.allSettled` semantics exactly: every item runs to
+ * completion (no fast-fail), rejections land as `{status:'rejected'}`, and the
+ * caller evaluates halts AFTER the full set settles — so a gate-rejected
+ * step's siblings still finish + record (the existing runParallel contract).
+ */
+async function mapAllSettledWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let cursor = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const index = cursor++; // microtask-safe handout: JS is single-threaded,
+      // so read+inc happens atomically between awaits — no two workers take the
+      // same index.
+      if (index >= items.length) return;
+      try {
+        results[index] = { status: 'fulfilled', value: await fn(items[index]!, index) };
+      } catch (err) {
+        results[index] = { status: 'rejected', reason: err };
+      }
+    }
+  }
+  const pool = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: pool }, () => worker()));
+  return results;
+}
+
 async function runParallel(
   manifest: Manifest,
   state: RunState,
@@ -494,12 +532,17 @@ async function runParallel(
     iterations += phase.stepIds.length;
     options.hooks?.onPhaseStart?.(phase.phaseIndex, phase.stepIds);
 
-    const promises = phase.stepIds.map(async (stepId) => {
+    const runStep = (stepId: string): Promise<StepResult> => {
       const step = stepsById.get(stepId)!;
       return executeStep(step, manifest, state, config, agentsDir, options, stepCounters, stepRows);
-    });
-
-    const settled = await Promise.allSettled(promises);
+    };
+    const cap = options.limits?.maxParallelSteps;
+    // Unset (or non-positive) = unbounded: every step of the phase launches at
+    // once (the existing v1.1 behaviour — the limit-less parallel test pins it).
+    // Set → bound simultaneous execution via a worker pool.
+    const settled = (cap !== undefined && cap > 0)
+      ? await mapAllSettledWithConcurrency(phase.stepIds, cap, runStep)
+      : await Promise.allSettled(phase.stepIds.map(runStep));
 
     options.hooks?.onPhaseComplete?.(phase.phaseIndex);
 
