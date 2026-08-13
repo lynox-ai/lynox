@@ -36,7 +36,7 @@ vi.mock('./stream.js', () => ({
     return this;
   }),
 }));
-vi.mock('../tools/permission-guard.js', () => ({ isDangerous: vi.fn().mockReturnValue(null) }));
+vi.mock('../tools/permission-guard.js', () => ({ isDangerous: vi.fn().mockReturnValue(null), isDangerousDetailed: vi.fn().mockReturnValue(null) }));
 vi.mock('./observability.js', () => ({
   channels: {
     cacheHealth: { publish: vi.fn() },

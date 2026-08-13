@@ -143,6 +143,13 @@ export interface SpawnedSubAgent {
   /** Resolved capability tier this child runs on (fast/balanced/deep). Lets the
    * spawn panel show what was actually delegated to, separately from the model id. */
   tier?: ModelTier | undefined;
+  /**
+   * Set when this child was clamped down from deep to balanced because the user
+   * chose "Run on balanced" at the consent gate. Lets the result + spawn panel
+   * label the run honestly (predicate 5: "ran on balanced — you declined deep;
+   * quality may be lower") instead of presenting a silent downgrade.
+   */
+  downgraded?: boolean | undefined;
 }
 
 export type StreamEvent =

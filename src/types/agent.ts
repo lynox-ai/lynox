@@ -296,6 +296,13 @@ export interface IAgent {
    */
   readonly sessionCounters: SessionCounters;
   /**
+   * Return and clear the tier downgrade chosen at the most recent permission GO
+   * ("Run on balanced" on a deep-tier consent gate), if any. The spawn handler
+   * reads this to clamp deep specs to the cheaper tier. Optional: ad-hoc agents
+   * built outside a Session never produce one.
+   */
+  consumePendingDowngrade?: () => import('./models.js').ModelTier | undefined;
+  /**
    * Per-conversation store of large tool results evicted at the last
    * compaction. The `recall_tool_result` tool reads it to re-fetch a payload
    * by handle id. Owned by the Session; undefined for ad-hoc Agents built
