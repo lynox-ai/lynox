@@ -20,6 +20,21 @@ export interface WorkflowLimits {
   maxIterations?: number | undefined;
   /** Abort once cumulative run cost exceeds this (opt-in; unset = no per-run cap). */
   maxSpendUsd?: number | undefined;
+  /**
+   * Max steps of one parallel phase running *concurrently* (backpressure).
+   * Unset (or non-positive) = unbounded — every step of a phase launches at
+   * once (the existing v1.1 behaviour). When set, `runParallel` launches at
+   * most this many steps per phase, starting the next as each completes. The
+   * phase barrier is preserved: a phase still fully settles before the next
+   * begins. Guards bulk workflows (a 2000-contact triage fans into ~40 batch
+   * subagents; unbounded fan-out would exhaust the instance).
+   *
+   * Distinct from the `workflowBoundExceeded` fields above — those bound
+   * spend / iterations / wall-clock *between* steps; this bounds *simultaneous*
+   * execution *within* a phase, so it is read directly in `runParallel`, not
+   * by `workflowBoundExceeded`.
+   */
+  maxParallelSteps?: number | undefined;
 }
 
 export interface InlinePipelineStep {

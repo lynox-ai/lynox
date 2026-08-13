@@ -375,6 +375,39 @@ describe('runManifest — v1.1 parallel execution', () => {
     expect(Math.max(...startIndices)).toBeLessThan(Math.min(...completeIndices));
   });
 
+  it('limits concurrency to limits.maxParallelSteps within a phase (backpressure)', async () => {
+    const manifest: Manifest = {
+      manifest_version: '1.1',
+      name: 'backpressure',
+      triggered_by: 'test',
+      context: {},
+      agents: Array.from({ length: 8 }, (_, i) => ({
+        id: `s${i}`, agent: `agent-${i}`, runtime: 'mock' as const,
+      })),
+      gate_points: [],
+      on_failure: 'stop',
+    };
+    // 8 independent steps land in a single phase. onStepStart fires synchronously
+    // before the first await in executeStep, so maxActive is a faithful measure of
+    // simultaneous execution. Bare `Promise.allSettled(map)` starts all 8 at once;
+    // the worker pool must hold it to the cap.
+    let active = 0;
+    let maxActive = 0;
+    const hooks: RunHooks = {
+      onStepStart: () => { active++; maxActive = Math.max(maxActive, active); },
+      onStepComplete: () => { active--; },
+    };
+    const mockResponses = new Map(manifest.agents.map((a) => [a.agent, 'r']));
+    const state = await runManifest(manifest, CONFIG, {
+      mockResponses,
+      hooks,
+      limits: { maxParallelSteps: 3 },
+    });
+    expect(state.status).toBe('completed');
+    expect(state.outputs.size).toBe(8);
+    expect(maxActive).toBeLessThanOrEqual(3); // backpressure — kills bare allSettled
+  });
+
   it('diamond dependency: D receives both B and C outputs', async () => {
     const manifest: Manifest = {
       manifest_version: '1.1',
