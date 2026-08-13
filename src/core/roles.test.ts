@@ -20,6 +20,23 @@ describe('BUILTIN_ROLES', () => {
     expect(BUILTIN_ROLES['collector']!.model).toBe('fast');
   });
 
+  it('collector can fetch + read — the engine recommends it to work large payloads in isolation (DEF-0112)', () => {
+    // The truncation hints in fs.ts (large files), http.ts (large API responses)
+    // and the web-fetch path actively tell the model to spawn role='collector' to
+    // work a payload too big for the main context in isolation. allowTools is
+    // hard-enforced as a whitelist (resolve-tools.ts), so a missing entry is a
+    // silent hole — a collector without the tool a hint recommends cannot do the
+    // job it was spawned for.
+    const allow = BUILTIN_ROLES['collector']!.allowTools!;
+    expect(allow).toContain('read_file');
+    expect(allow).toContain('http_request');
+    expect(allow).toContain('web_research');
+    // Stays read-only — none of the destructive or system tools.
+    expect(allow).not.toContain('write_file');
+    expect(allow).not.toContain('edit_file');
+    expect(allow).not.toContain('bash');
+  });
+
   it('getRole returns the named role, undefined on miss', () => {
     expect(getRole('researcher')?.model).toBe('balanced');
     expect(getRole('nonexistent')).toBeUndefined();
