@@ -476,6 +476,37 @@ function sanitizeHeaderValue(value: string): string {
   return value.replace(/[\r\n\t]+/g, ' ').trim();
 }
 
+/** Printable ASCII + space — values matching this need no RFC 2047 encoding. */
+const ASCII_PRINTABLE = /^[\x20-\x7E]*$/;
+
+/**
+ * RFC 2047 Q-encode a header value when it contains non-ASCII bytes, so Gmail
+ * decodes UTF-8 instead of mis-reading the raw bytes as Latin1 (reported
+ * 2026-08-12: `Subject: … — lynox` arrived in Gmail as `Subject: Ã¢Â€Â™ ynox`).
+ * nodemailer (IMAP/SMTP) encodes automatically; this is only needed because
+ * the Gmail-API send builds the raw MIME itself (buildRfc2822). Pure-ASCII
+ * values pass through unchanged.
+ */
+export function encodeMimeHeader(value: string): string {
+  if (value.length === 0) return '';
+  if (ASCII_PRINTABLE.test(value)) return value;
+  let out = '';
+  for (const ch of value) {
+    if (ch === ' ') { out += '_'; continue; }
+    const buf = Buffer.from(ch, 'utf-8');
+    if (buf.length === 1) {
+      const c = ch.charCodeAt(0);
+      // printable ASCII (except the encoded-word specials ? = _) stays literal
+      if (c >= 0x21 && c <= 0x7E && ch !== '?' && ch !== '_' && ch !== '=') {
+        out += ch;
+        continue;
+      }
+    }
+    for (const b of buf) out += '=' + b.toString(16).toUpperCase().padStart(2, '0');
+  }
+  return `=?UTF-8?Q?${out}?=`;
+}
+
 function buildRfc2822(input: MailSendInput, fromAddress: string, fromDisplayName?: string): string {
   const lines: string[] = [];
   // Display names get quotes escaped + CRLF stripped so a malicious display
@@ -483,8 +514,14 @@ function buildRfc2822(input: MailSendInput, fromAddress: string, fromDisplayName
   const formatAddr = (a: MailAddress): string => {
     const address = sanitizeHeaderValue(a.address);
     if (!a.name) return address;
-    const safeName = sanitizeHeaderValue(a.name).replace(/"/g, '\\"');
-    return `"${safeName}" <${address}>`;
+    const safeName = sanitizeHeaderValue(a.name);
+    // Non-ASCII display names mojibake inside quotes too — encode the whole
+    // name as an RFC 2047 atom (no quotes). Pure-ASCII keeps the quoted form so
+    // embedded quotes stay escaped.
+    if (!ASCII_PRINTABLE.test(safeName)) {
+      return `${encodeMimeHeader(safeName)} <${address}>`;
+    }
+    return `"${safeName.replace(/"/g, '\\"')}" <${address}>`;
   };
   const fromAddr: MailAddress = fromDisplayName
     ? { name: fromDisplayName, address: fromAddress }
@@ -494,7 +531,7 @@ function buildRfc2822(input: MailSendInput, fromAddress: string, fromDisplayName
   if (input.cc?.length) lines.push(`Cc: ${input.cc.map(formatAddr).join(', ')}`);
   if (input.bcc?.length) lines.push(`Bcc: ${input.bcc.map(formatAddr).join(', ')}`);
   if (input.replyTo) lines.push(`Reply-To: ${formatAddr(input.replyTo)}`);
-  lines.push(`Subject: ${sanitizeHeaderValue(input.subject)}`);
+  lines.push(`Subject: ${encodeMimeHeader(sanitizeHeaderValue(input.subject))}`);
   // Date is needed for proper threading on receiving servers — Gmail backfills
   // when omitted but that loses precision when the message is forwarded.
   lines.push(`Date: ${new Date().toUTCString()}`);

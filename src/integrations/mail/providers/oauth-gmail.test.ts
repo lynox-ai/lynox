@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import iconv from 'iconv-lite';
-import { OAuthGmailProvider } from './oauth-gmail.js';
+import { OAuthGmailProvider, encodeMimeHeader } from './oauth-gmail.js';
 import { MailError, type MailAccountConfig, type MailEnvelope } from '../provider.js';
 import type { GoogleAuth } from '../../google/google-auth.js';
 
@@ -400,6 +400,73 @@ describe('OAuthGmailProvider — send', () => {
     const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
     expect(decoded).not.toMatch(/^X-Injected:/m);
     expect(decoded).toContain('"Bob \\"the Hacker\\" X-Injected: yes" <bob@example.com>');
+  });
+
+  it('RFC 2047-encodes a non-ASCII subject so Gmail does not show mojibake', async () => {
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
+      if (init?.method === 'POST' && url.includes('messages/send')) {
+        return Promise.resolve(respondJson({ id: 'sent-mime', threadId: 't' }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    await provider.send({
+      to: [{ address: 'bob@example.com' }],
+      subject: 'TEST: Offert-Anfrage BVG-Anschluss — lynox GmbH',
+      text: 'body',
+    });
+    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
+    const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
+    const subjectLine = decoded.split('\r\n').find((l) => l.startsWith('Subject:'));
+    // Before the fix the em-dash rode the wire as raw UTF-8 and Gmail rendered
+    // it Latin1 → "Ã¢Â€Â™". It must now be an RFC 2047 encoded-word.
+    expect(subjectLine).toMatch(/^Subject: =\?UTF-8\?Q\?/);
+    expect(subjectLine).toContain('=E2=80=94'); // em-dash UTF-8 bytes, encoded
+    expect(subjectLine).not.toContain('—'); // raw non-ASCII must be gone
+  });
+
+  it('RFC 2047-encodes a non-ASCII From display name (account sender)', async () => {
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
+      if (init?.method === 'POST' && url.includes('messages/send')) {
+        return Promise.resolve(respondJson({ id: 'sent-name', threadId: 't' }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const account: MailAccountConfig = { ...makeAccount(), displayName: 'Björn Müller' };
+    const provider = new OAuthGmailProvider(account, makeAuth());
+    await provider.send({
+      to: [{ address: 'bob@example.com' }],
+      subject: 'Hi',
+      text: 'body',
+    });
+    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
+    const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
+    const fromLine = decoded.split('\r\n').find((l) => l.startsWith('From:'));
+    expect(fromLine).toMatch(/^From: =\?UTF-8\?Q\?/);
+    expect(fromLine).toContain('=C3=B6'); // ö
+    expect(fromLine).not.toContain('ö'); // raw umlaut gone
+  });
+});
+
+describe('encodeMimeHeader', () => {
+  it('passes pure-ASCII through unchanged (no encoded-word)', () => {
+    expect(encodeMimeHeader('Hello World')).toBe('Hello World');
+    expect(encodeMimeHeader('TEST: a-b/c')).toBe('TEST: a-b/c');
+    expect(encodeMimeHeader('')).toBe('');
+  });
+  it('Q-encodes the em-dash case from the 2026-08-12 report', () => {
+    const out = encodeMimeHeader('BVG-Anschluss — lynox');
+    expect(out).toMatch(/^=\?UTF-8\?Q\?/);
+    expect(out).toMatch(/\?=$/); // encoded-word ends with ?=
+    expect(out).toContain('=E2=80=94'); // em-dash → UTF-8 bytes
+    expect(out).not.toContain('—'); // raw non-ASCII gone
+    expect(out).toContain('_lynox'); // space → underscore
+  });
+  it('encodes the encoded-word specials (=) when a value is already being encoded', () => {
+    const out = encodeMimeHeader('a = b über'); // ü forces an encoded-word
+    expect(out).toContain('=3D'); // '=' must not terminate the encoded-word early
   });
 });
 
