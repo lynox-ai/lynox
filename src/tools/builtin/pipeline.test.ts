@@ -1362,6 +1362,27 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     expect(opts['parentTools']).toBe(mockTools);
   });
 
+  it('headless run forwards a stored maxParallelSteps (symmetry with in-session)', async () => {
+    // Symmetry fix: resolveHeadlessLimits used to omit maxParallelSteps entirely
+    // — a workflow that stored maxParallelSteps:3 got it in-session but it was
+    // silently dropped on the headless path (the path that arguably needs it
+    // more, being unattended). Now all four WorkflowLimits fields pass through.
+    const id = 'wf-headless-cap';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+      limits: { maxParallelSteps: 3 },
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number; maxIterations?: number; maxWallClockMs?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBe(3); // pipeline.test.ts:<this line> — kills the symmetry regression
+    expect(limits?.maxWallClockMs).toBe(30 * 60_000); // headless default still applies to unset fields
+  });
+
   it('in-session inline run inherits the parent agent autonomy + forwards its context', async () => {
     const agent = makeAutonomyAgent('autonomous');
     mockRunManifest.mockResolvedValueOnce(makeRunState());

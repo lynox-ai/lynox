@@ -550,11 +550,14 @@ const DEFAULT_HEADLESS_WALL_CLOCK_MS = 30 * 60_000; // 30 minutes
 const DEFAULT_HEADLESS_MAX_ITERATIONS = 50;          // backstop above MAX_STEPS
 
 /** Merge a workflow's stored limits with the headless defaults (unset → default;
- *  `maxSpendUsd` stays opt-in). */
+ *  `maxSpendUsd` stays opt-in; `maxParallelSteps` passes through only when set —
+ *  an unattended run defaulting to unbounded fan-out is an operator policy
+ *  choice, not a bug, so no default is imposed here). */
 function resolveHeadlessLimits(stored: WorkflowLimits | undefined): WorkflowLimits {
   return {
     maxWallClockMs: stored?.maxWallClockMs ?? DEFAULT_HEADLESS_WALL_CLOCK_MS,
     maxIterations: stored?.maxIterations ?? DEFAULT_HEADLESS_MAX_ITERATIONS,
+    maxParallelSteps: stored?.maxParallelSteps,
     maxSpendUsd: stored?.maxSpendUsd,
   };
 }
@@ -566,17 +569,21 @@ function resolveHeadlessLimits(stored: WorkflowLimits | undefined): WorkflowLimi
  * the user can cancel — so wall-clock stays opt-in and the Session-level cost
  * cap ($50 default, tenant-tunable) already bounds spend. The two defaults that
  * DO apply:
- *  - `maxIterations` — a runaway-step backstop (catches the subagent-loop shape
- *    a live user would not necessarily notice mid-run);
- *  - `maxParallelSteps` — backpressure. Without it a bulk workflow (e.g. a
- *    2000-contact triage fanning into ~40 batch subagents) launches every step
- *    of a phase at once and exhausts the instance.
+ *  - `maxParallelSteps` — backpressure. `runParallel`'s bare `Promise.allSettled`
+ *    launches every step of a phase at once; a phase with a handful of
+ *    independent steps spawns that many concurrent sub-agents (each a live LLM
+ *    run). Capping at 5 bounds instance load + memory without serialising small
+ *    phases. (Workflows validate to ≤ MAX_STEPS=20 steps total, so this bounds
+ *    fan-out *within* a phase, not the run.)
+ *  - `maxIterations` — defense-in-depth above MAX_STEPS (=20). Not reachable
+ *    today (a workflow can't exceed 20 steps); binds only if MAX_STEPS rises
+ *    or a future path spawns steps past validation.
  *
  * Both default-merge with any the workflow explicitly stored; `maxWallClockMs`
  * and `maxSpendUsd` pass through only when set.
  */
-const DEFAULT_INSESSION_MAX_ITERATIONS = 50; // backstop above MAX_STEPS (== headless)
-const DEFAULT_INSESSION_MAX_PARALLEL_STEPS = 5; // backpressure — bounds fan-out
+const DEFAULT_INSESSION_MAX_ITERATIONS = 50; // defense-in-depth above MAX_STEPS=20
+const DEFAULT_INSESSION_MAX_PARALLEL_STEPS = 5; // backpressure — bounds per-phase fan-out
 
 function resolveInSessionLimits(stored: WorkflowLimits | undefined): WorkflowLimits {
   return {
