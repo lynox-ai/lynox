@@ -28,7 +28,7 @@ describe('proactiveDeepGuidance — feature-gated proactive deep escalation', ()
     expect(proactiveDeepGuidance({ proactiveDeep: false, proactiveDeepAnthropic: true, deepSlotProvider: 'anthropic' })).toBe('');
   });
 
-  it('fires on a CHEAP (non-Anthropic) deep slot with the flag on — "inexpensive → escalate freely"', () => {
+  it('fires on a CHEAP (non-Anthropic) deep slot with the flag on — "inexpensive → OFFER first"', () => {
     const out = proactiveDeepGuidance({ proactiveDeep: true, proactiveDeepAnthropic: false, deepSlotProvider: 'openai' });
     expect(out).toContain('Proactive deep escalation');
     expect(out).toContain('inexpensive');
@@ -51,6 +51,20 @@ describe('proactiveDeepGuidance — feature-gated proactive deep escalation', ()
     const out = proactiveDeepGuidance({ proactiveDeep: true, proactiveDeepAnthropic: false, deepSlotProvider: 'openai' });
     expect(out).toContain('sub-agent');
     expect(out).toContain('Never switch THIS conversation');
+  });
+
+  // PRD-SPAWN-TIER-CONSENT §3.1: the acute symptom was "escalate freely" → the
+  // agent auto-spawned `model: "deep"` (the cost + injection lever). The rewrite
+  // makes deep OFFER-first + wait for the user's OK, aligning the prompt with the
+  // structural consent gate on `spawn_agent.destructive`. Mutating the rewrite
+  // back to auto-spawn ("escalate freely" / "call spawn_agent … then …" without an
+  // offer+wait) fails every assertion below.
+  it('OFFERs deep and WAITS — never auto-spawns (consent alignment)', () => {
+    const out = proactiveDeepGuidance({ proactiveDeep: true, proactiveDeepAnthropic: false, deepSlotProvider: 'openai' });
+    expect(out).not.toContain('escalate freely');
+    expect(out).toMatch(/\bOFFER\b/);
+    // Offer-first intent: wait for the user before spawning deep.
+    expect(out).toMatch(/WAIT|wait for the user|user.*(ok|confirm|agree)/i);
   });
 });
 
