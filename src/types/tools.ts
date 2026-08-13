@@ -32,7 +32,11 @@ export interface WarningPayload {
   costUsd?: number | undefined;
   provider?: string | undefined;
   provenance?: string | undefined;
-  /** Present => the GO may offer to run on this cheaper tier instead. */
+  /**
+   * Present => the GO may offer to run on this cheaper tier instead. Reserved for
+   * the spawn-consent deny→balanced path (PR2b): the deep-tier check (PR2a) does
+   * not set it yet, so today no producer populates this field by design.
+   */
   downgradeTo?: 'balanced' | undefined;
 }
 
@@ -137,7 +141,7 @@ export interface SpawnedSubAgent {
   /** Concrete model this child runs on (sanitized id, not the tier). */
   model?: string | undefined;
   /** Resolved capability tier this child runs on (fast/balanced/deep). Lets the
-   *  spawn panel show what was actually delegated to, separately from the model id. */
+   * spawn panel show what was actually delegated to, separately from the model id. */
   tier?: ModelTier | undefined;
 }
 

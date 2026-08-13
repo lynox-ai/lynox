@@ -94,6 +94,9 @@ vi.mock('../../core/observability.js', () => ({
     // Slice 2: the child's tier now resolves through resolveTierModel (to honor
     // a hybrid tier_set), which publishes a routing-attribution signal here.
     llmCall: { publish: vi.fn() },
+    // The real isDangerous guard publishes a guardBlock event when it denies; the
+    // consent-gate wiring test drives the real guard, so the channel must exist.
+    guardBlock: { publish: vi.fn(), hasSubscribers: false },
   },
 }));
 
@@ -110,6 +113,7 @@ vi.mock('../../core/roles.js', () => ({
 }));
 
 import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, profileExceedsMaxTier } from './spawn.js';
+import { isDangerous } from '../permission-guard.js';
 import { channels } from '../../core/observability.js';
 import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot, LLMProvider } from '../../types/index.js';
 import type { WarningPayload } from '../../types/tools.js';
@@ -2548,6 +2552,53 @@ describe('spawn_agent tool', () => {
       const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
       const sub = (spawn['subAgents'] as Array<{ tier?: string }>)[0]!;
       expect(sub.tier).toBe('deep');
+    });
+
+    it('SECURITY: an unregistered (unknown-band) profile STILL fires the gate — no bypass', async () => {
+      const { reloadConfig } = await import('../../core/config.js');
+      // An unregistered model_id (BYOK / custom endpoint) reads band=undefined from
+      // modelCapability. The gate must treat unknown conservatively (fire) — otherwise
+      // an injected spawn_agent({profile:custom-expensive}) runs unconsented, the exact
+      // asymmetry the gate exists to close. Mutate profileBandIsDeepOrUnknown to
+      // `band === 'deep'` only and this returns null (the bypass).
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        custom: { provider: 'openai', api_base_url: 'https://api.example.com/v1', api_key: 'k', model_id: 'custom-expensive-byok-model' },
+      }));
+      reloadConfig();
+      try {
+        const payload = consent({ agents: [{ name: 'r', task: 'x', profile: 'custom' }] }, 'guided');
+        expect(payload).not.toBeNull();
+        expect((payload as WarningPayload).message).toContain('unregistered');
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
+    });
+
+    it('does NOT over-trigger: a deep spec under a balanced max_tier ceiling is already clamped → null', async () => {
+      const { reloadConfig } = await import('../../core/config.js');
+      vi.stubEnv('LYNOX_MAX_MODEL_TIER', 'balanced');
+      reloadConfig();
+      try {
+        // resolveSpawnChildRouting clamps deep→balanced under the ceiling, so the child
+        // runs balanced — no deep cost to consent to. Mutate specResolvesDeep back to a
+        // bare `spec.model === 'deep'` shortcut and this over-triggers (non-null).
+        expect(consent({ agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided')).toBeNull();
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
+    });
+
+    it('the real isDangerous guard surfaces the spawn deep-consent message (end-to-end wiring)', () => {
+      // Drives the REAL spawn_agent destructive.check through the REAL isDangerous —
+      // not a synthetic toolEntry. A deep spawn in guided mode reaches the GO text;
+      // autonomous does not gate (the handler clamps instead).
+      const guided = isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', undefined, undefined, spawnAgentTool);
+      expect(guided).not.toBeNull();
+      expect(guided).toContain('DEEP');
+      const autonomous = isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'autonomous', undefined, undefined, spawnAgentTool);
+      expect(autonomous).toBeNull();
     });
   });
 });

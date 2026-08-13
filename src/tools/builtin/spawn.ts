@@ -17,7 +17,7 @@ import { resolveTools } from '../resolve-tools.js';
 
 import { checkSessionBudget } from '../../core/session-budget.js';
 import { escapeXml, wrapUntrustedData } from '../../core/data-boundary.js';
-import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId } from '../../core/prompts.js';
+import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK, safeModelId, providerFamilyLabel } from '../../core/prompts.js';
 import {
   DEFAULT_SPAWN_BUDGET_USD,
   DEFAULT_SPAWN_MAX_TURNS,
@@ -80,13 +80,30 @@ interface SpawnAgentInput {
 }
 
 /**
- * Does a spawn spec route a child to the DEEP tier? The consent `check`
- * (permission guard) + the headless clamp (handler) MUST agree on the answer, so
- * they share this one predicate. Two paths:
- *  1. a deep-band PROFILE — A2: `resolveSpawnChildRouting.tier` reflects the
- *     CLAMPED tier, not the profile's band, so a profile pinning a deep model
- *     returns `.tier='balanced'` while `.model=<deep id>`. Read the band directly
- *     via `modelCapability`.
+ * A profile's model runs at the DEEP band, OR its band is UNKNOWN (the model_id
+ * is not in `MODEL_CAPABILITIES` — common for BYOK / openai-compat custom
+ * endpoints). Both are gated conservatively: a profile pins an arbitrary
+ * model_id whose cost modelCapability cannot prove, so treating unknown as
+ * "not deep" would let an expensive custom model run unconsented (the exact
+ * asymmetry `spawn_agent({model:'deep'})` is gated but `spawn_agent({profile:
+ * custom-expensive})` is not). Mirrors `profileExceedsMaxTier`, which refuses
+ * unknown bands under a restrictive ceiling for the same reason. Single source
+ * of truth for the rule — the check, the actual-tier report, and the headless
+ * refuse all read it.
+ */
+function profileBandIsDeepOrUnknown(profile: ModelProfile): boolean {
+  const band = modelCapability(profile.model_id)?.tier;
+  return band === 'deep' || band === undefined;
+}
+
+/**
+ * Does a spawn spec route a child onto a tier that needs consent? The consent
+ * `check` (permission guard) + the headless clamp (handler) MUST agree, so they
+ * share this one predicate. Two paths:
+ *  1. a profile whose band is deep OR unknown — A2: `resolveSpawnChildRouting.tier`
+ *     reflects the CLAMPED tier, not the profile's band, so a profile pinning a
+ *     deep model returns `.tier='balanced'` while `.model=<deep id>`. Read the
+ *     band directly via `modelCapability` (and treat unknown conservatively).
  *  2. the resolved tier is deep. `resolveSpawnChildRouting` already clamps
  *     `spec.model` against the tenant `max_tier`, so the resolved tier is both
  *     necessary and sufficient — a bare `spec.model === 'deep'` shortcut would
@@ -95,20 +112,10 @@ interface SpawnAgentInput {
  */
 function specResolvesDeep(spec: SpawnSpec, userConfig: LynoxUserConfig, baseProvider: LLMProvider): boolean {
   const profile = spec.profile ? userConfig.model_profiles?.[spec.profile] : undefined;
-  if (profile && modelCapability(profile.model_id)?.tier === 'deep') return true;
+  if (profile && profileBandIsDeepOrUnknown(profile)) return true;
   const role = spec.role ? getRole(spec.role) : undefined;
   const { tier } = resolveSpawnChildRouting({ spec, role, profile, userConfig, baseProvider });
   return tier === 'deep';
-}
-
-/** Customer-facing label for the provider a deep delegation resolves onto. */
-function providerLabel(provider: LLMProvider): string {
-  switch (provider) {
-    case 'anthropic': return 'Anthropic';
-    case 'vertex':    return 'Google Vertex AI';
-    case 'openai':    return 'an OpenAI-compatible provider';
-    case 'custom':    return 'a custom provider';
-  }
 }
 
 /**
@@ -926,12 +933,18 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       assertSpawnRoutingPermitted(spec, cfg);
       if (isHeadless && specResolvesDeep(spec, cfg, provider)) {
         const deepProfile = spec.profile ? cfg.model_profiles?.[spec.profile] : undefined;
-        if (deepProfile && modelCapability(deepProfile.model_id)?.tier === 'deep') {
+        // A deep-band OR unknown-band profile pins a specific endpoint and cannot be
+        // substituted down to balanced, so it is REFUSED headless (not clamped). This
+        // is the security control for the unknown-band case: without it, a profile
+        // pinning an expensive unregistered model would run unconsented headlessly —
+        // `specResolvesDeep` treats unknown bands as deep, so this refuse must too.
+        if (deepProfile && profileBandIsDeepOrUnknown(deepProfile)) {
           throw new Error(
-            `Spawn "${spec.name}" pins the deep-tier model profile "${spec.profile}" (${deepProfile.model_id}), ` +
-            `which cannot run autonomously without explicit consent — a profile pins a specific endpoint and ` +
-            `cannot be substituted down to balanced. Run this delegation interactively (where you can approve ` +
-            `the deep tier), or use the \`model\` tier parameter (fast/balanced) for an autonomous child.`,
+            `Spawn "${spec.name}" uses model profile "${spec.profile}" (${deepProfile.model_id}), ` +
+            `whose tier cannot run autonomously without explicit consent — a profile pins a specific ` +
+            `endpoint and cannot be substituted down to balanced. Run this delegation interactively ` +
+            `(where you can approve it), or use the \`model\` tier parameter (fast/balanced) for an ` +
+            `autonomous child.`,
           );
         }
         return { ...spec, model: 'balanced' as const };
@@ -1147,7 +1160,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       spawnRecords,
     });
 
-    if (errors.length === input.agents.length) {
+    if (errors.length === specs.length) {
       const details = errors.map(e => `${e.message}${e.cause ? ` (cause: ${e.cause})` : ''}`).join('; ');
       throw new AggregateError(errors, `All sub-agents failed: ${details}`);
     }
@@ -1171,30 +1184,38 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       let costUsd = 0;
       const providers = new Set<LLMProvider>();
       let resolvedTier: ModelTier = 'deep';
+      let hasUnknownBand = false;
       for (const spec of deepSpecs) {
         const role = spec.role ? getRole(spec.role) : undefined;
         const profile = spec.profile ? cfg.model_profiles?.[spec.profile] : undefined;
         const r = resolveSpawnChildRouting({ spec, role, profile, userConfig: cfg, baseProvider });
-        // A2: a deep-band profile runs deep even though `r.tier` reads balanced
-        // (the profile bypasses the tier clamp). The payload names the ACTUAL band
-        // the child runs on, not the clamp-resolved tier — predicate 6 honesty.
-        const profileDeep = !!(profile && modelCapability(profile.model_id)?.tier === 'deep');
-        resolvedTier = profileDeep ? 'deep' : r.tier;
+        // A profile's band hides behind the clamp-resolved tier. The payload names
+        // the ACTUAL classification — deep for a known-deep profile, deep
+        // (conservatively) for an unknown-band profile whose cost can't be proven.
+        if (profile && profileBandIsDeepOrUnknown(profile)) {
+          resolvedTier = 'deep';
+          if (modelCapability(profile.model_id)?.tier === undefined) hasUnknownBand = true;
+        } else {
+          resolvedTier = r.tier;
+        }
         costUsd += estimateSpawnCost(r.model, spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS);
-        // The deep child's REAL provider: a cross-provider hybrid slot runs on the
-        // slot's provider (a Mistral main with a deep→Sonnet slot runs on Anthropic),
-        // not the base provider. Naming the base provider here would be a transparency
-        // lie — predicate 6 is load-bearing precisely because it is what makes this
-        // gate worth having.
-        providers.add(r.hybridSlot.crossProviderSlot ? r.hybridSlot.provider : baseProvider);
+        // The deep child's REAL provider. A cross-provider hybrid slot runs on the
+        // slot's provider (a Mistral main with a deep→Sonnet slot runs on Anthropic);
+        // a profile forces hybridSlot to {crossProviderSlot:false} but routes via its
+        // OWN provider, so read profile.provider — naming the base provider in either
+        // case would be a transparency lie. Predicate 6 is load-bearing.
+        providers.add(profile?.provider ?? (r.hybridSlot.crossProviderSlot ? r.hybridSlot.provider : baseProvider));
       }
-      const providerList = [...providers].map(providerLabel).join(', ');
+      const providerList = [...providers].map((p) => providerFamilyLabel(p)).join(', ');
       const childWord = deepSpecs.length === 1 ? 'One child would run' : `${deepSpecs.length} children would run`;
+      const tierWord = hasUnknownBand
+        ? 'a model gated as DEEP (or an unregistered custom model whose cost band the engine cannot prove)'
+        : 'the DEEP tier (a stronger reasoning model, more capable but more expensive)';
       return {
         message:
-          `⚠ spawn_agent: ${childWord} on the DEEP tier — a stronger reasoning model, ` +
-          `more capable but more expensive. Estimated cost ~$${costUsd.toFixed(2)} against this session. ` +
-          `Provider: ${providerList}. Allow only if the work genuinely needs the deep tier; ` +
+          `⚠ spawn_agent: ${childWord} on ${tierWord}. ` +
+          `Estimated cost ~$${costUsd.toFixed(2)} against this session. ` +
+          `Provider: ${providerList}. Allow only if the work genuinely needs it; ` +
           `otherwise the children can run on balanced instead.`,
         tier: resolvedTier,
         costUsd,
