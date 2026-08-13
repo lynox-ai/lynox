@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { isDangerous, isCriticalTool, normalizeCommand, splitCommandSegments } from './permission-guard.js';
 import type { AutonomyLevel, PreApprovalSet, ToolEntry } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
+import type { WarningPayload } from '../types/tools.js';
 import { channels } from '../core/observability.js';
 
 // Stub ToolEntry fixtures mirroring the real `destructive` declarations
@@ -2188,5 +2189,63 @@ describe('isDangerous — capability-contract grant', () => {
       channels.guardBlock.unsubscribe(handler);
     }
     expect(events.at(-1)?.contractVersion).toBe(4);
+  });
+});
+
+// A `destructive.check` may return a WarningPayload (spawn-agent deep-tier
+// consent) instead of a plain action-label string. The guard must render the
+// payload's `message` verbatim — NOT wrap it in the generic "modifies external
+// data" label, which is the wrong framing for a cost-consent gate — and must
+// pass the run's autonomy through so a check can opt out in autonomous mode.
+describe('isDangerous — WarningPayload check (spawn-style consent)', () => {
+  it('renders the payload message verbatim, not the generic external-data label', () => {
+    const entry: ToolEntry = {
+      definition: { name: 'consent_tool', description: '', input_schema: { type: 'object' as const, properties: {}, required: [] } },
+      handler: async () => '',
+      destructive: {
+        mode: 'external',
+        check: () => ({ message: '⚠ consent_tool: custom consent text naming tier + cost' }) satisfies WarningPayload,
+      },
+    };
+    const result = isDangerous('consent_tool', {}, undefined, undefined, undefined, entry);
+    // Mutate the guard back to wrapping `detail` as a suffix and this reads
+    // `⚠ consent_tool: [object Object] — modifies external data` instead.
+    expect(result).toBe('⚠ consent_tool: custom consent text naming tier + cost');
+    expect(result).not.toContain('modifies external data');
+  });
+
+  it('passes the autonomy ctx to the check so it can opt out in autonomous mode', () => {
+    const seen: Array<{ autonomy?: AutonomyLevel } | undefined> = [];
+    const entry: ToolEntry = {
+      definition: { name: 'consent_tool', description: '', input_schema: { type: 'object' as const, properties: {}, required: [] } },
+      handler: async () => '',
+      destructive: {
+        mode: 'external',
+        check: (_input, ctx) => {
+          seen.push(ctx);
+          return ctx?.autonomy === 'autonomous' ? null : ({ message: '⚠ consent_tool: needs your OK' } satisfies WarningPayload);
+        },
+      },
+    };
+    // Autonomous → check opts out → not flagged. Mutate the ctx pass-away and the
+    // check sees ctx=undefined, returns the payload, and the spawn is refused
+    // headlessly instead of clamped — the D2 regression at the guard layer.
+    expect(isDangerous('consent_tool', {}, 'autonomous', undefined, undefined, entry)).toBeNull();
+    expect(isDangerous('consent_tool', {}, 'guided', undefined, undefined, entry)).toBe('⚠ consent_tool: needs your OK');
+    expect(seen).toContainEqual({ autonomy: 'autonomous' });
+    expect(seen).toContainEqual({ autonomy: 'guided' });
+  });
+
+  it('a plain-string check still gets the wrapped form (backward compatible)', () => {
+    const entry: ToolEntry = {
+      definition: { name: 'gd', description: '', input_schema: { type: 'object' as const, properties: {}, required: [] } },
+      handler: async () => '',
+      destructive: { mode: 'external', check: (input) => {
+        const a = (input as { action?: unknown } | null)?.action;
+        return typeof a === 'string' && a === 'upload' ? a : null;
+      } },
+    };
+    expect(isDangerous('gd', { action: 'upload' }, undefined, undefined, undefined, entry)).toBe('⚠ gd: upload — modifies external data');
+    expect(isDangerous('gd', { action: 'search' }, undefined, undefined, undefined, entry)).toBeNull();
   });
 });
