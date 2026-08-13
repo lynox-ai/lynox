@@ -736,8 +736,19 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   // Workspace write actions.
   if (entry?.destructive) {
     const { mode, check } = entry.destructive;
-    const detail = check ? check(input) : '';
+    const detail = check ? check(input, { autonomy }) : '';
     if (detail !== null) {
+      // A WarningPayload carries its OWN fully-formed GO message (spawn-agent
+      // deep-tier consent: tier + cost + provider). Render it verbatim — the
+      // generic "modifies external data" label is the wrong framing for a
+      // cost-consent gate. Plain-string checks (the action-label suffix used by
+      // google_drive etc.) keep their existing wrapped form below. A payload
+      // returned in autonomous mode is also rendered verbatim; in practice the
+      // spawn check returns null in autonomous (the handler clamps instead), so
+      // this branch is reached only interactively.
+      if (typeof detail !== 'string') {
+        return detail.message;
+      }
       const suffix = detail ? `: ${detail}` : '';
       if (autonomy === 'autonomous') {
         const blockReason = mode === 'data'

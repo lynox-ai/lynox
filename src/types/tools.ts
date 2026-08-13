@@ -3,11 +3,38 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
 import type { IAgent } from './agent.js';
-import type { CostSnapshot } from './modes.js';
+import type { AutonomyLevel, CostSnapshot } from './modes.js';
+import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
+
+/**
+ * Structured payload a tool's `destructive.check` may return INSTEAD of a plain
+ * action-label string, when the consent gate carries information beyond "this
+ * mutates data". The spawn-agent deep-tier consent gate is the first user: it
+ * names the tier, the estimated cost, and the provider a deep delegation would
+ * run on, so the user can make an informed call before authorising expensive work.
+ *
+ * The permission guard renders `message` as the GO text verbatim (it IS the whole
+ * warning, not a suffix); the structured fields let a UI render a richer card and,
+ * when `downgradeTo` is set, offer a cheaper alternative.
+ *
+ * `provenance` is OPTIONAL and only set where the engine can PROVE the data path
+ * (e.g. a control-plane provider registry naming the processing region). It is
+ * deliberately left undefined in the public engine rather than guessed — a wrong
+ * region claim is worse than none.
+ */
+export interface WarningPayload {
+  message: string;
+  tier?: ModelTier | undefined;
+  costUsd?: number | undefined;
+  provider?: string | undefined;
+  provenance?: string | undefined;
+  /** Present => the GO may offer to run on this cheaper tier instead. */
+  downgradeTo?: 'balanced' | undefined;
+}
 
 export interface ToolEntry<TInput = unknown> {
   definition: BetaTool;
@@ -42,13 +69,20 @@ export interface ToolEntry<TInput = unknown> {
    * the action label for destructive inputs, or `null` for safe ones. Omit
    * `check` for always-destructive tools.
    *
+   * `check` may instead return a {@link WarningPayload} — used when the gate
+   * carries richer information than an action label (the spawn-agent deep-tier
+   * consent gate names tier + cost + provider). The guard renders the payload's
+   * `message` verbatim. The optional second argument `ctx` carries the run's
+   * `autonomy`, so a check can opt OUT of gating in autonomous mode (spawn does:
+   * the handler clamps deep→balanced headlessly instead of refusing).
+   *
    * Colocating this with the tool registration keeps the write-action
    * set next to the input schema — adding a new write action no longer
    * requires updating a separate enumerated list in the guard.
    */
   destructive?: {
     mode: 'data' | 'external';
-    check?: (input: TInput) => string | null;
+    check?: (input: TInput, ctx?: { autonomy?: AutonomyLevel | undefined }) => string | WarningPayload | null;
   } | undefined;
   /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
@@ -102,6 +136,9 @@ export interface SpawnedSubAgent {
   role?: string | undefined;
   /** Concrete model this child runs on (sanitized id, not the tier). */
   model?: string | undefined;
+  /** Resolved capability tier this child runs on (fast/balanced/deep). Lets the
+   *  spawn panel show what was actually delegated to, separately from the model id. */
+  tier?: ModelTier | undefined;
 }
 
 export type StreamEvent =

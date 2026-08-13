@@ -112,6 +112,7 @@ vi.mock('../../core/roles.js', () => ({
 import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, profileExceedsMaxTier } from './spawn.js';
 import { channels } from '../../core/observability.js';
 import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot, LLMProvider } from '../../types/index.js';
+import type { WarningPayload } from '../../types/tools.js';
 
 function makeTool(name: string): ToolEntry {
   return {
@@ -2444,6 +2445,109 @@ describe('spawn_agent tool', () => {
     it('never refuses when there is no ceiling (self-host default)', () => {
       expect(profileExceedsMaxTier(DEEP, undefined)).toBe(false);
       expect(profileExceedsMaxTier(UNKNOWN, undefined)).toBe(false);
+    });
+  });
+
+  // PRD-SPAWN-TIER-CONSENT §6: a deep-tier delegation needs explicit consent in
+  // interactive mode (predicate 1), and a headless run never executes deep
+  // without it — the handler clamps deep→balanced instead (predicate 3, D2).
+  // A deep-band profile is the A2 bypass (predicate 4): resolveSpawnChildRouting
+  // .tier hides the profile's band, so the check reads modelCapability directly.
+  describe('deep-tier consent gate (PRD §6: predicates 1,3,4 + wire)', () => {
+    /** Read the consent payload (or null) from the registered destructive check. */
+    function consent(input: Parameters<NonNullable<NonNullable<typeof spawnAgentTool.destructive>['check']>>[0], autonomy: 'guided' | 'autonomous'): string | WarningPayload | null {
+      return spawnAgentTool.destructive!.check!(input, { autonomy });
+    }
+
+    it('predicate 1: a deep-tier spawn returns a consent payload interactively (mutate check away → null)', () => {
+      const payload = consent({ agents: [{ name: 'r', task: 'deep work', model: 'deep' }] }, 'guided');
+      expect(payload).not.toBeNull();
+      expect(typeof payload).toBe('object');
+      const p = payload as WarningPayload;
+      expect(p.message).toContain('DEEP');
+      expect(p.message).toMatch(/Estimated cost/i);
+      expect(p.tier).toBe('deep');
+      expect(p.costUsd).toBeGreaterThan(0);
+    });
+
+    it('D2: a deep-tier spawn returns null in autonomous mode — the guard does not gate, the handler clamps', () => {
+      // Mutate the `ctx?.autonomy === autonomous → null` guard away and this
+      // returns a payload, which would make the permission guard refuse the
+      // spawn headlessly (denying the balanced fallback) — the exact regression.
+      expect(consent({ agents: [{ name: 'r', task: 'deep work', model: 'deep' }] }, 'autonomous')).toBeNull();
+    });
+
+    it('consent is deep-only: a balanced spawn returns null', () => {
+      expect(consent({ agents: [{ name: 'r', task: 'x', model: 'balanced' }] }, 'guided')).toBeNull();
+    });
+
+    it('predicate 4 (A2): a deep-band PROFILE returns a payload even with model unset (mutate the A2 branch → bypass)', async () => {
+      const { reloadConfig } = await import('../../core/config.js');
+      // claude-opus-4-6 is the anthropic deep model (MODEL_MAP.deep) — a profile
+      // pinning it routes the child deep REGARDLESS of .tier (the profile bypass).
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        pinned: { provider: 'openai', api_base_url: 'https://api.example.com/v1', api_key: 'k', model_id: 'claude-opus-4-6' },
+      }));
+      reloadConfig();
+      try {
+        const payload = consent({ agents: [{ name: 'r', task: 'x', profile: 'pinned' }] }, 'guided');
+        expect(payload).not.toBeNull();
+        expect((payload as WarningPayload).tier).toBe('deep');
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
+    });
+
+    it('predicate 3: a headless deep spawn is CLAMPED to balanced, not refused (mutate the clamp → deep leaks)', async () => {
+      const onStream = vi.fn() as StreamHandler;
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'r', task: 'deep analysis', model: 'deep' }] },
+        makeAgent({ autonomy: 'autonomous', onStream }),
+      );
+      const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
+      // Announced tier is balanced (clamped), NOT deep. Remove the clamp and this
+      // reads 'deep' — a headless run executing the expensive tier unconsented.
+      const sub = (spawn['subAgents'] as Array<{ tier?: string }>)[0]!;
+      expect(sub.tier).toBe('balanced');
+      // And the child is constructed on the balanced model, not opus.
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const child = vi.mocked(MockAgent).mock.calls[0]![0] as { model?: string };
+      expect(child.model).toBe('claude-sonnet-4-6');
+    });
+
+    it('predicate 3: a headless deep-band PROFILE is REFUSED, not silently run deep (mutate the refuse → deep leak via profile)', async () => {
+      const { reloadConfig } = await import('../../core/config.js');
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        pinned: { provider: 'openai', api_base_url: 'https://api.example.com/v1', api_key: 'k', model_id: 'claude-opus-4-6' },
+      }));
+      reloadConfig();
+      try {
+        // A profile pins a specific endpoint and cannot be substituted down, so a
+        // deep-band profile in headless is REFUSED. Without this branch the clamp
+        // would set model:'balanced' — but resolveSpawnChildRouting still honours
+        // profile.model_id, so the child would run opus (deep) anyway. The leak.
+        await expect(
+          spawnAgentTool.handler(
+            { agents: [{ name: 'r', task: 'x', profile: 'pinned' }] },
+            makeAgent({ autonomy: 'autonomous' }),
+          ),
+        ).rejects.toThrow(/cannot run autonomously without explicit consent/);
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
+    });
+
+    it('wire: the spawn event carries the resolved tier on each sub-agent (mutate → undefined)', async () => {
+      const onStream = vi.fn() as StreamHandler;
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'r', task: 'x', model: 'deep' }] },
+        makeAgent({ onStream }),
+      );
+      const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
+      const sub = (spawn['subAgents'] as Array<{ tier?: string }>)[0]!;
+      expect(sub.tier).toBe('deep');
     });
   });
 });
