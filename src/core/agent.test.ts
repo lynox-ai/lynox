@@ -1295,6 +1295,22 @@ describe('Agent', () => {
       expect(tool.handler).not.toHaveBeenCalled();
     });
 
+    it('2-way GO does NOT accept "allow deep" — that answer is spawn-consent-only', async () => {
+      // A danger WITHOUT payload.downgradeTo is the ordinary 2-way gate; 'allow deep'
+      // is a spawn 3-way answer and must NOT authorise it. Mutate Fix 2 back to a
+      // shared allow-set (['y','yes','allow','allow deep'] unconditionally) and this
+      // allows — a CLI 'allow deep' on a bash prompt would run.
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous: bash' });
+      const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
+      const promptUser = vi.fn().mockResolvedValue('allow deep');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_b', name: 'bash', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Denied'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
+      await agent.send('Do it');
+      expect(tool.handler).not.toHaveBeenCalled();
+    });
+
     it('input validation: rejects unknown top-level key before handler runs', async () => {
       const handler = vi.fn().mockResolvedValue('never called');
       const strictTool: ToolEntry = {

@@ -2707,7 +2707,8 @@ describe('spawn_agent tool', () => {
       // gate produces one. Mutate extractDangerPayload to always read and a bash
       // danger would gain a spurious payload.
       const bash = isDangerousDetailed('bash', { command: 'rm -rf /tmp/lynox-probe' }, 'guided', undefined, undefined, undefined);
-      if (bash) expect(bash.payload).toBeUndefined();
+      expect(bash).not.toBeNull();
+      expect(bash!.payload).toBeUndefined();
     });
   });
 });

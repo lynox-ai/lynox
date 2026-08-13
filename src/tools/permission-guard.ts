@@ -315,7 +315,9 @@ function isPathWithin(childPath: string, parentPath: string): boolean {
  * {@link isDangerous} returns); `payload` is present ONLY when the danger came
  * from a declarative `ToolEntry.destructive` check that returned a
  * {@link WarningPayload} (the spawn-agent deep-tier gate), letting the caller
- * (agent.ts) offer a downgrade. Bash/read/write/mail dangers carry no payload.
+ * (agent.ts) offer a downgrade. Dangers from `_detectDanger`'s hardcoded
+ * branches (bash / read / write / mail / http / …) carry no payload — only a
+ * declarative `destructive` check returning a WarningPayload sets it.
  */
 export interface DangerSignal {
   warning: string;

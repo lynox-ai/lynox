@@ -340,9 +340,16 @@ export class Agent implements IAgent {
    * Transient tier downgrade requested at the GO prompt for the NEXT tool call.
    * Set when the user picks "Run on balanced" on a deep-tier consent gate;
    * consumed (and cleared) by the spawn handler via {@link consumePendingDowngrade},
-   * which clamps the deep specs to the requested tier. Lives one tool call: a
-   * tool that doesn't read it (anything but spawn) simply leaves it to be
-   * overwritten or GC'd. Sequential tool execution keeps this race-free.
+   * which clamps the deep specs to the requested tier.
+   *
+   * Tool dispatch is CONCURRENT (fan-out via Promise.allSettled), so a shared
+   * instance field is not race-free by itself. The invariant that holds it safe:
+   * the GO writes its decision to a per-call LOCAL, and that local is published
+   * to this field SYNCHRONOUSLY immediately before `tool.handler(...)` (see the
+   * call site in `_executeOneInner`); spawn's handler calls `consumePendingDowngrade`
+   * as its first statement, before any `await`. No microtask can run between that
+   * publish and that read, so concurrent calls cannot interleave here. Do NOT
+   * insert an `await` between the publish and the handler call.
    */
   private _pendingDowngradeTier: import('../types/models.js').ModelTier | undefined;
   readonly autonomy: AutonomyLevel | undefined;
@@ -2760,7 +2767,7 @@ export class Agent implements IAgent {
         const normalized = answer.toLowerCase();
         if (offersDowngrade && normalized === 'run on balanced') {
           downgradeDecision = 'balanced';
-        } else if (!['y', 'yes', 'allow', 'allow deep'].includes(normalized)) {
+        } else if (!(offersDowngrade ? ['y', 'yes', 'allow', 'allow deep'] : ['y', 'yes', 'allow']).includes(normalized)) {
           return {
             type: 'tool_result',
             tool_use_id: tc.id,

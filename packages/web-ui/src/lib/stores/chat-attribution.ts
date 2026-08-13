@@ -13,6 +13,8 @@
  * plain data, and a reducer is worth testing on its own.
  */
 
+import { normalizeTier, type ModelTier } from '../contract/vocab.js';
+
 export interface ToolCallInfo {
 	name: string;
 	input: unknown;
@@ -29,7 +31,7 @@ export interface SubAgentActivity {
 	role?: string | undefined;
 	model?: string | undefined;
 	/** Resolved capability tier this child runs on (fast/balanced/deep). */
-	tier?: 'fast' | 'balanced' | 'deep' | undefined;
+	tier?: ModelTier | undefined;
 	/** True when the user chose "Run on balanced" and this child was clamped down from deep. */
 	downgraded?: boolean | undefined;
 	status: 'running' | 'done' | 'error';
@@ -120,7 +122,7 @@ export interface AnnouncedSubAgent {
 	name: string;
 	role?: string | undefined;
 	model?: string | undefined;
-	tier?: 'fast' | 'balanced' | 'deep' | undefined;
+	tier?: ModelTier | undefined;
 	downgraded?: boolean | undefined;
 }
 
@@ -146,7 +148,7 @@ export function parseAnnouncedSubAgents(raw: unknown): AnnouncedSubAgent[] {
 			name: name.slice(0, 64),
 			role: typeof role === 'string' ? role.slice(0, 32) : undefined,
 			model: typeof model === 'string' ? model.slice(0, 64) : undefined,
-			tier: tier === 'fast' || tier === 'balanced' || tier === 'deep' ? tier : undefined,
+			tier: normalizeTier(typeof tier === 'string' ? tier : undefined),
 			downgraded: downgraded === true ? true : undefined,
 		});
 	}
