@@ -28,7 +28,7 @@ describe('proactiveDeepGuidance — feature-gated proactive deep escalation', ()
     expect(proactiveDeepGuidance({ proactiveDeep: false, proactiveDeepAnthropic: true, deepSlotProvider: 'anthropic' })).toBe('');
   });
 
-  it('fires on a CHEAP (non-Anthropic) deep slot with the flag on — "inexpensive → escalate freely"', () => {
+  it('fires on a CHEAP (non-Anthropic) deep slot with the flag on — "inexpensive → OFFER first"', () => {
     const out = proactiveDeepGuidance({ proactiveDeep: true, proactiveDeepAnthropic: false, deepSlotProvider: 'openai' });
     expect(out).toContain('Proactive deep escalation');
     expect(out).toContain('inexpensive');
@@ -51,6 +51,31 @@ describe('proactiveDeepGuidance — feature-gated proactive deep escalation', ()
     const out = proactiveDeepGuidance({ proactiveDeep: true, proactiveDeepAnthropic: false, deepSlotProvider: 'openai' });
     expect(out).toContain('sub-agent');
     expect(out).toContain('Never switch THIS conversation');
+  });
+
+  // PRD-SPAWN-TIER-CONSENT §3.1: the acute symptom was "escalate freely" → the
+  // agent auto-spawned `model: "deep"` (the cost + injection lever). The rewrite
+  // makes deep OFFER-first + wait for the user's OK, aligning the prompt with the
+  // structural consent gate on `spawn_agent.destructive`. Each assertion below is
+  // anchored to the CHEAP costLine signature, so it fails on a revert of that line
+  // to the old "escalate freely" wording (the BORDERLINE bullet's generic "OFFER"/
+  // "wait" were NOT distinguishing anchors — they survived on the old prompt too).
+  it('OFFERs deep and WAITS — never auto-spawns (cheap branch consent alignment)', () => {
+    const out = proactiveDeepGuidance({ proactiveDeep: true, proactiveDeepAnthropic: false, deepSlotProvider: 'openai' });
+    // [A] old cheap costLine said "escalate freely" — gone now.
+    expect(out).not.toContain('escalate freely');
+    // [B] the NEW cheap costLine pins consent before spawn. The old cheap costLine
+    //     had no such clause, so this distinguishes old from new (mutation kill).
+    expect(out).toContain('spawn only once the user confirms');
+  });
+
+  it('premium branch also requires the user explicit OK before a deep spawn (consent alignment)', () => {
+    const out = proactiveDeepGuidance({ proactiveDeep: true, proactiveDeepAnthropic: true, deepSlotProvider: 'anthropic' });
+    // The premium costLine changed from "when in doubt OFFER rather than spawn" to
+    // "never spawn it without the user's explicit OK". The sibling test above only
+    // asserts 'PREMIUM'/'judiciously' — both identical on old and new — so without
+    // this assertion the premium-side consent change is untested.
+    expect(out).toContain("never spawn it without the user's explicit OK");
   });
 });
 
