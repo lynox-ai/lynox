@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { sendMail, parseAddressList, buildSendPreview, previewAddressList, MASS_SEND_THRESHOLD, type SendCoreInput } from './send-core.js';
 import { singleLine } from '../../core/prompt-value.js';
-import type { MailAddress, MailProvider, MailSendResult } from './provider.js';
+import type { MailAddress, MailAccountConfig, MailProvider, MailSendResult } from './provider.js';
 import { flattenPrompt } from '../../core/prompt-value.js';
 
 vi.mock('./tools/rate-limit.js', () => {
@@ -289,6 +289,32 @@ describe('buildSendPreview', () => {
     expect(preview).toContain('alice@example.com');
     expect(preview).toContain('Hello');
     expect(preview).toContain('acct-1');
+  });
+
+  // The From label must show ONLY the account id. The persona is a composition
+  // instruction (an internal control), not sender metadata — leaking it into the
+  // From line made the preview read as if the persona were part of the address
+  // ("From: gmail-x · Casual, warm, first-person. Sign with the user's first
+  // name only…", reported 2026-08-12). Mass-send already renders persona as its
+  // own labelled line; single-send now matches.
+  it('does not leak the persona into the From label (own Persona line instead)', () => {
+    const preview = flattenPrompt(buildSendPreview({
+      provider: { accountId: 'gmail-x' } as MailProvider,
+      accountConfig: {
+        personaPrompt: "Casual, warm, first-person. Sign with the user's first name only.",
+        type: 'gmail-oauth',
+      } as unknown as MailAccountConfig,
+      to: [RECIPIENT], cc: [], bcc: [],
+      subject: 'Hello', body: 'Body text',
+      isMassSend: false, uniqueRecipientCount: 1,
+    }));
+    // The From line carries ONLY the account id — no persona words leak in.
+    const fromLine = preview.split('\n').find((l) => l.includes('From:'));
+    expect(fromLine).toBeDefined();
+    expect(fromLine).toContain('gmail-x');
+    expect(fromLine).not.toMatch(/Casual|first-person|Sign with/i);
+    // persona still surfaces, but as its own labelled line — not appended to From
+    expect(preview).toMatch(/persona/i);
   });
 
   it('renders the mass-send warning above the threshold', () => {
