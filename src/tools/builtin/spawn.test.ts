@@ -113,7 +113,7 @@ vi.mock('../../core/roles.js', () => ({
 }));
 
 import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, profileExceedsMaxTier } from './spawn.js';
-import { isDangerous } from '../permission-guard.js';
+import { isDangerous, isDangerousDetailed } from '../permission-guard.js';
 import { channels } from '../../core/observability.js';
 import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot, LLMProvider } from '../../types/index.js';
 import type { WarningPayload } from '../../types/tools.js';
@@ -2599,6 +2599,115 @@ describe('spawn_agent tool', () => {
       expect(guided).toContain('DEEP');
       const autonomous = isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'autonomous', undefined, undefined, spawnAgentTool);
       expect(autonomous).toBeNull();
+    });
+  });
+
+  describe('deny→balanced downgrade (PRD §6: predicates 5,7)', () => {
+    /** Read the consent payload (or null) from the registered destructive check. */
+    function consent(input: Parameters<NonNullable<NonNullable<typeof spawnAgentTool.destructive>['check']>>[0], autonomy: 'guided' | 'autonomous'): string | WarningPayload | null {
+      return spawnAgentTool.destructive!.check!(input, { autonomy });
+    }
+
+    it('predicate 5/GO: a substitutable deep spawn OFFERS downgrade (downgradeTo set + message promises it)', () => {
+      // Mutate `canDowngrade` to stay true unconditionally and the message still
+      // promises balanced for a deep-band profile — the dishonest offer this test
+      // forbids in the next case. Here: a plain model:'deep' is substitutable.
+      const p = consent({ agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided') as WarningPayload;
+      expect(p.downgradeTo).toBe('balanced');
+      // Predicate 6: the text must match the buttons offered.
+      expect(p.message).toContain('Run on balanced');
+    });
+
+    it('a deep-band profile does NOT offer downgrade (cannot substitute) — mutate canDowngrade → dishonest offer', async () => {
+      const { reloadConfig } = await import('../../core/config.js');
+      vi.stubEnv('LYNOX_MODEL_PROFILES_JSON', JSON.stringify({
+        pinned: { provider: 'openai', api_base_url: 'https://api.example.com/v1', api_key: 'k', model_id: 'claude-opus-4-6' },
+      }));
+      reloadConfig();
+      try {
+        const p = consent({ agents: [{ name: 'r', task: 'x', profile: 'pinned' }] }, 'guided') as WarningPayload;
+        // A profile pins a specific endpoint and cannot be clamped to balanced, so
+        // the GO stays two-way. Mutate canDowngrade to `true` and this becomes
+        // 'balanced' — an offer the engine cannot honour.
+        expect(p.downgradeTo).toBeUndefined();
+        expect(p.message).not.toContain('Run on balanced');
+      } finally {
+        vi.unstubAllEnvs();
+        reloadConfig();
+      }
+    });
+
+    it('predicate 5 (clamp+label): "Run on balanced" clamps the deep spec and labels the child (mutate clamp → deep leaks)', async () => {
+      const onStream = vi.fn() as StreamHandler;
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'r', task: 'deep analysis', model: 'deep' }] },
+        makeAgent({ onStream, consumePendingDowngrade: () => 'balanced' }),
+      );
+      const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
+      const sub = (spawn['subAgents'] as Array<{ tier?: string; downgraded?: boolean }>)[0]!;
+      // Announced tier is balanced (clamped on the interactive downgrade). Remove
+      // the downgrade branch in the specs map and this reads 'deep' — a run the
+      // user explicitly declined.
+      expect(sub.tier).toBe('balanced');
+      expect(sub.downgraded).toBe(true);
+    });
+
+    it('predicate 5 (result label): the downgraded child header says it ran on balanced because deep was declined', async () => {
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'r', task: 'x', model: 'deep' }] },
+        makeAgent({ consumePendingDowngrade: () => 'balanced' }),
+      );
+      // Predicate 5: no silent degradation — the result names the downgrade.
+      expect(result).toContain('ran on balanced because you declined deep');
+    });
+
+    it('does NOT clamp when no downgrade was requested — deep still runs deep (guards over-trigger)', async () => {
+      const onStream = vi.fn() as StreamHandler;
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'r', task: 'x', model: 'deep' }] },
+        // consumePendingDowngrade unset → undefined → no clamp (the "Allow deep" path).
+        makeAgent({ onStream }),
+      );
+      const spawn = streamEvents(onStream).find((e) => e['type'] === 'spawn')!;
+      const sub = (spawn['subAgents'] as Array<{ tier?: string; downgraded?: boolean }>)[0]!;
+      expect(sub.tier).toBe('deep');
+      expect(sub.downgraded).toBeUndefined();
+    });
+
+    it('predicate 7 (budget): downgrade reserves the BALANCED estimate, strictly less than deep (clamp before reservation)', async () => {
+      // The clamp runs BEFORE totalEstimate/checkSessionBudget, so the reservation
+      // reflects the cheaper run — no separate reconcile. Mutate the clamp away and
+      // both reservations go deep (equal), failing the strict-less-than.
+      testCounters.costUSD = 0;
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'r', task: 'x', model: 'deep' }] },
+        makeAgent({ onStream: vi.fn() as StreamHandler }),
+      );
+      const deepReserved = testCounters.costUSD;
+
+      testCounters.costUSD = 0;
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'r', task: 'x', model: 'deep' }] },
+        makeAgent({ onStream: vi.fn() as StreamHandler, consumePendingDowngrade: () => 'balanced' }),
+      );
+      const downgradedReserved = testCounters.costUSD;
+
+      expect(downgradedReserved).toBeGreaterThan(0);
+      expect(downgradedReserved).toBeLessThan(deepReserved);
+    });
+
+    it('isDangerousDetailed threads the payload (downgradeTo); isDangerous stays a plain string', () => {
+      const signal = isDangerousDetailed('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', undefined, undefined, spawnAgentTool);
+      expect(signal).not.toBeNull();
+      expect(signal!.warning).toContain('DEEP');
+      expect(signal!.payload?.downgradeTo).toBe('balanced');
+      // Legacy string view unchanged (287 existing assertions depend on it).
+      expect(isDangerous('spawn_agent', { agents: [{ name: 'r', task: 'x', model: 'deep' }] }, 'guided', undefined, undefined, spawnAgentTool)).toContain('DEEP');
+      // A non-destructive danger (bash) carries NO payload — only the declarative
+      // gate produces one. Mutate extractDangerPayload to always read and a bash
+      // danger would gain a spurious payload.
+      const bash = isDangerousDetailed('bash', { command: 'rm -rf /tmp/lynox-probe' }, 'guided', undefined, undefined, undefined);
+      if (bash) expect(bash.payload).toBeUndefined();
     });
   });
 });

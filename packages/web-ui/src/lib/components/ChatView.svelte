@@ -2110,6 +2110,13 @@
 							<span class="text-text-subtle/50" aria-hidden="true">·</span>
 							<span class="text-text-subtle/60 truncate min-w-0 max-w-[12rem]" title={child.model}>{child.model}</span>
 						{/if}
+						{#if child.tier}
+							<span class="text-text-subtle/50" aria-hidden="true">·</span>
+							<span class="uppercase tracking-wide text-[9px] {child.downgraded ? 'text-warning/80' : 'text-text-subtle/50'}">{child.tier}</span>
+						{/if}
+						{#if child.downgraded}
+							<span class="text-warning/80">{t('spawn.downgraded_note')}</span>
+						{/if}
 						<!-- Kept together and unshrinkable: elapsed and cost are the two
 						     numbers the row exists for, so the model id yields space first. -->
 						{#if child.elapsedS !== undefined || child.costUsd !== undefined}
@@ -3227,12 +3234,13 @@
 	{#if pendingPermission && !inBatchMode}
 		{@const opts = pendingPermission.options ?? []}
 		{@const isPermissionGuard = opts.includes('Allow') && opts.includes('Deny')}
-		{@const visibleOptions = isPermissionGuard ? [] : opts.filter(o => o !== '\x00')}
+		{@const isDeepConsent = opts.includes('Run on balanced')}
+		{@const visibleOptions = (isPermissionGuard || isDeepConsent) ? [] : opts.filter(o => o !== '\x00')}
 		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
 				{@render promptOrigin(pendingPermission.origin)}
 				<div class="flex items-start gap-2">
-					{#if isPermissionGuard}
+					{#if isPermissionGuard || isDeepConsent}
 						<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
 					{:else}
 						<!-- renderPromptMarkdown, NOT MarkdownRenderer: the chat renderer
@@ -3254,7 +3262,7 @@
 						{#if promptSecondsLeft != null}
 							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}" title={t('chat.prompt_timeout_left')}>{formatCountdown(promptSecondsLeft)}</span>
 						{/if}
-						{#if !isPermissionGuard}
+						{#if !isPermissionGuard && !isDeepConsent}
 							<button onclick={() => answerPrompt('__dismissed__')} class="p-1.5 rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors" aria-label={t('chat.dismiss')}>
 								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
 							</button>
@@ -3262,7 +3270,13 @@
 					</div>
 				</div>
 
-				{#if isPermissionGuard}
+				{#if isDeepConsent}
+					<div class="flex flex-wrap gap-2">
+						<button onclick={() => answerPrompt('allow deep')} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.consent_allow_deep')}</button>
+						<button onclick={() => answerPrompt('run on balanced')} class="rounded-[var(--radius-sm)] bg-accent/15 border border-accent/30 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/25 transition-opacity">{t('chat.consent_run_balanced')}</button>
+						<button onclick={() => answerPrompt('n')} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.consent_cancel')}</button>
+					</div>
+				{:else if isPermissionGuard}
 					<div class="flex flex-wrap gap-2">
 						<button onclick={() => answerPrompt('y')} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.allow')}</button>
 						<button onclick={() => answerPrompt('n')} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.deny')}</button>

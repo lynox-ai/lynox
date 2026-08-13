@@ -28,6 +28,10 @@ export interface SubAgentActivity {
 	name: string;
 	role?: string | undefined;
 	model?: string | undefined;
+	/** Resolved capability tier this child runs on (fast/balanced/deep). */
+	tier?: 'fast' | 'balanced' | 'deep' | undefined;
+	/** True when the user chose "Run on balanced" and this child was clamped down from deep. */
+	downgraded?: boolean | undefined;
 	status: 'running' | 'done' | 'error';
 	/** Wall-clock, filled in when the child finishes. */
 	elapsedS?: number | undefined;
@@ -116,6 +120,8 @@ export interface AnnouncedSubAgent {
 	name: string;
 	role?: string | undefined;
 	model?: string | undefined;
+	tier?: 'fast' | 'balanced' | 'deep' | undefined;
+	downgraded?: boolean | undefined;
 }
 
 /**
@@ -132,7 +138,7 @@ export function parseAnnouncedSubAgents(raw: unknown): AnnouncedSubAgent[] {
 	const out: AnnouncedSubAgent[] = [];
 	for (const item of raw) {
 		if (typeof item !== 'object' || item === null) continue;
-		const { id, name, role, model } = item as Record<string, unknown>;
+		const { id, name, role, model, tier, downgraded } = item as Record<string, unknown>;
 		if (typeof id !== 'string' || id.length === 0) continue;
 		if (typeof name !== 'string' || name.length === 0) continue;
 		out.push({
@@ -140,6 +146,8 @@ export function parseAnnouncedSubAgents(raw: unknown): AnnouncedSubAgent[] {
 			name: name.slice(0, 64),
 			role: typeof role === 'string' ? role.slice(0, 32) : undefined,
 			model: typeof model === 'string' ? model.slice(0, 64) : undefined,
+			tier: tier === 'fast' || tier === 'balanced' || tier === 'deep' ? tier : undefined,
+			downgraded: downgraded === true ? true : undefined,
 		});
 	}
 	return out;
@@ -189,6 +197,8 @@ function startSpawn(
 			name: c.name,
 			role: c.role,
 			model: c.model,
+			tier: c.tier,
+			downgraded: c.downgraded,
 			status: 'running',
 			toolCalls: [],
 		};

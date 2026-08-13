@@ -1,6 +1,6 @@
 import { realpathSync, existsSync } from 'node:fs';
 import { resolve, dirname, basename, join, relative, isAbsolute } from 'node:path';
-import type { AutonomyLevel, PreApprovalSet, PreApproveAuditLike, ToolEntry } from '../types/index.js';
+import type { AutonomyLevel, PreApprovalSet, PreApproveAuditLike, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isWorkspaceActive } from '../core/workspace.js';
 import { channels } from '../core/observability.js';
@@ -310,7 +310,45 @@ function isPathWithin(childPath: string, parentPath: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
-export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): string | null {
+/**
+ * The structured danger signal. `warning` is the GO text (identical to what
+ * {@link isDangerous} returns); `payload` is present ONLY when the danger came
+ * from a declarative `ToolEntry.destructive` check that returned a
+ * {@link WarningPayload} (the spawn-agent deep-tier gate), letting the caller
+ * (agent.ts) offer a downgrade. Bash/read/write/mail dangers carry no payload.
+ */
+export interface DangerSignal {
+  warning: string;
+  payload?: WarningPayload | undefined;
+}
+
+/**
+ * Re-read the declarative destructive `check` to recover the structured
+ * {@link WarningPayload}, if any. The check is PURE (reads config, no side
+ * effects), so calling it a second time here — only for tools that HAVE a
+ * destructive check — avoids threading a payload through `_detectDanger`'s many
+ * string-return paths. A non-destructive tool, or a check that returned a plain
+ * action-label string, yields null: those dangers offer no downgrade.
+ * Consistent with `_detectDanger` by construction: both call the same
+ * `check(input, { autonomy })`.
+ */
+function extractDangerPayload(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, entry: ToolEntry | undefined): WarningPayload | null {
+  const check = entry?.destructive?.check;
+  if (!check) return null;
+  const detail = check(input, { autonomy });
+  if (detail !== null && typeof detail !== 'string') return detail;
+  return null;
+}
+
+/**
+ * The full danger signal with pre-approval / capability-contract overrides and
+ * the observability publish applied — the single place that logic lives.
+ * {@link isDangerous} is a thin `?.warning` wrapper over this for the many
+ * callers (and the test suite) that only want the warning string; agent.ts calls
+ * this directly to also receive `payload`, so the GO can offer a cheaper tier
+ * when `payload.downgradeTo` is set.
+ */
+export function isDangerousDetailed(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): DangerSignal | null {
   const warning = _detectDanger(toolName, input, autonomy, entry);
   if (!warning) return null;
 
@@ -344,7 +382,12 @@ export function isDangerous(toolName: string, input: unknown, autonomy?: Autonom
     channels.guardBlock.publish({ toolName, warning, autonomy, runId, contractVersion: contract?.version });
   }
 
-  return warning;
+  const payload = extractDangerPayload(toolName, input, autonomy, entry);
+  return { warning, ...(payload ? { payload } : {}) };
+}
+
+export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): string | null {
+  return isDangerousDetailed(toolName, input, autonomy, preApproval, audit, entry, runId, contract)?.warning ?? null;
 }
 
 /** A value matches if any glob pattern in the list matches it (empty list = no match). */

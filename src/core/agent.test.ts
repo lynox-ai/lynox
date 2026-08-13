@@ -37,6 +37,7 @@ vi.mock('./stream.js', () => ({
 
 vi.mock('../tools/permission-guard.js', () => ({
   isDangerous: vi.fn().mockReturnValue(null),
+  isDangerousDetailed: vi.fn().mockReturnValue(null),
 }));
 
 vi.mock('./observability.js', () => ({
@@ -63,7 +64,7 @@ import type { PromptText } from '../types/index.js';
 import { buildDedupReference } from './tool-result-hygiene.js';
 import { TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { getBetasForProvider } from '../types/index.js';
-import { isDangerous } from '../tools/permission-guard.js';
+import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
 import { createToolContext } from './tool-context.js';
 import { CONTEXT_COST_LOG_FILE } from './context-cost-log.js';
@@ -1158,7 +1159,7 @@ describe('Agent', () => {
     });
 
     it('isDangerous + promptUser: y allows execution', async () => {
-      vi.mocked(isDangerous).mockReturnValueOnce('Dangerous: rm -rf /');
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous: rm -rf /' });
       const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
       const promptUser = vi.fn().mockResolvedValue('y');
 
@@ -1179,7 +1180,7 @@ describe('Agent', () => {
     });
 
     it('isDangerous + promptUser: deny blocks execution', async () => {
-      vi.mocked(isDangerous).mockReturnValueOnce('Dangerous command');
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous command' });
       const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
       const promptUser = vi.fn().mockResolvedValue('no');
 
@@ -1207,7 +1208,7 @@ describe('Agent', () => {
     });
 
     it('isDangerous without promptUser: blocks with non-interactive denial', async () => {
-      vi.mocked(isDangerous).mockReturnValueOnce('Dangerous');
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous' });
       const tool = makeTool('bash');
 
       mockProcess
@@ -1227,6 +1228,70 @@ describe('Agent', () => {
       const results = (toolResultsMsg as { content: Array<{ content: string; is_error: boolean }> }).content;
       expect(results[0]!.content).toContain('Permission denied (non-interactive)');
       expect(results[0]!.is_error).toBe(true);
+      expect(tool.handler).not.toHaveBeenCalled();
+    });
+
+    it('deep-consent 3-way GO: "Run on balanced" sets the downgrade for the handler (mutate options → 2-way)', async () => {
+      // A danger carrying payload.downgradeTo offers a 3-way GO. "Run on balanced"
+      // must stash the tier so the upcoming handler can clamp. Mutate the option
+      // list back to the 2-way ['Allow','Deny','\x00'] and the assertion on the
+      // 3-way args fails — the wiring this test pins.
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({
+        warning: '⚠ spawn_agent: deep',
+        payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
+      });
+      let consumed: unknown = undefined;
+      const tool = makeTool('spawn_agent', vi.fn().mockImplementation((_input, agent) => {
+        consumed = agent.consumePendingDowngrade?.();
+        return 'spawned';
+      }));
+      const promptUser = vi.fn().mockResolvedValue('run on balanced');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_sp', name: 'spawn_agent', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
+      await agent.send('Spawn deep');
+      expect(promptUser).toHaveBeenCalledWith('⚠ spawn_agent: deep', ['Allow deep', 'Run on balanced', 'Cancel', '\x00']);
+      expect(tool.handler).toHaveBeenCalled();
+      expect(consumed).toBe('balanced');
+    });
+
+    it('deep-consent 3-way GO: "Allow deep" proceeds WITHOUT a downgrade', async () => {
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({
+        warning: '⚠ spawn_agent: deep',
+        payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
+      });
+      let consumed: unknown = 'untouched';
+      const tool = makeTool('spawn_agent', vi.fn().mockImplementation((_input, agent) => {
+        consumed = agent.consumePendingDowngrade?.();
+        return 'spawned';
+      }));
+      const promptUser = vi.fn().mockResolvedValue('allow deep');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_sp', name: 'spawn_agent', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
+      await agent.send('Spawn deep');
+      // Allow deep → no downgrade stashed (the handler runs deep as-authorised).
+      // Mutate the 'allow deep' branch to also set the downgrade and consumed reads 'balanced'.
+      expect(tool.handler).toHaveBeenCalled();
+      expect(consumed).toBeUndefined();
+    });
+
+    it('deep-consent 3-way GO: "Cancel" denies — handler never runs', async () => {
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({
+        warning: '⚠ spawn_agent: deep',
+        payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
+      });
+      const tool = makeTool('spawn_agent', vi.fn().mockResolvedValue('spawned'));
+      const promptUser = vi.fn().mockResolvedValue('cancel');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_sp', name: 'spawn_agent', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Denied'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
+      await agent.send('Spawn deep');
+      // Cancel is outside the allow-set → denied. Mutate the deny branch to allow
+      // 'cancel' and the handler IS called (the regression).
       expect(tool.handler).not.toHaveBeenCalled();
     });
 

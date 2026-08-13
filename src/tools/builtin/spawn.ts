@@ -929,7 +929,16 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     // silently run deep. The deep test matches `specResolvesDeep` so the gate and
     // the clamp agree on what "deep" means.
     const isHeadless = agent.autonomy === 'autonomous';
-    const specs: SpawnSpec[] = input.agents.map((spec) => {
+    // Read (and clear) a tier downgrade the user chose at the GO prompt
+    // ("Run on balanced"). Only the deep-consent check produces one; undefined
+    // for headless (the D2 clamp below is the headless control) and for any
+    // non-spawn call. Consumed here so it can never leak to a later tool call.
+    const downgradeTier = agent.consumePendingDowngrade?.();
+    // Indices of specs clamped down by the interactive choice, so the announce
+    // tier, the budget estimate, and the labelled result all agree the child
+    // ran on the cheaper tier (predicate 5).
+    const downgradedIdx = new Set<number>();
+    const specs: SpawnSpec[] = input.agents.map((spec, i) => {
       assertSpawnRoutingPermitted(spec, cfg);
       if (isHeadless && specResolvesDeep(spec, cfg, provider)) {
         const deepProfile = spec.profile ? cfg.model_profiles?.[spec.profile] : undefined;
@@ -948,6 +957,16 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           );
         }
         return { ...spec, model: 'balanced' as const };
+      }
+      // Interactive "Run on balanced": clamp substitutable deep specs down. A
+      // deep-band profile is UNREACHABLE here — the check offers downgrade only
+      // when canDowngrade (no deep-band profile in the batch), so every deep spec
+      // is substitutable. Clamping before the announce loop means totalEstimate,
+      // the session budget reservation, and the announced tier all reflect the
+      // cheaper run (predicate 7 — no separate reconcile needed).
+      if (downgradeTier === 'balanced' && specResolvesDeep(spec, cfg, provider)) {
+        downgradedIdx.add(i);
+        return { ...spec, model: 'balanced' };
       }
       return spec;
     });
@@ -973,6 +992,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         name: spec.name,
         role: spec.role,
         tier,
+        ...(downgradedIdx.has(i) ? { downgraded: true } : {}),
         ...(wireModel ? { model: wireModel } : {}),
       });
     });
@@ -1128,7 +1148,13 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // an empty code span in a heading claims a model with no name.
         const safeModel = safeModelId(outcome.value.model);
         const ranOn = safeModel ? ` (ran on \`${safeModel}\`)` : '';
-        sections.push(`## ${spec.name}${ranOn}\n\n${wrapped}`);
+        // Predicate 5: a child the user downgraded from deep is labelled, not
+        // silently degraded. The note rides the header OUTSIDE the untrusted
+        // envelope (engine wording, not child output).
+        const downgradeNote = downgradedIdx.has(i)
+          ? ' — ran on balanced because you declined deep; quality may be lower'
+          : '';
+        sections.push(`## ${spec.name}${ranOn}${downgradeNote}\n\n${wrapped}`);
         childRunIds.push(outcome.value.childRunId);
       } else {
         const err = outcome.reason instanceof Error
@@ -1185,6 +1211,11 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       const providers = new Set<LLMProvider>();
       let resolvedTier: ModelTier = 'deep';
       let hasUnknownBand = false;
+      // "Run on balanced" is offered (downgradeTo set) only when EVERY deep spec
+      // is substitutable — i.e. none pins a deep/unknown-band model profile,
+      // which cannot be clamped down without silently changing the configured
+      // endpoint. A profile present → the GO stays two-way (Allow deep / Cancel).
+      let canDowngrade = true;
       for (const spec of deepSpecs) {
         const role = spec.role ? getRole(spec.role) : undefined;
         const profile = spec.profile ? cfg.model_profiles?.[spec.profile] : undefined;
@@ -1194,6 +1225,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // (conservatively) for an unknown-band profile whose cost can't be proven.
         if (profile && profileBandIsDeepOrUnknown(profile)) {
           resolvedTier = 'deep';
+          canDowngrade = false;
           if (modelCapability(profile.model_id)?.tier === undefined) hasUnknownBand = true;
         } else {
           resolvedTier = r.tier;
@@ -1211,15 +1243,20 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
       const tierWord = hasUnknownBand
         ? 'a model gated as DEEP (or an unregistered custom model whose cost band the engine cannot prove)'
         : 'the DEEP tier (a stronger reasoning model, more capable but more expensive)';
+      // The trailing clause must match the buttons offered (predicate 6,
+      // non-phishing): promise "Run on balanced" only when the engine can honour it.
+      const tail = canDowngrade
+        ? `Allow only if the work genuinely needs deep; otherwise choose "Run on balanced".`
+        : `A model profile pins a specific endpoint and cannot be substituted down — allow only if you want this run on that model.`;
       return {
         message:
           `⚠ spawn_agent: ${childWord} on ${tierWord}. ` +
           `Estimated cost ~$${costUsd.toFixed(2)} against this session. ` +
-          `Provider: ${providerList}. Allow only if the work genuinely needs it; ` +
-          `otherwise the children can run on balanced instead.`,
+          `Provider: ${providerList}. ${tail}`,
         tier: resolvedTier,
         costUsd,
         provider: providerList,
+        ...(canDowngrade ? { downgradeTo: 'balanced' as const } : {}),
       };
     },
   },

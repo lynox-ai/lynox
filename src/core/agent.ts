@@ -34,7 +34,7 @@ import { deriveTurnUntrusted, describeTurnUntrusted } from './untrusted-signals.
 import { appendUntrustedCauseLog } from './untrusted-cause-log.js';
 import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
-import { isDangerous } from '../tools/permission-guard.js';
+import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
@@ -336,6 +336,15 @@ export class Agent implements IAgent {
     });
   }
   private briefing: string | undefined;
+  /**
+   * Transient tier downgrade requested at the GO prompt for the NEXT tool call.
+   * Set when the user picks "Run on balanced" on a deep-tier consent gate;
+   * consumed (and cleared) by the spawn handler via {@link consumePendingDowngrade},
+   * which clamps the deep specs to the requested tier. Lives one tool call: a
+   * tool that doesn't read it (anything but spawn) simply leaves it to be
+   * overwritten or GC'd. Sequential tool execution keeps this race-free.
+   */
+  private _pendingDowngradeTier: import('../types/models.js').ModelTier | undefined;
   readonly autonomy: AutonomyLevel | undefined;
   private readonly preApproval: PreApprovalSet | undefined;
   private readonly audit: PreApproveAuditLike | undefined;
@@ -711,6 +720,18 @@ export class Agent implements IAgent {
    */
   getCostSnapshot(): import('../types/index.js').CostSnapshot | null {
     return this.costGuard ? this.costGuard.snapshot() : null;
+  }
+
+  /**
+   * Return and clear the tier downgrade the user chose at the most recent GO
+   * prompt, if any. The spawn handler calls this to decide whether to clamp deep
+   * specs to a cheaper tier. Reading consumes the request so a later, unrelated
+   * tool call never inherits it.
+   */
+  consumePendingDowngrade(): import('../types/models.js').ModelTier | undefined {
+    const tier = this._pendingDowngradeTier;
+    this._pendingDowngradeTier = undefined;
+    return tier;
   }
 
   /**
@@ -2712,15 +2733,34 @@ export class Agent implements IAgent {
     // — those still get BLOCKED in autonomous mode via isDangerous, but the generic
     // "Allow / Deny" prompt is replaced by the tool's own contextual confirmation.
     const selfConfirming = tool?.requiresConfirmation === true;
-    const danger = (mutatesFile && this.changesetManager?.active)
+    // Tier downgrade chosen at the GO below ("Run on balanced"). Held locally until
+    // the handler is about to run, then published to the instance field synchronously
+    // (see the handler call site) — so concurrent fan-out tool calls can't clobber
+    // each other's decision via the shared field, and a handler that never runs
+    // (validation abort) leaves nothing stale behind.
+    let downgradeDecision: import('../types/models.js').ModelTier | undefined;
+    const signal = (mutatesFile && this.changesetManager?.active)
       ? null
-      : isDangerous(tc.name, tc.input, this.autonomy, this.preApproval, this.audit, tool, this.currentRunId, this.capabilityContract);
+      : isDangerousDetailed(tc.name, tc.input, this.autonomy, this.preApproval, this.audit, tool, this.currentRunId, this.capabilityContract);
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
-    const effectiveDanger = (selfConfirming && danger && !danger.includes('[BLOCKED')) ? null : danger;
-    if (effectiveDanger) {
+    const effectiveSignal = (selfConfirming && signal && !signal.warning.includes('[BLOCKED')) ? null : signal;
+    if (effectiveSignal) {
       if (this.promptUser) {
-        const answer = await this.promptUser(effectiveDanger, ['Allow', 'Deny', '\x00']);
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+        // A deep-tier consent gate may offer a cheaper alternative
+        // (payload.downgradeTo). When it does the GO is three-way:
+        // Allow deep / Run on balanced / Cancel. "Run on balanced" stashes the
+        // tier for the upcoming handler (spawn clamps deep→balanced); the spawn
+        // deep check is the only producer of downgradeTo, so only spawn honours
+        // it. Anything outside the allow-set (incl. Cancel) denies, same as the
+        // existing two-way gate.
+        const offersDowngrade = effectiveSignal.payload?.downgradeTo === 'balanced';
+        const answer = offersDowngrade
+          ? await this.promptUser(effectiveSignal.warning, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'])
+          : await this.promptUser(effectiveSignal.warning, ['Allow', 'Deny', '\x00']);
+        const normalized = answer.toLowerCase();
+        if (offersDowngrade && normalized === 'run on balanced') {
+          downgradeDecision = 'balanced';
+        } else if (!['y', 'yes', 'allow', 'allow deep'].includes(normalized)) {
           return {
             type: 'tool_result',
             tool_use_id: tc.id,
@@ -2817,6 +2857,13 @@ export class Agent implements IAgent {
 
     let toolTimer: ReturnType<typeof setTimeout> | undefined;
     try {
+      // Publish the GO's downgrade decision to the instance field synchronously,
+      // immediately before the handler reads it. spawn_agent calls
+      // consumePendingDowngrade() as its first statement — before any await — so
+      // no concurrent fan-out call can interleave between this set and that read.
+      // A non-spawn tool never offers downgrade (downgradeDecision undefined) and
+      // never reads the field, so this is a no-op for it.
+      this._pendingDowngradeTier = downgradeDecision;
       const rawResult = this.workerPool && this.workerPool.isWorkerSafe(tc.name)
         ? this.workerPool.execute(tc.name, processedInput)
         : tool.handler(processedInput, this);
