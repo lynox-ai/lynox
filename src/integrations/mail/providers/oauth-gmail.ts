@@ -490,21 +490,43 @@ const ASCII_PRINTABLE = /^[\x20-\x7E]*$/;
 export function encodeMimeHeader(value: string): string {
   if (value.length === 0) return '';
   if (ASCII_PRINTABLE.test(value)) return value;
-  let out = '';
+  // Pass 1: encode each char into an ATOMIC Q-piece. A multi-byte char (ü → =C3=B6,
+  // — → =E2=80=94, 🚀 → =F0=9F=9A=80) becomes one piece, never split below.
+  const pieces: string[] = [];
   for (const ch of value) {
-    if (ch === ' ') { out += '_'; continue; }
+    if (ch === ' ') { pieces.push('_'); continue; }
     const buf = Buffer.from(ch, 'utf-8');
     if (buf.length === 1) {
       const c = ch.charCodeAt(0);
       // printable ASCII (except the encoded-word specials ? = _) stays literal
       if (c >= 0x21 && c <= 0x7E && ch !== '?' && ch !== '_' && ch !== '=') {
-        out += ch;
+        pieces.push(ch);
         continue;
       }
     }
-    for (const b of buf) out += '=' + b.toString(16).toUpperCase().padStart(2, '0');
+    let hex = '';
+    for (const b of buf) hex += '=' + b.toString(16).toUpperCase().padStart(2, '0');
+    pieces.push(hex);
   }
-  return `=?UTF-8?Q?${out}?=`;
+  // Pass 2: greedy-pack pieces into encoded-words whose encoded-text stays under
+  // MAX_ATOM, so the whole encoded-word (=?UTF-8?Q?…?=, 12 chars overhead) is
+  // within RFC 2047 §2's 75-char limit. Long German subjects otherwise end up as
+  // one >75-char encoded-word that strict clients truncate or show verbatim.
+  const MAX_ATOM = 60; // 75 − 12 overhead − 3 headroom
+  const atoms: string[] = [];
+  let atom = '';
+  for (const p of pieces) {
+    if (atom.length > 0 && atom.length + p.length > MAX_ATOM) {
+      atoms.push(atom);
+      atom = p;
+    } else {
+      atom += p;
+    }
+  }
+  if (atom.length > 0) atoms.push(atom);
+  // Encoded-words separated by linear whitespace are concatenated on decode
+  // (RFC 2047 §6.2), so the space between atoms is not part of the value.
+  return atoms.map((a) => `=?UTF-8?Q?${a}?=`).join(' ');
 }
 
 function buildRfc2822(input: MailSendInput, fromAddress: string, fromDisplayName?: string): string {
