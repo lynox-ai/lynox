@@ -19,7 +19,7 @@ import {
 	type ContentBlock,
 } from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
-import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody, parseReviewFailure, carryKnowledgeWrites, allKnowledgeWrites, type KnowledgeWriteChip } from './knowledge-chip.js';
+import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody, parseReviewFailure, carryKnowledgeWrites, allKnowledgeWrites, queueEntriesToChips, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -2974,6 +2974,31 @@ export async function resumeThread(threadId: string): Promise<void> {
 				carryKnowledgeWrites(localMessages, serverMessages);
 				messages = serverMessages;
 				adoptedServer = true;
+				// DEF-dk-review-chip-resume-invisible: the carried chips cover what
+				// LOCAL storage remembered, but a reload on another device (or after
+				// the local cache dropped the thread) still started chip-less — the
+				// amber review chip only lived in the SSE side-channel. Re-hydrate
+				// this thread's PENDING queue entries as chips on the last message,
+				// so the keep/edit/discard decision happens where the conversation
+				// happened. Client-only display state; the wording never re-enters
+				// model context (the store field is documentation-pinned to that).
+				try {
+					const qRes = await fetch(
+						`${getApiBase()}/knowledge/queue?threadId=${encodeURIComponent(threadId)}`,
+						{ signal: controller.signal },
+					);
+					if (gen !== _resumeGeneration) return;
+					if (qRes.ok) {
+						const qData = await qRes.json() as { entries?: unknown };
+						if (Array.isArray(qData.entries) && qData.entries.length > 0 && messages.length > 0) {
+							const chips = queueEntriesToChips(allKnowledgeWrites(messages), qData.entries);
+							const last = messages[messages.length - 1]!;
+							(last.knowledgeWrites ??= []).push(...chips);
+						}
+					}
+				} catch {
+					// Best-effort: the queue hub remains the authoritative surface.
+				}
 			}
 		}
 
