@@ -30,6 +30,7 @@ import {
   type MailSendResult,
 } from './provider.js';
 import type { MailContext } from './context.js';
+import { reflowMailBody } from './body-reflow.js';
 import type { MailProvider } from './provider.js';
 import type { SentMailLogInput } from './state.js';
 import { resolveProvider, type MailRegistry } from './tools/registry.js';
@@ -184,7 +185,12 @@ export async function sendMail(
   const sendInput: MailSendInput = {
     to: [...input.to],
     subject: input.subject,
-    text: input.body,
+    // Reflow the model's hard editing-wrap before the wire: text/plain renders
+    // every CRLF as a real break, so the ~76-char wrap the model emits showed
+    // up mid-sentence in clients (Apple Mail, 2026-08-14). Structural lines
+    // (quotes, lists, code, signature) survive verbatim — see body-reflow.ts.
+    // Same words the approver consented to; only whitespace changes.
+    text: reflowMailBody(input.body),
   };
   if (cc.length > 0) sendInput.cc = [...cc];
   if (bcc.length > 0) sendInput.bcc = [...bcc];

@@ -4,8 +4,20 @@
 // All preset providers (gmail, icloud, fastmail, yahoo, outlook, custom) build
 // on top of this — they only differ in the host/port/TLS configuration.
 
+import { randomUUID } from 'node:crypto';
 import { ImapFlow, type FetchMessageObject, type MessageStructureObject, type SearchObject } from 'imapflow';
 import nodemailer, { type Transporter } from 'nodemailer';
+// nodemailer ships no typings for its internal composer (the same code path
+// `sendMail` uses to serialize a message); this narrows it to the only two
+// members the Sent-append path touches.
+import MailComposerUntyped from 'nodemailer/lib/mail-composer/index.js';
+interface MailComposerInstance {
+  compile(): { build(cb: (err: Error | null, buf: Buffer) => void): void };
+}
+interface MailComposerCtor {
+  new (mail: Record<string, unknown>): MailComposerInstance;
+}
+const MailComposer = MailComposerUntyped as unknown as MailComposerCtor;
 
 import {
   MailError,
@@ -73,6 +85,10 @@ function insecureTlsFromEnv(): boolean {
 const CONNECT_TIMEOUT_MS = 10_000;
 const GREETING_TIMEOUT_MS = 10_000;
 const SOCKET_TIMEOUT_MS = 60_000;
+/** Hard ceiling for the best-effort Sent-copy APPEND — below the SMTP socket
+ *  timeout on purpose: the copy is optional and must never hold a delivered
+ *  send hostage to IMAP reconnect backoff. */
+const SENT_APPEND_TIMEOUT_MS = 5_000;
 const RECONNECT_BACKOFF_INITIAL_MS = 1_000;
 const RECONNECT_BACKOFF_MAX_MS = 30_000;
 const RECONNECT_MAX_ATTEMPTS = 5;
@@ -733,6 +749,12 @@ export class ImapSmtpProvider implements MailProvider {
     }
 
     const transport = this.getSmtpTransport(creds);
+    // Pre-assign the Message-ID so the SMTP copy and the Sent-APPEND copy are
+    // thread-identical — two independently generated ids would show up as
+    // unrelated messages in clients that display both. (dogfood 2026-08-14:
+    // sent mail was invisible to the sender because nothing appends to Sent;
+    // this is the append half.)
+    const messageId = `<${randomUUID()}@${this.account.address.split('@')[1] ?? 'localhost'}>`;
 
     try {
       const result = await transport.sendMail({
@@ -746,6 +768,7 @@ export class ImapSmtpProvider implements MailProvider {
         html: input.html,
         inReplyTo: input.inReplyTo,
         references: input.references,
+        messageId,
         attachments: input.attachments?.map(a => ({
           filename: a.filename,
           content: Buffer.from(a.content),
@@ -753,14 +776,72 @@ export class ImapSmtpProvider implements MailProvider {
         })),
       });
 
+      // Sent-folder APPEND, best-effort. A failure here must NOT fail a send
+      // that is already on the wire — the mail exists; only the sender's own
+      // "Gesendete" view would miss it (logged, not thrown). Bounded by a race
+      // timeout: IMAP connection problems retry with backoff, and the caller
+      // must not wait out that backoff for a copy that is optional. Skipped
+      // entirely for Gmail-via-SMTP: smtp.gmail.com files SMTP sends into Sent
+      // server-side, an append would duplicate.
+      const smtpHost = this.account.smtp.host.toLowerCase();
+      if (!smtpHost.includes('gmail')) {
+        try {
+          await Promise.race([
+            this.appendSentCopy(input, messageId),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('sent-copy append timed out')), SENT_APPEND_TIMEOUT_MS).unref()),
+          ]);
+        } catch (err) {
+          console.warn('[mail] sent-copy append failed (mail is delivered):', err instanceof Error ? err.message : String(err));
+        }
+      }
+
       return {
-        messageId: result.messageId ?? '',
+        messageId: result.messageId ?? messageId,
         accepted: (result.accepted ?? []).map(addrToPlain),
         rejected: (result.rejected ?? []).map(addrToPlain),
       };
     } catch (err) {
       throw wrapSmtpError(err, 'send');
     }
+  }
+
+  /** Re-serialize the sent message with the SAME Message-ID and APPEND it to
+   *  the account's Sent folder (SPECIAL-USE `\Sent`, name fallbacks for servers
+   *  that don't advertise special-use). Returns silently when no Sent folder
+   *  resolves — nothing sensible to append to. Throws on transport failure;
+   *  the caller decides fatality (never fatal post-SMTP). */
+  private async appendSentCopy(input: MailSendInput, messageId: string): Promise<void> {
+    const composer = new MailComposer({
+      from: { name: this.account.displayName, address: this.account.address },
+      to: input.to.map(addressToString),
+      cc: input.cc?.map(addressToString),
+      bcc: input.bcc?.map(addressToString),
+      replyTo: input.replyTo ? addressToString(input.replyTo) : undefined,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+      inReplyTo: input.inReplyTo,
+      references: input.references,
+      messageId,
+      date: new Date(),
+      attachments: input.attachments?.map(a => ({
+        filename: a.filename,
+        content: Buffer.from(a.content),
+        contentType: a.contentType,
+      })),
+    });
+    const raw = await new Promise<Buffer>((resolve, reject) => {
+      composer.compile().build((err, buf) => (err ? reject(err) : resolve(buf)));
+    });
+
+    const client = await this.getClient();
+    const folders = await client.list();
+    const sent =
+      folders.find(f => f.specialUse === '\\Sent')
+      ?? folders.find(f => /^(INBOX\.)?Sent( Messages| Items)?$/i.test(f.path));
+    if (!sent) return;
+    await client.append(sent.path, raw, ['\\Seen'], new Date());
   }
 
   // ── watch ───────────────────────────────────────────────────────────────
