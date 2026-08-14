@@ -255,7 +255,7 @@ export function translateMessages(
       if (typeof m.content === 'string') {
         result.push({ role: 'user', content: m.content });
       } else if (Array.isArray(m.content)) {
-        const blocks = m.content as Array<{ type: string; text?: string; tool_use_id?: string; content?: unknown; source?: { media_type?: string; data?: string } }>;
+        const blocks = m.content as Array<{ type: string; text?: string; tool_use_id?: string; content?: unknown; is_error?: boolean; source?: { media_type?: string; data?: string } }>;
 
         // 1. Tool results → role:'tool' messages (they answer the prior
         //    assistant's tool_calls, so they come first).
@@ -268,6 +268,12 @@ export function translateMessages(
               .filter(b => b.type === 'text')
               .map(b => b.text ?? '')
               .join('\n');
+          }
+          // The OpenAI wire has no is_error field on role:'tool' — an unmarked
+          // error result reads as success to the model (agent.ts flags denied
+          // permissions and tool exceptions with is_error:true, DEF-openai-wire-toolerr).
+          if (tr.is_error === true) {
+            content = content ? `[Tool error] ${content}` : '[Tool error]';
           }
           result.push({ role: 'tool', tool_call_id: tr.tool_use_id ?? '', content });
         }

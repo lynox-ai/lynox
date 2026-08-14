@@ -291,7 +291,15 @@ describe('LLM_CATALOG.tier_models (per-tier picker options on a free-text tile)'
       // All are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no
       // measured tier map) — a `tier` tag here would fake a band mapping.
       expect(m.tier, `${m.id} must not fake a tier band`).toBeUndefined();
-      expect(m.capabilities).toEqual(['tool_use']);   // text-only on Fireworks
+      // Vision (2026-08-14): the three candidates whose wire was validated
+      // live (fireworks-vision online test) carry 'vision'; the genuinely
+      // text-only siblings stay ['tool_use'].
+      const visionIds = new Set([
+        'accounts/fireworks/models/kimi-k3',
+        'accounts/fireworks/models/qwen3p7-plus',
+        'accounts/fireworks/models/minimax-m3',
+      ]);
+      expect(m.capabilities, m.id).toEqual(visionIds.has(m.id) ? ['vision', 'tool_use'] : ['tool_use']);
       expect(m.residency).toContain('Fireworks');
     }
   });
