@@ -26,8 +26,10 @@ export interface WorkflowLimits {
    * once (the existing v1.1 behaviour). When set, `runParallel` launches at
    * most this many steps per phase, starting the next as each completes. The
    * phase barrier is preserved: a phase still fully settles before the next
-   * begins. Guards bulk workflows (a 2000-contact triage fans into ~40 batch
-   * subagents; unbounded fan-out would exhaust the instance).
+   * begins. Backpressure against unbounded per-phase fan-out: a phase of N
+   * independent steps would otherwise launch N concurrent sub-agents (each a
+   * live LLM run) — capping bounds instance load + memory. (Workflows validate
+   * to ≤ MAX_STEPS=20 steps total; this bounds fan-out *within* a phase.)
    *
    * Distinct from the `workflowBoundExceeded` fields above — those bound
    * spend / iterations / wall-clock *between* steps; this bounds *simultaneous*

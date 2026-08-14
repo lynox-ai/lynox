@@ -1296,7 +1296,7 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
 const RUN_CTX_KEYS = [
   'autonomy', 'parentTools', 'parentToolContext', 'parentMemory', 'userTimezone',
   'parentPrompt', 'parentSessionCounters', 'runHistory', 'hooks', 'capabilityContract',
-  'secretStore', 'runTaint',
+  'limits', 'secretStore', 'runTaint',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
@@ -1362,6 +1362,27 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     expect(opts['parentTools']).toBe(mockTools);
   });
 
+  it('headless run forwards a stored maxParallelSteps (symmetry with in-session)', async () => {
+    // Symmetry fix: resolveHeadlessLimits used to omit maxParallelSteps entirely
+    // — a workflow that stored maxParallelSteps:3 got it in-session but it was
+    // silently dropped on the headless path (the path that arguably needs it
+    // more, being unattended). Now all four WorkflowLimits fields pass through.
+    const id = 'wf-headless-cap';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+      limits: { maxParallelSteps: 3 },
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number; maxIterations?: number; maxWallClockMs?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBe(3); // pipeline.test.ts:<this line> — kills the symmetry regression
+    expect(limits?.maxWallClockMs).toBe(30 * 60_000); // headless default still applies to unset fields
+  });
+
   it('in-session inline run inherits the parent agent autonomy + forwards its context', async () => {
     const agent = makeAutonomyAgent('autonomous');
     mockRunManifest.mockResolvedValueOnce(makeRunState());
@@ -1377,6 +1398,27 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     // Value assertion: the agent's tool context + tools actually flow through.
     expect(opts['parentToolContext']).toBe(agent.toolContext);
     expect(opts['parentTools']).toBe(agent.toolContext.tools);
+  });
+
+  it('in-session inline run applies default limits (backpressure + iteration backstop)', async () => {
+    // T4: in-session runs ran with limits===undefined — so the DoS guards
+    // (workflowBoundExceeded) AND the backpressure cap (maxParallelSteps, T2)
+    // never fired for a chat-started workflow. resolveInSessionLimits now
+    // supplies defaults: an iteration backstop + a parallelism cap. Wall-clock
+    // + spend stay opt-in (attended run; Session cost cap + cancel bound them).
+    const agent = makeAutonomyAgent('autonomous');
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'do thing')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxIterations?: number; maxParallelSteps?: number; maxWallClockMs?: number; maxSpendUsd?: number } | undefined;
+    expect(limits).toBeDefined(); // pipeline.test.ts:<this line> — kills the limits-less in-session path
+    expect(limits?.maxIterations).toBe(50);    // backstop
+    expect(limits?.maxParallelSteps).toBe(5);  // backpressure (T2 activator)
+    expect(limits?.maxWallClockMs).toBeUndefined(); // opt-in (attended)
+    expect(limits?.maxSpendUsd).toBeUndefined();    // opt-in (Session cap bounds it)
   });
 
   it('threads the parent agent secretStore into the run options (value, not just key)', async () => {
