@@ -1,4 +1,5 @@
 import { existsSync, realpathSync, lstatSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { resolve, dirname, basename, join, isAbsolute, relative } from 'node:path';
 import type { LynoxContext } from '../types/index.js';
 import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
@@ -201,16 +202,25 @@ export function _resetCache(): void {
  * timestamped prefix; the name is expected to be sanitized already (the upload
  * handler runs sanitizeUploadFilename).
  */
-export function persistChatUpload(fileName: string, text: string): string | null {
+export function persistChatUpload(fileName: string, text: string): { rel: string; abs: string } | null {
   try {
     const uploadsDir = ensureDirSync(join(getFileAreaDir(), 'uploads'));
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, 'Z');
-    const rel = `uploads/${stamp}-${fileName}`;
+    // Normalize the persist name HARD (the display name stays untouched):
+    // path separators out (review A2 — a crafted name escaped uploads/ into
+    // the area root), quotes/backticks out (review C1 — the name rides an
+    // ENGINE INSTRUCTION line `read_file('<rel>')`), length capped so the
+    // stamp+name cannot exceed filesystem limits and silently fall back to
+    // the full inline path (review A3).
+    const safe = fileName.replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 180);
+    // Review A1: millisecond-stamp collisions are a real (if narrow) window
+    // with a silent overwrite — a short random suffix makes the doc claim true.
+    const uniq = randomBytes(4).toString('hex');
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const rel = `uploads/${stamp}-${uniq}-${safe}`;
     const abs = resolveFileAreaPath(rel);
     if (abs === null) return null; // paranoid: must resolve inside the area
     writeFileAtomicSync(abs, text);
-    // Sanity: the file exists and is non-empty before we hand out the path.
-    return existsSync(abs) ? rel : null;
+    return existsSync(abs) ? { rel, abs } : null;
   } catch {
     return null;
   }

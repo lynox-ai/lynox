@@ -2297,7 +2297,7 @@ export class LynoxHTTPApi {
                 // document body past the inline threshold becomes a real file
                 // (the knowledge-layer ingest below still runs — recall is not
                 // affected by how the model receives the text).
-                const bigDocRel = safeBody.length > INLINE_FILE_MAX_CHARS
+                const bigDoc = safeBody.length > INLINE_FILE_MAX_CHARS
                   ? persistChatUploadRef(`${safeName}.txt`, safeBody)
                   : null;
                 // WRAPPED, not merely sanitised. An uploaded document is third-party-authored
@@ -2307,11 +2307,11 @@ export class LynoxHTTPApi {
                 // one that was missing: the model sees an explicit content boundary, AND the
                 // turn counts as having handled untrusted content, so a `remember` on it routes
                 // to the review queue instead of landing active and pinnable.
-                content.push(bigDocRel !== null
+                content.push(bigDoc !== null
                   ? { type: 'text', text: wrapUntrustedData(
                       `[File: ${safeName}] — extracted text, ${String(safeBody.length)} chars, too large to inline into the message. `
-                      + `Saved to the files area as \`${bigDocRel}\`. `
-                      + `Work on it there: read_file('${bigDocRel}'), or bash/python on that path — do NOT rewrite its content into a tool call or the reply.\n\n`
+                      + `Saved to the files area as \`${bigDoc.rel}\`. `
+                      + `Work on it there: read_file('${bigDoc.abs}'), or bash/python on '${bigDoc.rel}' (the workspace cwd) — do NOT rewrite its content into a tool call or the reply.\n\n`
                       + `Preview (first ${String(INLINE_FILE_PREVIEW_CHARS)} chars):\n${safeBody.slice(0, INLINE_FILE_PREVIEW_CHARS)}`,
                       'file_upload') }
                   : { type: 'text', text: wrapUntrustedData(`[File: ${safeName}]\n${safeBody}`, 'file_upload') });
@@ -2390,14 +2390,19 @@ export class LynoxHTTPApi {
             // /api/files/download, readable by read_file/bash/python via the
             // workspace cwd), and the message carries the reference plus a short
             // preview. The turn still counts as untrusted — the wrapper stays.
-            if (text.length > INLINE_FILE_MAX_CHARS) {
-              const relPath = persistChatUploadRef(safeName, text);
-              if (relPath !== null) {
-                const preview = text.slice(0, INLINE_FILE_PREVIEW_CHARS);
+            if (decoded.length > INLINE_FILE_MAX_CHARS) {
+              // Persist the FULL decoded text (pre-cap): the 200k decode cap
+              // limits what may ride INLINE — not what lands on disk (review).
+              const stored = persistChatUploadRef(safeName, decoded);
+              if (stored !== null) {
+                const preview = decoded.slice(0, INLINE_FILE_PREVIEW_CHARS);
+                // ABSOLUTE path in the instruction: read_file resolves relative
+                // paths against the process cwd, NOT the file area — the
+                // relative form failed 100% of first attempts in review.
                 content.push({ type: 'text', text: wrapUntrustedData(
-                  `[File: ${safeName}] — ${String(text.length)} chars, too large to inline into the message. `
-                  + `It has been saved to the files area as \`${relPath}\`. `
-                  + `Work on it there: read_file('${relPath}'), or use bash/python on that path — do NOT rewrite its content into a tool call or the reply.\n\n`
+                  `[File: ${safeName}] — ${String(decoded.length)} chars, too large to inline into the message. `
+                  + `It has been saved to the files area as \`${stored.rel}\`. `
+                  + `Work on it there: read_file('${stored.abs}'), or use bash/python on '${stored.rel}' (the workspace cwd) — do NOT rewrite its content into a tool call or the reply.\n\n`
                   + `Preview (first ${String(INLINE_FILE_PREVIEW_CHARS)} chars):\n${preview}`,
                   'file_upload') });
                 continue;

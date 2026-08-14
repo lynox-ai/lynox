@@ -7627,9 +7627,14 @@ describe('mail custom-server defaults are the same on both routes', () => {
         const taskArg = mockSessionRun.mock.calls.at(-1)?.[0] as Array<{ type: string; text?: string }> | undefined;
         const fileBlock = taskArg?.find(b => b.type === 'text' && b.text?.includes('buchungen.csv'));
         expect(fileBlock).toBeDefined();
+        // The user's own message must survive alongside the file block.
+        expect(taskArg?.some(b => b.type === 'text' && b.text?.includes('sum the amounts'))).toBe(true);
         // Reference, not content: the full CSV must NOT ride the message.
         expect(fileBlock!.text).toContain('files area');
-        expect(fileBlock!.text).toMatch(/read_file\('uploads\/[^']+\.csv'\)/);
+        // ABSOLUTE path in the instruction — read_file resolves relatives
+        // against cwd, not the file area (review D1 pinned here).
+        expect(fileBlock!.text).toMatch(/read_file\('\/[^']*\/uploads\/[^']+\.csv'\)/);
+        expect(fileBlock!.text).toMatch(/bash\/python on 'uploads\//);
         // Preview only: the message stays far smaller than the file (the
         // preview shows the head, never all 24k chars).
         expect(fileBlock!.text!.length).toBeLessThan(6_000);
