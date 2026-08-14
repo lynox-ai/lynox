@@ -318,6 +318,9 @@ export class ToolCallTracker {
 
 export interface RepeatCallSkip {
   readonly escalatedResult: string;
+  /** How many consecutive escalations for this latched key this is (1, 2, …) —
+   *  the agent run breaks hard once this reaches `BREAK_AFTER_ESCALATIONS`. */
+  readonly consecutiveSkips: number;
 }
 
 /**
@@ -342,6 +345,12 @@ export interface RepeatCallSkip {
 export class RepeatCallGuard {
   private key: string | null = null;
   private lastResult = '';
+  /** Consecutive skips already served for the latched key. Reset with the streak. */
+  private skipCount = 0;
+  /** Latched once the model has IGNORED `BREAK_AFTER_ESCALATIONS` escalated
+   *  results — read (and kept) by the agent loop to end the run hard. Carries
+   *  the `tool\x00input` key so the break error can name the call. */
+  private breakKey: string | null = null;
   private identicalCount = 0;
 
   /**
@@ -351,6 +360,17 @@ export class RepeatCallGuard {
    * caught — only a genuinely stuck, output-unchanging loop is.
    */
   static readonly REPEAT_LIMIT = 3;
+
+  /**
+   * After this many consecutive ESCALATED skips for the same latched key — i.e.
+   * the model received the "do NOT call this again" result this many times and
+   * re-issued the identical call anyway — the agent loop ends the run hard
+   * (ToolLoopBreakError). The escalated result alone was measured NOT to stop
+   * weaker models: the 2026-08-14 prod loop (thread 861f3e4b, GLM) re-issued the
+   * identical `api_setup view` ~25 times, reading the escalation every time.
+   * Two ignored warnings is a stuck loop with certainty; one is a hiccup.
+   */
+  static readonly BREAK_AFTER_ESCALATIONS = 2;
 
   private static readonly EXCERPT_MAX = 300;
 
@@ -366,7 +386,10 @@ export class RepeatCallGuard {
     const excerpt = this.lastResult.length > RepeatCallGuard.EXCERPT_MAX
       ? this.lastResult.slice(0, RepeatCallGuard.EXCERPT_MAX) + '…'
       : this.lastResult;
+    this.skipCount++;
+    if (this.skipCount >= RepeatCallGuard.BREAK_AFTER_ESCALATIONS) this.breakKey = key;
     return {
+      consecutiveSkips: this.skipCount,
       escalatedResult:
         `This exact call was already made ${String(this.identicalCount)} times in a row and returned the same result each time:\n\n` +
         `${excerpt}\n\n` +
@@ -378,7 +401,8 @@ export class RepeatCallGuard {
   /**
    * Call AFTER executing a tool, with the result content the agent actually saw.
    * Grows the streak when the same key yields the same result; otherwise starts
-   * a fresh streak of 1.
+   * a fresh streak of 1. Any progress (different call or different result)
+   * clears the escalation counters and unlatches a pending break.
    */
   record(key: string, result: string): void {
     if (key === this.key && result === this.lastResult) {
@@ -387,7 +411,20 @@ export class RepeatCallGuard {
       this.key = key;
       this.lastResult = result;
       this.identicalCount = 1;
+      this.skipCount = 0;
+      this.breakKey = null;
     }
+  }
+
+  /**
+   * The latched hard-break key, if the model has ignored
+   * `BREAK_AFTER_ESCALATIONS` escalated results. Deliberately NOT consumed: if
+   * the caller's throw were ever swallowed upstream, the next read still
+   * reports the break — the latch clears only on progress (`record`) or run
+   * entry (`reset`).
+   */
+  breakLatched(): string | null {
+    return this.breakKey;
   }
 
   /** Clear all state — call at the start of each agent run. */
@@ -395,5 +432,7 @@ export class RepeatCallGuard {
     this.key = null;
     this.lastResult = '';
     this.identicalCount = 0;
+    this.skipCount = 0;
+    this.breakKey = null;
   }
 }
