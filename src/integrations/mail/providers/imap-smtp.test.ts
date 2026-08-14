@@ -951,3 +951,15 @@ describe('ImapSmtpProvider — sent-folder resolution cache', () => {
     expect(arg.text).toBe(reflowed);
   });
 });
+
+describe('ImapSmtpProvider — googlemail alias skip', () => {
+  it('skips the append for smtp.googlemail.com too (alias of smtp.gmail.com)', async () => {
+    vi.clearAllMocks();
+    probe = makeFakeClient();
+    sendMailMock.mockResolvedValue({ messageId: '<m@x>', accepted: ['b@example.com'], rejected: [] });
+    const gw = { ...ACCOUNT, smtp: { ...ACCOUNT.smtp, host: 'smtp.googlemail.com' } };
+    const provider = new ImapSmtpProvider(gw, credResolver);
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' });
+    expect(probe.append).not.toHaveBeenCalled();
+  });
+});

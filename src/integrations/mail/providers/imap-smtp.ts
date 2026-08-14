@@ -789,7 +789,11 @@ export class ImapSmtpProvider implements MailProvider {
       // entirely for Gmail-via-SMTP: smtp.gmail.com files SMTP sends into Sent
       // server-side, an append would duplicate.
       const smtpHost = this.account.smtp.host.toLowerCase();
-      if (!smtpHost.includes('gmail')) {
+      // googlemail.com is Google's documented alias endpoint for smtp.gmail.com
+      // (same submission service, same server-side Sent filing) — the review
+      // caught the alias slipping past the skip and duplicating Sent.
+      const googleFilesSentItself = smtpHost.includes('gmail') || smtpHost.includes('googlemail');
+      if (!googleFilesSentItself) {
         try {
           await Promise.race([
             this.appendSentCopy(input, messageId),

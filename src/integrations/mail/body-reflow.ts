@@ -21,14 +21,26 @@
 // client support) and an HTML alternative (changes what the approver consented
 // to — the consent preview shows the plain text).
 
-/** A line whose shape carries meaning and must survive reflow verbatim. */
+/** A line whose shape carries meaning and must survive reflow verbatim.
+ *
+ *  Review-hardened (2026-08-14): the false-direction is asymmetric — a line
+ *  WRONGLY kept verbatim merely loses its reflow benefit, a line WRONGLY
+ *  joined destroys readable structure. So the structural set errs wide:
+ *  patch/diff/log/stack shapes (the review collapsed a full unified diff and
+ *  a stack trace to one line), indented continuations, `+`-prefixed
+ *  changelog entries, and any-width numbering all stay verbatim. */
 function isStructuralLine(line: string, inCodeFence: boolean): boolean {
   // Inside a code fence EVERYTHING is verbatim; the fence toggles only on the
   // delimiter itself (checked by the caller before this test runs).
   if (inCodeFence) return true;
-  if (line.length === 0) return true; // paragraph boundary
+  if (line.trim().length === 0) return true; // paragraph boundary (incl. whitespace-only)
   if (line.startsWith('>')) return true; // quoted reply chain
-  if (/^\s*(?:[-*•]|\d{1,3}[.)])\s/.test(line)) return true; // list item
+  if (/^\s/.test(line)) return true; // indented continuation / code / nested quote
+  if (/^\s*(?:[-*+•]|\d+[.)])\s/.test(line)) return true; // list item / changelog `+`
+  if (/^(diff --git |--- |\+\+\+ |@@ )/.test(line)) return true; // unified diff markers
+  if (/^[+-]/.test(line)) return true; // patch hunk line (\`-old\` / \`+new\` have no space after the marker)
+  if (/^\s*at \S+\s*\(/.test(line)) return true; // stack-trace frame
+  if (/^\d{4}-\d{2}-\d{2}[T ]/.test(line)) return true; // timestamped log line
   if (line === '--' || line === '-- ') return true; // signature delimiter
   if (/\S {2,}\S/.test(line)) return true; // column-aligned / ASCII layout
   return false;
@@ -69,6 +81,14 @@ export function reflowMailBody(body: string): string {
       flush();
       afterSignature = true;
       out.push(line);
+      continue;
+    }
+    if (line.trim().length === 0) {
+      // Paragraph boundary — normalize whitespace-only lines to empty so the
+      // wire output has clean paragraph separators (a '   ' line would
+      // otherwise survive as a weird blank-with-spaces row).
+      flush();
+      out.push('');
       continue;
     }
     if (isStructuralLine(line, inCodeFence)) {

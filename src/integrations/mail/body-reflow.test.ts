@@ -64,3 +64,34 @@ describe('reflowMailBody', () => {
     expect(reflowMailBody(body)).toBe('Zeile eins die hart umbrochen ist.');
   });
 });
+
+describe('reflowMailBody — review-hardened shapes (2026-08-14)', () => {
+  it('keeps a unified diff verbatim', () => {
+    const body = 'Der Fix:\ndiff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n context';
+    expect(reflowMailBody(body)).toBe(body);
+  });
+
+  it('keeps stack-trace frames verbatim', () => {
+    const body = 'Error: boom\n    at foo (/app/x.js:1:2)\n    at bar (/app/y.js:3:4)';
+    expect(reflowMailBody(body)).toBe(body);
+  });
+
+  it('keeps timestamped log lines verbatim', () => {
+    const body = 'Log:\n2026-08-14T12:00:00Z started\n2026-08-14T12:00:01Z done';
+    expect(reflowMailBody(body)).toBe(body);
+  });
+
+  it('keeps + changelog entries as their own lines', () => {
+    const body = 'Changelog:\n+ added feature\n- removed legacy\n+ another add';
+    expect(reflowMailBody(body)).toBe(body);
+  });
+
+  it('treats a whitespace-only line as a paragraph boundary', () => {
+    expect(reflowMailBody('First para.\n   \nSecond para.')).toBe('First para.\n\nSecond para.');
+  });
+
+  it('keeps indented continuation lines out of the following paragraph', () => {
+    const body = '- item one\n  continuation of item one\nAnd then running prose.';
+    expect(reflowMailBody(body)).toBe(body);
+  });
+});
