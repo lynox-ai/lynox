@@ -21,13 +21,17 @@ vi.mock('../../orchestrator/runner.js', async (importActual) => {
   };
 });
 
-// Mock validate — keep MAX_STEPS in sync with the real module (pipeline.ts
-// imports the canonical constant from here).
+// Mock validate — partial mock: spread the real module (so pipeline.ts gets the
+// real maxStepsFor, which it now imports) and override only validateManifest.
 const mockValidateManifest = vi.fn();
-vi.mock('../../orchestrator/validate.js', () => ({
-  validateManifest: (...args: unknown[]) => mockValidateManifest(...args),
-  MAX_STEPS: 20,
-}));
+vi.mock('../../orchestrator/validate.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../orchestrator/validate.js')>();
+  return {
+    ...actual,
+    validateManifest: (...args: unknown[]) => mockValidateManifest(...args),
+    MAX_STEPS: 20,
+  };
+});
 
 // Spy the billing debit so the money-leak fix can be asserted: an in-session
 // run_workflow must report its aggregated step cost (partial mock — keep every
@@ -188,6 +192,21 @@ describe('run_workflow — inline steps', () => {
       agent,
     );
     expect(result).toBe('Error: Workflow exceeds maximum of 20 steps (got 21).');
+  });
+
+  it('honors a config max_workflow_steps override (bulk workflows)', async () => {
+    // config.max_workflow_steps raises the policy cap above the default 20, so a
+    // large bulk workflow (>20 batch steps) isn't rejected. The default-cap test
+    // above still holds; this is the tenant escape hatch for big bulks.
+    const agent = makePipelineAgent({ config: { ...mockConfig, max_workflow_steps: 40 } });
+    const steps = Array.from({ length: 25 }, (_, i) => makeStep(`s${i}`, `task ${i}`));
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const result = await runWorkflowTool.handler(
+      { name: 'bulk', steps },
+      agent,
+    );
+    expect(result).not.toMatch(/exceeds maximum/); // pipeline.test.ts:<this line> — kills the hardcoded-MAX_STEPS regression
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
   });
 
   it('returns error for duplicate step IDs', async () => {

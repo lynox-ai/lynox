@@ -7,13 +7,40 @@ import { findAutonomousViolations } from './human-in-the-loop.js';
 import { INLINE_CORE_TOOLS } from './runtime-adapter.js';
 
 /**
- * Hard ceiling on workflow steps — single source of truth.
- * Lives here (the lower-level validation module) rather than in
- * `pipeline.ts` so the declarative `.max()` on the manifest schema and the
- * imperative checks in `pipeline.ts` share one constant without an
- * import cycle (`pipeline.ts` already depends on this module).
+ * Default policy ceiling on workflow steps. The run-path enforcement points in
+ * `pipeline.ts` read this via {@link maxStepsFor}, which lets a config override
+ * (`max_workflow_steps`) raise it for a tenant that runs large bulk workflows
+ * (e.g. a 2000-contact triage needing >20 batch steps).
+ *
+ * Lives here (the lower-level validation module) so the manifest schema and the
+ * imperative checks in `pipeline.ts` share one constant without an import cycle.
  */
 export const MAX_STEPS = 20;
+
+/**
+ * Absolute schema-level sanity ceiling. The `.max()` on the manifest schema
+ * guards against pathological/accidental manifests (a generated workflow with
+ * thousands of steps) regardless of config. The *policy* cap (config-overridable,
+ * default {@link MAX_STEPS}) is enforced imperatively in `pipeline.ts`, which is
+ * the only place a run can see the resolved config.
+ */
+export const ABSOLUTE_MAX_STEPS = 1000;
+
+/**
+ * Resolve the per-run step cap from config, defaulting to {@link MAX_STEPS}.
+ * Structural on the config so this low-level module need not depend on the full
+ * LynoxUserConfig type. Used by the run-path enforcement in `pipeline.ts`.
+ */
+export function maxStepsFor(config?: { max_workflow_steps?: number | undefined } | undefined): number {
+  const requested = config?.max_workflow_steps;
+  // Graceful: a malformed value (0, negative, NaN, non-finite) falls back to the
+  // default rather than rejecting every workflow (0) or silently disabling the
+  // cap (NaN -> comparisons always false). Clamped to the absolute ceiling.
+  if (requested === undefined || !Number.isFinite(requested) || requested < 1) {
+    return MAX_STEPS;
+  }
+  return Math.min(Math.trunc(requested), ABSOLUTE_MAX_STEPS);
+}
 
 const ConditionOperators = ['lt', 'gt', 'eq', 'neq', 'gte', 'lte', 'exists', 'not_exists', 'contains'] as const;
 
@@ -62,7 +89,7 @@ const ManifestSchema_1_0 = z.object({
   name: z.string().min(1),
   triggered_by: z.string(),
   context: z.record(z.string(), z.unknown()).default({}),
-  agents: z.array(ManifestStepSchema).min(1).max(MAX_STEPS),
+  agents: z.array(ManifestStepSchema).min(1).max(ABSOLUTE_MAX_STEPS),
   gate_points: z.array(z.string()).default([]),
   on_failure: z.enum(['stop', 'continue', 'notify']).default('stop'),
 });
@@ -72,7 +99,7 @@ const ManifestSchema_1_1 = z.object({
   name: z.string().min(1),
   triggered_by: z.string(),
   context: z.record(z.string(), z.unknown()).default({}),
-  agents: z.array(ManifestStepSchema).min(1).max(MAX_STEPS),
+  agents: z.array(ManifestStepSchema).min(1).max(ABSOLUTE_MAX_STEPS),
   gate_points: z.array(z.string()).default([]),
   on_failure: z.enum(['stop', 'continue', 'notify']).default('stop'),
   execution: z.enum(['sequential', 'parallel']).default('parallel'),

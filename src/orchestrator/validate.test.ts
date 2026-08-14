@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateManifest, assertPipelineModeIsValid, assertPlannedPipelineIsValid, AutonomousPipelineViolation, MAX_STEPS } from './validate.js';
+import { validateManifest, assertPipelineModeIsValid, assertPlannedPipelineIsValid, AutonomousPipelineViolation, MAX_STEPS, ABSOLUTE_MAX_STEPS, maxStepsFor } from './validate.js';
 import type { InlinePipelineStep, PlannedPipeline } from '../types/index.js';
 
 const validManifest = {
@@ -72,11 +72,15 @@ describe('validateManifest', () => {
       .not.toThrow();
   });
 
-  it('throws when agents array exceeds the MAX_STEPS ceiling', () => {
-    const overCeiling = Array.from({ length: MAX_STEPS + 1 }, (_, i) => ({
+  it('throws when agents array exceeds the absolute sanity ceiling (schema backstop)', () => {
+    // The policy cap (MAX_STEPS=20, config-overridable via max_workflow_steps) is
+    // enforced on the run paths in pipeline.ts, NOT in the zod schema — so 21
+    // agents no longer throws here. The schema keeps ABSOLUTE_MAX_STEPS as a
+    // sanity backstop against pathological manifests regardless of config.
+    const overSanity = Array.from({ length: ABSOLUTE_MAX_STEPS + 1 }, (_, i) => ({
       id: `step-${String(i)}`, agent: 'my-agent', runtime: 'mock' as const,
     }));
-    expect(() => validateManifest({ ...validManifest, agents: overCeiling }))
+    expect(() => validateManifest({ ...validManifest, agents: overSanity }))
       .toThrow('Invalid manifest');
   });
 
@@ -438,5 +442,17 @@ describe('validateManifest applies the declared-tools gate (F2 fix round)', () =
       name: 'm', triggered_by: 't',
       agents: [{ id: 'a', agent: 'a', runtime: 'inline', task: 'reason', tools: [] }],
     })).not.toThrow();
+  });
+});
+
+describe('maxStepsFor', () => {
+  it('returns the default for absent/malformed config, the override when valid, clamped to the ceiling', () => {
+    expect(maxStepsFor()).toBe(MAX_STEPS);
+    expect(maxStepsFor({})).toBe(MAX_STEPS);
+    expect(maxStepsFor({ max_workflow_steps: 0 })).toBe(MAX_STEPS);   // 0 would reject every workflow
+    expect(maxStepsFor({ max_workflow_steps: -5 })).toBe(MAX_STEPS);  // negative
+    expect(maxStepsFor({ max_workflow_steps: NaN })).toBe(MAX_STEPS); // NaN disables the cap silently
+    expect(maxStepsFor({ max_workflow_steps: 40 })).toBe(40);         // valid override
+    expect(maxStepsFor({ max_workflow_steps: 5000 })).toBe(ABSOLUTE_MAX_STEPS); // clamped to sanity ceiling
   });
 });
