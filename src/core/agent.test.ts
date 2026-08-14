@@ -57,7 +57,7 @@ vi.mock('./observability.js', () => ({
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
-import { Agent, RunAbortedError, LAZY_DEFERRED_TOOLS } from './agent.js';
+import { Agent, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS } from './agent.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { flattenPrompt } from './prompt-value.js';
 import type { PromptText } from '../types/index.js';
@@ -139,7 +139,17 @@ function makeTool(name: string, handler?: ToolEntry['handler']): ToolEntry {
       // default for real tools but opts these out via additionalProperties.
       input_schema: { type: 'object' as const, properties: {}, additionalProperties: true },
     },
-    handler: handler ?? vi.fn().mockResolvedValue('tool result'),
+    // Default handler returns a FRESH result per call (per-tool counter). A
+    // constant default made every repeated same-input call a "no progress"
+    // streak, which the RepeatCallGuard hard-breaks since 2026-08-14 — tests
+    // that exercise OTHER mechanics (loop caps, truncation, stamping) would
+    // trip the break for a reason their fixture never meant to model. No test
+    // asserts the literal result string; tests that WANT identical results
+    // pass an explicit handler (see the loop-guard repros).
+    handler: handler ?? (() => {
+      let n = 0;
+      return vi.fn().mockImplementation(() => Promise.resolve(`tool result #${String(n++)}`));
+    })(),
   };
 }
 
@@ -555,41 +565,47 @@ describe('Agent', () => {
       expect(mockProcess).toHaveBeenCalledTimes(2);
     });
 
-    it('loop guard: skips an identical tool call that keeps returning the same result', async () => {
+    it('loop guard: escalates, then hard-breaks an identical-call loop', async () => {
       // Regression repro for the 2026-07-26 prod loop: the agent called
       // `api_setup view` with a hallucinated id 20× in a row, each returning the
       // SAME ordinary (non-is_error) "not found. Use action list" string, making
-      // no progress. The deterministic RepeatCallGuard must break it: after
-      // REPEAT_LIMIT identical (call → result) pairs, the next identical call is
-      // NOT dispatched to the handler — an escalated result is returned instead.
+      // no progress. The deterministic RepeatCallGuard escalates after
+      // REPEAT_LIMIT identical (call → result) pairs (handler no longer runs),
+      // AND — since the 2026-08-14 RECURRENCE, where the model read the
+      // escalation and re-issued anyway 25× (thread 861f3e4b) — the run now
+      // ends with ToolLoopBreakError after BREAK_AFTER_ESCALATIONS ignored
+      // escalations, instead of looping to the iteration cap.
       const notFound = 'API profile "wrong" not found. Use action "list" to see available profiles.';
       const handler = vi.fn().mockResolvedValue(notFound);
       const tool = makeTool('test_lookup', handler);
 
-      const REPEATS = 8; // model insists 8×; guard must cap handler at REPEAT_LIMIT
+      // Queue EXACTLY the 5 turns the guard allows (3 executed + 2 escalated
+      // skips). More would leak unconsumed once-values into the file-scoped
+      // mock queue and cascade into unrelated tests after this one.
+      const REPEATS = 5;
       for (let i = 0; i < REPEATS; i++) {
         mockProcess.mockResolvedValueOnce(
           toolUseResponse([{ id: `tu_${String(i)}`, name: 'test_lookup', input: { action: 'view', id: 'wrong' } }]),
         );
       }
-      mockProcess.mockResolvedValueOnce(endTurnResponse('gave up looping'));
 
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
-      const result = await agent.send('check the api');
-      expect(result).toBe('gave up looping');
+      await expect(agent.send('check the api')).rejects.toThrow(ToolLoopBreakError);
 
-      // The handler ran only REPEAT_LIMIT times, not REPEATS — the loop was cut.
+      // 3 dispatched executions (streak → limit) + 2 escalated skips = 5 model
+      // turns, then the break — the model never gets a 6th turn to loop in.
       expect(handler).toHaveBeenCalledTimes(3);
+      expect(mockProcess).toHaveBeenCalledTimes(5);
 
-      // The skipped calls returned an escalated, is_error tool_result telling the
-      // agent to stop repeating (visible in the thread as a user/tool_result msg).
-      const escalated = agent.getMessages().some(
+      // The escalated is_error results lived in the rolled-back carrier (the
+      // abort-style rollback is pinned in tool-loop-break.test.ts); on disk they
+      // become the display-only tool_loop_break note (pinned in
+      // eager-persist.test.ts) — nothing of the loop re-enters API context.
+      expect(agent.getMessages().some(
         m => m.role === 'user' && Array.isArray(m.content) && m.content.some(
-          b => b.type === 'tool_result' && b.is_error === true
-            && typeof b.content === 'string' && /not change the outcome|do not call it again/i.test(b.content),
+          b => (b as { type?: string }).type === 'tool_result',
         ),
-      );
-      expect(escalated).toBe(true);
+      )).toBe(false);
     });
 
     it('loop guard: does NOT throttle identical calls that make progress', async () => {
