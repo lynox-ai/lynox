@@ -282,6 +282,43 @@ describe('RepeatCallGuard', () => {
     guard.reset();
     expect(guard.check(key)).toBeNull();
   });
+
+  // ── hard break (2026-08-14 prod regression: GLM ignored the escalated
+  //    result ~25 times, thread 861f3e4b) ──────────────────────────────────
+  it('escalations count up and latch a hard break at BREAK_AFTER_ESCALATIONS', () => {
+    const guard = new RepeatCallGuard();
+    const key = 'api_setup {"action":"view","id":"zai"}';
+    for (let i = 0; i < K; i++) { guard.check(key); guard.record(key, 'not found'); }
+    const first = guard.check(key)!;
+    expect(first.consecutiveSkips).toBe(1);
+    expect(guard.breakLatched()).toBeNull(); // one ignored warning is a hiccup
+    const second = guard.check(key)!;
+    expect(second.consecutiveSkips).toBe(2);
+    expect(guard.breakLatched()).toBe(key);  // two = a stuck loop, break the run
+  });
+
+  it('progress (a different result) unlatches a pending break', () => {
+    const guard = new RepeatCallGuard();
+    const key = 'a {"x":1}';
+    for (let i = 0; i < K; i++) { guard.check(key); guard.record(key, 'same'); }
+    guard.check(key); guard.check(key); // escalate twice → latched
+    expect(guard.breakLatched()).toBe(key);
+    guard.record(key, 'different — progress!');
+    expect(guard.breakLatched()).toBeNull();
+    // And a fresh streak starts: the next identical result does not
+    // immediately skip again.
+    expect(guard.check(key)).toBeNull();
+  });
+
+  it('reset() clears the hard-break latch too', () => {
+    const guard = new RepeatCallGuard();
+    const key = 'a {"x":1}';
+    for (let i = 0; i < K; i++) { guard.check(key); guard.record(key, 'same'); }
+    guard.check(key); guard.check(key);
+    expect(guard.breakLatched()).toBe(key);
+    guard.reset();
+    expect(guard.breakLatched()).toBeNull();
+  });
 });
 
 /**
