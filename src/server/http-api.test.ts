@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import type { Server } from 'node:http';
 import { createHmac, randomBytes } from 'node:crypto';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
+import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7587,5 +7588,74 @@ describe('mail custom-server defaults are the same on both routes', () => {
           expect(body.entries).toHaveLength(0);
           expect(store.listPendingForThread).toHaveBeenCalledWith('', 100);
         });
+      });
+    });
+
+    describe('large uploads become files-area files (DEF-chat-upload-inline-only-no-file)', () => {
+      // The 8c09e50a shape: a 90 KB inline CSV made the model echo the whole
+      // file through a write_file tool input → max_tokens mid-tool_use →
+      // identical continuation loop. Above the threshold the upload must
+      // become a REAL file the agent works on, with reference + preview in
+      // the message — and the turn must STILL count as untrusted.
+      let tmpArea: string;
+
+      beforeEach(() => {
+        // Same fake-key default the 'runs' describe sets — this block sits at
+        // file scope, outside its beforeEach.
+        mockSecretResolve.mockImplementation((name: string) =>
+          name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null,
+        );
+        tmpArea = mkdtempSync(join(tmpdir(), 'lynox-upload-area-'));
+        setTenantWorkspace(tmpArea);
+      });
+      afterEach(() => {
+        clearTenantWorkspace();
+        rmSync(tmpArea, { recursive: true, force: true });
+      });
+
+      it('a text upload past the threshold is persisted to uploads/ and only referenced inline', async () => {
+        const big = `id,amount\n${'1,42.00\n'.repeat(3_000)}`; // ~24k chars > 20k
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const res = await jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({
+            task: 'sum the amounts',
+            files: [{ name: 'buchungen.csv', type: 'text/csv', data: Buffer.from(big).toString('base64') }],
+          }),
+        });
+        expect(res.status).toBe(200);
+        const taskArg = mockSessionRun.mock.calls.at(-1)?.[0] as Array<{ type: string; text?: string }> | undefined;
+        const fileBlock = taskArg?.find(b => b.type === 'text' && b.text?.includes('buchungen.csv'));
+        expect(fileBlock).toBeDefined();
+        // Reference, not content: the full CSV must NOT ride the message.
+        expect(fileBlock!.text).toContain('files area');
+        expect(fileBlock!.text).toMatch(/read_file\('uploads\/[^']+\.csv'\)/);
+        // Preview only: the message stays far smaller than the file (the
+        // preview shows the head, never all 24k chars).
+        expect(fileBlock!.text!.length).toBeLessThan(6_000);
+        // …and the wrapper stays — a large upload is still untrusted content.
+        expect(containsUntrustedMarker(fileBlock!.text!)).toBe(true);
+        // The file really exists in the tenant area with the full content.
+        const uploadsDir = join(tmpArea, 'uploads');
+        const written = readdirSync(uploadsDir).filter(f => f.endsWith('buchungen.csv'));
+        expect(written).toHaveLength(1);
+        expect(readFileSync(join(uploadsDir, written[0]!), 'utf-8')).toBe(big);
+      });
+
+      it('a small upload still rides inline unchanged', async () => {
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const res = await jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({
+            task: 'check',
+            files: [{ name: 'klein.csv', type: 'text/csv', data: Buffer.from('a,b\n1,2').toString('base64') }],
+          }),
+        });
+        expect(res.status).toBe(200);
+        const taskArg = mockSessionRun.mock.calls.at(-1)?.[0] as Array<{ type: string; text?: string }> | undefined;
+        const fileBlock = taskArg?.find(b => b.type === 'text' && b.text?.includes('klein.csv'));
+        expect(fileBlock!.text).toContain('a,b\n1,2');
+        expect(fileBlock!.text).not.toContain('files area');
+        expect(existsSync(join(tmpArea, 'uploads'))).toBe(false);
       });
     });

@@ -201,6 +201,19 @@ describe('persistFailedTurnDisplay (B-full)', () => {
     expect(note._lynox_note.detail).toBeUndefined();
   });
 
+  it('a continuation loop (continuation_loop) names the repeated truncated prefix', () => {
+    const m = makeFailMockStore({ hadUserMessage: true, marked: 1, total: 3 });
+    const err = Object.assign(new Error('Run stopped: truncated continuations repeated'), {
+      loopPrefix: 'Ich speichere die CSV-Datei und analysiere sie strukturiert mit Python.',
+    });
+    persistFailedTurnDisplay({ threadStore: m.store, sessionId: 's1', startSeq: 2, task: 'q', error: err, noteCode: 'continuation_loop' });
+    const notes = m.appendDisplayNotes.mock.calls[0]![1] as DisplayNoteInput[];
+    const note = notes.find(n => n.role === 'assistant')!.content as { _lynox_note: { code: string; detail?: string } };
+    expect(note._lynox_note.code).toBe('continuation_loop');
+    expect(note._lynox_note.detail).toContain('repeated truncated response');
+    expect(note._lynox_note.detail).toContain('Ich speichere die CSV-Datei');
+  });
+
   it('a hard loop break (tool_loop_break) names the repeated call in the note detail', () => {
     const m = makeFailMockStore({ hadUserMessage: true, marked: 1, total: 3 });
     // ToolLoopBreakError shape, duck-typed (loopKey carries `tool\x00input`) so

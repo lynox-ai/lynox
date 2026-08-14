@@ -1,7 +1,7 @@
 import { existsSync, realpathSync, lstatSync } from 'node:fs';
 import { resolve, dirname, basename, join, isAbsolute, relative } from 'node:path';
 import type { LynoxContext } from '../types/index.js';
-import { ensureDirSync } from './atomic-write.js';
+import { ensureDirSync, writeFileAtomicSync } from './atomic-write.js';
 import { getLynoxDir } from './config.js';
 
 let _cachedDir: string | null | undefined;
@@ -185,4 +185,33 @@ export function ensureContextWorkspace(context: LynoxContext): string {
 export function _resetCache(): void {
   _cachedDir = undefined;
   _tenantOverride = null;
+}
+
+
+/**
+ * DEF-chat-upload-inline-only-no-file: persist a chat upload that is too large
+ * to inline into the message as a REAL FILE in the tenant's file area
+ * (`uploads/<stamp>-<name>`), so the agent works on it with read_file / bash /
+ * python instead of echoing the whole content through a tool input (which hit
+ * max_tokens mid-tool_use and looped continuations — thread 8c09e50a, 2026-08-14).
+ *
+ * Returns the file-area-RELATIVE path on success, or null when the area cannot
+ * be written (missing dir rights, disk full) — the caller then falls back to
+ * the legacy inline path rather than losing the upload. Collision-free via the
+ * timestamped prefix; the name is expected to be sanitized already (the upload
+ * handler runs sanitizeUploadFilename).
+ */
+export function persistChatUpload(fileName: string, text: string): string | null {
+  try {
+    const uploadsDir = ensureDirSync(join(getFileAreaDir(), 'uploads'));
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace(/Z$/, 'Z');
+    const rel = `uploads/${stamp}-${fileName}`;
+    const abs = resolveFileAreaPath(rel);
+    if (abs === null) return null; // paranoid: must resolve inside the area
+    writeFileAtomicSync(abs, text);
+    // Sanity: the file exists and is non-empty before we hand out the path.
+    return existsSync(abs) ? rel : null;
+  } catch {
+    return null;
+  }
 }
