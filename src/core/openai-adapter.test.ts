@@ -1640,6 +1640,36 @@ describe('translateMessages — user content is never silently dropped', () => {
     ).toThrow(/cannot process images/i);
   });
 
+  // Fireworks vision candidates (2026-08-14): registry → adapter, same shape as
+  // the Mistral #2 guard. The online test (tests/online/fireworks-vision.test.ts)
+  // proves the wire against the real Fireworks endpoint but skips without
+  // FIREWORKS_API_KEY — this CI-visible twin catches a flip-back to
+  // FIREWORKS_TEXT_FEATURES on the three candidate entries.
+  it('fireworks: kimi-k3 / qwen3p7-plus / minimax-m3 resolve vision:true → adapter translates the image', () => {
+    for (const id of ['accounts/fireworks/models/kimi-k3', 'accounts/fireworks/models/qwen3p7-plus', 'accounts/fireworks/models/minimax-m3']) {
+      const visionSupport = modelCapability(id)?.features?.vision;
+      expect(visionSupport, id).toBe(true);
+      const out = translateMessages(undefined, [{ role: 'user', content: [{ type: 'text', text: 'hi' }, IMG] }], {
+        visionSupport, modelLabel: id,
+      });
+      const parts = out.find((m) => m.role === 'user')!.content as Array<{ type: string }>;
+      expect(parts.some((p) => p.type === 'image_url'), id).toBe(true);
+    }
+  });
+
+  it('fireworks: genuinely non-vision siblings stay vision:false → adapter throws (no shared-object flip)', () => {
+    // GLM 5.2 / DeepSeek v4 / gpt-oss-120b have no image input on Fireworks. If
+    // someone "fixes" the candidates by flipping FIREWORKS_TEXT_FEATURES itself,
+    // these models would silently start receiving images their pages disavow.
+    for (const id of ['accounts/fireworks/models/glm-5p2', 'accounts/fireworks/models/deepseek-v4-pro', 'accounts/fireworks/models/deepseek-v4-flash', 'accounts/fireworks/models/gpt-oss-120b']) {
+      const visionSupport = modelCapability(id)?.features?.vision;
+      expect(visionSupport, id).toBe(false);
+      expect(() =>
+        translateMessages(undefined, [{ role: 'user', content: [IMG] }], { visionSupport, modelLabel: id }),
+      ).toThrow(/cannot process images/i);
+    }
+  });
+
   it('DEF-0074: preserves user text that shares a turn with a tool_result', () => {
     const out = translateMessages(undefined, [
       { role: 'user', content: [
@@ -1653,6 +1683,48 @@ describe('translateMessages — user content is never silently dropped', () => {
     expect(tool.tool_call_id).toBe('call_1');
     const user = out.find((m) => m.role === 'user')!;
     expect(user.content).toBe('and here is my follow-up');
+  });
+
+  it('DEF-openai-wire-toolerr: prefixes an is_error tool_result so the model sees the failure', () => {
+    // The Anthropic wire carries is_error on tool_result; the OpenAI wire has no
+    // such field on role:'tool'. Without a marker, agent.ts error results
+    // ('Permission denied', tool exceptions) reach the model as ordinary
+    // success-shaped text on every openai-compat provider.
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'call_e', content: 'Permission denied', is_error: true },
+      ] },
+    ]);
+    expect(out).toEqual([{ role: 'tool', tool_call_id: 'call_e', content: '[Tool error] Permission denied' }]);
+  });
+
+  it('DEF-openai-wire-toolerr: prefixes is_error with block-array content too', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [
+        {
+          type: 'tool_result', tool_use_id: 'call_b', is_error: true,
+          content: [{ type: 'text', text: 'HTTP 403' }, { type: 'text', text: 'forbidden' }],
+        },
+      ] },
+    ]);
+    const tool = out.find((m) => m.role === 'tool')!;
+    expect(tool.content).toBe('[Tool error] HTTP 403\nforbidden');
+  });
+
+  it('DEF-openai-wire-toolerr: an is_error result with empty content still carries the marker', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_x', is_error: true }] },
+    ]);
+    // '[Tool error] ' with a trailing space would be the only content on the
+    // message — assert the bare marker instead.
+    expect(out).toEqual([{ role: 'tool', tool_call_id: 'call_x', content: '[Tool error]' }]);
+  });
+
+  it('DEF-openai-wire-toolerr: a successful tool_result carries no prefix', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_ok', content: 'fine', is_error: false }] },
+    ]);
+    expect(out).toEqual([{ role: 'tool', tool_call_id: 'call_ok', content: 'fine' }]);
   });
 
   it('byte-parity: a text-only user message stays a plain string (no array)', () => {

@@ -517,15 +517,27 @@ const MISTRAL_FEATURES_GEN3: ModelFeatures = {
 };
 
 // Fireworks-hosted openai-compat text models. Text + tool-use + prompt-cache;
-// vision:false for ALL consumers, for two different reasons: GLM 5.2, DeepSeek
-// v4 Pro/Flash and gpt-oss-120b genuinely have none (their Fireworks pages
-// state "image input: not supported"), while the Kimi/Qwen/MiniMax candidates
-// DO serve image input on Fireworks but stay text-only here until the
-// openai-wire image path is validated. Either way vision:false yields a clean
-// pre-flight throw on an image-attach, never a silent drop. extendedThinking
-// is the Anthropic-specific mechanism → false on the openai wire.
+// vision:false for the models that genuinely have none: GLM 5.2, DeepSeek
+// v4 Pro/Flash and gpt-oss-120b (their Fireworks pages state "image input:
+// not supported"). vision:false yields a clean pre-flight throw on an
+// image-attach, never a silent drop. extendedThinking is the
+// Anthropic-specific mechanism → false on the openai wire.
 const FIREWORKS_TEXT_FEATURES: ModelFeatures = {
   vision: false,
+  extendedThinking: false,
+  toolUse: true,
+  promptCaching: true,
+  pdfInput: false,
+};
+
+// Fireworks candidates whose pages list image input — validated live
+// 2026-08-14 via tests/online/fireworks-vision.test.ts (red/blue split PNG →
+// the model names both halves through the real adapter + Fireworks endpoint).
+// Same shape as FIREWORKS_TEXT_FEATURES except vision:true. A model that
+// later proves non-multimodal on the wire rolls back to the text object —
+// the online test is the tripwire.
+const FIREWORKS_VISION_FEATURES: ModelFeatures = {
+  vision: true,
   extendedThinking: false,
   toolUse: true,
   promptCaching: true,
@@ -1023,11 +1035,9 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // Kimi K3 (Moonshot). Pricing read from its Fireworks page 2026-08-09 —
   // cacheRead $0.30 here IS input×0.1, unlike the flat $0.14 of the two above
   // (each page is its own source of truth). Fireworks lists image-input support,
-  // but the entry stays FIREWORKS_TEXT_FEATURES (vision:false → loud attach
-  // refusal, not a silent drop) until the openai-wire image path is validated —
-  // flipping vision on is a separate, tested change. Context: the page says
-  // "1040k"; pinned to the round 1M the sibling entries use — a conservative
-  // floor for compaction, not a capability claim.
+  // validated live 2026-08-14 (fireworks-vision online test) → vision:true.
+  // Context: the page says "1040k"; pinned to the round 1M the sibling entries
+  // use — a conservative floor for compaction, not a capability claim.
   'accounts/fireworks/models/kimi-k3': {
     id: 'accounts/fireworks/models/kimi-k3',
     provider: 'openai',
@@ -1036,7 +1046,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
-    features: FIREWORKS_TEXT_FEATURES,
+    features: FIREWORKS_VISION_FEATURES,
     pricing: { input: 3.00, output: 15.00, cacheWrite: 3.00, cacheRead: 0.30 },
     uiLabel: 'Kimi K3',
     provenance: 'CN',
@@ -1058,8 +1068,8 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     uiLabel: 'DeepSeek v4 Flash',
     provenance: 'CN',
   },
-  // Fireworks lists image input for Qwen3.7 Plus; text-only here for the same
-  // reason as Kimi K3 (vision flip = separate, validated change). 262k context.
+  // Fireworks lists image input for Qwen3.7 Plus — validated live 2026-08-14
+  // (fireworks-vision online test) → vision:true. 262k context.
   'accounts/fireworks/models/qwen3p7-plus': {
     id: 'accounts/fireworks/models/qwen3p7-plus',
     provider: 'openai',
@@ -1068,7 +1078,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
-    features: FIREWORKS_TEXT_FEATURES,
+    features: FIREWORKS_VISION_FEATURES,
     pricing: { input: 0.40, output: 1.60, cacheWrite: 0.40, cacheRead: 0.08 },
     uiLabel: 'Qwen3.7 Plus',
     provenance: 'CN',
@@ -1120,6 +1130,8 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     uiLabel: 'Kimi K2.7 Code',
     provenance: 'CN',
   },
+  // MiniMax M3 — Fireworks lists image input; validated live 2026-08-14
+  // (fireworks-vision online test) → vision:true.
   'accounts/fireworks/models/minimax-m3': {
     id: 'accounts/fireworks/models/minimax-m3',
     provider: 'openai',
@@ -1128,7 +1140,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
-    features: FIREWORKS_TEXT_FEATURES,
+    features: FIREWORKS_VISION_FEATURES,
     pricing: { input: 0.30, output: 1.20, cacheWrite: 0.30, cacheRead: 0.059 },
     uiLabel: 'MiniMax M3',
     provenance: 'CN',
