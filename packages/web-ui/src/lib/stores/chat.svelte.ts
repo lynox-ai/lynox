@@ -1062,68 +1062,43 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 			}
 		}
 	} catch {
-		// SSE connection error. A MID-RUN drop (events streamed or a prompt is
-		// pending → the run is live server-side) must NOT re-POST /run — that
-		// collides with the parked run (409) and strands the user's answer as
-		// "not sent" (the #83 bug). Leave it to the re-attach recovery after the
-		// finally. Only a PRE-RUN failure (nothing streamed, no prompt) is retried.
-		if (lastAppliedSeq > 0 || hasAnyPendingPrompt()) {
-			// mid-run drop → recovered below via reattachToActiveRun()
-		} else if (!retried) {
-			retried = true;
-			try {
-				await new Promise(r => setTimeout(r, 2000));
-				const retryRes = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify(payload)
-				});
-				if (retryRes.ok && retryRes.body) {
-					const retryReader = retryRes.body.getReader();
-					const retryDecoder = new TextDecoder();
-					let retryBuffer = '';
-					while (true) {
-						const { done, value } = await retryReader.read();
-						if (done) break;
-						retryBuffer += retryDecoder.decode(value, { stream: true });
-						const retryLines = retryBuffer.split('\n');
-						retryBuffer = retryLines.pop() ?? '';
-						let retryEventType = '';
-						for (const line of retryLines) {
-							if (line.startsWith('event: ')) retryEventType = line.slice(7);
-							else if (line.startsWith('data: ') && retryEventType) {
-								try { handleSSEEvent(retryEventType, JSON.parse(line.slice(6)) as Record<string, unknown>, assistantIdx, userMsgIdx); } catch { /* skip */ }
-								retryEventType = '';
-							}
-						}
-					}
-					try { retryReader.cancel(); } catch { /* already closed */ }
-				} else {
-					throw new Error('Retry failed');
-				}
-			} catch {
-				chatError = t('chat.error_connection');
-				chatErrorDetail = null;
-				if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
-				if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
-			}
-		} else {
-			chatError = t('chat.error_connection');
-			chatErrorDetail = null;
-			if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
-			if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
-		}
+		// SSE connection error — the client NEVER re-POSTs /run from here
+		// (2026-08-14, thread 861f3e4b: four run rows sharing one prompt_hash).
+		// The old "pre-run" retry slept 2 s and re-POSTed the same payload
+		// whenever the stream died with zero applied seq events, treating that
+		// as "the run never started". False negative: a run whose provider is
+		// erroring/backing off server-side can be minutes live while streaming
+		// nothing seq'd (the measured run: 52 s), so the re-POST minted a
+		// duplicate billed run out of a transport hiccup. Whether the run is
+		// still alive is the SERVER's to answer — the re-attach below asks
+		// /runs/active and either takes over the live run or leaves the turn
+		// failed for the user's explicit tap-to-retry (chat.send_failed).
 	} finally {
 		try { reader.cancel(); } catch { /* already closed */ }
 	}
 
 	// Stream ended without a terminal done/error while still marked streaming (not
-	// a user stop): the transport dropped mid-run (mobile background, proxy idle, tab
-	// freeze) or the run aborted. If the run is still live server-side, re-attach to
-	// its resumable stream so the continuation AND any pending prompt recover live —
-	// the user never has to reload from history (the #83 bug).
-	if (!sawTerminal && isStreaming && await reattachToActiveRun(sid, assistantIdx)) {
-		return; // the re-attach owns streaming state + persistence + queue drain
+	// a user stop — abortRun() clears isStreaming): the transport dropped mid-run
+	// (mobile background, proxy idle, tab freeze). Ask the SERVER whether the run
+	// is still live: re-attach to its resumable stream so the continuation AND any
+	// pending prompt recover live — the user never has to reload from history (the
+	// #83 bug).
+	if (!sawTerminal && isStreaming) {
+		if (await reattachToActiveRun(sid, assistantIdx)) {
+			return; // the re-attach owns streaming state + persistence + queue drain
+		}
+		// No live run to recover and the stream never reached a terminal event.
+		// The client does NOT re-POST the payload (see the catch above) — the
+		// next attempt is the user's explicit tap on the failed message. Only a
+		// turn that never rendered anything counts as "not sent": a partial
+		// answer stays standing (same as the old mid-run-drop behaviour).
+		const dropped = messages[assistantIdx];
+		if (dropped && dropped.role === 'assistant' && !dropped.content && !dropped.blocks?.length && !dropped.toolCalls?.length) {
+			messages.splice(assistantIdx, 1);
+			if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
+			chatError = t('chat.error_connection');
+			chatErrorDetail = null;
+		}
 	}
 
 	isStreaming = false;
