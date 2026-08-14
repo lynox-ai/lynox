@@ -30,29 +30,15 @@ const mockLoadMessages = vi.fn();
 const mockSetContinuationPrompt = vi.fn();
 const mockSetKnowledgeContext = vi.fn();
 
-vi.mock('./agent.js', () => {
-  // Real classes so `err instanceof RunAbortedError` /
-  // `err instanceof ToolLoopBreakError` in session.ts (which imports from this
-  // same mocked module) match the instances the tests construct. The loop-break
-  // subclass extends the mocked RunAbortedError for the same reason session.ts
-  // treats it as an abort-family error.
-  class MockRunAbortedError extends Error {
+vi.mock('./agent.js', () => ({
+  // Real class so `err instanceof RunAbortedError` in session.ts (which imports
+  // from this same mocked module) matches the instances the tests construct.
+  RunAbortedError: class RunAbortedError extends Error {
     constructor(message = 'Run interrupted before completion') {
       super(message);
       this.name = 'RunAbortedError';
     }
-  }
-  class MockToolLoopBreakError extends MockRunAbortedError {
-    readonly loopKey: string;
-    constructor(loopKey: string) {
-      super('Run stopped: the same tool call was repeated after repeated warnings');
-      this.name = 'ToolLoopBreakError';
-      this.loopKey = loopKey;
-    }
-  }
-  return {
-    RunAbortedError: MockRunAbortedError,
-    ToolLoopBreakError: MockToolLoopBreakError,
+  },
   Agent: vi.fn().mockImplementation(function (config: {
     toolResultBlobStore?: unknown;
     onStream?: ((event: unknown) => void | Promise<void>) | undefined;
@@ -115,8 +101,7 @@ vi.mock('./agent.js', () => {
     // @ts-expect-error mock constructor
     this.setThinking = vi.fn();
   }),
-  };
-});
+}));
 
 vi.mock('./memory.js', () => ({
   Memory: vi.fn().mockImplementation(function () {
