@@ -7528,3 +7528,54 @@ describe('mail custom-server defaults are the same on both routes', () => {
     expect(added).toBe(true);
   });
 });
+
+    describe('GET /api/knowledge/queue?threadId= (chip re-hydration)', () => {
+      // Local twin of the swapEngine helper above (it is describe-scoped there).
+      function swapEngineQ(overrides: Record<string, (...args: unknown[]) => unknown>, test: () => Promise<void>): Promise<void> {
+        const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+        const origs: Record<string, unknown> = {};
+        for (const k of Object.keys(overrides)) { origs[k] = engineRef[k]; engineRef[k] = overrides[k]; }
+        return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
+      }
+      // DEF-dk-review-chip-resume-invisible: the resume path asks for ONE
+      // conversation's queue. The filter branch is the whole point — without a
+      // test a mutation on it survives silently and every thread re-hydrates
+      // every other thread's pending wording into its chips.
+      function fakeQueueStore(): { pendingCount: ReturnType<typeof vi.fn>; listPending: ReturnType<typeof vi.fn> } {
+        return {
+          pendingCount: vi.fn().mockReturnValue(2),
+          listPending: vi.fn().mockReturnValue([
+            { id: 'ke_a', subjectHint: 'SVA', text: 'fact of thread one', sourceThreadId: 't-1' },
+            { id: 'ke_b', subjectHint: 'X', text: 'fact of thread two', sourceThreadId: 't-2' },
+          ]),
+        };
+      }
+
+      it('filters entries to the named thread', async () => {
+        const store = fakeQueueStore();
+        await swapEngineQ({ getKnowledgeStore: () => store }, async () => {
+          const res = await jsonFetch('/api/knowledge/queue?threadId=t-1');
+          const body = await res.json() as { entries: Array<{ id: string }>; pendingCount: number };
+          expect(body.entries.map((e) => e.id)).toEqual(['ke_a']);
+          expect(body.pendingCount).toBe(2); // global count, unchanged semantics
+        });
+      });
+
+      it('returns ALL entries when no thread is named (hub view)', async () => {
+        const store = fakeQueueStore();
+        await swapEngineQ({ getKnowledgeStore: () => store }, async () => {
+          const res = await jsonFetch('/api/knowledge/queue');
+          const body = await res.json() as { entries: Array<{ id: string }> };
+          expect(body.entries).toHaveLength(2);
+        });
+      });
+
+      it('an EMPTY ?threadId= filters to nothing (presence, not truthiness — same rule as the count route)', async () => {
+        const store = fakeQueueStore();
+        await swapEngineQ({ getKnowledgeStore: () => store }, async () => {
+          const res = await jsonFetch('/api/knowledge/queue?threadId=');
+          const body = await res.json() as { entries: Array<{ id: string }> };
+          expect(body.entries).toHaveLength(0);
+        });
+      });
+    });
