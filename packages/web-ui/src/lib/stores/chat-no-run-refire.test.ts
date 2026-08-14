@@ -63,14 +63,51 @@ describe('chat store — no client-side run re-fire', () => {
 		const body = executeRunBody();
 		// The retry machinery of the old pre-run path is gone entirely.
 		expect(body).not.toContain('retryRes');
+		// The whole recovery block (outer if) is thread-scoped …
+		const blockStart = body.indexOf('if (!sawTerminal && isStreaming && _userStopEpoch !== epoch)');
+		if (blockStart < 0) throw new Error('anchor lost: recovery block head');
+		const blockWindow = body.slice(blockStart, blockStart + 5500);
+		// Exact statement shape — a substring check would let a neutered guard
+		// (`if (true || sessionId === sid)`) pass green.
+		expect(blockWindow).toMatch(/\n\t\tif \(sessionId === sid\) \{/);
 		// The re-attach is the FIRST thing after the stream ends…
 		const reattachCall = body.indexOf('await reattachToActiveRun(sid, assistantIdx)');
 		expect(reattachCall).toBeGreaterThan(-1);
 		// …and the failed-turn fallback (tap-to-retry) sits AFTER it in the same
 		// block — marking the turn failed before asking the server would regress
 		// to a client-side guess about liveness, the exact bug this guards.
-		const fallbackWindow = body.slice(reattachCall, reattachCall + 2000);
+		const fallbackWindow = body.slice(reattachCall, reattachCall + 4500);
 		expect(fallbackWindow).toContain('!.failed = true');
+		// …and only for a turn that is honestly unsent: a run that FINISHED in
+		// the drop window is absent from /runs/active with its answer already
+		// persisted — the transcript check keeps tap-to-retry from re-running
+		// a billed, already-answered turn.
+		expect(fallbackWindow).toContain("/threads/${enc}/messages");
+		expect(fallbackWindow).toContain(`.role === 'assistant'`);
+		// The emptiness guard must cover the invisible-only states too: follow-up
+		// pills and knowledge-write chips never populate content/blocks/toolCalls,
+		// so a turn that rendered EITHER is partial, not unsent.
+		expect(fallbackWindow).toContain('!dropped.followUps?.length');
+		expect(fallbackWindow).toContain('!dropped.knowledgeWrites?.length');
+	});
+
+	it('a deliberate stop is never mistaken for a transport drop', () => {
+		// The server ends an aborted stream WITHOUT a done/error terminal, and
+		// abortRun only clears isStreaming after the /abort round-trip — so the
+		// stopped run's own cleanup needs a synchronous signal. The epoch stamp
+		// is written BEFORE the abort fetch and consulted by the run's cleanup.
+		const abortStart = SRC.indexOf('export async function abortRun(');
+		if (abortStart < 0) throw new Error('anchor lost: abortRun');
+		const abortEnd = SRC.indexOf('\nexport ', abortStart + 40);
+		const abortBody = SRC.slice(abortStart, abortEnd < 0 ? SRC.length : abortEnd);
+		const stamp = abortBody.indexOf('_userStopEpoch = streamEpoch;');
+		expect(stamp).toBeGreaterThan(-1);
+		// The real fetch (not the word "abort" in a comment above it).
+		const abortFetch = abortBody.indexOf('sessions/${sessionId}/abort');
+		if (abortFetch < 0) throw new Error('anchor lost: abort fetch');
+		expect(stamp).toBeLessThan(abortFetch);
+		// And the run's cleanup actually consults it.
+		expect(executeRunBody()).toContain('_userStopEpoch !== epoch');
 	});
 
 	it('queue entries originate only from a user send or the reconnect retry', () => {
