@@ -2227,6 +2227,12 @@ export class LynoxHTTPApi {
         const MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024;
         const MAX_FILE_B64_BYTES = 10 * 1024 * 1024;
         const MAX_TEXT_FILE_DECODED_CHARS = 200_000;
+        // DEF-chat-upload-inline-only-no-file: above this the upload becomes a
+        // real file in the tenant's file area instead of message content.
+        const INLINE_FILE_MAX_CHARS = 20_000;
+        const INLINE_FILE_PREVIEW_CHARS = 2_000;
+        // Lazy import — consistent with the other workspace imports below.
+        const { persistChatUpload: persistChatUploadRef } = await import('../core/workspace.js');
         // Allowlist matches what Anthropic vision accepts AND what the frontend
         // resize path produces. Anything else here is either client tampering
         // or an unsupported format that we should reject before forwarding.
@@ -2287,6 +2293,13 @@ export class LynoxHTTPApi {
                 // hygiene the user's own message text and the watch page-text
                 // get — before it is framed to the model AND persisted+recalled.
                 const safeBody = stripUntrustedSeparators(extracted.text);
+                // Same file-area rule as decoded text files below: an extracted
+                // document body past the inline threshold becomes a real file
+                // (the knowledge-layer ingest below still runs — recall is not
+                // affected by how the model receives the text).
+                const bigDoc = safeBody.length > INLINE_FILE_MAX_CHARS
+                  ? persistChatUploadRef(`${safeName}.txt`, safeBody)
+                  : null;
                 // WRAPPED, not merely sanitised. An uploaded document is third-party-authored
                 // — the person attached the file, they did not write what is inside it — so it
                 // is the same class of input as a fetched page or a received mail, both of
@@ -2294,7 +2307,14 @@ export class LynoxHTTPApi {
                 // one that was missing: the model sees an explicit content boundary, AND the
                 // turn counts as having handled untrusted content, so a `remember` on it routes
                 // to the review queue instead of landing active and pinnable.
-                content.push({ type: 'text', text: wrapUntrustedData(`[File: ${safeName}]\n${safeBody}`, 'file_upload') });
+                content.push(bigDoc !== null
+                  ? { type: 'text', text: wrapUntrustedData(
+                      `[File: ${safeName}] — extracted text, ${String(safeBody.length)} chars, too large to inline into the message. `
+                      + `Saved to the files area as \`${bigDoc.rel}\`. `
+                      + `Work on it there: read_file('${bigDoc.abs}'), or bash/python on '${bigDoc.rel}' (the workspace cwd) — do NOT rewrite its content into a tool call or the reply.\n\n`
+                      + `Preview (first ${String(INLINE_FILE_PREVIEW_CHARS)} chars):\n${safeBody.slice(0, INLINE_FILE_PREVIEW_CHARS)}`,
+                      'file_upload') }
+                  : { type: 'text', text: wrapUntrustedData(`[File: ${safeName}]\n${safeBody}`, 'file_upload') });
                 // U1 persist+recall: store the document into the knowledge layer
                 // (best-effort, OFF the request path) so it survives the turn and
                 // is auto-recalled on later turns. Never awaited — embedding /
@@ -2358,6 +2378,39 @@ export class LynoxHTTPApi {
             // `_sawUntrustedData` stays false, so a `remember` in that turn writes straight to
             // active knowledge instead of the review queue. The formats that skipped the gate
             // were the majority, and the plainest ones.
+            //
+            // DEF-chat-upload-inline-only-no-file (2026-08-14, thread 8c09e50a):
+            // above INLINE_FILE_MAX_CHARS the decoded text is NOT inlined. An
+            // inlined 90 KB CSV forced the model to echo the whole file through a
+            // write_file tool input to process it — which hit max_tokens MID
+            // tool_use, the truncated call was discarded, the continuation
+            // restarted the same text, and the loop burned every continuation of
+            // a 5-minute run (no tool call ever dispatched). Large uploads now
+            // land as a REAL FILE in the tenant's file area (served by
+            // /api/files/download, readable by read_file/bash/python via the
+            // workspace cwd), and the message carries the reference plus a short
+            // preview. The turn still counts as untrusted — the wrapper stays.
+            if (decoded.length > INLINE_FILE_MAX_CHARS) {
+              // Persist the FULL decoded text (pre-cap): the 200k decode cap
+              // limits what may ride INLINE — not what lands on disk (review).
+              const stored = persistChatUploadRef(safeName, decoded);
+              if (stored !== null) {
+                const preview = decoded.slice(0, INLINE_FILE_PREVIEW_CHARS);
+                // ABSOLUTE path in the instruction: read_file resolves relative
+                // paths against the process cwd, NOT the file area — the
+                // relative form failed 100% of first attempts in review.
+                content.push({ type: 'text', text: wrapUntrustedData(
+                  `[File: ${safeName}] — ${String(decoded.length)} chars, too large to inline into the message. `
+                  + `It has been saved to the files area as \`${stored.rel}\`. `
+                  + `Work on it there: read_file('${stored.abs}'), or use bash/python on '${stored.rel}' (the workspace cwd) — do NOT rewrite its content into a tool call or the reply.\n\n`
+                  + `Preview (first ${String(INLINE_FILE_PREVIEW_CHARS)} chars):\n${preview}`,
+                  'file_upload') });
+                continue;
+              }
+              // File-area write failed (no workspace writable? disk full?): fall
+              // through to the inline path below rather than lose the upload —
+              // the old behavior is the fallback, not the void.
+            }
             content.push({ type: 'text', text: wrapUntrustedData(`[File: ${safeName}]\n${text}`, 'file_upload') });
           }
         }

@@ -50,9 +50,18 @@ vi.mock('./agent.js', () => {
       this.loopKey = loopKey;
     }
   }
+  class MockContinuationLoopError extends MockRunAbortedError {
+    readonly loopPrefix: string;
+    constructor(loopPrefix: string) {
+      super('Run stopped: truncated-response continuations repeated without progress');
+      this.name = 'ContinuationLoopError';
+      this.loopPrefix = loopPrefix;
+    }
+  }
   return {
     RunAbortedError: MockRunAbortedError,
     ToolLoopBreakError: MockToolLoopBreakError,
+    ContinuationLoopError: MockContinuationLoopError,
   Agent: vi.fn().mockImplementation(function (config: {
     toolResultBlobStore?: unknown;
     onStream?: ((event: unknown) => void | Promise<void>) | undefined;

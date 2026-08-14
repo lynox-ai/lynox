@@ -30,7 +30,7 @@ import { effectiveContextWindow } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
-import { Agent, RunAbortedError, ToolLoopBreakError } from './agent.js';
+import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
@@ -1229,6 +1229,10 @@ export class Session {
       // rendering, but its OWN note code so the thread says WHY (the tool call
       // that was repeated past all warnings) instead of a bare "interrupted".
       const isLoopBreak = err instanceof ToolLoopBreakError;
+      // A continuation loop (truncated responses repeating without progress)
+      // is the same calm family — its own code so the note names the repeated
+      // prefix instead of a bare "interrupted".
+      const isContinuationLoop = err instanceof ContinuationLoopError;
       // Bugsink capture — structured error with tags
       void import('./error-reporting.js').then(({ captureLynoxError, captureError: captureReportedError }) => {
         if (err instanceof LynoxError) {
@@ -1376,7 +1380,7 @@ export class Session {
         error: err,
         // An abort renders a calm "interrupted" note; a real error keeps the
         // provider-error banner + sanitized detail.
-        noteCode: isLoopBreak ? 'tool_loop_break' : isAbort ? 'run_interrupted' : 'provider_error',
+        noteCode: isContinuationLoop ? 'continuation_loop' : isLoopBreak ? 'tool_loop_break' : isAbort ? 'run_interrupted' : 'provider_error',
         // An internal (compaction) run must NOT surface a visible note — the
         // success path skips persisting its messages entirely (_persistMessages +
         // the end-of-run append both no-op for an internal run), so mirror that

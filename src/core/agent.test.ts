@@ -539,12 +539,16 @@ describe('Agent', () => {
     it('returns the truncated text, not the notice, when an exhausted turn still has text', async () => {
       // The notice only replaces an *empty* exhausted turn. When the final
       // truncated turn carries visible text, that text must come through.
+      // Varying text per turn: the continuation-loop detector breaks runs
+      // whose truncated prefix REPEATS identically with no tool progress —
+      // this test is about the cap path, not that detector (its own spec
+      // lives in continuation-loop.test.ts).
       for (let i = 0; i < 11; i++) {
-        mockProcess.mockResolvedValueOnce(maxTokensResponse('partial'));
+        mockProcess.mockResolvedValueOnce(maxTokensResponse(`partial ${String(i)}`));
       }
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
       const result = await agent.send('a task that keeps getting truncated');
-      expect(result).toBe('partial');
+      expect(result).toContain('partial'); // final turn varies by design
       expect(mockProcess).toHaveBeenCalledTimes(11);
     });
 

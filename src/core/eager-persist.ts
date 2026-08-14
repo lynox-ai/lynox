@@ -129,14 +129,17 @@ export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedT
     // `tool\x00input` — read duck-typed to keep this module free of an agent
     // import) so the user sees WHICH call was repeated, not just that one was.
     const loopKey = (error as { loopKey?: unknown }).loopKey;
+    const loopPrefix = (error as { loopPrefix?: unknown }).loopPrefix;
     const loopDetail = typeof loopKey === 'string'
       ? `repeated call: ${loopKey.split('\x00').join(' ')}`
-      : undefined;
+      : typeof loopPrefix === 'string' && loopPrefix.trim().length > 0
+        ? `repeated truncated response: ${loopPrefix.slice(0, 140)}…`
+        : undefined;
     notes.push({
       role: 'assistant',
       content: noteCode === 'provider_error'
         ? buildDisplayNoteContent('provider_error', sanitizeNoteDetail(getErrorMessage(error)))
-        : noteCode === 'tool_loop_break' && loopDetail !== undefined
+        : (noteCode === 'tool_loop_break' || noteCode === 'continuation_loop') && loopDetail !== undefined
           ? buildDisplayNoteContent(noteCode, sanitizeNoteDetail(loopDetail))
           : buildDisplayNoteContent(noteCode),
     });

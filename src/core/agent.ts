@@ -217,6 +217,16 @@ export class ToolLoopBreakError extends RunAbortedError {
   }
 }
 
+export class ContinuationLoopError extends RunAbortedError {
+  /** The repeated assistant prefix — the loop's fingerprint, for the note. */
+  readonly loopPrefix: string;
+  constructor(loopPrefix: string) {
+    super('Run stopped: truncated-response continuations repeated without progress');
+    this.name = 'ContinuationLoopError';
+    this.loopPrefix = loopPrefix;
+  }
+}
+
 export class Agent implements IAgent {
   readonly name: string;
   readonly model: string;
@@ -409,6 +419,10 @@ export class Agent implements IAgent {
    *  inherits the flag (else a sub-agent on an ON tenant would still run legacy extraction). */
   get durableMemoryEnabled(): boolean { return this._durableMemoryEnabled; }
   private continuationCount = 0;
+  /** Continuation-loop detector state — see the max_tokens branch in _loop. */
+  private _continuationLoopPrefix = '';
+  private _continuationLoopCount = 0;
+  private _continuationToolCount = 0;
   private readonly maxContinuations: number;
   private static readonly MAX_RETRIES = 3;
   private static readonly ABSOLUTE_MAX_ITERATIONS = 500;
@@ -1414,6 +1428,9 @@ export class Agent implements IAgent {
     }
     this.abortController = new AbortController();
     this.continuationCount = 0;
+    this._continuationLoopPrefix = '';
+    this._continuationLoopCount = 0;
+    this._continuationToolCount = 0;
     this._loopToolCount = 0;
     this._repeatGuard.reset();
     this._sawUntrustedData = false;
@@ -1680,6 +1697,34 @@ export class Agent implements IAgent {
         // max_tokens is itself the signal to continue, gated only by the
         // continuation cap. Without this, a turn whose whole output budget
         // went to extended thinking returned an empty assistant message.
+        //
+        // Continuation-loop guard (2026-08-14, thread 8c09e50a): a model that
+        // tries to echo a huge inline upload through a tool input (write_file
+        // with the whole CSV) hits max_tokens MID-tool_use, the truncated
+        // tool_use is discarded (never dispatched), the continuation restarts
+        // the SAME text prefix, and the loop burns all continuations — 5
+        // minutes, no tool call ever lands, RepeatCallGuard never sees a
+        // single record (it counts dispatched calls). Detect THAT shape: N
+        // consecutive continuations with ZERO dispatched tools and an
+        // identical assistant prefix are a stuck loop with certainty —
+        // progress resets the detector (a tool that landed, or a different
+        // continuation).
+        const prefix = extractText(response.content).slice(0, 120);
+        const toolsDelta = this._loopToolCount - this._continuationToolCount;
+        // An EMPTY truncated turn is the thinking-heavy case the continuation
+        // exists for (the whole budget went to extended thinking) — it is NOT
+        // loop evidence and must not count. Only a NON-EMPTY identical prefix
+        // repeating with zero dispatched tools is the stuck shape.
+        if (prefix.trim().length === 0) {
+          this._continuationLoopPrefix = '';
+          this._continuationLoopCount = 0;
+        } else if (toolsDelta > 0 || prefix !== this._continuationLoopPrefix) {
+          this._continuationLoopPrefix = prefix;
+          this._continuationLoopCount = 1;
+        } else if (++this._continuationLoopCount > 3) {
+          throw new ContinuationLoopError(prefix);
+        }
+        this._continuationToolCount = this._loopToolCount;
         if (this.continuationCount < this.maxContinuations) {
           this.continuationCount++;
           if (this.onStream) {
@@ -1749,10 +1794,16 @@ export class Agent implements IAgent {
         // and re-issued the identical call anyway. The escalation alone was
         // measured not to stop weaker models (2026-08-14 prod, thread 861f3e4b:
         // ~25 identical `api_setup view` calls, every escalation read and
-        // ignored, run burned 50s until the user aborted). Ends the run via the
-        // abort path (keeps the user message, rolls back partial assistant
-        // content — ToolLoopBreakError extends RunAbortedError), and Session
-        // renders a calm tool_loop_break note naming the stuck call.
+        // ignored, run burned 50s until the user aborted).
+        // PATH NOTE: this takes send()'s NON-abort branch (the abortController
+        // signal is NOT set), so the whole turn — user message included — rolls
+        // back out of the API context. That is correct here, NOT a bug: Session
+        // has already durably persisted the user message and persistFailedTurnDisplay
+        // flips the run's footprint display-only, then appends the calm
+        // tool_loop_break note naming the stuck call. Do NOT "fix" this into the
+        // abort branch: that path REPLACES the error with a fresh RunAbortedError
+        // (see the abort handler in send()), which would destroy loopKey and
+        // silently downgrade the note to a generic run_interrupted.
         const breakKey = this._repeatGuard.breakLatched();
         if (breakKey !== null) throw new ToolLoopBreakError(breakKey);
         if (endsTurn) {
