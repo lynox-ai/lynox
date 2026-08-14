@@ -30,6 +30,7 @@ import {
   type MailSendResult,
 } from './provider.js';
 import type { MailContext } from './context.js';
+import { reflowMailBody } from './body-reflow.js';
 import type { MailProvider } from './provider.js';
 import type { SentMailLogInput } from './state.js';
 import { resolveProvider, type MailRegistry } from './tools/registry.js';
@@ -184,7 +185,12 @@ export async function sendMail(
   const sendInput: MailSendInput = {
     to: [...input.to],
     subject: input.subject,
-    text: input.body,
+    // Reflow the model's hard editing-wrap before the wire: text/plain renders
+    // every CRLF as a real break, so the ~76-char wrap the model emits showed
+    // up mid-sentence in clients (Apple Mail, 2026-08-14). Structural lines
+    // (quotes, lists, code, signature) survive verbatim — see body-reflow.ts.
+    // Same words the approver consented to; only whitespace changes.
+    text: reflowMailBody(input.body),
   };
   if (cc.length > 0) sendInput.cc = [...cc];
   if (bcc.length > 0) sendInput.bcc = [...bcc];
@@ -244,7 +250,7 @@ export async function sendMail(
         cc,
         bcc,
         subject: input.subject,
-        bodyChars: input.body.length,
+        bodyChars: sendInput.text.length,
       };
       if (input.inReplyTo !== undefined) sentLogInput.inReplyTo = input.inReplyTo;
       if (followupId !== null) sentLogInput.followupId = followupId;
@@ -258,8 +264,15 @@ export async function sendMail(
   return { ok: true, result, followupId };
 }
 
-/** Chars of the whitespace-flattened body rendered inline in the preview. */
-const BODY_PREVIEW_CHARS = 200;
+/** Chars of the whitespace-flattened body rendered inline in the preview.
+ *  4000 since 2026-08-14: at 200 the approver saw almost none of what they
+ *  were approving (rafael: „damit der user auch sehen kann was er freigibt"),
+ *  and the web preview's scroll container (max-h-64 + overflow-y-auto, which
+ *  already exists for this prompt) never engaged. The flattening stays: a
+ *  line break in a value is a block-level markdown opener (`\n\n<!--` would
+ *  swallow the warning below), and the body on mail_reply can carry
+ *  remote-authored quoted text — same rule the subject flattening pins. */
+const BODY_PREVIEW_CHARS = 4000;
 
 /**
  * Render the body block for the confirmation preview.

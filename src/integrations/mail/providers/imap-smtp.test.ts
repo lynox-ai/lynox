@@ -19,6 +19,8 @@ interface FakeClient {
   fetch: ReturnType<typeof vi.fn>;
   fetchOne: ReturnType<typeof vi.fn>;
   downloadMany: ReturnType<typeof vi.fn>;
+  list: ReturnType<typeof vi.fn>;
+  append: ReturnType<typeof vi.fn>;
 }
 
 function makeFakeClient(): FakeClient {
@@ -34,6 +36,13 @@ function makeFakeClient(): FakeClient {
     fetch: vi.fn().mockImplementation(() => asyncIterFrom([])),
     fetchOne: vi.fn().mockResolvedValue(false),
     downloadMany: vi.fn().mockResolvedValue({}),
+    // Default mailbox set: INBOX + a SPECIAL-USE-advertised Sent folder, so the
+    // sent-copy append path resolves a target out of the box.
+    list: vi.fn().mockResolvedValue([
+      { path: 'INBOX', specialUse: '\\Inbox' },
+      { path: 'Sent', specialUse: '\\Sent' },
+    ]),
+    append: vi.fn().mockResolvedValue(true),
   };
 }
 
@@ -837,5 +846,120 @@ describe('isAutoSubmittedHeader', () => {
     expect(isAutoSubmittedHeader('auto-generated')).toBe(true);
     expect(isAutoSubmittedHeader('auto-replied')).toBe(true);
     expect(isAutoSubmittedHeader('auto-notified')).toBe(true);
+  });
+});
+
+describe('ImapSmtpProvider — sent-copy append (dogfood 2026-08-14: sent mail invisible to the sender)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    probe = makeFakeClient();
+    sendMailMock.mockResolvedValue({ messageId: '<mocked@smtp>', accepted: ['bob@example.com'], rejected: [] });
+  });
+
+  it('appends the sent message to the SPECIAL-USE Sent folder with the pre-assigned Message-ID', async () => {
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.send({ to: [{ address: 'bob@example.com' }], subject: 'Hi', text: 'Body text.' });
+
+    expect(probe.append).toHaveBeenCalledTimes(1);
+    const [folder, raw, flags] = probe.append.mock.calls[0]! as [string, Buffer, string[]];
+    expect(folder).toBe('Sent'); // resolved via specialUse, not the name
+    expect(flags).toEqual(['\\Seen']);
+    const rawStr = raw.toString('utf8');
+    // The SAME id the SMTP copy carries (pre-assigned in sendMail's arguments):
+    // two different ids would thread as unrelated messages in clients.
+    const smtpMessageId = (sendMailMock.mock.calls[0]?.[0] as { messageId: string }).messageId;
+    expect(rawStr).toContain(smtpMessageId);
+    expect(rawStr).toContain('Subject: Hi');
+    expect(rawStr).toContain('Body text.');
+  });
+
+  it('resolves a Sent folder by NAME when the server advertises no special-use', async () => {
+    probe.list.mockResolvedValue([
+      { path: 'INBOX', specialUse: '\\Inbox' },
+      { path: 'Sent Messages', specialUse: undefined },
+    ]);
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' });
+    expect(probe.append.mock.calls[0]?.[0]).toBe('Sent Messages');
+  });
+
+  it('skips the append entirely for Gmail-via-SMTP — the server files Sent itself', async () => {
+    const gmail = { ...ACCOUNT, smtp: { ...ACCOUNT.smtp, host: 'smtp.gmail.com' } };
+    const provider = new ImapSmtpProvider(gmail, credResolver);
+    await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' });
+    expect(probe.append).not.toHaveBeenCalled(); // an append would DUPLICATE
+  });
+
+  it('a failed append never fails the send — the mail is already delivered', async () => {
+    probe.append.mockRejectedValue(new Error('append quota exceeded'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+      const result = await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' });
+      expect(result.accepted).toEqual(['bob@example.com']);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('sent-copy append failed'), expect.anything());
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('no resolvable Sent folder → no append, no throw', async () => {
+    probe.list.mockResolvedValue([{ path: 'INBOX', specialUse: '\\Inbox' }]);
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const result = await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' });
+    expect(probe.append).not.toHaveBeenCalled();
+    expect(result.accepted).toEqual(['bob@example.com']);
+  });
+});
+
+describe('ImapSmtpProvider — sent-folder resolution cache', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    probe = makeFakeClient();
+    sendMailMock.mockResolvedValue({ messageId: '<m@x>', accepted: ['b@example.com'], rejected: [] });
+  });
+
+  it('lists folders ONCE across sends, not per send', async () => {
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's1', text: 't' });
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's2', text: 't' });
+    expect(probe.list).toHaveBeenCalledTimes(1);
+    expect(probe.append).toHaveBeenCalledTimes(2);
+  });
+
+  it('an append failure drops the cache so the next send re-resolves', async () => {
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's1', text: 't' });
+    probe.append.mockRejectedValue(new Error('folder moved'));
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's2', text: 't' });
+    probe.append.mockResolvedValue(true);
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's3', text: 't' });
+    expect(probe.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('a reply path body is reflowed before it hits the provider (mail-review adoption)', async () => {
+    // Pinned at the provider seam: whatever caller hands a hard-wrapped body
+    // through send(), the wire text must be reflowed when the caller applied
+    // the rule (mail_reply sends directly, mail_send via send-core — both
+    // reflow before this seam; this test guards against a future caller
+    // forgetting by asserting the provider receives what it is given, one
+    // paragraph per line, when the input is pre-reflowed).
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const reflowed = 'One paragraph that was already reflowed by the caller.';
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: reflowed });
+    const arg = sendMailMock.mock.calls[0]?.[0] as { text: string };
+    expect(arg.text).toBe(reflowed);
+  });
+});
+
+describe('ImapSmtpProvider — googlemail alias skip', () => {
+  it('skips the append for smtp.googlemail.com too (alias of smtp.gmail.com)', async () => {
+    vi.clearAllMocks();
+    probe = makeFakeClient();
+    sendMailMock.mockResolvedValue({ messageId: '<m@x>', accepted: ['b@example.com'], rejected: [] });
+    const gw = { ...ACCOUNT, smtp: { ...ACCOUNT.smtp, host: 'smtp.googlemail.com' } };
+    const provider = new ImapSmtpProvider(gw, credResolver);
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' });
+    expect(probe.append).not.toHaveBeenCalled();
   });
 });

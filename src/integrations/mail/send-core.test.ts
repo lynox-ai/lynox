@@ -358,36 +358,40 @@ describe('buildSendPreview', () => {
   // Pins the RENDERED quote against the claimed count. If truncate's slice
   // arithmetic changed, the quote and the sentence would disagree and this
   // fails — asserting only the sentence would not catch that.
-  it('shows exactly the first 199 chars plus an ellipsis, and says so', () => {
-    const preview = previewFor('z'.repeat(4000));
-    expect(preview).toContain(`> ${'z'.repeat(199)}…`);
-    expect(preview).toContain('Body is 4000 chars');
-    expect(preview).toContain('only the first 199 are shown');
+  it('shows exactly the first 3999 chars plus an ellipsis, and says so', () => {
+    const preview = previewFor('z'.repeat(6000));
+    expect(preview).toContain(`> ${'z'.repeat(3999)}…`);
+    expect(preview).toContain('Body is 6000 chars');
+    expect(preview).toContain('only the first 3999 are shown');
   });
 
-  // The two lengths must not be mixed: 300 chars of text around 500 newlines is
-  // 1100 raw but 601 flattened. Reporting the raw number overstates the hidden
-  // volume by 499 chars for what is really a normal multi-line mail — and every
+  // The two lengths must not be mixed: chars of text around bulk newlines
+  // differ between raw and flattened. Reporting the raw number overstates the
+  // hidden volume for what is really a normal multi-line mail — and every
   // fixture whose body has no whitespace (`'x'.repeat(n)`) is blind to it.
+  // Sized ABOVE the preview cap so the warning (and its number) fires.
   it('states the flattened body size, not the raw length', () => {
-    const body = `${'A'.repeat(300)}${'\n'.repeat(500)}${'B'.repeat(300)}`;
-    expect(body.length).toBe(1100);
-    expect(flatten(body).length).toBe(601);
+    const body = `${'A'.repeat(3000)}${'\n'.repeat(500)}${'B'.repeat(2000)}`;
+    expect(body.length).toBe(5500);
+    expect(flatten(body).length).toBe(5001);
     const preview = previewFor(body);
-    expect(preview).toContain('Body is 601 chars');
-    expect(preview).not.toContain('1100');
+    expect(preview).toContain('Body is 5001 chars');
+    expect(preview).not.toContain('5500');
   });
 
   it('does not warn at exactly the cap, warns one char over', () => {
-    expect(previewFor('c'.repeat(200))).not.toContain('only the first');
-    expect(previewFor('c'.repeat(201))).toContain('Body is 201 chars');
+    expect(previewFor('c'.repeat(4000))).not.toContain('only the first');
+    expect(previewFor('c'.repeat(4001))).toContain('Body is 4001 chars');
   });
 
   // The gate's whole purpose: an approver must not read a plausible opening
-  // line and miss that a payload rides behind it. Before this, the preview cut
-  // at 200 chars with a bare "…" — indistinguishable from a slightly-longer
-  // mail. The hidden text stays hidden (a terminal prompt is not the place to
-  // dump 40 KB), but its EXISTENCE and size must be stated.
+  // line and miss that a payload rides behind it. Since the cap was raised
+  // 200 → 4000 (2026-08-14: a 200-char flattened preview meant the approver
+  // saw almost none of what they were approving and the UI's scroll container
+  // never engaged), the payload's START is now VISIBLE in the preview — which
+  // is strictly better for the approver — and the warning still states the
+  // true size and that a remainder is unseen. The hidden text stays hidden
+  // beyond the cap, but its EXISTENCE and size must be stated.
   it('flags the hidden remainder when a payload trails a harmless opening', () => {
     // The opening alone fills the preview window — which is what a real
     // injected send looks like, not a two-line stub.
@@ -396,11 +400,16 @@ describe('buildSendPreview', () => {
       'consolidated summary of the Q3 figures together with the notes from ' +
       'the workshop, so you have everything in one place before the review ' +
       'meeting on Thursday. Let me know if anything is unclear.\n\n';
-    const body = `${opening}${'LEAKED-RECORD;'.repeat(3000)}`;
+    const body = `${opening}${'LEAKED-RECORD;'.repeat(3000)}END-OF-BODY-MARKER`;
     const preview = previewFor(body);
     expect(preview).toContain('thanks for the call earlier');
-    expect(preview).not.toContain('LEAKED-RECORD');
+    // The first payload records are inside the raised window — visible, so the
+    // approver can see WHAT kind of content rides behind the opening.
+    expect(preview).toContain('LEAKED-RECORD');
+    // …but the tail is beyond it, and the warning says so with the true size.
     expect(preview).toContain(`Body is ${String(flatten(body).length)} chars`);
+    expect(preview).toContain('only the first');
+    expect(preview).not.toContain('END-OF-BODY-MARKER');
   });
 
   it('flags an oversized body on the mass-send path too', () => {
@@ -430,11 +439,11 @@ describe('buildSendPreview', () => {
   // a singleLine that only handled \n — CR alone is an equally valid CommonMark
   // line ending — and would miss every other block opener.
   it('renders an attacker-supplied multi-line subject on exactly one line', () => {
-    const preview = previewFor('q'.repeat(400), false, 'Report\r\n\r\n<!--');
+    const preview = previewFor('q'.repeat(5000), false, 'Report\r\n\r\n<!--');
     const subjectLines = preview.split('\n').filter((l) => l.includes('**Subject:**'));
     expect(subjectLines).toHaveLength(1);
     expect(subjectLines[0]).toContain('<!--');
-    expect(preview).toContain('Body is 400 chars');
+    expect(preview).toContain('Body is 5000 chars');
   });
 
   it('flattens every line-breaking character in a header value', () => {
