@@ -377,9 +377,11 @@ export class RepeatCallGuard {
   /**
    * Call BEFORE executing a tool. Returns a skip directive when this exact call
    * has already produced this exact result REPEAT_LIMIT times in a row;
-   * otherwise null (execute normally). State is left UNTOUCHED on skip, so the
-   * guard stays latched until a different call resets it — every further
-   * identical repeat is skipped too.
+   * otherwise null (execute normally). The streak itself stays untouched on
+   * skip (no record() runs), so the guard stays latched until a different call
+   * resets it — every further identical repeat is skipped too. The SKIP,
+   * however, is state: it counts toward the hard break (skipCount/breakKey), so
+   * an ignored escalation eventually ends the run rather than repeating forever.
    */
   check(key: string): RepeatCallSkip | null {
     if (key !== this.key || this.identicalCount < RepeatCallGuard.REPEAT_LIMIT) return null;
