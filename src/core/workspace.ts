@@ -204,7 +204,7 @@ export function _resetCache(): void {
  */
 export function persistChatUpload(fileName: string, text: string): { rel: string; abs: string } | null {
   try {
-    const uploadsDir = ensureDirSync(join(getFileAreaDir(), 'uploads'));
+    ensureDirSync(join(getFileAreaDir(), 'uploads'));
     // Normalize the persist name HARD (the display name stays untouched):
     // path separators out (review A2 — a crafted name escaped uploads/ into
     // the area root), quotes/backticks out (review C1 — the name rides an
