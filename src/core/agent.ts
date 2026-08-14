@@ -58,7 +58,7 @@ import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
-import { evictSavedArtifactBodies } from './artifact-eviction.js';
+import { evictSavedArtifactBodies, restoreEvictedBodies } from './artifact-eviction.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
@@ -419,6 +419,25 @@ export class Agent implements IAgent {
    *  already-on-disk truncated tail is never re-persisted. See
    *  `getUnpersistedTail`/`markPersisted`. */
   private _persistedMark = 0;
+  /** Original bodies of artifact_save inputs this buffer has evicted, by
+   *  tool_use id — D4's other half. Eviction rewrites the buffer in place
+   *  (that is the cost control), but every persist path appends the buffer
+   *  tail, so the tail must be restored to the ORIGINAL before it reaches the
+   *  ThreadStore (`getUnpersistedTail` does). Without this map a persist retry
+   *  one turn later wrote the marker to disk — measured on prod 2026-08-14:
+   *  five `[evicted after successful save` rows in a single thread, user-
+   *  visible on reload/export. Cleared when the buffer is rebuilt
+   *  (`reset`/`loadMessages`): entries for messages no longer in the buffer
+   *  can never match again, and an entry whose row is already durable sits
+   *  BELOW the mark and is never re-read. A body evicted AND persisted stays
+   *  mapped until then — RAM-cheap relative to the cache-writes it prevents. */
+  private _evictedOriginals = new Map<string, string>();
+  /** The single eviction callback both buffer-entry points (`send`,
+   *  `loadMessages`) pass to `evictSavedArtifactBodies` — one line to mutate,
+   *  one place that can drift. */
+  private readonly _noteEvicted = (id: string, original: string): void => {
+    this._evictedOriginals.set(id, original);
+  };
   private abortController: AbortController | null = null;
   private _msgLenCache = 0;
   private _msgLenVersion = -1;
@@ -895,6 +914,7 @@ export class Agent implements IAgent {
   reset(): void {
     this.messages = [];
     this._persistedMark = 0;
+    this._evictedOriginals.clear();
     this._lastRealInputTokens = undefined;
     this._lastCacheReadTokens = undefined;
     this._lastRealAtMsgCount = 0;
@@ -966,7 +986,11 @@ export class Agent implements IAgent {
   /** Count of leading buffer entries already known durable on disk. The
    *  persist delta is everything after this mark. See `_persistedMark`. */
   getUnpersistedTail(): BetaMessageParam[] {
-    return this.messages.slice(this._persistedMark);
+    // D4: the durable transcript keeps ORIGINAL artifact bodies. The buffer is
+    // evicted for the wire; every persist path appends exactly this tail, so
+    // restoring here is the one place that covers run-end, the eager
+    // checkpoint, and a failed persist's retry alike.
+    return restoreEvictedBodies(this.messages.slice(this._persistedMark), this._evictedOriginals);
   }
 
   /** Advance the persisted mark after the caller has durably written the tail.
@@ -979,13 +1003,17 @@ export class Agent implements IAgent {
   }
 
   loadMessages(messages: BetaMessageParam[]): void {
+    // Buffer rebuilt: originals mapped for the PREVIOUS buffer can never match
+    // again (ids are unique per buffer). The eviction below re-fills the map
+    // for any body this reload evicts that has not been persisted yet.
+    this._evictedOriginals.clear();
     // Rehydrated histories can have drifted tool_use/tool_result pairs
     // (partial persist, rolled-back run). Anthropic 400s on unpaired blocks,
     // so normalise at the single entry point for external history.
     // F5: loaded history is by definition past turns — evict successfully
     // saved artifact bodies here too, or a resume would re-send (and
     // cache-write) every body the live session had already evicted.
-    this.messages = evictSavedArtifactBodies(sanitizeToolPairs(messages));
+    this.messages = evictSavedArtifactBodies(sanitizeToolPairs(messages), this._noteEvicted);
     // Everything just loaded is "already accounted for": it is EITHER the
     // post-compaction synthetic summary (the real messages stay on disk and
     // must NOT be re-persisted) OR the summary+recent tail loaded FROM disk on
@@ -1357,7 +1385,11 @@ export class Agent implements IAgent {
     // confirmed save and the result row names the recoverable file. NOT gated
     // on the mark: for a persistence-less agent (sub-agents, pipeline steps)
     // the mark never advances and the gate would disable eviction entirely.
-    this.messages = evictSavedArtifactBodies(this.messages);
+    // The originals are captured (not dropped) so the persist tail can carry
+    // the ORIGINAL body to the ThreadStore — the narrow exception below (a
+    // failed persist retried after this rewrite) wrote the marker to disk
+    // before `restoreEvictedBodies` existed (measured, prod 2026-08-14).
+    this.messages = evictSavedArtifactBodies(this.messages, this._noteEvicted);
     const snapshot = this.messages.length;
     // Support multimodal content blocks (e.g. vision: image + text)
     const content = Array.isArray(userMessage)
