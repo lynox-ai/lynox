@@ -547,6 +547,17 @@ let retryStatus = $state<{ attempt: number; maxAttempts: number; reason?: 'retry
 // thread switch can cut it short without waiting for the 3s tick or the
 // 6 min cap to elapse. Kept at module scope alongside _resumeController.
 let _queuePollController: AbortController | null = null;
+// streamEpoch of the run the user DELIBERATELY stopped (abortRun). Set
+// SYNCHRONOUSLY, before the /abort round-trip: the server ends an aborted
+// run's stream cleanly WITHOUT a done/error terminal (RunAbortedError →
+// res.end(), http-api.ts), so if the stopped run's read loop unblocks
+// before abortRun's await resolves, `!sawTerminal && isStreaming` alone
+// would misread the deliberate stop as a transport drop — label the turn
+// failed (which the online-reconnect listener then auto re-fires, the
+// duplicate-run bug this store's guard tests pin). Per-run comparison: a
+// new run bumps streamEpoch, so a stale stop can never suppress a later
+// run's recovery.
+let _userStopEpoch = -1;
 let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : false);
 
 // Offline detection + auto-retry on reconnect
@@ -828,6 +839,7 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	// Claim ownership of the shared streaming state so an in-flight re-attach
 	// that ends mid-send can't switch off this run's activity indicators.
 	streamEpoch++;
+	const epoch = streamEpoch;
 	isStreaming = true;
 	// Seed liveness markers so a stale value from the previous run can't
 	// flash "Verbindung scheint langsam" for the first ~20s of this run.
@@ -1062,68 +1074,73 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 			}
 		}
 	} catch {
-		// SSE connection error. A MID-RUN drop (events streamed or a prompt is
-		// pending → the run is live server-side) must NOT re-POST /run — that
-		// collides with the parked run (409) and strands the user's answer as
-		// "not sent" (the #83 bug). Leave it to the re-attach recovery after the
-		// finally. Only a PRE-RUN failure (nothing streamed, no prompt) is retried.
-		if (lastAppliedSeq > 0 || hasAnyPendingPrompt()) {
-			// mid-run drop → recovered below via reattachToActiveRun()
-		} else if (!retried) {
-			retried = true;
-			try {
-				await new Promise(r => setTimeout(r, 2000));
-				const retryRes = await fetch(`${getApiBase()}/sessions/${sid}/run`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify(payload)
-				});
-				if (retryRes.ok && retryRes.body) {
-					const retryReader = retryRes.body.getReader();
-					const retryDecoder = new TextDecoder();
-					let retryBuffer = '';
-					while (true) {
-						const { done, value } = await retryReader.read();
-						if (done) break;
-						retryBuffer += retryDecoder.decode(value, { stream: true });
-						const retryLines = retryBuffer.split('\n');
-						retryBuffer = retryLines.pop() ?? '';
-						let retryEventType = '';
-						for (const line of retryLines) {
-							if (line.startsWith('event: ')) retryEventType = line.slice(7);
-							else if (line.startsWith('data: ') && retryEventType) {
-								try { handleSSEEvent(retryEventType, JSON.parse(line.slice(6)) as Record<string, unknown>, assistantIdx, userMsgIdx); } catch { /* skip */ }
-								retryEventType = '';
-							}
-						}
-					}
-					try { retryReader.cancel(); } catch { /* already closed */ }
-				} else {
-					throw new Error('Retry failed');
-				}
-			} catch {
-				chatError = t('chat.error_connection');
-				chatErrorDetail = null;
-				if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
-				if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
-			}
-		} else {
-			chatError = t('chat.error_connection');
-			chatErrorDetail = null;
-			if (messages[assistantIdx] && !messages[assistantIdx]!.content) messages.splice(assistantIdx, 1);
-			if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
-		}
+		// SSE connection error — the client NEVER re-POSTs /run from here
+		// (2026-08-14, thread 861f3e4b: four run rows sharing one prompt_hash).
+		// The old "pre-run" retry slept 2 s and re-POSTed the same payload
+		// whenever the stream died with zero applied seq events, treating that
+		// as "the run never started". False negative: a run whose provider is
+		// erroring/backing off server-side can be minutes live while streaming
+		// nothing seq'd (the measured run: 52 s), so the re-POST minted a
+		// duplicate billed run out of a transport hiccup. Whether the run is
+		// still alive is the SERVER's to answer — the re-attach below asks
+		// /runs/active and either takes over the live run or leaves the turn
+		// failed for the user's explicit tap-to-retry (chat.send_failed).
 	} finally {
 		try { reader.cancel(); } catch { /* already closed */ }
 	}
 
-	// Stream ended without a terminal done/error while still marked streaming (not
-	// a user stop): the transport dropped mid-run (mobile background, proxy idle, tab
-	// freeze) or the run aborted. If the run is still live server-side, re-attach to
-	// its resumable stream so the continuation AND any pending prompt recover live —
+	// Stream ended without a terminal done/error while still marked streaming.
+	// Three things this must NOT misread:
+	//  - a deliberate stop (abortRun): the server ends an aborted stream
+	//    terminal-less, and isStreaming only flips after the /abort round-trip —
+	//    the epoch stamp tells them apart;
+	//  - a thread switch: the read loop of the OLD run keeps running while
+	//    `messages` already belongs to the new thread — every mutation below
+	//    is sid-guarded (same reasoning as the 409 path above);
+	//  - a run that FINISHED inside the drop window: absent from /runs/active
+	//    but its answer is already persisted — see the transcript check.
+	// Otherwise: ask the SERVER whether the run is still live; re-attach to its
+	// resumable stream so the continuation AND any pending prompt recover live —
 	// the user never has to reload from history (the #83 bug).
-	if (!sawTerminal && isStreaming && await reattachToActiveRun(sid, assistantIdx)) {
-		return; // the re-attach owns streaming state + persistence + queue drain
+	if (!sawTerminal && isStreaming && _userStopEpoch !== epoch) {
+		if (sessionId === sid) {
+			if (await reattachToActiveRun(sid, assistantIdx)) {
+				return; // the re-attach owns streaming state + persistence + queue drain
+			}
+			// No live run to recover and the stream never reached a terminal
+			// event. The client does NOT re-POST the payload (see the catch
+			// above) — the next attempt is the user's explicit tap on the failed
+			// message. Only a turn that never rendered anything counts as "not
+			// sent": a partial answer stays standing (incl. chips/pills —
+			// follow-ups and knowledge-write chips intentionally never populate
+			// content/blocks/toolCalls).
+			const dropped = messages[assistantIdx];
+			if (dropped && dropped.role === 'assistant' && !dropped.content && !dropped.blocks?.length && !dropped.toolCalls?.length
+				&& !dropped.followUps?.length && !dropped.knowledgeWrites?.length) {
+				// Absent from /runs/active does NOT prove "never started": the
+				// run may have finished in the drop window with the answer
+				// already persisted. Labeling that "not sent" makes tap-to-retry
+				// re-run an already-answered (billed) turn — the duplicate-run
+				// outcome this whole change exists to prevent. Ask the
+				// transcript: only a thread still ending on OUR user message is
+				// honestly unsent.
+				let answered = false;
+				try {
+					const enc = encodeURIComponent(sid);
+					const r = await fetch(`${getApiBase()}/threads/${enc}/messages`);
+					if (r.ok) {
+						const md = await r.json() as { messages?: Array<{ role?: string }> };
+						answered = md.messages?.at(-1)?.role === 'assistant';
+					}
+				} catch { /* unreachable transcript — fall through to failed */ }
+				if (!answered) {
+					messages.splice(assistantIdx, 1);
+					if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
+					chatError = t('chat.error_connection');
+					chatErrorDetail = null;
+				}
+			}
+		}
 	}
 
 	isStreaming = false;
@@ -2085,6 +2102,10 @@ export async function abortRun(): Promise<void> {
 	// re-POSTing /run before the server /abort round-trip even begins.
 	_queuePollController?.abort();
 	_queuePollController = null;
+	// Stamp the stop BEFORE the round-trip — see _userStopEpoch. The server
+	// may end the stream (terminal-less) before this fetch resolves, and the
+	// run's own cleanup then reads this flag.
+	_userStopEpoch = streamEpoch;
 	await fetch(`${getApiBase()}/sessions/${sessionId}/abort`, { method: 'POST' });
 	isStreaming = false;
 	streamingActivity = 'idle';
