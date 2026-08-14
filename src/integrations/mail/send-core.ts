@@ -258,8 +258,15 @@ export async function sendMail(
   return { ok: true, result, followupId };
 }
 
-/** Chars of the whitespace-flattened body rendered inline in the preview. */
-const BODY_PREVIEW_CHARS = 200;
+/** Chars of the whitespace-flattened body rendered inline in the preview.
+ *  4000 since 2026-08-14: at 200 the approver saw almost none of what they
+ *  were approving (rafael: „damit der user auch sehen kann was er freigibt"),
+ *  and the web preview's scroll container (max-h-64 + overflow-y-auto, which
+ *  already exists for this prompt) never engaged. The flattening stays: a
+ *  line break in a value is a block-level markdown opener (`\n\n<!--` would
+ *  swallow the warning below), and the body on mail_reply can carry
+ *  remote-authored quoted text — same rule the subject flattening pins. */
+const BODY_PREVIEW_CHARS = 4000;
 
 /**
  * Render the body block for the confirmation preview.
