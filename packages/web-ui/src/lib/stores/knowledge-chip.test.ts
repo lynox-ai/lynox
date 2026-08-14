@@ -10,6 +10,7 @@ import {
 	performReview,
 	projectKnowledgeWrite,
 	queueEntriesToChips,
+	anchorKnowledgeChips,
 	reviewRequestBody,
 	reviewResolution,
 	retireResolution,
@@ -486,5 +487,23 @@ describe('queueEntriesToChips', () => {
 		// whose stored status drifted.
 		const [chip] = queueEntriesToChips([], [row({ status: 'active' })]);
 		expect(chip!.status).toBe('pending_review');
+	});
+});
+
+describe('anchorKnowledgeChips (review F1)', () => {
+	const bearer = (role: 'user' | 'assistant'): ChipBearer => ({ role, content: '' });
+
+	it('anchors on the last ASSISTANT message even when the transcript ends on a user turn', () => {
+		const list = [bearer('user'), bearer('assistant'), bearer('assistant'), bearer('user')];
+		expect(anchorKnowledgeChips(list)).toBe(list[2]);
+	});
+
+	it('returns undefined when there is no assistant message at all (nothing renders chips)', () => {
+		expect(anchorKnowledgeChips([bearer('user'), bearer('user')])).toBeUndefined();
+	});
+
+	it('returns the last message when it is itself assistant', () => {
+		const list = [bearer('user'), bearer('assistant')];
+		expect(anchorKnowledgeChips(list)).toBe(list[1]);
 	});
 });

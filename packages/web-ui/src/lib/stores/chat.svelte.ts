@@ -19,7 +19,7 @@ import {
 	type ContentBlock,
 } from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
-import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody, parseReviewFailure, carryKnowledgeWrites, allKnowledgeWrites, queueEntriesToChips, type KnowledgeWriteChip } from './knowledge-chip.js';
+import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody, parseReviewFailure, carryKnowledgeWrites, allKnowledgeWrites, queueEntriesToChips, anchorKnowledgeChips, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
@@ -2990,10 +2990,18 @@ export async function resumeThread(threadId: string): Promise<void> {
 					if (gen !== _resumeGeneration) return;
 					if (qRes.ok) {
 						const qData = await qRes.json() as { entries?: unknown };
-						if (Array.isArray(qData.entries) && qData.entries.length > 0 && messages.length > 0) {
+						// Guard again AFTER the body read: an abort between the header
+						// and here lets the continuation run after a newer resume
+						// started — without it, this thread's chips land on the
+						// OTHER thread's transcript (review F3).
+						if (gen !== _resumeGeneration) return;
+						if (Array.isArray(qData.entries) && qData.entries.length > 0) {
 							const chips = queueEntriesToChips(allKnowledgeWrites(messages), qData.entries);
-							const last = messages[messages.length - 1]!;
-							(last.knowledgeWrites ??= []).push(...chips);
+							// Chips render ONLY on assistant messages (review F1): a
+							// transcript ending on a user turn (interrupted run) must
+							// anchor on the last ASSISTANT message, not messages[-1].
+							const anchor = anchorKnowledgeChips(messages);
+							if (chips.length > 0 && anchor) (anchor.knowledgeWrites ??= []).push(...chips);
 						}
 					}
 				} catch {

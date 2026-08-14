@@ -7541,13 +7541,17 @@ describe('mail custom-server defaults are the same on both routes', () => {
       // conversation's queue. The filter branch is the whole point — without a
       // test a mutation on it survives silently and every thread re-hydrates
       // every other thread's pending wording into its chips.
-      function fakeQueueStore(): { pendingCount: ReturnType<typeof vi.fn>; listPending: ReturnType<typeof vi.fn> } {
+      function fakeQueueStore(): { pendingCount: ReturnType<typeof vi.fn>; listPending: ReturnType<typeof vi.fn>; listPendingForThread: ReturnType<typeof vi.fn> } {
         return {
           pendingCount: vi.fn().mockReturnValue(2),
           listPending: vi.fn().mockReturnValue([
             { id: 'ke_a', subjectHint: 'SVA', text: 'fact of thread one', sourceThreadId: 't-1' },
             { id: 'ke_b', subjectHint: 'X', text: 'fact of thread two', sourceThreadId: 't-2' },
           ]),
+          // Mirrors the real store: an EMPTY thread id is a question about no
+          // thread — trim-guard answers [] (see listPendingForThread).
+          listPendingForThread: vi.fn().mockImplementation((id: string) =>
+            id === '' ? [] : [{ id: 'ke_a', subjectHint: 'SVA', text: 'fact of thread one', sourceThreadId: 't-1' }]),
         };
       }
 
@@ -7558,6 +7562,11 @@ describe('mail custom-server defaults are the same on both routes', () => {
           const body = await res.json() as { entries: Array<{ id: string }>; pendingCount: number };
           expect(body.entries.map((e) => e.id)).toEqual(['ke_a']);
           expect(body.pendingCount).toBe(2); // global count, unchanged semantics
+          // SQL-side filter, not a post-filter (review F2): the thread store
+          // method is what ran, so 100+ foreign rows cannot crowd this
+          // thread's entries out of the window.
+          expect(store.listPendingForThread).toHaveBeenCalledWith('t-1', 100);
+          expect(store.listPending).not.toHaveBeenCalled();
         });
       });
 
@@ -7576,6 +7585,7 @@ describe('mail custom-server defaults are the same on both routes', () => {
           const res = await jsonFetch('/api/knowledge/queue?threadId=');
           const body = await res.json() as { entries: Array<{ id: string }> };
           expect(body.entries).toHaveLength(0);
+          expect(store.listPendingForThread).toHaveBeenCalledWith('', 100);
         });
       });
     });

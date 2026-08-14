@@ -511,6 +511,21 @@ export class KnowledgeStore {
     return rows.map(r => this._rowToEntry(r));
   }
 
+  /** Thread-scoped queue read (DEF-dk-review-chip-resume-invisible). Filters
+   *  in SQL BEFORE the limit: a limit-then-filter made a thread's entries
+   *  invisible once 100+ pending rows of OTHER threads crowded the window,
+   *  while the unbounded thread COUNT still counted them — pill and chips
+   *  disagreed past queue depth 100 (review F2). */
+  listPendingForThread(threadId: string, limit = 100): KnowledgeEntry[] {
+    const id = threadId.trim();
+    if (!id) return [];
+    const capped = Math.max(1, Math.min(limit, 500));
+    const rows = this.db.prepare(
+      "SELECT * FROM knowledge_entries WHERE status = 'pending_review' AND source_thread_id = ? ORDER BY created_at ASC LIMIT ?",
+    ).all(id, capped) as KnowledgeRow[];
+    return rows.map(r => this._rowToEntry(r));
+  }
+
   /**
    * Active knowledge for the read-surface (the "Wissen" browse tab, DK-UX). Unlike
    * {@link recall} this is NOT query-ranked — a stable browse list: pinned first, then

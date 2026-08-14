@@ -302,3 +302,21 @@ export function queueEntriesToChips(
 	}
 	return chips;
 }
+
+/**
+ * Review F1 (2026-08-14): the chat renders knowledge chips ONLY on assistant
+ * messages (`{#if msg.role === 'assistant' && msg.knowledgeWrites?.length}`).
+ * A transcript can END on a user message (interrupted run between the
+ * knowledge-write commit and the assistant persist; drained queue turn) —
+ * anchoring on `messages[length-1]` made the re-hydrated chips a silent no-op
+ * for exactly those shapes. This centralizes the module's own convention
+ * (same as the unanchored-chip fallback in carryKnowledgeWrites): the LAST
+ * ASSISTANT message, and nothing else.
+ */
+export function anchorKnowledgeChips<T extends ChipBearer>(messages: readonly T[]): T | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const m = messages[i]!;
+		if (m.role === 'assistant') return m;
+	}
+	return undefined;
+}

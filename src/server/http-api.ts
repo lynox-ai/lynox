@@ -3735,13 +3735,15 @@ export class LynoxHTTPApi {
       if (!requireService(res, store, 'Durable memory')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 100, 500));
-      let entries = store.listPending(limit);
       // DEF-dk-review-chip-resume-invisible: the chat resume re-hydrates a
       // thread's pending review chips from THIS endpoint, so it can ask for
-      // exactly one conversation's queue instead of re-rendering the global
-      // list and dedup-masking other threads' entries as "already present".
+      // exactly one conversation's queue. Thread-scoped reads filter in SQL
+      // BEFORE the limit (review F2) — a post-filter let 100+ foreign pending
+      // rows crowd this thread's entries out while the count still saw them.
       const threadId = url.searchParams.get('threadId');
-      if (threadId !== null) entries = entries.filter((e) => e.sourceThreadId === threadId);
+      const entries = threadId === null
+        ? store.listPending(limit)
+        : store.listPendingForThread(threadId, limit);
       jsonResponse(res, 200, { entries, pendingCount: store.pendingCount() });
     });
 
