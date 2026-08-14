@@ -412,6 +412,11 @@ export class ImapSmtpProvider implements MailProvider {
   private readonly tlsRejectUnauthorized: boolean;
 
   private client: ImapFlow | null = null;
+  /** Resolved Sent-folder path, cached after the first successful lookup —
+   *  the review found appendSentCopy paid a full `client.list()` roundtrip on
+   *  EVERY send. Mailbox layout does not change mid-session; the cache is
+   *  dropped on an append failure (folder may have been removed). */
+  private sentFolderPath: string | null | undefined = undefined;
   private connecting: Promise<ImapFlow> | null = null;
   private smtpTransport: Transporter | null = null;
   private closed = false;
@@ -836,12 +841,25 @@ export class ImapSmtpProvider implements MailProvider {
     });
 
     const client = await this.getClient();
-    const folders = await client.list();
-    const sent =
-      folders.find(f => f.specialUse === '\\Sent')
-      ?? folders.find(f => /^(INBOX\.)?Sent( Messages| Items)?$/i.test(f.path));
-    if (!sent) return;
-    await client.append(sent.path, raw, ['\\Seen'], new Date());
+    let sentPath = this.sentFolderPath;
+    if (sentPath === undefined) {
+      const folders = await client.list();
+      const sent =
+        folders.find(f => f.specialUse === '\\Sent')
+        ?? folders.find(f => /^(INBOX\.)?Sent( Messages| Items)?$/i.test(f.path));
+      if (!sent) {
+        this.sentFolderPath = null; // nothing sensible — remember, don't re-list every send
+        return;
+      }
+      sentPath = this.sentFolderPath = sent.path;
+    }
+    if (sentPath === null) return;
+    try {
+      await client.append(sentPath, raw, ['\\Seen'], new Date());
+    } catch (err) {
+      this.sentFolderPath = undefined; // folder may be gone — re-resolve next time
+      throw err;
+    }
   }
 
   // ── watch ───────────────────────────────────────────────────────────────

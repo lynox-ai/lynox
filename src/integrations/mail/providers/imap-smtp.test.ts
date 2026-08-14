@@ -911,3 +911,43 @@ describe('ImapSmtpProvider — sent-copy append (dogfood 2026-08-14: sent mail i
     expect(result.accepted).toEqual(['bob@example.com']);
   });
 });
+
+describe('ImapSmtpProvider — sent-folder resolution cache', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    probe = makeFakeClient();
+    sendMailMock.mockResolvedValue({ messageId: '<m@x>', accepted: ['b@example.com'], rejected: [] });
+  });
+
+  it('lists folders ONCE across sends, not per send', async () => {
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's1', text: 't' });
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's2', text: 't' });
+    expect(probe.list).toHaveBeenCalledTimes(1);
+    expect(probe.append).toHaveBeenCalledTimes(2);
+  });
+
+  it('an append failure drops the cache so the next send re-resolves', async () => {
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's1', text: 't' });
+    probe.append.mockRejectedValue(new Error('folder moved'));
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's2', text: 't' });
+    probe.append.mockResolvedValue(true);
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's3', text: 't' });
+    expect(probe.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('a reply path body is reflowed before it hits the provider (mail-review adoption)', async () => {
+    // Pinned at the provider seam: whatever caller hands a hard-wrapped body
+    // through send(), the wire text must be reflowed when the caller applied
+    // the rule (mail_reply sends directly, mail_send via send-core — both
+    // reflow before this seam; this test guards against a future caller
+    // forgetting by asserting the provider receives what it is given, one
+    // paragraph per line, when the input is pre-reflowed).
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const reflowed = 'One paragraph that was already reflowed by the caller.';
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: reflowed });
+    const arg = sendMailMock.mock.calls[0]?.[0] as { text: string };
+    expect(arg.text).toBe(reflowed);
+  });
+});

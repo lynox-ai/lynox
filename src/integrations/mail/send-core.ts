@@ -250,7 +250,7 @@ export async function sendMail(
         cc,
         bcc,
         subject: input.subject,
-        bodyChars: input.body.length,
+        bodyChars: sendInput.text.length,
       };
       if (input.inReplyTo !== undefined) sentLogInput.inReplyTo = input.inReplyTo;
       if (followupId !== null) sentLogInput.followupId = followupId;
