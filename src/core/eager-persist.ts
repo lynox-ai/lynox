@@ -124,12 +124,21 @@ export function persistFailedTurnDisplay(input: FailedTurnDisplayInput): FailedT
     const notes: { role: 'user' | 'assistant'; content: unknown }[] = [];
     if (!footprint.hadUserMessage) notes.push({ role: 'user', content: task });
     // An intentional interruption shows a calm note with no raw provider detail;
-    // a genuine failure keeps the sanitized provider-error snippet for debugging.
+    // a genuine failure keeps the sanitized provider-error snippet for debugging;
+    // a hard loop break names the stuck call (ToolLoopBreakError.loopKey carries
+    // `tool\x00input` — read duck-typed to keep this module free of an agent
+    // import) so the user sees WHICH call was repeated, not just that one was.
+    const loopKey = (error as { loopKey?: unknown }).loopKey;
+    const loopDetail = typeof loopKey === 'string'
+      ? `repeated call: ${loopKey.split('\x00').join(' ')}`
+      : undefined;
     notes.push({
       role: 'assistant',
       content: noteCode === 'provider_error'
         ? buildDisplayNoteContent('provider_error', sanitizeNoteDetail(getErrorMessage(error)))
-        : buildDisplayNoteContent(noteCode),
+        : noteCode === 'tool_loop_break' && loopDetail !== undefined
+          ? buildDisplayNoteContent(noteCode, sanitizeNoteDetail(loopDetail))
+          : buildDisplayNoteContent(noteCode),
     });
     const totalCount = threadStore.getMessageCount(sessionId);
     threadStore.appendDisplayNotes(sessionId, notes, threadStore.getNextSeq(sessionId));

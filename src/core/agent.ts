@@ -207,6 +207,16 @@ export class RunAbortedError extends Error {
   }
 }
 
+export class ToolLoopBreakError extends RunAbortedError {
+  /** The `tool\x00input` key of the call that was repeated past all escalations. */
+  readonly loopKey: string;
+  constructor(loopKey: string) {
+    super('Run stopped: the same tool call was repeated after repeated warnings');
+    this.name = 'ToolLoopBreakError';
+    this.loopKey = loopKey;
+  }
+}
+
 export class Agent implements IAgent {
   readonly name: string;
   readonly model: string;
@@ -1734,6 +1744,17 @@ export class Agent implements IAgent {
         this.messages.push({ role: 'user', content: carrier });
         // Same checkpoint after tool_results — see above.
         await this._checkpoint();
+        // Hard loop break (RepeatCallGuard): the model has now been HANDED the
+        // escalated "do not repeat this" result BREAK_AFTER_ESCALATIONS times
+        // and re-issued the identical call anyway. The escalation alone was
+        // measured not to stop weaker models (2026-08-14 prod, thread 861f3e4b:
+        // ~25 identical `api_setup view` calls, every escalation read and
+        // ignored, run burned 50s until the user aborted). Ends the run via the
+        // abort path (keeps the user message, rolls back partial assistant
+        // content — ToolLoopBreakError extends RunAbortedError), and Session
+        // renders a calm tool_loop_break note naming the stuck call.
+        const breakKey = this._repeatGuard.breakLatched();
+        if (breakKey !== null) throw new ToolLoopBreakError(breakKey);
         if (endsTurn) {
           // Mirror the end_turn path exactly: return this turn's text and run the
           // same memory-extraction gate (skipped for untrusted/internal/durable).

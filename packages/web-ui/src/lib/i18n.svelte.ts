@@ -744,6 +744,8 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.note.generic': { de: 'Ein Fehler hat diese Runde unterbrochen. Tippe deine Nachricht erneut, um es nochmal zu versuchen.', en: 'An error interrupted this turn. Send your message again to retry.' },
 	'chat.note.run_interrupted.title': { de: 'Runde unterbrochen', en: 'Turn interrupted' },
 	'chat.note.run_interrupted': { de: 'Diese Runde wurde gestoppt, bevor sie fertig war. Tippe deine Nachricht erneut, um fortzufahren.', en: 'This turn was stopped before it finished. Send your message again to continue.' },
+	'chat.note.tool_loop_break.title': { de: 'Wiederholung gestoppt', en: 'Repetition stopped' },
+	'chat.note.tool_loop_break': { de: 'Der Agent hat dieselbe Aktion wiederholt, ohne dass sich etwas geändert hat, und wurde deshalb gestoppt. Beschreibe den nächsten Schritt anders oder nenne fehlende Angaben direkt in deiner Nachricht.', en: 'The agent repeated the same action with no change and was stopped for it. Describe the next step differently, or include any missing details in your message.' },
 	'chat.note.context_compacted.title': { de: 'Unterhaltung zusammengefasst', en: 'Conversation summarized' },
 	'chat.note.context_compacted': { de: 'Der Verlauf wurde hier gekürzt, um Kontext freizugeben. Frühere Nachrichten bleiben in deiner Historie, aber der Agent arbeitet ab hier mit einer Zusammenfassung. Fehlt etwas Wichtiges, erinnere ihn kurz daran.', en: 'The history was summarized here to free up context. Earlier messages stay in your history, but the agent now works from a summary. If something important is missing, just remind it.' },
 	'chat.run_blocked': { de: 'Anfrage blockiert', en: 'Request blocked' },
