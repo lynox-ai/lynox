@@ -32,7 +32,14 @@ export const ABSOLUTE_MAX_STEPS = 1000;
  * LynoxUserConfig type. Used by the run-path enforcement in `pipeline.ts`.
  */
 export function maxStepsFor(config?: { max_workflow_steps?: number | undefined } | undefined): number {
-  return config?.max_workflow_steps ?? MAX_STEPS;
+  const requested = config?.max_workflow_steps;
+  // Graceful: a malformed value (0, negative, NaN, non-finite) falls back to the
+  // default rather than rejecting every workflow (0) or silently disabling the
+  // cap (NaN -> comparisons always false). Clamped to the absolute ceiling.
+  if (requested === undefined || !Number.isFinite(requested) || requested < 1) {
+    return MAX_STEPS;
+  }
+  return Math.min(Math.trunc(requested), ABSOLUTE_MAX_STEPS);
 }
 
 const ConditionOperators = ['lt', 'gt', 'eq', 'neq', 'gte', 'lte', 'exists', 'not_exists', 'contains'] as const;
