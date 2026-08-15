@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { TIER_PRESETS, expandTierPreset } from './tier-presets.js';
+import { TIER_PRESETS, expandTierPreset, tierPresetDeviation } from './tier-presets.js';
 import { TIER_PRESET_NAMES, isTierPresetName } from '../contract/vocab.js';
 import { MODEL_CAPABILITIES } from '../types/index.js';
 import { isAllowlistedEndpoint } from './llm/endpoint-allowlist.js';
@@ -188,5 +188,74 @@ describe('TIER_PRESET_NAMES — the contract half cannot drift from the table', 
     expect(isTierPresetName('__proto__')).toBe(false);
     expect(isTierPresetName(undefined)).toBe(false);
     expect(isTierPresetName(null)).toBe(false);
+  });
+});
+
+describe('tierPresetDeviation — a preset NAME that no longer describes its set', () => {
+  // Staging 2026-08-11: `tier_preset: "efficient"` while the live set ran
+  // Mistral / Fireworks / Anthropic, and the Anthropic deep slot pointed at a
+  // provider with no credit — every deep escalation died and the label could
+  // not have shown it. An explicit slot overriding a preset band is CORRECT
+  // (config.ts:485); the name surviving the override unannounced is the defect.
+  const EFFICIENT = TIER_PRESETS['efficient'].tier_set;
+
+  it('a set that matches its preset band for band reports NOTHING', () => {
+    // Absence is the affirmative signal, so this is the load-bearing case: if it
+    // ever returns an object, every faithful tenant renders a false warning.
+    expect(tierPresetDeviation('efficient', EFFICIENT)).toBeUndefined();
+  });
+
+  it('names ONLY the overridden band, with both sides of the disagreement', () => {
+    const handMixed = {
+      ...EFFICIENT,
+      deep: { provider: 'anthropic' as const, model_id: 'claude-sonnet-5' },
+    };
+    const dev = tierPresetDeviation('efficient', handMixed);
+    expect(dev).toBeDefined();
+    expect(dev!.preset).toBe('efficient');
+    // fast + balanced still match, so they must not appear — the reader is told
+    // WHICH band drifted, not handed the whole set to diff again.
+    expect(Object.keys(dev!.slots)).toEqual(['deep']);
+    expect(dev!.slots.deep).toEqual({
+      expected: 'accounts/fireworks/models/kimi-k3',
+      actual: 'claude-sonnet-5',
+    });
+  });
+
+  it('reports a band the managed constraints DROPPED as actual:null', () => {
+    // The runtime removes a slot the CP cannot back. The set then silently has
+    // fewer bands than its name promises — same class of lie, opposite shape.
+    const dropped = { fast: EFFICIENT.fast, balanced: EFFICIENT.balanced };
+    const dev = tierPresetDeviation('efficient', dropped);
+    expect(dev!.slots.deep).toEqual({
+      expected: 'accounts/fireworks/models/kimi-k3',
+      actual: null,
+    });
+  });
+
+  it('reports nothing when no preset is named, or the name is unknown', () => {
+    // No name ⇒ nothing claims anything. Unknown name ⇒ unreachable via
+    // loadConfig (it throws) but must not fabricate a comparison here either.
+    expect(tierPresetDeviation(undefined, EFFICIENT)).toBeUndefined();
+    expect(tierPresetDeviation('', EFFICIENT)).toBeUndefined();
+    expect(tierPresetDeviation('no-such-preset', EFFICIENT)).toBeUndefined();
+    expect(tierPresetDeviation('__proto__', EFFICIENT)).toBeUndefined();
+  });
+
+  it('treats a wholly absent tier_set as a deviation on every pinned band', () => {
+    // `tier_preset` set but the loader produced no set at all: the name promises
+    // three models and none run. Reporting silence here would be the worst case.
+    const dev = tierPresetDeviation('efficient', undefined);
+    expect(Object.keys(dev!.slots).sort()).toEqual(['balanced', 'deep', 'fast']);
+  });
+
+  it('never carries a slot api_key into its result', () => {
+    // This result is serialized into GET /api/config, whose redaction pass only
+    // ever sees the RAW file config — never the loader output compared here.
+    const withKey = {
+      ...EFFICIENT,
+      deep: { provider: 'anthropic' as const, model_id: 'claude-sonnet-5', api_key: 'sk-must-not-leak' },
+    };
+    expect(JSON.stringify(tierPresetDeviation('efficient', withKey))).not.toContain('sk-must-not-leak');
   });
 });

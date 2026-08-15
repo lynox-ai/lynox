@@ -27,12 +27,12 @@ import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
 import { loadConfig } from '../core/config.js';
-import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
+import { expandTierPreset, tierPresetDeviation, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
 import { resolveChatContext, closeLoadedContext, type ChatContextRef } from '../core/chat-context.js';
 import { getActiveProvider } from '../core/llm-client.js';
-import { getActiveRoutingMode, effectiveTierModelId } from '../core/tier-resolver.js';
+import { getActiveRoutingMode, effectiveTierModelId, resolveDefaultChatTier } from '../core/tier-resolver.js';
 import type { RunRecord } from '../core/run-history.js';
 import { getRerankerCapability } from '../integrations/search/search-reranker.js';
 import { resolveProviderApiKey, mayFallBackToStoredKey, PROVIDER_KEY_SLOTS } from '../core/llm/provider-keys.js';
@@ -4567,7 +4567,31 @@ export class LynoxHTTPApi {
       // values ≤ contextWindow; show-all-grayed (Item 8) reads `features` to
       // disable settings that don't apply to the active model.
       const activeProvider = getActiveProvider();
-      const activeTier = config.default_tier ?? 'balanced';
+      // The tier that INDEXES the set, resolved the way the ENGINE resolves it —
+      // `engine.ts:304/394/765` calls exactly this function to decide the main
+      // chat tier. #1194 corrected the tier_set's SOURCE and left the tier that
+      // indexes it reading `config.default_tier ?? 'balanced'`, which was wrong
+      // twice over:
+      //   - SOURCE: `default_tier` is env-SEEDED (`LYNOX_DEFAULT_MODEL_TIER`,
+      //     legacy `LYNOX_DEFAULT_TIER`, config.ts:357). The env fills only an
+      //     unset value, so on a CP-provisioned tenant whose config.json never
+      //     carried one the raw file says nothing and this answered 'balanced'
+      //     while the engine routed the seed. It also skipped the project-config
+      //     layer that `loadConfig()` merges and `readUserConfig()` by contract
+      //     does not.
+      //   - CLAMP: `max_tier` is env-WINS, a cost LOCK (config.ts:369), and
+      //     `resolveDefaultChatTier` applies `clampTier` + `normalizeTier` +
+      //     the model blocklist on top. Reading the field raw reported the deep
+      //     slot on a tenant capped at balanced — the right set, indexed at a
+      //     band the engine never routes.
+      // Deliberately the engine's own resolver rather than a re-derivation, so
+      // this field mirrors what runs. `resolveDefaultChatTier` returns a TIER
+      // ('fast'/'balanced'/'deep'), clamped by `TIER_ORDER` against `max_tier`
+      // — it does not consult a model map, so hybrid routing does not change
+      // its answer. The band it returns is then indexed into the tier_set
+      // below, which IS hybrid-aware, so a clamped band still names the slot
+      // the engine routes.
+      const activeTier = resolveDefaultChatTier(effectiveConfig);
       // The tier_set the ENGINE routes on, taken from the loader instead of
       // re-derived here. `readUserConfig()` is file-only (config.ts:640), while
       // `loadConfig()` also merges the CP-pinned `LYNOX_TIER_PRESET` — whose own
@@ -4653,7 +4677,15 @@ export class LynoxHTTPApi {
       // (resolveBalancedModel falls it back to the default). The redaction
       // spread already carries the raw stored value; overriding it with the
       // resolver guarantees the UI never sees `undefined` or a non-served id.
-      redacted['balanced_model'] = resolveBalancedModel(config);
+      //
+      // From the LOADER: `LYNOX_BALANCED_MODEL` is env-merged (config.ts:363)
+      // and the engine seeds its own resolver from the same layer
+      // (engine.ts:880), so `getModelId('balanced', …)` — which `active_model`
+      // falls back to when no slot pins the band — already answers with the
+      // env's model. Reading the raw file here made this field, and the label
+      // below, name Sonnet 4.6 while `active_model` named Sonnet 5.
+      const effectiveBalanced = resolveBalancedModel(effectiveConfig);
+      redacted['balanced_model'] = effectiveBalanced;
 
       // main_chat_tiers (DEF-0082): the active provider's per-tier model LABEL,
       // for the composer picker's two follow-ups —
@@ -4682,13 +4714,23 @@ export class LynoxHTTPApi {
       // managed constraints (the runtime drops any slot the CP can't back), so the
       // picker cannot label a model that never routes — and sharing the one value
       // is what keeps these labels and `active_model` from disagreeing.
+      // …and the window inside those labels comes from the SAME resolver that
+      // produced `active_model.contextWindow` above, fed the same declared
+      // window. Sharing the tier_set stopped the two fields naming different
+      // MODELS; sharing the resolver stops them stating different WINDOWS for
+      // the one model they now agree on.
       if (resolvedTierSet) {
-        const tierLabels = mainChatTierLabelsFromTierSet(resolvedTierSet, activeProvider);
+        const tierLabels = mainChatTierLabelsFromTierSet(resolvedTierSet, activeProvider, {
+          declaredWindow: config.openai_context_window,
+        });
         if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
       } else {
         const mainChatEntry = getCatalogEntryByKey(resolveCatalogKey(activeProvider, config.api_base_url));
         if (mainChatEntry) {
-          const tierLabels = mainChatTierLabels(mainChatEntry, resolveBalancedModel(config));
+          const tierLabels = mainChatTierLabels(mainChatEntry, effectiveBalanced, {
+            provider: activeProvider,
+            declaredWindow: config.openai_context_window,
+          });
           if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
         }
       }
@@ -4698,6 +4740,26 @@ export class LynoxHTTPApi {
       // the CP can't back. Server-authoritative so the client needs no
       // @lynox-ai/core import and the disclosure gate stays honest.
       redacted['available_tier_presets'] = tierPresetSignal;
+      // The preset NAME itself, from the loader. `LYNOX_TIER_PRESET` is a LOCK,
+      // not a seed (config.ts:452-466) and lands only in the merged config, so
+      // the redaction spread — raw file — omits it entirely on the normal
+      // CP-provisioned shape. Emitting the deviation from the loader while the
+      // name beside it came from the file would have shipped a body naming a
+      // preset in one field and nothing in the other. Unconditional: the loader
+      // never deletes `tier_preset`, so when it is absent the file is too, and
+      // assigning `undefined` is a no-op (`JSON.stringify` omits it).
+      redacted['tier_preset'] = effectiveConfig.tier_preset;
+      // `tier_preset` names a preset; the set the engine routes on may no
+      // longer BE that preset, because an explicit slot overrides per band and
+      // the managed constraints can drop one. Present only when they disagree,
+      // so its ABSENCE is the affirmative "this name is faithful" — the reader
+      // never has to diff `tier_preset` against `main_chat_tiers` to find out.
+      // Reads the LOADER's set (same value `active_model` resolved from), and
+      // `tierPresetDeviation` projects model-id STRINGS out of it: the slot
+      // objects carry per-slot `api_key`s, and `redactConfigForResponse` above
+      // only ever scrubbed the raw file config, never this.
+      const presetDeviation = tierPresetDeviation(effectiveConfig.tier_preset, effectiveConfig.tier_set);
+      if (presetDeviation) redacted['tier_preset_deviation'] = presetDeviation;
       // Bugsink-toggle UX requires the page to know whether a DSN is
       // configured (env or vault) without leaking the DSN itself.
       redacted['bugsink_dsn_configured'] = !!(process.env['LYNOX_BUGSINK_DSN'] || secretNames.has('LYNOX_BUGSINK_DSN') || config.bugsink_dsn);

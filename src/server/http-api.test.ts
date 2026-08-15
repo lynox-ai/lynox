@@ -10,6 +10,7 @@ import type { LynoxHooks } from '../core/engine.js';
 // Mocked below (vi.mock '../core/config.js') — imported so the model-blocklist
 // gate tests can override its return value per-test.
 import { loadConfig } from '../core/config.js';
+import { TIER_PRESETS } from '../core/tier-presets.js';
 import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
 
@@ -2288,8 +2289,22 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('GET surfaces a persisted Sonnet 5 selection', async () => {
-      const { readUserConfig } = await import('../core/config.js');
+      // Both mocks carry it, because in production they cannot disagree in this
+      // direction for THIS key: `loadConfig()` starts from `{ ...userConfig }`
+      // (config.ts:149) and layers project + env on top, and nothing in the
+      // loader drops or transforms `balanced_model` (project layer only overrides
+      // non-null, env only sets). The loader is NOT a general superset of the
+      // file — it deletes `api_key`, can null `worker_profile`, and can drop
+      // `tier_set` slots — but for `balanced_model` specifically the two cannot
+      // diverge, so the loader-only mock this case used to have described a state
+      // that cannot occur. It was the sole thing keeping `balanced_model` on the
+      // raw file after `LYNOX_BALANCED_MODEL` (env-merged, config.ts:363) reached
+      // `active_model` and this field by different routes.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
       (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce({
+        default_tier: 'deep', thinking_mode: 'adaptive', balanced_model: 'claude-sonnet-5',
+      });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void }).mockReturnValueOnce({
         default_tier: 'deep', thinking_mode: 'adaptive', balanced_model: 'claude-sonnet-5',
       });
       const res = await jsonFetch('/api/config');
@@ -2638,6 +2653,305 @@ describe('LynoxHTTPApi', () => {
       // Same body, same model — the invariant the shared derivation buys.
       const tiers = body['main_chat_tiers'] as Record<string, string> | undefined;
       expect(tiers!['balanced']).toContain('GLM 5.2');
+    });
+
+    it('GET active_model takes the TIER from the loader, not the raw file', async () => {
+      // #1194 moved the tier_SET to the loader and left the tier that INDEXES it
+      // on the raw file. `default_tier` is env-SEEDED (config.ts:357): the CP's
+      // `LYNOX_DEFAULT_MODEL_TIER` only fills an unset value, so a tenant whose
+      // config.json never carried one — the normal CP-provisioned shape — has the
+      // seed visible ONLY through loadConfig(). Reading the file then reported
+      // the 'balanced' default while the engine routed 'fast', i.e. the right
+      // tier_set indexed at the wrong band: still the wrong model, one layer up.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      const slots = {
+        fast: {
+          provider: 'openai',
+          model_id: 'accounts/fireworks/models/kimi-k3',
+          api_base_url: 'https://api.fireworks.ai/inference/v1',
+        },
+        balanced: {
+          provider: 'openai',
+          model_id: 'accounts/fireworks/models/glm-5p2',
+          api_base_url: 'https://api.fireworks.ai/inference/v1',
+        },
+      };
+      // File: no `default_tier` at all — the seed channel is env-only here.
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ default_tier: 'fast', routing_mode: 'hybrid', tier_set: slots });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown>;
+      expect(am['tier']).toBe('fast');
+      // The band decides the model: falling back to 'balanced' names GLM 5.2,
+      // which is a real slot on this tenant — so the id assert is what separates
+      // "read the wrong field" from "read no field", and the tier assert alone
+      // would survive a mutation that hardcoded 'fast'.
+      expect(am['id']).toBe('accounts/fireworks/models/kimi-k3');
+      expect(am['uiLabel']).toBe('Kimi K3');
+    });
+
+    it('GET states ONE context window for one model — label and active_model agree', async () => {
+      // The window in a per-tier label came from `modelCapability(id).contextWindow`
+      // while `active_model.contextWindow` came from `resolveNativeContextWindow(id,
+      // provider, declared)`. Two resolvers, one quantity, one response body — the
+      // same defect shape #1194 closed for the model ID.
+      //
+      // The case that separates them is the Anthropic-fallback trap
+      // (models.ts:1204-1207): a registered Claude model pinned into a slot on the
+      // openai wire. `resolveNativeContextWindow` refuses to trust its 1M there and
+      // returns the 200k fallback — so a label that skips the provider advertises
+      // 1M for a band the engine caps at 200k, and the settings UI filters its
+      // context-window radios against the larger of two numbers it printed itself.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({
+          default_tier: 'balanced',
+          routing_mode: 'hybrid',
+          tier_set: {
+            // Registered at 1M (models.ts:670) but pinned onto the openai wire.
+            balanced: {
+              provider: 'openai',
+              model_id: 'claude-sonnet-5',
+              api_base_url: 'https://api.fireworks.ai/inference/v1',
+            },
+            // A second distinct model so the picker clears its ≥2 hide rule.
+            fast: {
+              provider: 'openai',
+              model_id: 'accounts/fireworks/models/kimi-k3',
+              api_base_url: 'https://api.fireworks.ai/inference/v1',
+            },
+          },
+        });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown>;
+      const tiers = body['main_chat_tiers'] as Record<string, string>;
+      expect(am['contextWindow']).toBe(200_000);
+      // The label must state the SAME window, not the registry's 1M.
+      expect(tiers['balanced']).toContain('200k');
+      expect(tiers['balanced']).not.toContain('1M');
+      // And the untrapped sibling keeps its real window — the fix must not flatten
+      // every label to the fallback, which is the opposite failure.
+      expect(tiers['fast']).toContain('1M');
+    });
+
+    it('GET carries a DECLARED self-host window into the labels too', async () => {
+      // The other direction the two resolvers diverge in. An operator's declared
+      // `openai_context_window` outranks the registry in `active_model` (the first
+      // check in resolveNativeContextWindow, models.ts:1201) — so a label still
+      // reading the registry states a window the engine will not honour, on the
+      // very screen whose radios are filtered by that number.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'openai', openai_context_window: 500_000 });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({
+          default_tier: 'balanced',
+          routing_mode: 'hybrid',
+          tier_set: {
+            // Registered at 1M — the declared 500k must win over that, in BOTH fields.
+            balanced: { provider: 'openai', model_id: 'accounts/fireworks/models/glm-5p2', api_base_url: 'https://api.fireworks.ai/inference/v1' },
+            fast: { provider: 'openai', model_id: 'accounts/fireworks/models/kimi-k3', api_base_url: 'https://api.fireworks.ai/inference/v1' },
+          },
+        });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown>;
+      const tiers = body['main_chat_tiers'] as Record<string, string>;
+      expect(am['contextWindow']).toBe(500_000);
+      expect(tiers['balanced']).toContain('500k');
+      expect(tiers['balanced']).not.toContain('1M');
+    });
+
+    it('GET states a declared window for an UNREGISTERED model in both fields', async () => {
+      // The self-host openai-compat case, and the only input where the declared
+      // window changes the LABEL's answer: for a registered id the resolver
+      // honours `declaredWindow` on its own (models.ts:1201), so the label's own
+      // early return is redundant there — a mutation removing it survives every
+      // registered-model case. It bites exactly here, where the registry-presence
+      // gate would otherwise print no window at all while `active_model` (its
+      // unknown-id branch) reports the declared one. Two fields, one quantity,
+      // one of them silent is the same disagreement in a quieter form.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'openai', openai_context_window: 32_000 });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({
+          default_tier: 'balanced',
+          routing_mode: 'hybrid',
+          tier_set: {
+            // Deliberately absent from MODEL_CAPABILITIES — a local llama.cpp /
+            // vLLM endpoint, which is what `openai_context_window` exists for.
+            balanced: { provider: 'openai', model_id: 'local/some-unregistered-model', api_base_url: 'https://llm.internal.example/v1' },
+            fast: { provider: 'openai', model_id: 'local/some-other-model', api_base_url: 'https://llm.internal.example/v1' },
+          },
+        });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown>;
+      const tiers = body['main_chat_tiers'] as Record<string, string>;
+      expect(am['contextWindow']).toBe(32_000);
+      expect(tiers['balanced']).toContain('32k');
+    });
+
+    it('GET clamps the reported tier to max_tier, like the engine does', async () => {
+      // Source was only half the defect. `max_tier` is env-WINS — a cost LOCK
+      // (config.ts:369) — and the engine decides its main chat tier through
+      // `resolveDefaultChatTier` (engine.ts:304/394/765), which clamps. Taking
+      // `default_tier` straight off the loader still reported the deep band on a
+      // tenant capped at balanced: the right tier_set, indexed where nothing
+      // routes. Found by review, not by the first mutation round.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({
+          default_tier: 'deep',
+          max_tier: 'balanced',
+          routing_mode: 'hybrid',
+          tier_set: {
+            balanced: { provider: 'openai', model_id: 'accounts/fireworks/models/glm-5p2', api_base_url: 'https://api.fireworks.ai/inference/v1' },
+            deep: { provider: 'anthropic', model_id: 'claude-opus-4-6' },
+          },
+        });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown>;
+      expect(am['tier']).toBe('balanced');
+      // The id is what separates "clamped the label" from "clamped the lookup".
+      expect(am['id']).toBe('accounts/fireworks/models/glm-5p2');
+    });
+
+    it('GET resolves balanced_model and its LABEL from the loader, not the file', async () => {
+      // `LYNOX_BALANCED_MODEL` is env-merged (config.ts:363) and the engine seeds
+      // its own resolver from that layer (engine.ts:880), so `active_model` — via
+      // getModelId when no slot pins the band — already named the env's Sonnet
+      // while `balanced_model` and the picker label named the file's. Standard
+      // routing (no tier_set), which is also the ONLY coverage of the
+      // `mainChatTierLabels` call site: a review pass showed the entire
+      // window-context argument could be deleted there with 528 tests still green.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ default_tier: 'balanced', balanced_model: 'claude-sonnet-5' });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['balanced_model']).toBe('claude-sonnet-5');
+      const tiers = body['main_chat_tiers'] as Record<string, string>;
+      // The label follows the resolved variant. (The window-CONTEXT argument at
+      // this call site is pinned by the dedicated 'declared window into the
+      // STANDARD-routing labels' case below, NOT here: Sonnet 5 is registered at
+      // 1M, so the suffix appears whether or not windowCtx is passed.)
+      expect(tiers['balanced']).toContain('Sonnet 5');
+    });
+
+    it('GET carries a declared window into the STANDARD-routing labels too', async () => {
+      // The `mainChatTierLabels` branch (no tier_set). Deleting its window-context
+      // argument leaves every other test green, so this is the case that pins it.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', openai_context_window: 48_000 });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ default_tier: 'balanced', openai_context_window: 48_000 });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown>;
+      const tiers = body['main_chat_tiers'] as Record<string, string>;
+      expect(am['contextWindow']).toBe(48_000);
+      // Every band states the declared window — the same one active_model states.
+      for (const label of Object.values(tiers)) expect(label).toContain('48k');
+    });
+
+    it('GET reports a CP-PINNED tier_preset name, not the file that lacks it', async () => {
+      // `LYNOX_TIER_PRESET` is a LOCK (config.ts:452-466) and lands only in the
+      // merged config, so on the normal CP shape the raw file has no preset key
+      // at all. Emitting the deviation from the loader while the name came from
+      // the file shipped one body that named a preset in one field and nothing in
+      // the other.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({
+          default_tier: 'balanced',
+          tier_preset: 'efficient',
+          routing_mode: 'hybrid',
+          tier_set: {
+            ...TIER_PRESETS['efficient'].tier_set,
+            deep: { provider: 'anthropic', model_id: 'claude-sonnet-5' },
+          },
+        });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['tier_preset']).toBe('efficient');
+      const dev = body['tier_preset_deviation'] as { preset: string };
+      // Both fields name the same preset — the reader is never handed a
+      // deviation against a preset the body does not admit to.
+      expect(dev.preset).toBe(body['tier_preset']);
+    });
+
+    it('GET flags a tier_preset whose set no longer matches it — and leaks no slot key', async () => {
+      // `tier_preset: "efficient"` with a hand-mixed deep slot: the name is still
+      // rendered by the settings preset-cards, so it stays (direction (b)), and the
+      // deviation is stated beside it instead of leaving the reader to diff
+      // `tier_preset` against `main_chat_tiers`.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      const effective = {
+        default_tier: 'balanced',
+        tier_preset: 'efficient',
+        routing_mode: 'hybrid',
+        tier_set: {
+          fast: { provider: 'openai', model_id: 'accounts/fireworks/models/deepseek-v4-flash', api_base_url: 'https://api.fireworks.ai/inference/v1' },
+          balanced: { provider: 'openai', model_id: 'accounts/fireworks/models/minimax-m3', api_base_url: 'https://api.fireworks.ai/inference/v1' },
+          // Overridden away from the preset's kimi-k3 — and carrying a key, which
+          // is the shape the loader really hands over.
+          deep: { provider: 'anthropic', model_id: 'claude-sonnet-5', api_key: 'sk-slot-must-not-leak' },
+        },
+      };
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', tier_preset: 'efficient' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce(effective);
+      const res = await jsonFetch('/api/config');
+      const raw = await res.text();
+      const body = JSON.parse(raw) as Record<string, unknown>;
+      const dev = body['tier_preset_deviation'] as { preset: string; slots: Record<string, unknown> };
+      expect(dev).toBeDefined();
+      expect(dev.preset).toBe('efficient');
+      expect(Object.keys(dev.slots)).toEqual(['deep']);
+      expect(dev.slots['deep']).toEqual({
+        expected: 'accounts/fireworks/models/kimi-k3',
+        actual: 'claude-sonnet-5',
+      });
+      // Asserted against the SERIALIZED body, not the intermediate object: the
+      // redaction pass only ever saw the raw file config, so a branch that emitted
+      // slot objects instead of ids would ship the key while an object-level
+      // assertion still passed.
+      expect(raw).not.toContain('sk-slot-must-not-leak');
+    });
+
+    it('GET omits tier_preset_deviation when the set IS its preset', async () => {
+      // Absence is the affirmative "this label is faithful" — if the field showed
+      // up on a faithful tenant, every settings page would render a false warning.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', tier_preset: 'efficient' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({
+          default_tier: 'balanced',
+          tier_preset: 'efficient',
+          routing_mode: 'hybrid',
+          tier_set: TIER_PRESETS['efficient'].tier_set,
+        });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['tier_preset_deviation']).toBeUndefined();
     });
 
     it('GET active_model resolves a `custom` slot to the Anthropic wire', async () => {
