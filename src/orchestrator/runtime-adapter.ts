@@ -1,13 +1,13 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
-import { getModelId, clampTier, normalizeTier } from '../types/index.js';
-import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike } from '../types/index.js';
+import { getModelId, clampTier, normalizeTier, modelCapability } from '../types/index.js';
+import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike, AutonomyLevel } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
 import type { ManifestStep, AgentDef, AgentTool, GateAdapter, Manifest } from '../types/orchestration.js';
 import { getRole, getRoleNames } from '../core/roles.js';
-import { resolveRunModel, resolveCrossProviderSlotCreds } from '../core/tier-resolver.js';
+import { resolveRunModel, resolveCrossProviderSlotCreds, type ResolvedRunModel } from '../core/tier-resolver.js';
 import { resolveProviderApiKey } from '../core/llm/provider-keys.js';
 import { resolveTools } from '../tools/resolve-tools.js';
 import { isHumanInTheLoopTool } from './human-in-the-loop.js';
@@ -468,6 +468,57 @@ export function resolveModel(stepModel: string | undefined, defaultTier: ModelTi
 }
 
 /**
+ * Deep-consent parity for pipeline steps (the spawn-side D2 control, applied at
+ * the two step-resolution sites). A headless (`autonomy: 'autonomous'`) run
+ * never executes the deep tier without explicit consent: the spawn gate cannot
+ * fire there (the permission-guard check returns null in autonomous), and until
+ * this clamp the SAME fan-out expressed as workflow steps bypassed the gate
+ * spawn_agent got — a consent boundary a sibling tool bypasses is not a
+ * boundary.
+ *
+ * Two paths, mirroring `specResolvesDeep` + the spawn handler in spawn.ts:
+ *  1. a SUBSTITUTABLE deep request — `step.model` naming the deep tier (or its
+ *     legacy alias), or a deep default reaching an undeclared step — is clamped
+ *     down to `balanced`. The announcement, the cost-guard bucket, and the run
+ *     all see the clamped tier because callers consume the RETURNED resolution.
+ *  2. a deep-band RAW model id pins a specific endpoint and cannot be
+ *     substituted down, so it is REFUSED headless — the same rule the spawn
+ *     profile guard applies. Unknown-band ids are deliberately PASSED: they are
+ *     overwhelmingly self-host pins (local gateways absent from
+ *     MODEL_CAPABILITIES), the per-step cost guard still bounds them, and
+ *     refusing them would break every existing autonomous workflow on a local
+ *     model. (The spawn profile rule treats unknown as deep because profiles
+ *     are operator-managed entries; a step pin is not.)
+ *
+ * Interactive runs are returned UNCHANGED: the interactive consent prompt for
+ * steps (a GO at the run_workflow surface, like spawn's) is the full-parity
+ * follow-up — see the deferred register — and clamping interactively would
+ * silently change runs a user is watching.
+ */
+export function enforceHeadlessStepDeepConsent(
+  resolved: ResolvedRunModel,
+  requested: string | undefined,
+  defaultTier: ModelTier,
+  autonomy: AutonomyLevel | undefined,
+  provider: LLMProvider,
+): ResolvedRunModel {
+  if (autonomy !== 'autonomous') return resolved;
+  const requestedTier = requested ? normalizeTier(requested) : undefined;
+  if (requested !== undefined && requested !== '' && requestedTier === undefined) {
+    // A raw id: only a REGISTERED deep band refuses headless (see note above).
+    if (modelCapability(requested)?.tier === 'deep') {
+      const shownId = requested.replace(/\u0000-\u001f\u007f]/g, ' ').slice(0, 80);
+      throw new Error(
+        `Step model "${shownId}" is in the deep cost band and cannot run autonomously without explicit consent — a specific model id pins an endpoint and cannot be substituted down to balanced. Run this workflow interactively (where you can approve it), or declare the step's model as a tier (fast/balanced) instead.`,
+      );
+    }
+    return resolved;
+  }
+  if (requestedTier !== 'deep' && !(requested === undefined && defaultTier === 'deep')) return resolved;
+  return { tier: 'balanced', modelId: getModelId('balanced', provider) };
+}
+
+/**
  * Resolve the per-step Agent wire + creds for an already-resolved tier under the
  * active routing mode. In STANDARD mode (no hybrid tier_set) the result is
  * `crossProviderSlot:false` and the caller keeps its base `config.*` values, so
@@ -543,7 +594,7 @@ export async function spawnViaAgent(
 
   // Single chokepoint: override gate (now a pass-through, D8) + clamp to
   // max_tier + map to the provider's id. The clamp is the cost cap that applies.
-  const runModel = resolveRunModel({
+  const resolvedRun = resolveRunModel({
     requested: step.model,
     defaultTier: agentDef.defaultTier,
     accountTier: config.account_tier,
@@ -551,6 +602,10 @@ export async function spawnViaAgent(
     blockedModelIds: config.blocked_model_ids,
     provider: getActiveProvider(),
   });
+  // Headless deep-consent parity: the step-side twin of spawn's D2 clamp, so an
+  // autonomous run cannot reach the deep tier by naming it as a step model or
+  // agent default (substitutable → balanced) or pinning a deep-band id (refused).
+  const runModel = enforceHeadlessStepDeepConsent(resolvedRun, step.model, agentDef.defaultTier, autonomy, getActiveProvider());
   const model = runModel.modelId;
   // #66: steer this step by the hybrid tier_set. Standard mode (no tier_set) →
   // crossProviderSlot=false → the base config.* values below are byte-identical
@@ -772,7 +827,7 @@ export async function spawnInline(
   // pass-through, D8) + CLAMP to max_tier + map to the provider's id. The
   // cost-guard bucket below uses the same resolved tier so the budget can't
   // disagree with the chosen model.
-  const runModel = resolveRunModel({
+  const resolvedInline = resolveRunModel({
     requested: step.model,
     defaultTier: undeclaredInlineStepTier(step),
     accountTier: config.account_tier,
@@ -780,6 +835,10 @@ export async function spawnInline(
     blockedModelIds: config.blocked_model_ids,
     provider: getActiveProvider(),
   });
+  // Headless deep-consent parity (see spawnViaAgent): the inline path is the
+  // run_workflow fan-out — without this clamp it ran `model: 'deep'` headless
+  // where spawn_agent clamps to balanced.
+  const runModel = enforceHeadlessStepDeepConsent(resolvedInline, step.model, undeclaredInlineStepTier(step), autonomy, getActiveProvider());
   const model = runModel.modelId;
   // #66: steer this inline step by the hybrid tier_set (see spawnViaAgent).
   // Standard mode → crossProviderSlot=false → byte-parity with the base config.*.
