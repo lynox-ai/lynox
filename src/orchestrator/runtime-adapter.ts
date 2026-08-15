@@ -1,7 +1,7 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
-import { getModelId, clampTier, normalizeTier } from '../types/index.js';
-import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike } from '../types/index.js';
+import { getModelId, clampTier, normalizeTier, modelCapability } from '../types/index.js';
+import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike, AutonomyLevel } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
@@ -468,6 +468,69 @@ export function resolveModel(stepModel: string | undefined, defaultTier: ModelTi
 }
 
 /**
+ * Deep-consent parity for pipeline steps (the spawn-side D2 control, applied at
+ * the step-resolution sites). A headless (`autonomy: 'autonomous'`) run never
+ * executes the deep tier without explicit consent: the spawn gate cannot fire
+ * there (the permission-guard check returns null in autonomous), and until this
+ * clamp the SAME fan-out expressed as workflow steps bypassed the gate
+ * spawn_agent got — a consent boundary a sibling tool bypasses is not a
+ * boundary.
+ *
+ * Returns the (possibly rewritten) `requested` for the caller to hand to
+ * `resolveRunModel` — the clamp is a REQUEST rewrite, exactly like spawn's
+ * `spec.model = 'balanced'`, NOT a post-hoc substitution of the resolved pair.
+ * That distinction is load-bearing: resolveRunModel re-applies `maxTier` +
+ * `blockedModelIds` to the rewritten request, so the consent clamp can never
+ * land a step ABOVE the tenant ceiling or on a blocked model (a substituting
+ * clamp would have).
+ *
+ * Two paths, mirroring `specResolvesDeep` + the spawn handler in spawn.ts:
+ *  1. a SUBSTITUTABLE deep request — `step.model` naming the deep tier (or its
+ *     legacy alias), or a deep default reaching an undeclared step (including
+ *     `model: ''`, which resolveRunModel already treats as "no override") — is
+ *     rewritten down to `balanced`.
+ *  2. a deep-band RAW model id pins a specific endpoint and cannot be
+ *     substituted down, so it is REFUSED headless — the same rule the spawn
+ *     profile guard applies. Unknown-band ids are deliberately PASSED: they are
+ *     overwhelmingly self-host pins (local gateways absent from
+ *     MODEL_CAPABILITIES), the per-step cost guard still bounds them, and
+ *     refusing them would break every existing autonomous workflow on a local
+ *     model. (The spawn profile rule treats unknown as deep because profiles
+ *     are operator-managed entries; a step pin is not.)
+ *
+ * Interactive requests are returned UNCHANGED: the interactive consent prompt
+ * for steps (a GO at the run_workflow surface, like spawn's) is the full-parity
+ * follow-up — see the deferred register — and clamping interactively would
+ * silently change runs a user is watching.
+ */
+export function headlessStepModelOverride(
+  requested: string | undefined,
+  defaultTier: ModelTier,
+  autonomy: AutonomyLevel | undefined,
+): string | undefined {
+  if (autonomy !== 'autonomous') return requested;
+  // Same empty-string coercion resolveRunModel applies: `model: ''` is
+  // type-legal and means "no override", so the deep DEFAULT must reach it.
+  const req = requested ? requested : undefined;
+  if (req !== undefined) {
+    const requestedTier = normalizeTier(req);
+    if (requestedTier === undefined) {
+      // A raw id: only a REGISTERED deep band refuses headless (see note above).
+      if (modelCapability(req)?.tier === 'deep') {
+        const shownId = req.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 80);
+        throw new Error(
+          `Step model "${shownId}" is in the deep cost band and cannot run autonomously without explicit consent — a specific model id pins an endpoint and cannot be substituted down to balanced. Run this workflow interactively (where you can approve it), or declare the step's model as a tier (fast/balanced) instead.`,
+        );
+      }
+      return req;
+    }
+    if (requestedTier !== 'deep') return req;
+    return 'balanced';
+  }
+  return defaultTier === 'deep' ? 'balanced' : req;
+}
+
+/**
  * Resolve the per-step Agent wire + creds for an already-resolved tier under the
  * active routing mode. In STANDARD mode (no hybrid tier_set) the result is
  * `crossProviderSlot:false` and the caller keeps its base `config.*` values, so
@@ -543,8 +606,12 @@ export async function spawnViaAgent(
 
   // Single chokepoint: override gate (now a pass-through, D8) + clamp to
   // max_tier + map to the provider's id. The clamp is the cost cap that applies.
+  // Headless deep-consent parity: the step-side twin of spawn's D2 clamp, as a
+  // REQUEST rewrite BEFORE resolution — resolveRunModel then re-applies the
+  // tenant ceiling + model blocklist to the rewritten request, so the consent
+  // clamp can never land a step above max_tier or on a blocked model.
   const runModel = resolveRunModel({
-    requested: step.model,
+    requested: headlessStepModelOverride(step.model, agentDef.defaultTier, autonomy),
     defaultTier: agentDef.defaultTier,
     accountTier: config.account_tier,
     maxTier: config.max_tier,
@@ -771,9 +838,13 @@ export async function spawnInline(
   // deliberately does not reach steps), then the override gate (now a
   // pass-through, D8) + CLAMP to max_tier + map to the provider's id. The
   // cost-guard bucket below uses the same resolved tier so the budget can't
-  // disagree with the chosen model.
+  // disagree with the chosen model. Headless deep-consent parity (see
+  // spawnViaAgent): the inline path is the run_workflow fan-out — without this
+  // rewrite it ran `model: 'deep'` headless where spawn_agent clamps to
+  // balanced; rewriting the REQUEST (not the resolved pair) keeps ceiling +
+  // blocklist applied to the clamped run.
   const runModel = resolveRunModel({
-    requested: step.model,
+    requested: headlessStepModelOverride(step.model, undeclaredInlineStepTier(step), autonomy),
     defaultTier: undeclaredInlineStepTier(step),
     accountTier: config.account_tier,
     maxTier: config.max_tier,
