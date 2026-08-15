@@ -1,13 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ToolEntry, LynoxUserConfig } from '../types/index.js';
 import { getModelId } from '../types/index.js';
+import { resolveRunModel } from '../core/tier-resolver.js';
 
 // The headless deep-consent parity for pipeline steps — the spawn-side D2
-// clamp applied at the two step-resolution sites (spawnInline for run_workflow
-// inline steps, spawnViaAgent for saved/agent steps). A consent boundary that a
-// sibling fan-out tool bypasses is not a boundary, so these tests pin BOTH the
-// pure predicate and the wiring at each site: autonomous deep is clamped to
-// balanced, a deep-band raw id is refused, interactive deep is untouched.
+// clamp applied at the step-resolution sites (spawnInline for run_workflow
+// inline steps, spawnViaAgent for saved/agent steps, resolveModelForCost for
+// the budget precheck + step-row stamp). A consent boundary that a sibling
+// fan-out tool bypasses is not a boundary, so these tests pin the REQUEST
+// rewrite (not a post-hoc substitution — the ceiling + blocklist must
+// re-apply to the clamped request), both wiring sites, and the empty-string
+// no-override path.
 
 const mockSend = vi.fn().mockResolvedValue('mock result');
 
@@ -31,7 +34,7 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
-import { enforceHeadlessStepDeepConsent, spawnInline, spawnViaAgent } from './runtime-adapter.js';
+import { headlessStepModelOverride, spawnInline, spawnViaAgent } from './runtime-adapter.js';
 import type { AgentDef, ManifestStep } from '../types/orchestration.js';
 
 const mockConfig = { api_key: 'test-key' } as unknown as LynoxUserConfig;
@@ -56,54 +59,112 @@ beforeEach(() => {
   mockGetRole.mockReturnValue(undefined);
 });
 
-describe('enforceHeadlessStepDeepConsent (pure)', () => {
-  const deepResolved = { tier: 'deep' as const, modelId: getModelId('deep', PROVIDER) };
-
-  it('clamps a requested deep tier to balanced when autonomous', () => {
-    const out = enforceHeadlessStepDeepConsent(deepResolved, 'deep', 'fast', 'autonomous', PROVIDER);
-    expect(out.tier).toBe('balanced');
-    expect(out.modelId).toBe(getModelId('balanced', PROVIDER));
+describe('headlessStepModelOverride (pure)', () => {
+  it('rewrites a requested deep tier to balanced when autonomous', () => {
+    expect(headlessStepModelOverride('deep', 'fast', 'autonomous')).toBe('balanced');
   });
 
-  it('clamps the legacy deep alias (opus) to balanced when autonomous', () => {
-    const out = enforceHeadlessStepDeepConsent(deepResolved, 'opus', 'fast', 'autonomous', PROVIDER);
-    expect(out.tier).toBe('balanced');
+  it('rewrites the legacy deep alias (opus) to balanced when autonomous', () => {
+    expect(headlessStepModelOverride('opus', 'fast', 'autonomous')).toBe('balanced');
   });
 
-  it('clamps a deep step default reaching an undeclared step when autonomous', () => {
-    const out = enforceHeadlessStepDeepConsent(deepResolved, undefined, 'deep', 'autonomous', PROVIDER);
-    expect(out.tier).toBe('balanced');
+  it('rewrites a deep step default reaching an undeclared step when autonomous', () => {
+    expect(headlessStepModelOverride(undefined, 'deep', 'autonomous')).toBe('balanced');
+  });
+
+  it('treats model:"" as no override — a deep default still clamps (the empty-string bypass)', () => {
+    expect(headlessStepModelOverride('', 'deep', 'autonomous')).toBe('balanced');
   });
 
   it('refuses a deep-band raw model id when autonomous (cannot be substituted)', () => {
     const pinned = getModelId('deep', PROVIDER); // a registered deep-band id
-    expect(() => enforceHeadlessStepDeepConsent({ tier: 'fast', modelId: pinned }, pinned, 'fast', 'autonomous', PROVIDER))
+    expect(() => headlessStepModelOverride(pinned, 'fast', 'autonomous'))
       .toThrow(/cannot run autonomously without explicit consent/);
   });
 
+  it('strips control characters from the refused id in the error surface', () => {
+    const pinned = getModelId('deep', PROVIDER);
+    const poisoned = pinned + '\nX-Injected: 1';
+    try {
+      headlessStepModelOverride(poisoned, 'fast', 'autonomous');
+      expect.unreachable('must throw');
+    } catch (err) {
+      expect((err as Error).message).not.toContain('\n');
+    }
+  });
+
   it('passes an unknown-band raw id when autonomous (self-host local pins)', () => {
-    const pinned = 'my-local-gateway-model';
-    const out = enforceHeadlessStepDeepConsent({ tier: 'fast', modelId: pinned }, pinned, 'fast', 'autonomous', PROVIDER);
-    expect(out.modelId).toBe(pinned);
+    expect(headlessStepModelOverride('my-local-gateway-model', 'fast', 'autonomous')).toBe('my-local-gateway-model');
   });
 
-  it('returns the resolution untouched for non-deep requests when autonomous', () => {
-    const fast = { tier: 'fast' as const, modelId: getModelId('fast', PROVIDER) };
-    expect(enforceHeadlessStepDeepConsent(fast, 'fast', 'fast', 'autonomous', PROVIDER)).toEqual(fast);
+  it('returns non-deep requests untouched when autonomous', () => {
+    expect(headlessStepModelOverride('fast', 'fast', 'autonomous')).toBe('fast');
+    expect(headlessStepModelOverride(undefined, 'balanced', 'autonomous')).toBeUndefined();
   });
 
-  it('returns the resolution untouched when interactive (autonomy not autonomous)', () => {
-    expect(enforceHeadlessStepDeepConsent(deepResolved, 'deep', 'fast', 'guided', PROVIDER)).toEqual(deepResolved);
-    expect(enforceHeadlessStepDeepConsent(deepResolved, 'deep', 'fast', undefined, PROVIDER)).toEqual(deepResolved);
+  it('returns requests untouched when interactive (autonomy not autonomous)', () => {
+    expect(headlessStepModelOverride('deep', 'fast', 'guided')).toBe('deep');
+    expect(headlessStepModelOverride('deep', 'fast', undefined)).toBe('deep');
+    expect(headlessStepModelOverride(undefined, 'deep', 'guided')).toBeUndefined();
+  });
+});
+
+describe('composition with resolveRunModel (the ceiling re-application)', () => {
+  it('never lands a clamped step ABOVE the tenant max_tier (fast ceiling)', () => {
+    // requested deep + ceiling fast: the old substituting clamp produced
+    // balanced — ABOVE the ceiling. The request rewrite must not.
+    const resolved = resolveRunModel({
+      requested: headlessStepModelOverride('deep', 'fast', 'autonomous'),
+      defaultTier: 'fast',
+      accountTier: undefined,
+      maxTier: 'fast',
+      blockedModelIds: undefined,
+      provider: PROVIDER,
+    });
+    expect(resolved.tier).toBe('fast');
+  });
+
+  it('resolves to balanced when the ceiling allows it', () => {
+    const resolved = resolveRunModel({
+      requested: headlessStepModelOverride('deep', 'fast', 'autonomous'),
+      defaultTier: 'fast',
+      accountTier: undefined,
+      maxTier: 'deep',
+      blockedModelIds: undefined,
+      provider: PROVIDER,
+    });
+    expect(resolved.tier).toBe('balanced');
+    expect(resolved.modelId).toBe(getModelId('balanced', PROVIDER));
+  });
+
+  it('re-applies the model blocklist to the clamped request', () => {
+    // Block the balanced-band model: the clamped request must fall back to
+    // fast (resolveRunModel's rule), never run the blocked id.
+    const balancedId = getModelId('balanced', PROVIDER);
+    const resolved = resolveRunModel({
+      requested: headlessStepModelOverride('deep', 'fast', 'autonomous'),
+      defaultTier: 'fast',
+      accountTier: undefined,
+      maxTier: 'deep',
+      blockedModelIds: [balancedId],
+      provider: PROVIDER,
+    });
+    expect(resolved.modelId).not.toBe(balancedId);
   });
 });
 
 describe('spawnInline wiring (run_workflow inline steps)', () => {
   it('runs a model:deep step on balanced when the session is autonomous', async () => {
-    const step = { id: 's1', task: 'do' } as unknown as ManifestStep & { model?: string };
-    (step as { model?: string }).model = 'deep';
+    const step = { id: 's1', task: 'do', model: 'deep' } as unknown as ManifestStep;
     await spawnInline(step, {}, mockConfig, mockParentTools, undefined, 'autonomous');
     expect(agentModelOfCall(0)).toBe(getModelId('balanced', PROVIDER));
+  });
+
+  it('honors a fast max_tier ceiling even when the step asked for deep (no escalation)', async () => {
+    const cfg = { api_key: 'test-key', max_tier: 'fast' } as unknown as LynoxUserConfig;
+    const step = { id: 's1', task: 'do', model: 'deep' } as unknown as ManifestStep;
+    await spawnInline(step, {}, cfg, mockParentTools, undefined, 'autonomous');
+    expect(agentModelOfCall(0)).toBe(getModelId('fast', PROVIDER));
   });
 
   it('keeps a model:deep step on deep for an interactive session', async () => {
@@ -121,11 +182,31 @@ describe('spawnInline wiring (run_workflow inline steps)', () => {
   });
 });
 
+describe('resolveModelForCost wiring (budget precheck + step-row stamp)', () => {
+  it('prices the CLAMPED model when autonomous — not the refused deep announcement', async () => {
+    const { resolveModelForCost } = await import('./runner.js');
+    const step = { id: 's1', task: 'do', model: 'deep' } as unknown as ManifestStep;
+    expect(resolveModelForCost(step, 'fast', mockConfig, 'autonomous')).toBe(getModelId('balanced', PROVIDER));
+  });
+
+  it('prices the deep model for an interactive session', async () => {
+    const { resolveModelForCost } = await import('./runner.js');
+    const step = { id: 's1', task: 'do', model: 'deep' } as unknown as ManifestStep;
+    expect(resolveModelForCost(step, 'fast', mockConfig, undefined)).toBe(getModelId('deep', PROVIDER));
+  });
+});
+
 describe('spawnViaAgent wiring (saved/agent steps)', () => {
   const agentDefDeep = { name: 'worker', defaultTier: 'deep', tools: [] } as unknown as AgentDef;
 
   it('clamps a deep agent default to balanced when the session is autonomous', async () => {
     const step = { id: 's1', agent: 'worker', task: 'do' } as unknown as ManifestStep;
+    await spawnViaAgent(step, agentDefDeep, {}, mockConfig, undefined, 'run-1', undefined, 'autonomous');
+    expect(agentModelOfCall(0)).toBe(getModelId('balanced', PROVIDER));
+  });
+
+  it('clamps a deep agent default through an empty model string (the empty-string bypass)', async () => {
+    const step = { id: 's1', agent: 'worker', task: 'do', model: '' } as unknown as ManifestStep;
     await spawnViaAgent(step, agentDefDeep, {}, mockConfig, undefined, 'run-1', undefined, 'autonomous');
     expect(agentModelOfCall(0)).toBe(getModelId('balanced', PROVIDER));
   });

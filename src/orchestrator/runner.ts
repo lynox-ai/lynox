@@ -11,7 +11,7 @@ import { buildApprovalSet } from '../core/pre-approve.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, resolveTaskTemplate, resolveInputTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
-import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint } from './runtime-adapter.js';
+import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
 import { channels } from '../core/observability.js';
 import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from '../types/orchestration.js';
@@ -754,7 +754,7 @@ async function executeStep(
           : step;
       // Check session budget before spawning step agent — same undeclared-tier
       // default as the spawn (F1), so the budget prices the model that runs.
-      const stepModel = resolveModelForCost(step, undeclaredInlineStepTier(step), config);
+      const stepModel = resolveModelForCost(step, undeclaredInlineStepTier(step), config, options.autonomy);
       stepModelId = stepModel; // A2: stamp the resolved model on the step run at finalize
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
@@ -764,7 +764,7 @@ async function executeStep(
     } else {
       const agentDef = await loadAgentDef(step.agent, agentsDir);
       // Check session budget before spawning step agent
-      const stepModel = resolveModelForCost(step, agentDef.defaultTier, config);
+      const stepModel = resolveModelForCost(step, agentDef.defaultTier, config, options.autonomy);
       stepModelId = stepModel; // A2: stamp the resolved model on the step run at finalize
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
@@ -910,12 +910,20 @@ function makeSkipped(stepId: string, reason: string): AgentOutput {
   };
 }
 
-function resolveModelForCost(step: ManifestStep, defaultTier: ModelTier, config: LynoxUserConfig): string {
+/** Exported ONLY so a test can pin that the budget precheck + step-row stamp
+ * price the model the run actually uses — including the headless deep-consent
+ * rewrite. A ledger that names a different tier than the run is exactly the
+ * announce≠run gap the shared-resolution work closed; no compiler check ties
+ * this wiring, so a test has to. */
+export function resolveModelForCost(step: ManifestStep, defaultTier: ModelTier, config: LynoxUserConfig, autonomy?: import('../types/index.js').AutonomyLevel | undefined): string {
   // Price the step against the SAME model the runtime-adapter ran it on — gate +
   // clamp + the ACTIVE provider — not an Anthropic-only tier map. A Mistral tenant
   // was previously billed at Claude prices (and a clamped deep step at deep prices).
+  // The headless deep-consent override is applied here too, so the budget precheck
+  // and the step-row stamp name the CLAMPED model, not the refused/announced deep
+  // one (the run itself runs the clamped tier — the ledger must not disagree).
   return resolveRunModel({
-    requested: step.model,
+    requested: headlessStepModelOverride(step.model, defaultTier, autonomy),
     defaultTier,
     accountTier: config.account_tier,
     maxTier: config.max_tier,
