@@ -1,0 +1,43 @@
+{
+  "schema": "fast-bench-transcript/v1",
+  "id": "t10-crm-cleanup",
+  "title": "CRM-Dublettenbereinigung (DE+EN, grosse Kontaktlisten, Merge-Regeln)",
+  "targetTokens": 22000,
+  "messages": [
+    { "role": "user", "content": [ { "type": "text", "text": "Unser CRM ist ein Saustall — der Vertrieb beschwert sich, dass jeder zweite Kontakt doppelt drin ist. Analysier mal den Bestand und mach mir einen Bereinigungsvorschlag. Aber nichts loeschen ohne mein Okay!" } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Verstanden — reine Analyse, kein Loeschen ohne dein Go. Ich ziehe den Bestand." }, { "type": "tool_use", "id": "tu_t10_01", "name": "run_sql", "input": { "db": "crm", "query": "SELECT COUNT(*) total FROM contacts; SELECT lower(email) e, COUNT(*) c FROM contacts GROUP BY lower(email) HAVING c > 1 ORDER BY c DESC" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t10_01", "content": [ { "type": "text", "text": "Total contacts: 2'340. Exact-email duplicates: 412 groups covering 861 records. Worst offender: info@baumgartner-gruppe.example with 6 records. Additionally suspected: name+company fuzzy matches without shared email.\n\nDuplicate groups:" }, { "type": "pad", "generator": "csv", "lines": 950, "seed": 101 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "First layer: 412 exact-email duplicate groups (861 records — about 37% of the base is affected, der Vertrieb hat also recht). Now the fuzzy layer: same person, different email spellings." }, { "type": "tool_use", "id": "tu_t10_02", "name": "run_sql", "input": { "db": "crm", "query": "SELECT a.id, b.id, a.first_name, a.last_name, a.company, similarity(a.last_name||a.company, b.last_name||b.company) sim FROM contacts a JOIN contacts b ON a.id < b.id WHERE lower(a.email) != lower(b.email) AND similarity(a.last_name||a.company, b.last_name||b.company) > 0.82" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t10_02", "content": [ { "type": "text", "text": "127 fuzzy pairs above 0.82 similarity. Sample: \"Chantal Widmer / Widmer & Soehne AG\" appears with chantal.widmer@widmer-soehne.example AND c.widmer@widmer-soehne.example. Some pairs are genuinely different people (father/son at the same firm).\n\nPairs:" }, { "type": "pad", "generator": "sqlrows", "lines": 700, "seed": 102 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Bereinigungsvorschlag in zwei Stufen mit unterschiedlicher Sicherheit:\n\nStufe 1 — exakte E-Mail-Dubletten (412 Gruppen, 861 Records): automatisch mergebar. Merge-Regel pro Gruppe:\n- Survivor = Record mit der juengsten Aktivitaet (letzte Opportunity oder letzter Notiz-Eintrag).\n- Felder: nicht-leere Felder des Survivors gewinnen; leere Felder werden aus den Dubletten aufgefuellt (aelteste zuerst).\n- Aktivitaeten, Notizen, Opportunities ALLER Dubletten werden auf den Survivor umgehaengt — nichts geht verloren.\n- Die Dubletten werden nicht geloescht, sondern als merged_into=<survivor_id> archiviert (reversibel).\n\nStufe 2 — die 127 Fuzzy-Paare: NICHT automatisch. Da sind echte Verwechslungsfaelle drin (Vater/Sohn im gleichen Betrieb). Die gehen als Review-Liste an den Vertrieb, jedes Paar mit Confirm/Reject-Knopf.\n\nVorab als Export fuer dich: /exports/crm-dedupe-2026-08.csv mit allen 412 Gruppen und dem jeweils vorgeschlagenen Survivor." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Die Merge-Regel gefaellt mir, aber eine Ausnahme: bei Kontakten mit offener Opportunity ist IMMER der Record mit der Opportunity der Survivor, egal wie alt. Sonst haengt ploetzlich eine laufende Verhandlung an einem archivierten Kontakt. Mit der Aenderung: go fuer Stufe 1. Stufe 2 an den Vertrieb ist auch okay, aber setz denen eine Frist, sonst versandet das." } ] },
+    { "role": "assistant", "content": [ { "type": "tool_use", "id": "tu_t10_03", "name": "run_sql", "input": { "db": "crm", "query": "CALL merge_duplicates(rule := 'open_opportunity_wins_then_latest_activity', archive := true, dry_run := false)" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t10_03", "content": [ { "type": "text", "text": "Merge complete: 412 groups processed, 449 records archived with merged_into pointer, 0 activities lost (verified: activity count before 18'114 == after 18'114). 23 groups had an open opportunity — in all 23 the opportunity holder became survivor per the override rule. Log written to /exports/crm-merge-log-2026-08-08.json.\n\nPer-group results:" }, { "type": "pad", "generator": "csv", "lines": 600, "seed": 103 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Stufe 1 ist durch:\n- 412 Gruppen gemerged, 449 Records reversibel archiviert (merged_into-Pointer, kein Loeschen).\n- Aktivitaeten-Erhalt verifiziert: 18'114 vorher == 18'114 nachher.\n- Deine Ausnahme-Regel griff in 23 Gruppen: ueberall wurde der Opportunity-Traeger Survivor.\n- Merge-Log: /exports/crm-merge-log-2026-08-08.json, Uebersicht weiterhin unter /exports/crm-dedupe-2026-08.csv.\n\nStufe 2 ist angestossen: die 127 Fuzzy-Paare sind als Review-Liste im CRM dem Vertriebsteam zugewiesen, Frist 22.08.2026 — danach eskaliere ich unerledigte Paare an dich. Der Kontaktbestand ist von 2'340 auf 1'891 aktive Records runter.\n\nNoch ein Vorschlag zur Ursache: die Dubletten entstehen hauptsaechlich durch den Webformular-Import, der keinen E-Mail-Abgleich macht. Soll ich dem Formular-Import einen Upsert-per-E-Mail verpassen, damit der Saustall nicht wieder entsteht?" } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Ja, unbedingt — genau solche Vorschlaege will ich. Bau den Upsert, aber teste ihn ordentlich, der Import darf keine bestehenden Felder ueberschreiben." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Notiert als naechster Schritt: Webformular-Import bekommt Upsert-per-E-Mail — neue Kontakte werden angelegt, bestehende NUR in leeren Feldern ergaenzt, niemals ueberschrieben. Mit Testfaellen fuer: Gross/Kleinschreibung der E-Mail, Plus-Adressen, und den Konflikt \"Formular bringt anderen Firmennamen als CRM hat\" (CRM gewinnt, Formularwert landet als Notiz). Ich melde mich mit dem PR. Danach steht noch aus: Vertriebs-Review der 127 Paare bis 22.08., sonst Eskalation an dich." } ] }
+  ],
+  "checklist": {
+    "literals": [
+      "412",
+      "449",
+      "18'114",
+      "127",
+      "merged_into",
+      "/exports/crm-merge-log-2026-08-08.json",
+      "22.08.2026",
+      "1'891",
+      "2'340"
+    ],
+    "rubric": [
+      "Records the two-stage cleanup design: exact-email groups merged automatically, fuzzy pairs (127) to human review — and WHY fuzzy is not auto-merged (real distinct-person cases).",
+      "Preserves the user's override rule: a record holding an open opportunity is ALWAYS the merge survivor, and that this rule applied in 23 groups.",
+      "Preserves the merge-rule details: survivor by latest activity otherwise, empty-field backfill, activities re-attached, duplicates archived reversibly via merged_into (never deleted).",
+      "Preserves the executed outcome numbers: 412 groups, 449 archived, contact base 2'340 → 1'891, activity count verified unchanged (18'114).",
+      "Preserves the artifact paths: /exports/crm-dedupe-2026-08.csv and /exports/crm-merge-log-2026-08-08.json.",
+      "Keeps the open task with deadline: sales team reviews the 127 fuzzy pairs by 22.08.2026, unresolved pairs escalate to the user.",
+      "Records the root-cause finding (web-form import without email matching) and the approved prevention work: upsert-by-email that must never overwrite existing fields.",
+      "Keeps the no-delete-without-approval constraint the user set at the start (and that it was honored — archive, not delete)."
+    ]
+  }
+}

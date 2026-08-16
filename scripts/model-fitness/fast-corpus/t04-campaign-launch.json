@@ -1,0 +1,39 @@
+{
+  "schema": "fast-bench-transcript/v1",
+  "id": "t04-campaign-launch",
+  "title": "Herbstkampagne Kanalwahl (DE+EN, Research-Resultate, Budget-Entscheid)",
+  "targetTokens": 21000,
+  "messages": [
+    { "role": "user", "content": [ { "type": "text", "text": "Wir planen die Herbstkampagne fuer unsere Projektmanagement-Software Nordlicht. Budget ist EUR 18'000 fuer acht Wochen, Ziel sind Trial-Signups aus DACH. Frage: LinkedIn Ads oder Meta? Und was fuer eine Landingpage brauchen wir?" } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Ich ziehe zuerst Benchmark-Daten fuer B2B-SaaS-Kampagnen in DACH auf beiden Kanaelen." }, { "type": "tool_use", "id": "tu_t04_01", "name": "web_research", "input": { "query": "B2B SaaS DACH LinkedIn ads vs Meta ads CPL benchmark 2026 project management software" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t04_01", "content": [ { "type": "text", "text": "Research digest (14 sources): B2B-SaaS DACH benchmarks 2026 — LinkedIn: CPC EUR 6.20-9.80, Trial-CPL EUR 62-95, aber Lead-Qualitaet (SQL-Rate) 2.4x hoeher als Meta. Meta: CPC EUR 1.10-2.40, Trial-CPL EUR 28-45, SQL-Rate niedrig fuer PM-Tools mit Zielgruppe Team-Leads 30-55. Retargeting auf Meta guenstig (CPL EUR 12-19) wenn Erstkontakt woanders stattfand.\n\nSource excerpts:" }, { "type": "pad", "generator": "maillist", "lines": 600, "seed": 41 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Die Daten sind eindeutig fuer einen Split statt entweder/oder: LinkedIn fuer Cold-Reach (teurer CPL, aber 2.4x SQL-Rate — bei einem PM-Tool fuer Teams zahlt sich Qualitaet aus), Meta ausschliesslich fuers Retargeting (CPL EUR 12-19 statt 28-45 cold). Vorschlag: EUR 13'000 LinkedIn Cold + EUR 3'500 Meta Retargeting + EUR 1'500 Reserve fuer Creative-Tests. Erwartung bei CPL EUR 75: rund 170 Trials aus LinkedIn plus Retargeting-Uplift.\n\nZur Landingpage: eigene Kampagnen-LP unter /lp/herbst-2026, nicht die Homepage — die Homepage konvertiert Kampagnen-Traffic erfahrungsgemaess 3x schlechter." }, { "type": "tool_use", "id": "tu_t04_02", "name": "run_sql", "input": { "db": "analytics", "query": "SELECT source, visits, trial_signups, ROUND(100.0*trial_signups/visits,2) AS cr FROM channel_stats WHERE quarter='2026-Q2' ORDER BY visits DESC" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t04_02", "content": [ { "type": "text", "text": "Q2 channel stats: organic 48'112 visits / 2.1% CR; homepage paid traffic (Restkampagne Mai): 6'204 visits / 0.7% CR; die alte Kampagnen-LP /lp/fruehjahr: 3'988 visits / 2.9% CR. Bestaetigt den LP-Vorteil.\n\nRaw rows:" }, { "type": "pad", "generator": "csv", "lines": 900, "seed": 42 } ] } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Ueberzeugt mich. Aber das Sales-Team will unbedingt einen Demo-Call-CTA statt Self-Service-Trial. Was meinst du?" } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Beides — aber mit klarer Hierarchie. Primaer-CTA bleibt der Self-Service-Trial (die eigenen Q2-Daten: 2.9% CR auf der Kampagnen-LP), Sekundaer-CTA \"Demo buchen\" unterhalb des Folds fuer die Enterprise-Faelle. Ein reiner Demo-CTA wuerde die Masse der Team-Lead-Zielgruppe verlieren, die selbst testen will; komplett ohne Demo-Option verlieren wir die groesseren Accounts, die Sales braucht. A/B-Test der CTA-Reihenfolge in Woche 3, wenn genug Traffic da ist.\n\nEntscheidungen bis jetzt:\n1. Kanal-Split: EUR 13'000 LinkedIn Cold / EUR 3'500 Meta Retargeting / EUR 1'500 Creative-Reserve.\n2. Eigene Landingpage /lp/herbst-2026, nicht Homepage.\n3. Dual-CTA: Trial primaer, Demo sekundaer, A/B-Test Woche 3.\n\nNaechste Schritte: Creative-Brief bis Freitag 15.08. an die Agentur Nordpol Studio, LP-Copy-Entwurf von mir bis Mittwoch, Kampagnenstart 01.09.2026." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Passt alles. Fuer das Briefing: unser USP gegen die grossen US-Tools ist Datenhaltung in der EU und der faire Flat-Preis, das muss prominent rein. Startdatum bestaetige ich noch, haengt vom Sales-Kickoff ab." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Notiert: Kern-USPs fuers Briefing sind EU-Datenhaltung und der Flat-Preis — beide kommen prominent in Creative und LP-Hero. Der Kampagnenstart 01.09. ist vorlaeufig und wartet auf deine Bestaetigung nach dem Sales-Kickoff. Ich liefere: LP-Copy-Entwurf bis Mittwoch 13.08., Creative-Brief an Nordpol Studio bis Freitag 15.08. Danach Review-Runde mit dir." } ] }
+  ],
+  "checklist": {
+    "literals": [
+      "18'000",
+      "13'000",
+      "3'500",
+      "/lp/herbst-2026",
+      "Nordpol Studio",
+      "15.08",
+      "01.09.2026",
+      "2.9%"
+    ],
+    "rubric": [
+      "Records the channel decision: split budget — LinkedIn for cold reach, Meta ONLY for retargeting — with the SQL-rate/CPL reasoning.",
+      "Preserves the exact budget split: EUR 13'000 LinkedIn / EUR 3'500 Meta retargeting / EUR 1'500 creative reserve out of EUR 18'000 total.",
+      "Records the decision for a dedicated landing page /lp/herbst-2026 instead of the homepage, backed by the Q2 conversion data (2.9% vs 0.7%).",
+      "Records the CTA decision: trial as primary CTA, demo call as secondary, with an A/B test of the ordering in week 3.",
+      "Preserves the user-asserted USPs that must be prominent: EU data residency and the flat price.",
+      "Keeps the deadline: creative brief to agency Nordpol Studio by Friday 15.08.",
+      "Keeps the assistant's deliverable: LP copy draft by Wednesday 13.08.",
+      "Preserves that the 01.09.2026 launch date is provisional, pending the user's confirmation after the sales kickoff."
+    ]
+  }
+}
