@@ -764,10 +764,10 @@ export class ImapSmtpProvider implements MailProvider {
     try {
       const result = await transport.sendMail({
         from: { name: this.account.displayName, address: this.account.address },
-        to: input.to.map(addressToString),
-        cc: input.cc?.map(addressToString),
-        bcc: input.bcc?.map(addressToString),
-        replyTo: input.replyTo ? addressToString(input.replyTo) : undefined,
+        to: input.to.map(toNodemailerAddress),
+        cc: input.cc?.map(toNodemailerAddress),
+        bcc: input.bcc?.map(toNodemailerAddress),
+        replyTo: input.replyTo ? toNodemailerAddress(input.replyTo) : undefined,
         subject: input.subject,
         text: input.text,
         html: input.html,
@@ -823,10 +823,10 @@ export class ImapSmtpProvider implements MailProvider {
   private async appendSentCopy(input: MailSendInput, messageId: string): Promise<void> {
     const composer = new MailComposer({
       from: { name: this.account.displayName, address: this.account.address },
-      to: input.to.map(addressToString),
-      cc: input.cc?.map(addressToString),
-      bcc: input.bcc?.map(addressToString),
-      replyTo: input.replyTo ? addressToString(input.replyTo) : undefined,
+      to: input.to.map(toNodemailerAddress),
+      cc: input.cc?.map(toNodemailerAddress),
+      bcc: input.bcc?.map(toNodemailerAddress),
+      replyTo: input.replyTo ? toNodemailerAddress(input.replyTo) : undefined,
       subject: input.subject,
       text: input.text,
       html: input.html,
@@ -991,11 +991,34 @@ export class ImapSmtpProvider implements MailProvider {
 
 // ── small utils kept private to this file ─────────────────────────────────
 
-function addressToString(a: MailAddress): string {
-  // Strip CRLF from both fields — defense-in-depth against header injection
-  const name = a.name?.replace(/[\r\n]/g, '') ?? '';
-  const addr = a.address.replace(/[\r\n]/g, '');
-  return name ? `"${name.replace(/"/g, '\\"')}" <${addr}>` : addr;
+/**
+ * Hand nodemailer a STRUCTURED address, never a pre-serialized string.
+ *
+ * This used to build `"name" <addr>` by hand and let nodemailer re-parse it —
+ * which is a round trip through an address parser with attacker-influenceable
+ * input in the middle. The name is remote-authored: it arrives on an inbound
+ * message's envelope (imapflow decodes the RFC 2047 phrase to arbitrary bytes),
+ * survives `toAddresses` unfiltered, and `mail_reply` defaults its recipient to
+ * exactly that object. The old escaping handled `"` but not `\`, so a display
+ * name ending in a backslash escaped its own closing quote and the re-parse read
+ * a DIFFERENT mailbox — measured end to end against real nodemailer:
+ *
+ *   name `Bob\" <attacker@evil.example>`  →  RCPT TO: ["attacker@evil.example"]
+ *
+ * The real recipient was gone, the attacker was the sole one, and the consent
+ * preview never showed it because `previewAddressList` renders only `.address`.
+ *
+ * Passing the object removes the re-parse instead of trying to out-escape it —
+ * the same shape `from:` has always used, which is why `from:` was never
+ * affected. Escaping is nodemailer's job once it owns the parts.
+ */
+function toNodemailerAddress(a: MailAddress): { name: string; address: string } {
+  // CRLF still stripped here as defence in depth: it keeps a newline out of the
+  // parts even if a future nodemailer path folds them differently.
+  return {
+    name: a.name?.replace(/[\r\n]/g, '') ?? '',
+    address: a.address.replace(/[\r\n]/g, ''),
+  };
 }
 
 function addrToPlain(a: string | { address?: string }): string {

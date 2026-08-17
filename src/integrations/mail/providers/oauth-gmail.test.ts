@@ -344,6 +344,53 @@ describe('OAuthGmailProvider — send', () => {
     expect(decoded).toMatch(/Date: \w{3}, \d{2} \w{3} \d{4}/);
   });
 
+  /** Drive a send and hand back the decoded MIME + its From line. */
+  async function sendWithDisplayName(displayName: string): Promise<{ decoded: string; fromLine: string }> {
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
+      if (init?.method === 'POST' && url.includes('messages/send')) {
+        return Promise.resolve(respondJson({ id: 'sent-1', threadId: 't' }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const provider = new OAuthGmailProvider({ ...makeAccount(), displayName }, makeAuth());
+    await provider.send({ to: [{ address: 'bob@example.com' }], subject: 'Hi', text: 'b' });
+    const call = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
+    const raw = (JSON.parse((call[1] as { body: string }).body) as { raw: string }).raw;
+    const decoded = Buffer.from(raw, 'base64').toString('utf-8');
+    return { decoded, fromLine: decoded.split(/\r?\n/).find(l => l.startsWith('From:')) ?? '' };
+  }
+
+  it('SEC: a non-ASCII display name cannot append a recipient of its own', async () => {
+    // RFC 2047 §5(3): inside a PHRASE an encoded-word may carry only
+    // alphanumerics and `!*+-/`. The encoder applied the looser `text` rule, so
+    // `<`, `>`, `@` and `,` survived literally — and a phrase is exactly where
+    // an address list is parsed. A display name is remote-authored (it can come
+    // from a contact record or an inbound header), so this is reachable.
+    const { fromLine } = await sendWithDisplayName('Ärger <attacker@evil.example>,');
+    // The hostile address must not appear in ANY parseable form.
+    expect(fromLine).not.toContain('attacker@evil.example');
+    // …and the header must still name exactly one address: the real one.
+    expect(fromLine.match(/</g) ?? []).toHaveLength(1);
+    expect(fromLine).toContain('<user@example.org>');
+  });
+
+  it('SEC: a display name ending in a backslash cannot escape its own quotes', async () => {
+    // The quoted-string branch escaped `"` but not `\`, so `Bob\` produced
+    // `"Bob\" <user@example.org>` — the `\"` is a quoted-pair, so the string
+    // never closed there and swallowed the real address. Backslash must be
+    // escaped FIRST, or escaping the quote re-introduces the problem.
+    const { fromLine } = await sendWithDisplayName('Bob\\');
+    expect(fromLine).toBe('From: "Bob\\\\" <user@example.org>');
+    expect(fromLine).toContain('<user@example.org>');
+  });
+
+  it('a plain ASCII display name is still rendered quoted and unencoded', async () => {
+    // Counter-direction: the tightening must not start encoding ordinary names.
+    const { fromLine } = await sendWithDisplayName('Rafael Burlet');
+    expect(fromLine).toBe('From: "Rafael Burlet" <user@example.org>');
+  });
+
   it('falls back to bare address when displayName is empty', async () => {
     fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
       if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
@@ -451,6 +498,26 @@ describe('OAuthGmailProvider — send', () => {
 });
 
 describe('encodeMimeHeader', () => {
+  it('phrase context: a pure-ASCII value with specials is still encoded (fast-path guard)', () => {
+    // The pure-ASCII shortcut must not fire in phrase context when the value
+    // carries a character a phrase may not hold literally. Without this guard
+    // an all-ASCII `Bob <x@y>,` would skip encoding entirely and reach an
+    // address header verbatim. Reached only via a direct call today —
+    // `formatAddr` gates on !ASCII_PRINTABLE — which is exactly why nothing
+    // else pins it.
+    const out = encodeMimeHeader('Bob <x@y>,', 'phrase');
+    expect(out).not.toBe('Bob <x@y>,');
+    expect(out).toContain('=3C'); // <
+    expect(out).toContain('=40'); // @
+    expect(out).toContain('=2C'); // ,
+  });
+
+  it('phrase context: a value made only of phrase-safe chars passes through', () => {
+    // Counter-direction for the guard above — it must not encode everything.
+    expect(encodeMimeHeader('Bob', 'phrase')).toBe('Bob');
+    expect(encodeMimeHeader('a-b/c*1', 'phrase')).toBe('a-b/c*1');
+  });
+
   it('passes pure-ASCII through unchanged (no encoded-word)', () => {
     expect(encodeMimeHeader('Hello World')).toBe('Hello World');
     expect(encodeMimeHeader('TEST: a-b/c')).toBe('TEST: a-b/c');
