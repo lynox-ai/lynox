@@ -253,6 +253,58 @@ describe('resolveModelForCost wiring (budget precheck + step-row stamp)', () => 
     const step = { id: 's1', task: 'do', model: 'deep' } as unknown as ManifestStep;
     expect(resolveModelForCost(step, 'fast', mockConfig, undefined)).toBe(getModelId('deep', PROVIDER));
   });
+
+  it('prices the HYBRID SLOT that runs, not the base provider model for the tier', async () => {
+    // The over-debit this fixes. `resolveRunModel`'s tier branch answers with the
+    // BASE provider's model, but under hybrid routing the tier's SLOT executes —
+    // and they are different models at very different prices. A tenant on the
+    // `efficient` preset ran minimax-m3 ($0.30/$1.20) and was priced at the base
+    // balanced model ($3/$15): a ~10x over-debit against their own included
+    // budget, so they hit ceilings they had not actually reached.
+    const { setTierSetResolver } = await import('../core/tier-resolver.js');
+    const { resolveModelForCost } = await import('./runner.js');
+    try {
+      setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: {
+          balanced: {
+            provider: 'openai',
+            model_id: 'accounts/fireworks/models/minimax-m3',
+            api_key: 'sk-test',
+            api_base_url: 'https://api.fireworks.ai/inference/v1',
+          },
+        },
+      });
+      const step = { id: 's1', task: 'do', model: 'balanced' } as unknown as ManifestStep;
+      expect(resolveModelForCost(step, 'fast', mockConfig, undefined))
+        .toBe('accounts/fireworks/models/minimax-m3');
+      // Guard against the assertion passing by coincidence: the base model for
+      // that tier is a DIFFERENT string, so this is a real discrimination.
+      expect(getModelId('balanced', PROVIDER)).not.toBe('accounts/fireworks/models/minimax-m3');
+    } finally {
+      setTierSetResolver({ routingMode: 'standard', tierSet: null });
+    }
+  });
+
+  it('still prices a PINNED raw id as itself, not through the slot', async () => {
+    // Counter-direction: a raw id names the model that actually runs, so mapping
+    // it through the tier's slot would price a model the step never touches.
+    const { setTierSetResolver } = await import('../core/tier-resolver.js');
+    const { resolveModelForCost } = await import('./runner.js');
+    try {
+      setTierSetResolver({
+        routingMode: 'hybrid',
+        tierSet: {
+          balanced: { provider: 'openai', model_id: 'accounts/fireworks/models/minimax-m3', api_key: 'sk-test', api_base_url: 'https://api.fireworks.ai/inference/v1' },
+        },
+      });
+      const pinned = getModelId('balanced', PROVIDER);
+      const step = { id: 's1', task: 'do', model: pinned } as unknown as ManifestStep;
+      expect(resolveModelForCost(step, 'fast', mockConfig, undefined)).toBe(pinned);
+    } finally {
+      setTierSetResolver({ routingMode: 'standard', tierSet: null });
+    }
+  });
 });
 
 describe('spawnViaAgent wiring (saved/agent steps)', () => {

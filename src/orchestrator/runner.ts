@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry, CapabilityContract, WorkflowLimits, SecretStoreLike } from '../types/index.js';
 import { getActiveProvider } from '../core/llm-client.js';
-import { resolveRunModel } from '../core/tier-resolver.js';
+import { resolveRunModel, effectiveTierModelId } from '../core/tier-resolver.js';
 import { calculateCost } from '../core/pricing.js';
 import { checkSessionBudget, adjustSessionCost } from '../core/session-budget.js';
 import type { SessionCounters } from '../types/agent.js';
@@ -930,12 +930,27 @@ export function resolveModelForCost(step: ManifestStep, defaultTier: ModelTier, 
   // The headless deep-consent override is applied here too, so the budget precheck
   // and the step-row stamp name the CLAMPED model, not the refused/announced deep
   // one (the run itself runs the clamped tier — the ledger must not disagree).
-  return resolveRunModel({
+  //
+  // That property was only half true until 2026-08-17, and the comment above
+  // asserted it anyway. `resolveRunModel`'s tier branch answers with the BASE
+  // provider's model for the tier — but under HYBRID routing the tier's slot is
+  // what executes, and the two are different models at very different prices.
+  // A tenant on the `efficient` preset ran Fireworks (minimax-m3, $0.30/$1.20)
+  // and was priced at the base provider's balanced model (sonnet-5, $3/$15) —
+  // a ~10x over-debit against their included budget, so they hit cost ceilings
+  // they had not actually reached. Pre-existing, but this release made presets
+  // CP-pinnable, which is what turns it from a corner case into the norm.
+  //
+  // A PINNED raw id is exempt: that id is the model that runs, so it is already
+  // the right thing to charge. Only a tier has to be mapped through the active
+  // routing — hence the `pinned` flag rather than re-deriving the branch here.
+  const resolved = resolveRunModel({
     requested: headlessStepModelOverride(step.model, defaultTier, autonomy),
     defaultTier,
     accountTier: config.account_tier,
     maxTier: config.max_tier,
     blockedModelIds: config.blocked_model_ids,
     provider: getActiveProvider(),
-  }).modelId;
+  });
+  return resolved.pinned ? resolved.modelId : effectiveTierModelId(resolved.tier, getActiveProvider());
 }
