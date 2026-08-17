@@ -251,6 +251,14 @@ vi.mock('../core/session-store.js', () => ({
 
 vi.mock('../core/config.js', () => ({
   loadConfig: vi.fn().mockReturnValue({ default_tier: 'deep' }),
+  // Not a stub: the REAL escaper, so this suite tests the same rendering the
+  // engine ships. A stub here would let the two sinks drift, which is the exact
+  // failure this helper exists to prevent.
+  describePinForDisplay: (v: string): string =>
+    [...[...v].map((ch) => {
+      const cp = ch.codePointAt(0) ?? 0;
+      return cp >= 0x20 && cp <= 0x7e ? ch : `\\u${cp.toString(16).padStart(4, '0')}`;
+    }).join('')].slice(0, 64).join(''),
   readUserConfig: vi.fn().mockReturnValue({
     default_tier: 'deep', thinking_mode: 'adaptive',
     api_key: 'sk-ant-secret-key',
@@ -2904,6 +2912,82 @@ describe('LynoxHTTPApi', () => {
       const body = await res.json() as Record<string, unknown>;
       expect(body['active_provider']).toBeUndefined();
       expect((body['env_overrides'] as Record<string, unknown>)['provider']).toBe(false);
+    });
+
+    it('GET names an IGNORED tier-preset pin — silence would read as applied', async () => {
+      // An unknown CP pin no longer takes the container down. That keeps the
+      // instance up, but it also removes the failure that USED to be the operator
+      // signal (an unreachable engine escalates on its own), so the ignore has to
+      // be observable somewhere. `env_overrides` is where this surface already
+      // says "the environment is overriding your setting".
+      //
+      // Asserts the NAME, not a boolean: an operator needs to tell a version skew
+      // from a typo, and only the name distinguishes them.
+      const prev = process.env['LYNOX_TIER_PRESET'];
+      process.env['LYNOX_TIER_PRESET'] = 'ultra-cheap';
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        expect((body['env_overrides'] as Record<string, unknown>)['tier_preset_ignored']).toBe('ultra-cheap');
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_TIER_PRESET']; else process.env['LYNOX_TIER_PRESET'] = prev;
+      }
+    });
+
+    it('GET reports an ignored pin even when sanitising WOULD have resolved it', async () => {
+      // Order matters: the loader validates the raw value, so a control character
+      // inside the name makes it unknown and the pin is dropped. A marker that
+      // sanitised first would strip the character, resolve the name, and stay
+      // silent — the "silence reads as applied" case this field exists to stop.
+      const prev = process.env['LYNOX_TIER_PRESET'];
+      process.env['LYNOX_TIER_PRESET'] = 'effici\u0001ent';
+      try {
+        const body = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+        // NOT 'efficient'. Stripping the byte would rename an unresolvable pin
+        // into a preset this engine knows, so the field would name a valid preset
+        // while reporting it as unknown — and an operator would read "version
+        // skew" where the truth is an invisible character. Escaping keeps the
+        // evidence, which is the whole reason the field carries a name at all.
+        expect((body['env_overrides'] as Record<string, unknown>)['tier_preset_ignored']).toBe('effici\\u0001ent');
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_TIER_PRESET']; else process.env['LYNOX_TIER_PRESET'] = prev;
+      }
+    });
+
+    it('GET bounds the echoed pin — it is arbitrary env text by definition', async () => {
+      // The marker fires exactly when the value is NOT a known preset, i.e.
+      // exactly when it is arbitrary. Operator-set and behind auth, so this is
+      // hygiene — but a response field must not be an unbounded passthrough of
+      // an environment variable.
+      const prev = process.env['LYNOX_TIER_PRESET'];
+      process.env['LYNOX_TIER_PRESET'] = 'bad name\u001B[31m' + 'x'.repeat(200);
+      try {
+        const body = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+        const echoed = (body['env_overrides'] as Record<string, unknown>)['tier_preset_ignored'] as string;
+        expect(echoed).toBeDefined();
+        expect(echoed.length).toBeLessThanOrEqual(64);
+        expect(echoed).not.toMatch(/[\u0000-\u001F\u007F]/);
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_TIER_PRESET']; else process.env['LYNOX_TIER_PRESET'] = prev;
+      }
+    });
+
+    it('GET stays silent about a pin that RESOLVES, and about no pin at all', async () => {
+      // Counter-direction. A marker that is always present says nothing, and one
+      // that fires on a working pin would train operators to ignore it.
+      const prev = process.env['LYNOX_TIER_PRESET'];
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      try {
+        const body = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+        expect((body['env_overrides'] as Record<string, unknown>)['tier_preset_ignored']).toBeUndefined();
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_TIER_PRESET']; else process.env['LYNOX_TIER_PRESET'] = prev;
+      }
+      delete process.env['LYNOX_TIER_PRESET'];
+      const body2 = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+      expect((body2['env_overrides'] as Record<string, unknown>)['tier_preset_ignored']).toBeUndefined();
+      if (prev !== undefined) process.env['LYNOX_TIER_PRESET'] = prev;
     });
 
     it('GET reports debug_wire_capture env-pinned + the EFFECTIVE value over a stale disk value', async () => {
