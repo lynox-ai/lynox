@@ -205,6 +205,27 @@ export class ToolCallTracker {
   ]);
 
   /**
+   * Credential-shaped file paths, for the read-then-exfil patterns below. One
+   * constant because the same literal used to be spelled twice — patterns 1 and 3
+   * — which is how the two copies would have drifted.
+   *
+   * `.access-token` is listed EXPLICITLY rather than by widening the separator
+   * class to `[.-]`. Both spellings catch it; the broad one also catches every
+   * ordinary source file whose name ends in `-key`, `-token`, `-secret` or `-env`.
+   * Measured against this repo's own tracked filenames: 1 match before, 10 after.
+   *
+   * That difference is not cosmetic here. This detector runs in SHADOW MODE and
+   * the decision to enforce it is explicitly waiting on its observed
+   * false-positive rate (see the comment at its call site in `agent.ts`). A
+   * tenfold jump in matches against ordinary paths would move exactly the number
+   * that decision gets read from, and it would look like a product signal rather
+   * than a regex edit. One named alternative costs nothing and leaves the
+   * measurement intact.
+   */
+  private static readonly SENSITIVE_READ_PATH =
+    /(\.(env|pem|key|secret|token)\b|\.access-token\b|credentials|authorized_keys|\.ssh\/)/i;
+
+  /**
    * Check for suspicious tool call patterns.
    * Returns a warning string if anomaly detected, null otherwise.
    */
@@ -221,7 +242,7 @@ export class ToolCallTracker {
     if (lastHttpIdx >= 0) {
       for (let j = lastHttpIdx - 1; j >= 0; j--) {
         const prev = recent[j]!;
-        if (prev.tool === 'read_file' && /(\.(env|pem|key|secret|token)\b|credentials|authorized_keys|\.ssh\/)/i.test(prev.inputPreview)) {
+        if (prev.tool === 'read_file' && ToolCallTracker.SENSITIVE_READ_PATH.test(prev.inputPreview)) {
           if (channels.securityFlagged.hasSubscribers) {
             channels.securityFlagged.publish({
               event_type: 'anomaly_read_then_exfil',
@@ -274,7 +295,7 @@ export class ToolCallTracker {
     // Pattern 3: Google read followed by read_file on sensitive path (credential harvesting)
     for (let i = recent.length - 1; i >= 0; i--) {
       const entry = recent[i]!;
-      if (entry.tool === 'read_file' && /(\.(env|pem|key|secret|token)\b|credentials|authorized_keys|\.ssh\/)/i.test(entry.inputPreview)) {
+      if (entry.tool === 'read_file' && ToolCallTracker.SENSITIVE_READ_PATH.test(entry.inputPreview)) {
         for (let j = i - 1; j >= 0; j--) {
           if (ToolCallTracker.GOOGLE_READ_TOOLS.has(recent[j]!.tool)) {
             const detail = `${recent[j]!.tool} followed by read_file on "${entry.inputPreview}"`;
