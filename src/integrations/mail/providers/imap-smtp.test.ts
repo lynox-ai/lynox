@@ -495,13 +495,57 @@ describe('ImapSmtpProvider — send', () => {
     expect(result.rejected).toEqual([]);
 
     expect(sendMailMock).toHaveBeenCalledTimes(1);
-    const args = sendMailMock.mock.calls[0]?.[0] as { from: { name?: string; address: string }; to: string[]; inReplyTo: string };
+    const args = sendMailMock.mock.calls[0]?.[0] as {
+      from: { name?: string; address: string };
+      to: Array<{ name: string; address: string }>;
+      inReplyTo: string;
+    };
     expect(args.from.address).toBe('user@example.com');
     // displayName from the account config must round-trip through nodemailer
     // so recipients see a friendly sender name, not just the local-part.
     expect(args.from.name).toBe('Test User');
-    expect(args.to[0]).toBe('"Bob" <bob@example.com>');
+    // CHANGED 2026-08-17: this asserted the pre-serialized string
+    // `'"Bob" <bob@example.com>'`. Recipients now go to nodemailer as STRUCTURED
+    // objects, the same shape `from` always used — see the security test below
+    // for why the round trip through an address parser had to go.
+    expect(args.to[0]).toEqual({ name: 'Bob', address: 'bob@example.com' });
     expect(args.inReplyTo).toBe('<old@example.com>');
+
+    // Structured, not serialized: nodemailer receives the parts and does its own
+    // escaping. The assertion above is the shape; the one below is the reason.
+  });
+
+  it('SEC: a hostile display name cannot become an extra SMTP recipient', async () => {
+    // Measured end to end against real nodemailer before the fix: recipients
+    // were handed over PRE-SERIALIZED as `"name" <addr>`, and nodemailer
+    // RE-PARSED that string. The old escaping handled `"` but not `\\`, so a
+    // display name ending in a backslash escaped its own closing quote and the
+    // re-parse read a different mailbox:
+    //
+    //   name `Bob\\" <attacker@evil.example>`  =>  RCPT TO: ["attacker@evil.example"]
+    //
+    // The real recipient was GONE and the consent preview never showed it —
+    // `previewAddressList` renders only `.address`. The name is remote-authored:
+    // it arrives on an inbound envelope, survives `toAddresses` unfiltered, and
+    // `mail_reply` defaults its recipient to that object.
+    //
+    // The fix is structural, not more escaping: pass the parts, so there is no
+    // re-parse to exploit. The hostile text must stay DATA in `name`, and
+    // `address` must be untouched.
+    sendMailMock.mockResolvedValue({ messageId: '<x>', accepted: ['bob@customer.example'], rejected: [] });
+    const hostile = 'Bob\\" <attacker@evil.example>';
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.send({
+      to: [{ name: hostile, address: 'bob@customer.example' }],
+      subject: 'Hi',
+      text: 'b',
+    });
+    const args = sendMailMock.mock.calls[0]?.[0] as { to: Array<{ name: string; address: string }> };
+    expect(args.to).toHaveLength(1);
+    expect(args.to[0]?.address).toBe('bob@customer.example');
+    expect(args.to[0]?.name).toBe(hostile);
+    // The decisive part: nothing handed to nodemailer is a string it must parse.
+    expect(typeof args.to[0]).toBe('object');
 
     const transport = lastTransportOptions as { host: string; port: number; secure: boolean; requireTLS: boolean; tls: { rejectUnauthorized: boolean } };
     expect(transport.host).toBe('smtp.example.com');
