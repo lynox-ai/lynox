@@ -1402,6 +1402,50 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     expect(limits?.maxWallClockMs).toBe(30 * 60_000); // headless default still applies to unset fields
   });
 
+  it('headless run normalizes a MALFORMED stored maxParallelSteps to the same default as in-session', async () => {
+    // The two resolvers must agree about one stored blob. While this one passed
+    // the value through raw, a stored `null` resolved to 5 in-session but hit the
+    // executor's fallback of 1 — fully SERIAL — headless. That is the worse half:
+    // the headless path always carries a 30-minute wall clock, and
+    // workflowBoundExceeded re-checks it at every phase boundary, so serializing
+    // a multi-phase run can turn a completing run into a wall-clock abort.
+    //
+    // `null`, not NaN, is the value under test on purpose: JSON.stringify writes
+    // both NaN and Infinity as null, so null is the only malformed form a stored
+    // limits blob can actually carry.
+    const id = 'wf-headless-malformed';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+      limits: { maxParallelSteps: null as unknown as number },
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBe(5); // NOT 1 (serial), NOT null
+  });
+
+  it('headless run leaves an UNSET maxParallelSteps unbounded (no default imposed)', async () => {
+    // Counter-direction: normalizing the malformed case must not smuggle a
+    // default onto the absent one. An unattended run defaulting to unbounded
+    // fan-out is a deliberate operator policy choice here, unlike in-session.
+    const id = 'wf-headless-unset';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBeUndefined();
+  });
+
   it('in-session inline run inherits the parent agent autonomy + forwards its context', async () => {
     const agent = makeAutonomyAgent('autonomous');
     mockRunManifest.mockResolvedValueOnce(makeRunState());

@@ -468,9 +468,24 @@ describe('parallelStepCapFor', () => {
     // The regression this exists for: `cap > 0` treated every one of these as
     // "unset" and fell through to unbounded fan-out. A present value is a
     // REQUEST for a bound, so the malformed forms must resolve to the fallback.
-    for (const bad of [0, -1, -0.5, NaN, Infinity, -Infinity]) {
+    // `null` is in the list because it is the form that actually PERSISTS:
+    // JSON.stringify turns both NaN and Infinity into null, so a stored
+    // limits blob can never carry the other two.
+    for (const bad of [0, -1, -0.5, NaN, -Infinity, null as unknown as number]) {
       expect(parallelStepCapFor(bad, 5), `maxParallelSteps: ${String(bad)}`).toBe(5);
     }
+  });
+
+  it('treats Infinity as the "no limit" sentinel it is, NOT as malformed', () => {
+    // The safe direction points backwards here, which is why it gets its own
+    // test. Infinity is the idiomatic JS "no bound", and the pre-clamp executor
+    // honoured it exactly (Math.min(Infinity, N) = N). Lumping it in with NaN
+    // would give the caller who asked most explicitly for NO bound the tightest
+    // one — a 180° inversion of intent, and silent.
+    expect(parallelStepCapFor(Infinity, 5)).toBeUndefined();
+    expect(parallelStepCapFor(Infinity, 1)).toBeUndefined();
+    // …while its nonsense twin still takes the fallback.
+    expect(parallelStepCapFor(-Infinity, 5)).toBe(5);
   });
 
   it('passes a valid width through, truncated to a whole number of workers', () => {

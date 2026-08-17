@@ -22,8 +22,16 @@ export interface WorkflowLimits {
   maxSpendUsd?: number | undefined;
   /**
    * Max steps of one parallel phase running *concurrently* (backpressure).
-   * Unset (or non-positive) = unbounded — every step of a phase launches at
-   * once (the existing v1.1 behaviour). When set, `runParallel` launches at
+   *
+   * UNSET (or `Infinity`, the explicit "no limit" sentinel) = unbounded — every
+   * step of a phase launches at once (the existing v1.1 behaviour). A MALFORMED
+   * value (`0`, negative, `NaN`, `null`) is NOT a way to say unbounded: it is
+   * normalized to a real bound by `parallelStepCapFor`, because a limiter that
+   * silently disables itself on a bad value is worse than no limiter. This
+   * doc-comment used to say "unset (or non-positive) = unbounded", which
+   * documented the fail-open as the contract.
+   *
+   * When set, `runParallel` launches at
    * most this many steps per phase, starting the next as each completes. The
    * phase barrier is preserved: a phase still fully settles before the next
    * begins. Backpressure against unbounded per-phase fan-out: a phase of N
