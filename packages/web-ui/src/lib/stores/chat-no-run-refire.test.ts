@@ -89,6 +89,47 @@ describe('chat store — no client-side run re-fire', () => {
 		// so a turn that rendered EITHER is partial, not unsent.
 		expect(fallbackWindow).toContain('!dropped.followUps?.length');
 		expect(fallbackWindow).toContain('!dropped.knowledgeWrites?.length');
+		// …and when the transcript says the turn WAS answered, the recovery must
+		// do something about it. Doing nothing left an empty assistant bubble
+		// standing over a persisted, billed answer until a manual reload — the
+		// sibling non-takeover path already reconciles for exactly this.
+		//
+		// Asserted as a STATEMENT (`await …;`), not as the bare name: the bare
+		// name also occurs in the comment that explains this branch, so a
+		// mutation removing the call left the guard green. Measured, not assumed.
+		const answeredBranch = fallbackWindow.slice(fallbackWindow.indexOf('} else {'));
+		expect(answeredBranch).toContain('await reconcileThread();');
+		expect(answeredBranch).toContain('messages.splice(assistantIdx, 1);');
+	});
+
+	it('a failure marked on a blind guess is labelled as one', () => {
+		// `no-run` (the server answered: nothing live) and `unreachable` (we could
+		// not ask) used to be the same `false`, and the caller read both as "the
+		// run never started". Only the second one is a guess, and only the guess
+		// may not be auto-re-sent.
+		const body = executeRunBody();
+		expect(body).toContain("reattachOutcome === 'unreachable'");
+		expect(body).toContain('failedOffline');
+		// The label has to depend on BOTH probes: a reachable transcript answers
+		// the question outright, whatever /runs/active did.
+		expect(body).toMatch(/failedOffline = reattachOutcome === 'unreachable' && !transcriptReached/);
+	});
+
+	it('the reconnect refire is gated on a server re-check, not on the guess', () => {
+		const onlineListener = SRC.indexOf("window.addEventListener('online'");
+		if (onlineListener < 0) throw new Error('anchor lost: online listener');
+		const onlineEnd = SRC.indexOf("window.addEventListener('beforeunload'", onlineListener);
+		if (onlineEnd < 0) throw new Error('anchor lost: end of online listener (beforeunload)');
+		const listener = SRC.slice(onlineListener, onlineEnd);
+		// It asks the transcript…
+		expect(listener).toContain('/threads/${enc}/messages');
+		// …and hands the decision to the pure, unit-tested rule rather than
+		// re-deriving it inline, where it could drift from the tests above.
+		expect(listener).toContain('shouldRefireOfflineTurn({ reached, lastRole })');
+		// The refire is INSIDE that decision, never before it.
+		const decision = listener.indexOf('shouldRefireOfflineTurn(');
+		const refire = listener.indexOf('refireFailedTurn(lastFailed)', decision);
+		expect(refire).toBeGreaterThan(decision);
 	});
 
 	it('a deliberate stop is never mistaken for a transport drop', () => {
@@ -119,6 +160,14 @@ describe('chat store — no client-side run re-fire', () => {
 		//      message once the network is back (gated on !isStreaming, and the
 		//      server's 409 path keeps it from colliding with a live run).
 		// A push anywhere else would be an auto-refire laundered through the queue.
+		//
+		// ANCHOR MOVED 2026-08-17, invariant unchanged. The listener's push now
+		// lives in `refireFailedTurn()`, because the listener grew a second path:
+		// a turn marked failed while BOTH server probes were blind gets verified
+		// against the transcript before it may be re-sent. Two callers, one place
+		// that touches the queue. The guard follows the code and then adds the
+		// obligation the extraction creates — that the helper itself is reachable
+		// only from that listener, never from the run machinery.
 		const pushes = [...SRC.matchAll(/messageQueue\.push\(/g)];
 		expect(pushes.length).toBe(2);
 
@@ -129,12 +178,28 @@ describe('chat store — no client-side run re-fire', () => {
 		const inSendMessage = pushes.some((p) => p.index! > sendStart && p.index! < sendEnd);
 		expect(inSendMessage).toBe(true);
 
+		const refireStart = SRC.indexOf('function refireFailedTurn(');
+		if (refireStart < 0) throw new Error('anchor lost: `function refireFailedTurn(`');
+		const refireEnd = SRC.indexOf('\n}', refireStart);
+		const inRefireHelper = pushes.some((p) => p.index! > refireStart && p.index! < refireEnd);
+		expect(inRefireHelper).toBe(true);
+
+		// Every CALL of the helper sits inside the online listener — so the second
+		// queue site cannot be reached from a run, a resume, or a timer.
 		const onlineListener = SRC.indexOf("window.addEventListener('online'");
 		if (onlineListener < 0) throw new Error('anchor lost: online listener');
-		const onlineEnd = SRC.indexOf('window.addEventListener(', onlineListener + 10);
-		const onlineWindowEnd = onlineEnd < 0 ? SRC.length : onlineEnd;
-		const inOnlineListener = pushes.some((p) => p.index! > onlineListener && p.index! < onlineWindowEnd);
-		expect(inOnlineListener).toBe(true);
+		const onlineEnd = SRC.indexOf("window.addEventListener('beforeunload'", onlineListener);
+		if (onlineEnd < 0) throw new Error('anchor lost: end of online listener (beforeunload)');
+		// Everything outside the helper's own body is a call site (its declaration
+		// is inside that range, so it drops out here rather than needing a special
+		// case).
+		const callSites = [...SRC.matchAll(/refireFailedTurn\(/g)]
+			.filter((c) => c.index! < refireStart || c.index! > refireEnd);
+		expect(callSites.length).toBeGreaterThan(0);
+		for (const c of callSites) {
+			expect(c.index!).toBeGreaterThan(onlineListener);
+			expect(c.index!).toBeLessThan(onlineEnd);
+		}
 
 		// And NONE of them may sit inside the run/resume machinery.
 		const runStart = SRC.indexOf('async function _executeRun(');

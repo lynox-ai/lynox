@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { parseActiveRuns, countLiveRuns, selectReattachTarget } from './active-runs.js';
+import { parseActiveRuns, countLiveRuns, selectReattachTarget, shouldRefireOfflineTurn } from './active-runs.js';
 
 /**
  * Locks the GET /api/runs/active wire contract shared by the thread-history nav
@@ -113,5 +113,38 @@ describe('selectReattachTarget', () => {
 			.toEqual({ runId: 'r1', lastPersistedSeq: 0 });
 		expect(selectReattachTarget({ runs: [{ threadId: 't1', runId: 'r1', status: 'running', lastPersistedSeq: 'x' }] }, 't1'))
 			.toEqual({ runId: 'r1', lastPersistedSeq: 0 });
+	});
+});
+
+describe('shouldRefireOfflineTurn', () => {
+	// The turn under discussion was marked failed WITHOUT server confirmation:
+	// both probes were blind, which is the ordinary shape of "the network went
+	// away" — and that is also the commonest reason the SSE stream dropped. So
+	// "failed" was a guess, and acting on it costs a second billed run.
+
+	it('declines when the thread already ends on an assistant message', () => {
+		// The run finished inside the drop window and is persisted and billed.
+		// Re-sending it IS the duplicate.
+		expect(shouldRefireOfflineTurn({ reached: true, lastRole: 'assistant' })).toBe(false);
+	});
+
+	it('allows the refire when the server confirms the thread still ends on the user', () => {
+		expect(shouldRefireOfflineTurn({ reached: true, lastRole: 'user' })).toBe(true);
+	});
+
+	it('declines while the server is still unreachable — even though nothing contradicts a refire', () => {
+		// The asymmetry is the whole point: declining leaves the user's own
+		// tap-to-retry on the failed bubble, while refiring on a second guess
+		// spends money. `lastRole` is deliberately varied to show the outcome
+		// does not depend on it once the probe failed.
+		expect(shouldRefireOfflineTurn({ reached: false, lastRole: undefined })).toBe(false);
+		expect(shouldRefireOfflineTurn({ reached: false, lastRole: 'user' })).toBe(false);
+		expect(shouldRefireOfflineTurn({ reached: false, lastRole: 'assistant' })).toBe(false);
+	});
+
+	it('treats an empty transcript as refireable once the server answered', () => {
+		// A reachable server with no messages at all means the turn genuinely
+		// never landed — the one case the original auto-refire got right.
+		expect(shouldRefireOfflineTurn({ reached: true, lastRole: undefined })).toBe(true);
 	});
 });
