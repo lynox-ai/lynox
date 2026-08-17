@@ -14,7 +14,7 @@ import { LLM_CATALOG } from './llm/catalog.js';
  */
 describe('tier-presets (model-presets W2 SoT)', () => {
   it('ships exactly the three hybrid presets', () => {
-    // eu-sovereign joined 2026-08-10: the EU choice used to be a side effect of
+    // An EU set was drafted 2026-08-10 and PULLED before merging; the EU choice used to be a side effect of
     // picking "efficient", which meant a customer needing EU processing had to
     // know that. Reshaping efficient to open weights would have removed it silently.
     expect(Object.keys(TIER_PRESETS).sort()).toEqual(['balanced', 'efficient', 'max-quality']);
@@ -102,7 +102,7 @@ describe('tier-presets (model-presets W2 SoT)', () => {
   });
 
   it('EVERY preset prices its bands in ascending order — escalating must never get cheaper', () => {
-    // The ladder claim that the eu-sovereign comment spends 25 lines defending
+    // The ladder claim that the pulled-EU-set comment spends 25 lines defending
     // ("the price rises with the band ... the reverse order was considered and
     // rejected") was backed by nothing until a delta review pointed it out. It is the
     // one invariant that holds across ALL four presets and the reason a preset is a

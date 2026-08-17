@@ -26,7 +26,7 @@ import { ensureHttpSecret } from '../core/engine-init.js';
 import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
-import { loadConfig } from '../core/config.js';
+import { loadConfig, describePinForDisplay } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
@@ -4735,12 +4735,55 @@ export class LynoxHTTPApi {
       const wireCaptureEnv = process.env['LYNOX_DEBUG_WIRE_CAPTURE'];
       const wireCaptureEnvOn = wireCaptureEnv === 'true' || wireCaptureEnv === '1';
       const wireCaptureEnvOff = wireCaptureEnv === 'false' || wireCaptureEnv === '0';
+      // A CP-pinned preset this engine does not know is IGNORED at load rather
+      // than fatal, which keeps the container up — but "ignored" has to be
+      // OBSERVABLE or the pin silently reads as applied. Before, an unknown pin
+      // took the container down, and that failure WAS the operator signal: the
+      // control plane's health monitor escalates an unreachable instance on its
+      // own. Ignoring removes that signal, so it has to be replaced rather than
+      // dropped, and `env_overrides` is where this surface already reports "your
+      // setting is being overridden by the environment" (the provider case
+      // above renders a banner instead of accepting the click in silence).
+      //
+      // Carries the NAME, not a boolean: the operator needs to know WHICH name
+      // this engine could not resolve to tell a version skew from a typo.
+      //
+      // ⚠️ This is the tenant/operator-facing half only. The automatic
+      // control-plane escalation that the crash-loop used to trigger is NOT
+      // restored by this — the CP would have to read it, and the CP still
+      // reports the pin as set from its own row. Tracked as a follow-up rather
+      // than half-built here.
+      // VALIDATE THE RAW VALUE, SANITISE ONLY FOR DISPLAY — and in that order.
+      //
+      // The loader decides on `process.env[...]?.trim()` and nothing else. If this
+      // marker validated a cleaned-up copy instead, the two would disagree in the
+      // one direction that matters: a name carrying a control character is unknown
+      // to the loader, which drops the pin — while a sanitise-first check would
+      // strip the character, resolve the name, and report nothing at all. Silence
+      // reads as applied, which is the exact failure this field exists to prevent.
+      //
+      // The bound then applies to what is ECHOED, because the marker appears
+      // precisely when the value is not a known preset, i.e. precisely when it is
+      // arbitrary text. Operator-set rather than attacker-set and the route is
+      // authenticated, so this is hygiene rather than a hole — but a response
+      // field should not be an unbounded passthrough of an environment variable.
+      //
+      // ⚠️ Honest scope: NO UI reads this field yet. The comparison with the
+      // `provider` flag above is about WHERE the signal belongs, not about what
+      // ships — that one renders a banner, this one is currently only visible to
+      // whoever inspects the response. Covers the unknown-NAME case only: a pin
+      // that resolves but lost to the tenant's own choice reports nothing here,
+      // because `tier_preset` already says what is running.
+      const rawPin = process.env['LYNOX_TIER_PRESET']?.trim();
+      const pinIgnored = rawPin !== undefined && rawPin !== '' && !expandTierPreset(rawPin);
+      const pinnedPreset = rawPin === undefined ? undefined : describePinForDisplay(rawPin);
       redacted['env_overrides'] = {
         provider: !!process.env['LYNOX_LLM_PROVIDER'],
         // Env-pinned marker for the Privacy toggle: the raw disk value spread
         // above can read OFF while capture actually runs, so the UI needs both
         // the pin (disable the toggle) and the EFFECTIVE value (overwritten below).
         debug_wire_capture: wireCaptureEnvOn || wireCaptureEnvOff,
+        ...(pinIgnored ? { tier_preset_ignored: pinnedPreset } : {}),
       };
       if (wireCaptureEnvOn) {
         redacted['debug_wire_capture'] = true;

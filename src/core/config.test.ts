@@ -218,6 +218,40 @@ describe('Config', () => {
       expect(config.tier_set?.deep?.api_base_url).toContain('fireworks');
     });
 
+    it('an UNBACKED managed preset clears the NAME too, not just the slots', async () => {
+      // `efficient` is all-Fireworks. On a managed instance without the credential,
+      // `applyManagedTierSetConstraints` drops every slot and routing falls back to
+      // standard — correct. What it used to leave behind was the NAME, so
+      // `/api/config` and the strategy picker reported a preset as in effect while
+      // every band ran on the base provider. Two of three presets exist precisely to
+      // route away from that model, so the surface claimed the opposite of the bill.
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['ANTHROPIC_API_KEY'] = 'cp-key';
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      delete process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'];
+      delete process.env['FIREWORKS_API_KEY'];
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_set).toBeUndefined();
+      expect(config.routing_mode).toBe('standard');
+      expect(config.tier_preset).toBeUndefined();
+    });
+
+    it('a BACKED managed preset keeps both the slots and the name', async () => {
+      // Counter-direction: the clear must fire on the dropped-to-empty case only.
+      // Without this, deleting the name unconditionally would pass the test above.
+      process.env['LYNOX_BILLING_TIER'] = 'managed';
+      process.env['ANTHROPIC_API_KEY'] = 'cp-key';
+      process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'] = '1';
+      process.env['FIREWORKS_API_KEY'] = 'fw-key';
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_preset).toBe('efficient');
+      expect(config.routing_mode).toBe('hybrid');
+      expect(config.tier_set?.deep?.api_base_url).toContain('fireworks');
+    });
+
     it('a config.json preset WINS over the CP pin — it is a seed, not a lock', async () => {
       // INVERTED 2026-08-17. This test used to assert the opposite ("it is a lock,
       // not a seed"), on the argument that the preset picks the PROVIDER and the
@@ -247,8 +281,17 @@ describe('Config', () => {
       // and `loadConfig()` in the engine ctor has no catch — so the container
       // crash-loops, and the settings UI needed to clear the value is served by
       // the container that will not boot. Measured on this branch before the fix:
-      // `Unknown tier_preset "eu-sovereign"`. The ladder was reshaped twice in one
-      // week and eu-sovereign was drafted and pulled, so this is real churn.
+      // `Unknown tier_preset "eu-sovereign"`.
+      //
+      // The name in this fixture is not arbitrary: `eu-sovereign` really was a
+      // preset here and in TIER_PRESET_NAMES, added and withdrawn inside #1185
+      // before it merged. So a name entering the shared vocabulary and leaving
+      // again is a thing that has happened, caught by a review rather than by a
+      // mechanism — which is the case the rescue exists for.
+      //
+      // (A `git log -S"'eu-sovereign':"` on tier-presets.ts comes back empty and
+      // reads like proof it never existed. It is not: squash-merge collapses a
+      // symbol added and removed within one PR. Dropping the quotes finds it.)
       writeUserConfig({ tier_preset: 'eu-sovereign' });
       process.env['LYNOX_TIER_PRESET'] = 'efficient';
       const { loadConfig } = await import('./config.js');
@@ -257,23 +300,50 @@ describe('Config', () => {
       expect(config.tier_set?.deep?.api_base_url).toContain('fireworks');
     });
 
-    it('an unresolvable persisted preset with NO pin still FAILS CLOSED', async () => {
-      // The rescue must not become a blanket "unknown names are fine". Without a
-      // pin there is nothing to fall back to, so the fail-closed throw stands.
+    it('an unresolvable persisted preset with NO pin BOOTS on default routing', async () => {
+      // REVERSED 2026-08-17 (second time, and the direction is now consistent).
+      // This asserted the throw, and a review showed the carve-out around it was
+      // arbitrary: the no-pin case IS the motivating scenario — "retiring a preset
+      // would crash-loop every tenant who had it persisted, with no way back" —
+      // and since the pin is emitted only when set, most instances have none. The
+      // guard reached everything except the case it was written for.
+      //
+      // The throw bought nothing here. An absent preset means the instance's own
+      // default routing: no tier_set, no unregistered model, none of the
+      // misbilling that justifies failing closed. It cost a container that will
+      // not start, with the settings UI needed to fix it served by that container.
       writeUserConfig({ tier_preset: 'eu-sovereign' });
       delete process.env['LYNOX_TIER_PRESET'];
       const { loadConfig } = await import('./config.js');
-      expect(() => loadConfig()).toThrow(/Unknown tier_preset "eu-sovereign"/);
+      const config = loadConfig();
+      expect(config.tier_preset).toBeUndefined();
+      expect(config.tier_set).toBeUndefined();
     });
 
-    it('a BLANK pin cannot rescue — an unresolvable persisted preset still throws', async () => {
-      // Kills the `envPreset !== ''` guard: drop it and the blank pin would be
-      // assigned over the bad name, the expansion would skip on a falsy value,
-      // and a container that should fail loudly would boot on standard routing.
+    it('drops an unresolvable persisted name even when the tenant chose their OWN routing', async () => {
+      // The bug this restructure fixes. The drop used to sit inside the seed's
+      // `else if`, which is unreachable once `choseOwnRouting` short-circuits the
+      // arm above — and the settings writer plants `routing_mode` in config.json
+      // permanently after any Standard/Custom pick. So the rescue was off for
+      // exactly the tenants who use the picker most, WITH a valid pin sitting
+      // right there. Measured before the fix: it threw.
+      writeUserConfig({ routing_mode: 'standard', tier_preset: 'eu-sovereign' });
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_preset).toBeUndefined();
+    });
+
+    it('a BLANK pin does not rescue — but the bad name is dropped, not fatal', async () => {
+      // Still kills the `envPreset !== ''` guard: drop it and the blank pin would
+      // be assigned over the bad name. What changed is the consequence — an
+      // unresolvable persisted name no longer takes the boot with it.
       writeUserConfig({ tier_preset: 'eu-sovereign' });
       process.env['LYNOX_TIER_PRESET'] = '   ';
       const { loadConfig } = await import('./config.js');
-      expect(() => loadConfig()).toThrow(/Unknown tier_preset "eu-sovereign"/);
+      const config = loadConfig();
+      expect(config.tier_preset).toBeUndefined();
+      expect(config.routing_mode).not.toBe('hybrid');
     });
 
     it('a BLANK config.json preset is not a choice — it neither wins nor throws', async () => {
@@ -369,19 +439,179 @@ describe('Config', () => {
       });
     });
 
-    it('an unknown CP-pinned preset FAILS CLOSED too', async () => {
-      // The pin goes through the same validation as a config.json name. If the CP
-      // could name a preset that does not exist and get a silent standard boot, a
-      // fleet-wide rollout would look successful while routing nothing.
+    it('an unknown CP-pinned preset is IGNORED, not fatal — the container still boots', async () => {
+      // Deliberately the reverse of what this test asserted before. It used to pin
+      // the throw, arguing that a silent standard boot would make a fleet-wide
+      // rollout look successful while routing nothing. That concern is real and is
+      // now carried by a warn log; what the throw actually bought was worse — the
+      // engine ctor's loadConfig() has no catch, so an unknown pin took the
+      // container down with no way back, and the CP can emit one whenever it is
+      // deployed ahead of the fleet (which is the normal direction: the CP
+      // redeploys on release dispatch, the fleet rolls out by hand, and a pinned
+      // instance is skipped by rollouts indefinitely).
+      //
+      // The asymmetry with a config.json name is the point: an unknown PIN degrades
+      // to the documented meaning of an unset pin, i.e. the instance's own default
+      // routing — no tier_set, no unregistered model, so none of the
+      // FALLBACK_CAPABILITY misbilling the throw exists to prevent.
       process.env['LYNOX_TIER_PRESET'] = 'ultra-cheap';
       const { loadConfig } = await import('./config.js');
-      expect(() => loadConfig()).toThrow(/Unknown tier_preset "ultra-cheap"/);
+      const config = loadConfig();
+      expect(config.tier_preset).toBeUndefined();
+      expect(config.tier_set).toBeUndefined();
+      expect(config.routing_mode).not.toBe('hybrid');
     });
 
-    it('an unknown tier_preset name FAILS CLOSED (throws, not a silent standard boot)', async () => {
-      writeUserConfig({ tier_preset: 'ultra-cheap' });
+    it('an unknown pin does not silently swallow a VALID persisted preset', async () => {
+      // Counter-direction: ignoring the pin must not also drop what the tenant
+      // chose. Only the pin's own name is in question here.
+      writeUserConfig({ tier_preset: 'max-quality' });
+      process.env['LYNOX_TIER_PRESET'] = 'ultra-cheap';
       const { loadConfig } = await import('./config.js');
-      expect(() => loadConfig()).toThrow(/Unknown tier_preset "ultra-cheap"/);
+      const config = loadConfig();
+      expect(config.tier_preset).toBe('max-quality');
+      expect(config.routing_mode).toBe('hybrid');
+    });
+
+    it('NEITHER name resolvable → boots on default routing instead of crash-looping', async () => {
+      // REVERSED 2026-08-17 after review (rafael's call). This used to assert the
+      // throw, on the reasoning that with no valid pin to rescue WITH the tenant's
+      // own state is corrupt and belongs in the fail-closed path.
+      //
+      // The two names do not fail independently — they fail TOGETHER in exactly
+      // the skew the pin guard exists for. Pin an instance to an older image (a
+      // routine operation here) and BOTH the tenant's persisted name and the CP's
+      // pin come from a vocabulary that engine does not carry. Throwing there is
+      // the same crash-loop with the same missing exit: the settings UI that would
+      // clear the value is served by the container that will not boot. Fixing the
+      // pin half and leaving this one meant the rescue was weakest precisely when
+      // it was needed.
+      //
+      // An empty preset means what it has always meant — the instance keeps its
+      // own default routing. No tier_set, no unregistered model, so none of the
+      // misbilling the fail-closed throw exists to prevent.
+      writeUserConfig({ tier_preset: 'eu-sovereign' });
+      process.env['LYNOX_TIER_PRESET'] = 'ultra-cheap';
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_preset).toBeUndefined();
+      expect(config.routing_mode).not.toBe('hybrid');
+      expect(config.tier_set).toBeUndefined();
+    });
+
+    it('a VALID pin still rescues rather than clearing — the rescue is not a blanket drop', async () => {
+      // Counter-direction for the clear above: it must fire only when there is
+      // nothing to rescue with. Without this, "always clear the persisted name"
+      // would satisfy the previous test and silently disable the rescue path.
+      writeUserConfig({ tier_preset: 'eu-sovereign' });
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_preset).toBe('efficient');
+      expect(config.routing_mode).toBe('hybrid');
+    });
+
+    it('warns about an ignored pin even when a tenant preset wins', async () => {
+      // The warn used to sit inside the seed branch, which a tenant-chosen preset
+      // skips. During a fleet-wide bad pin that meant the log lines appeared only
+      // on the subset that would have adopted it — so an operator could not even
+      // count the affected instances from stdout.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        writeUserConfig({ tier_preset: 'max-quality' });
+        process.env['LYNOX_TIER_PRESET'] = 'ultra-cheap';
+        const { loadConfig } = await import('./config.js');
+        expect(loadConfig().tier_preset).toBe('max-quality');
+        expect(warn.mock.calls.flat().join(' ')).toContain('ultra-cheap');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('warns when a preset RESOLVES but none of its slots can be backed', async () => {
+      // The expensive case, and the one the ignore-warning cannot cover: the name
+      // is valid, so nothing above fires, while every band silently moves to the
+      // base model. Left unsaid, this is invisible until the invoice.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        process.env['LYNOX_BILLING_TIER'] = 'managed';
+        process.env['ANTHROPIC_API_KEY'] = 'cp-key';
+        process.env['LYNOX_TIER_PRESET'] = 'efficient';
+        delete process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'];
+        delete process.env['FIREWORKS_API_KEY'];
+        const { loadConfig } = await import('./config.js');
+        expect(loadConfig().tier_preset).toBeUndefined();
+        expect(warn.mock.calls.flat().join(' ')).toContain('none of its slots could be backed');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('does NOT warn when a preset resolves AND its slots are backed', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        process.env['LYNOX_BILLING_TIER'] = 'managed';
+        process.env['ANTHROPIC_API_KEY'] = 'cp-key';
+        process.env['LYNOX_MANAGED_FIREWORKS_ENABLED'] = '1';
+        process.env['FIREWORKS_API_KEY'] = 'fw-key';
+        process.env['LYNOX_TIER_PRESET'] = 'efficient';
+        const { loadConfig } = await import('./config.js');
+        expect(loadConfig().tier_preset).toBe('efficient');
+        expect(warn.mock.calls.flat().join(' ')).not.toContain('could be backed');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('escapes AND bounds the pin name it prints — both, and by code point', async () => {
+      // Two properties, both previously unpinned. The LENGTH bound survived being
+      // deleted (the old fixture was 27 characters), and the character handling
+      // stripped rather than escaped — which renamed an unresolvable pin into a
+      // valid one in the very line that calls it unknown.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        // U+2028 is a JS line terminator: the forged-log-line threat the bound was
+        // justified by, and exactly what a C0-only class lets through.
+        process.env['LYNOX_TIER_PRESET'] = 'bad\u2028[lynox] FATAL: fake\u0001' + 'x'.repeat(200);
+        const { loadConfig } = await import('./config.js');
+        loadConfig();
+        const printed = warn.mock.calls.flat().join(' ');
+        expect(printed).toContain('bad\\u2028[lynox] FATAL: fake\\u0001');
+        expect(printed).not.toMatch(/[\u0000-\u001F\u0085\u007F\u2028\u2029]/);
+        const shown = /LYNOX_TIER_PRESET="([^"]*)"/.exec(printed)?.[1] ?? '';
+        expect(shown.length).toBeLessThanOrEqual(64);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('does NOT warn when the pin resolves', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        process.env['LYNOX_TIER_PRESET'] = 'efficient';
+        const { loadConfig } = await import('./config.js');
+        loadConfig();
+        expect(warn.mock.calls.flat().join(' ')).not.toContain('LYNOX_TIER_PRESET');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('an unknown tier_preset name is dropped with a warning, not fatal', async () => {
+      // The sibling of the reversal above, same reasoning: an unknown NAME has no
+      // misbill to guard against, so failing closed only costs the boot. The
+      // fail-closed throw that DOES guard money — a preset that resolves but names
+      // an unregistered model — is the test below, and it is untouched.
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      try {
+        writeUserConfig({ tier_preset: 'ultra-cheap' });
+        const { loadConfig } = await import('./config.js');
+        const config = loadConfig();
+        expect(config.tier_preset).toBeUndefined();
+        expect(warn.mock.calls.flat().join(' ')).toContain('ultra-cheap');
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     it('a preset referencing an UNREGISTERED model FAILS CLOSED (no Opus-rate FALLBACK misbill)', async () => {
