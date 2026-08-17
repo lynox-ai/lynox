@@ -449,21 +449,65 @@ export function loadConfig(): LynoxUserConfig {
   // key-custody flag (managed/managed_pro) so the managed tier_set allowlist can
   // gate on it. Canonical LYNOX_BILLING_TIER, legacy LYNOX_MANAGED_MODE alias.
   if (cpSuppliesLLMKey(readEnvAlias('LYNOX_BILLING_TIER'))) merged.cp_supplied = true;
-  // CP-pinned preset (`LYNOX_TIER_PRESET`) — a LOCK, not a seed: it overwrites a
-  // config.json `tier_preset` rather than only filling an empty one. That is the
-  // opposite of `default_tier` above and deliberate. The preset decides WHICH
-  // PROVIDER serves each band, and on the CP-keyed tiers the provider set is both
-  // DPA-disclosed (sub-processors) and paid for by the control plane — so it is an
-  // operator decision, not a tenant preference. The CP emits it only for those
-  // tiers; unset leaves routing exactly as it was, which is what makes an older
-  // engine ignoring this var the pre-change behaviour rather than a silent drift.
+  // CP-pinned preset (`LYNOX_TIER_PRESET`) — a SEED, not a lock: it fills an
+  // EMPTY `tier_preset` and never overwrites one the tenant chose.
   //
-  // Placed BEFORE the expansion below so a pinned name goes through the same
+  // Close to `default_tier` above but NOT the same predicate, and the difference
+  // is deliberate: `default_tier` has no null state, while `tier_preset` is
+  // `.nullable()` so the picker can CLEAR it. `!merged.tier_preset` would
+  // conflate that clear with "never chose" and re-seed over it, so absence and
+  // an explicit null are handled separately below. The seed also RESCUES an
+  // unresolvable persisted name, which `default_tier` never has to.
+  //
+  // It used to overwrite, argued as "the preset picks the PROVIDER, and on the
+  // CP-keyed tiers that set is DPA-disclosed and CP-paid, so it is an operator
+  // decision". Two things broke that argument, both measured on staging
+  // 2026-08-17 against a live CP pin:
+  //  1. It was never a lock in the direction that mattered. A tenant writing
+  //     explicit `tier_set` slots already beat the pin, because the expansion
+  //     below spreads config.json slots OVER the preset's. So the "operator
+  //     decision" was enforced against the settings picker and nothing else.
+  //  2. Against the picker it did not fail loudly, it failed SILENTLY. The write
+  //     gate accepted the tenant's preset (200), it persisted, `/api/config`
+  //     reported it as their setting — and the loader discarded it. The settings
+  //     surface showed a selection that did nothing, next to an `active_model`
+  //     that disagreed with it, with `locks.tier_preset` unset because that
+  //     channel only ever described preset AVAILABILITY.
+  // Seeding removes both: the tenant's choice takes effect, so the surface stops
+  // lying, and the pin still decides for every tenant who has not chosen — which
+  // is the case it was actually built for (an instance sitting on default
+  // Anthropic routing while a paid-for provider went unused).
+  //
+  // Placed BEFORE the expansion below so a seeded name goes through the same
   // fail-closed validation as a config.json one — an unknown preset must throw
   // for the CP too, not resolve to something else.
-  const envPreset = process.env['LYNOX_TIER_PRESET'];
-  if (envPreset !== undefined && envPreset.trim() !== '') {
-    merged.tier_preset = envPreset.trim();
+  //
+  // A blank tenant value is not a choice. Left as-is it would suppress the seed
+  // AND reach the fail-closed expander below, which THROWS — and the engine
+  // ctor's loadConfig() has no catch, so an effectively empty field would
+  // crash-loop the container. Normalized away before anything reads it.
+  if (typeof merged.tier_preset === 'string' && merged.tier_preset.trim() === '') {
+    delete merged.tier_preset;
+  }
+  const envPreset = process.env['LYNOX_TIER_PRESET']?.trim();
+  if (envPreset !== undefined && envPreset !== '') {
+    const chosen = merged.tier_preset;
+    if (chosen === null) {
+      // An explicit `null` is the picker's CLEAR — the schema is `.nullable()`
+      // precisely so it can express "no preset". That IS a choice, so the seed
+      // must not overwrite it. (Distinct from absent: `!chosen` would conflate
+      // the two, which is why this is not the `!merged.tier_preset` shorthand.)
+    } else if (chosen === undefined || !expandTierPreset(chosen)) {
+      // Absent → seed, the normal case. Present but UNRESOLVABLE → the pin also
+      // RESCUES, and that half is load-bearing: while the pin overwrote, it
+      // masked any stale name in config.json. Without the rescue, retiring a
+      // preset from TIER_PRESETS would crash-loop every tenant who had it
+      // persisted, with no way back — the settings UI needed to clear it is
+      // served by the container that will not boot. The ladder was reshaped
+      // twice in one week and `eu-sovereign` was drafted and pulled, so this is
+      // churn that actually happens.
+      merged.tier_preset = envPreset;
+    }
   }
   // Named hybrid strategy (model-presets, W2): a `tier_preset` from config.json
   // materializes to {routing_mode:'hybrid', tier_set} from the shared TIER_PRESETS

@@ -4570,8 +4570,9 @@ export class LynoxHTTPApi {
       const activeTier = config.default_tier ?? 'balanced';
       // The tier_set the ENGINE routes on, taken from the loader instead of
       // re-derived here. `readUserConfig()` is file-only (config.ts:640), while
-      // `loadConfig()` also merges the CP-pinned `LYNOX_TIER_PRESET` — whose own
-      // comment calls it "a LOCK, not a seed" — and `LYNOX_TIER_SET_JSON`, then
+      // `loadConfig()` also merges the CP-pinned `LYNOX_TIER_PRESET` — a SEED
+      // since 2026-08-17: it fills an empty `tier_preset` and rescues an
+      // unresolvable one, but a tenant pick wins — and `LYNOX_TIER_SET_JSON`, then
       // applies the managed constraints. Re-deriving from config.json misses that
       // whole channel: on a CP-pinned preset it reports the base provider's model,
       // and where config.json and the CP env disagree it makes `active_model` and
