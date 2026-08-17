@@ -19,6 +19,7 @@ import { GateRejectedError, GateExpiredError } from '../types/orchestration.js';
 import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, DEFAULT_PROMPT_BUDGET } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
+import { parallelStepCapFor } from './validate.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
 
@@ -536,11 +537,18 @@ async function runParallel(
       const step = stepsById.get(stepId)!;
       return executeStep(step, manifest, state, config, agentsDir, options, stepCounters, stepRows);
     };
-    const cap = options.limits?.maxParallelSteps;
-    // Unset (or non-positive) = unbounded: every step of the phase launches at
-    // once (the existing v1.1 behaviour — the limit-less parallel test pins it).
-    // Set → bound simultaneous execution via a worker pool.
-    const settled = (cap !== undefined && cap > 0)
+    // UNSET = unbounded: every step of the phase launches at once (the existing
+    // v1.1 behaviour — the limit-less parallel test pins it). SET → bound
+    // simultaneous execution via a worker pool.
+    //
+    // The normalization matters. This used to read `cap !== undefined && cap > 0`,
+    // which lumped a MALFORMED value in with an absent one: `0`, `-1` and `NaN`
+    // all failed `> 0` and fell through to the unbounded branch. A caller who
+    // asks for a bound and supplies nonsense would then get FULL fan-out — the
+    // one outcome a limiter must never produce. `parallelStepCapFor` maps a
+    // present-but-malformed value to the tightest bound (1) instead.
+    const cap = parallelStepCapFor(options.limits?.maxParallelSteps, 1);
+    const settled = cap !== undefined
       ? await mapAllSettledWithConcurrency(phase.stepIds, cap, runStep)
       : await Promise.allSettled(phase.stepIds.map(runStep));
 

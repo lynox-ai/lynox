@@ -1,7 +1,7 @@
 import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier, IAgent } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { randomUUID } from 'node:crypto';
-import { validateManifest, maxStepsFor } from '../../orchestrator/validate.js';
+import { validateManifest, maxStepsFor, parallelStepCapFor } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
@@ -549,16 +549,30 @@ export interface RunSavedWorkflowResult {
  */
 const DEFAULT_HEADLESS_WALL_CLOCK_MS = 30 * 60_000; // 30 minutes
 const DEFAULT_HEADLESS_MAX_ITERATIONS = 50;          // backstop above MAX_STEPS
+/** Width a MALFORMED stored `maxParallelSteps` falls back to, on both the
+ *  headless and the in-session resolver. Shared so the two cannot drift into
+ *  disagreeing about the same stored blob. */
+const DEFAULT_MAX_PARALLEL_STEPS = 5; // backpressure — bounds per-phase fan-out
 
 /** Merge a workflow's stored limits with the headless defaults (unset → default;
- *  `maxSpendUsd` stays opt-in; `maxParallelSteps` passes through only when set —
- *  an unattended run defaulting to unbounded fan-out is an operator policy
- *  choice, not a bug, so no default is imposed here). */
+ *  `maxSpendUsd` stays opt-in; an UNSET `maxParallelSteps` still passes through
+ *  as unbounded — an unattended run defaulting to unbounded fan-out is an
+ *  operator policy choice, not a bug, so no default is imposed on absence).
+ *
+ *  A MALFORMED stored width is a different thing from an absent one and gets the
+ *  same normalization as the in-session path. Without it this resolver handed
+ *  the raw value to the executor, whose fallback is `1` — so the identical
+ *  stored blob ran at width 5 in-session and fully SERIAL headless. That is not
+ *  academic here: the headless path always carries a 30-minute wall clock
+ *  (above) and `workflowBoundExceeded` re-checks it at every phase boundary, so
+ *  serializing a multi-phase run can turn a completing run into a wall-clock
+ *  ABORT. Note also that `null` — not `NaN` — is the malformed form that can
+ *  actually reach here: `JSON.stringify` writes both NaN and Infinity as null. */
 function resolveHeadlessLimits(stored: WorkflowLimits | undefined): WorkflowLimits {
   return {
     maxWallClockMs: stored?.maxWallClockMs ?? DEFAULT_HEADLESS_WALL_CLOCK_MS,
     maxIterations: stored?.maxIterations ?? DEFAULT_HEADLESS_MAX_ITERATIONS,
-    maxParallelSteps: stored?.maxParallelSteps,
+    maxParallelSteps: parallelStepCapFor(stored?.maxParallelSteps, DEFAULT_MAX_PARALLEL_STEPS),
     maxSpendUsd: stored?.maxSpendUsd,
   };
 }
@@ -584,12 +598,16 @@ function resolveHeadlessLimits(stored: WorkflowLimits | undefined): WorkflowLimi
  * and `maxSpendUsd` pass through only when set.
  */
 const DEFAULT_INSESSION_MAX_ITERATIONS = 50; // defense-in-depth above MAX_STEPS=20
-const DEFAULT_INSESSION_MAX_PARALLEL_STEPS = 5; // backpressure — bounds per-phase fan-out
 
 function resolveInSessionLimits(stored: WorkflowLimits | undefined): WorkflowLimits {
   return {
     maxIterations: stored?.maxIterations ?? DEFAULT_INSESSION_MAX_ITERATIONS,
-    maxParallelSteps: stored?.maxParallelSteps ?? DEFAULT_INSESSION_MAX_PARALLEL_STEPS,
+    // `??` alone was not enough: it is NULLISH, so a stored `0`, `-1` or `null`
+    // survived it and then failed the executor's `> 0` test, silently turning
+    // the backpressure limit OFF for that workflow. An in-session run always
+    // wants a bound, so both an absent and a malformed width land on the default.
+    maxParallelSteps: parallelStepCapFor(stored?.maxParallelSteps, DEFAULT_MAX_PARALLEL_STEPS)
+      ?? DEFAULT_MAX_PARALLEL_STEPS,
     maxWallClockMs: stored?.maxWallClockMs,
     maxSpendUsd: stored?.maxSpendUsd,
   };

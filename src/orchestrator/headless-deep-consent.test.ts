@@ -82,19 +82,78 @@ describe('headlessStepModelOverride (pure)', () => {
       .toThrow(/cannot run autonomously without explicit consent/);
   });
 
-  it('strips control characters from the refused id in the error surface', () => {
-    const pinned = getModelId('deep', PROVIDER);
-    const poisoned = pinned + '\nX-Injected: 1';
-    try {
-      headlessStepModelOverride(poisoned, 'fast', 'autonomous');
-      expect.unreachable('must throw');
-    } catch (err) {
-      expect((err as Error).message).not.toContain('\n');
-    }
+  it('a control-char-poisoned id never reaches the refusal, so it passes through unchanged', () => {
+    // This replaces a test that could not fail. It read:
+    //   try { headlessStepModelOverride(poisoned, …); expect.unreachable('must throw'); }
+    //   catch (err) { expect((err as Error).message).not.toContain('\n'); }
+    // `expect.unreachable`'s OWN error landed in that same catch, and "must
+    // throw" contains no newline — so the assertion passed, the refusal branch
+    // was never executed, and deleting the sanitizer left the suite green.
+    //
+    // The honest fact: refusal requires a REGISTERED id (optionally date-
+    // suffixed), and no registry literal contains a control character, so the
+    // poisoned id takes the unknown-band pass-through like any local pin.
+    const poisoned = getModelId('deep', PROVIDER) + '\nX-Injected: 1';
+    expect(() => headlessStepModelOverride(poisoned, 'fast', 'autonomous')).not.toThrow();
+    expect(headlessStepModelOverride(poisoned, 'fast', 'autonomous')).toBe(poisoned);
+  });
+
+  it('the refused-id error surface can only carry a registry literal', () => {
+    // What the deleted test was reaching for, asserted where it is actually
+    // decidable. This is the tripwire for the two widenings already discussed in
+    // the module docs — pulling date normalization into `normalizeModelId`, or
+    // adopting spawn's "unknown ⇒ deep": either makes this branch live on
+    // arbitrary strings, and then the sanitizer needs coverage BEFORE it lands.
+    const dated = getModelId('deep', PROVIDER) + '-20260601';
+    expect(() => headlessStepModelOverride(dated, 'fast', 'autonomous'))
+      .toThrow(/cannot run autonomously without explicit consent/);
+    let msg = '';
+    try { headlessStepModelOverride(dated, 'fast', 'autonomous'); } catch (err) { msg = (err as Error).message; }
+    // A fallback message (e.g. from a missing refusal) fails BOTH of these.
+    expect(msg).toContain(dated);
+    expect(msg).not.toMatch(/[\u0000-\u001f\u007f]/);
   });
 
   it('passes an unknown-band raw id when autonomous (self-host local pins)', () => {
     expect(headlessStepModelOverride('my-local-gateway-model', 'fast', 'autonomous')).toBe('my-local-gateway-model');
+  });
+
+  it('refuses a DATE-SUFFIXED deep model id — "unknown" must not cover a dated snapshot', () => {
+    // normalizeModelId strips only the Vertex `@YYYYMMDD` form, so an
+    // Anthropic-style dash-dated snapshot of a registered deep model missed the
+    // registry and took the unknown-band branch, which PASSES headless. An
+    // operator pinning a dated Opus in a step would have run it autonomously at
+    // the deep rate with no consent (on any instance without a max_tier).
+    const dated = getModelId('deep', PROVIDER) + '-20260601';
+    expect(() => headlessStepModelOverride(dated, 'fast', 'autonomous'))
+      .toThrow(/cannot run autonomously without explicit consent/);
+  });
+
+  it('still passes a dated id whose BASE is not a registered deep model', () => {
+    // The counter-direction, and the reason this is a suffix-aware lookup rather
+    // than the spawn side's "unknown ⇒ deep": a local pin that merely happens to
+    // carry a date must keep working, or every self-host autonomous workflow on
+    // a versioned local model breaks. Both of these DO carry an 8-digit tail, so
+    // the suffix branch actually engages and the base lookup is what decides.
+    expect(headlessStepModelOverride('my-local-gateway-model-20260601', 'fast', 'autonomous'))
+      .toBe('my-local-gateway-model-20260601');
+    expect(headlessStepModelOverride('llama-3-70b-20260601', 'fast', 'autonomous'))
+      .toBe('llama-3-70b-20260601');
+  });
+
+  it('the suffix branch is 8 DIGITS, not a validated date — stated, not implied', () => {
+    // Honest scope. The strip is `-\d{8}$`; it cannot tell a date from any eight
+    // digits, so a deep base wearing a nonsense tail is refused too. That is the
+    // fail-closed direction and therefore fine, but it must not be described as
+    // "date-aware" anywhere — an earlier version of this test claimed exactly
+    // that while feeding it an input with no 8-digit tail at all, so nothing
+    // checked either half of the claim.
+    const deep = getModelId('deep', PROVIDER);
+    expect(() => headlessStepModelOverride(`${deep}-99999999`, 'fast', 'autonomous')).toThrow();
+    expect(() => headlessStepModelOverride(`${deep}-00000000`, 'fast', 'autonomous')).toThrow();
+    // Seven or nine digits do not engage the branch — the id stays unknown.
+    expect(headlessStepModelOverride(`${deep}-1234567`, 'fast', 'autonomous')).toBe(`${deep}-1234567`);
+    expect(headlessStepModelOverride(`${deep}-123456789`, 'fast', 'autonomous')).toBe(`${deep}-123456789`);
   });
 
   it('returns non-deep requests untouched when autonomous', () => {

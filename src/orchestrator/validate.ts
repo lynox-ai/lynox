@@ -42,6 +42,40 @@ export function maxStepsFor(config?: { max_workflow_steps?: number | undefined }
   return Math.min(Math.trunc(requested), ABSOLUTE_MAX_STEPS);
 }
 
+/**
+ * Normalize a `WorkflowLimits.maxParallelSteps` request into either a positive
+ * integer bound or `undefined` (= unbounded).
+ *
+ * ABSENT means unbounded: that is the documented v1.1 phase behaviour, and the
+ * limit-less parallel test pins it. A value that IS present, however, is a
+ * request for a bound — so a malformed one (0, negative, NaN, Infinity, a
+ * fraction below 1) must never resolve to "no bound at all". That is the
+ * fail-open shape {@link maxStepsFor} already avoids one screen above, and it
+ * is worth avoiding twice: a limiter that silently disables itself on a bad
+ * value is more dangerous than no limiter, because callers believe it is there.
+ *
+ * Malformed input therefore falls back to `fallback`, which each call site
+ * picks for its own layer: the resolvers pass the default width, the executor
+ * passes `1` (the tightest bound — a caller who asked for a limit and supplied
+ * nonsense gets the safe direction, never full fan-out).
+ *
+ * `Infinity` is NOT malformed. It is the idiomatic JS way to say "no limit",
+ * and the pre-clamp executor honoured it exactly (`Math.min(Infinity, N)` = N =
+ * full fan-out). Folding it into the malformed branch would hand the caller who
+ * asked MOST explicitly for no bound the TIGHTEST one — the safe-direction rule
+ * pointing exactly backwards. `-Infinity` is nonsense, not a sentinel, and
+ * still takes the fallback.
+ */
+export function parallelStepCapFor(
+  requested: number | undefined,
+  fallback: number,
+): number | undefined {
+  if (requested === undefined) return undefined;
+  if (requested === Infinity) return undefined;
+  if (!Number.isFinite(requested) || requested < 1) return fallback;
+  return Math.trunc(requested);
+}
+
 const ConditionOperators = ['lt', 'gt', 'eq', 'neq', 'gte', 'lte', 'exists', 'not_exists', 'contains'] as const;
 
 const ManifestConditionSchema = z.object({
