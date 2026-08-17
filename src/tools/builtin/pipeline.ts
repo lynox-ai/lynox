@@ -1,7 +1,7 @@
 import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier, IAgent } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { randomUUID } from 'node:crypto';
-import { validateManifest, maxStepsFor } from '../../orchestrator/validate.js';
+import { validateManifest, maxStepsFor, parallelStepCapFor } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
@@ -589,7 +589,12 @@ const DEFAULT_INSESSION_MAX_PARALLEL_STEPS = 5; // backpressure — bounds per-p
 function resolveInSessionLimits(stored: WorkflowLimits | undefined): WorkflowLimits {
   return {
     maxIterations: stored?.maxIterations ?? DEFAULT_INSESSION_MAX_ITERATIONS,
-    maxParallelSteps: stored?.maxParallelSteps ?? DEFAULT_INSESSION_MAX_PARALLEL_STEPS,
+    // `??` alone was not enough: it is NULLISH, so a stored `0`, `-1` or `NaN`
+    // survived it and then failed the executor's `> 0` test, silently turning
+    // the backpressure limit OFF for that workflow. An in-session run always
+    // wants a bound, so a malformed stored width falls back to the default.
+    maxParallelSteps: parallelStepCapFor(stored?.maxParallelSteps, DEFAULT_INSESSION_MAX_PARALLEL_STEPS)
+      ?? DEFAULT_INSESSION_MAX_PARALLEL_STEPS,
     maxWallClockMs: stored?.maxWallClockMs,
     maxSpendUsd: stored?.maxSpendUsd,
   };

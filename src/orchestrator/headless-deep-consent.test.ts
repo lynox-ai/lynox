@@ -97,6 +97,28 @@ describe('headlessStepModelOverride (pure)', () => {
     expect(headlessStepModelOverride('my-local-gateway-model', 'fast', 'autonomous')).toBe('my-local-gateway-model');
   });
 
+  it('refuses a DATE-SUFFIXED deep model id — "unknown" must not cover a dated snapshot', () => {
+    // normalizeModelId strips only the Vertex `@YYYYMMDD` form, so an
+    // Anthropic-style dash-dated snapshot of a registered deep model missed the
+    // registry and took the unknown-band branch, which PASSES headless. An
+    // operator pinning a dated Opus in a step would have run it autonomously at
+    // the deep rate with no consent (on any instance without a max_tier).
+    const dated = getModelId('deep', PROVIDER) + '-20260601';
+    expect(() => headlessStepModelOverride(dated, 'fast', 'autonomous'))
+      .toThrow(/cannot run autonomously without explicit consent/);
+  });
+
+  it('still passes a dated id whose BASE is not a registered deep model', () => {
+    // The counter-direction, and the reason this is a suffix-aware lookup rather
+    // than the spawn side's "unknown ⇒ deep": a local pin that merely happens to
+    // carry a date must keep working, or every self-host autonomous workflow on
+    // a versioned local model breaks.
+    expect(headlessStepModelOverride('my-local-gateway-model-20260601', 'fast', 'autonomous'))
+      .toBe('my-local-gateway-model-20260601');
+    // …and an 8-digit tail that is not a date suffix at all is untouched too.
+    expect(headlessStepModelOverride('llama-3-70b', 'fast', 'autonomous')).toBe('llama-3-70b');
+  });
+
   it('returns non-deep requests untouched when autonomous', () => {
     expect(headlessStepModelOverride('fast', 'fast', 'autonomous')).toBe('fast');
     expect(headlessStepModelOverride(undefined, 'balanced', 'autonomous')).toBeUndefined();

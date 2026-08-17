@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateManifest, assertPipelineModeIsValid, assertPlannedPipelineIsValid, AutonomousPipelineViolation, MAX_STEPS, ABSOLUTE_MAX_STEPS, maxStepsFor } from './validate.js';
+import { validateManifest, assertPipelineModeIsValid, assertPlannedPipelineIsValid, AutonomousPipelineViolation, MAX_STEPS, ABSOLUTE_MAX_STEPS, maxStepsFor, parallelStepCapFor } from './validate.js';
 import type { InlinePipelineStep, PlannedPipeline } from '../types/index.js';
 
 const validManifest = {
@@ -454,5 +454,35 @@ describe('maxStepsFor', () => {
     expect(maxStepsFor({ max_workflow_steps: NaN })).toBe(MAX_STEPS); // NaN disables the cap silently
     expect(maxStepsFor({ max_workflow_steps: 40 })).toBe(40);         // valid override
     expect(maxStepsFor({ max_workflow_steps: 5000 })).toBe(ABSOLUTE_MAX_STEPS); // clamped to sanity ceiling
+  });
+});
+
+describe('parallelStepCapFor', () => {
+  it('keeps ABSENT meaning unbounded — the documented v1.1 phase behaviour', () => {
+    // The one case that must stay `undefined`: no limits object at all means
+    // "launch the whole phase", which the limit-less parallel test pins.
+    expect(parallelStepCapFor(undefined, 5)).toBeUndefined();
+  });
+
+  it('never lets a MALFORMED width mean "no bound at all"', () => {
+    // The regression this exists for: `cap > 0` treated every one of these as
+    // "unset" and fell through to unbounded fan-out. A present value is a
+    // REQUEST for a bound, so the malformed forms must resolve to the fallback.
+    for (const bad of [0, -1, -0.5, NaN, Infinity, -Infinity]) {
+      expect(parallelStepCapFor(bad, 5), `maxParallelSteps: ${String(bad)}`).toBe(5);
+    }
+  });
+
+  it('passes a valid width through, truncated to a whole number of workers', () => {
+    expect(parallelStepCapFor(3, 5)).toBe(3);
+    expect(parallelStepCapFor(1, 5)).toBe(1);
+    expect(parallelStepCapFor(2.9, 5)).toBe(2); // a worker pool is integral
+  });
+
+  it('honours the caller-supplied fallback, so each layer picks its own safe width', () => {
+    // The executor passes 1 (tightest bound); the in-session resolver passes its
+    // default. Same helper, different safe direction per layer.
+    expect(parallelStepCapFor(0, 1)).toBe(1);
+    expect(parallelStepCapFor(0, 5)).toBe(5);
   });
 });

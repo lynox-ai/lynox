@@ -408,6 +408,72 @@ describe('runManifest — v1.1 parallel execution', () => {
     expect(maxActive).toBeLessThanOrEqual(3); // backpressure — kills bare allSettled
   });
 
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['NaN', NaN],
+  ])('a %s maxParallelSteps does NOT fall through to full fan-out', async (_label, bad) => {
+    // The fail-open this closes: the executor used to test `cap !== undefined &&
+    // cap > 0`, and every one of these values fails `> 0`, so a caller who ASKED
+    // for a bound and supplied nonsense got the unbounded branch — the one
+    // outcome a limiter must never produce. Present-but-malformed now resolves to
+    // the tightest bound (1), so the phase runs serially instead of all at once.
+    const manifest: Manifest = {
+      manifest_version: '1.1',
+      name: 'malformed-cap',
+      triggered_by: 'test',
+      context: {},
+      agents: Array.from({ length: 8 }, (_, i) => ({
+        id: `s${i}`, agent: `agent-${i}`, runtime: 'mock' as const,
+      })),
+      gate_points: [],
+      on_failure: 'stop',
+    };
+    let active = 0;
+    let maxActive = 0;
+    const hooks: RunHooks = {
+      onStepStart: () => { active++; maxActive = Math.max(maxActive, active); },
+      onStepComplete: () => { active--; },
+    };
+    const mockResponses = new Map(manifest.agents.map((a) => [a.agent, 'r']));
+    const state = await runManifest(manifest, CONFIG, {
+      mockResponses,
+      hooks,
+      limits: { maxParallelSteps: bad },
+    });
+    // Still a correct run — the clamp bounds width, it never drops work.
+    expect(state.status).toBe('completed');
+    expect(state.outputs.size).toBe(8);
+    expect(maxActive).toBe(1);
+  });
+
+  it('an ABSENT maxParallelSteps still means unbounded (the v1.1 contract)', async () => {
+    // The counter-direction of the test above: the clamp must not turn "no
+    // limits declared" into a bound. Without this, tightening the malformed case
+    // could silently serialize every existing limit-less workflow.
+    const manifest: Manifest = {
+      manifest_version: '1.1',
+      name: 'no-cap',
+      triggered_by: 'test',
+      context: {},
+      agents: Array.from({ length: 8 }, (_, i) => ({
+        id: `s${i}`, agent: `agent-${i}`, runtime: 'mock' as const,
+      })),
+      gate_points: [],
+      on_failure: 'stop',
+    };
+    let active = 0;
+    let maxActive = 0;
+    const hooks: RunHooks = {
+      onStepStart: () => { active++; maxActive = Math.max(maxActive, active); },
+      onStepComplete: () => { active--; },
+    };
+    const mockResponses = new Map(manifest.agents.map((a) => [a.agent, 'r']));
+    const state = await runManifest(manifest, CONFIG, { mockResponses, hooks });
+    expect(state.status).toBe('completed');
+    expect(maxActive).toBe(8);
+  });
+
   it('diamond dependency: D receives both B and C outputs', async () => {
     const manifest: Manifest = {
       manifest_version: '1.1',

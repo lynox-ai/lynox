@@ -1440,6 +1440,45 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     expect(limits?.maxSpendUsd).toBeUndefined();    // opt-in (Session cap bounds it)
   });
 
+  it('in-session run replaces a MALFORMED stored maxParallelSteps with the default', async () => {
+    // `??` is nullish, so a stored 0 / -1 / NaN survived it and reached the
+    // executor, where it failed the old `cap > 0` test and turned backpressure
+    // OFF for that workflow. The executor now clamps a malformed width to 1, but
+    // that would silently SERIALIZE the run; the resolver is what restores the
+    // intended default width, so this assertion is what pins the resolver.
+    const id = 'wf-malformed-cap';
+    storePipeline(id, {
+      id, name: 'malformed', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: false, mode: 'autonomous',
+      parameters: [],
+      limits: { maxParallelSteps: 0 },
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id }, makePipelineAgent());
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBe(5); // NOT 0, and NOT the executor's serial fallback of 1
+  });
+
+  it('in-session run still honours a VALID stored maxParallelSteps', async () => {
+    // Counter-direction: the clamp must not flatten every stored width to the
+    // default — a workflow that deliberately stored 2 keeps 2.
+    const id = 'wf-valid-cap';
+    storePipeline(id, {
+      id, name: 'valid', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: false, mode: 'autonomous',
+      parameters: [],
+      limits: { maxParallelSteps: 2 },
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id }, makePipelineAgent());
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBe(2);
+  });
+
   it('threads the parent agent secretStore into the run options (value, not just key)', async () => {
     // The security fix: run_workflow forwards agent.secretStore so each step
     // sub-agent's tools resolve `secret:NAME` refs + fire the fail-loud guard —
