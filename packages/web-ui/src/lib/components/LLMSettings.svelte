@@ -136,9 +136,16 @@
 		// routing_mode === 'hybrid'. An unset tier falls back to the base provider.
 		tier_set?: TierSet;
 		// Named hybrid strategy (model-presets W4). Config-sugar: the engine expands
-		// it to {routing_mode:'hybrid', tier_set} at load. Returned verbatim by GET,
-		// so the "Modell-Strategie" cards read it to highlight the active preset.
-		tier_preset?: string;
+		// it to {routing_mode:'hybrid', tier_set} at load, so the "Modell-Strategie"
+		// cards read it to highlight the active preset.
+		//
+		// LOADER-resolved, not the raw config.json — which is what makes `null`
+		// meaningful here rather than merely absent. A CP-pinned instance has no
+		// `tier_preset` in its file at all; while GET reported the file, the cards
+		// fell through to "Eigene" beside an `active_model` that named the preset's
+		// model. `null` now says "the engine is running no preset", and the routing
+		// beside it is the engine's too.
+		tier_preset?: string | null;
 		// Server-persisted disclosure acceptances for non-allowlisted custom
 		// endpoints (host + timestamp). Read from /api/config; replaces the old
 		// per-tab sessionStorage flag so acceptance survives reload / new device.
