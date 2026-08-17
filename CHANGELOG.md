@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.14.0 — 2026-08-17
+## 2.14.0 — 2026-08-18
 
 A routing release. The control plane can now decide which model sits behind
 each band of an instance, which is what makes a customer's bill movable
