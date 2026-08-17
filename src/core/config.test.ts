@@ -218,16 +218,104 @@ describe('Config', () => {
       expect(config.tier_set?.deep?.api_base_url).toContain('fireworks');
     });
 
-    it('the CP pin OVERRIDES a config.json preset — it is a lock, not a seed', async () => {
-      // Deliberately unlike `default_tier`, which only seeds an empty field. The
-      // preset picks the PROVIDER, and on the CP-keyed tiers the provider set is
-      // both DPA-disclosed and CP-paid, so a tenant cannot quietly route around it.
-      writeUserConfig({ tier_preset: 'balanced' });
+    it('a config.json preset WINS over the CP pin — it is a seed, not a lock', async () => {
+      // INVERTED 2026-08-17. This test used to assert the opposite ("it is a lock,
+      // not a seed"), on the argument that the preset picks the PROVIDER and the
+      // provider set is DPA-disclosed + CP-paid, so a tenant must not route around
+      // it. Measured on staging against a live pin, that argument did not survive:
+      // a tenant writing explicit `tier_set` slots ALREADY beat the pin (the
+      // expansion spreads config.json slots over the preset's), so the rule bound
+      // only the settings picker — and there it failed silently, accepting the
+      // write, persisting it, reporting it back, and then discarding it at load.
+      //
+      // Seeding is the intended semantic (rafael 2026-08-17). The counter-direction
+      // — pin still applies when the tenant has NOT chosen — is the test below.
+      writeUserConfig({ tier_preset: 'max-quality' });
       process.env['LYNOX_TIER_PRESET'] = 'efficient';
       const { loadConfig } = await import('./config.js');
       const config = loadConfig();
-      // `efficient` puts Mistral in fast; `balanced` would have put Anthropic there.
-      expect(config.tier_set?.fast?.provider).toBe('openai');
+      // max-quality is all-Anthropic; efficient would have put Fireworks here.
+      expect(config.tier_preset).toBe('max-quality');
+      expect(config.tier_set?.balanced?.provider).toBe('anthropic');
+      expect(config.tier_set?.deep?.api_base_url).toBeUndefined();
+    });
+
+    it('the pin RESCUES an unresolvable persisted preset instead of crash-looping', async () => {
+      // While the pin overwrote, it masked any stale name in config.json. Seeding
+      // removed that by accident and the cost was severe: retiring a preset from
+      // TIER_PRESETS would throw at load for every tenant who had it persisted,
+      // and `loadConfig()` in the engine ctor has no catch — so the container
+      // crash-loops, and the settings UI needed to clear the value is served by
+      // the container that will not boot. Measured on this branch before the fix:
+      // `Unknown tier_preset "eu-sovereign"`. The ladder was reshaped twice in one
+      // week and eu-sovereign was drafted and pulled, so this is real churn.
+      writeUserConfig({ tier_preset: 'eu-sovereign' });
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_preset).toBe('efficient');
+      expect(config.tier_set?.deep?.api_base_url).toContain('fireworks');
+    });
+
+    it('an unresolvable persisted preset with NO pin still FAILS CLOSED', async () => {
+      // The rescue must not become a blanket "unknown names are fine". Without a
+      // pin there is nothing to fall back to, so the fail-closed throw stands.
+      writeUserConfig({ tier_preset: 'eu-sovereign' });
+      delete process.env['LYNOX_TIER_PRESET'];
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/Unknown tier_preset "eu-sovereign"/);
+    });
+
+    it('a BLANK pin cannot rescue — an unresolvable persisted preset still throws', async () => {
+      // Kills the `envPreset !== ''` guard: drop it and the blank pin would be
+      // assigned over the bad name, the expansion would skip on a falsy value,
+      // and a container that should fail loudly would boot on standard routing.
+      writeUserConfig({ tier_preset: 'eu-sovereign' });
+      process.env['LYNOX_TIER_PRESET'] = '   ';
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).toThrow(/Unknown tier_preset "eu-sovereign"/);
+    });
+
+    it('a BLANK config.json preset is not a choice — it neither wins nor throws', async () => {
+      // `min(1)` lets "  " through the schema, and it is truthy, so it used to
+      // suppress the seed AND reach the fail-closed expander: measured
+      // `Unknown tier_preset "  "` on a container that booted fine before.
+      writeUserConfig({ tier_preset: '  ' });
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_preset).toBe('efficient');
+    });
+
+    it('a blank config.json preset with NO pin boots on standard routing, no throw', async () => {
+      writeUserConfig({ tier_preset: '  ' });
+      delete process.env['LYNOX_TIER_PRESET'];
+      const { loadConfig } = await import('./config.js');
+      expect(() => loadConfig()).not.toThrow();
+    });
+
+    it('an explicit null CLEAR is a choice — the pin does NOT re-seed over it', async () => {
+      // The schema is `.nullable()` precisely so the picker can clear
+      // (schemas.ts). `!merged.tier_preset` would read that deliberate clear as
+      // "never chose" and hand the tenant the pin back.
+      writeUserConfig({ tier_preset: null as unknown as string });
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_preset).toBeNull();
+      expect(config.tier_set?.deep?.api_base_url).toBeUndefined();
+    });
+
+    it('the CP pin still applies when the tenant has chosen NOTHING', async () => {
+      // The case the pin was actually built for: an instance sitting on default
+      // routing while a paid-for, DPA-disclosed provider went unused. Seeding must
+      // not break it — without this, "make it overridable" could quietly become
+      // "make it inert", and nobody would notice until a fleet pin did nothing.
+      writeUserConfig({});
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_preset).toBe('efficient');
       expect(config.tier_set?.deep?.api_base_url).toContain('fireworks');
     });
 
