@@ -62,6 +62,42 @@ export interface ReattachTarget {
 }
 
 /**
+ * What a re-attach attempt actually established.
+ *
+ * `no-run` and `unreachable` used to be the same `false`, and the caller drew
+ * "the run never started" from it. They are opposite facts: `no-run` means the
+ * server ANSWERED and has nothing live (so the turn either never started or
+ * already finished), while `unreachable` means we learned nothing at all —
+ * which is the ordinary situation when an SSE stream drops because the network
+ * went away, i.e. precisely when the conflation fires.
+ */
+export type ReattachOutcome = 'took-over' | 'no-run' | 'unreachable';
+
+/**
+ * May a turn that was marked failed WITHOUT server confirmation be re-sent
+ * automatically on reconnect?
+ *
+ * Pure so it can be tested without a store, a network, or a browser. The rule
+ * is default-deny in both unhappy directions, because the cost is asymmetric:
+ * declining to auto-refire leaves the user's own tap-to-retry — which the
+ * failed bubble already offers — while re-firing a turn the server already
+ * answered runs and BILLS it a second time.
+ */
+export function shouldRefireOfflineTurn(probe: {
+	/** Did the transcript probe actually reach the server? */
+	reached: boolean;
+	/** Role of the last persisted message, when it did. */
+	lastRole: string | undefined;
+}): boolean {
+	// Still blind: an auto-refire here would be the same guess that created the
+	// problem, only now it costs a run.
+	if (!probe.reached) return false;
+	// The thread ends on an assistant message: the turn was answered and billed
+	// inside the drop window. Re-sending it is the duplicate.
+	return probe.lastRole !== 'assistant';
+}
+
+/**
  * Pick the re-attach target for `threadId` from the `/api/runs/active` body, or
  * null if none. Same envelope tolerance as `parseActiveRuns` (null/missing
  * `runs`/non-object rows degrade to null, never throw), but keeps `runId` +

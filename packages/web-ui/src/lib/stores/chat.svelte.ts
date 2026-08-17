@@ -25,7 +25,7 @@ import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
-import { selectReattachTarget, type ReattachTarget } from '../utils/active-runs.js';
+import { selectReattachTarget, shouldRefireOfflineTurn, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
 import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
@@ -96,6 +96,14 @@ export interface ChatMessage {
 	queueId?: string;
 	/** Message failed to send (API error, connection lost, etc.) */
 	failed?: boolean;
+	/** The failure above was marked on a GUESS, because neither server probe
+	 *  could be reached — the usual situation when an SSE stream drops due to
+	 *  the network going away. Distinct from a failure the server confirmed:
+	 *  "absent from /runs/active" and "could not ask /runs/active" look the
+	 *  same to the caller, and so do "the transcript says unanswered" and "the
+	 *  transcript was unreachable". The auto-refire on reconnect must re-check
+	 *  with the server before spending money on this one. */
+	failedOffline?: boolean;
 	/** Agent-generated follow-up suggestions (parsed from <follow_ups> block) */
 	followUps?: FollowUpSuggestion[];
 	/** DK-UX: durable-knowledge writes made during this turn, surfaced as inline chips
@@ -560,6 +568,23 @@ let _queuePollController: AbortController | null = null;
 let _userStopEpoch = -1;
 let isOffline = $state(typeof navigator !== 'undefined' ? !navigator.onLine : false);
 
+/** Queue a failed user turn for another send. Extracted so the confirmed and
+ *  the offline-verified paths below re-fire through exactly one place. */
+function refireFailedTurn(msg: ChatMessage): void {
+	msg.failed = false;
+	msg.queued = true;
+	msg.queueId = newQueueId();
+	messageQueue.push({ id: msg.queueId, task: msg.content });
+	chatError = null;
+	// Small delay to let network stabilize
+	setTimeout(() => {
+		if (messageQueue.length > 0) {
+			const next = messageQueue.shift()!;
+			void _executeRun(next.task, next.files, undefined, next.runOptions, next.id);
+		}
+	}, 500);
+}
+
 // Offline detection + auto-retry on reconnect
 if (typeof window !== 'undefined') {
 	window.addEventListener('offline', () => { isOffline = true; });
@@ -568,18 +593,42 @@ if (typeof window !== 'undefined') {
 		// Auto-retry the last failed message
 		const lastFailed = [...messages].reverse().find((m) => m.role === 'user' && m.failed);
 		if (lastFailed && !isStreaming) {
-			lastFailed.failed = false;
-			lastFailed.queued = true;
-			lastFailed.queueId = newQueueId();
-			messageQueue.push({ id: lastFailed.queueId, task: lastFailed.content });
-			chatError = null;
-			// Small delay to let network stabilize
-			setTimeout(() => {
-				if (messageQueue.length > 0) {
-					const next = messageQueue.shift()!;
-					void _executeRun(next.task, next.files, undefined, next.runOptions, next.id);
-				}
-			}, 500);
+			// A turn marked failed WITHOUT server confirmation gets asked about
+			// first. `failedOffline` means both probes were blind, so "failed" was
+			// a guess — and re-POSTing on a guess re-runs and re-bills a turn the
+			// engine may well have finished while we were offline. Now that the
+			// network is back the question is answerable, so answer it.
+			if (lastFailed.failedOffline) {
+				void (async () => {
+					let reached = false;
+					let lastRole: string | undefined;
+					try {
+						const enc = encodeURIComponent(sessionId ?? '');
+						const r = await fetch(`${getApiBase()}/threads/${enc}/messages`);
+						if (r.ok) {
+							reached = true;
+							const md = await r.json() as { messages?: Array<{ role?: string }> };
+							lastRole = md.messages?.at(-1)?.role;
+						}
+					} catch { /* still blind — shouldRefireOfflineTurn declines */ }
+					if (!shouldRefireOfflineTurn({ reached, lastRole })) {
+						// Answered, or still unverifiable. Either way this turn does not
+						// get sent again by itself; the failed bubble keeps its
+						// tap-to-retry, which is the user's explicit decision.
+						if (reached) {
+							lastFailed.failed = false;
+							lastFailed.failedOffline = false;
+							chatError = null;
+							await reconcileThread();
+						}
+						return;
+					}
+					lastFailed.failedOffline = false;
+					refireFailedTurn(lastFailed);
+				})();
+				return;
+			}
+			refireFailedTurn(lastFailed);
 		}
 	});
 	// Flush pending persist on tab close to prevent data loss
@@ -754,16 +803,18 @@ function hasAnyPendingPrompt(): boolean {
  * tested path a manual reload uses (`reattachRun`). Returns true only when the
  * re-attach actually took over the stream.
  */
-async function reattachToActiveRun(sid: string, assistantIdx: number): Promise<boolean> {
+async function reattachToActiveRun(sid: string, assistantIdx: number): Promise<ReattachOutcome> {
 	let target: ReattachTarget | null = null;
 	try {
 		const res = await fetch(`${getApiBase()}/runs/active`);
-		if (!res.ok) return false;
+		if (!res.ok) return 'unreachable';
 		target = selectReattachTarget(await res.json(), sid);
 	} catch {
-		return false; // no way to reach the registry — let the caller fall back
+		return 'unreachable'; // no way to reach the registry — the caller must not
+		// read this as "there is no run"; that conflation is what let a finished,
+		// billed turn be marked failed and then auto re-fired on reconnect.
 	}
-	if (!target) return false; // run already finished/gone — nothing to re-attach to
+	if (!target) return 'no-run'; // registry ANSWERED: run already finished/gone
 	// Restore a prompt that survived the disconnect so the reply routes correctly.
 	await checkPendingPrompt();
 	// Drop an empty in-progress assistant bubble so the re-attach's own lazily
@@ -776,7 +827,7 @@ async function reattachToActiveRun(sid: string, assistantIdx: number): Promise<b
 	const since = lastAppliedSeq > 0 ? lastAppliedSeq : target.lastPersistedSeq;
 	const epochBefore = streamEpoch;
 	await reattachRun(sid, target.runId, since, _resumeGeneration);
-	if (streamEpoch !== epochBefore) return true; // reattachRun took over + owns teardown
+	if (streamEpoch !== epochBefore) return 'took-over'; // reattachRun took over + owns teardown
 	// Non-takeover: the run finished in the tiny /runs/active → /stream gap
 	// (reattachRun 404'd before claiming the stream). We already spliced the empty
 	// bubble and may have restored a now-stale prompt, so reconcile to the
@@ -790,7 +841,7 @@ async function reattachToActiveRun(sid: string, assistantIdx: number): Promise<b
 	pendingPermission = null;
 	pendingTabsPrompt = null;
 	await reconcileThread();
-	return true;
+	return 'took-over';
 }
 
 async function _executeRun(task: string, files?: FileAttachment[], displayText?: string, runOptions?: RunOptions, queueId?: string): Promise<void> {
@@ -1102,9 +1153,11 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	// Otherwise: ask the SERVER whether the run is still live; re-attach to its
 	// resumable stream so the continuation AND any pending prompt recover live —
 	// the user never has to reload from history (the #83 bug).
+	let reconciledAfterDrop = false;
 	if (!sawTerminal && isStreaming && _userStopEpoch !== epoch) {
 		if (sessionId === sid) {
-			if (await reattachToActiveRun(sid, assistantIdx)) {
+			const reattachOutcome = await reattachToActiveRun(sid, assistantIdx);
+			if (reattachOutcome === 'took-over') {
 				return; // the re-attach owns streaming state + persistence + queue drain
 			}
 			// No live run to recover and the stream never reached a terminal
@@ -1125,19 +1178,40 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 				// transcript: only a thread still ending on OUR user message is
 				// honestly unsent.
 				let answered = false;
+				let transcriptReached = false;
 				try {
 					const enc = encodeURIComponent(sid);
 					const r = await fetch(`${getApiBase()}/threads/${enc}/messages`);
 					if (r.ok) {
+						transcriptReached = true;
 						const md = await r.json() as { messages?: Array<{ role?: string }> };
 						answered = md.messages?.at(-1)?.role === 'assistant';
 					}
-				} catch { /* unreachable transcript — fall through to failed */ }
+				} catch { /* unreachable transcript — see failedOffline below */ }
 				if (!answered) {
 					messages.splice(assistantIdx, 1);
-					if (messages[userMsgIdx]) messages[userMsgIdx]!.failed = true;
+					if (messages[userMsgIdx]) {
+						messages[userMsgIdx]!.failed = true;
+						// Mark HOW we know. If neither probe reached the server we are
+						// guessing, and the `online` listener below used to act on that
+						// guess by re-POSTing the turn — re-running and re-billing a run
+						// that may well have completed during the outage. Both probes
+						// failing together is not an edge case: it is the normal shape
+						// of "the network went away", which is also the commonest reason
+						// the SSE stream dropped in the first place.
+						messages[userMsgIdx]!.failedOffline = reattachOutcome === 'unreachable' && !transcriptReached;
+					}
 					chatError = t('chat.error_connection');
 					chatErrorDetail = null;
+				} else {
+					// The run FINISHED in the drop window and its answer is persisted.
+					// Doing nothing here left the empty assistant bubble standing and
+					// the billed answer invisible until a manual reload — the exact
+					// outcome the sibling non-takeover path fixes with reconcileThread()
+					// one screen up. Mirror it.
+					messages.splice(assistantIdx, 1);
+					await reconcileThread();
+					reconciledAfterDrop = true;
 				}
 			}
 		}
@@ -1156,7 +1230,10 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	// followUps live — the text parse must not run (there is no trailer to strip,
 	// and it must not override the structured pills). Text-form output (legacy or
 	// weak models) still lands here.
-	const lastMsg = messages[assistantIdx];
+	// Skipped after a reconcile: `messages` was just replaced from the server, so
+	// `assistantIdx` no longer addresses this turn's bubble — and the reconciled
+	// messages already carry whatever the server persisted.
+	const lastMsg = reconciledAfterDrop ? undefined : messages[assistantIdx];
 	if (lastMsg && lastMsg.role === 'assistant' && lastMsg.content && !lastMsg.followUps) {
 		const parsed = parseFollowUps(lastMsg.content);
 		if (parsed.suggestions.length > 0) {
