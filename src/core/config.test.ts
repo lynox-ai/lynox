@@ -294,10 +294,46 @@ describe('Config', () => {
       expect(() => loadConfig()).not.toThrow();
     });
 
-    it('an explicit null CLEAR is a choice — the pin does NOT re-seed over it', async () => {
-      // The schema is `.nullable()` precisely so the picker can clear
-      // (schemas.ts). `!merged.tier_preset` would read that deliberate clear as
-      // "never chose" and hand the tenant the pin back.
+    it('picking STANDARD sticks — the pin does not silently revert it to hybrid', async () => {
+      // REWRITTEN 2026-08-17. The previous version wrote `{ tier_preset: null }`
+      // straight to disk and passed — but the product's writer CANNOT produce
+      // that state: `PUT /api/config` deletes a null key (http-api.ts, "explicit
+      // null = delete field"). So the green test proved nothing about any
+      // reachable configuration; it was false confidence, the exact class this
+      // file guards against elsewhere.
+      //
+      // This is the state the writer really leaves behind when a tenant clicks
+      // Standard: `buildRoutingUpdate` sends `{routing_mode:'standard',
+      // tier_preset:null}`, the null key is dropped, and `routing_mode` — not
+      // null, therefore persisted — is what remains.
+      writeUserConfig({ routing_mode: 'standard' });
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.routing_mode).toBe('standard');
+      expect(config.tier_preset).toBeUndefined();
+      expect(config.tier_set?.deep?.api_base_url).toBeUndefined();
+    });
+
+    it('a PARTIAL custom tier_set is not quietly completed out of the pin', async () => {
+      // Custom sends `{routing_mode:'hybrid', tier_preset:null, tier_set}`. With
+      // the seed firing, the expander's `{...expanded.tier_set, ...merged.tier_set}`
+      // filled every slot the tenant left empty from the pinned preset — so a
+      // tenant who set only `deep` silently got the pin's fast and balanced.
+      writeUserConfig({ routing_mode: 'hybrid', tier_set: { deep: { provider: 'anthropic', model_id: 'claude-opus-5' } } });
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      const { loadConfig } = await import('./config.js');
+      const config = loadConfig();
+      expect(config.tier_set?.deep?.model_id).toBe('claude-opus-5');
+      expect(config.tier_set?.fast).toBeUndefined();
+      expect(config.tier_set?.balanced).toBeUndefined();
+    });
+
+    it('a hand-edited null tier_preset is still respected (defensive, not reachable)', async () => {
+      // Kept as defence for a config.json edited outside the product — the
+      // schema is `.nullable()`, so the value is representable even though the
+      // writer never emits it. Labelled as unreachable so it is not mistaken for
+      // evidence about the product's own path; the two tests above are that.
       writeUserConfig({ tier_preset: null as unknown as string });
       process.env['LYNOX_TIER_PRESET'] = 'efficient';
       const { loadConfig } = await import('./config.js');

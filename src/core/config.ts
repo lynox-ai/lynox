@@ -492,11 +492,31 @@ export function loadConfig(): LynoxUserConfig {
   const envPreset = process.env['LYNOX_TIER_PRESET']?.trim();
   if (envPreset !== undefined && envPreset !== '') {
     const chosen = merged.tier_preset;
-    if (chosen === null) {
+    // A PERSISTED `routing_mode` is the tenant saying "I picked a routing
+    // strategy", and it is the only signal that survives the write path.
+    //
+    // The picker sends `tier_preset: null` for both Standard and Custom, and the
+    // PUT merge loop DELETES a null key — so by the time the loader runs, "chose
+    // Standard" and "never chose anything" are the same `undefined`, and the
+    // seed silently reverted the tenant to hybrid on the very reload their own
+    // save triggered. `routing_mode` is not null in either message, so it
+    // persists: `'standard'` for Standard, `'hybrid'` for Custom. A tenant who
+    // picks a PRESET sends no `routing_mode` at all — so its presence means
+    // exactly "Standard or Custom was chosen", which is what has to block the
+    // seed. Absent means never chosen, which is the case the pin was built for.
+    //
+    // Read BEFORE the expander below: that sets `merged.routing_mode` itself, so
+    // afterwards this would be reading its own output.
+    const choseOwnRouting = merged.routing_mode !== undefined;
+    if (chosen === null || choseOwnRouting) {
       // An explicit `null` is the picker's CLEAR — the schema is `.nullable()`
       // precisely so it can express "no preset". That IS a choice, so the seed
       // must not overwrite it. (Distinct from absent: `!chosen` would conflate
       // the two, which is why this is not the `!merged.tier_preset` shorthand.)
+      // Reachable by hand-edit only, since the writer deletes the key —
+      // `choseOwnRouting` is what covers the case the product can actually
+      // produce, and it also stops a PARTIAL custom tier_set from being quietly
+      // completed out of the pin by the spread below.
     } else if (chosen === undefined || !expandTierPreset(chosen)) {
       // Absent → seed, the normal case. Present but UNRESOLVABLE → the pin also
       // RESCUES, and that half is load-bearing: while the pin overwrote, it
