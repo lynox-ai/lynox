@@ -1,5 +1,117 @@
 # Changelog
 
+## 2.14.0 — 2026-08-17
+
+A routing release. The control plane can now decide which model sits behind
+each band of an instance, which is what makes a customer's bill movable
+without asking them to change how they work. Everything else in here is what
+that turned out to require: the pin has to be honest about whether it took
+effect, it must never cost the instance its boot, and the money it moves has
+to be metered against the model that actually ran.
+
+### Changed
+- **The control plane can pin a routing preset per instance, and a tenant's own
+  choice still wins.** `LYNOX_TIER_PRESET` names one of the shared presets; the
+  engine expands it to the same `{routing_mode, tier_set}` the settings picker
+  produces. It is a SEED, not a lock: it fills an empty selection and never
+  overwrites one the tenant made. That is a reversal from how it shipped
+  mid-cycle, and the reason is measured rather than argued — as a lock it bound
+  only the picker (a tenant writing explicit slots already beat it) and there it
+  failed silently: the write was accepted, persisted, reported back, and then
+  discarded at load. (#1217, #1220)
+- **An unknown pin is ignored, not fatal.** The name is validated before it is
+  adopted. Previously an unrecognised value reached a fail-closed expander that
+  throws, and `loadConfig()` in the engine constructor has no catch — so a pin
+  the running image did not know took the container down, with the settings UI
+  needed to clear it served by that container. The same now holds for an
+  unresolvable name in the instance's own config: it is dropped with a warning
+  and the instance keeps its default routing. The fail-closed guard that
+  protects money — a preset that resolves but names an unregistered model — is
+  unchanged. (#1223)
+- **The preset ladder is one axis: the main slot.** Two Fireworks sets that
+  differ in exactly that slot, plus an all-Anthropic set. `efficient` →
+  `balanced` buys a stronger main for 3.7× the output price, and the main is
+  the slot that runs every turn, which is why it is the only axis worth a
+  separate preset. A preset name and its table are now two halves the compiler
+  joins, so neither can exist without the other. (#1185, #1187)
+- **A workflow step is priced against the model that ran it.** Step cost, the
+  budget reservation and the persisted `model_id` resolved through the base
+  provider's tier map, so on a hybrid instance they named a model that never
+  ran — roughly a tenfold over-charge against the tenant's included budget
+  under the cheap presets. The comment above the call already claimed this
+  property; the base-provider half had been fixed and the hybrid-slot half
+  missed. (#1221)
+- **The workflow step cap is config-overridable, and in-session runs inherit
+  the same limits as saved ones.** Parallel phase concurrency is bounded, and
+  two fail-open gaps in the spend guards are closed — a malformed width no
+  longer switches backpressure off entirely. (#1204, #1205, #1206, #1216)
+- **`spawn_agent` asks before it spends a deep tier**, with a
+  deny→balanced downgrade instead of an all-or-nothing refusal, and headless
+  runs clamp rather than prompt. The proactive-deep guidance offers the deep
+  tier instead of spawning one. (#1200, #1201, #1202, #1215)
+- **Large chat uploads are stored as files instead of inlined.** A 200k-character
+  paste used to enter the conversation whole and be re-read as a cache write on
+  every subsequent turn. Oversized tool results are parked and recallable rather
+  than dropped. (#1190, #1212)
+- **Model picker labels state the context window**, and `active_model` resolves
+  through the tier_set rather than the base provider map — on a hybrid instance
+  the two used to disagree, and the capability flags beside them inherited the
+  wrong answer. (#1165, #1194)
+- **`GET /api/config` reports the routing strategy the engine runs**, not the
+  raw config file. A pinned instance carries no preset in its file at all, so
+  the response said "no preset" about an engine that was routing one — which is
+  also the surface an operator uses to check that a pin took effect. (#1224)
+
+### Fixed
+- **A display name can no longer add a mail recipient.** A non-ASCII name went
+  out as an RFC-2047 atom in a context whose grammar forbids it, so a name written by
+  someone else could inject an address the consent preview never showed.
+  Found and fixed on the Gmail path, then found again on IMAP/SMTP, where it
+  was worse: recipients went pre-serialised to nodemailer, which re-parses them,
+  and the injected address became the sole envelope recipient. Fixed
+  structurally — addresses are passed as objects — rather than with more
+  escaping. (#1219)
+- **Encoded-words are split at the 75-character limit**, and a From-persona no
+  longer breaks subject encoding. (#1197, #1199)
+- **The engine's own secret files are guarded against agent reads — the ones it
+  actually writes.** The list had been written from the filenames the engine's
+  code creates, which is not the set a deployment ends up with: the container
+  entrypoint writes two of them elsewhere, the conversation store was on no
+  list, and the backup directory holds copies of all of them. Self-host only;
+  managed receives these values as container environment and never materialises
+  the files. (#1164, #1222)
+- **The client does not re-POST a run after an SSE transport failure.** A
+  stream that died with no applied events was treated as "never started" and
+  re-fired, which minted duplicate billed runs out of a transport hiccup. The
+  server is now the authority on whether the run is alive. (#1213)
+- **Durable knowledge is judged by ownership, not by whether a tool ran**, and
+  review chips survive transcript adoption, late arrival and thread resume.
+  A warning fires when durable knowledge is enabled but the model is barely
+  capturing. (#1167, #1169, #1171, #1175, #1179, #1211)
+- **Tool-call recording has one owner** instead of N listeners, records on the
+  failed-run path, and no longer attributes another conversation's calls to
+  this run. (#1180, #1183, #1188)
+- **Files whose name holds a non-ASCII byte are no longer skipped.** (#1184)
+
+### Upgrade and rollback
+No engine-schema migration. Four control-plane migrations from this cycle
+(0050–0053), all additive and idempotent; the vendored wire contract moves with
+this release and its control-plane sync must land before the control-plane
+deploy.
+
+Rolling back to 2.13.0 is safe for the engine: the new config fields are
+optional everywhere, and an older image simply ignores `LYNOX_TIER_PRESET`
+rather than failing on it — that is the pre-change behaviour, not a new one.
+An instance that was pinned keeps routing on its own configuration.
+
+Two known limits are stated rather than left to be discovered. A mail body's
+signature block still collapses onto one line when the model hard-wraps it;
+three separate attempts at a rule that could tell an author's line break from a
+machine wrap were measured wrong in both directions, and shipping any of them
+would have reintroduced mid-sentence breaks. And an ignored pin is reported in
+the API response but no interface renders it yet — the operator-facing signal
+today is a log line.
+
 ## 2.13.0 — 2026-08-09
 
 A cost release. Its origin is one afternoon of real usage: a customer's
