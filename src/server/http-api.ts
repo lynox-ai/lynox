@@ -4699,6 +4699,24 @@ export class LynoxHTTPApi {
       // the CP can't back. Server-authoritative so the client needs no
       // @lynox-ai/core import and the disclosure gate stays honest.
       redacted['available_tier_presets'] = tierPresetSignal;
+      // The strategy fields themselves come from the LOADER, not the raw file.
+      // `redacted` is built from `readUserConfig()` (config.json only), while every
+      // neighbouring field above — `active_model`, `main_chat_tiers` — already reads
+      // `effectiveConfig`. For `tier_preset` that difference is the whole CP channel:
+      // a pinned instance has no `tier_preset` in its config.json at all, so the raw
+      // read reported "no preset" while the engine routed one, and the picker drew
+      // the "Standard" card next to an `active_model` that disagreed with it.
+      //
+      // This is also the surface an operator uses to CHECK that a pin took effect,
+      // which is why it cannot be left reporting the file instead of the engine.
+      // `routing_mode` gets the same treatment for the same reason — the expander
+      // sets it at load, so config.json carries it only for a hand-written hybrid.
+      //
+      // Both are plain vocabulary values (a preset name, `standard`/`hybrid`), never
+      // credentials, so no redaction applies — the `redact` pass above is about
+      // api_keys in `tier_set` slots, which are unaffected.
+      redacted['tier_preset'] = effectiveConfig.tier_preset ?? null;
+      redacted['routing_mode'] = effectiveConfig.routing_mode ?? 'standard';
       // Bugsink-toggle UX requires the page to know whether a DSN is
       // configured (env or vault) without leaking the DSN itself.
       redacted['bugsink_dsn_configured'] = !!(process.env['LYNOX_BUGSINK_DSN'] || secretNames.has('LYNOX_BUGSINK_DSN') || config.bugsink_dsn);

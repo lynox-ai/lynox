@@ -2638,6 +2638,100 @@ describe('LynoxHTTPApi', () => {
       // Same body, same model — the invariant the shared derivation buys.
       const tiers = body['main_chat_tiers'] as Record<string, string> | undefined;
       expect(tiers!['balanced']).toContain('GLM 5.2');
+      // ...and the STRATEGY fields have to come from the same place. The raw file
+      // above says nothing about routing, so reporting the file made this
+      // `standard` right next to a hybrid `active_model` — the picker then drew
+      // "Standard" while the engine routed GLM.
+      expect(body['routing_mode']).toBe('hybrid');
+    });
+
+    it('GET /api/config reports the LOADER preset, not the raw file (CP-pin visibility)', async () => {
+      // The channel a pin travels: `LYNOX_TIER_PRESET` never touches config.json, so
+      // the raw file carries no `tier_preset` at all. While GET reported the file,
+      // an operator checking whether a pin took effect saw "no preset" on an
+      // instance that was routing one — and this is the surface used to check.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({
+          provider: 'anthropic',
+          default_tier: 'balanced',
+          tier_preset: 'efficient',
+          routing_mode: 'hybrid' as const,
+          tier_set: {
+            balanced: {
+              provider: 'openai',
+              model_id: 'accounts/fireworks/models/minimax-m3',
+              api_base_url: 'https://api.fireworks.ai/inference/v1',
+            },
+          },
+        });
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['tier_preset']).toBe('efficient');
+      expect(body['routing_mode']).toBe('hybrid');
+    });
+
+    it('GET /api/config says null for no preset — not merely absent', async () => {
+      // Counter-direction. An overlay that only ever WROTE a name would satisfy the
+      // case above while leaving "the engine runs no preset" indistinguishable from
+      // "nobody asked", which is the ambiguity that started this.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      expect(body).toHaveProperty('tier_preset');
+      expect(body['tier_preset']).toBeNull();
+      expect(body['routing_mode']).toBe('standard');
+    });
+
+    it('no value from the LOADER reaches the body except the declared vocabulary', async () => {
+      // A tripwire on the OUTPUT, added because the two assignments above
+      // establish a pattern: copy a field out of `effectiveConfig` into the
+      // response AFTER the redaction pass. That is safe for a preset name and a
+      // routing mode, and unsafe in general — the loader is a SECRET-BEARING
+      // object. `applyManagedTierSetConstraints` writes live control-plane
+      // provider keys into its `tier_set` slots, and on managed those are the
+      // OPERATOR's credentials, not the tenant's.
+      //
+      // The existing fail-closed guard cannot see this: it constrains the INPUT
+      // of `redactConfigForResponse`, and an assignment after that call is
+      // structurally invisible to it. So the next person to extend this block —
+      // the surrounding comments already reason about "the tier_set the ENGINE
+      // routes on" — would ship those keys with a green suite. This test is what
+      // goes red instead.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({
+          provider: 'anthropic',
+          default_tier: 'balanced',
+          api_key: 'LOADER-TOP-LEVEL-SECRET',
+          tier_preset: 'efficient',
+          routing_mode: 'hybrid' as const,
+          tier_set: {
+            balanced: {
+              provider: 'openai',
+              model_id: 'accounts/fireworks/models/minimax-m3',
+              api_base_url: 'https://api.fireworks.ai/inference/v1',
+              api_key: 'LOADER-SLOT-SECRET',
+            },
+          },
+        });
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      // Serialized, not key-by-key: a future assignment could place a secret
+      // under any name, and this has to fail for all of them, not for the ones
+      // someone remembered to enumerate.
+      const raw = JSON.stringify(await res.json());
+      expect(raw).not.toContain('LOADER-TOP-LEVEL-SECRET');
+      expect(raw).not.toContain('LOADER-SLOT-SECRET');
     });
 
     it('GET active_model resolves a `custom` slot to the Anthropic wire', async () => {
