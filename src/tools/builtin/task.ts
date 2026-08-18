@@ -128,12 +128,27 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
     // auto-trigger) — a plain user-TODO fires nothing, so it isn't gated (no FP on a
     // legit "mail X to a@b.com" reminder). The human HTTP create route is NOT scanned
     // (the human is the trusted author + the confirmer).
+    //
+    // `workflow_id` joins the list because a pipeline task FIRES: createPipelineTask
+    // forces `assignee: 'lynox'` internally, and a lynox-assignee task with no
+    // run_at fires immediately — so a caller who passed neither assignee nor
+    // schedule slipped past this scan while creating a firing trigger. Pre-existing;
+    // surfaced by adding `params`, which is the payload that makes it worth having.
     const willFire = Boolean(input.schedule) || Boolean(input.watch_url)
-      || Boolean(input.run_at) || input.assignee === 'lynox';
+      || Boolean(input.run_at) || input.assignee === 'lynox' || Boolean(input.workflow_id);
     if (willFire) {
-      const scan = detectInjectionAttempt(`${input.title}\n${input.description ?? ''}`);
+      // `params` is scanned with the rest: its values are interpolated into the
+      // step tasks of a workflow that then runs UNATTENDED, so it is the same
+      // channel the title/description scan exists to close — an agent that
+      // ingested poisoned content must not be able to steer a confirmed workflow
+      // through its re-target values. The patterns are instruction- and
+      // marker-shaped (the exfil one needs a URL verb clause, the mail one an
+      // `@`), so an ordinary batch range or API base URL matches nothing.
+      const scan = detectInjectionAttempt(
+        `${input.title}\n${input.description ?? ''}\n${input.params !== undefined ? JSON.stringify(input.params) : ''}`,
+      );
       if (scan.detected) {
-        return `Error: refused to schedule this trigger — its title/description matched prompt-injection patterns (${scan.patterns.join(', ')}). A scheduled agent action runs unattended, so it cannot carry instruction-like or exfiltration-like content. If this is legitimate, set it up from the Triggers page (a human-confirmed schedule) or rephrase without embedded instructions/addresses.`;
+        return `Error: refused to schedule this trigger — its title/description/params matched prompt-injection patterns (${scan.patterns.join(', ')}). A scheduled agent action runs unattended, so it cannot carry instruction-like or exfiltration-like content. If this is legitimate, set it up from the Triggers page (a human-confirmed schedule) or rephrase without embedded instructions/addresses.`;
       }
     }
 
