@@ -473,9 +473,11 @@ export interface ModelCapability {
    *  host implies it. */
   provenance?: WeightsOrigin | undefined;
   /**
-   * The `reasoning_effort` this model gets on the openai wire when the CALLER
-   * asked for none. Only `'none'` is expressible here, and it exists for one
-   * measured failure mode: a hybrid-reasoning model whose thinking floor is
+   * The `reasoning_effort` this model gets on the openai wire for calls whose
+   * `max_tokens` is at or below `REASONING_SUPPRESSION_MAX_TOKENS`. It WINS over
+   * `features.reasoningEffort`, and it does not care what the caller asked for —
+   * see the adapter for why both are deliberate. Only `'none'` is expressible
+   * here, and it exists for one measured failure mode: a hybrid-reasoning model whose thinking floor is
    * larger than the output budget its callers give it returns `finish_reason:
    * 'length'` with an EMPTY string and HTTP 200 — no error anywhere.
    *
@@ -489,10 +491,10 @@ export interface ModelCapability {
    * still returned empty, which is why this field takes the wire's `'none'`
    * rather than reusing the low/medium/high ladder in `features.reasoningEffort`.
    *
-   * Precedence: the `features.reasoningEffort` ladder wins where a model sets
-   * BOTH. No model does today, so on the fast slot this default always applies —
-   * which is intended, since `'low'` (the ladder's floor) was measured not to
-   * suppress the thinking floor at all.
+   * Precedence: this field wins where a model sets BOTH — `features` is a shared
+   * object across six Fireworks entries, so flagging any one of them for the
+   * ladder would otherwise silently un-suppress this one, and `'low'` (the
+   * ladder's floor) was measured not to suppress the thinking floor at all.
    */
   defaultReasoningEffort?: 'none' | undefined;
 }
@@ -1101,9 +1103,11 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     uiLabel: 'DeepSeek v4 Flash',
     provenance: 'CN',
     // Hybrid-reasoning: it thinks before it answers, and the floor is task-
-    // dependent (54 tokens for a one-word question, 512+ for entity extraction).
-    // Every fast-tier caller budgets 64-1024, so without this the slot silently
-    // returns "" on the tight ones. See the field doc for the measurement.
+    // dependent (54 tokens for a one-word question, 512+ for entity extraction,
+    // 727 for memory extraction). The single-shot utility callers budget
+    // 64-1024, so without this the slot silently returns "" on the tight ones.
+    // A `spawn_agent` on this tier runs far above that bound and keeps its
+    // thinking. See the field doc for the measurement.
     defaultReasoningEffort: 'none',
   },
   // Fireworks lists image input for Qwen3.7 Plus — validated live 2026-08-14

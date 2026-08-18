@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo, translateMessages } from './openai-adapter.js';
+import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo, translateMessages, REASONING_SUPPRESSION_MAX_TOKENS } from './openai-adapter.js';
 import { modelCapability } from '../types/models.js';
 import { StreamProcessor } from './stream.js';
 import type Anthropic from '@anthropic-ai/sdk';
@@ -1156,7 +1156,7 @@ describe('OpenAIAdapter', () => {
     // unflagged case therefore uses a MISTRAL model (its own features object).
     const GLM = 'accounts/fireworks/models/glm-5p2';
 
-    async function captureBody(model: string, outputConfig: unknown): Promise<Record<string, unknown>> {
+    async function captureBody(model: string, outputConfig: unknown, maxTokens = 100): Promise<Record<string, unknown>> {
       let captured = '';
       const server = await createMockServer((req, res) => {
         let body = '';
@@ -1174,7 +1174,7 @@ describe('OpenAIAdapter', () => {
       try {
         const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'key', modelId: model });
         await collectEvents(adapter.beta.messages.stream({
-          model, max_tokens: 100,
+          model, max_tokens: maxTokens,
           messages: [{ role: 'user', content: 'Go.' }],
           ...(outputConfig !== undefined ? { output_config: outputConfig } : {}),
         } as unknown as Parameters<typeof adapter.beta.messages.stream>[0]));
@@ -1237,15 +1237,30 @@ describe('OpenAIAdapter', () => {
       expect(body['reasoning_effort']).toBe('none');
     });
 
-    it('lets the ladder win over the default when a model sets both', async () => {
+    it('wins over the ladder when a model sets both — `features` is a SHARED object', async () => {
+      // Flagging any ONE Fireworks model for the ladder flags all six (they
+      // point at the same FIREWORKS_TEXT_FEATURES reference), and the agent's
+      // post-run effort restore would then put `medium` on this wire. `'low'`
+      // was measured not to suppress the floor, so yielding here would make the
+      // empty-response bug reachable from an unrelated model's flag.
       const cap = modelCapability(FAST)! as { features: { reasoningEffort?: boolean } };
       cap.features.reasoningEffort = true;
       try {
         const body = await captureBody(FAST, { effort: 'high' });
-        expect(body['reasoning_effort']).toBe('high');
+        expect(body['reasoning_effort']).toBe('none');
       } finally {
         delete cap.features.reasoningEffort;
       }
+    });
+
+    it('leaves a call above the budget bound self-adaptive — a spawned sub-agent keeps its thinking', async () => {
+      const body = await captureBody(FAST, undefined, REASONING_SUPPRESSION_MAX_TOKENS + 1);
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+
+    it('still suppresses exactly AT the bound', async () => {
+      const body = await captureBody(FAST, undefined, REASONING_SUPPRESSION_MAX_TOKENS);
+      expect(body['reasoning_effort']).toBe('none');
     });
 
     it('sends nothing for a model that declares no default', async () => {
