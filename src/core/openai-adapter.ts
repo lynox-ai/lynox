@@ -954,7 +954,8 @@ export class OpenAIAdapter {
     // gate keeps that from happening until a flip is a measured decision, and the
     // model stays self-adaptive (today's behaviour) everywhere else.
     // 'max'/'xhigh' (Anthropic-only tiers) clamp to 'high', the wire's ceiling.
-    if (modelCapability(model)?.features?.reasoningEffort === true) {
+    const cap = modelCapability(model);
+    if (cap?.features?.reasoningEffort === true) {
       const oc = params['output_config'];
       const effortRaw = typeof oc === 'object' && oc !== null && 'effort' in oc
         ? (oc as { effort?: unknown }).effort : undefined;
@@ -962,6 +963,24 @@ export class OpenAIAdapter {
       if (mapped === 'low' || mapped === 'medium' || mapped === 'high') {
         body['reasoning_effort'] = mapped;
       }
+    }
+
+    // A model whose thinking floor exceeds its callers' output budgets returns
+    // an EMPTY string with HTTP 200 (`finish_reason: 'length'`, the whole budget
+    // spent on reasoning tokens) — the failure mode `defaultReasoningEffort`
+    // exists for. Applied only when the ladder above did not already set one:
+    // for a model that is ALSO `features.reasoningEffort`-flagged an explicit
+    // caller effort therefore wins, and for one that is not — every model today,
+    // the fast slot included — the default always applies. That asymmetry is
+    // deliberate: the measurement says the ladder's lowest rung (`'low'`) does
+    // not suppress the floor, so letting it override would reinstate the bug.
+    // Only on the openai wire, where `'none'` is a real value.
+    // Deliberately NOT folded into the block above:
+    // that one is gated on `features.reasoningEffort` (the low/medium/high
+    // ladder, opt-in per model and still absent everywhere), and `'none'` is not
+    // a point on that ladder — measured, `'low'` does not suppress the floor.
+    if (body['reasoning_effort'] === undefined && cap?.defaultReasoningEffort !== undefined) {
+      body['reasoning_effort'] = cap.defaultReasoningEffort;
     }
 
     // Mistral-native prompt cache: forward prompt_cache_key when caller sets

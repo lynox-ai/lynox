@@ -472,6 +472,29 @@ export interface ModelCapability {
    *  three axes per model). Absent on models the presets don't surface, where the
    *  host implies it. */
   provenance?: WeightsOrigin | undefined;
+  /**
+   * The `reasoning_effort` this model gets on the openai wire when the CALLER
+   * asked for none. Only `'none'` is expressible here, and it exists for one
+   * measured failure mode: a hybrid-reasoning model whose thinking floor is
+   * larger than the output budget its callers give it returns `finish_reason:
+   * 'length'` with an EMPTY string and HTTP 200 — no error anywhere.
+   *
+   * Measured on `deepseek-v4-flash-0731` against the live Fireworks API,
+   * 2026-08-18, at each fast-tier caller's real `max_tokens`: 4 of 6 came back
+   * empty (title/64, retrieval-HyDE/256, entity-extraction/512, search-rerank/
+   * 512), each having spent 100% of its budget on reasoning tokens. With
+   * `'none'` all six answer, in roughly half the tokens and half the latency.
+   *
+   * `'low'` is NOT a substitute — measured, it still spent the full 512 and
+   * still returned empty, which is why this field takes the wire's `'none'`
+   * rather than reusing the low/medium/high ladder in `features.reasoningEffort`.
+   *
+   * Precedence: the `features.reasoningEffort` ladder wins where a model sets
+   * BOTH. No model does today, so on the fast slot this default always applies —
+   * which is intended, since `'low'` (the ladder's floor) was measured not to
+   * suppress the thinking floor at all.
+   */
+  defaultReasoningEffort?: 'none' | undefined;
 }
 
 const CLAUDE_FEATURES: ModelFeatures = {
@@ -1077,6 +1100,11 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 0.14, output: 0.28, cacheWrite: 0.14, cacheRead: 0.028 },
     uiLabel: 'DeepSeek v4 Flash',
     provenance: 'CN',
+    // Hybrid-reasoning: it thinks before it answers, and the floor is task-
+    // dependent (54 tokens for a one-word question, 512+ for entity extraction).
+    // Every fast-tier caller budgets 64-1024, so without this the slot silently
+    // returns "" on the tight ones. See the field doc for the measurement.
+    defaultReasoningEffort: 'none',
   },
   // Fireworks lists image input for Qwen3.7 Plus — validated live 2026-08-14
   // (fireworks-vision online test) → vision:true. 262k context.

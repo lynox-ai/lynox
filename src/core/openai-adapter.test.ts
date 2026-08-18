@@ -1215,6 +1215,44 @@ describe('OpenAIAdapter', () => {
       expect(body).not.toHaveProperty('reasoning_effort');
     });
 
+    // ── defaultReasoningEffort ────────────────────────────────────────────
+    // A hybrid-reasoning model whose thinking floor is bigger than its callers'
+    // output budgets answers HTTP 200 with an EMPTY string. Measured against the
+    // live Fireworks API on 2026-08-18: 4 of 6 fast-tier callers came back empty
+    // at their real max_tokens, each having spent 100% of the budget on
+    // reasoning tokens. These pin the suppression that fixes it.
+    const FAST = 'accounts/fireworks/models/deepseek-v4-flash-0731';
+    const NO_DEFAULT = 'accounts/fireworks/models/minimax-m3';
+
+    it("sends reasoning_effort:'none' for a model that declares the default", async () => {
+      const body = await captureBody(FAST, undefined);
+      expect(body['reasoning_effort']).toBe('none');
+    });
+
+    it('applies the default even when the caller sent an effort — the model is not ladder-flagged', async () => {
+      // Documents the real precedence rather than the one the field name
+      // suggests. `'low'` was measured NOT to suppress the floor, so a caller
+      // able to override down to it would reinstate the empty-response bug.
+      const body = await captureBody(FAST, { effort: 'high' });
+      expect(body['reasoning_effort']).toBe('none');
+    });
+
+    it('lets the ladder win over the default when a model sets both', async () => {
+      const cap = modelCapability(FAST)! as { features: { reasoningEffort?: boolean } };
+      cap.features.reasoningEffort = true;
+      try {
+        const body = await captureBody(FAST, { effort: 'high' });
+        expect(body['reasoning_effort']).toBe('high');
+      } finally {
+        delete cap.features.reasoningEffort;
+      }
+    });
+
+    it('sends nothing for a model that declares no default', async () => {
+      const body = await captureBody(NO_DEFAULT, undefined);
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+
     it('drops effort for an unflagged model — the registry default keeps today\'s wire byte-identical', async () => {
       // mistral-medium is registered but NOT flagged (own features object, not
       // the mutated Fireworks one) — the Agent's default effort must not reach it.
