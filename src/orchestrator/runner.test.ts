@@ -1085,6 +1085,71 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
     }
   });
 
+  it('records the CLAMPED band, not the declaration, when a deep step runs headless', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // The headless deep-consent clamp (#1215) rewrites a `deep` REQUEST to
+      // `balanced` before resolution, so the step runs and is billed at balanced.
+      // The row has to say what ran: it feeds getAvgStepCostByModelTier, whose
+      // average is the cost shown in the plan_task consent dialog. Stamping
+      // `step.model` filed balanced-priced spend under `deep` and dragged the
+      // deep average down — measured live 2026-08-18 (factor 4.5 on one step).
+      //
+      // No mockResponses → the real inline branch runs, so a model is actually
+      // resolved (the mock path resolves none and keeps the legacy fallback).
+      const manifest: Manifest = {
+        manifest_version: '1.0',
+        name: 'clamp-record',
+        triggered_by: 'test',
+        context: {},
+        agents: [{ id: 'wants-deep', agent: 'x', runtime: 'inline', task: 'think hard', model: 'deep' }],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      const state = await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [], autonomy: 'autonomous' });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare(
+        `SELECT step_id, model_tier FROM pipeline_step_results WHERE pipeline_run_id = ?`,
+      ).all(state.runId) as Array<{ step_id: string; model_tier: string }>;
+
+      expect(rows).toEqual([{ step_id: 'wants-deep', model_tier: 'balanced' }]);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('records `deep` for the SAME step when it is NOT headless (the clamp is what moves it)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // Counter-direction, and it is what makes the assert above mean something:
+      // without it, hard-coding `modelTier: 'balanced'` would pass. Interactive
+      // (autonomy undefined) applies no clamp, so deep IS what resolves and runs,
+      // and the row must say so.
+      const manifest: Manifest = {
+        manifest_version: '1.0',
+        name: 'clamp-record-interactive',
+        triggered_by: 'test',
+        context: {},
+        agents: [{ id: 'wants-deep', agent: 'x', runtime: 'inline', task: 'think hard', model: 'deep' }],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      const state = await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [] });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare(
+        `SELECT step_id, model_tier FROM pipeline_step_results WHERE pipeline_run_id = ?`,
+      ).all(state.runId) as Array<{ step_id: string; model_tier: string }>;
+
+      expect(rows).toEqual([{ step_id: 'wants-deep', model_tier: 'deep' }]);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
   it('prices an undeclared INLINE step at the fast tier on the budget path (model_id stamp)', async () => {
     const { h, cleanup } = tmpHistory();
     try {
