@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.14.1 — 2026-08-18
+
+A repair release. The `fast` slot had been naming a Fireworks model id the
+provider stopped serving on 2026-08-14, and every caller that routes to that
+band — compaction, memory and knowledge extraction, a workflow step that
+declares no model — had been failing daily since, on all four production
+instances, without surfacing anything: each of those callers catches. The other
+two entries are the same shape of quiet wrongness. A number that was right
+about the wrong thing. A limit the agent could hit but not see.
+
+### Fixed
+- **The `fast` slot names a DeepSeek id Fireworks still serves.**
+  `accounts/fireworks/models/deepseek-v4-flash` was withdrawn in favour of
+  `…-flash-0731`. Nothing made the failure visible: compaction leaves the
+  summary empty and its guard deliberately suppresses the reset, so the thread
+  survives and no one looks; extraction skips; an undeclared workflow step dies
+  at step 0 with an empty `stepErrors`, which reads like a cap. A new online
+  test inverts the usual skip rule for this class — with a provider credential
+  present, a slot a preset pins that answers anything but 200 now FAILS instead
+  of skipping. Without a credential it still skips, because then we genuinely
+  did not test it. The next withdrawal is caught by the suite rather than by a
+  customer four days later. (#1232)
+- **A workflow step is recorded against the model that ran it, not the one it
+  requested.** The row stored the DECLARED tier, so any step whose request was
+  clamped — the headless `deep` → `balanced` rewrite, an account-tier ceiling,
+  a blocked model id — was filed and priced as the tier it had asked for. That
+  row is what the consent dialog estimates a run's cost from, so a clamped step
+  made the estimate read high against a run that would have been cheap. Price
+  and label now read one resolver call. (#1231)
+
+### Changed
+- **The agent can see the per-conversation request cap and plan around it.**
+  `http_request` is capped at 100 calls per conversation, and that budget is
+  SHARED with sub-agents — so splitting a bulk job into children buys nothing.
+  Neither fact was stated anywhere the model could read it, so a job larger
+  than the cap walked into the wall blind. Both are now in the tool
+  description, together with the escape that does work: a stored workflow fired
+  once per batch, where each firing gets its own budget. `task_create`
+  therefore accepts `params` to re-target a stored workflow per firing —
+  rejected without a `workflow_id`, scanned for injection like every other
+  free-text field it carries, and counted as a firing by the confirmation gate,
+  which had not been counting `workflow_id` at all. (#1233)
+
+### Upgrade and rollback
+No schema migration, engine or control plane. Rolling back to 2.14.0 restores
+the dead `fast` slot, so an instance that rolls back should carry an explicit
+`compaction_model` until it rolls forward again.
+
 ## 2.14.0 — 2026-08-18
 
 A routing release. The control plane can now decide which model sits behind
