@@ -51,7 +51,7 @@ export const CANDIDATES: Candidate[] = [
   // The 2026-08-09 picker-candidate wave (core #1162) — every entry the per-tier picker now
   // offers must be measurable HERE before a preset may pin it (tier-presets.test.ts guard).
   // All `expect: 'escalate'` = the same floor hypothesis as above, decided per body via --expect.
-  { label: 'deepseek-v4-flash (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/deepseek-v4-flash', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
+  { label: 'deepseek-v4-flash-0731 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/deepseek-v4-flash-0731', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
   { label: 'qwen3.7-plus (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/qwen3p7-plus', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
   { label: 'gpt-oss-120b (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/gpt-oss-120b', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },
   { label: 'kimi-k2.6 (fireworks)', provider: 'openai', modelId: 'accounts/fireworks/models/kimi-k2p6', apiBaseURL: FIREWORKS_BASE, keyName: 'fireworks', expect: 'escalate' },

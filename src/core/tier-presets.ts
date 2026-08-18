@@ -120,7 +120,7 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   // contradicted by the catalog note this same PR wrote). The old set paid $7.50/M
   // output for a main (mistral-medium) that the /model-smoke sweep found weakest on
   // open turns, while its deep slot already routed here.
-  //   fast  — deepseek-v4-flash: fast-bench HOLD at 89.1% literal recall against a
+  //   fast  — deepseek-v4-flash-0731: fast-bench HOLD at 89.1% literal recall against a
   //           90.4% haiku-4.5 reference, with the BEST judge score of the field
   //           (7.83 vs 7.13), at $0.14/$0.28 instead of haiku's $1/$5. This is the
   //           fast SLOT only — it was never benched as a main (rafael 2026-08-10).
@@ -141,7 +141,7 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   efficient: {
     routing_mode: 'hybrid',
     tier_set: {
-      fast: fireworks('accounts/fireworks/models/deepseek-v4-flash'),
+      fast: fireworks('accounts/fireworks/models/deepseek-v4-flash-0731'),
       balanced: fireworks('accounts/fireworks/models/minimax-m3'),
       deep: fireworks('accounts/fireworks/models/kimi-k3'),
     },
@@ -186,7 +186,7 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   balanced: {
     routing_mode: 'hybrid',
     tier_set: {
-      fast: fireworks('accounts/fireworks/models/deepseek-v4-flash'),
+      fast: fireworks('accounts/fireworks/models/deepseek-v4-flash-0731'),
       balanced: fireworks('accounts/fireworks/models/glm-5p2'),
       deep: fireworks('accounts/fireworks/models/kimi-k3'),
     },

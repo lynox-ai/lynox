@@ -1055,8 +1055,18 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // underperforms as the main on real requests (rafael), so the picker offers
   // alternatives to test. Pricing read from each model's Fireworks page — the
   // cached rates differ per model (0.028 / 0.08), never derived.
-  'accounts/fireworks/models/deepseek-v4-flash': {
-    id: 'accounts/fireworks/models/deepseek-v4-flash',
+  // Fireworks retired the UNSUFFIXED alias on 2026-08-14: the last successful call
+  // on a production instance was 09:05:49 that day, the first 404 at 09:44:31, and
+  // every call since has failed with `Model not found, inaccessible, and/or not
+  // deployed`. The model list now offers only the dated snapshot, so the id carries
+  // the date. Verified against the live API on 2026-08-18: the bare id 404s, this
+  // one answers 200.
+  //
+  // A dated id is the thing this codebase normally avoids (see the Mistral
+  // stable-tag rule) — but here the choice is not between dated and floating. The
+  // floating alias is GONE; the only alternative is no fast slot at all.
+  'accounts/fireworks/models/deepseek-v4-flash-0731': {
+    id: 'accounts/fireworks/models/deepseek-v4-flash-0731',
     provider: 'openai',
     tier: null,
     contextWindow: 1_000_000,

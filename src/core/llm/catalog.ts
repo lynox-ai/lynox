@@ -533,13 +533,13 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         notes: '1M context; deep slot of the efficient + balanced presets — operator decision on the chat sweep, no deep bench exists. Vision validated on the openai wire 2026-08-14 (fireworks-vision online test).',
       },
       {
-        id: 'accounts/fireworks/models/deepseek-v4-flash',
+        id: 'accounts/fireworks/models/deepseek-v4-flash-0731',
         label: 'DeepSeek v4 Flash',
         context_window: 1_000_000,
         pricing: { input: 0.14, output: 0.28 },
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '1M context; FAST slot only — benched there (89.1% recall, best judge of the field), never as a main. Text-only (no vision).',
+        notes: '1M context; FAST slot only — benched there (89.1% recall, best judge of the field), never as a main. Text-only (no vision). Dated id: Fireworks retired the unsuffixed alias on 2026-08-14.',
       },
       {
         id: 'accounts/fireworks/models/qwen3p7-plus',

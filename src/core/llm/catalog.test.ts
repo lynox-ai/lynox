@@ -280,7 +280,7 @@ describe('LLM_CATALOG.tier_models (per-tier picker options on a free-text tile)'
       // Candidates (2026-08-09, rafael canary) — replay measurement owed before
       // any preset pins them; presence here only makes them picker-selectable.
       'accounts/fireworks/models/kimi-k3',
-      'accounts/fireworks/models/deepseek-v4-flash',
+      'accounts/fireworks/models/deepseek-v4-flash-0731',
       'accounts/fireworks/models/qwen3p7-plus',
       'accounts/fireworks/models/gpt-oss-120b',
       'accounts/fireworks/models/kimi-k2p6',

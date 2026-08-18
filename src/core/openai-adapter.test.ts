@@ -1661,7 +1661,7 @@ describe('translateMessages — user content is never silently dropped', () => {
     // GLM 5.2 / DeepSeek v4 / gpt-oss-120b have no image input on Fireworks. If
     // someone "fixes" the candidates by flipping FIREWORKS_TEXT_FEATURES itself,
     // these models would silently start receiving images their pages disavow.
-    for (const id of ['accounts/fireworks/models/glm-5p2', 'accounts/fireworks/models/deepseek-v4-pro', 'accounts/fireworks/models/deepseek-v4-flash', 'accounts/fireworks/models/gpt-oss-120b']) {
+    for (const id of ['accounts/fireworks/models/glm-5p2', 'accounts/fireworks/models/deepseek-v4-pro', 'accounts/fireworks/models/deepseek-v4-flash-0731', 'accounts/fireworks/models/gpt-oss-120b']) {
       const visionSupport = modelCapability(id)?.features?.vision;
       expect(visionSupport, id).toBe(false);
       expect(() =>
