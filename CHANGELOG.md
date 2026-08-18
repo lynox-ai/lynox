@@ -1,5 +1,50 @@
 # Changelog
 
+## 2.14.2 — 2026-08-18
+
+A second repair, on the slot 2.14.1 brought back to life. Pointing the `fast`
+slot at an id the provider still serves was necessary and not sufficient: the
+model in it thinks before it answers, and its thinking floor is larger than the
+output budget most of its callers give it. So it answered — with an empty
+string, HTTP 200, `finish_reason: 'length'`, no error anywhere.
+
+### Fixed
+- **The `fast` slot returns output to the callers whose budgets are too tight to
+  afford its thinking.** Measured against the live provider at each caller's real
+  `max_tokens`: 4 of 6 came back empty — thread titles (64), retrieval HyDE
+  (256), entity extraction (512), search reranking (512) — each having spent its
+  whole budget on reasoning tokens. Nothing surfaced it: every one of those
+  callers treats an empty result as "nothing to do". A model may now declare
+  `defaultReasoningEffort: 'none'`, which the openai adapter applies at or below
+  a budget bound. With it, all four answer, in roughly half the tokens and half
+  the latency, and quality did not drop where the caller already worked — memory
+  extraction stopped translating its output to English and stopped inventing
+  three "durable facts" from a note that says nothing was discussed. (#1235)
+
+  Two narrowings are deliberate and both came out of review. The declaration
+  **wins** over the existing `features.reasoningEffort` ladder rather than
+  yielding to it, because `features` is a shared object across six models — so
+  flagging any one of them would otherwise silently un-suppress this one, and the
+  ladder's lowest rung was measured not to suppress the floor at all. And it
+  applies only at or below 1024 output tokens, the largest budget any of those
+  callers passes, so a `spawn_agent` on the fast tier keeps its thinking.
+
+### Known limits
+The bench that put this model in the fast slot measured it WITH thinking, so
+below the bound the shipped configuration is no longer the benched one. That is
+not new with this release — today's shipped configuration is not the benched one
+either, it is one that returns an empty string — but nothing re-benches the
+suppressed slot yet.
+
+The failure mode itself stays silent: an HTTP 200 with `finish_reason: 'length'`
+and no content assembles into an ordinary empty message, so a future model in
+this slot could reproduce the bug with no error anywhere. A detector for that
+shape is owed, not shipped here.
+
+### Upgrade and rollback
+No schema migration, engine or control plane. Rolling back to 2.14.1 restores the
+empty responses on the four tight callers.
+
 ## 2.14.1 — 2026-08-18
 
 A repair release. The `fast` slot had been naming a Fireworks model id the
