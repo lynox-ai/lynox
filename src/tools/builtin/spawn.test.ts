@@ -2183,6 +2183,80 @@ describe('spawn_agent tool', () => {
       expect(result).toContain('## good (ran on');
       expect(result).toContain('good result');
     });
+
+    // === the third outcome: a child that RETURNS, but returns nothing ===
+    // Observed on rafael's prod instance 2026-08-18 (thread `d8047252`,
+    // engine 2.14.2): 3 of 8 sub-agents came back `''` at status=completed /
+    // stop_reason=end_turn / error_text=NULL. Pre-fix the parent rendered a
+    // heading plus an EMPTY untrusted-data envelope — a section that reads as
+    // a success — and the agent reported a model defect it could not know.
+    it('names an empty result instead of rendering a blank successful-looking section', async () => {
+      mockSend.mockResolvedValue('');
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'fast-arithmetic', task: 'compute 1234 * 5678' }] },
+        makeAgent(),
+      );
+      expect(result).toContain('## fast-arithmetic');
+      expect(result).toContain('— NO OUTPUT');
+      expect(result).toContain('finished without returning any text');
+      // Pre-fix shape: heading + empty envelope, nothing else. Pin its absence
+      // so a revert cannot pass by leaving the blank envelope in place.
+      expect(result).not.toMatch(/<untrusted_data source="sub_agent:fast-arithmetic">\s*<\/untrusted_data>/);
+    });
+
+    // COUNTER-DIRECTION 1 — an empty return is NOT a dead child. Re-branding it
+    // FAILED would be the overshoot: a side-effect-only task or an honest
+    // "nothing matched" legitimately returns nothing, and the parent must not
+    // be told the child crashed.
+    it('does NOT mark an empty result as FAILED — it did not crash', async () => {
+      mockSend.mockResolvedValue('');
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'quiet', task: 'x' }] },
+        makeAgent(),
+      );
+      expect(result).not.toContain('FAILED');
+      expect(result).not.toContain('**Error:**');
+      expect(result).toContain('This is not a crash');
+    });
+
+    // COUNTER-DIRECTION 2 — the detector must not fire on real answers. A
+    // short-but-real result is the case a naive length check would eat.
+    it('leaves a real result untouched, including a very short one', async () => {
+      mockSend.mockResolvedValue('4');
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'terse', task: 'two plus two' }] },
+        makeAgent(),
+      );
+      expect(result).not.toContain('NO OUTPUT');
+      expect(result).toContain('<untrusted_data source="sub_agent:terse">');
+      expect(result).toContain('4');
+    });
+
+    // COUNTER-DIRECTION 3 — whitespace-only is empty in substance. Without the
+    // trim, a model emitting a stray newline slips straight back through.
+    it('treats a whitespace-only result as empty', async () => {
+      mockSend.mockResolvedValue('   \n\t  \n ');
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'blank', task: 'x' }] },
+        makeAgent(),
+      );
+      expect(result).toContain('— NO OUTPUT');
+    });
+
+    // COUNTER-DIRECTION 4 — per section, not per batch. The empty one must be
+    // named without touching a sibling that answered.
+    it('names only the empty child in a mixed batch', async () => {
+      mockSend
+        .mockResolvedValueOnce('')
+        .mockResolvedValueOnce('the real answer');
+      const result = await spawnAgentTool.handler(
+        { agents: [{ name: 'silent', task: 'x' }, { name: 'loud', task: 'y' }] },
+        makeAgent(),
+      );
+      expect(result).toMatch(/## silent[^\n]*— NO OUTPUT/);
+      expect(result).toContain('the real answer');
+      expect(result).not.toMatch(/## loud[^\n]*— NO OUTPUT/);
+    });
   });
 
   // The v2.1.1 hybrid-spawn provider bug + its fix, pinned at the pure seam.

@@ -1154,7 +1154,44 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         const downgradeNote = downgradedIdx.has(i)
           ? ' — ran on balanced because you declined deep; quality may be lower'
           : '';
-        sections.push(`## ${spec.name}${ranOn}${downgradeNote}\n\n${wrapped}`);
+        // A sub-agent that RETURNS but returns nothing is the third outcome,
+        // and until 2026-08-18 it was the only one the parent could not see.
+        // `rejected` gets a FAILED section right below; a real answer gets the
+        // envelope above; an empty string got a heading followed by an EMPTY
+        // envelope — formally a success, indistinguishable from "worked, found
+        // nothing to say".
+        //
+        // Measured on rafael's production instance, thread `d8047252`,
+        // engine 2.14.2: 3 of 8 sub-agents returned `''` at
+        // `status=completed`, `stop_reason=end_turn`, `error_text=NULL`,
+        // `tokens_out` 113-669 — on TWO different models, one of them the
+        // instance's own balanced default. The parent could only guess, and
+        // guessed wrong: it reported a model defect the ledger does not
+        // support.
+        //
+        // It is NAMED, not re-branded as a failure. An empty return is not a
+        // dead child — a side-effect-only task ("write the file") or an
+        // honest "nothing matched" can legitimately produce it. The parent
+        // needs to know the difference between "no answer came back" and "the
+        // answer was that there is nothing", and only the first is knowable
+        // here. `PR #1235` suppressed one CAUSE of this (a reasoning floor
+        // eating a tight output budget) and said in the same commit that the
+        // empty-response class "deserves its own detector rather than this
+        // constant carrying the whole defence". This is that detector: it is
+        // cause-agnostic on purpose, because the causes are not enumerable
+        // from here.
+        if (outcome.value.result.trim() === '') {
+          sections.push(
+            `## ${spec.name}${ranOn}${downgradeNote} — NO OUTPUT\n\n` +
+            `**The sub-agent finished without returning any text.** This is not a crash — ` +
+            `it ran to completion. Do not present its result as an answer, and do not infer ` +
+            `a cause (model, prompt, or tooling) from this alone: the engine cannot tell ` +
+            `"nothing came back" apart from "the answer was that there is nothing". ` +
+            `Say what happened and, if the task still matters, re-run it.`,
+          );
+        } else {
+          sections.push(`## ${spec.name}${ranOn}${downgradeNote}\n\n${wrapped}`);
+        }
         childRunIds.push(outcome.value.childRunId);
       } else {
         const err = outcome.reason instanceof Error
