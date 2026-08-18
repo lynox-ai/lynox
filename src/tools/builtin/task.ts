@@ -19,6 +19,7 @@ interface TaskCreateInput {
   watch_url?: string | undefined;
   watch_interval_minutes?: number | undefined;
   workflow_id?: string | undefined;
+  params?: Record<string, unknown> | undefined;
 }
 
 interface TaskUpdateInput {
@@ -97,6 +98,7 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
         watch_url: { type: 'string', description: 'URL to monitor for changes. Creates a watch task that checks periodically.' },
         watch_interval_minutes: { type: 'number', minimum: 5, description: 'How often to check the watched URL (in minutes). Default: 60. Minimum: 5.' },
         workflow_id: { type: 'string', description: 'ID of a stored workflow to execute on this schedule.' },
+        params: { type: 'object', description: 'Values for the workflow\'s {{params.<name>}} placeholders, re-targeting THIS firing (needs workflow_id). Run one workflow over many batches by firing it once per batch with a different range, e.g. {"from":1,"to":90} then {"from":91,"to":180}.' },
       },
       required: ['title'],
     },
@@ -108,6 +110,12 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
     const embeddedErr = detectEmbeddedParams('description', input.description)
       ?? detectEmbeddedParams('title', input.title);
     if (embeddedErr) return embeddedErr;
+
+    // `params` only reaches a workflow run. Silently dropping it would look like
+    // a successful batch schedule that in fact re-targets nothing.
+    if (input.params !== undefined && !input.workflow_id) {
+      return 'Error: `params` re-targets a stored workflow and only applies together with `workflow_id`. Pass the workflow to run, or drop `params`.';
+    }
 
     // Injection defense-in-depth (triggers-consent / SEC leg): an agent that
     // ingested poisoned content (mail / web / doc) could be steered into SCHEDULING
@@ -161,10 +169,26 @@ export const taskCreateTool: ToolEntry<TaskCreateInput> = {
       if (input.workflow_id) {
         // The tool param is `workflow_id`; the TaskManager + DB column remain
         // `pipelineId` / `tasks.pipeline_id` (no migration — see PRD §6.6).
+        // Re-target values for THIS firing. The column, the TaskManager field and
+        // the WorkerLoop read (`task.pipeline_params` → bindWorkflowParameters)
+        // all existed already; only the agent-facing surface did not, so an agent
+        // could schedule "run workflow X" but never "run workflow X for batch 3"
+        // — which is the whole shape of a batched bulk job.
+        //
+        // Serialised here rather than in the manager because the storage contract
+        // is a JSON string.
+        //
+        // An EMPTY object needs no special case: the trigger store already
+        // round-trips '{}' back to `undefined` on read (trigger-store.ts), which is
+        // what the WorkerLoop money-path guard `if (task.pipeline_params)` reads. A
+        // guard here for that case survived its own mutation test — it changed
+        // nothing — so it is not written.
+        const pipelineParams = input.params !== undefined ? JSON.stringify(input.params) : undefined;
         const task = managerRef.createPipelineTask({
           ...baseParams,
           pipelineId: input.workflow_id,
           scheduleCron: input.schedule,
+          ...(pipelineParams !== undefined ? { pipelineParams } : {}),
         });
         const nextRun = task.next_run_at ? ` — next run: ${task.next_run_at}` : '';
         const scheduleInfo = input.schedule ? ` (schedule: ${input.schedule})` : '';

@@ -7,7 +7,7 @@ vi.mock('node:dns/promises', () => ({
 }));
 
 import dns from 'node:dns/promises';
-import { httpRequestTool, detectSecretInContent } from './http.js';
+import { httpRequestTool, detectSecretInContent, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { applyHttpRateLimits, createToolContext, applyNetworkPolicy } from '../../core/tool-context.js';
 import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context.js';
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
@@ -2793,5 +2793,34 @@ describe('httpRequestTool', () => {
       expect(result).toContain('window.__D__');
       expect(result).not.toContain('HTML auto-extracted');
     });
+  });
+});
+
+describe('http_request tool description — the session cap is stated, not discovered', () => {
+  // Before this, the 100 appeared in no tool description and no system prompt, so
+  // the model learned the ceiling by hitting it at request 101 — mid-bulk, with no
+  // way to have batched differently. Measured live on 2026-08-18: 130 requested,
+  // exactly 100 served, blocked from id 101.
+  const description = httpRequestTool.definition.description;
+
+  it('interpolates the real constant rather than shipping a literal placeholder', () => {
+    // A template literal that is accidentally single-quoted ships `${…}` verbatim
+    // to the model. Caught exactly that way while writing this.
+    expect(description).not.toContain('${');
+    expect(description).toContain(String(MAX_REQUESTS_PER_SESSION));
+  });
+
+  it('says the cap is SHARED with sub-agents', () => {
+    // Without this the obvious plan is "spawn sub-agents to get more budget",
+    // which gains nothing: spawn.ts passes the parent's counters deliberately.
+    expect(description).toMatch(/shared with sub-agents/i);
+  });
+
+  it('names the escape in the same breath as the limit', () => {
+    // A stated limit without a stated way around it teaches the model to give up
+    // rather than to batch. The escape is a saved workflow fired per batch —
+    // each firing gets fresh counters (runner.ts `parentSessionCounters ?? {…}`).
+    expect(description).toMatch(/task_create/);
+    expect(description).toMatch(/fresh budget/i);
   });
 });

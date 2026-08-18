@@ -320,6 +320,52 @@ describe('Task Tools', () => {
       expect(created?.source).toBe('cron');
       expect(created?.schedule_cron).toBe('0 9 * * 1');
     });
+
+    it('carries `params` onto pipeline_params so one workflow can run per batch', async () => {
+      // The whole point of the field: the column, the TaskManager and the
+      // WorkerLoop read (`task.pipeline_params` → bindWorkflowParameters) all
+      // existed, but the agent could not reach them — so it could schedule
+      // "run workflow X" and never "run workflow X for batch 3".
+      history.insertPlannedPipeline({
+        id: 'wf-batch', name: 'Contact triage', goal: 'triage', steps: [],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-08-18T00:00:00.000Z', template: true,
+      });
+      await taskCreateTool.handler(
+        { title: 'Batch 2', assignee: 'lynox', workflow_id: 'wf-batch', params: { from: 91, to: 180 } },
+        makeAgent(),
+      );
+      const created = tm.listTriggers().find((t) => t.title === 'Batch 2');
+      expect(created?.pipeline_id).toBe('wf-batch');
+      expect(JSON.parse(created!.pipeline_params!)).toEqual({ from: 91, to: 180 });
+    });
+
+    it('reads back an EMPTY params object as unset, not as a binding-nothing blob', async () => {
+      // Counter-direction. The normalisation lives in the trigger store, which
+      // round-trips '{}' to `undefined` on read — that is what the WorkerLoop
+      // money-path guard `if (task.pipeline_params)` sees. Asserted here because
+      // the property matters at THIS surface even though it is enforced one layer
+      // down; a tool-level guard for it was written, survived its mutation, and
+      // was deleted.
+      history.insertPlannedPipeline({
+        id: 'wf-plain', name: 'Plain', goal: 'plain', steps: [],
+        reasoning: '', estimatedCost: 0, createdAt: '2026-08-18T00:00:00.000Z', template: true,
+      });
+      await taskCreateTool.handler(
+        { title: 'No params', assignee: 'lynox', workflow_id: 'wf-plain', params: {} },
+        makeAgent(),
+      );
+      const created = tm.listTriggers().find((t) => t.title === 'No params');
+      expect(created?.pipeline_params).toBeUndefined();
+    });
+
+    it('refuses `params` without a workflow_id instead of dropping it silently', async () => {
+      const result = await taskCreateTool.handler(
+        { title: 'Orphan params', params: { from: 1 } },
+        makeAgent(),
+      );
+      expect(result).toContain('only applies together with `workflow_id`');
+      expect(tm.listTriggers().find((t) => t.title === 'Orphan params')).toBeUndefined();
+    });
   });
 
   describe('task_update', () => {

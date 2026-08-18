@@ -285,7 +285,23 @@ function measureStaticPrefixTokens(): number {
 // workflow step, which buys back far more than the prefix pays. Descriptions
 // were tightened before bumping — neither names a tool list (the caller's own
 // toolset is in context; an invalid name fails loudly at save).
-const STATIC_PREFIX_BUDGET = 23500;
+// 2026-08-18: +125 tokens for the http_request session cap and the task_create
+// `params` field — the two halves of one change, so the bump is one entry.
+//
+// What it buys, measured rather than argued: the 100-request cap appeared in no
+// tool description and no prompt, so the model learned it by HITTING it. A live
+// bulk on 2026-08-18 asked for 130 records, got exactly 100, and stopped at id
+// 101 — correctly reported, but it had no way to have batched differently,
+// because it could not know the ceiling existed. The escape it now names is
+// real: a saved workflow fired per batch gets fresh counters (proved by two
+// headless runs of 60 requests each, 120 total, none blocked), and `params` is
+// what makes one workflow serve many batches.
+//
+// The alternative was leaving the model to discover a hard wall mid-job on a
+// customer's 2000-record import. 125 tokens a turn is the cheaper failure.
+// Both descriptions were tightened before this bump (176 → 125) — the first
+// draft spelled out what the shorter one implies.
+const STATIC_PREFIX_BUDGET = 23625;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
