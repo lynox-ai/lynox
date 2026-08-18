@@ -783,12 +783,10 @@ async function executeStep(
           : step;
       // Check session budget before spawning step agent — same undeclared-tier
       // default as the spawn (F1), so the budget prices the model that runs.
-      const resolvedStepModel = resolveStepRunModel(step, undeclaredInlineStepTier(step), config, options.autonomy);
-      const stepModel = resolvedStepModel.pinned
-        ? resolvedStepModel.modelId
-        : effectiveTierModelId(resolvedStepModel.tier, getActiveProvider());
+      const stepModel = resolveModelForCost(step, undeclaredInlineStepTier(step), config, options.autonomy);
       stepModelId = stepModel; // A2: stamp the resolved model on the step run at finalize
-      stepModelTier = resolvedStepModel.tier; // …and the band it was charged at (step row)
+      stepModelTier = resolveTierForCost(step, undeclaredInlineStepTier(step), config, options.autonomy); // …and its band
+
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
       r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint);
@@ -797,12 +795,10 @@ async function executeStep(
     } else {
       const agentDef = await loadAgentDef(step.agent, agentsDir);
       // Check session budget before spawning step agent
-      const resolvedStepModel = resolveStepRunModel(step, agentDef.defaultTier, config, options.autonomy);
-      const stepModel = resolvedStepModel.pinned
-        ? resolvedStepModel.modelId
-        : effectiveTierModelId(resolvedStepModel.tier, getActiveProvider());
+      const stepModel = resolveModelForCost(step, agentDef.defaultTier, config, options.autonomy);
       stepModelId = stepModel; // A2: stamp the resolved model on the step run at finalize
-      stepModelTier = resolvedStepModel.tier; // …and the band it was charged at (step row)
+      stepModelTier = resolveTierForCost(step, agentDef.defaultTier, config, options.autonomy); // …and its band
+
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
       r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint);
@@ -975,6 +971,26 @@ export function resolveModelForCost(step: ManifestStep, defaultTier: ModelTier, 
   // routing — hence the `pinned` flag rather than re-deriving the branch here.
   const resolved = resolveStepRunModel(step, defaultTier, config, autonomy);
   return resolved.pinned ? resolved.modelId : effectiveTierModelId(resolved.tier, getActiveProvider());
+}
+
+/**
+ * The BAND {@link resolveModelForCost} priced the step at, for the durable step
+ * row. Both read {@link resolveStepRunModel} with the same inputs, so they cannot
+ * disagree — the resolution is pure config math, so calling it twice costs
+ * nothing and keeps each function answering exactly one question.
+ *
+ * Split out on 2026-08-18: `recordStepRow` had no resolved value to stamp and
+ * fell back to `step.model`, the DECLARED tier. Under the headless clamp those
+ * differ by construction, and the row fed a cost average shown in a consent
+ * dialog. See the note at the `modelTier` assignment.
+ */
+export function resolveTierForCost(
+  step: ManifestStep,
+  defaultTier: ModelTier,
+  config: LynoxUserConfig,
+  autonomy?: import('../types/index.js').AutonomyLevel | undefined,
+): ModelTier {
+  return resolveStepRunModel(step, defaultTier, config, autonomy).tier;
 }
 
 /**
