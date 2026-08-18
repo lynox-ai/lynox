@@ -63,7 +63,7 @@ describe('tier-presets (model-presets W2 SoT)', () => {
       // BENCH — fast-slot compaction 2026-08-10: 89.1% literal recall vs a 90.4%
       // haiku-4.5 reference, best judge score of the field (7.83 vs 7.13) → HOLD.
       // Benched as a FAST slot only; it is not a measured main (rafael 2026-08-10).
-      'accounts/fireworks/models/deepseek-v4-flash',
+      'accounts/fireworks/models/deepseek-v4-flash-0731',
       // BENCH — fast-slot compaction 2026-08-10: HOLD at 87.9% recall / judge 6.96,
       // and the quickest model of the sweep in every probe that did not stall on an
       // ask_user question. No longer pinned by any preset (lost the efficient main

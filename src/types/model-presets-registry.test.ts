@@ -18,7 +18,7 @@ describe('model-presets Wave 1 — new model registrations', () => {
       'accounts/fireworks/models/glm-5p2',
       'accounts/fireworks/models/deepseek-v4-pro',
       'accounts/fireworks/models/kimi-k3',
-      'accounts/fireworks/models/deepseek-v4-flash',
+      'accounts/fireworks/models/deepseek-v4-flash-0731',
       'accounts/fireworks/models/qwen3p7-plus',
       'accounts/fireworks/models/gpt-oss-120b',
       'accounts/fireworks/models/kimi-k2p6',
@@ -95,7 +95,7 @@ describe('model-presets Wave 1 — new model registrations', () => {
   });
 
   it('DeepSeek v4 Flash (Fireworks) — verified $0.14/$0.28 + $0.028 cached, text-only, CN', () => {
-    const m = MODEL_CAPABILITIES['accounts/fireworks/models/deepseek-v4-flash']!;
+    const m = MODEL_CAPABILITIES['accounts/fireworks/models/deepseek-v4-flash-0731']!;
     expect(m.provider).toBe('openai');
     // Read from the Fireworks model page 2026-08-09.
     expect(m.pricing).toEqual({ input: 0.14, output: 0.28, cacheWrite: 0.14, cacheRead: 0.028 });
