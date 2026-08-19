@@ -2863,8 +2863,13 @@
 												     "übernommen") and English (the causative, and a reduced relative:
 												     "content from outside discarded") re-open the slot by different
 												     grammar. Twelve pairs to re-check on every copy edit is not a rule
-												     anyone keeps. Removing the neighbour ends it for all of them.
-												     Glyph + full-strength colour then make the outcome read as a status. -->
+												     anyone keeps, so the SENTENCE-FRAGMENT neighbour goes instead.
+												     Not "the neighbour is gone" — the header line above still is one,
+												     and `→ lynox GmbH` over `übernommen` can still be read as a phrase.
+												     What changed is that it no longer READS as one: the header is 10px
+												     mono muted against full-strength body text, a name is not a clause
+												     left hanging mid-bracket, and the glyph opens the line as a status.
+												     A wording that trails off into a verb slot cannot end up here now. -->
 												<p class="flex items-center gap-1.5 text-text">
 													<span aria-hidden="true" class={kw.resolved === 'discarded' ? 'text-danger' : 'text-success'}>{kw.resolved === 'discarded' ? '✗' : '✓'}</span>
 													{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}
