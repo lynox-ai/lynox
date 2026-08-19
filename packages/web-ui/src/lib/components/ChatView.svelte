@@ -2846,16 +2846,16 @@
 											</div>
 											{#if kw.resolved}
 												<!-- The outcome must not read as the TAIL OF THE CAUSE LINE above it.
-												     Both lines were `text-text-subtle` and the German cause leaves its
-												     verb bracket open ("...hatte Inhalte von ausserhalb"), so the wrapped
-												     status closed it into a sentence that says something else entirely:
-												     "an earlier step had taken on content from outside" — a warning,
-												     where the line actually reports that the PERSON accepted the fact.
-												     Observed 2026-08-19; the cause wording is closed now too, and the
-												     glyph + full-strength colour keep a future wording from re-merging. -->
-												<p class="text-text flex items-center gap-1.5">
-													<span aria-hidden="true" class={kw.resolved === 'discarded' ? 'text-red-500/80' : 'text-accent-text'}
-													>{kw.resolved === 'discarded' ? '✕' : '✓'}</span>
+												     Both lines were `text-text-subtle`, and both causes left a slot open
+												     for the outcome participle — German by an unclosed verb bracket
+												     ("...hatte Inhalte von ausserhalb"), English by the causative
+												     ("...had content from outside discarded" = arranged for its removal).
+												     Either way the wrapped status read as one fluent sentence about the
+												     AGENT, where the line reports what the PERSON decided. Observed
+												     2026-08-19. Both wordings are closed now; the glyph and the
+												     full-strength colour are what hold if a future wording re-opens one. -->
+												<p class="flex items-center gap-1.5 text-text">
+													<span aria-hidden="true" class={kw.resolved === 'discarded' ? 'text-danger' : 'text-success'}>{kw.resolved === 'discarded' ? '✗' : '✓'}</span>
 													{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}
 												</p>
 											{:else if editingKnowledgeId === kw.id}

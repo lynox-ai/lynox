@@ -976,7 +976,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	// "which tasks are open?" arms it, and claiming "something external was read" there would be
 	// plainly untrue to someone who just asked about their own to-dos.
 	'chat.knowledge.cause.this_step': { de: 'kann Inhalte von ausserhalb enthalten', en: 'may include content from outside' },
-	'chat.knowledge.cause.earlier': { de: 'ein früherer Schritt in diesem Chat enthielt Inhalte von ausserhalb', en: 'an earlier step in this chat had content from outside' },
+	'chat.knowledge.cause.earlier': { de: 'ein früherer Schritt in diesem Chat enthielt Inhalte von ausserhalb', en: 'an earlier step in this chat contained content from outside' },
 	'chat.knowledge.review_keep': { de: 'behalten', en: 'keep' },
 	'chat.knowledge.review_edit': { de: 'bearbeiten', en: 'edit' },
 	'chat.knowledge.review_discard': { de: 'verwerfen', en: 'discard' },
