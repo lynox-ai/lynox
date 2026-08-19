@@ -2845,7 +2845,19 @@
 												<span class="text-text-subtle">{t(knowledgeCauseKey(kw.cause))}</span>
 											</div>
 											{#if kw.resolved}
-												<p class="text-text-subtle">{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}</p>
+												<!-- The outcome must not read as the TAIL OF THE CAUSE LINE above it.
+												     Both lines were `text-text-subtle` and the German cause leaves its
+												     verb bracket open ("...hatte Inhalte von ausserhalb"), so the wrapped
+												     status closed it into a sentence that says something else entirely:
+												     "an earlier step had taken on content from outside" — a warning,
+												     where the line actually reports that the PERSON accepted the fact.
+												     Observed 2026-08-19; the cause wording is closed now too, and the
+												     glyph + full-strength colour keep a future wording from re-merging. -->
+												<p class="text-text flex items-center gap-1.5">
+													<span aria-hidden="true" class={kw.resolved === 'discarded' ? 'text-red-500/80' : 'text-accent-text'}
+													>{kw.resolved === 'discarded' ? '✕' : '✓'}</span>
+													{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}
+												</p>
 											{:else if editingKnowledgeId === kw.id}
 												<textarea
 													aria-label={t('chat.knowledge.review_edit_aria')}
