@@ -2841,19 +2841,30 @@
 												<!-- WHY it is here. The generic "from external content" is true of every
 												     queued write, so it gives the person nothing to judge. The sticky case
 												     matters most: nothing external happened on THIS turn, and without
-												     saying so the chip looks like a bug. -->
-												<span class="text-text-subtle">{t(knowledgeCauseKey(kw.cause))}</span>
+												     saying so the chip looks like a bug.
+												     ONLY while the decision is open. It explains a pending question, and
+												     once answered it stops being one — see the outcome branch below for
+												     the second, load-bearing reason it must go. -->
+												{#if !kw.resolved}<span class="text-text-subtle">{t(knowledgeCauseKey(kw.cause))}</span>{/if}
 											</div>
 											{#if kw.resolved}
-												<!-- The outcome must not read as the TAIL OF THE CAUSE LINE above it.
-												     Both lines were `text-text-subtle`, and both causes left a slot open
-												     for the outcome participle — German by an unclosed verb bracket
-												     ("...hatte Inhalte von ausserhalb"), English by the causative
-												     ("...had content from outside discarded" = arranged for its removal).
-												     Either way the wrapped status read as one fluent sentence about the
-												     AGENT, where the line reports what the PERSON decided. Observed
-												     2026-08-19. Both wordings are closed now; the glyph and the
-												     full-strength colour are what hold if a future wording re-opens one. -->
+												<!-- The cause line is GONE above (`{#if !kw.resolved}`), and that is
+												     structural, not tidying. Stacked under a cause in the same weight, the
+												     outcome read as its tail — one fluent sentence about the AGENT, where
+												     the line reports what the PERSON decided:
+
+												       prüfen → lynox GmbH  …hatte Inhalte von ausserhalb
+												       übernommen
+
+												     Observed 2026-08-19; reported as a chip whose buttons had vanished.
+												     Re-wording the causes cannot fix this. There are THREE of them (incl.
+												     `knowledgeCauseKey`'s default) across two locales, each has to survive
+												     both outcome participles, and German ("aus externem Inhalt" +
+												     "übernommen") and English (the causative, and a reduced relative:
+												     "content from outside discarded") re-open the slot by different
+												     grammar. Twelve pairs to re-check on every copy edit is not a rule
+												     anyone keeps. Removing the neighbour ends it for all of them.
+												     Glyph + full-strength colour then make the outcome read as a status. -->
 												<p class="flex items-center gap-1.5 text-text">
 													<span aria-hidden="true" class={kw.resolved === 'discarded' ? 'text-danger' : 'text-success'}>{kw.resolved === 'discarded' ? '✗' : '✓'}</span>
 													{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}

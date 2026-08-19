@@ -75,28 +75,18 @@ describe('two pending chips from ONE turn (dogfood 2026-08-19)', () => {
 		expect(adopted[1]!.knowledgeWrites?.map((w) => w.id)).toEqual([A, B]);
 	});
 
-	it('resolves the approved chip and nothing else it can reach', async () => {
+	it('resolves the approved chip', async () => {
 		// NOTE ON WHAT IS *NOT* ASSERTED HERE. The obvious test — "the sibling stays
 		// unresolved" — cannot fail: `performReview(chip, …)` takes ONE chip and never
-		// sees a list, so no implementation of it could touch the sibling. Asserting it
-		// anyway would read as coverage of the reported symptom while being a tautology.
-		// The sibling being unreachable from here is a PROPERTY OF THE SIGNATURE; if that
-		// signature ever takes a collection, this test must grow a real sibling assert.
+		// sees a list, so nothing in that module can reach a sibling to touch it.
+		// Asserting it anyway would read as coverage of the reported symptom while being
+		// a tautology. The sibling is unreachable from here as a PROPERTY OF THE
+		// SIGNATURE; should it ever take a collection, this test owes a real one.
+		// (The resolve transitions themselves — 2xx-gating, the already-resolved noop,
+		// a thrown send — are covered in `knowledge-chip.test.ts`; not repeated here.)
 		const chip1 = chip(B);
 		const out = await performReview(chip1, 'approve', undefined, async () => ({ ok: true, errorMessage: null }));
 		expect(out.outcome).toBe('resolved');
-		expect(chip1.resolved).toBe('kept');
-	});
-
-	it('refuses a second resolve on an already-resolved chip', async () => {
-		// The double-click guard, and the one branch here that CAN fail: drop the
-		// `chip.resolved` check in `performReview` and this goes from noop to resolved.
-		const chip1 = chip(B);
-		chip1.resolved = 'kept';
-		let sent = 0;
-		const out = await performReview(chip1, 'reject', undefined, async () => { sent += 1; return { ok: true, errorMessage: null }; });
-		expect(out.outcome).toBe('noop');
-		expect(sent).toBe(0);
 		expect(chip1.resolved).toBe('kept');
 	});
 
