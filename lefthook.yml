@@ -30,6 +30,33 @@ pre-push:
       skip:
         - merge
         - rebase
+    public-repo-guard-meta:
+      # The customer-name class does NOT scan the tree — it scans commit
+      # messages, which is where that leak actually happens and the one surface
+      # that cannot be edited after a merge. So it needs its own invocation:
+      # without this the class would be enforced nowhere at all locally, since
+      # the scan above never looks at a message.
+      #
+      # merge-base gives the commits this push adds, relative to HEAD. Known
+      # limit, stated rather than hidden: pushing a branch you are not standing
+      # on (`git push origin other`) computes the range from HEAD, so it walks
+      # nothing. That case prints "NO commits scanned" — visible, not silent —
+      # and this class has no CI twin to catch it afterwards.
+      #
+      # Without ~/.lynox/private-names.re the class warns and stands down rather
+      # than blocking: an unpushable hook is how people learn --no-verify.
+      # The `|| echo HEAD` is load-bearing. Without it, a clone that has no local
+      # origin/main — a --single-branch clone, a differently named remote, a repo
+      # with no origin at all — makes the substitution empty, the guard sees a
+      # missing argument and exits 2, and the push is BLOCKED for a reason its
+      # message never mentions. Falling back to HEAD yields an empty range, which
+      # the guard reports as "NO commits" and lets through: it says it checked
+      # nothing rather than blocking, which is the right trade for a hook whose
+      # CI twin is the actual gate.
+      run: bash scripts/public-repo-guard.sh check-meta "$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)" HEAD
+      skip:
+        - merge
+        - rebase
     drift-guard:
       # Catch the mechanizable slices of doc/code drift gitleaks + public-repo-
       # guard don't: committed merge-conflict markers, removed features (Telegram
