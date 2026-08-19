@@ -2841,11 +2841,39 @@
 												<!-- WHY it is here. The generic "from external content" is true of every
 												     queued write, so it gives the person nothing to judge. The sticky case
 												     matters most: nothing external happened on THIS turn, and without
-												     saying so the chip looks like a bug. -->
-												<span class="text-text-subtle">{t(knowledgeCauseKey(kw.cause))}</span>
+												     saying so the chip looks like a bug.
+												     ONLY while the decision is open. It explains a pending question, and
+												     once answered it stops being one — see the outcome branch below for
+												     the second, load-bearing reason it must go. -->
+												{#if !kw.resolved}<span class="text-text-subtle">{t(knowledgeCauseKey(kw.cause))}</span>{/if}
 											</div>
 											{#if kw.resolved}
-												<p class="text-text-subtle">{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}</p>
+												<!-- The cause line is GONE above (`{#if !kw.resolved}`), and that is
+												     structural, not tidying. Stacked under a cause in the same weight, the
+												     outcome read as its tail — one fluent sentence about the AGENT, where
+												     the line reports what the PERSON decided:
+
+												       prüfen → lynox GmbH  …hatte Inhalte von ausserhalb
+												       übernommen
+
+												     Observed 2026-08-19; reported as a chip whose buttons had vanished.
+												     Re-wording the causes cannot fix this. There are THREE of them (incl.
+												     `knowledgeCauseKey`'s default) across two locales, each has to survive
+												     both outcome participles, and German ("aus externem Inhalt" +
+												     "übernommen") and English (the causative, and a reduced relative:
+												     "content from outside discarded") re-open the slot by different
+												     grammar. Twelve pairs to re-check on every copy edit is not a rule
+												     anyone keeps, so the SENTENCE-FRAGMENT neighbour goes instead.
+												     Not "the neighbour is gone" — the header line above still is one,
+												     and `→ lynox GmbH` over `übernommen` can still be read as a phrase.
+												     What changed is that it no longer READS as one: the header is 10px
+												     mono muted against full-strength body text, a name is not a clause
+												     left hanging mid-bracket, and the glyph opens the line as a status.
+												     A wording that trails off into a verb slot cannot end up here now. -->
+												<p class="flex items-center gap-1.5 text-text">
+													<span aria-hidden="true" class={kw.resolved === 'discarded' ? 'text-danger' : 'text-success'}>{kw.resolved === 'discarded' ? '✗' : '✓'}</span>
+													{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}
+												</p>
 											{:else if editingKnowledgeId === kw.id}
 												<textarea
 													aria-label={t('chat.knowledge.review_edit_aria')}
