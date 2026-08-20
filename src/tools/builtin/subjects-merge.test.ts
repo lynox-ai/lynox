@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { EngineDb } from '../../core/engine-db.js';
 import { SubjectStore } from '../../core/subject-store.js';
 import { DataStore } from '../../core/data-store.js';
@@ -9,11 +11,11 @@ import { createToolContext } from '../../core/tool-context.js';
 import { setDataDir } from '../../core/config.js';
 import { subjectsMergeTool } from './subjects-merge.js';
 import type { IAgent } from '../../types/index.js';
-import { flattenPrompt } from '../../core/prompt-value.js';
+import { flattenPrompt, isPromptText } from '../../core/prompt-value.js';
 import type { PromptText } from '../../types/index.js';
 
 /**
- * PR-C3 subjects_merge chat tool — the confirmed, reversible surface over
+ * PR-C3 subjects_merge chat tool — the confirmed, consent-gated surface over
  * SubjectStore.mergeSubjects. requiresConfirmation ⇒ it owns its confirmation via
  * promptUser and fails closed with no interactive channel; it shares the merge
  * runner's ledger (hermetic here via setDataDir into a tmp dir).
@@ -48,6 +50,187 @@ describe('subjects_merge tool (PR-C3)', () => {
     setDataDir(null);
     for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
     tmpDirs.length = 0;
+  });
+
+  // ── The consent prompt must not promise an undo the user does not have ──────
+  //
+  // It used to end "This is reversible." Three independent reasons it was not:
+  // `rollbackMergeRun`'s only non-test caller is the `subject-sweep` CLI, and the
+  // ledger it reads lives in `~/.lynox/sweeps/`, which appears in NONE of
+  // `backup.ts`'s three lists and in neither the migration export set nor the
+  // import whitelist — so a migration or a restore silently makes every past
+  // merge unreversible.
+  // ── The axis that kept escaping: a NEW string promising an undo ────────────
+  //
+  // Four rounds each pinned the field that had just been caught, by equality.
+  // The fifth showed why that loses: four pinned fields left EIGHT of this
+  // module's strings unpinned — `Cancelled`, the refusal, the error paths — and
+  // an undo promise dropped into the success message's own `record cells` branch
+  // stayed green. Enumerating the fields is the thing that keeps being wrong.
+  //
+  // So assert over ALL of them. Every string literal in the module is collected
+  // through the TypeScript AST, which never yields a comment — so the undo
+  // vocabulary in the prose above can neither trip this test nor satisfy it, the
+  // failure mode a `readFileSync` + regex guard would have. Of those literals,
+  // the ones carrying undo vocabulary must be EXACTLY the clauses below.
+  //
+  // Its honest limit, so nobody reads more into a green run: it matches
+  // VOCABULARY. A promise phrased without any of these words ("you can always get
+  // the old entry back") passes. It buys every literal in the file on the one
+  // axis that has actually failed five times — not a proof that no promise can be
+  // phrased at all.
+  // `revers` misses "revert", and `recoverab` misses "recover" — both near-misses of roots
+  // this obviously meant to cover, and both plausible developer wording. Widened after a
+  // review pass smuggled "You can ask an operator to revert it at any time." past the
+  // first version with the whole suite green.
+  const UNDO_VOCABULARY =
+    /revers|revert|undo|unmerge|un-merge|permanent|recover|restor|rollback|roll(?:ed|s|ing|\s+it)? back|back out|not final/i;
+
+  /** The clauses allowed to speak about undoing — fragments, as the source concatenates them. */
+  const ALLOWED_UNDO_CLAUSES = [
+    ' — that file is in no backup, so it will not survive a restore or a migration.',
+    '" is archived. Undoing it needs a command-line rollback — not something you can do from chat.',
+    'An operator can reverse this from ',
+    'Never tell the user a merge is reversible, undoable or can be rolled back from chat. It ',
+    '`kind` if they are not people. You will be asked to confirm. It cannot be undone from chat.',
+    'and that file is in no backup and in neither migration list, so a restore or a tenant ',
+    'cannot: the rollback is a command-line step against a ledger file under ~/.lynox/sweeps/, ',
+  ];
+
+  it('lets no string in this module speak about undoing except the vetted clauses', () => {
+    const file = fileURLToPath(new URL('./subjects-merge.ts', import.meta.url));
+    const sf = ts.createSourceFile(file, readFileSync(file, 'utf-8'), ts.ScriptTarget.Latest, true);
+
+    const plain: string[] = [];
+    const templateParts: string[] = [];
+    const walk = (node: ts.Node): void => {
+      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) plain.push(node.text);
+      else if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) templateParts.push(node.text);
+      ts.forEachChild(node, walk);
+    };
+    walk(sf);
+    const literals = [...plain, ...templateParts];
+
+    // Guards the guard: if the collector silently stopped seeing one KIND of string,
+    // every assertion below would pass vacuously — the swallowed-outage shape. A count
+    // floor is the wrong instrument for that and a review pass proved it: the module has
+    // exactly 40 plain literals, so deleting the template-span branch left `> 40` failing
+    // by ONE, and a single added plain string would have hidden the regression entirely.
+    // Assert instead that BOTH kinds were actually collected, which is the property that
+    // matters and has no margin to erode.
+    expect(plain.length, 'collector stopped seeing plain string literals').toBeGreaterThan(0);
+    expect(templateParts.length, 'collector stopped seeing template spans').toBeGreaterThan(0);
+
+    expect(
+      literals.filter((lit) => UNDO_VOCABULARY.test(lit)).sort(),
+      [
+        'A string in subjects_merge started (or stopped) speaking about undoing a merge.',
+        'There IS no undo from chat: rollbackMergeRun has one non-test caller (the subject-sweep',
+        'CLI), and its ledger is in no backup and in neither migration list — so a restore or a',
+        'tenant migration ends the possibility silently. If the new wording says that honestly,',
+        'add it to ALLOWED_UNDO_CLAUSES. If it promises the user an undo, it is wrong.',
+      ].join(' '),
+    ).toEqual([...ALLOWED_UNDO_CLAUSES].sort());
+  });
+
+  // The guard above reads the FILE. That is not the same thing as what ships, and a
+  // review pass proved the gap: move the caveat out of `definition.description` into a
+  // module-level const and the literal is still in the file, so the source guard stays
+  // green while the cached wire definition — the only text the model has on the FIRST
+  // merge in a thread, and the whole reason the token budget moved — silently loses it.
+  //
+  // So run the same vocabulary over the RUNTIME surface too: the serialized definition
+  // (name + description + schema, i.e. exactly what is cached and sent) plus
+  // detailedGuidance. Two surfaces, one mechanism, neither able to vouch for the other.
+  it('ships the honest caveat on the WIRE, not merely somewhere in the file', () => {
+    const wire = JSON.stringify(subjectsMergeTool.definition);
+    expect(wire).toContain('It cannot be undone from chat.');
+
+    // Collect the definition's actual string VALUES (description, every schema
+    // description, the enum members) rather than splitting the serialized blob — JSON has
+    // no sentence boundaries, so a naive split yields one giant chunk that matches
+    // nothing. detailedGuidance rides along: it is model-visible too, just later.
+    const wireStrings: string[] = [];
+    const collect = (v: unknown): void => {
+      if (typeof v === 'string') wireStrings.push(v);
+      else if (Array.isArray(v)) v.forEach(collect);
+      else if (v && typeof v === 'object') Object.values(v).forEach(collect);
+    };
+    collect(subjectsMergeTool.definition);
+    collect(subjectsMergeTool.detailedGuidance ?? '');
+    expect(wireStrings.length, 'wire collector saw nothing').toBeGreaterThan(5);
+
+    // Every wire string that speaks about undoing must be accounted for by a vetted
+    // clause. Containment either way, because the file's clauses are concatenation
+    // fragments while the wire carries them joined.
+    for (const text of wireStrings.filter((t) => UNDO_VOCABULARY.test(t))) {
+      const vetted = ALLOWED_UNDO_CLAUSES.some(
+        (clause) => text.includes(clause.trim()) || clause.trim().includes(text),
+      );
+      expect(vetted, `unvetted undo wording on the wire: ${text}`).toBe(true);
+    }
+  });
+
+  it('names the real undo route instead of claiming reversibility', async () => {
+    const agent = makeAgent('Merge');
+    await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);
+
+    // `pv` hands promptUser a PromptText, not a string. The first version of this
+    // flatten accepted a plain string too — which read as defensive and was the
+    // opposite: it made this test pass with the `pv` tag REMOVED, i.e. with the
+    // frame/value boundary that keeps KG-derived names out of markdown gone.
+    // Assert the shape first, then use the helper this file already imports.
+    const arg = (agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(isPromptText(arg), 'the consent prompt must stay a pv PromptText').toBe(true);
+    // The brand alone is not the boundary: a 4-line wrapper returning one all-`frame`
+    // segment passes `isPromptText` and puts KG-derived names back into markdown frame,
+    // which is exactly what `pv` exists to prevent. Pin the KIND.
+    // BOTH names are KG-extracted from untrusted content (the handler says so), so both
+    // must be values. The first version pinned only the canonical one, and wrapping the
+    // duplicate in an all-`frame` fragment passed.
+    const segs = (arg as { segments: Array<{ kind: string; text: string }> }).segments;
+    expect(segs).toContainEqual({ kind: 'value', text: 'Dr. Ada Lovelace' });
+    expect(segs).toContainEqual({ kind: 'value', text: 'Ada' });
+    const prompt = flattenPrompt(arg as Parameters<typeof flattenPrompt>[0]);
+    // The wording is tier-neutral on purpose. "You cannot undo this yourself" was the
+    // first attempt and is FALSE for a self-hoster: `subject-sweep --rollback` ships in
+    // `dist/` and they own the box, so for the primary distribution tier the user IS the
+    // operator. Naming the ROUTE is true for both tiers.
+    //
+    // MUTATION THIS KILLS: restoring "This is reversible." to the prompt. Killed by the
+    // `toMatch(/command-line rollback/i)` assert below — the happy-path test further
+    // down only checks `toContain('Merged')` on the RESULT and passes with any wording.
+    expect(prompt).toMatch(/command-line rollback/i);
+    expect(prompt).not.toMatch(/is reversible/i);
+  });
+
+  it('hands over the ledger file that was ACTUALLY written, not a plausible path', async () => {
+    const agent = makeAgent('Merge');
+    const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);
+
+    // The first version of this test asserted `/sweeps[/\\]merge-/` — the SHAPE of a
+    // path. An adversarial pass replaced the interpolation with the hardcoded, never-
+    // written `~/.lynox/sweeps/merge-latest.json` and the whole suite stayed green. The
+    // whole point of the change is handing over the REAL address, and shape-matching
+    // does not pin it: the obvious "tidy-up" refactor (reconstructing the path from
+    // `getLynoxDir()`) would ship a nonexistent file to the user with CI green.
+    //
+    // So: find what `runMerge` actually wrote, and require the message to name it.
+    const written = readdirSync(join(dir, 'sweeps')).filter((f) => f.startsWith('merge-'));
+    expect(written, 'runMerge must have written exactly one ledger').toHaveLength(1);
+
+    // `readdirSync` returns BASENAMES, so asserting on `written[0]` alone pinned the
+    // filename and nothing about the directory — a delta round shipped both a bare
+    // basename and a reconstructed `/backups/sweeps/` path with the suite green, the
+    // second being verbatim the failure the comment above claims to kill. Assert the
+    // full path the tool must actually emit.
+    //
+    // MUTATION THIS KILLS: any constant, any basename-only form, any reconstructed
+    // directory. Killed by this assert — `subjects-merge.test.ts`, the
+    // `toContain(join(dir, 'sweeps', written[0]!))` on the next line.
+    expect(res).toContain(join(dir, 'sweeps', written[0]!));
+    expect(res).toMatch(/in no backup/i);
+    expect(res).not.toMatch(/Reversible from the merge ledger/i);
   });
 
   it('confirmed merge folds the duplicate into the canonical (by name)', async () => {

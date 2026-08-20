@@ -301,7 +301,24 @@ function measureStaticPrefixTokens(): number {
 // customer's 2000-record import. 125 tokens a turn is the cheaper failure.
 // Both descriptions were tightened before this bump (176 → 125) — the first
 // draft spelled out what the shorter one implies.
-const STATIC_PREFIX_BUDGET = 23625;
+// 2026-08-20: +9 (measured 23634) for one clause on `subjects_merge`'s description —
+// "It cannot be undone from chat." The tool used to promise the opposite ("This is
+// reversible"), which was false three ways, and the honest correction cannot live in
+// `detailedGuidance` alone: that carrier is injected AFTER the first call
+// (`agent.ts:1774-1785`), so on the first merge in a thread the model composes its message
+// to the user having read only the cached description. Paying 9 tokens a turn is the
+// price of the model not telling a user something untrue at the one moment it matters.
+// WHO pays it, stated precisely rather than as "the fleet": `subjects_merge` is registered
+// only when `subject_graph_enabled` is true (`engine.ts:1786`), so a tenant with the flag
+// off pays ZERO — this guard counts it worst-case, as it does `set_thread_context`. The
+// four prod instances run with the flag on (measured, not assumed), so there it is real.
+// Not claimed to be minimal: "No undo from chat." would be ~4 tokens cheaper and is
+// equally true; the fuller sentence was kept because this text is parsed by a model
+// deciding whether to call a destructive tool.
+// The MECHANISM (ledger path, absent from backup and migration) stays on
+// `detailedGuidance` where the on-use split puts it — the full-mechanism wording in the
+// description measured 23649, i.e. +15 more for prose the model does not need to decide.
+const STATIC_PREFIX_BUDGET = 23634;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
@@ -361,6 +378,7 @@ describe('extended-tool-description-on-use split invariants', () => {
     { name: 'ask_secret', movedPhrase: 'dead end' },
     { name: 'memory_recall', movedPhrase: 'may be stale' },
     { name: 'api_setup', movedPhrase: 'auto-attached' },
+    { name: 'subjects_merge', movedPhrase: 'Never tell the user a merge is reversible' },
   ] as const;
 
   for (const { name, movedPhrase } of TARGETS) {
