@@ -1792,6 +1792,25 @@ export class Engine {
         this._toolContext.threadStore = this._threadStore;
         this.registry.register(setThreadContextTool);
         this.registry.register(subjectsMergeTool);
+
+        // Sweep expired merge ledgers once at boot, in addition to the sweep inside runMerge.
+        // Without this the retention has a hole exactly where it is needed most: a backup
+        // restore and a migration import both LAND ledgers without a merge ever running, so an
+        // instance that stops merging would keep that personal data forever — and a restore is
+        // the very case the retention exists for. Best-effort, never fatal: a cleanup must not
+        // be able to stop the engine from starting.
+        try {
+          const { pruneExpiredLedgers } = await import('./subject-merge-runner.js');
+          pruneExpiredLedgers(join(getLynoxDir(), 'sweeps'), new Date().toISOString());
+        } catch {
+          // Unreadable directory, permissions, a partially restored tree — none of it is
+          // worth failing boot over. The next merge sweeps again.
+        }
+        // The CALL is covered, not just the decision: `engine-init-wiring-boot.test.ts` boots a
+        // real Engine against a tmp data dir and asserts that a restored, expired ledger is gone
+        // afterwards, so deleting this line turns that test red. It shipped as a declared
+        // survivor on the premise that reaching init() needs a heavy mock chain; the precedent
+        // for booting one directly (`engine-startup-reap-boot.test.ts`) already existed.
         // Record-on-spine (R1 write + R1.5 query): wire the subject-column bridge
         // so `subject`-typed DataStore columns resolve a row's name → a real
         // subject_id on insert (the SAME findOrCreate dedup that feeds the graph),
@@ -1877,11 +1896,27 @@ export class Engine {
       }
     }
 
-    // Wire Google Drive backup upload if Google auth is available
+    // Wire Google Drive backup upload — SELF-HOSTED ONLY.
+    //
+    // On a CP-provisioned instance the control plane already runs restic backups, so a second
+    // backup path to a third party adds exposure without adding safety. Since core#1240 that
+    // exposure is concrete: the backup carries the merge ledger, which embeds email, phone,
+    // vat_id and domain.
+    //
+    // The boundary is who HOSTS, not the word "managed": BYOK (`hosted`) runs on lynox hosts
+    // too and gets the same CP backups — only the LLM key is the customer's. LYNOX_BILLING_TIER
+    // is emitted to all three CP tiers and absent on self-host, which is exactly the check the
+    // managed hook makes ~15 lines below. Same signal, same meaning, no new concept.
     if (this._backupManager && this._googleAuth) {
       try {
-        const { GDriveBackupUploader } = await import('./backup-upload-gdrive.js');
-        this._backupManager.setGDriveUploader(new GDriveBackupUploader(this._googleAuth));
+        // Both symbols from ONE dynamic import, INSIDE the try. The first version hoisted a
+        // second `await import` above this block to reach the gate — outside the catch, in an
+        // `init()` that has none, so a module-load failure in an OPTIONAL feature would have
+        // been fatal to boot on every tier. A gate is not worth a crash.
+        const { GDriveBackupUploader, driveBackupAllowed } = await import('./backup-upload-gdrive.js');
+        if (driveBackupAllowed()) {
+          this._backupManager.setGDriveUploader(new GDriveBackupUploader(this._googleAuth));
+        }
       } catch {
         // Non-critical — GDrive backup upload not available
       }
