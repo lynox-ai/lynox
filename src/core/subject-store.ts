@@ -1253,6 +1253,55 @@ export class SubjectStore {
     const { dupId, canonicalId } = entry;
     try {
       db.transaction(() => {
+      // Every reversal step below is an `UPDATE … WHERE id = ?` or an `INSERT OR IGNORE`,
+      // and SQLite reports "0 rows changed" for those exactly as it reports success. So a
+      // ledger this database cannot actually reverse used to walk the whole reversal,
+      // touch nothing (or the WRONG thing), commit, and return {ok:true} — while the tool
+      // told the user the merge had been undone.
+      //
+      // The predicate is "is this merge in effect", not "do these rows exist". Presence
+      // alone is too weak, and the gap is not academic: merge A→B, roll it back, merge
+      // A→C, then replay the FIRST ledger. Both rows are present, so a presence check
+      // passes — and the reversal then un-archives A while C still carries A's aliases,
+      // i.e. it CORRUPTS the graph and reports success. Replaying one ledger twice has the
+      // same shape. `merged_into === canonicalId` is strictly stronger and subsumes the
+      // absent-row case, because an absent row cannot satisfy it.
+      //
+      // Absence is not a hypothetical cross-machine case either: `restoreBackup` is
+      // ADDITIVE — it renames the files the manifest names and removes nothing else — so a
+      // ledger written AFTER a backup survives the restore of the older engine.db and then
+      // points at ids that database never had.
+      //
+      // Checked INSIDE the transaction so nothing can change these rows between the check
+      // and the writes; `.immediate()` below takes the write lock up front, so opening
+      // with a read no longer risks an unretryable SQLITE_BUSY_SNAPSHOT.
+      if (dupId === canonicalId) {
+        // `planMerge` refuses a self-merge, but this function consumes an operator-supplied
+        // ledger file, so the normal path is not the only path.
+        throw new Error('this merge ledger names the same entry on both sides — it cannot be a real merge');
+      }
+      const dupRow = db.prepare('SELECT merged_into FROM subjects WHERE id = ?').get(dupId) as { merged_into: string | null } | undefined;
+      const canonPresent = db.prepare('SELECT 1 AS ok FROM subjects WHERE id = ?').get(canonicalId) as { ok: number } | undefined;
+      const missing = [
+        ...(dupRow ? [] : ['the merged-away entry']),
+        ...(canonPresent ? [] : ['the entry it was merged into']),
+      ];
+      if (missing.length > 0) {
+        // Says what is TRUE (the rows are not here) rather than guessing WHY: "belongs to
+        // another instance" would be wrong for this instance after a hard delete — and this
+        // whole change exists because a message claimed more than it knew.
+        throw new Error(
+          `cannot reverse this merge here — ${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} not in this subject graph (a ledger from another instance, or an entry deleted since)`,
+        );
+      }
+      if (dupRow!.merged_into !== canonicalId) {
+        throw new Error(
+          dupRow!.merged_into === null
+            ? 'this merge is not in effect — it has already been reversed. If an earlier rollback reported a PARTIAL failure, the engine side is already undone and only the datastore/thread side still needs attention; re-running the whole reversal is not the repair.'
+            : `this merge is not in effect — the entry is currently merged into ${dupRow!.merged_into}, not into the entry this ledger names. Reversing it from here would un-archive the entry while the other merge still holds its aliases.`,
+        );
+      }
+
       // 1. restore dup archive/redirect state. A UNIQUE-index collision here THROWS →
       //    the transaction rolls back atomically (no partial reversal).
       db.prepare("UPDATE subjects SET merged_into = ?, archived_at = ?, updated_at = datetime('now') WHERE id = ?")
@@ -1300,7 +1349,13 @@ export class SubjectStore {
         const stmt = db.prepare(`UPDATE "${t.table}" SET "${t.column}" = ? WHERE "${t.pkCol}" = ? AND "${t.column}" = ?`);
         for (const pk of t.pks) stmt.run(dupId, pk, canonicalId);
       }
-      })();
+      // `.immediate()` — the transaction now OPENS with a read (the guard above), and a
+      // deferred BEGIN would upgrade to a write lock only at the first UPDATE. Under the
+      // documented contention (the operator sweep against a live engine) that upgrade
+      // raises SQLITE_BUSY_SNAPSHOT, which `busy_timeout` cannot absorb because it is not
+      // retryable. Taking the write lock up front keeps the guard's atomicity and restores
+      // the plain-BUSY behaviour the timeout does handle.
+      }).immediate();
     } catch (err) {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
