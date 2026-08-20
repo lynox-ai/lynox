@@ -1,4 +1,4 @@
-import { readdirSync, statSync, unlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomicSync } from './atomic-write.js';
 import type { SubjectStore, MergeLedgerEntry } from './subject-store.js';
@@ -76,27 +76,57 @@ export const LEDGER_RETENTION_DAYS = 90;
 /**
  * Delete merge ledgers older than the retention window. Best-effort by design.
  *
- * A merge must never fail because a cleanup could not run, so every error is swallowed: an
- * unreadable directory, a file removed by someone else mid-loop, a permission problem. The
- * name filter is deliberately tight (`merge-*.json`) — this function deletes files, and it
- * must not touch anything it did not write.
+ * ⚠ Ages by the ledger's OWN `createdAt`, not by mtime. The first version used mtime with the
+ * stated reason that "a rollback rewrites the file" — which is simply false: `rollbackMergeRun`
+ * never writes, the `applied` flip happens inside `runMerge` before anyone can roll back. Worse,
+ * the premise pointed the wrong way. Copies do NOT preserve mtime, so a backup restore and a
+ * migration import both hand every ledger a fresh full window — the one bound that exists for
+ * this personal data would have been reset by the very operations that spread it. `pruneBackups`
+ * already ages by `manifest.created_at` for the same reason; this follows it.
+ *
+ * Two safety rails, both from that same neighbour:
+ *   · the newest ledger is NEVER deleted, whatever the clock says — one forward clock jump
+ *     would otherwise unlink every reversal record in a single pass, irreversibly;
+ *   · a ledger whose `createdAt` cannot be read or parsed is KEPT. Unreadable is not expired,
+ *     and this function's failure mode must be "kept too long", never "deleted too early".
+ *
+ * A merge must never fail because a cleanup could not run, so every error is swallowed. The name
+ * filter is deliberately tight (`merge-*.json`) — this deletes files, and must not touch
+ * anything it did not write.
  */
 export function pruneExpiredLedgers(sweepsDir: string, nowIso: string): void {
-  const cutoff = Date.parse(nowIso) - LEDGER_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-  if (!Number.isFinite(cutoff)) return;
+  const now = Date.parse(nowIso);
+  if (!Number.isFinite(now)) return;
+  const cutoff = now - LEDGER_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
   let names: string[];
   try {
     names = readdirSync(sweepsDir);
   } catch {
     return;
   }
+
+  const aged: Array<{ full: string; createdMs: number }> = [];
   for (const name of names) {
     if (!name.startsWith('merge-') || !name.endsWith('.json')) continue;
     const full = join(sweepsDir, name);
     try {
-      // mtime, not the timestamp in the filename: a rollback rewrites the file (`applied`
-      // flips), and a ledger that was touched recently is one someone is still working with.
-      if (statSync(full).mtimeMs >= cutoff) continue;
+      const parsed = JSON.parse(readFileSync(full, 'utf8')) as { createdAt?: unknown };
+      const createdMs = typeof parsed.createdAt === 'string' ? Date.parse(parsed.createdAt) : NaN;
+      if (!Number.isFinite(createdMs)) continue;   // unreadable age ⇒ keep
+      aged.push({ full, createdMs });
+    } catch {
+      continue;                                     // unreadable file ⇒ keep
+    }
+  }
+  if (aged.length === 0) return;
+
+  // Never the newest, even if the clock claims it is ancient.
+  const newest = aged.reduce((a, b) => (b.createdMs > a.createdMs ? b : a));
+  for (const { full, createdMs } of aged) {
+    if (full === newest.full) continue;
+    if (createdMs >= cutoff) continue;
+    try {
       unlinkSync(full);
     } catch {
       // Someone else's concurrent delete, or a file we may not remove. Neither is our problem.

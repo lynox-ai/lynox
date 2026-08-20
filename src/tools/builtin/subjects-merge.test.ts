@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
+import { DATA_DIR_INVENTORY } from '../../core/data-dir-inventory.js';
 import { EngineDb } from '../../core/engine-db.js';
 import { SubjectStore } from '../../core/subject-store.js';
 import { DataStore } from '../../core/data-store.js';
@@ -133,9 +134,10 @@ describe('subjects_merge tool (PR-C3)', () => {
       [
         'A string in subjects_merge started (or stopped) speaking about undoing a merge.',
         'There IS no undo from chat: rollbackMergeRun has one non-test caller (the subject-sweep',
-        'CLI), and its ledger is in no backup and in neither migration list — so a restore or a',
-        'tenant migration ends the possibility silently. If the new wording says that honestly,',
-        'add it to ALLOWED_UNDO_CLAUSES. If it promises the user an undo, it is wrong.',
+        'CLI), which needs shell access to the machine. The LEDGER is durable — DATA_DIR_INVENTORY',
+        'declares sweeps as backup+migrate — so do not say it dies on a restore; that was the',
+        'old wording and it stopped being true. If the new string states the access limit',
+        'honestly, add it to ALLOWED_UNDO_CLAUSES. If it promises the user an undo, it is wrong.',
       ].join(' '),
     ).toEqual([...ALLOWED_UNDO_CLAUSES].sort());
   });
@@ -245,6 +247,18 @@ describe('subjects_merge tool (PR-C3)', () => {
     expect(res).toMatch(/shell access/i);
     expect(res).not.toMatch(/in no backup/i);
     expect(res).not.toMatch(/Reversible from the merge ledger/i);
+  });
+
+  it('the "kept in backups" promise is coupled to the inventory that makes it true', () => {
+    // The whole defect this PR fixes was a string that outlived the fact behind it: the tool
+    // said the ledger dies on a restore long after the inventory started carrying it. Without
+    // this assert the same drift can happen in the other direction — flip `sweeps` back to
+    // `backup: false` and the result message would silently promise durability that is gone.
+    // Pin the fact, next to the string that depends on it.
+    const sweeps = DATA_DIR_INVENTORY.find((e) => e.name === 'sweeps');
+    expect(sweeps, 'sweeps must be declared in the data-dir inventory').toBeDefined();
+    expect(sweeps!.backup, 'result message claims the ledger is kept in backups').toBe(true);
+    expect(sweeps!.migrate, 'result message claims it is carried across migrations').toBe(true);
   });
 
   it('confirmed merge folds the duplicate into the canonical (by name)', async () => {

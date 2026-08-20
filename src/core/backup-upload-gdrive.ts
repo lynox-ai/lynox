@@ -9,7 +9,7 @@
 import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import type { BackupManifest } from './backup.js';
-import { readEnvAlias } from './env.js';
+import { isProvisionedInstance } from './wire-capture.js';
 
 const DRIVE_BASE = 'https://www.googleapis.com/drive/v3';
 const UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
@@ -71,12 +71,19 @@ const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
  * BYOK. `LYNOX_BILLING_TIER` is emitted to all three CP tiers and absent on self-host, which
  * is the same signal the managed hook uses.
  *
- * Extracted from the engine's wiring so the DECISION is testable; the one line that calls it
- * is not covered by a test, because reaching it means booting Engine.init() through a mock
- * chain — a cost that buys less than this function's own cases do.
+ * It delegates to `isProvisionedInstance`, which this repo already uses to answer exactly this
+ * question — and answers it across THREE markers (`LYNOX_MANAGED_INSTANCE_ID`,
+ * `LYNOX_BILLING_TIER`, `LYNOX_MANAGED_MODE`), so a half-provisioned environment still counts as
+ * provisioned. The first version here read only `LYNOX_BILLING_TIER` and so failed OPEN on
+ * partial env: a CP instance missing that one variable would have uploaded to Drive. Same
+ * question, one answer — the earlier claim of "no new concept" was only true after this change.
+ *
+ * Extracted from the engine's wiring so the DECISION is testable; the one line that calls it is
+ * not covered by a test, because reaching it means booting Engine.init() through a mock chain —
+ * a cost that buys less than this function's own cases do.
  */
-export function driveBackupAllowed(): boolean {
-  return !readEnvAlias('LYNOX_BILLING_TIER');
+export function driveBackupAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !isProvisionedInstance(env);
 }
 
 

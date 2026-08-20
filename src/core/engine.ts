@@ -1888,11 +1888,16 @@ export class Engine {
     // too and gets the same CP backups — only the LLM key is the customer's. LYNOX_BILLING_TIER
     // is emitted to all three CP tiers and absent on self-host, which is exactly the check the
     // managed hook makes ~15 lines below. Same signal, same meaning, no new concept.
-    const { driveBackupAllowed } = await import('./backup-upload-gdrive.js');
-    if (this._backupManager && this._googleAuth && driveBackupAllowed()) {
+    if (this._backupManager && this._googleAuth) {
       try {
-        const { GDriveBackupUploader } = await import('./backup-upload-gdrive.js');
-        this._backupManager.setGDriveUploader(new GDriveBackupUploader(this._googleAuth));
+        // Both symbols from ONE dynamic import, INSIDE the try. The first version hoisted a
+        // second `await import` above this block to reach the gate — outside the catch, in an
+        // `init()` that has none, so a module-load failure in an OPTIONAL feature would have
+        // been fatal to boot on every tier. A gate is not worth a crash.
+        const { GDriveBackupUploader, driveBackupAllowed } = await import('./backup-upload-gdrive.js');
+        if (driveBackupAllowed()) {
+          this._backupManager.setGDriveUploader(new GDriveBackupUploader(this._googleAuth));
+        }
       } catch {
         // Non-critical — GDrive backup upload not available
       }

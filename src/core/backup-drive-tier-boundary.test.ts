@@ -16,7 +16,11 @@ import { driveBackupAllowed } from './backup-upload-gdrive.js';
  * the tier most likely to have it enabled.
  */
 describe('driveBackupAllowed — the boundary is who hosts, not the tier name', () => {
-  const KEYS = ['LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'] as const;
+  // All three markers isProvisionedInstance reads. The third one is the reason this
+  // delegates rather than reading LYNOX_BILLING_TIER itself: an instance carrying only
+  // LYNOX_MANAGED_INSTANCE_ID is still CP-provisioned, and the first version would have
+  // called it self-host and uploaded.
+  const KEYS = ['LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE', 'LYNOX_MANAGED_INSTANCE_ID'] as const;
   const saved = new Map<string, string | undefined>();
   const set = (k: string, v: string | undefined): void => {
     if (!saved.has(k)) saved.set(k, process.env[k]);
@@ -50,12 +54,28 @@ describe('driveBackupAllowed — the boundary is who hosts, not the tier name', 
     expect(driveBackupAllowed()).toBe(false);
   });
 
-  it('an empty value is not a tier — it must not silently disable the upload', () => {
-    // Fail-open in this direction is right: an empty env var is a deployment slip, and
-    // silently dropping a self-hoster's only backup path would be worse than the exposure
-    // this guard prevents.
+  it('an empty value is not a marker — it must not silently disable the upload', () => {
+    // Fail-open in THIS direction is right: an empty env var is a deployment slip, and
+    // silently dropping a self-hoster's only offsite backup would be worse than the
+    // exposure the guard prevents. isProvisionedInstance already reads it this way
+    // (`(env[k] ?? '').length > 0`), so the two agree by construction.
     for (const k of KEYS) set(k, undefined);
     set('LYNOX_BILLING_TIER', '');
     expect(driveBackupAllowed()).toBe(true);
+  });
+
+  it('⭐ refuses on a PARTIAL provisioning env — only the instance id is set', () => {
+    // The defect this pins: the first version read LYNOX_BILLING_TIER alone, so a CP
+    // instance missing that one variable was treated as self-host and would have uploaded
+    // tenant data to Drive. Fail-CLOSED here — a half-provisioned env is a provisioning
+    // bug, not a licence. Same posture, and the same helper, as the capture-sink gate.
+    for (const k of KEYS) set(k, undefined);
+    set('LYNOX_MANAGED_INSTANCE_ID', 'inst_abc123');
+    expect(driveBackupAllowed()).toBe(false);
+  });
+
+  it('takes an explicit env, so the decision is testable without touching the process', () => {
+    expect(driveBackupAllowed({ LYNOX_BILLING_TIER: 'hosted' })).toBe(false);
+    expect(driveBackupAllowed({})).toBe(true);
   });
 });
