@@ -16,7 +16,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { join, resolve, sep, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
@@ -24,6 +24,7 @@ import { ApiStore } from './api-store.js';
 import { SecretVault } from './secret-vault.js';
 import { parsePortableMemoryKey, trimMemoryContent } from './memory-file.js';
 import { isMergeLedgerFileName } from './subject-merge-runner.js';
+import { MIGRATE_SQLITE_DBS, GENERIC_PORTABLE_DIRS, isPortableDirEntryName, MAX_PORTABLE_DIR_BYTES, MAX_PORTABLE_DIR_ENTRIES } from './data-dir-inventory.js';
 import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
 import type { ExportedSecret } from './migration-export.js';
@@ -64,6 +65,8 @@ export interface ImportVerification {
   memoryFilesImported: number;
   /** Merge ledgers restored — the reversal records `rollbackMergeRun` consumes. */
   mergeLedgersImported: number;
+  /** Files restored into the generic portable directories (`apis/`, `workspace/`). */
+  portableDirFilesImported: number;
   configApplied: boolean;
 }
 
@@ -110,7 +113,9 @@ const MAX_MERGE_LEDGERS = 50_000;
 
 /** Whitelist of allowed database file names — prevents path traversal via crafted manifests.
  *  engine.db (Foundation Rework v2 subject-graph) is portable user data — mirrors the export set. */
-const ALLOWED_DB_NAMES = new Set(['history.db', 'agent-memory.db', 'datastore.db', 'engine.db']);
+// DERIVED — the importer's whitelist is the exporter's set, so a database can never be
+// shipped by one side and refused by the other.
+const ALLOWED_DB_NAMES = new Set<string>(MIGRATE_SQLITE_DBS);
 
 /** Config fields the importer will accept — defense-in-depth re-validation (matches exporter allowlist). */
 const SAFE_CONFIG_FIELDS = new Set([
@@ -328,6 +333,7 @@ export class MigrationImporter {
       artifactsImported: 0,
       memoryFilesImported: 0,
       mergeLedgersImported: 0,
+      portableDirFilesImported: 0,
       configApplied: false,
     };
 
@@ -375,6 +381,13 @@ export class MigrationImporter {
     if (chunksByType.sweeps.length > 0) {
       onProgress?.({ phase: 'restoring', currentChunk: chunksByType.sweeps[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: 'sweeps' });
       verification.mergeLedgersImported = this.restoreSweeps(chunksByType.sweeps);
+    }
+
+    // 4c. Generic portable directories (`apis/`, `workspace/`) — opaque file trees, so
+    // they carry no ordering constraint against the databases.
+    for (const { meta, data } of chunksByType.portable_dir) {
+      onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: meta.name });
+      verification.portableDirFilesImported += this.restorePortableDir([{ meta, data }]);
     }
 
     // 5. Secrets (most sensitive — last)
@@ -439,6 +452,7 @@ export class MigrationImporter {
       memory: [],
       config: [],
       sweeps: [],
+      portable_dir: [],
     };
 
     for (const meta of metas) {
@@ -711,6 +725,62 @@ export class MigrationImporter {
       written++;
     }
 
+    return written;
+  }
+
+  /**
+   * Restore one generic portable directory. Every guard the sweeps restore earned from an
+   * adversarial round applies here too, for the same reasons: the bundle comes from another
+   * machine, `writeFileSync` follows symlinks, `resolve()` is purely lexical, and
+   * `mkdirSync(recursive)` no-ops on an existing link.
+   */
+  private restorePortableDir(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): number {
+    const totalBytes = chunks.reduce((n, c) => n + c.data.length, 0);
+    if (totalBytes > MAX_PORTABLE_DIR_BYTES) {
+      throw new Error(`Portable directory bundle too large: ${String(totalBytes)} > ${String(MAX_PORTABLE_DIR_BYTES)}`);
+    }
+    const ordered = [...chunks].sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
+    const data = ordered.length === 1 ? ordered[0]!.data : Buffer.concat(ordered.map(c => c.data));
+
+    const bundle = JSON.parse(data.toString('utf-8')) as { dir?: unknown; files?: Record<string, string> };
+    // The directory name comes from the bundle, so it is attacker-shaped: accept only the
+    // ones this build declares portable, never whatever the payload asks for.
+    if (typeof bundle.dir !== 'string' || !GENERIC_PORTABLE_DIRS.includes(bundle.dir)) return 0;
+    if (!bundle.files || typeof bundle.files !== 'object') return 0;
+
+    const entries = Object.entries(bundle.files);
+    if (entries.length > MAX_PORTABLE_DIR_ENTRIES) {
+      throw new Error(`Too many entries in ${bundle.dir}: ${String(entries.length)} > ${String(MAX_PORTABLE_DIR_ENTRIES)}`);
+    }
+
+    const root = join(this.lynoxDir, bundle.dir);
+    const rootPrefix = root + sep;
+    if (existsSync(root) && !lstatSync(root).isDirectory()) {
+      throw new Error(`Refusing to restore ${bundle.dir}: it is not a real directory.`);
+    }
+
+    let written = 0;
+    for (const [rel, b64] of entries) {
+      if (typeof b64 !== 'string') continue;
+      if (!isPortableDirEntryName(rel)) continue;
+
+      const filePath = resolve(root, rel);
+      if (!filePath.startsWith(rootPrefix)) continue;
+
+      const parent = dirname(filePath);
+      // A parent that is a symlink would put the write outside the tree even though the
+      // resolved path looks inside it.
+      if (existsSync(parent) && !lstatSync(parent).isDirectory()) continue;
+      mkdirSync(parent, { recursive: true, mode: DIR_MODE_PRIVATE });
+
+      // unlink first, then 'wx': writeFileSync opens O_CREAT|O_TRUNC and FOLLOWS a symlink,
+      // so writing onto one would put bundle content into its target.
+      try { unlinkSync(filePath); } catch { /* not there — the normal case */ }
+      try {
+        writeFileSync(filePath, Buffer.from(b64, 'base64'), { mode: FILE_MODE_PRIVATE, flag: 'wx' });
+      } catch { continue; } // raced, or the parent vanished
+      written++;
+    }
     return written;
   }
 

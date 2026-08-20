@@ -27,6 +27,7 @@ import { getLynoxDir } from './config.js';
 import { SecretVault } from './secret-vault.js';
 import { parsePortableMemoryKey } from './memory-file.js';
 import { isMergeLedgerFileName } from './subject-merge-runner.js';
+import { MIGRATE_SQLITE_DBS, GENERIC_PORTABLE_DIRS, isPortableDirEntryName, MAX_PORTABLE_DIR_BYTES } from './data-dir-inventory.js';
 import type { SecretScope } from '../types/index.js';
 import {
   encryptChunk,
@@ -70,11 +71,9 @@ interface PlaintextChunk {
 
 // ── Constants ──
 
-// Foundation Rework v2: engine.db (the subject-graph) is portable user data and
-// must migrate with the rest. Safe to list before it has data — the export loop
-// skips any DB that doesn't exist (existsSync guard below), so a pre-S0 or
-// flag-off (empty/absent engine.db) instance migrates it harmlessly.
-const SQLITE_DBS = ['history.db', 'agent-memory.db', 'datastore.db', 'engine.db'] as const;
+// DERIVED from `data-dir-inventory.ts` — see the note there. Safe to list a DB before it
+// has data: the export loop skips any that doesn't exist (existsSync guard below).
+const SQLITE_DBS = MIGRATE_SQLITE_DBS;
 
 /**
  * Split a payload into `MAX_CHUNK_BYTES`-bounded chunks. `encryptChunk` throws
@@ -175,6 +174,11 @@ export class MigrationExporter {
 
     onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'sweeps' });
     plaintextChunks.push(...this.collectSweeps());
+
+    for (const dirName of GENERIC_PORTABLE_DIRS) {
+      onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: dirName });
+      plaintextChunks.push(...this.collectPortableDir(dirName));
+    }
 
     // 5. Config (sanitized)
     const configChunk = this.collectConfig();
@@ -458,6 +462,53 @@ export class MigrationExporter {
 
     if (Object.keys(files).length === 0) return [];
     return splitIntoChunks(Buffer.from(JSON.stringify({ files }), 'utf-8'), 'sweeps', 'sweeps');
+  }
+
+  /**
+   * A portable directory whose contents are opaque to us — `apis/` holds connection
+   * definitions, `workspace/` is the file area the fs tools write into. Both can contain
+   * BINARY payloads (a measured instance had a .docx in its file area), so entries are
+   * base64, not utf-8: decoding a .docx as text and re-encoding it destroys the file while
+   * every test that only round-trips ASCII stays green.
+   *
+   * Symlinks are skipped rather than followed — the same reason as `collectSweeps`: a link
+   * planted here would otherwise carry whatever it points at out inside the bundle.
+   */
+  private collectPortableDir(dirName: string): PlaintextChunk[] {
+    const root = join(this.lynoxDir, dirName);
+    if (!existsSync(root)) return [];
+
+    const files: Record<string, string> = {};
+    let total = 0;
+
+    const walk = (rel: string): void => {
+      const abs = rel === '' ? root : join(root, rel);
+      let entries: string[];
+      try { entries = readdirSync(abs); } catch { return; }
+      for (const name of entries) {
+        const childRel = rel === '' ? name : `${rel}/${name}`;
+        const childAbs = join(abs, name);
+        let st;
+        try { st = lstatSync(childAbs); } catch { continue; }
+        if (st.isSymbolicLink()) continue;
+        if (st.isDirectory()) { walk(childRel); continue; }
+        if (!st.isFile()) continue;
+        if (!isPortableDirEntryName(childRel)) continue;
+        if (total + st.size > MAX_PORTABLE_DIR_BYTES) continue;
+        try {
+          files[childRel] = readFileSync(childAbs).toString('base64');
+          total += st.size;
+        } catch { continue; } // vanished between lstat and read
+      }
+    };
+    walk('');
+
+    if (Object.keys(files).length === 0) return [];
+    return splitIntoChunks(
+      Buffer.from(JSON.stringify({ dir: dirName, files }), 'utf-8'),
+      'portable_dir',
+      dirName,
+    );
   }
 
   private collectConfig(): PlaintextChunk | null {

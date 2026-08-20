@@ -13,6 +13,7 @@ import Database from 'better-sqlite3';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
 import { deriveBackupKey, encryptFile, decryptFile, isEncryptedBackupFile } from './backup-crypto.js';
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
+import { BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
 
 /** Metadata stored alongside every backup. */
 export interface BackupManifest {
@@ -48,19 +49,14 @@ export interface BackupConfig {
   gdriveUploader?: import('./backup-upload-gdrive.js').GDriveBackupUploader | undefined;
 }
 
-// Foundation Rework v2: `engine.db` is the new consolidated subject-graph store.
-// During S0/S1 it co-exists with the legacy files (which still hold the live
-// data), so ALL are backed up — `mail-state.db` is added here too, fixing a
-// pre-existing omission (inbox/mail state was never backed up). At S2 the legacy
-// files fold into engine.db and are deleted; trim this list to the 3-file set then.
-const SQLITE_DBS = ['engine.db', 'history.db', 'vault.db', 'datastore.db', 'agent-memory.db', 'mail-state.db', 'push-subscriptions.db'] as const;
-// `sweeps` holds the merge ledgers — the ONLY record that makes a `subjects_merge`
-// reversible (`rollbackMergeRun` takes a ledger file and nothing else). It was absent
-// here, so a restore silently ended the possibility for every past merge while the tool
-// was telling users the merge was reversible. Restoring it is what makes the honest
-// wording true rather than merely honest.
-const COPY_DIRS = ['memory', 'sessions', 'sweeps'] as const;
-const COPY_FILES = ['config.json', 'vapid-keys.json'] as const;
+// DERIVED, not restated. These three lists and the migration set used to be maintained
+// independently and drifted: on 2026-08-20 the merge ledger was in neither, `artifacts/`
+// was in migration only, and `apis/`, `workspace/` and a hand-placed `files/` holding a
+// customer contract were in neither. `data-dir-inventory.ts` is now the single table both
+// paths read, and it must state a REASON for anything it does not carry.
+const SQLITE_DBS = BACKUP_SQLITE_DBS;
+const COPY_DIRS = BACKUP_COPY_DIRS;
+const COPY_FILES = BACKUP_COPY_FILES;
 
 export class BackupManager {
   private readonly lynoxDir: string;
