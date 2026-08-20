@@ -367,6 +367,7 @@ describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
     // case that proves the gate statement is read BEFORE the number.
     statusBalance = -250;
     statusGate = 'none';
+    await hook.onShutdown?.(); // stop the first timer pair before re-init
     await hook.onInit?.();
 
     // MUTATION THIS KILLS (a): dropping the `spend_gate === 'none'` branch —
@@ -403,12 +404,13 @@ describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
     await hook.onShutdown?.();
   });
 
-  it('only the exact token `"none"` releases — near-misses keep the guard armed', async () => {
-    // `'NONE'`, `'None'`, `'none '`, `'balance'`-with-a-null-balance, a boolean:
-    // each is what a careless emitter or a loosened comparison would produce.
-    // A `typeof data.spend_gate === 'string'` rewrite, or a `.toLowerCase()`
-    // "tolerance", passes the comp test above and admits every one of these.
-    for (const junk of ['NONE', 'None', 'none ', 'balance', true, 1, {}]) {
+  it('only the exact token `"none"` releases — `"unfunded"` and every near-miss keep the guard armed', async () => {
+    // `'unfunded'` is the CP's "no statement" token and must behave like an
+    // absent key. `'NONE'`, `'None'`, `'none '`, `'balance'`-with-a-null-balance,
+    // a boolean: each is what a careless emitter or a loosened comparison would
+    // produce. A `typeof data.spend_gate === 'string'` rewrite, or a
+    // `.toLowerCase()` "tolerance", passes the comp test above and admits these.
+    for (const junk of ['unfunded', 'NONE', 'None', 'none ', 'balance', true, 1, {}]) {
       const hook = createManagedHook();
       statusBalance = 50;
       statusGate = 'balance';
@@ -417,14 +419,61 @@ describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
 
       statusBalance = null;
       statusGate = junk;
+      await hook.onShutdown?.();
       await hook.onInit?.();
 
       // MUTATION THIS KILLS: loosening the `=== 'none'` comparison in any
-      // direction (case-folding, trimming, truthiness, typeof-string).
+      // direction (case-folding, trimming, truthiness, typeof-string), or
+      // treating `'unfunded'` as a release.
       await expect(hook.onBeforeRun!('run-x', CTX), JSON.stringify(junk))
         .rejects.toThrow(/budget for this period reached/i);
       await hook.onShutdown?.();
     }
+  });
+
+  it('a body WITHOUT `spend_gate` still anchors on a numeric balance — an older control plane keeps gating', async () => {
+    // The rollout window this change depends on: the engine carries the reader
+    // to the fleet before the control plane emits the field. During that window
+    // every numeric balance arrives without a token and must gate exactly as
+    // before. MUTATION THIS KILLS: `else if (data.spend_gate === 'balance' &&
+    // typeof data.balance_cents === 'number')` — every other test in this
+    // block sends `'balance'`, so only this one sees the difference.
+    const hook = createManagedHook();
+    statusGate = undefined;
+    statusBalance = 50;
+    await hook.onInit?.(); // anchored at 50c from a legacy body
+    hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10c
+    await expect(hook.onBeforeRun!('run-x', CTX)).rejects.toThrow(/budget for this period reached/i);
+    await hook.onShutdown?.();
+  });
+
+  it('`"none"` releases on the token alone — a null balance beside it changes nothing', async () => {
+    // The token is the statement; `balance_cents` is not consulted once it is
+    // read. MUTATION THIS KILLS: `spend_gate === 'none' && typeof
+    // data.balance_cents === 'number'` — which would turn a comp reply with a
+    // null balance back into a frozen mirror.
+    const hook = createManagedHook();
+    await hook.onInit?.(); // mirror = 50c
+    hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10c
+
+    statusBalance = null;
+    statusGate = 'none';
+    await hook.onShutdown?.();
+    await hook.onInit?.();
+    await expect(hook.onBeforeRun!('run-x', CTX)).resolves.toBeUndefined();
+    await hook.onShutdown?.();
+  });
+
+  it('`"none"` does not override `allowed: false` — the two terms stay independent', async () => {
+    // A CP that says "not balance-gated" but also "not allowed" is contradicting
+    // itself; the engine resolves that in the safe direction and refuses.
+    const hook = createManagedHook();
+    statusBalance = -250;
+    statusGate = 'none';
+    statusAllowed = false;
+    await hook.onInit?.();
+    await expect(hook.onBeforeRun!('run-x', CTX)).rejects.toThrow(/budget for this period reached/i);
+    await hook.onShutdown?.();
   });
 
   it('a malformed /status does NOT clear the mirror — the guard stays armed', async () => {
@@ -643,11 +692,39 @@ describe('managed-hook contract fixtures (K-W2)', () => {
     hook.onAfterRun?.('TEST-RUN-0001', 30, CTX); // mirror → ≤ 0
     await expect(hook.onBeforeRun!('TEST-RUN-0002', CTX)).rejects.toThrow(/budget for this period reached/i);
 
+    // The kill below exists only because the comp fixture's balance is ≤ 0 — a
+    // positive comp balance would admit the run with or without the token.
+    expect((load('usage-status-response.comp.json') as { balance_cents: number }).balance_cents).toBeLessThanOrEqual(0);
     status = 'usage-status-response.comp.json'; // the account is comped
+    await hook.onShutdown?.();
     await hook.onInit?.();
     // Renaming `spend_gate` in the fixture (or the parser) re-anchors on -250
     // and this run is refused — the rename-fails-both-sides probe for the field.
     await expect(hook.onBeforeRun!('TEST-RUN-0003', CTX)).resolves.toBeUndefined();
+    await hook.onShutdown?.();
+  });
+
+  it('the REAL /status parser consumes the hosted fixture WARM: `unfunded` keeps an anchored mirror', async () => {
+    // Cold, the hosted fixture leaves the mirror inert (above). Warm — a
+    // container anchored from a funded reply that then meets the unfunded
+    // branch — it must NOT be released: the CP made no statement about a gate.
+    let status = 'usage-status-response.managed.json';
+    fetchSpy = vi.fn().mockImplementation((url: unknown) => {
+      const u = String(url);
+      if (u.endsWith('/status')) {
+        return Promise.resolve({ ok: true, json: async () => load(status) });
+      }
+      return Promise.resolve({ ok: true, json: async () => load('usage-flush-response.json') });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const hook = mkHook();
+    await hook.onInit?.(); // anchored at 2985c
+    status = 'usage-status-response.hosted.json';
+    hook.onAfterRun?.('TEST-RUN-0001', 30, CTX); // mirror → ≤ 0
+    // The refuse path resyncs against the hosted fixture; `unfunded` keeps the
+    // mirror, so this and the next run stay refused.
+    await expect(hook.onBeforeRun!('TEST-RUN-0002', CTX)).rejects.toThrow(/budget for this period reached/i);
+    await expect(hook.onBeforeRun!('TEST-RUN-0003', CTX)).rejects.toThrow(/budget for this period reached/i);
     await hook.onShutdown?.();
   });
 });

@@ -1,6 +1,6 @@
 {
   "balance_cents": null,
   "allowed": true,
-  "spend_gate": "none",
+  "spend_gate": "unfunded",
   "tier": "hosted"
 }

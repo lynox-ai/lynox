@@ -75,7 +75,7 @@ export const TYPED_MIRRORS: Record<string, unknown> = {
   'usage-status-response.hosted.json': {
     balance_cents: null,
     allowed: true,
-    spend_gate: 'none',
+    spend_gate: 'unfunded',
     tier: 'hosted',
   } satisfies UsageStatusResponse,
   'usage-summary-response.managed.json': {

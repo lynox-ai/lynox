@@ -234,8 +234,8 @@ export function createManagedHook(): LynoxHooks {
         signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
       });
       if (res.ok) {
-        // Parse-tolerant: only `allowed` + `balance_cents` are dereferenced —
-        // the contract type documents the full emitted shape.
+        // Parse-tolerant: only `allowed`, `balance_cents` and `spend_gate` are
+        // dereferenced — the contract type documents the full emitted shape.
         const data = (await res.json()) as UsageStatusResponse;
         allowed = data.allowed;
         lastSyncedAtMs = Date.now();
@@ -249,36 +249,24 @@ export function createManagedHook(): LynoxHooks {
         // re-anchoring high by up to one batch — is absorbed by the next CP debit
         // rather than stacking).
         //
-        // Decision order, and it is load-bearing: the POSITIVE gate statement
-        // first, then a numeric balance, then keep.
+        // Decision order is load-bearing: the gate statement first, then a
+        // numeric balance, then keep.
         if (data.spend_gate === 'none') {
-          // The control plane states that this account is NOT balance-gated — a
-          // comp whose pool may read negative but must never be refused for
-          // money, or a provider the CP does not fund. Clear the mirror. Once
-          // anchored it can only go DOWN (`onAfterRun` decrements, `onBeforeRun`
-          // refuses at <= 0) and this re-anchor is the only thing that can lift
-          // it, so "skip the write" would not neutralise it, it would freeze it
-          // at a stale number — which an admin credit grant could then never
-          // rescue. Checked BEFORE the number: a comp's balance is a real, often
-          // negative, number, and anchoring on it is exactly the refusal.
+          // The CP states this account is funded but not balance-gated (a comp:
+          // its balance is a real, often negative, number — anchoring on it
+          // would be the refusal). Clear: once anchored the mirror only goes
+          // DOWN, and this re-anchor is the only thing that can lift it.
           mirror = undefined;
         } else if (typeof data.balance_cents === 'number') {
           mirror = data.balance_cents - sumReportCents(pending) - inflightCents;
         }
         // Anything else keeps the current mirror, exactly as a failed sync does:
-        // the key absent, a non-numeric value — and an EXPLICIT `null` without
-        // `spend_gate: 'none'`. That last one is deliberate and reverses an
-        // earlier fix (#1102) that cleared on the bare null. A `null` is a
-        // PROVIDER-TYPE fact ("nothing to report on this branch"), not an
-        // entitlement fact: a container that holds the pooled key while its
-        // instance row says otherwise receives exactly that null, and clearing
-        // on it left such a container with no bound at all. Keeping the mirror
-        // there is a bounded, restart-clearable freeze; clearing it was
-        // unbounded. So the CP says "not gated" with a token that cannot arise
-        // by accident (`JSON.stringify(NaN)` emits `null`; nothing emits
-        // `'none'` by mistake), and only that token clears. An unrecognised
-        // token keeps the mirror as well — `'NONE'`, `'None'`, `'none '` are
-        // not the signal, and a strict equality is what makes that true.
+        // `'unfunded'`, an absent or unrecognised token (`'NONE'`, `'none '` —
+        // strict equality is what makes that true), and a bare `null`. The
+        // null case reverses #1102, which cleared on it: a null says only that
+        // the CP has nothing to report, not that the account is ungated, and a
+        // `JSON.stringify(NaN)` emits exactly that null. Keeping the mirror is
+        // bounded and a restart clears it; clearing it was unbounded.
       }
     } catch {
       // Sync failed — keep current state. The staleness check in

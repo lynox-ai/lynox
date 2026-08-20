@@ -49,34 +49,33 @@ export interface UsageFlushResponse {
 // === Usage status — GET /internal/usage/:instanceId/status (engine ← CP) ===
 
 /**
- * How the control plane gates this account's spend — the POSITIVE statement
- * the engine's local balance mirror acts on. Never inferred from
- * `balance_cents`.
+ * What the control plane states about this account's spend gate. The engine's
+ * local balance mirror acts on this token and never on `balance_cents` alone.
  *
- *  - `'balance'` — the account is balance-gated: `balance_cents` is a number
- *    and the engine anchors its mirror on it.
- *  - `'none'`    — the control plane states that this account is NOT
- *    balance-gated: a comp account (metered, never refused for money) or a
- *    provider the control plane does not fund at all. The engine clears its
- *    mirror.
+ *  - `'balance'`  — the control plane funds this instance and gates it by
+ *    balance: `balance_cents` is a number, the engine anchors its mirror on it.
+ *  - `'none'`     — the control plane funds this instance and states that it is
+ *    NOT balance-gated (a comp account: metered, never refused for money). The
+ *    engine clears its mirror. The control plane must emit this only where it
+ *    is the key supplier — never for an instance it merely does not fund.
+ *  - `'unfunded'` — the control plane does not fund this instance's spend
+ *    (BYOK/hosted) and makes no statement about a gate. The engine keeps
+ *    whatever mirror it holds, exactly as for an absent or unrecognised value.
  *
- * Why a token and not the absence of a number: `balance_cents: null` is a
- * PROVIDER-TYPE fact ("nothing to report on this branch"), not an entitlement
- * fact. Two earlier attempts read an entitlement out of that null and were
- * both wrong in opposite directions — one froze the mirror, the other
- * disarmed it on a container that still held the pooled key. A `null` can
- * also arise by accident (`JSON.stringify(NaN)` emits it); a token cannot.
+ * Why a token and not the absence of a number: `balance_cents: null` only says
+ * there is nothing to report on this branch; it says nothing about the gate,
+ * and a `null` can arise by accident (`JSON.stringify(NaN)` emits it) where a
+ * token cannot.
  */
-export type SpendGate = 'balance' | 'none';
+export type SpendGate = 'balance' | 'none' | 'unfunded';
 
 /**
  * High-frequency liveness/credit poll. `balance_cents` is `null` when the
- * control plane has no balance to report on this branch (BYOK/hosted). That
- * is a provider-type fact and says NOTHING about whether the account is
- * gated — `spend_gate` does. The engine dereferences `allowed`,
- * `balance_cents` and `spend_gate`, parse-tolerant: a response without
- * `spend_gate` comes from an older control plane and leaves the mirror as it
- * was — a legacy `null` does not clear it.
+ * control plane has no balance to report on this branch (BYOK/hosted); the
+ * gate is stated by `spend_gate`, never inferred from that null. The engine
+ * dereferences `allowed`, `balance_cents` and `spend_gate`, parse-tolerant: a
+ * response without `spend_gate` comes from an older control plane and leaves
+ * the mirror as it was.
  */
 export interface UsageStatusResponse {
   allowed: boolean;
@@ -90,8 +89,8 @@ export interface UsageStatusResponse {
    */
   tier: string;
   /**
-   * Required on the emit side — every branch states it. The engine treats an
-   * absent or unrecognised value as "unknown" and keeps its current mirror.
+   * The control plane must state it on every branch. The engine treats an
+   * absent or unrecognised value as no statement and keeps its current mirror.
    */
   spend_gate: SpendGate;
 }
