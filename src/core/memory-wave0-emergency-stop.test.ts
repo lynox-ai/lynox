@@ -60,14 +60,40 @@ describe('Wave 0 — 0.2/0.3 read path: confMult dropped, confidence not rendere
     const vConfirmed = v2.memories.find(m => m.id === confirmed)!;
     expect(vFresh).toBeDefined();
     expect(vConfirmed).toBeDefined();
-    // No confMult: the retrieval-tally no longer moves the score at all.
-    expect(vConfirmed.finalScore).toBeCloseTo(vFresh.finalScore, 10);
 
     const legacy = await legacyEngine.retrieve(text, [scope], opts);
     const lFresh = legacy.memories.find(m => m.id === fresh)!;
     const lConfirmed = legacy.memories.find(m => m.id === confirmed)!;
     // Legacy branch retained: the confirmed twin still scores strictly higher.
     expect(lConfirmed.finalScore).toBeGreaterThan(lFresh.finalScore);
+
+    // No confMult: the retrieval-tally no longer moves the score at all.
+    //
+    // Measured against the effect this test exists to detect, not against an absolute
+    // precision. `toBeCloseTo(…, 10)` demanded the two v2 scores agree to 5e-11 — tighter
+    // than the arithmetic that produces them, so the identical claim held while the
+    // ASSERT failed on accumulation order (twice in one day, only ever in a full run:
+    // 1.26e-10 and 2.09e-10 against a 5e-11 bar). A tolerance nobody can satisfy makes
+    // every unrelated PR look broken, which is worse than no tolerance at all.
+    //
+    // The legacy branch above measures the confMult effect on this very fixture, so it is
+    // the honest yardstick rather than a number someone liked. MEASURED on this fixture:
+    // legacyEffect = 0.055, and the v2 gap is float noise — 1.4e-11 isolated, up to
+    // 2.1e-10 in a full run. A bar at legacyEffect/10000 = 5.5e-6 therefore sits about
+    // FOUR orders of magnitude above the worst noise observed and four below the effect
+    // it must catch. Both sides of that sandwich are measured, which is the whole point.
+    //
+    // Named limit, measured rather than estimated. Mutating the v2 branch back to
+    // `(1 + confirmationCount * k)` and bisecting k: k=1e-1, 1e-4 and 1e-6 all FAIL this
+    // assert; k=1e-7 (≈9e-7 absolute on this fixture) passes. So the floor sits between
+    // ~9e-7 and ~9e-6 absolute — a bonus that cannot reorder anything. The old assert
+    // claimed to catch everything and in practice could not hold even for a gap of ZERO,
+    // so this is strictly more coverage, not less.
+    const legacyEffect = lConfirmed.finalScore - lFresh.finalScore;
+    const v2Gap = Math.abs(vConfirmed.finalScore - vFresh.finalScore);
+    expect(legacyEffect, 'fixture no longer produces a confMult effect to measure against').toBeGreaterThan(1e-4);
+    expect(v2Gap, `confirmation still moves the v2 score (gap ${v2Gap}, legacy effect ${legacyEffect})`)
+      .toBeLessThan(legacyEffect / 10000);
   });
 
   it('0.2: an OLD never-retrieved row is no longer penalized by the sticky confirmDecay when ON', async () => {
