@@ -28,6 +28,7 @@ this mechanically for every string leaf.
 | `usage-flush-response.json` | `UsageFlushResponse` | control plane (pair test in the private repo) | engine `managed-hook.ts` `flush()` — driven in `src/core/managed-hook.test.ts` |
 | `usage-status-response.managed.json` | `UsageStatusResponse` | control plane (pair test in the private repo) | engine `managed-hook.ts` `syncStatus()` — driven in `src/core/managed-hook.test.ts` |
 | `usage-status-response.hosted.json` | `UsageStatusResponse` | control plane, non-managed branch (pair test in the private repo) | engine `managed-hook.ts` `syncStatus()` |
+| `usage-status-response.comp.json` | `UsageStatusResponse` (comp account: metered balance, `spend_gate: none`) | control plane, comp branch (pair test in the private repo) | engine `managed-hook.ts` `syncStatus()` — driven in `src/core/managed-hook.test.ts` (clears the mirror) |
 | `usage-summary-response.managed.json` | `UsageSummaryResponse` | control plane (pair test in the private repo) | engine `src/core/managed-usage-summary.ts` — driven in its test |
 | `usage-summary-response.not-managed.json` | `UsageSummaryResponse` | control plane, non-managed branch (pair test in the private repo) | engine `src/core/managed-usage-summary.ts` |
 | `health-body.json` | `HealthBody` | engine `src/server/http-api.ts` `_collectHealthMetrics()` — shape-verified in `src/server/http-api.test.ts` | control plane (pair test in the private repo) |

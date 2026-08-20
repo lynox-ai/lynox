@@ -248,39 +248,37 @@ export function createManagedHook(): LynoxHooks {
         // running increment (so a /status straddling a concurrent flush's debit —
         // re-anchoring high by up to one batch — is absorbed by the next CP debit
         // rather than stacking).
-        if (typeof data.balance_cents === 'number') {
-          mirror = data.balance_cents - sumReportCents(pending) - inflightCents;
-        } else if (data.balance_cents === null) {
-          // An EXPLICIT null means "this account is not balance-gated" — BYOK and
-          // hosted today, and a comp account once the CP says so. Clear the mirror.
-          //
-          // The comment here used to claim a null balance "leaves the mirror a
-          // no-op". That is true only from a cold start. Once the mirror has been
-          // anchored from a number it can only ever go DOWN — `onAfterRun`
-          // decrements under `mirror !== undefined`, `onBeforeRun` refuses under
-          // `mirror <= 0`, and this branch was the ONLY thing that could raise
-          // it. (Named, not line-numbered: the two references that used to sit
-          // here pointed at `:370`/`:313` and the real sites had moved to
-          // `:396`/`:339` by the time anyone read them.) So skipping
-          // the write did not neutralise the mirror, it FROZE it: an account whose
-          // balance later went null was gated forever by a stale number, and an
-          // admin credit grant could not rescue it, because the grant reaches the
-          // engine only through the re-anchor this branch performs.
-          //
-          // Note the asymmetry with the `else` below, and it is deliberate.
-          mirror = undefined;
-        }
-        // Anything else — key absent, or a non-null non-number — is a MALFORMED
-        // response, not a signal. Keep the current mirror, exactly as a failed
-        // sync does. Treating "no usable value" as "not balance-gated" would let
-        // a degraded CP response switch the local spend guard off.
         //
-        // "A degraded response", not "any degraded response", because ONE shape
-        // gets through and it is worth naming: `JSON.stringify(NaN)` emits
-        // `null`, so a CP that computes a NaN balance sends a value this code
-        // reads as the deliberate "not balance-gated" signal and clears on. No
-        // check here can tell those apart — they arrive byte-identical. The CP
-        // is the place that has to not do that.
+        // Decision order, and it is load-bearing: the POSITIVE gate statement
+        // first, then a numeric balance, then keep.
+        if (data.spend_gate === 'none') {
+          // The control plane states that this account is NOT balance-gated — a
+          // comp whose pool may read negative but must never be refused for
+          // money, or a provider the CP does not fund. Clear the mirror. Once
+          // anchored it can only go DOWN (`onAfterRun` decrements, `onBeforeRun`
+          // refuses at <= 0) and this re-anchor is the only thing that can lift
+          // it, so "skip the write" would not neutralise it, it would freeze it
+          // at a stale number — which an admin credit grant could then never
+          // rescue. Checked BEFORE the number: a comp's balance is a real, often
+          // negative, number, and anchoring on it is exactly the refusal.
+          mirror = undefined;
+        } else if (typeof data.balance_cents === 'number') {
+          mirror = data.balance_cents - sumReportCents(pending) - inflightCents;
+        }
+        // Anything else keeps the current mirror, exactly as a failed sync does:
+        // the key absent, a non-numeric value — and an EXPLICIT `null` without
+        // `spend_gate: 'none'`. That last one is deliberate and reverses an
+        // earlier fix (#1102) that cleared on the bare null. A `null` is a
+        // PROVIDER-TYPE fact ("nothing to report on this branch"), not an
+        // entitlement fact: a container that holds the pooled key while its
+        // instance row says otherwise receives exactly that null, and clearing
+        // on it left such a container with no bound at all. Keeping the mirror
+        // there is a bounded, restart-clearable freeze; clearing it was
+        // unbounded. So the CP says "not gated" with a token that cannot arise
+        // by accident (`JSON.stringify(NaN)` emits `null`; nothing emits
+        // `'none'` by mistake), and only that token clears. An unrecognised
+        // token keeps the mirror as well — `'NONE'`, `'None'`, `'none '` are
+        // not the signal, and a strict equality is what makes that true.
       }
     } catch {
       // Sync failed — keep current state. The staleness check in

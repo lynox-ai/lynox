@@ -49,10 +49,34 @@ export interface UsageFlushResponse {
 // === Usage status — GET /internal/usage/:instanceId/status (engine ← CP) ===
 
 /**
- * High-frequency liveness/credit poll. `balance_cents` is `null` for
- * non-managed providers (BYOK/hosted — no CP entitlement to report).
- * Both branches have always emitted every non-optional field below; the
- * engine still dereferences only `allowed` + `balance_cents` (parse-tolerant).
+ * How the control plane gates this account's spend — the POSITIVE statement
+ * the engine's local balance mirror acts on. Never inferred from
+ * `balance_cents`.
+ *
+ *  - `'balance'` — the account is balance-gated: `balance_cents` is a number
+ *    and the engine anchors its mirror on it.
+ *  - `'none'`    — the control plane states that this account is NOT
+ *    balance-gated: a comp account (metered, never refused for money) or a
+ *    provider the control plane does not fund at all. The engine clears its
+ *    mirror.
+ *
+ * Why a token and not the absence of a number: `balance_cents: null` is a
+ * PROVIDER-TYPE fact ("nothing to report on this branch"), not an entitlement
+ * fact. Two earlier attempts read an entitlement out of that null and were
+ * both wrong in opposite directions — one froze the mirror, the other
+ * disarmed it on a container that still held the pooled key. A `null` can
+ * also arise by accident (`JSON.stringify(NaN)` emits it); a token cannot.
+ */
+export type SpendGate = 'balance' | 'none';
+
+/**
+ * High-frequency liveness/credit poll. `balance_cents` is `null` when the
+ * control plane has no balance to report on this branch (BYOK/hosted). That
+ * is a provider-type fact and says NOTHING about whether the account is
+ * gated — `spend_gate` does. The engine dereferences `allowed`,
+ * `balance_cents` and `spend_gate`, parse-tolerant: a response without
+ * `spend_gate` comes from an older control plane and leaves the mirror as it
+ * was — a legacy `null` does not clear it.
  */
 export interface UsageStatusResponse {
   allowed: boolean;
@@ -65,6 +89,11 @@ export interface UsageStatusResponse {
    * values are legal on the wire.
    */
   tier: string;
+  /**
+   * Required on the emit side — every branch states it. The engine treats an
+   * absent or unrecognised value as "unknown" and keeps its current mirror.
+   */
+  spend_gate: SpendGate;
 }
 
 // === Usage summary — GET /internal/usage/:instanceId/summary (engine ← CP) ===

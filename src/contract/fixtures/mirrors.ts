@@ -59,11 +59,23 @@ export const TYPED_MIRRORS: Record<string, unknown> = {
     balance_cents: 2985,
     included_budget_cents: 3000,
     allowed: true,
+    spend_gate: 'balance',
+    tier: 'managed',
+  } satisfies UsageStatusResponse,
+  // A comp account: metered (the balance is a real, here negative, number) but
+  // never refused for money — `spend_gate: 'none'` is what tells the engine
+  // to clear its mirror instead of anchoring on -250.
+  'usage-status-response.comp.json': {
+    balance_cents: -250,
+    included_budget_cents: 3000,
+    allowed: true,
+    spend_gate: 'none',
     tier: 'managed',
   } satisfies UsageStatusResponse,
   'usage-status-response.hosted.json': {
     balance_cents: null,
     allowed: true,
+    spend_gate: 'none',
     tier: 'hosted',
   } satisfies UsageStatusResponse,
   'usage-summary-response.managed.json': {

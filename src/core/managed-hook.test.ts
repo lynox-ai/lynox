@@ -273,6 +273,10 @@ describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
   let statusBalance: number | null;
   let statusAllowed: boolean;
+  // What the CP states about the gate. `'balance'` is the current control
+  // plane; `undefined` omits the key entirely (a control plane from before the
+  // field existed); anything else is what a broken reply would carry.
+  let statusGate: unknown;
 
   beforeEach(() => {
     process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.test';
@@ -281,9 +285,12 @@ describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
     delete process.env['LYNOX_MANAGED_FLUSH_INTERVAL_MS'];
     statusBalance = 50; // 50c default entitlement
     statusAllowed = true;
+    statusGate = 'balance';
     fetchSpy = vi.fn().mockImplementation((url: string) => {
       if (String(url).endsWith('/status')) {
-        return Promise.resolve({ ok: true, json: async () => ({ allowed: statusAllowed, balance_cents: statusBalance }) });
+        const body: Record<string, unknown> = { allowed: statusAllowed, balance_cents: statusBalance };
+        if (statusGate !== undefined) body['spend_gate'] = statusGate;
+        return Promise.resolve({ ok: true, json: async () => body });
       }
       // flush POST — its balance is deliberately unreliable and the mirror ignores it.
       return Promise.resolve({ ok: true, json: async () => ({ allowed: statusAllowed, balance_cents: 0 }) });
@@ -333,43 +340,91 @@ describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
     await hook.onShutdown?.();
   });
 
-  // ── An ALREADY-ANCHORED mirror meeting a null balance ────────────────────
+  // ── An ALREADY-ANCHORED mirror meeting the CP's gate statement ──────────────
   //
-  // The case above starts cold. This one does not, and that is the whole
-  // difference: the mirror can only ever go DOWN once anchored (`onAfterRun`
-  // decrements, `onBeforeRun` refuses), and the re-anchor is the only thing that
-  // can raise it. Skipping the write on a null therefore did not neutralise the
-  // mirror, it froze it at whatever number it last held.
+  // The case above starts cold. These do not, and that is the whole difference:
+  // the mirror can only ever go DOWN once anchored (`onAfterRun` decrements,
+  // `onBeforeRun` refuses), and the re-anchor is the only thing that can raise
+  // it. So what the re-anchor does on a non-numeric balance decides whether an
+  // account that stops being balance-gated is released (comp) or stays frozen
+  // — and whether a container that should NOT be released can be released by
+  // accident. The two signals are kept apart on purpose:
   //
-  // This is not hypothetical plumbing. It is the failure the control-plane comp
-  // work has to send a non-numeric balance to express, and the reason that work
-  // is blocked on the engine reaching the fleet FIRST.
+  //   `spend_gate: 'none'`        → a POSITIVE statement → clear
+  //   `balance_cents: null` alone → a provider-type fact  → keep
+  //
+  // #1102 cleared on the bare null and was reversed here: the null also reaches
+  // a container that holds the pooled key while its instance row says
+  // otherwise, and clearing left that container with no bound at all.
 
-  it('clears an anchored mirror when the balance turns null — the account is no longer balance-gated', async () => {
+  it('clears an anchored mirror on `spend_gate: "none"` — a comp is metered but never refused', async () => {
     const hook = createManagedHook();
     await hook.onInit?.(); // mirror = 50c, anchored from a number
-    hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10c: gated, and refused today
-    await expect(hook.onBeforeRun!('run-a', CTX)).rejects.toThrow(/budget for this period reached/i);
+    hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10c: gated
 
-    statusBalance = null; // the CP now says: not balance-gated
-    await hook.onInit?.(); // a fresh /status re-anchors — here, clears
+    // The CP now states the account is not balance-gated. The balance it sends
+    // is the REAL one — negative — so anchoring on it would refuse: this is the
+    // case that proves the gate statement is read BEFORE the number.
+    statusBalance = -250;
+    statusGate = 'none';
+    await hook.onInit?.();
 
-    // MUTATION THIS KILLS: dropping the `else if (data.balance_cents === null)`
-    // branch — verified by running it, not by reading.
-    //
-    // But NOT at this line, and the difference is worth writing down because the
-    // next person will edit against the reason rather than the assertion. The
-    // refuse above fires a forced flush+resync, which re-anchors the mirror to
-    // +50 BEFORE the null arrives — so under the mutant `run-b` resolves anyway.
-    // What actually fails is the last assertion: r2's spend drives that stale
-    // +50 to -450 and the coalesce window blocks a rescue resync. The mutant
-    // dies at "it stays ungated", not here.
+    // MUTATION THIS KILLS (a): dropping the `spend_gate === 'none'` branch —
+    // the -250 anchors, run-b is refused.
+    // MUTATION THIS KILLS (b): swapping the order (number first, then gate) —
+    // same outcome, the number wins and refuses.
     await expect(hook.onBeforeRun!('run-b', CTX)).resolves.toBeUndefined();
 
     // And it stays ungated: further spend must not re-arm a mirror that is gone.
     hook.onAfterRun?.('r2', 5.00, CTX);
     await expect(hook.onBeforeRun!('run-c', CTX)).resolves.toBeUndefined();
     await hook.onShutdown?.();
+  });
+
+  it('a bare null balance does NOT clear an anchored mirror — it is a provider-type fact, not a release', async () => {
+    // A control plane from before `spend_gate` existed (the key is absent), or
+    // a current one answering its non-managed branch for a container that
+    // still holds the pooled key. Either way: no positive statement, no clear.
+    // The freeze is bounded (the mirror keeps decrementing to its floor and a
+    // restart re-anchors); a clear would have been unbounded.
+    const hook = createManagedHook();
+    await hook.onInit?.(); // mirror = 50c
+
+    statusBalance = null;
+    statusGate = undefined; // legacy reply: `{ allowed, balance_cents: null }`
+    hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10c
+
+    // The refuse fires a forced flush→/status; that /status now carries the
+    // null. Under #1102's branch it would clear the mirror right there, and
+    // run-b below would be admitted. Under the current code it keeps -10c.
+    await expect(hook.onBeforeRun!('run-a', CTX)).rejects.toThrow(/budget for this period reached/i);
+    // MUTATION THIS KILLS: re-adding `else if (data.balance_cents === null) mirror = undefined`.
+    await expect(hook.onBeforeRun!('run-b', CTX)).rejects.toThrow(/budget for this period reached/i);
+    await hook.onShutdown?.();
+  });
+
+  it('only the exact token `"none"` releases — near-misses keep the guard armed', async () => {
+    // `'NONE'`, `'None'`, `'none '`, `'balance'`-with-a-null-balance, a boolean:
+    // each is what a careless emitter or a loosened comparison would produce.
+    // A `typeof data.spend_gate === 'string'` rewrite, or a `.toLowerCase()`
+    // "tolerance", passes the comp test above and admits every one of these.
+    for (const junk of ['NONE', 'None', 'none ', 'balance', true, 1, {}]) {
+      const hook = createManagedHook();
+      statusBalance = 50;
+      statusGate = 'balance';
+      await hook.onInit?.(); // mirror = 50c
+      hook.onAfterRun?.('r1', 0.60, CTX); // mirror → -10c
+
+      statusBalance = null;
+      statusGate = junk;
+      await hook.onInit?.();
+
+      // MUTATION THIS KILLS: loosening the `=== 'none'` comparison in any
+      // direction (case-folding, trimming, truthiness, typeof-string).
+      await expect(hook.onBeforeRun!('run-x', CTX), JSON.stringify(junk))
+        .rejects.toThrow(/budget for this period reached/i);
+      await hook.onShutdown?.();
+    }
   });
 
   it('a malformed /status does NOT clear the mirror — the guard stays armed', async () => {
@@ -567,6 +622,32 @@ describe('managed-hook contract fixtures (K-W2)', () => {
     // allowed:true + balance null (BYOK/hosted): no mirror, spend never refuses.
     hook.onAfterRun?.('TEST-RUN-0001', 100, CTX);
     await expect(hook.onBeforeRun!('TEST-RUN-0002', CTX)).resolves.toBeUndefined();
+    await hook.onShutdown?.();
+  });
+
+  it('the REAL /status parser consumes the comp fixture: a negative balance with `spend_gate: none` clears the mirror', async () => {
+    // The fixture carries balance_cents -250 — the number the engine would
+    // have anchored on and refused. The gate token is what stops that, and it
+    // is read off the same golden bytes the control plane's pair test emits.
+    let status = 'usage-status-response.managed.json';
+    fetchSpy = vi.fn().mockImplementation((url: unknown) => {
+      const u = String(url);
+      if (u.endsWith('/status')) {
+        return Promise.resolve({ ok: true, json: async () => load(status) });
+      }
+      return Promise.resolve({ ok: true, json: async () => load('usage-flush-response.json') });
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const hook = mkHook();
+    await hook.onInit?.(); // anchored at 2985c from the managed fixture
+    hook.onAfterRun?.('TEST-RUN-0001', 30, CTX); // mirror → ≤ 0
+    await expect(hook.onBeforeRun!('TEST-RUN-0002', CTX)).rejects.toThrow(/budget for this period reached/i);
+
+    status = 'usage-status-response.comp.json'; // the account is comped
+    await hook.onInit?.();
+    // Renaming `spend_gate` in the fixture (or the parser) re-anchors on -250
+    // and this run is refused — the rename-fails-both-sides probe for the field.
+    await expect(hook.onBeforeRun!('TEST-RUN-0003', CTX)).resolves.toBeUndefined();
     await hook.onShutdown?.();
   });
 });

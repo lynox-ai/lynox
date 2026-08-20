@@ -52,7 +52,7 @@ const OBVIOUSLY_FAKE: RegExp[] = [
   /^https:\/\/[a-z0-9.-]+\.invalid(?:\/[a-z0-9./-]*)?$/, // RFC-2606 reserved hosts
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,       // ISO timestamps
   /^0\.0\.0-test$/,                  // fake version
-  /^(?:ok|hosted|managed|managed_pro|balanced|deep|fast|stripe-billing|openai)$/, // contract literals (vocab + shapes + http)
+  /^(?:ok|hosted|managed|managed_pro|balanced|deep|fast|stripe-billing|openai|balance|none)$/, // contract literals (vocab + shapes + http)
 ];
 // A 40-hex SHA is fake iff it is blatantly low-entropy: ≤4 distinct chars.
 function isObviouslyFakeSha(s: string): boolean {

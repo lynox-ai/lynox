@@ -1,7 +1,7 @@
 {
-  "balance_cents": 2985,
+  "balance_cents": -250,
   "included_budget_cents": 3000,
   "allowed": true,
-  "spend_gate": "balance",
+  "spend_gate": "none",
   "tier": "managed"
 }
