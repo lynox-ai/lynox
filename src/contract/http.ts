@@ -49,10 +49,36 @@ export interface UsageFlushResponse {
 // === Usage status — GET /internal/usage/:instanceId/status (engine ← CP) ===
 
 /**
- * High-frequency liveness/credit poll. `balance_cents` is `null` for
- * non-managed providers (BYOK/hosted — no CP entitlement to report).
- * Both branches have always emitted every non-optional field below; the
- * engine still dereferences only `allowed` + `balance_cents` (parse-tolerant).
+ * What the control plane states about this account's spend gate. The engine's
+ * local balance mirror acts on this token and never on `balance_cents` alone.
+ *
+ *  - `'balance'`  — the control plane funds this instance and gates it by
+ *    balance: `balance_cents` is a number, the engine anchors its mirror on it.
+ *  - `'none'`     — the control plane funds this instance and states that it is
+ *    NOT balance-gated (a comp account: metered, never refused for money). The
+ *    engine clears its mirror. The control plane must emit this only where it
+ *    is the key supplier — never for an instance it merely does not fund.
+ *  - `'unfunded'` — the control plane does not fund this instance's spend
+ *    (BYOK/hosted) and makes no statement about a gate. The engine reads it
+ *    exactly like an absent or unrecognised value: a numeric `balance_cents`
+ *    beside it would still anchor (the CP never sends that pair), a `null`
+ *    leaves the mirror as it was.
+ *
+ * Why a token and not the absence of a number: `balance_cents: null` only says
+ * there is nothing to report on this branch; it says nothing about the gate,
+ * and a `null` can arise by accident (`JSON.stringify(NaN)` emits it) where a
+ * token cannot.
+ */
+export type SpendGate = 'balance' | 'none' | 'unfunded';
+
+/**
+ * High-frequency liveness/credit poll. `balance_cents` is `null` when the
+ * control plane has no balance to report on this branch (BYOK/hosted); the
+ * gate is stated by `spend_gate`, never inferred from that null. The engine
+ * dereferences `allowed`, `balance_cents` and `spend_gate`, parse-tolerant: a
+ * response without `spend_gate` comes from an older control plane and is read
+ * as if no statement were made — a numeric `balance_cents` still anchors the
+ * mirror, a `null` leaves it as it was.
  */
 export interface UsageStatusResponse {
   allowed: boolean;
@@ -65,6 +91,11 @@ export interface UsageStatusResponse {
    * values are legal on the wire.
    */
   tier: string;
+  /**
+   * The control plane must state it on every branch. The engine treats an
+   * absent or unrecognised value as no statement and keeps its current mirror.
+   */
+  spend_gate: SpendGate;
 }
 
 // === Usage summary — GET /internal/usage/:instanceId/summary (engine ← CP) ===
