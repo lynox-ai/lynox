@@ -1806,12 +1806,11 @@ export class Engine {
           // Unreadable directory, permissions, a partially restored tree — none of it is
           // worth failing boot over. The next merge sweeps again.
         }
-        // ⚠ UNTESTED WIRING, stated rather than glossed: removing these two lines leaves the
-        // whole suite green. It is the second gate in this file with that property (the Drive
-        // upload gate is the other) — reaching either from a test means booting Engine.init()
-        // through a heavy mock chain. `pruneExpiredLedgers` itself is covered, including the
-        // restore case; what is not covered is that anything calls it at boot.
-        // Filed as DEF-engine-init-wiring-untestable.
+        // The CALL is covered, not just the decision: `engine-init-wiring-boot.test.ts` boots a
+        // real Engine against a tmp data dir and asserts that a restored, expired ledger is gone
+        // afterwards, so deleting this line turns that test red. It shipped as a declared
+        // survivor on the premise that reaching init() needs a heavy mock chain; the precedent
+        // for booting one directly (`engine-startup-reap-boot.test.ts`) already existed.
         // Record-on-spine (R1 write + R1.5 query): wire the subject-column bridge
         // so `subject`-typed DataStore columns resolve a row's name → a real
         // subject_id on insert (the SAME findOrCreate dedup that feeds the graph),

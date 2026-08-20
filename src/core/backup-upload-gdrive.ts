@@ -78,9 +78,9 @@ const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
  * partial env: a CP instance missing that one variable would have uploaded to Drive. Same
  * question, one answer — the earlier claim of "no new concept" was only true after this change.
  *
- * Extracted from the engine's wiring so the DECISION is testable; the one line that calls it is
- * not covered by a test, because reaching it means booting Engine.init() through a mock chain —
- * a cost that buys less than this function's own cases do.
+ * Extracted from the engine's wiring so the DECISION is testable independently of a boot. The
+ * one line that CALLS it is covered too, by `engine-init-wiring-boot.test.ts` — both directions,
+ * so neither dropping the call nor dropping the `if` around it can pass unnoticed.
  */
 export function driveBackupAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
   return !isProvisionedInstance(env);
