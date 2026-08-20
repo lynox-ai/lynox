@@ -200,6 +200,35 @@ function stableStringify(value: unknown): string {
  * error (mirrors `InternalRunBlockedError`) funnels the abort into the caller's
  * existing failure path, which records it distinctly and surfaces a note.
  */
+/**
+ * Why the last `send()` returned. The return STRING alone cannot say: a run that
+ * hits its turn cap while the model is still calling tools used to come back as
+ * `''` — indistinguishable from a model that answered nothing. Measured on
+ * rafael's production instance (thread `d8047252`, engine 2.14.2, 2026-08-18):
+ * 3 of 8 sub-agents came back empty, and every one of them had made exactly
+ * `max_turns - 1` tool calls — the last turn's tool_use was dropped on the floor.
+ * Reproduced locally 6/6 on `ministral-14b-2512` with `max_turns: 3`.
+ *
+ *  - `end_turn`       the model finished on its own (or via a terminal tool).
+ *  - `max_tokens`     the output budget ran out and continuations are exhausted.
+ *  - `iteration_cap`  `maxIterations` (spawn: `max_turns`) was consumed; if the
+ *                     final response still carried tool_use blocks they are in
+ *                     `pendingTools` and NO final answer exists.
+ *  - `budget_cap`     the CostGuard's USD budget was consumed, same shape.
+ *  - `absolute_cap`   `ABSOLUTE_MAX_ITERATIONS` — the runaway backstop.
+ */
+export type SendStopCause = 'end_turn' | 'max_tokens' | 'iteration_cap' | 'budget_cap' | 'absolute_cap';
+
+export interface SendStop {
+  cause: SendStopCause;
+  /** Tool_use blocks the model emitted in its final response that were never
+   *  dispatched (cap exits), in emission order. Empty on a clean `end_turn`. */
+  pendingTools: string[];
+  /** The model's own text of that final response — WITHOUT the engine marker
+   *  `send()` appends on a cap exit, so a caller can render its own notice. */
+  text: string;
+}
+
 export class RunAbortedError extends Error {
   constructor(message = 'Run interrupted before completion') {
     super(message);
@@ -300,6 +329,9 @@ export class Agent implements IAgent {
   private readonly maxTokens: number;
   private readonly workerPool: IWorkerPool | null;
   private readonly maxIterations: number;
+  /** Outcome of the most recent `send()` — see {@link SendStop}. `null` until the
+   *  first send completes; reset at the start of every send. */
+  private _lastStop: SendStop | null = null;
   private continuationPrompt: string | undefined;
   private readonly excludeTools: string[] | undefined;
   /** Optional user-preferred max context window — clamps the trim budget below the model's native window. */
@@ -768,6 +800,31 @@ export class Agent implements IAgent {
    * spawn spend — without this, a self-hoster's BYOK cap can be drifted
    * past via fan-out (T2-X1, PRD-HN-LAUNCH-HARDENING).
    */
+  /** Why and how the last `send()` ended — `null` before the first send. */
+  getLastStop(): SendStop | null {
+    return this._lastStop;
+  }
+
+  /**
+   * The one exit for "a cap stopped the loop". Records {@link SendStop} and, when
+   * the model was still mid-tool-call, returns its text PLUS an explicit marker
+   * instead of the bare text. Mirrors the `max_tokens` branch above, with one
+   * deliberate difference: that branch marks only when the text is empty, but a
+   * cap with a pending tool call is a lie by omission even when text exists
+   * ("here is my plan: <tool call that never ran>" reads as a finished answer), so
+   * the marker is appended whenever a tool_use was dropped. Tool names come from
+   * the model's own tool_use blocks — rendered as chat text here; a consumer
+   * that embeds them in markup must escape them (spawn.ts does).
+   */
+  private _finishOnCap(text: string, pendingTools: string[], cause: 'iteration_cap' | 'budget_cap'): string {
+    this._lastStop = { cause, pendingTools, text };
+    this._captureAtTurnEnd(text);
+    if (pendingTools.length === 0) return text;
+    const limit = cause === 'iteration_cap' ? 'turn limit' : 'cost budget';
+    const marker = `[Stopped: the ${limit} was reached while the model was still calling tools (${pendingTools.join(', ')}) — no final answer was produced. The task needs more turns or a narrower scope.]`;
+    return text.trim().length > 0 ? `${text}\n\n${marker}` : marker;
+  }
+
   getCostSnapshot(): import('../types/index.js').CostSnapshot | null {
     return this.costGuard ? this.costGuard.snapshot() : null;
   }
@@ -1435,6 +1492,7 @@ export class Agent implements IAgent {
     this._repeatGuard.reset();
     this._sawUntrustedData = false;
     this._sawFollowUpCall = false;
+    this._lastStop = null;
     // The USER turn can itself carry untrusted content. An uploaded document's extracted
     // text is third-party-authored — the person attached the file, they did not write what
     // is in it — and it arrives as a content block on this message, not as a tool result.
@@ -1519,11 +1577,18 @@ export class Agent implements IAgent {
   }
 
   private async _loop(): Promise<string> {
+    // Names of the tool_use blocks dispatched on the most recent iteration. Read
+    // only when the loop runs out of iterations: those tools DID run, but no
+    // further model call will ever read their results, and the pre-fix exit
+    // returned '' for that — see `_finishOnCap`.
+    let lastToolUseNames: string[] = [];
+    let lastToolUseText = '';
     for (let i = 0; this.maxIterations === 0 || i < this.maxIterations; i++) {
       if (i >= Agent.ABSOLUTE_MAX_ITERATIONS) {
         if (this.onStream) {
           await this.onStream({ type: 'error', message: `Absolute iteration limit (${Agent.ABSOLUTE_MAX_ITERATIONS}) reached — terminating loop`, agent: this.name });
         }
+        this._lastStop = { cause: 'absolute_cap', pendingTools: [], text: '' };
         return extractText([]);
       }
       // Stamped BEFORE the call, not after it. The warm-miss detector asks "was
@@ -1679,14 +1744,21 @@ export class Agent implements IAgent {
           if (this.onStream) {
             await this.onStream({ type: 'cost_warning', snapshot: this.costGuard.snapshot(), agent: this.name });
           }
-          const text = extractText(response.content);
-          this._captureAtTurnEnd(text);
-          return text;
+          // Out of turns or out of money — NOT the model's choice to stop. The
+          // pre-fix `return extractText(...)` handed a tool_use-only final
+          // response back as `''`, which every consumer read as "the model had
+          // nothing to say". See `SendStop` for the measurement behind this.
+          return this._finishOnCap(
+            extractText(response.content),
+            response.content.filter((b): b is BetaToolUseBlock => b.type === 'tool_use').map((b) => b.name),
+            this.costGuard.iterationCapReached() ? 'iteration_cap' : 'budget_cap',
+          );
         }
       }
 
       if (response.stop_reason === 'end_turn') {
         const text = extractText(response.content);
+        this._lastStop = { cause: 'end_turn', pendingTools: [], text };
         this._captureAtTurnEnd(text);
         return text;
       }
@@ -1736,6 +1808,7 @@ export class Agent implements IAgent {
         // Continuation cap exhausted — surface a clear notice rather than an
         // empty bubble when the truncated turn produced no visible text.
         const text = extractText(response.content);
+        this._lastStop = { cause: 'max_tokens', pendingTools: [], text };
         this._captureAtTurnEnd(text);
         return text.trim().length > 0
           ? text
@@ -1753,6 +1826,8 @@ export class Agent implements IAgent {
         // discard the working tool's result unread — so keep looping and let the model
         // read it (it can re-suggest at the real end).
         const toolUses = response.content.filter(b => b.type === 'tool_use');
+        lastToolUseNames = toolUses.map((b) => b.name);
+        lastToolUseText = extractText(response.content);
         const endsTurn = toolUses.length > 0
           && toolUses.every(b => this.tools.find(t => t.definition.name === b.name)?.endsTurn === true);
         // The model did the job itself → the recovery stays silent (and free).
@@ -1810,6 +1885,7 @@ export class Agent implements IAgent {
           // Mirror the end_turn path exactly: return this turn's text and run the
           // same memory-extraction gate (skipped for untrusted/internal/durable).
           const text = extractText(response.content);
+          this._lastStop = { cause: 'end_turn', pendingTools: [], text };
           this._captureAtTurnEnd(text);
           return text;
         }
@@ -1829,7 +1905,9 @@ export class Agent implements IAgent {
       return this._loop();
     }
 
-    return extractText([]);
+    // Out of iterations with no continuation: the last turn was a tool_use
+    // whose results nobody will read. Say so instead of returning ''.
+    return this._finishOnCap(lastToolUseText, lastToolUseNames, 'iteration_cap');
   }
 
   /**

@@ -4,7 +4,7 @@ import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationC
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
-import { Agent, RunAbortedError } from '../../core/agent.js';
+import { Agent, RunAbortedError, type SendStop } from '../../core/agent.js';
 import { describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import type { AgentConfig } from '../../types/index.js';
 import { loadConfig } from '../../core/config.js';
@@ -60,6 +60,31 @@ export function abortSpawnedAgents(): void {
  * ~4K tokens/turn (cache reduces this further after turn 1, not modelled)
  * and output as {@link SPAWN_OUTPUT_FILL_RATIO} × `model.maxOutput` per turn.
  */
+/**
+ * Map the child's `send()` outcome onto the `runs.stop_reason` column. Until
+ * 2026-08-20 spawn stamped `'end_turn'` unconditionally on the completed path,
+ * so a child stopped by its turn cap with a tool call still pending was
+ * indistinguishable in the ledger from one that finished on its own — every
+ * empty sub-agent in rafael's prod thread `d8047252` read `end_turn` while in
+ * truth `max_turns` had run out. The column is free text (the failure path
+ * already writes error messages into it); its readers are display-only (the
+ * web-ui diagnostics panel, the debug export, this file's own tests), so two new
+ * words here break nothing and name the knob the operator has to turn.
+ */
+export function ledgerStopReason(stop: SendStop | null): string {
+  switch (stop?.cause) {
+    case 'iteration_cap':
+    case 'absolute_cap':
+      return 'max_turns';
+    case 'budget_cap':
+      return 'max_budget';
+    case 'max_tokens':
+      return 'max_tokens';
+    default:
+      return 'end_turn';
+  }
+}
+
 function estimateSpawnCost(model: string, maxIterations: number): number {
   const pricing = getPricing(model);
   const expectedOutput = getDefaultMaxTokens(model) * SPAWN_OUTPUT_FILL_RATIO;
@@ -455,7 +480,7 @@ async function executeThinker(
    * and the caller needs that number even though it never receives a result.
    */
   onSettled?: (costUsd: number) => void,
-): Promise<{ result: string; childRunId: string | undefined; model: string }> {
+): Promise<{ result: string; childRunId: string | undefined; model: string; stop: SendStop | null }> {
   // 4-tier resolution: spec fields > role defaults > user config > global default
   const userConfig = loadConfig();
 
@@ -705,6 +730,8 @@ async function executeThinker(
 
     // Same per-turn time anchor as top-level chat / pipeline steps.
     const result = await childAgent.send(withCurrentTimePrefix(task, childAgent.userTimezone));
+    // Why the child stopped — the string above cannot say (see `SendStop`).
+    const stop: SendStop | null = childAgent.getLastStop();
 
     // Wave 1.2 replay (b): a spawned child shares the parent's Memory by default
     // (`memory` above resolves to `parentAgent.memory` unless `isolated_memory`). If the
@@ -756,7 +783,7 @@ async function executeThinker(
           // though the attribution was not.
           toolCallCount: childAgent.getRecordedToolCallCount(),
           status: 'completed',
-          stopReason: 'end_turn',
+          stopReason: ledgerStopReason(stop),
         });
       } catch {
         // Persistence failure — non-fatal. The child's result still
@@ -781,7 +808,7 @@ async function executeThinker(
       reportMeteredCost(meteredHost, randomUUID(), childCostUsd, modelTier);
     }
 
-    return { result, childRunId: childAgent.currentRunId, model };
+    return { result, childRunId: childAgent.currentRunId, model, stop };
   } catch (err) {
     // Mark the child run failed/aborted so the cost cap and history UI don't
     // show it as still-running. Fires for BOTH ctor failures (childAgent
@@ -1155,6 +1182,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // it. The section that ends in `</untrusted_data>` used to close it by
         // accident; the two that do not — FAILED, and now NO OUTPUT — never did.
         const safeName = escapeXml(spec.name);
+        const stop = outcome.value.stop;
 
         // A sub-agent that RETURNS but returns nothing is the third outcome,
         // and it was the only one the parent could not see: `rejected` gets a
@@ -1193,7 +1221,34 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // bytes of child content, and the real child→parent taint hand-off is
         // content-based, one frame up (`describeTurnUntrusted` → the parent's
         // `noteUntrustedData`, above), not marker-based.
-        if (outcome.value.result.trim() === '') {
+        if (stop?.cause === 'iteration_cap' || stop?.cause === 'budget_cap' || stop?.cause === 'absolute_cap') {
+          // 2026-08-20: the cause behind all three of those empties turned out to
+          // be THIS — the child was STOPPED by its turn cap (each had made exactly
+          // `max_turns - 1` tool calls; the last turn's tool_use was dropped). The
+          // section is read by the parent model, which acts on it: it has to name
+          // the knob and the remedy, or the parent keeps diagnosing a model defect.
+          // Tool names are model-emitted — escaped and capped before they land
+          // outside the envelope, the same class of hole #1237 closed for `spec.name`.
+          const isBudget = stop.cause === 'budget_cap';
+          const turns = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
+          const budget = spec.max_budget_usd ?? DEFAULT_SPAWN_BUDGET_USD;
+          const knob = isBudget ? `max_budget_usd=${String(budget)}` : `max_turns=${String(turns)}`;
+          const tools = stop.pendingTools.map((t: string) => escapeXml(t).slice(0, 64)).join(', ');
+          const whileDoing = tools ? ` and was still calling tools (${tools}) when it was stopped` : ' and was stopped before it answered';
+          const raise = isBudget
+            ? `a higher max_budget_usd (at least ${String(budget * 2)})`
+            : `a higher max_turns (at least ${String(turns * 2)})`;
+          const partial = stop.text.trim().length > 0
+            ? `\n\nPartial text it produced before stopping:\n\n${wrapUntrustedData(stop.text, `sub_agent:${spec.name}`)}`
+            : '';
+          sections.push(
+            `## ${safeName}${ranOn} — ${isBudget ? 'COST BUDGET' : 'TURN LIMIT'} REACHED (${knob})${downgradeNote}\n\n` +
+            `**The sub-agent used up its ${isBudget ? 'cost budget' : `${String(turns)} turns`}${whileDoing} — it never produced a final answer.** ` +
+            `This is neither a crash nor a model defect: the ${isBudget ? 'budget' : 'turn budget'} ran out. ` +
+            `To get the result, re-run THIS sub-agent once with ${raise}, or narrow its task so it needs fewer tool calls. ` +
+            `Do not retry it unchanged, and do not switch models because of this.${partial}`,
+          );
+        } else if (outcome.value.result.trim() === '') {
           sections.push(
             `## ${safeName}${ranOn} — NO OUTPUT${downgradeNote}\n\n` +
             `**The sub-agent finished without returning any text.** This is not a crash — ` +

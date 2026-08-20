@@ -881,9 +881,72 @@ describe('Agent', () => {
         // No continuationPrompt → should stop at maxIterations
       });
       const result = await agent.send('Loop forever');
-      // After 3 iterations with tool_use, it falls through and returns extractText([]) which is ''
-      expect(result).toBe('');
       expect(mockProcess).toHaveBeenCalledTimes(3);
+      // Pre-fix this returned '' — the exact string a model that answered nothing
+      // returns, which is how 3 of 8 production sub-agents got reported as "the
+      // model returned nothing" (thread d8047252, 2026-08-18). The cap must SAY so.
+      expect(result).not.toBe('');
+      expect(result).toContain('turn limit was reached');
+      expect(result).toContain('loop_tool');
+      expect(agent.getLastStop()).toEqual({ cause: 'iteration_cap', pendingTools: ['loop_tool'], text: '' });
+    });
+
+    it('maxIterations: keeps the model text AND marks the dropped tool call (mixed final response)', async () => {
+      // The max_tokens branch marks only when the text is empty; a cap with a
+      // pending tool call must mark even with text — "here is my plan: <tool call
+      // that never ran>" reads as a finished answer otherwise.
+      const tool = makeTool('loop_tool');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_1', name: 'loop_tool', input: {} }]))
+        .mockResolvedValueOnce(toolUseWithTextResponse('Checking one more thing:', [{ id: 'tu_2', name: 'loop_tool', input: {} }]));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], maxIterations: 2 });
+      const result = await agent.send('go');
+      expect(result.startsWith('Checking one more thing:')).toBe(true);
+      expect(result).toContain('turn limit was reached');
+      expect(agent.getLastStop()).toEqual({ cause: 'iteration_cap', pendingTools: ['loop_tool'], text: 'Checking one more thing:' });
+    });
+
+    it('CostGuard iteration cap (the spawn path): the pending tool is NOT dispatched and the stop is named', async () => {
+      // spawn.ts hands `max_turns` to the CostGuard as well as to the loop; the
+      // guard trips first, BEFORE dispatch — so the last tool_use never runs. This
+      // is the exit every empty production sub-agent took.
+      const handler = vi.fn().mockResolvedValue('ran');
+      const tool = makeTool('loop_tool', handler);
+      mockProcess.mockResolvedValue(toolUseResponse([{ id: 'tu_c', name: 'loop_tool', input: {} }]));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        maxIterations: 10,
+        costGuard: { maxBudgetUSD: 100, maxIterations: 2 },
+      });
+      const result = await agent.send('go');
+      expect(mockProcess).toHaveBeenCalledTimes(2);
+      expect(handler).toHaveBeenCalledTimes(1); // turn 1 ran; turn 2's call was dropped
+      expect(result).toContain('turn limit was reached');
+      expect(result).toContain('loop_tool');
+      expect(agent.getLastStop()?.cause).toBe('iteration_cap');
+      expect(agent.getLastStop()?.pendingTools).toEqual(['loop_tool']);
+    });
+
+    it('CostGuard budget cap names the BUDGET, not the turn limit', async () => {
+      const tool = makeTool('loop_tool');
+      mockProcess.mockResolvedValue(toolUseResponse([{ id: 'tu_b', name: 'loop_tool', input: {} }]));
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        costGuard: { maxBudgetUSD: 0.0000001, maxIterations: 50 },
+      });
+      const result = await agent.send('go');
+      expect(result).toContain('cost budget was reached');
+      expect(result).not.toContain('turn limit');
+      expect(agent.getLastStop()?.cause).toBe('budget_cap');
+    });
+
+    it('a clean end_turn reports cause end_turn, no pending tools, and the bare text', async () => {
+      mockProcess.mockResolvedValue(endTurnResponse('done.'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+      expect(agent.getLastStop()).toBeNull();
+      const result = await agent.send('hi');
+      expect(result).toBe('done.');
+      expect(agent.getLastStop()).toEqual({ cause: 'end_turn', pendingTools: [], text: 'done.' });
     });
 
     it('maxIterations with continuationPrompt: recurses after hitting limit', async () => {
