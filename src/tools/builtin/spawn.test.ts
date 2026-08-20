@@ -2297,6 +2297,27 @@ describe('spawn_agent tool', () => {
       expect(nearMax).toContain('higher max_turns (at least 50)');
     });
 
+    it('clamps the prescribed max_budget_usd to the schema maximum', async () => {
+      mockSend.mockResolvedValue('[Response stopped: …]');
+      mockLastStop = { cause: 'budget_cap', pendingTools: ['bash'], pendingToolCount: 1, text: '' };
+      const atMax = await spawnAgentTool.handler({ agents: [{ name: 'maxed', task: 'x', max_budget_usd: 50 }] }, makeAgent());
+      expect(atMax).toContain('COST BUDGET REACHED (max_budget_usd=50)');
+      expect(atMax).toContain('max_budget_usd is already at its maximum of 50');
+      expect(atMax).not.toContain('at least 100');
+      const nearMax = await spawnAgentTool.handler({ agents: [{ name: 'near', task: 'x', max_budget_usd: 30 }] }, makeAgent());
+      expect(nearMax).toContain('higher max_budget_usd (at least 50)');
+    });
+
+    it('a zero budget names the zero, not "already at its maximum"', async () => {
+      mockSend.mockResolvedValue('[Response stopped: …]');
+      mockLastStop = { cause: 'budget_cap', pendingTools: ['bash'], pendingToolCount: 1, text: '' };
+      const result = await spawnAgentTool.handler({ agents: [{ name: 'broke', task: 'x', max_budget_usd: 0 }] }, makeAgent());
+      expect(result).toContain('COST BUDGET REACHED (max_budget_usd=0)');
+      expect(result).toContain('a positive max_budget_usd');
+      expect(result).toContain('the default is 5');
+      expect(result).not.toContain('already at its maximum');
+    });
+
     it('ledgerStopReason maps every cause onto the column vocabulary', () => {
       const base = { pendingTools: [], pendingToolCount: 0, text: '' };
       expect(ledgerStopReason(null)).toBe('end_turn');

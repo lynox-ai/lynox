@@ -1221,29 +1221,31 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // bytes of child content, and the real child→parent taint hand-off is
         // content-based, one frame up (`describeTurnUntrusted` → the parent's
         // `noteUntrustedData`, above), not marker-based.
-        if (
-          (stop?.cause === 'iteration_cap' || stop?.cause === 'budget_cap' || stop?.cause === 'absolute_cap')
-          && stop.pendingToolCount > 0
-        ) {
+        // `absolute_cap` is deliberately not here: a child never runs with
+        // unlimited iterations (`maxIterations` is always set above), so the
+        // 500-call backstop cannot be what stopped it.
+        if ((stop?.cause === 'iteration_cap' || stop?.cause === 'budget_cap') && stop.pendingToolCount > 0) {
           // 2026-08-20: the cause behind the empties measured above turned out to
           // be THIS — the child was STOPPED by its turn cap while still calling
           // tools (each had made exactly `max_turns - 1` tool calls; the last
           // turn's tool_use was dropped). `pendingToolCount > 0` is load-bearing:
-          // a cap that coincides with a turn the model finished by itself is the
-          // most common SUCCESSFUL shape and takes the normal path below. The
+          // a cap that coincides with a turn the model finished by itself is a
+          // legitimate successful shape and takes the normal path below. The
           // section is read by the parent model, which acts on it: it has to name
           // the knob and the remedy, or the parent keeps diagnosing a model defect.
           // Tool names arrive charset-gated and capped from `SendStop`; escaped
           // again here because they land OUTSIDE the envelope (the class of hole
           // #1237 closed for `spec.name`).
           //
-          // Why "at least 2N": a failed tool call costs two more model calls to
-          // recover from (the retry, and the turn that reads its result), so
-          // doubling is the smallest step that turns "one more call" into "one
-          // more recoverable failure". N+1 moves the cap by exactly the call that
-          // was dropped; 3N and up invite the re-spawn loop the "once" below
-          // exists to prevent. Clamped to the schema maximum — prescribing a value
-          // the validator rejects would send the parent into an error instead.
+          // Why "at least 2N" — a heuristic, not a measured value: a failed tool
+          // call costs two more model calls to recover from (the retry, and the
+          // turn that reads its result), so doubling is the smallest step that
+          // turns "one more call" into "one more recoverable failure". N+1 moves
+          // the cap by exactly the call that was dropped; larger factors only
+          // raise the bill of the re-spawn loop the "once" below asks the parent
+          // not to enter. The code enforces only `min(2N, schema maximum)` —
+          // prescribing a value the validator rejects would send the parent into
+          // an error instead.
           const isBudget = stop.cause === 'budget_cap';
           const turns = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
           const budget = spec.max_budget_usd ?? DEFAULT_SPAWN_BUDGET_USD;
@@ -1253,9 +1255,11 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
           const raisedTurns = Math.min(turns * 2, MAX_SPAWN_TURNS);
           const raisedBudget = Math.min(budget * 2, MAX_SPAWN_BUDGET_USD);
           const raise = isBudget
-            ? (raisedBudget > budget
-              ? `a higher max_budget_usd (at least ${String(raisedBudget)})`
-              : `a narrower task (max_budget_usd is already at its maximum of ${String(MAX_SPAWN_BUDGET_USD)})`)
+            ? (budget <= 0
+              ? `a positive max_budget_usd (it was 0, so the child could not complete a single call; the default is ${String(DEFAULT_SPAWN_BUDGET_USD)})`
+              : raisedBudget > budget
+                ? `a higher max_budget_usd (at least ${String(raisedBudget)})`
+                : `a narrower task (max_budget_usd is already at its maximum of ${String(MAX_SPAWN_BUDGET_USD)})`)
             : (raisedTurns > turns
               ? `a higher max_turns (at least ${String(raisedTurns)})`
               : `a narrower task (max_turns is already at its maximum of ${String(MAX_SPAWN_TURNS)})`);

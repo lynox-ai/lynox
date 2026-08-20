@@ -830,7 +830,9 @@ export class Agent implements IAgent {
     if (pendingToolsRaw.length === 0) return text;
     const limit = cause === 'iteration_cap' ? 'turn limit' : 'cost budget';
     const more = pendingToolsRaw.length - pendingTools.length;
-    const names = (pendingTools.length > 0 ? pendingTools.join(', ') : 'unnamed tool') + (more > 0 ? ` +${String(more)} more` : '');
+    // `more` counts CALLS the name list does not show — duplicates of a listed
+    // name, names the charset gate rejected, and names past the cap alike.
+    const names = (pendingTools.length > 0 ? pendingTools.join(', ') : 'unnamed tool') + (more > 0 ? ` +${String(more)} more call${more === 1 ? '' : 's'}` : '');
     const marker = `[Response stopped: the ${limit} was reached while the model was still calling tools (${names}) — no final answer was produced. The task needs more turns or a narrower scope.]`;
     return text.trim().length > 0 ? `${text}\n\n${marker}` : marker;
   }
@@ -1771,9 +1773,9 @@ export class Agent implements IAgent {
             // to say". See `SendStop` for the measurement behind this.
             return this._finishOnCap(text, pending, this.costGuard.iterationCapReached() ? 'iteration_cap' : 'budget_cap', true);
           }
-          // The guard tripped on a turn the model finished by itself — the most
-          // common successful shape for a child (N-1 tool calls, then the answer
-          // on the last allowed turn). That is a normal end, not a cut-off.
+          // The guard tripped on a turn the model finished by itself — a
+          // legitimate successful shape for a child (N-1 tool calls, then the
+          // answer on the last allowed turn). That is a normal end, not a cut-off.
           this._lastStop = {
             cause: response.stop_reason === 'max_tokens' ? 'max_tokens' : 'end_turn',
             pendingTools: [],

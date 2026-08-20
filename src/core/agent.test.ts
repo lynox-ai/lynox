@@ -989,7 +989,7 @@ describe('Agent', () => {
         costGuard: { maxBudgetUSD: 100, maxIterations: 1 },
       });
       const result = await agent.send('go');
-      expect(result).toContain('(bash, web_research +3 more)');
+      expect(result).toContain('(bash, web_research +3 more calls)');
       expect(result).not.toContain('forged');
       expect(result).not.toContain('untrusted_data');
       expect(result).not.toContain('\n\n##');
