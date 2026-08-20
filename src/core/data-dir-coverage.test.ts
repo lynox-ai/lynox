@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MigrationExporter } from './migration-export.js';
@@ -19,42 +19,125 @@ import {
  */
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** Every string literal the source uses as a name directly under the data dir. */
+/**
+ * Every name the source uses directly under the data dir.
+ *
+ * Recall is the whole question here, so it is MEASURED rather than assumed — see the
+ * "declares every name" test, which asserts in BOTH directions: nothing scanned may be
+ * undeclared, and nothing declared may be unscanned unless the row says why. A review pass
+ * defeated the first version with seven shapes, one of them already in the tree
+ * (`engine-init.ts` builds the agent-memory path from a template literal and a const), and
+ * `agent-memory.db` could then be deleted from the table with every test still green.
+ */
+const DIRISH = /lynoxdir|datadir|LYNOX_DIR|DATA_DIR/i;
+
 function scanDataDirNames(): Map<string, string[]> {
   const found = new Map<string, string[]>();
-  const DIRISH = /lynoxdir|datadir|dataDir|LYNOX_DIR|DATA_DIR/i;
 
-  const visitFile = (file: string): void => {
+  const visitFile = (file: string, label: string): void => {
     const sf = ts.createSourceFile(file, readFileSync(file, 'utf-8'), ts.ScriptTarget.Latest, true);
+
+    // `const X = 'literal'`, so `join(dir, AGENT_MEMORY_DB_NAME)` resolves — and any
+    // variable initialised FROM a dirish expression, so `const root = getLynoxDir()`
+    // makes `join(root, 'x')` visible even though `root` is not named like a dir.
+    const consts = new Map<string, string>();
+    const dirAliases = new Set<string>();
+    const collectConsts = (node: ts.Node): void => {
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+        if (ts.isStringLiteral(node.initializer) || ts.isNoSubstitutionTemplateLiteral(node.initializer)) {
+          consts.set(node.name.text, node.initializer.text);
+        } else if (DIRISH.test(node.initializer.getText())
+                   && !/\b(join|resolve)\s*\(/.test(node.initializer.getText())) {
+          // DIRECT alias only. `const root = getLynoxDir()` is the data dir;
+          // `const artifactsDir = join(lynoxDir, 'artifacts')` is a directory INSIDE it, and
+          // treating that as an alias reports every file under it as a root-level store.
+          dirAliases.add(node.name.text);
+        }
+      }
+      ts.forEachChild(node, collectConsts);
+    };
+    collectConsts(sf);
+    const isDirish = (node: ts.Node): boolean => {
+      const text = node.getText();
+      return DIRISH.test(text) || dirAliases.has(text);
+    };
+
+    const literalOf = (node: ts.Node | undefined): string | null => {
+      if (!node) return null;
+      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+      if (ts.isIdentifier(node)) return consts.get(node.text) ?? null;
+      if (ts.isTemplateExpression(node)) {
+        // `${PREFIX}store` — resolvable when every substitution is a known const.
+        let out = node.head.text;
+        for (const span of node.templateSpans) {
+          const part = literalOf(span.expression);
+          if (part === null) return null;
+          out += part + span.literal.text;
+        }
+        return out;
+      }
+      return null;
+    };
+
+    const record = (name: string, node: ts.Node): void => {
+      if (name === '' || name === '.' || name === '..') return;   // walks OUT of the dir
+      const line = sf.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+      // Only the FIRST segment is an entry in the data dir; the rest are inside it.
+      const head = name.replace(/^[/\\]+/, '').split(/[/\\]/)[0]!;
+      if (head === '' || head === '.' || head === '..') return;
+      // An entry in the data dir is a FILENAME. Without this the template branch also
+      // matches prose that merely mentions LYNOX_DATA_DIR — a CLI help string did exactly
+      // that and arrived as an "undeclared store".
+      if (!/^[A-Za-z0-9._-]+$/.test(head)) return;
+      found.set(head, [...(found.get(head) ?? []), `${label}:${line}`]);
+    };
+
     const walk = (node: ts.Node): void => {
+      // join(<dirish>, '<name>') / join(<dirish>, CONST)
       if (ts.isCallExpression(node)) {
         const callee = node.expression.getText();
-        if (callee === 'join' || callee === 'path.join' || callee === 'resolve' || callee === 'path.resolve') {
+        if (/(^|\.)(join|resolve)$/.test(callee)) {
           const [base, second] = node.arguments;
-          if (base && second && DIRISH.test(base.getText())
-              && (ts.isStringLiteral(second) || ts.isNoSubstitutionTemplateLiteral(second))) {
-            const name = second.text;
-            // `join(dir, '..')` walks OUT of the data dir — not an entry in it.
-            if (name !== '..' && name !== '.') {
-              const line = sf.getLineAndCharacterOfPosition(node.getStart()).line + 1;
-              found.set(name, [...(found.get(name) ?? []), `${file.slice(SRC.length + 1)}:${line}`]);
-            }
+          if (base && second && isDirish(base)) {
+            const lit = literalOf(second);
+            if (lit !== null) record(lit, node);
           }
         }
+      }
+      // `${dirish}/name` and `${dirish}/${CONST}`
+      if (ts.isTemplateExpression(node) && (DIRISH.test(node.getText()) || node.templateSpans.some(sp => isDirish(sp.expression)))) {
+        const spans = node.templateSpans;
+        for (let i = 0; i < spans.length; i++) {
+          const span = spans[i]!;
+          if (!isDirish(span.expression)) continue;
+          const tail = span.literal.text;                       // e.g. "/" or "/memory"
+          const rest = tail.replace(/^[/\\]+/, '');
+          if (rest.length > 0) { record(rest, node); continue; }
+          const next = spans[i + 1];
+          if (next) { const lit = literalOf(next.expression); if (lit !== null) record(lit, node); }
+        }
+      }
+      // dirish + '/name'
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken
+          && isDirish(node.left)) {
+        const lit = literalOf(node.right);
+        if (lit !== null) record(lit, node);
       }
       ts.forEachChild(node, walk);
     };
     walk(sf);
   };
 
-  const walkDir = (dir: string): void => {
+  const walkDir = (dir: string, label: string): void => {
     for (const entry of readdirSync(dir)) {
       const p = join(dir, entry);
-      if (statSync(p).isDirectory()) walkDir(p);
-      else if (entry.endsWith('.ts') && !entry.endsWith('.test.ts')) visitFile(p);
+      if (statSync(p).isDirectory()) walkDir(p, `${label}/${entry}`);
+      else if (entry.endsWith('.ts') && !entry.endsWith('.test.ts')) visitFile(p, `${label}/${entry}`);
     }
   };
-  walkDir(SRC);
+  walkDir(SRC, 'src');
+  const repoScripts = join(SRC, '..', 'scripts');
+  if (existsSync(repoScripts)) walkDir(repoScripts, 'scripts');
   return found;
 }
 
@@ -77,6 +160,36 @@ describe('data-dir coverage', () => {
       'Decide whether it travels: add it with backup/migrate flags, and a `why` for anything',
       'either path does not carry. That decision is the whole point — the merge ledger was',
       'missed by BOTH lists for months because nothing forced anyone to make it.',
+    ].join(' ')).toEqual([]);
+  });
+
+  it('finds every declared entry in the source — recall is measured, not assumed', () => {
+    // The reverse direction, and the one a review pass showed was missing. Forward-only,
+    // the table looks complete while the scanner quietly stops seeing things: seven path
+    // shapes evaded the first version, one of them (`${lynoxDir}/${CONST}` in
+    // engine-init.ts) already in the tree — so `agent-memory.db` could be deleted from the
+    // inventory with every test still green.
+    //
+    // A row the scan cannot see must say so explicitly, which turns a silent recall drop
+    // into an edit someone has to justify.
+    const scanned = scanDataDirNames();
+    const declaredButUnseen = DATA_DIR_INVENTORY
+      .filter(e => !e.sourceInvisible && !scanned.has(e.name))
+      .map(e => e.name);
+
+    // The opt-out has to be honest too: marking a row invisible that the scanner CAN see
+    // would silently disable its half of the check, and "mark everything invisible" would
+    // hollow the whole test out.
+    const falselyInvisible = DATA_DIR_INVENTORY
+      .filter(e => e.sourceInvisible && scanned.has(e.name))
+      .map(e => e.name);
+    expect(falselyInvisible, 'sourceInvisible is set on an entry the scan does find — drop the flag').toEqual([]);
+
+    expect(declaredButUnseen, [
+      'The inventory declares an entry the data-dir scan cannot find.',
+      'Either the scanner lost a path shape it used to see — fix it, that is the recall this',
+      'file exists to protect — or the entry genuinely is not constructed in the source, in',
+      'which case set sourceInvisible:true and say why.',
     ].join(' ')).toEqual([]);
   });
 

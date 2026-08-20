@@ -385,9 +385,19 @@ export class MigrationImporter {
 
     // 4c. Generic portable directories (`apis/`, `workspace/`) — opaque file trees, so
     // they carry no ordering constraint against the databases.
-    for (const { meta, data } of chunksByType.portable_dir) {
-      onProgress?.({ phase: 'restoring', currentChunk: meta.seq, totalChunks: manifest.totalChunks, currentName: meta.name });
-      verification.portableDirFilesImported += this.restorePortableDir([{ meta, data }]);
+    // Grouped BY DIRECTORY, not per chunk. `splitIntoChunks` turns a bundle over
+    // MAX_CHUNK_BYTES into `workspace:part0`, `workspace:part1`, … and handing those to
+    // JSON.parse one at a time throws on the first part — uncaught, aborting the import
+    // AFTER the databases have already landed. ~6 MB of files is enough to trigger it
+    // (the payload is base64, so ×4/3), and `workspace/` is the agent's own file area.
+    const portableByDir = new Map<string, Array<{ meta: MigrationChunkMeta; data: Buffer }>>();
+    for (const c of chunksByType.portable_dir) {
+      const base = c.meta.name.split(':')[0]!;
+      portableByDir.set(base, [...(portableByDir.get(base) ?? []), c]);
+    }
+    for (const [dirName, parts] of portableByDir) {
+      onProgress?.({ phase: 'restoring', currentChunk: parts[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: dirName });
+      verification.portableDirFilesImported += this.restorePortableDir(parts);
     }
 
     // 5. Secrets (most sensitive — last)
@@ -735,9 +745,13 @@ export class MigrationImporter {
    * `mkdirSync(recursive)` no-ops on an existing link.
    */
   private restorePortableDir(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): number {
+    // Sum the REASSEMBLED payload, not individual chunks: `encryptChunk` already caps each
+    // chunk at MAX_CHUNK_BYTES, so a per-chunk sum could never reach this limit — the check
+    // was unreachable. The bundle is base64, so the ceiling is expressed on the encoded
+    // size the importer actually holds in memory.
     const totalBytes = chunks.reduce((n, c) => n + c.data.length, 0);
-    if (totalBytes > MAX_PORTABLE_DIR_BYTES) {
-      throw new Error(`Portable directory bundle too large: ${String(totalBytes)} > ${String(MAX_PORTABLE_DIR_BYTES)}`);
+    if (totalBytes > MAX_PORTABLE_DIR_BYTES * 2) {
+      throw new Error(`Portable directory bundle too large: ${String(totalBytes)} > ${String(MAX_PORTABLE_DIR_BYTES * 2)}`);
     }
     const ordered = [...chunks].sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
     const data = ordered.length === 1 ? ordered[0]!.data : Buffer.concat(ordered.map(c => c.data));
@@ -759,6 +773,11 @@ export class MigrationImporter {
       throw new Error(`Refusing to restore ${bundle.dir}: it is not a real directory.`);
     }
 
+    // The root itself, once — the per-segment walk below deliberately does NOT use
+    // `recursive`, so it cannot create a chain through a link, and therefore cannot create
+    // the root either.
+    mkdirSync(root, { recursive: true, mode: DIR_MODE_PRIVATE });
+
     let written = 0;
     for (const [rel, b64] of entries) {
       if (typeof b64 !== 'string') continue;
@@ -767,11 +786,24 @@ export class MigrationImporter {
       const filePath = resolve(root, rel);
       if (!filePath.startsWith(rootPrefix)) continue;
 
-      const parent = dirname(filePath);
-      // A parent that is a symlink would put the write outside the tree even though the
-      // resolved path looks inside it.
-      if (existsSync(parent) && !lstatSync(parent).isDirectory()) continue;
-      mkdirSync(parent, { recursive: true, mode: DIR_MODE_PRIVATE });
+      // EVERY ancestor, not just the immediate parent. `resolve()` is lexical and
+      // `existsSync` FOLLOWS links, so checking only `dirname(filePath)` misses a link one
+      // level up: with `apis/sub` a symlink, the key `sub/deeper/pwn.txt` resolves to a
+      // path that still starts with the root, and `mkdirSync(recursive)` then creates
+      // `deeper` THROUGH the link and the write lands outside the data dir. Entries are
+      // written in object order, so an earlier entry could also plant the link the next
+      // one walks through — hence the check runs per entry, not once up front.
+      const segments = rel.split('/');
+      let cursor = root;
+      let ancestorEscape = false;
+      for (const segment of segments.slice(0, -1)) {
+        cursor = join(cursor, segment);
+        let st;
+        try { st = lstatSync(cursor); } catch { st = null; }   // absent — mkdir will create it
+        if (st && !st.isDirectory()) { ancestorEscape = true; break; }
+        if (!st) mkdirSync(cursor, { mode: DIR_MODE_PRIVATE });
+      }
+      if (ancestorEscape) continue;
 
       // unlink first, then 'wx': writeFileSync opens O_CREAT|O_TRUNC and FOLLOWS a symlink,
       // so writing onto one would put bundle content into its target.

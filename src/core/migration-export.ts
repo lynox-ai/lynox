@@ -27,7 +27,7 @@ import { getLynoxDir } from './config.js';
 import { SecretVault } from './secret-vault.js';
 import { parsePortableMemoryKey } from './memory-file.js';
 import { isMergeLedgerFileName } from './subject-merge-runner.js';
-import { MIGRATE_SQLITE_DBS, GENERIC_PORTABLE_DIRS, isPortableDirEntryName, MAX_PORTABLE_DIR_BYTES } from './data-dir-inventory.js';
+import { MIGRATE_SQLITE_DBS, GENERIC_PORTABLE_DIRS, isPortableDirEntryName, MAX_PORTABLE_DIR_BYTES, MAX_PORTABLE_DIR_ENTRIES } from './data-dir-inventory.js';
 import type { SecretScope } from '../types/index.js';
 import {
   encryptChunk,
@@ -130,7 +130,20 @@ export class MigrationExporter {
   private readonly lynoxDir: string;
   private readonly vaultKey: string;
 
-  constructor(options?: { lynoxDir?: string | undefined; vaultKey?: string | undefined } | undefined) {
+  /**
+   * Overrides for the portable-directory caps. Production never sets them — they exist so a
+   * test can REACH the boundary: the real ceilings are 20 000 entries and 64 MiB, and a test
+   * that has to materialise either one is slow enough that it does not get written, which is
+   * exactly how a cap ends up shipping untested.
+   */
+  private readonly portableDirLimits: { maxEntries: number; maxBytes: number } | undefined;
+
+  constructor(options?: {
+    lynoxDir?: string | undefined;
+    vaultKey?: string | undefined;
+    portableDirLimits?: { maxEntries: number; maxBytes: number } | undefined;
+  } | undefined) {
+    this.portableDirLimits = options?.portableDirLimits;
     this.lynoxDir = options?.lynoxDir ?? getLynoxDir();
     const key = options?.vaultKey ?? process.env['LYNOX_VAULT_KEY'];
     if (!key) {
@@ -478,10 +491,14 @@ export class MigrationExporter {
     const root = join(this.lynoxDir, dirName);
     if (!existsSync(root)) return [];
 
+    const maxEntries = this.portableDirLimits?.maxEntries ?? MAX_PORTABLE_DIR_ENTRIES;
+    const maxBytes = this.portableDirLimits?.maxBytes ?? MAX_PORTABLE_DIR_BYTES;
     const files: Record<string, string> = {};
     let total = 0;
+    let truncated = false;
 
     const walk = (rel: string): void => {
+      if (truncated) return;
       const abs = rel === '' ? root : join(root, rel);
       let entries: string[];
       try { entries = readdirSync(abs); } catch { return; }
@@ -494,7 +511,13 @@ export class MigrationExporter {
         if (st.isDirectory()) { walk(childRel); continue; }
         if (!st.isFile()) continue;
         if (!isPortableDirEntryName(childRel)) continue;
-        if (total + st.size > MAX_PORTABLE_DIR_BYTES) continue;
+        // Both caps enforced HERE as well as on import. Without the entry cap the exporter
+        // happily builds a 20 001-file bundle the importer then rejects — after it has
+        // already restored the databases. `break`, not `continue`: skipping past a cap and
+        // admitting whatever smaller files come next is a silent, order-dependent partial
+        // export, which is worse than stopping.
+        if (Object.keys(files).length >= maxEntries) { truncated = true; break; }
+        if (total + st.size > maxBytes) { truncated = true; break; }
         try {
           files[childRel] = readFileSync(childAbs).toString('base64');
           total += st.size;
@@ -504,6 +527,13 @@ export class MigrationExporter {
     walk('');
 
     if (Object.keys(files).length === 0) return [];
+    if (truncated) {
+      // Loud, not silent. A bounded export that says nothing reads exactly like a complete
+      // one — the shape this whole change exists to remove from the coverage lists.
+      throw new Error(
+        `${dirName}/ exceeds the migration limits (${String(maxEntries)} entries / ${String(maxBytes)} bytes) — refusing to ship a partial copy of it`,
+      );
+    }
     return splitIntoChunks(
       Buffer.from(JSON.stringify({ dir: dirName, files }), 'utf-8'),
       'portable_dir',

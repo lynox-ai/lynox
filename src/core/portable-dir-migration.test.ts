@@ -71,6 +71,51 @@ describe('portable directories survive a migration', () => {
     }
   });
 
+  it('round-trips a bundle large enough to be SPLIT into parts', () => {
+    // `splitIntoChunks` turns a payload over MAX_CHUNK_BYTES (8 MiB) into `workspace:part0`,
+    // `workspace:part1`, … A review pass showed the importer handed those to JSON.parse ONE
+    // AT A TIME, so the first part threw `Unterminated string in JSON` — uncaught, aborting
+    // the import AFTER the databases had already been written. ~6 MB of files is enough,
+    // because the payload is base64 (×4/3), and `workspace/` is the agent's own file area.
+    const srcDir = tmp('lynox-pd9-src-'); const dstDir = tmp('lynox-pd9-dst-');
+    mkdirSync(join(srcDir, 'workspace'), { recursive: true });
+    const big = Buffer.alloc(7 * 1024 * 1024);
+    for (let i = 0; i < big.length; i += 997) big[i] = i % 251;   // not all-zero, so a truncation shows
+    writeFileSync(join(srcDir, 'workspace', 'big.bin'), big);
+
+    const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_KEY });
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_KEY });
+    const { manifest, chunks } = exporter.export(handshake(importer));
+    expect(manifest.chunks.filter(c => c.type === 'portable_dir').length,
+      'fixture no longer produces a SPLIT bundle — the case this test exists for is gone')
+      .toBeGreaterThan(1);
+
+    importer.setManifest(manifest);
+    for (const c of chunks) importer.receiveChunk(c);
+    expect(importer.restore().portableDirFilesImported).toBe(1);
+    expect(readFileSync(join(dstDir, 'workspace', 'big.bin')).equals(big)).toBe(true);
+  });
+
+  it('refuses to ship a partial directory rather than truncating it silently', () => {
+    // Both caps, reached through the test-only override — the real ceilings are 20 000
+    // entries and 64 MiB, and a test that has to materialise either is slow enough that it
+    // does not get written. The exporter used to `continue` past a cap, which admits
+    // whatever smaller files come next: an order-dependent partial export with no signal.
+    const srcDir = tmp('lynox-pd10-src-');
+    mkdirSync(join(srcDir, 'apis'), { recursive: true });
+    for (let i = 0; i < 5; i++) writeFileSync(join(srcDir, 'apis', `f${String(i)}.json`), 'x'.repeat(100), 'utf-8');
+
+    const byEntries = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_KEY, portableDirLimits: { maxEntries: 3, maxBytes: 1 << 20 } });
+    expect(() => byEntries.export(Buffer.alloc(32, 1))).toThrow(/exceeds the migration limits/i);
+
+    const byBytes = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_KEY, portableDirLimits: { maxEntries: 1000, maxBytes: 250 } });
+    expect(() => byBytes.export(Buffer.alloc(32, 1))).toThrow(/exceeds the migration limits/i);
+
+    // Under the caps it ships normally, so the refusal is a boundary and not a blanket.
+    const ok = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_KEY, portableDirLimits: { maxEntries: 10, maxBytes: 1 << 20 } });
+    expect(ok.export(Buffer.alloc(32, 1)).manifest.chunks.some(c => c.type === 'portable_dir')).toBe(true);
+  });
+
   it('refuses entry keys that escape the directory', () => {
     for (const evil of ['../escape.json', 'a/../../escape.json', '/etc/passwd', 'a\\b.json', './x.json', '', 'a/./b']) {
       expect(isPortableDirEntryName(evil), `must refuse ${JSON.stringify(evil)}`).toBe(false);
@@ -130,6 +175,41 @@ describe('portable directories survive a migration', () => {
     importer.receiveChunk(encryptChunk(data, transferKey, 0, manifestHash));
     try { importer.restore(); } catch { /* a refusal is a pass here; the assertions check disk */ }
   }
+
+  it('refuses an ANCESTOR symlink, not just one at the target itself', () => {
+    // The depth-0 case (`target.txt` is a link) is closed by unlink+'wx'. This is the one a
+    // review pass got through: with `apis/sub` a pre-existing symlink, the key
+    // `sub/deeper/pwn.txt` still resolves to a path starting with the root — `resolve()` is
+    // lexical — and a recursive mkdir then creates `deeper` THROUGH the link.
+    const dstDir = tmp('lynox-pd7-dst-');
+    const outside = tmp('lynox-pd7-out-');
+    mkdirSync(join(dstDir, 'apis'), { recursive: true });
+    symlinkSync(outside, join(dstDir, 'apis', 'sub'));
+
+    const payload = Buffer.from('OWNED-OUTSIDE', 'utf-8').toString('base64');
+    importCrafted(dstDir, 'apis', { 'sub/deeper/pwn.txt': payload, 'sub/direct.txt': payload });
+
+    expect(existsSync(join(outside, 'deeper', 'pwn.txt'))).toBe(false);
+    expect(existsSync(join(outside, 'direct.txt'))).toBe(false);
+  });
+
+  it('an EARLIER entry cannot plant a link the next one walks through', () => {
+    // Entries are written in object order, so the ordering attack is real even on a clean
+    // destination: the guard runs per entry rather than once up front.
+    const dstDir = tmp('lynox-pd8-dst-');
+    const outside = tmp('lynox-pd8-out-');
+    mkdirSync(join(dstDir, 'apis'), { recursive: true });
+    symlinkSync(outside, join(dstDir, 'apis', 'planted'));
+
+    importCrafted(dstDir, 'apis', {
+      'planted/after.txt': Buffer.from('OWNED', 'utf-8').toString('base64'),
+      'ok.txt': Buffer.from('FINE', 'utf-8').toString('base64'),
+    });
+
+    expect(existsSync(join(outside, 'after.txt'))).toBe(false);
+    // …and a legitimate sibling in the same bundle still lands, so the refusal is scoped.
+    expect(readFileSync(join(dstDir, 'apis', 'ok.txt'), 'utf-8')).toBe('FINE');
+  });
 
   it('refuses a bundle naming a directory this build does not declare portable', () => {
     const dstDir = tmp('lynox-pd5-dst-');

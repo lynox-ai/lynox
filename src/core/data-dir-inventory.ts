@@ -13,10 +13,22 @@
  * change either one, and `data-dir-coverage.test.ts` fails if the engine constructs a
  * data-dir path this table does not declare.
  *
- * WHAT THIS CANNOT DO, stated so nobody reads more into a green build: it sees the
- * SOURCE. A directory that arrives on the volume some other way — a legacy store from a
- * feature that never merged, a file placed by hand — is invisible to it. Both of today's
- * finds were exactly that shape, so `scripts/data-dir-sweep.ts` covers the runtime half.
+ * WHAT THAT GATE IS WORTH, measured rather than claimed. A review pass built eight ways to
+ * write a new store; the first version of the scanner caught ONE of them, and
+ * `agent-memory.db` could be deleted from this table with every test still green. It now
+ * catches SIX — literal, const, template, concat, a variable aliased from the data dir, and
+ * `${dir}/${CONST}` (the shape already in the tree). Two still evade it: a helper that
+ * takes the name as a parameter, and a spread argument. Both need dataflow analysis.
+ *
+ * It also asserts the REVERSE — every row here must be findable in the source unless it
+ * carries `sourceInvisible` — so a recall drop shows up as a failing test instead of a
+ * table that quietly stops covering things.
+ *
+ * AND IT CANNOT SEE RUNTIME AT ALL. A directory that arrives some other way is invisible
+ * to any code scan, and both leftovers found on a live instance on 2026-08-20 were exactly
+ * that: an `ads-optimizer.db` from a feature that never merged, holding one real customer
+ * profile, and a hand-placed directory holding a customer contract. `src/scripts/data-dir-sweep.ts`
+ * is the runtime half — point it at a data dir and it reports what nobody declared.
  */
 
 /** How the entry is copied — SQLite needs `VACUUM INTO`, the rest is a plain copy. */
@@ -35,6 +47,14 @@ export interface DataDirEntry {
    * 2026-08-20 gaps got there.
    */
   readonly why?: string;
+  /**
+   * Set only when the coverage scan genuinely cannot see this entry, with the reason in
+   * `why`. It exists to keep the scan's RECALL visible: without it a name the scanner stops
+   * finding just quietly drops out, and the table goes on looking complete. A review pass
+   * showed that mattered — `agent-memory.db` was declared and unscanned, so deleting its row
+   * left every test green.
+   */
+  readonly sourceInvisible?: boolean;
 }
 
 export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
@@ -65,8 +85,8 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
     why: 'the push identity itself — same reason as the subscriptions it signs for',
   },
   {
-    name: 'sessions', kind: 'dir', backup: true, migrate: false,
-    why: 'live session scratch; a migration lands on a new host where none of it is current',
+    name: 'sessions', kind: 'dir', backup: true, migrate: false, sourceInvisible: true,
+    why: 'listed by backup since before this table existed, and NO source file constructs it today (grep + the scan below both come back empty) — kept because a backup of a directory that may exist on an older instance costs nothing, and removing it is a separate decision from writing this table',
   },
 
   // ── Carried by neither, each for a stated reason ───────────────────────────
@@ -95,6 +115,11 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
     why: 'derived upgrade bookkeeping, rewritten on every boot',
   },
   {
+    // Found by the scan, not by anyone remembering it — which is the point of the scan.
+    name: '.tos-accepted-1', kind: 'file', backup: false, migrate: false,
+    why: 'records that THIS installation\'s operator accepted the terms; an acceptance is personal to the person who gave it and must not ride a restore or a migration into an installation whose operator never saw the dialog',
+  },
+  {
     name: 'plugins', kind: 'dir', backup: false, migrate: false,
     why: 'third-party code, installed rather than authored here; a restore should re-install it, not resurrect whatever binary was on disk',
   },
@@ -121,10 +146,6 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
   {
     name: 'wire-sink-raw-on', kind: 'file', backup: false, migrate: false,
     why: 'arming marker for the raw debug capture',
-  },
-  {
-    name: 'manifest.json', kind: 'file', backup: false, migrate: false,
-    why: 'written INSIDE a backup directory, never at the data-dir root — declared so the coverage scan does not read it as an undeclared store',
   },
 ];
 
