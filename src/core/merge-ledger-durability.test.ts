@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync, symlinkSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
@@ -13,6 +13,8 @@ import { MigrationImporter } from './migration-import.js';
 import {
   generateEphemeralKeypair, serializePublicKey, deserializePublicKey,
   deriveTransferKey, deriveSigningKey, verifyHandshake,
+  encryptChunk, computeManifestHash, sha256,
+  type MigrationManifest, type MigrationChunkMeta,
 } from './migration-crypto.js';
 
 const MIGRATION_TOKEN = 'b'.repeat(64);
@@ -73,7 +75,7 @@ describe('merge ledger survives backup→restore and export→import', () => {
   };
 
   const readLedgerFrom = (dir: string): MergeLedgerFile => {
-    const f = readdirSync(join(dir, 'sweeps')).find((n) => n.startsWith('merge-'))!;
+    const f = readdirSync(join(dir, 'sweeps')).find((n) => isMergeLedgerFileName(n))!;
     return JSON.parse(readFileSync(join(dir, 'sweeps', f), 'utf8')) as MergeLedgerFile;
   };
 
@@ -108,10 +110,18 @@ describe('merge ledger survives backup→restore and export→import', () => {
     expect(restored.success).toBe(true);
     expect(existsSync(join(dir, 'sweeps'))).toBe(true);
 
+    // REOPEN the stores. `restoreBackup` renames a fresh file over `engine.db`, so the
+    // handle opened before it still points at the pre-restore inode — rolling back
+    // through it would exercise the OLD database and pass while the restore was broken.
+    // A review pass caught exactly that here; the ledger was read from disk, the stores
+    // were not.
+    const after = openStores(dir);
+    expect(after.store.getSubject(dup)?.archived_at).toBeTruthy();
+
     // The capability, not the file: the restored ledger actually reverses the merge.
-    const back = rollbackMergeRun(store, null, threadStore, readLedgerFrom(dir));
+    const back = rollbackMergeRun(after.store, null, after.threadStore, readLedgerFrom(dir));
     expect(back.ok).toBe(true);
-    expect(store.getSubject(dup)?.archived_at).toBeFalsy();
+    expect(after.store.getSubject(dup)?.archived_at).toBeFalsy();
   });
 
   it('a merge stays undoable across an export→import migration', () => {
@@ -145,34 +155,154 @@ describe('merge ledger survives backup→restore and export→import', () => {
     expect(dst.store.getSubject(dup)?.archived_at).toBeFalsy();
   });
 
-  it('refuses a crafted bundle key that tries to escape sweeps/', () => {
-    const srcDir = makeTmp('lynox-ledger-evilsrc-');
-    const dstDir = makeTmp('lynox-ledger-evildst-');
+  /**
+   * Hand-build an encrypted sweeps bundle. This exists because the EXPORTER structurally
+   * cannot produce a hostile key — it filters by the same predicate the importer applies —
+   * so a test that goes through the exporter can never reach the importer's guards. The
+   * first version of this file did exactly that and asserted a file it had written
+   * OUTSIDE sweeps/ (join normalises `../`) had not appeared: an assert that could not
+   * fail, guarding the code path it was named for. A migration bundle arrives from
+   * another machine; crafting one is the honest fixture.
+   */
+  function importCraftedSweeps(dstDir: string, files: Record<string, string>): { threw: string | null } {
+    const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
+    const transferKey = performHandshake(importer);
+    const data = Buffer.from(JSON.stringify({ files }), 'utf-8');
+    const meta: MigrationChunkMeta = {
+      seq: 0, type: 'sweeps', name: 'sweeps', originalSize: data.length, checksum: sha256(data),
+    };
+    const base = {
+      version: 1 as const, exportedAt: new Date().toISOString(), lynoxVersion: 'test',
+      totalChunks: 1, chunks: [meta],
+    };
+    const manifestHash = computeManifestHash(base);
+    const manifest: MigrationManifest = { ...base, manifestHash };
+    importer.setManifest(manifest);
+    importer.receiveChunk(encryptChunk(data, transferKey, 0, manifestHash));
+    try { importer.restore(); return { threw: null }; }
+    catch (err) { return { threw: err instanceof Error ? err.message : String(err) }; }
+  }
 
-    // Names an importer must refuse. The guard is the WRITER's own name shape, which
-    // admits a basename only — so traversal, absolute paths and lookalikes all fail it
-    // without the importer needing its own separate notion of "safe".
+  const VALID_LEDGER_NAME = 'merge-2026-08-20T10-00-00-000Z-abc123.json';
+  /** A payload the importer accepts — the name alone is no longer enough. */
+  const VALID_LEDGER_BODY = JSON.stringify({ version: 1, phase: 'merge', entry: {}, dataStore: [], threadAnchors: [], applied: true });
+
+  it('refuses every crafted bundle key that is not a plain ledger basename', () => {
     for (const evil of [
       '../../evil.json',
       '/etc/passwd',
-      'merge-2026-08-20T10-00-00-000Z-abc123.json/../../escape.json',
+      `${VALID_LEDGER_NAME}/../../escape.json`,
       'sweep-2026-08-20T10-00-00-000Z.json',
-      'merge-2026-08-20T10-00-00-000Z-abc123.json.bak',
+      `${VALID_LEDGER_NAME}.bak`,
     ]) {
       expect(isMergeLedgerFileName(evil), `must refuse ${evil}`).toBe(false);
     }
-    expect(isMergeLedgerFileName('merge-2026-08-20T10-00-00-000Z-abc123.json')).toBe(true);
+    expect(isMergeLedgerFileName(VALID_LEDGER_NAME)).toBe(true);
 
-    // And end-to-end: a bundle carrying such a key writes nothing outside sweeps/.
-    mkdirSync(join(srcDir, 'sweeps'), { recursive: true });
-    writeFileSync(join(srcDir, 'sweeps', '../escape-attempt.json'), '{"pwned":true}', 'utf-8');
+    // …and end-to-end through a real importer, which the exporter cannot set up for us.
+    const dstDir = makeTmp('lynox-ledger-craft-');
+    importCraftedSweeps(dstDir, {
+      '../escape-attempt.json': '{"pwned":true}',
+      '../../escape-deeper.json': '{"pwned":true}',
+      // The key that needs BOTH guards to be present in some combination: it survives a
+      // `startsWith('merge-')` predicate AND traverses, so it separates the two guards
+      // from each other instead of letting either hide behind the other.
+      'merge-../../escape-prefixed.json': '{"pwned":true}',
+      [VALID_LEDGER_NAME]: VALID_LEDGER_BODY,
+    });
+    expect(existsSync(join(dstDir, 'escape-attempt.json'))).toBe(false);
+    expect(existsSync(join(dstDir, '..', 'escape-deeper.json'))).toBe(false);
+    expect(existsSync(join(dstDir, '..', 'escape-prefixed.json'))).toBe(false);
+    expect(readdirSync(join(dstDir, 'sweeps'))).toEqual([VALID_LEDGER_NAME]);
+  });
+
+  it('never writes THROUGH a symlink planted at a valid ledger name', () => {
+    const dstDir = makeTmp('lynox-ledger-symwrite-');
+    const victim = join(dstDir, 'victim.json');
+    writeFileSync(victim, 'ORIGINAL', 'utf-8');
+    mkdirSync(join(dstDir, 'sweeps'), { recursive: true });
+    // `writeFileSync` opens O_CREAT|O_TRUNC, which FOLLOWS a symlink — so without the
+    // unlink-first + 'wx' this bundle content lands in `victim.json`.
+    symlinkSync(victim, join(dstDir, 'sweeps', VALID_LEDGER_NAME));
+
+    importCraftedSweeps(dstDir, { [VALID_LEDGER_NAME]: VALID_LEDGER_BODY });
+
+    expect(readFileSync(victim, 'utf-8')).toBe('ORIGINAL');
+    expect(lstatSync(join(dstDir, 'sweeps', VALID_LEDGER_NAME)).isSymbolicLink()).toBe(false);
+  });
+
+  it('refuses to restore at all when sweeps/ itself is a symlink', () => {
+    const dstDir = makeTmp('lynox-ledger-symdir-');
+    const outside = makeTmp('lynox-ledger-outside-');
+    // resolve() is lexical and mkdirSync(recursive) no-ops on an existing link, so the
+    // startsWith(sweepsPrefix) check passes while every ledger lands in `outside`.
+    symlinkSync(outside, join(dstDir, 'sweeps'));
+
+    const { threw } = importCraftedSweeps(dstDir, { [VALID_LEDGER_NAME]: VALID_LEDGER_BODY });
+    expect(threw).toMatch(/not a real directory/i);
+    expect(existsSync(join(outside, VALID_LEDGER_NAME))).toBe(false);
+  });
+
+  it('bounds the ledger COUNT, not only the byte size', () => {
+    const dstDir = makeTmp('lynox-ledger-count-');
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 60_001; i++) {
+      files[`merge-2026-08-20T10-00-00-${String(i % 1000).padStart(3, '0')}Z-x${String(i)}.json`] = '{}';
+    }
+    const { threw } = importCraftedSweeps(dstDir, files);
+    expect(threw).toMatch(/Too many merge ledgers/i);
+  });
+
+  it('does not carry a symlink in sweeps/ out through the export', () => {
+    const srcDir = makeTmp('lynox-ledger-symexp-src-');
+    const dstDir = makeTmp('lynox-ledger-symexp-dst-');
+    const { store, threadStore } = openStores(srcDir);
+    const dup = store.createSubject({ kind: 'organization', name: 'Kessler AG' });
+    const canon = store.createSubject({ kind: 'organization', name: 'Kessler' });
+    expect(runMerge(store, null, threadStore, srcDir, dup, canon).ok).toBe(true);
+
+    // A symlink wearing a valid ledger name, pointing at something that is not a ledger.
+    const secret = join(srcDir, 'secret-material.txt');
+    writeFileSync(secret, 'PRIVATE-KEY-MATERIAL', 'utf-8');
+    symlinkSync(secret, join(srcDir, 'sweeps', VALID_LEDGER_NAME));
+
     const exporter = new MigrationExporter({ lynoxDir: srcDir, vaultKey: SRC_VAULT_KEY });
     const importer = new MigrationImporter({ lynoxDir: dstDir, vaultKey: DST_VAULT_KEY });
     const { manifest, chunks } = exporter.export(performHandshake(importer));
     importer.setManifest(manifest);
     for (const chunk of chunks) importer.receiveChunk(chunk);
     importer.restore();
-    expect(existsSync(join(dstDir, 'escape-attempt.json'))).toBe(false);
+
+    for (const f of readdirSync(join(dstDir, 'sweeps'))) {
+      expect(readFileSync(join(dstDir, 'sweeps', f), 'utf-8')).not.toContain('PRIVATE-KEY-MATERIAL');
+    }
+    expect(existsSync(join(dstDir, 'sweeps', VALID_LEDGER_NAME))).toBe(false);
+  });
+
+  it('does not copy a symlink in sweeps/ into a backup', async () => {
+    const dir = makeTmp('lynox-ledger-symbak-');
+    const backupDir = makeTmp('lynox-ledger-symbakdest-');
+    const { store, threadStore } = openStores(dir);
+    const dup = store.createSubject({ kind: 'organization', name: 'Hallberg AG' });
+    const canon = store.createSubject({ kind: 'organization', name: 'Hallberg' });
+    expect(runMerge(store, null, threadStore, dir, dup, canon).ok).toBe(true);
+
+    const secret = join(dir, 'vault-lookalike.txt');
+    writeFileSync(secret, 'PRIVATE-KEY-MATERIAL', 'utf-8');
+    symlinkSync(secret, join(dir, 'sweeps', VALID_LEDGER_NAME));
+    // A dangling link too: following one hard-fails the WHOLE backup (ENOENT), which
+    // would take every other file in the run down with it.
+    symlinkSync(join(dir, 'does-not-exist'), join(dir, 'sweeps', 'merge-2026-08-20T10-00-00-001Z-dead01.json'));
+
+    const mgr = new BackupManager(dir, { backupDir, retentionDays: 7, encrypt: false }, null);
+    const made = await mgr.createBackup();
+    expect(made.success).toBe(true);
+
+    const copied = readdirSync(join(made.path, 'sweeps'));
+    expect(copied).not.toContain(VALID_LEDGER_NAME);
+    for (const f of copied) {
+      expect(readFileSync(join(made.path, 'sweeps', f), 'utf-8')).not.toContain('PRIVATE-KEY-MATERIAL');
+    }
   });
 
   // The exporter and the importer must decide "is this a merge ledger?" the SAME way.
@@ -229,5 +359,16 @@ describe('merge ledger survives backup→restore and export→import', () => {
 
     expect(importer.restore().mergeLedgersImported).toBe(1);
     expect(readdirSync(join(dstDir, 'sweeps')).filter((f) => f.startsWith('sweep-'))).toEqual([]);
+
+    // The destination assert above cannot fail on its own: the importer drops a sweep
+    // ledger whatever the exporter did, so deleting the EXPORTER's filter would stay
+    // green here. This is the trap the lookalike test's comment names, and the first
+    // version of this test walked straight into it. Pin the payload.
+    const sweepsChunk = manifest.chunks.find((c) => c.type === 'sweeps');
+    expect(sweepsChunk).toBeDefined();
+    const realName = readdirSync(join(srcDir, 'sweeps')).find((n) => isMergeLedgerFileName(n))!;
+    expect(sweepsChunk!.originalSize).toBe(
+      Buffer.byteLength(JSON.stringify({ files: { [realName]: readLedgerRaw(srcDir) } }), 'utf-8'),
+    );
   });
 });

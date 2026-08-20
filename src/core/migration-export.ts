@@ -20,7 +20,7 @@
  * an empty `memory_recall`/`memory_list`.
  */
 
-import { existsSync, readFileSync, unlinkSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, readdirSync, statSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { getLynoxDir } from './config.js';
@@ -448,7 +448,10 @@ export class MigrationExporter {
       if (!isMergeLedgerFileName(fileName)) continue;
       const filePath = join(sweepsDir, fileName);
       try {
-        if (!statSync(filePath).isFile()) continue;
+        // lstat, NOT stat: a symlink here would otherwise be read THROUGH, and whatever
+        // it points at (vault.db, a host key) would ride the migration bundle out under a
+        // ledger's name. Only a real file is a ledger.
+        if (!lstatSync(filePath).isFile()) continue;
         files[fileName] = readFileSync(filePath, 'utf-8');
       } catch { continue; } // vanished between readdir and read
     }
