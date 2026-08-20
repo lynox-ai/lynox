@@ -276,7 +276,27 @@ describe('pruneExpiredLedgers — bounded retention on personal data', () => {
     dirs.push(d);
     return d;
   };
-  /** A ledger aged by its OWN createdAt — the field the pruner reads. */
+  /**
+   * A ledger with a CANONICAL name, aged by its own createdAt.
+   *
+   * The name matters as much as the content: `pruneExpiredLedgers` filters with
+   * `isMergeLedgerFileName`, the writer's own definition, so a fixture called `merge-old.json`
+   * is not a ledger at all and would be spared for the wrong reason — a fixture that cannot
+   * be deleted turns every deletion test green by accident.
+   */
+  let seq = 0;
+  const ledgerNamed = (daysOld: number): { name: string; createdAt: string } => {
+    const createdAt = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000).toISOString();
+    seq += 1;
+    return { name: `merge-${createdAt.replace(/[:.]/g, '-')}-fix${String(seq).padStart(3, '0')}.json`, createdAt };
+  };
+  /** Writes a real ledger; returns its file name. */
+  const ledgerAged = (dir: string, daysOld: number): string => {
+    const { name, createdAt } = ledgerNamed(daysOld);
+    writeFileSync(join(dir, name), JSON.stringify({ version: 1, phase: 'merge', createdAt }));
+    return name;
+  };
+  /** Writes a file with an arbitrary name — for the near-miss cases. */
   const ledger = (dir: string, name: string, daysOld: number, extra: object = {}): string => {
     const p = join(dir, name);
     const createdAt = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000).toISOString();
@@ -287,10 +307,11 @@ describe('pruneExpiredLedgers — bounded retention on personal data', () => {
 
   it('deletes a ledger past the window and keeps one inside it', () => {
     const d = sweeps();
-    ledger(d, 'merge-old.json', LEDGER_RETENTION_DAYS + 5);
-    ledger(d, 'merge-recent.json', LEDGER_RETENTION_DAYS - 5);
+    const old = ledgerAged(d, LEDGER_RETENTION_DAYS + 5);
+    const recent = ledgerAged(d, LEDGER_RETENTION_DAYS - 5);
     pruneExpiredLedgers(d, now());
-    expect(readdirSync(d).sort()).toEqual(['merge-recent.json']);
+    expect(readdirSync(d)).toEqual([recent]);
+    expect(readdirSync(d)).not.toContain(old);
   });
 
   it('⭐ ages by createdAt, NOT mtime — a restore must not reset the retention clock', () => {
@@ -300,21 +321,22 @@ describe('pruneExpiredLedgers — bounded retention on personal data', () => {
     // renewed its only bound. Here the file is written now (fresh mtime) but declares an
     // ancient createdAt — exactly a restored ledger — and must still be collected.
     const d = sweeps();
-    ledger(d, 'merge-restored.json', LEDGER_RETENTION_DAYS + 30);
-    ledger(d, 'merge-newer.json', 1);   // so the floor below does not spare the restored one
+    const restored = ledgerAged(d, LEDGER_RETENTION_DAYS + 30);
+    const newer = ledgerAged(d, 1);   // so the floor below does not spare the restored one
     pruneExpiredLedgers(d, now());
-    expect(readdirSync(d)).toEqual(['merge-newer.json']);
+    expect(readdirSync(d)).toEqual([newer]);
+    expect(readdirSync(d)).not.toContain(restored);
   });
 
   it('⭐ never deletes the newest ledger, whatever the clock says', () => {
     // One forward clock jump would otherwise unlink every reversal record in a single pass,
     // irreversibly. `pruneBackups` carries the same rail for the same reason.
     const d = sweeps();
-    ledger(d, 'merge-a.json', LEDGER_RETENTION_DAYS + 100);
-    ledger(d, 'merge-b.json', LEDGER_RETENTION_DAYS + 50);
+    ledgerAged(d, LEDGER_RETENTION_DAYS + 100);
+    const newer = ledgerAged(d, LEDGER_RETENTION_DAYS + 50);
     pruneExpiredLedgers(d, now());
     // Both are far past the window; the newer of the two survives regardless.
-    expect(readdirSync(d)).toEqual(['merge-b.json']);
+    expect(readdirSync(d)).toEqual([newer]);
   });
 
   it('spares a ledger sitting EXACTLY on the cutoff — the window is inclusive', () => {
@@ -325,32 +347,36 @@ describe('pruneExpiredLedgers — bounded retention on personal data', () => {
     // constructed so that cutoff lands byte-exactly on this ledger's createdAt.
     const d = sweeps();
     const createdAt = '2026-01-01T00:00:00.000Z';
-    writeFileSync(join(d, 'merge-edge.json'), JSON.stringify({ version: 1, createdAt }));
+    const edge = `merge-${createdAt.replace(/[:.]/g, '-')}-edge01.json`;
+    writeFileSync(join(d, edge), JSON.stringify({ version: 1, createdAt }));
     // …plus a newer one, or the never-delete-the-newest floor would spare it for free and
     // this test would pass for the wrong reason.
-    writeFileSync(join(d, 'merge-newest.json'),
-      JSON.stringify({ version: 1, createdAt: '2026-02-01T00:00:00.000Z' }));
+    const newestAt = '2026-02-01T00:00:00.000Z';
+    const newest = `merge-${newestAt.replace(/[:.]/g, '-')}-new001.json`;
+    writeFileSync(join(d, newest), JSON.stringify({ version: 1, createdAt: newestAt }));
 
     const exactlyAtCutoff = new Date(
       Date.parse(createdAt) + LEDGER_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
     pruneExpiredLedgers(d, exactlyAtCutoff);
 
-    expect(readdirSync(d).sort()).toEqual(['merge-edge.json', 'merge-newest.json']);
+    expect(readdirSync(d).sort()).toEqual([edge, newest].sort());
   });
 
   it('deletes a ledger one millisecond past the cutoff — the boundary is real, not decorative', () => {
     // The other half: without this, "inclusive" could be satisfied by never deleting anything.
     const d = sweeps();
     const createdAt = '2026-01-01T00:00:00.000Z';
-    writeFileSync(join(d, 'merge-edge.json'), JSON.stringify({ version: 1, createdAt }));
-    writeFileSync(join(d, 'merge-newest.json'),
-      JSON.stringify({ version: 1, createdAt: '2026-02-01T00:00:00.000Z' }));
+    const edge = `merge-${createdAt.replace(/[:.]/g, '-')}-edge02.json`;
+    writeFileSync(join(d, edge), JSON.stringify({ version: 1, createdAt }));
+    const newestAt = '2026-02-01T00:00:00.000Z';
+    const newest = `merge-${newestAt.replace(/[:.]/g, '-')}-new002.json`;
+    writeFileSync(join(d, newest), JSON.stringify({ version: 1, createdAt: newestAt }));
 
     const oneMsPast = new Date(
       Date.parse(createdAt) + LEDGER_RETENTION_DAYS * 24 * 60 * 60 * 1000 + 1).toISOString();
     pruneExpiredLedgers(d, oneMsPast);
 
-    expect(readdirSync(d)).toEqual(['merge-newest.json']);
+    expect(readdirSync(d)).toEqual([newest]);
   });
 
   it('keeps a ledger whose createdAt is unreadable — unreadable is not expired', () => {
@@ -359,22 +385,36 @@ describe('pruneExpiredLedgers — bounded retention on personal data', () => {
     const d = sweeps();
     writeFileSync(join(d, 'merge-corrupt.json'), 'not json at all');
     writeFileSync(join(d, 'merge-nodate.json'), JSON.stringify({ version: 1 }));
-    ledger(d, 'merge-newest.json', 0);
+    const newest = ledgerAged(d, 0);
     pruneExpiredLedgers(d, now());
-    expect(readdirSync(d).sort()).toEqual(['merge-corrupt.json', 'merge-newest.json', 'merge-nodate.json']);
+    expect(readdirSync(d).sort()).toEqual(['merge-corrupt.json', 'merge-nodate.json', newest].sort());
   });
 
-  it('touches ONLY merge-*.json — it must not delete what it did not write', () => {
-    // `sweeps/` is not exclusively ours: the sweep CLI and future tooling write here too.
+  it('⭐ deletes only names runMerge itself writes — the canonical predicate, not a lookalike', () => {
+    // `sweeps/` is not exclusively ours, and the first version rolled its own filter
+    // (`startsWith('merge-') && endsWith('.json')`) while claiming it touched nothing it did
+    // not write. It would have deleted `merge-plan-notes.json`. The earlier version of THIS
+    // test probed only `archive-*` and `*.json.bak`, so it passed straight over the gap —
+    // the near-miss is the case that matters, not the obvious one.
     const d = sweeps();
-    ledger(d, 'merge-old.json', LEDGER_RETENTION_DAYS + 5);
-    ledger(d, 'merge-newest.json', 0);
+    const real = `merge-${new Date(Date.now() - (LEDGER_RETENTION_DAYS + 5) * 864e5)
+      .toISOString().replace(/[:.]/g, '-')}-abc123.json`;
+    ledger(d, real, LEDGER_RETENTION_DAYS + 5);
+    ledger(d, `merge-${new Date().toISOString().replace(/[:.]/g, '-')}-zzz999.json`, 0);
+    // Near-misses: every one of these starts with `merge-` and ends with `.json`.
+    ledger(d, 'merge-plan-notes.json', LEDGER_RETENTION_DAYS + 5);
+    ledger(d, 'merge-backup.json', LEDGER_RETENTION_DAYS + 5);
     ledger(d, 'archive-old.json', LEDGER_RETENTION_DAYS + 5);
-    ledger(d, 'merge-old.json.bak', LEDGER_RETENTION_DAYS + 5);
     writeFileSync(join(d, 'notes.txt'), 'x');
+
     pruneExpiredLedgers(d, now());
-    expect(readdirSync(d).sort()).toEqual(
-      ['archive-old.json', 'merge-newest.json', 'merge-old.json.bak', 'notes.txt']);
+
+    const left = readdirSync(d);
+    expect(left, 'the real expired ledger must be gone').not.toContain(real);
+    expect(left).toContain('merge-plan-notes.json');
+    expect(left).toContain('merge-backup.json');
+    expect(left).toContain('archive-old.json');
+    expect(left).toContain('notes.txt');
   });
 
   it('survives a missing directory instead of failing the merge', () => {
@@ -391,14 +431,14 @@ describe('pruneExpiredLedgers — bounded retention on personal data', () => {
       const store = new SubjectStore(engine);
       const threadStore = new ThreadStore(history.getDb());
       mkdirSync(join(dir, 'sweeps'), { recursive: true });
-      ledger(join(dir, 'sweeps'), 'merge-ancient.json', LEDGER_RETENTION_DAYS + 30);
+      const ancient = ledgerAged(join(dir, 'sweeps'), LEDGER_RETENTION_DAYS + 30);
 
       const dup = store.createSubject({ kind: 'organization', name: 'Gamma GmbH' });
       const canon = store.createSubject({ kind: 'organization', name: 'Gamma' });
       expect(runMerge(store, null, threadStore, dir, dup, canon).ok).toBe(true);
 
       const left = readdirSync(join(dir, 'sweeps'));
-      expect(left).not.toContain('merge-ancient.json');   // the old one is gone…
+      expect(left).not.toContain(ancient);                // the old one is gone…
       expect(left).toHaveLength(1);                       // …and this merge's ledger is not
     } finally {
       try { engine.close(); } catch { /* noop */ }

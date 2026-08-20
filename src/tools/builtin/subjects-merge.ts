@@ -1,6 +1,6 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
-import { runMerge } from '../../core/subject-merge-runner.js';
+import { runMerge, LEDGER_RETENTION_DAYS } from '../../core/subject-merge-runner.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { pv } from '../../core/prompt-value.js';
 import { NAME_DEDUPED_SUBJECT_KINDS } from '../../core/subject-store.js';
@@ -152,7 +152,7 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
       // (`data-dir-inventory.ts`), so the honest limit is the access it needs, not
       // the file's survival — the previous wording had that exactly backwards.
       return `Merged "${r.dupName}" into "${r.canonicalName}" — one entry now${cells}. `
-        + `An operator can reverse this from ${r.ledgerPath} — that needs shell access to this machine, not chat. The file is kept in backups and carried across migrations.`;
+        + `An operator can reverse this from ${r.ledgerPath} — that needs shell access to this machine, not chat. The file is kept in backups and carried across migrations, and is removed after ${String(LEDGER_RETENTION_DAYS)} days.`;
     } catch (err) {
       return `subjects_merge error: ${getErrorMessage(err)}`;
     }

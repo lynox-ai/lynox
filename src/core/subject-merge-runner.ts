@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomicSync } from './atomic-write.js';
 import type { SubjectStore, MergeLedgerEntry } from './subject-store.js';
@@ -90,9 +90,13 @@ export const LEDGER_RETENTION_DAYS = 90;
  *   · a ledger whose `createdAt` cannot be read or parsed is KEPT. Unreadable is not expired,
  *     and this function's failure mode must be "kept too long", never "deleted too early".
  *
- * A merge must never fail because a cleanup could not run, so every error is swallowed. The name
- * filter is deliberately tight (`merge-*.json`) — this deletes files, and must not touch
- * anything it did not write.
+ * A merge must never fail because a cleanup could not run, so every error is swallowed.
+ *
+ * The name filter is `isMergeLedgerFileName` — the writer's own definition, shared with
+ * migration export and import. The first version rolled its own `startsWith('merge-') &&
+ * endsWith('.json')`, a fourth and looser copy, and it would have deleted `merge-plan-notes.json`
+ * — a file runMerge never wrote — while its comment claimed it touched nothing it did not write.
+ * A delete path does not get its own definition of what it owns.
  */
 export function pruneExpiredLedgers(sweepsDir: string, nowIso: string): void {
   const now = Date.parse(nowIso);
@@ -108,7 +112,7 @@ export function pruneExpiredLedgers(sweepsDir: string, nowIso: string): void {
 
   const aged: Array<{ full: string; createdMs: number }> = [];
   for (const name of names) {
-    if (!name.startsWith('merge-') || !name.endsWith('.json')) continue;
+    if (!isMergeLedgerFileName(name)) continue;
     const full = join(sweepsDir, name);
     try {
       const parsed = JSON.parse(readFileSync(full, 'utf8')) as { createdAt?: unknown };

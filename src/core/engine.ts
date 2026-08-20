@@ -1792,6 +1792,26 @@ export class Engine {
         this._toolContext.threadStore = this._threadStore;
         this.registry.register(setThreadContextTool);
         this.registry.register(subjectsMergeTool);
+
+        // Sweep expired merge ledgers once at boot, in addition to the sweep inside runMerge.
+        // Without this the retention has a hole exactly where it is needed most: a backup
+        // restore and a migration import both LAND ledgers without a merge ever running, so an
+        // instance that stops merging would keep that personal data forever — and a restore is
+        // the very case the retention exists for. Best-effort, never fatal: a cleanup must not
+        // be able to stop the engine from starting.
+        try {
+          const { pruneExpiredLedgers } = await import('./subject-merge-runner.js');
+          pruneExpiredLedgers(join(getLynoxDir(), 'sweeps'), new Date().toISOString());
+        } catch {
+          // Unreadable directory, permissions, a partially restored tree — none of it is
+          // worth failing boot over. The next merge sweeps again.
+        }
+        // ⚠ UNTESTED WIRING, stated rather than glossed: removing these two lines leaves the
+        // whole suite green. It is the second gate in this file with that property (the Drive
+        // upload gate is the other) — reaching either from a test means booting Engine.init()
+        // through a heavy mock chain. `pruneExpiredLedgers` itself is covered, including the
+        // restore case; what is not covered is that anything calls it at boot.
+        // Filed as DEF-engine-init-wiring-untestable.
         // Record-on-spine (R1 write + R1.5 query): wire the subject-column bridge
         // so `subject`-typed DataStore columns resolve a row's name → a real
         // subject_id on insert (the SAME findOrCreate dedup that feeds the graph),
