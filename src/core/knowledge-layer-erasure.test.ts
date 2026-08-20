@@ -309,7 +309,8 @@ describe('KnowledgeLayer erase → orphan-subject reap (DEF-0015)', () => {
     expect(subjects.getSubject(acme)).not.toBeNull();
   });
 
-  it('an oracle READ FAILURE keeps the subject (answers "referenced"), never fails the erase', async () => {
+  it('an oracle READ FAILURE keeps the subject (answers "referenced"), never fails the erase — and says so once', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const { layer, subjects, threads } = await wired({ history: true, records: true });
     mock.extraction = ORG('Fragile AG');
     await layer.store('Fragile AG sits behind a broken anchor store.', 'knowledge', scope);
@@ -318,6 +319,10 @@ describe('KnowledgeLayer erase → orphan-subject reap (DEF-0015)', () => {
     threads!['db'].exec('DROP TABLE threads');
     expect(await layer.eraseByPattern('broken anchor store')).toBe(1); // the erase still completes
     expect(subjects.getSubject(id)).not.toBeNull();                      // … and keeps the subject
+    await layer.store('Fragile AG again.', 'knowledge', scope);
+    expect(await layer.eraseByPattern('Fragile AG again')).toBe(1);
+    const warns = stderr.mock.calls.filter(c => String(c[0]).includes('[lynox:subject-reap] thread-anchor probe failed'));
+    expect(warns).toHaveLength(1); // once per layer, not once per probe
   });
 
   it('a RECORD-probe failure keeps the subject too (the other half of catch → referenced)', async () => {

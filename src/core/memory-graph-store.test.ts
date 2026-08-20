@@ -433,4 +433,26 @@ describe('MemoryGraphStore orphan-subject reap (DEF-0015)', () => {
     expect(seen.sort()).toEqual([first, last].sort());
     engine.close();
   });
+
+  it('gcInactiveStubs: the reap is one transaction — a failure halfway rolls ITS deletes back, the stub delete stays', () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const { engine, mem, subs } = make();
+      const a = subs.createSubject({ kind: 'organization', name: 'A' });
+      const b = subs.createSubject({ kind: 'organization', name: 'B' });
+      stub(mem, 'old', { isActive: false }); mem.linkSubjects('old', [a, b]);
+      // A reaper that deletes the first candidate itself, then dies before the second.
+      mem.setOrphanSubjectReaper(ids => {
+        engine.getDb().prepare('DELETE FROM subjects WHERE id = ?').run(ids[0]!);
+        throw new Error('halfway');
+      });
+      expect(mem.gcInactiveStubs()).toBe(1);
+      expect(mem.getStub('old')).toBeNull();           // the stub delete committed first
+      expect(subs.getSubject(a)).not.toBeNull();       // the partial reap was rolled back …
+      expect(subs.getSubject(b)).not.toBeNull();       // … so neither subject is half-gone
+      engine.close();
+    } finally {
+      stderr.mockRestore();
+    }
+  });
 });

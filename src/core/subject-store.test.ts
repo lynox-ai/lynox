@@ -899,6 +899,51 @@ describe('SubjectStore reference oracle — schema sweep + merge closure (DEF-00
     engine.close();
   });
 
+  // The over-erase the delta round caught: a merge MOVES detail/anchor/record onto the canonical
+  // and leaves empty shells behind. `merge-target` must therefore be the LAST reason — returned
+  // early it hid every real holder on the canonical and the closure branch (which inspects only
+  // the shells) reaped a CRM contact / an anchored subject / a record subject.
+  it.each([
+    ['a CRM detail row (email)', (s: SubjectStore, canon: string): SubjectExternalRefs => { s.setPersonDetail(canon, { email: 'c@example.com' }); return NONE; }, 'has-detail'],
+    ['a history.db thread anchor', (_s: SubjectStore, canon: string): SubjectExternalRefs => ({ isThreadAnchor: id => id === canon, hasRecords: () => false }), 'thread-anchor'],
+    ['a datastore.db record', (_s: SubjectStore, canon: string): SubjectExternalRefs => ({ isThreadAnchor: () => false, hasRecords: id => id === canon }), 'record'],
+  ])('a once-merged canonical that %s still holds is KEPT, shells included', (_what, hold, expectedReason) => {
+    const { store, engine } = make();
+    const canon = store.createSubject({ kind: 'person', name: 'Petra Muster' });
+    const dup = store.createSubject({ kind: 'person', name: 'P. Muster' });
+    engine.getDb().prepare("UPDATE subjects SET merged_into = ?, archived_at = datetime('now') WHERE id = ?").run(canon, dup);
+    const external = hold(store, canon);
+    expect(store.referenceReason(canon, external)).toBe(expectedReason); // not 'merge-target'
+    expect(store.reapOrphans([canon], external)).toEqual([]);
+    expect(store.getSubject(canon)).not.toBeNull();
+    expect(store.getSubject(dup)).not.toBeNull();
+    engine.close();
+  });
+
+  it('a self-loop relationship (the residue of merging two related subjects) is not a holder; a real edge is', () => {
+    const { store, engine } = make();
+    const canon = store.createSubject({ kind: 'organization', name: 'Loop AG' });
+    const rel = new RelationshipStore(engine);
+    rel.createRelationship({ fromSubjectId: canon, toSubjectId: canon, kind: 'partner_of' });
+    expect(store.referenceReason(canon, NONE)).toBeNull();
+    const other = store.createSubject({ kind: 'organization', name: 'Other AG' });
+    rel.createRelationship({ fromSubjectId: canon, toSubjectId: other, kind: 'partner_of' });
+    expect(store.referenceReason(canon, NONE)).toBe('referenced-by-relationships.from_subject_id');
+    engine.close();
+  });
+
+  it('a prototype-key kind written straight into the DB neither throws nor counts as detail', () => {
+    const { store, engine } = make();
+    engine.getDb().prepare("INSERT INTO subjects (id, kind, name) VALUES ('proto', 'constructor', 'Proto')").run();
+    expect(store.referenceReason('proto', NONE)).toBeNull();
+    expect(store.reapOrphans(['proto'], NONE)).toEqual(['proto']);
+    engine.close();
+  });
+
+  it('every detail kind has a substantive predicate (the row-exists fallback never fires on today\'s schema)', () => {
+    expect(subjectReferenceCoverage().detailKindsMissingPredicate).toEqual([]);
+  });
+
   function stub(mem: MemoryGraphStore, id: string): void {
     mem.upsertStub({ id, text: `t-${id}`, namespace: 'knowledge', scopeType: 'context', scopeId: 'c' });
   }

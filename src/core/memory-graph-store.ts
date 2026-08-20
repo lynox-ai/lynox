@@ -588,7 +588,11 @@ export class MemoryGraphStore {
     }).immediate();
     if (this.orphanReaper && candidates.length > 0) {
       try {
-        this.orphanReaper(candidates);
+        // Its own transaction: the reap's fixpoint + merge-closure deletes are several
+        // statements, and a failure halfway must not leave shells gone and their canonical
+        // standing. Separate from the DELETE above on purpose (see the docblock).
+        const reaper = this.orphanReaper;
+        this.db.transaction(() => { reaper(candidates); }).immediate();
       } catch (err: unknown) {
         process.stderr.write(
           `[lynox:subject-reap] gc reap failed, ${candidates.length} candidate subject(s) left in place: ${err instanceof Error ? err.message : String(err)}\n`,

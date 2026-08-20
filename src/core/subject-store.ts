@@ -372,15 +372,22 @@ const DETAIL_SUBSTANTIVE_PREDICATE: Record<string, string> = {
 /**
  * Every engine.db column that points at `subjects(id)`, partitioned by how the orphan reap
  * treats it — exported so a schema sweep (`PRAGMA foreign_key_list` over every table) can
- * fail the build the day a new FK column appears that none of the three lists knows. Without
- * that guard the next `subject_id` column would be invisible to the reap and the subject it
- * holds would be over-erased.
+ * fail the build the day a new FK column onto `subjects(id)` appears that none of the three
+ * lists knows. Without that guard the next such column would be invisible to the reap and the
+ * subject it holds would be over-erased. (A soft pointer declared WITHOUT `REFERENCES` is
+ * outside what `PRAGMA foreign_key_list` can see — those are the cross-DB seams in
+ * {@link SubjectExternalRefs}, kept by hand.)
  *  - `counted`: a row here is a reference ({@link SubjectStore.referenceReason} keeps the subject).
  *  - `detail`:  the 1:1 kind-detail rows (PK = subject_id) — part of the subject itself; a
- *               reference only when they carry substantive data (`DETAIL_SUBSTANTIVE_PREDICATE`).
+ *               reference when they carry substantive data (`DETAIL_SUBSTANTIVE_PREDICATE`),
+ *               or — for a kind the predicate map does not know — whenever a row exists.
  *  - `derived`: recomputable materializations that must NOT count (cooccurrences).
+ *  - `detailKindsMissingPredicate`: detail kinds that would fall back to row-exists; the
+ *               sweep asserts this is empty so the fallback never fires on today's schema.
  */
-export function subjectReferenceCoverage(): { counted: string[]; detail: string[]; derived: string[] } {
+export function subjectReferenceCoverage(): {
+  counted: string[]; detail: string[]; derived: string[]; detailKindsMissingPredicate: string[];
+} {
   return {
     counted: [
       ...REPOINT_TARGETS.map(t => `${t.table}.${t.column}`),
@@ -389,6 +396,7 @@ export function subjectReferenceCoverage(): { counted: string[]; detail: string[
     ],
     detail: Object.values(DETAIL_TABLE).map(d => `${d.table}.subject_id`),
     derived: ['subject_cooccurrences.subject_a_id', 'subject_cooccurrences.subject_b_id'],
+    detailKindsMissingPredicate: Object.keys(DETAIL_TABLE).filter(k => !Object.hasOwn(DETAIL_SUBSTANTIVE_PREDICATE, k)),
   };
 }
 
@@ -928,21 +936,37 @@ export class SubjectStore {
     }
     for (const t of REPOINT_TARGETS) {
       // Table/column names are the STATIC literals above, never input — same injection
-      // argument as the merge repoint.
-      if (this.db.prepare(`SELECT 1 FROM "${t.table}" WHERE "${t.column}" = ? LIMIT 1`).get(subjectId)) {
+      // argument as the merge repoint. A relationship whose two ends are the SAME subject
+      // is the self-loop `executeMerge` leaves when two directly related subjects are
+      // folded (A→B becomes canon→canon): it describes nothing but the subject itself, so
+      // it is not a holder — counting it would make every such canonical unreapable.
+      const selfLoop = t.table === 'relationships' ? ' AND from_subject_id <> to_subject_id' : '';
+      if (this.db.prepare(`SELECT 1 FROM "${t.table}" WHERE "${t.column}" = ?${selfLoop} LIMIT 1`).get(subjectId)) {
         return `referenced-by-${t.table}.${t.column}`;
       }
     }
-    if (this.db.prepare('SELECT 1 FROM subjects WHERE merged_into = ? LIMIT 1').get(subjectId)) return 'merge-target';
-    const detail = DETAIL_TABLE[row.kind];
-    const substantive = DETAIL_SUBSTANTIVE_PREDICATE[row.kind];
-    if (detail && substantive) {
-      if (this.db.prepare(`SELECT 1 FROM "${detail.table}" WHERE subject_id = ? AND (${substantive}) LIMIT 1`).get(subjectId)) {
+    // `Object.hasOwn`: `kind` is a checked enum on every write path, but a row written
+    // straight into the DB with a prototype key (`constructor`) would otherwise make the
+    // lookup truthy and the SQL below unparseable — which aborts the erase.
+    const detail = Object.hasOwn(DETAIL_TABLE, row.kind) ? DETAIL_TABLE[row.kind] : undefined;
+    if (detail) {
+      // A detail kind WITHOUT a substantive predicate is treated as held by any row at all:
+      // fail-closed, so forgetting the predicate for a new kind keeps subjects rather than
+      // reaping CRM data. The coverage sweep asserts the map is complete for today's kinds.
+      const substantive = Object.hasOwn(DETAIL_SUBSTANTIVE_PREDICATE, row.kind) ? DETAIL_SUBSTANTIVE_PREDICATE[row.kind] : undefined;
+      const where = substantive ? `subject_id = ? AND (${substantive})` : 'subject_id = ?';
+      if (this.db.prepare(`SELECT 1 FROM "${detail.table}" WHERE ${where} LIMIT 1`).get(subjectId)) {
         return 'has-detail';
       }
     }
     if (external.isThreadAnchor(subjectId)) return 'thread-anchor';
     if (external.hasRecords(subjectId)) return 'record';
+    // LAST, deliberately: `merge-target` must mean "nothing else holds this canonical —
+    // only the archived shells of the duplicates it absorbed still point at it". Returned
+    // earlier, it would hide a CRM detail row, a thread anchor or a record on the canonical
+    // (a merge moves all of those onto it), and `reapOrphans`' closure branch — which only
+    // inspects the shells — would reap a canonical something real still holds.
+    if (this.db.prepare('SELECT 1 FROM subjects WHERE merged_into = ? LIMIT 1').get(subjectId)) return 'merge-target';
     return null;
   }
 
@@ -975,9 +999,10 @@ export class SubjectStore {
    * release another (a parent whose only child was itself a candidate), and the outcome
    * must not depend on iteration order. Bounded by the candidate count per pass.
    *
-   * The CALLER owns the transaction — this is meant to run INSIDE the memory delete, so a
-   * failure here rolls the whole erase back (and the erase's re-throw contract makes it
-   * retryable) instead of leaving memories gone and subjects half-reaped. The DELETE
+   * The CALLER owns the transaction — `purgeMemories` runs this INSIDE the memory delete, so
+   * a failure there rolls the whole erase back (and the erase's re-throw contract makes it
+   * retryable); `gcInactiveStubs` opens one around the reap alone, so a mid-closure failure
+   * leaves no half-reaped shells either way. The DELETE
    * cascades through the schema (detail row, junction, cooccurrences, relationships) and
    * SET-NULLs the soft pointers — by construction none of those exist for an unreferenced
    * subject except the derived cooccurrence rows, which is exactly the residue that should

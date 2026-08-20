@@ -160,6 +160,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   private _recordStore: DataStore | null = null;
   /** One stderr line per layer instance when the reap has to skip, not one per erase. */
   private _reapSkipWarned = false;
+  /** Same, for a cross-DB probe that throws (answers "referenced" while it fails). */
+  private _oracleFailWarned = false;
 
   constructor(
     dbPath: string,
@@ -786,7 +788,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   /**
    * DEF-0015 — the cross-DB half of the subject reference oracle, or `null` when it cannot
-   * be answered (no history.db handle, or the DataStore bridge not attached). `null` means
+   * be answered (no history.db handle, or no record store handed over yet). `null` means
    * the reap must NOT run. Each probe answers `true` (referenced) on a read failure — e.g.
    * a pre-v46 history.db without the anchor column — so an oracle error can never fail
    * the erase or over-erase; it only keeps the subject.
@@ -795,9 +797,21 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const threads = this._getAnchorThreadStore();
     const records = this._recordStore;
     if (!threads || !records) return null;
+    // A probe that throws answers "referenced" — and says so once per layer, because a
+    // permanently failing probe (a pre-v46 history.db, a locked datastore) keeps every
+    // subject forever and would otherwise be indistinguishable from a real holder.
+    const keptOnFailure = (probe: string, err: unknown): true => {
+      if (!this._oracleFailWarned) {
+        this._oracleFailWarned = true;
+        process.stderr.write(
+          `[lynox:subject-reap] ${probe} probe failed — subjects are KEPT while it fails: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+      return true;
+    };
     return {
-      isThreadAnchor: (id) => { try { return threads.listBySubjectId(id, 1).length > 0; } catch { return true; } },
-      hasRecords: (id) => { try { return records.hasRecordsForSubject(id); } catch { return true; } },
+      isThreadAnchor: (id) => { try { return threads.listBySubjectId(id, 1).length > 0; } catch (err: unknown) { return keptOnFailure('thread-anchor', err); } },
+      hasRecords: (id) => { try { return records.hasRecordsForSubject(id); } catch (err: unknown) { return keptOnFailure('record', err); } },
     };
   }
 
