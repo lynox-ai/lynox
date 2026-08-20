@@ -1,10 +1,20 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import type { LynoxConfig } from '../types/index.js';
+import { SubjectStore } from './subject-store.js';
+import type { ExtractionResult } from './entity-extractor.js';
+
+// Gate 3 (below) stores one memory through the real KnowledgeLayer; extraction is mocked so no
+// LLM is needed and the minted subject is deterministic. Hoisted by vitest — inert for gates 1/2.
+const extractorMock = vi.hoisted(() => ({ extraction: { entities: [], relations: [] } as ExtractionResult }));
+vi.mock('./entity-extractor.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./entity-extractor.js')>();
+  return { ...actual, extractEntities: vi.fn(async () => extractorMock.extraction) };
+});
 
 /**
  * The BOOT-WIRING proof for the two gates in {@link Engine.init} that carry data-protection
@@ -154,5 +164,64 @@ describe('Engine boot — the two init() gates are actually wired', () => {
     expect(engine.getBackupManager()).not.toBeNull();
 
     expect(engine.getBackupManager()!.getGDriveUploader()).toBeNull();
+  });
+});
+
+// ─── Gate 3: the orphan-subject reap is wired through init() (DEF-0015) ───────────────────
+//
+// The reap needs the record store, which `_initCoreTools()` hands the KnowledgeLayer via
+// `setRecordStore` — AFTER `_initKnowledge()`. The older `initDataStoreBridge` attach in
+// `_initKnowledge()` is guarded on a DataStore that does not exist yet at that point, so it has
+// never fired in production; a reap riding on it would be permanently fail-closed while every
+// unit test (which wires the store by hand) stays green. This boots the real Engine and asks
+// the only question that proves the wiring: does an erase remove the subject it minted?
+describe('Engine boot — the orphan-subject reap is reachable after init()', () => {
+  const dirs: string[] = [];
+  const engines: Engine[] = [];
+  const saved = new Map<string, string | undefined>();
+  function setEnv(key: string, value: string | undefined): void {
+    if (!saved.has(key)) saved.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+  afterEach(async () => {
+    for (const e of engines) { try { await e.shutdown(); } catch { /* best effort */ } }
+    engines.length = 0;
+    for (const [k, v] of saved) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    saved.clear();
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    dirs.length = 0;
+    extractorMock.extraction = { entities: [], relations: [] };
+    reloadConfig();
+  });
+
+  it('an erase through the booted KnowledgeLayer reaps the subject the erased memory minted', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-reap-boot-'));
+    dirs.push(dir);
+    for (const k of ['LYNOX_DATA_DIR', 'LYNOX_SUBJECT_GRAPH_ENABLED', 'LYNOX_KG_EXTRACTOR', 'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'] as const) setEnv(k, undefined);
+    setEnv('LYNOX_DATA_DIR', dir);
+    setEnv('LYNOX_SUBJECT_GRAPH_ENABLED', 'true');
+    // The V2 extractor needs a live LLM client; V1 is the path the file-level mock replaces.
+    setEnv('LYNOX_KG_EXTRACTOR', 'v1');
+    reloadConfig();
+    const engine = new Engine({} as LynoxConfig);
+    engines.push(engine);
+    await engine.init();
+
+    const layer = engine.getKnowledgeLayer();
+    const engineDb = engine.getEngineDb();
+    expect(layer, 'the boot must bring up the KnowledgeLayer — a null here is not a skip').not.toBeNull();
+    expect(engine.getDataStore(), 'the boot must bring up the DataStore').not.toBeNull();
+    expect(engineDb).not.toBeNull();
+
+    extractorMock.extraction = { entities: [{ name: 'Boot Orphan AG', type: 'organization', confidence: 0.9 }], relations: [] };
+    await layer!.store('Boot Orphan AG exists only to be erased.', 'knowledge', { type: 'context', id: 'boot' });
+    const subjects = new SubjectStore(engineDb!);
+    const id = subjects.findCanonical('Boot Orphan AG', 'organization')?.id;
+    expect(id, 'extraction through the real layer must have minted the subject').toBeTruthy();
+
+    expect(await layer!.eraseByPattern('exists only to be erased')).toBe(1);
+    // Delete the `setRecordStore` line in _initCoreTools and this is the assertion that fails:
+    // the oracle is null, the reap skips fail-closed, and the plaintext name survives.
+    expect(subjects.getSubject(id!)).toBeNull();
   });
 });

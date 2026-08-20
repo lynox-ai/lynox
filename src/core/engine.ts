@@ -1444,6 +1444,13 @@ export class Engine {
       process.stderr.write(`[lynox] DataStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
       this._dataStore = null;
     }
+    // DEF-0015: the orphan-subject reap needs the record store to answer "does a table row
+    // still link this subject?". Handed over HERE — after the DataStore init block succeeded
+    // (a store whose init threw is null by then, so the reap stays fail-closed) and not in
+    // _initKnowledge(): that step runs before this one, which is why the `initDataStoreBridge`
+    // attach there (guarded on `this._dataStore`) has never fired in production. The reap must
+    // not ride on it.
+    if (this._dataStore) this.knowledgeLayer?.setRecordStore(this._dataStore);
 
     // Initialize ArtifactStore (best-effort)
     try {
