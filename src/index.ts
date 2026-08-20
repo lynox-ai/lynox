@@ -21,6 +21,7 @@ process.emit = function (event: string, ...args: unknown[]) {
 } as typeof process.emit;
 // === Module exports ===
 export { Agent } from './core/agent.js';
+export type { SendStop, SendStopCause } from './core/agent.js';
 export { StreamProcessor } from './core/stream.js';
 export { Memory } from './core/memory.js';
 export { Engine } from './core/engine.js';
