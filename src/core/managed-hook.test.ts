@@ -432,10 +432,9 @@ describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
   });
 
   it('a body WITHOUT `spend_gate` still anchors on a numeric balance — an older control plane keeps gating', async () => {
-    // The rollout window this change depends on: the engine carries the reader
-    // to the fleet before the control plane emits the field. During that window
-    // every numeric balance arrives without a token and must gate exactly as
-    // before. MUTATION THIS KILLS: `else if (data.spend_gate === 'balance' &&
+    // The window in which an older control plane omits the field: every numeric
+    // balance arrives without a token and must gate exactly as before.
+    // MUTATION THIS KILLS: `else if (data.spend_gate === 'balance' &&
     // typeof data.balance_cents === 'number')` — every other test in this
     // block sends `'balance'`, so only this one sees the difference.
     const hook = createManagedHook();
@@ -465,8 +464,10 @@ describe('managed-hook balance mirror (C2 / DEF-0083)', () => {
   });
 
   it('`"none"` does not override `allowed: false` — the two terms stay independent', async () => {
-    // A CP that says "not balance-gated" but also "not allowed" is contradicting
-    // itself; the engine resolves that in the safe direction and refuses.
+    // `allowed` can go false for reasons other than money (a suspended
+    // account); the gate token must not be read as "allowed". This pins the
+    // independence only — both refuse paths throw the same message, so it does
+    // not distinguish WHICH term refused.
     const hook = createManagedHook();
     statusBalance = -250;
     statusGate = 'none';

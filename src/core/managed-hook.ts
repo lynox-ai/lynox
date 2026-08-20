@@ -1,8 +1,9 @@
 /**
  * Managed hosting usage hook — reports AI cost (USD cents) to the control plane.
  *
- * Only active when LYNOX_MANAGED_MODE is set (EU instances provisioned by
- * the managed hosting control plane). BYOK instances never load this.
+ * Active whenever LYNOX_BILLING_TIER (legacy alias LYNOX_MANAGED_MODE) is set,
+ * i.e. on every control-plane-provisioned instance. Hosted/BYOK instances run
+ * it too and receive `spend_gate: 'unfunded'`; their mirror stays inert.
  *
  * - onBeforeRun: blocks if cached `allowed` flag is false (hard cap) OR if
  *   the cached state is too stale to trust (fail-closed under CP outage)

@@ -59,8 +59,10 @@ export interface UsageFlushResponse {
  *    engine clears its mirror. The control plane must emit this only where it
  *    is the key supplier — never for an instance it merely does not fund.
  *  - `'unfunded'` — the control plane does not fund this instance's spend
- *    (BYOK/hosted) and makes no statement about a gate. The engine keeps
- *    whatever mirror it holds, exactly as for an absent or unrecognised value.
+ *    (BYOK/hosted) and makes no statement about a gate. The engine reads it
+ *    exactly like an absent or unrecognised value: a numeric `balance_cents`
+ *    beside it would still anchor (the CP never sends that pair), a `null`
+ *    leaves the mirror as it was.
  *
  * Why a token and not the absence of a number: `balance_cents: null` only says
  * there is nothing to report on this branch; it says nothing about the gate,
@@ -74,8 +76,9 @@ export type SpendGate = 'balance' | 'none' | 'unfunded';
  * control plane has no balance to report on this branch (BYOK/hosted); the
  * gate is stated by `spend_gate`, never inferred from that null. The engine
  * dereferences `allowed`, `balance_cents` and `spend_gate`, parse-tolerant: a
- * response without `spend_gate` comes from an older control plane and leaves
- * the mirror as it was.
+ * response without `spend_gate` comes from an older control plane and is read
+ * as if no statement were made — a numeric `balance_cents` still anchors the
+ * mirror, a `null` leaves it as it was.
  */
 export interface UsageStatusResponse {
   allowed: boolean;
