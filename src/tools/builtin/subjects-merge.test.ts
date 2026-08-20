@@ -79,11 +79,16 @@ describe('subjects_merge tool (PR-C3)', () => {
   // the old entry back") passes. It buys every literal in the file on the one
   // axis that has actually failed five times — not a proof that no promise can be
   // phrased at all.
-  const UNDO_VOCABULARY = /revers|undo|permanent|recoverab|restor|rollback|roll(?:ed|s|ing)? back/i;
+  // `revers` misses "revert", and `recoverab` misses "recover" — both near-misses of roots
+  // this obviously meant to cover, and both plausible developer wording. Widened after a
+  // review pass smuggled "You can ask an operator to revert it at any time." past the
+  // first version with the whole suite green.
+  const UNDO_VOCABULARY =
+    /revers|revert|undo|unmerge|un-merge|permanent|recover|restor|rollback|roll(?:ed|s|ing|\s+it)? back|back out|not final/i;
 
   /** The clauses allowed to speak about undoing — fragments, as the source concatenates them. */
   const ALLOWED_UNDO_CLAUSES = [
-    ' — that file is not included in backups, so keep it if this may need undoing.',
+    ' — that file is in no backup, so it will not survive a restore or a migration.',
     '" is archived. Undoing it needs a command-line rollback — not something you can do from chat.',
     'An operator can reverse this from ',
     'Never tell the user a merge is reversible, undoable or can be rolled back from chat. It ',
@@ -96,19 +101,25 @@ describe('subjects_merge tool (PR-C3)', () => {
     const file = fileURLToPath(new URL('./subjects-merge.ts', import.meta.url));
     const sf = ts.createSourceFile(file, readFileSync(file, 'utf-8'), ts.ScriptTarget.Latest, true);
 
-    const literals: string[] = [];
+    const plain: string[] = [];
+    const templateParts: string[] = [];
     const walk = (node: ts.Node): void => {
-      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) literals.push(node.text);
-      else if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) literals.push(node.text);
+      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) plain.push(node.text);
+      else if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) templateParts.push(node.text);
       ts.forEachChild(node, walk);
     };
     walk(sf);
+    const literals = [...plain, ...templateParts];
 
-    // Guards the guard: if the collector silently stopped seeing this module's
-    // strings, every assertion below would pass vacuously — the swallowed-outage
-    // shape. This tool has ~75 literals; a collapse to a handful is a broken
-    // collector, not a cleaned-up file.
-    expect(literals.length).toBeGreaterThan(40);
+    // Guards the guard: if the collector silently stopped seeing one KIND of string,
+    // every assertion below would pass vacuously — the swallowed-outage shape. A count
+    // floor is the wrong instrument for that and a review pass proved it: the module has
+    // exactly 40 plain literals, so deleting the template-span branch left `> 40` failing
+    // by ONE, and a single added plain string would have hidden the regression entirely.
+    // Assert instead that BOTH kinds were actually collected, which is the property that
+    // matters and has no margin to erode.
+    expect(plain.length, 'collector stopped seeing plain string literals').toBeGreaterThan(0);
+    expect(templateParts.length, 'collector stopped seeing template spans').toBeGreaterThan(0);
 
     expect(
       literals.filter((lit) => UNDO_VOCABULARY.test(lit)).sort(),
@@ -120,6 +131,44 @@ describe('subjects_merge tool (PR-C3)', () => {
         'add it to ALLOWED_UNDO_CLAUSES. If it promises the user an undo, it is wrong.',
       ].join(' '),
     ).toEqual([...ALLOWED_UNDO_CLAUSES].sort());
+  });
+
+  // The guard above reads the FILE. That is not the same thing as what ships, and a
+  // review pass proved the gap: move the caveat out of `definition.description` into a
+  // module-level const and the literal is still in the file, so the source guard stays
+  // green while the cached wire definition — the only text the model has on the FIRST
+  // merge in a thread, and the whole reason the token budget moved — silently loses it.
+  //
+  // So run the same vocabulary over the RUNTIME surface too: the serialized definition
+  // (name + description + schema, i.e. exactly what is cached and sent) plus
+  // detailedGuidance. Two surfaces, one mechanism, neither able to vouch for the other.
+  it('ships the honest caveat on the WIRE, not merely somewhere in the file', () => {
+    const wire = JSON.stringify(subjectsMergeTool.definition);
+    expect(wire).toContain('It cannot be undone from chat.');
+
+    // Collect the definition's actual string VALUES (description, every schema
+    // description, the enum members) rather than splitting the serialized blob — JSON has
+    // no sentence boundaries, so a naive split yields one giant chunk that matches
+    // nothing. detailedGuidance rides along: it is model-visible too, just later.
+    const wireStrings: string[] = [];
+    const collect = (v: unknown): void => {
+      if (typeof v === 'string') wireStrings.push(v);
+      else if (Array.isArray(v)) v.forEach(collect);
+      else if (v && typeof v === 'object') Object.values(v).forEach(collect);
+    };
+    collect(subjectsMergeTool.definition);
+    collect(subjectsMergeTool.detailedGuidance ?? '');
+    expect(wireStrings.length, 'wire collector saw nothing').toBeGreaterThan(5);
+
+    // Every wire string that speaks about undoing must be accounted for by a vetted
+    // clause. Containment either way, because the file's clauses are concatenation
+    // fragments while the wire carries them joined.
+    for (const text of wireStrings.filter((t) => UNDO_VOCABULARY.test(t))) {
+      const vetted = ALLOWED_UNDO_CLAUSES.some(
+        (clause) => text.includes(clause.trim()) || clause.trim().includes(text),
+      );
+      expect(vetted, `unvetted undo wording on the wire: ${text}`).toBe(true);
+    }
   });
 
   it('names the real undo route instead of claiming reversibility', async () => {
@@ -180,7 +229,7 @@ describe('subjects_merge tool (PR-C3)', () => {
     // directory. Killed by this assert — `subjects-merge.test.ts`, the
     // `toContain(join(dir, 'sweeps', written[0]!))` on the next line.
     expect(res).toContain(join(dir, 'sweeps', written[0]!));
-    expect(res).toMatch(/not included in backups/i);
+    expect(res).toMatch(/in no backup/i);
     expect(res).not.toMatch(/Reversible from the merge ledger/i);
   });
 

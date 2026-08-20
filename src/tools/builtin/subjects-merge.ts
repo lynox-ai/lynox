@@ -144,7 +144,7 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
       // only input `rollbackMergeRun` takes, and it is NOT covered by backup or
       // migration — so a user who might ever want this undone needs to keep it.
       return `Merged "${r.dupName}" into "${r.canonicalName}" — one entry now${cells}. `
-        + `An operator can reverse this from ${r.ledgerPath} — that file is not included in backups, so keep it if this may need undoing.`;
+        + `An operator can reverse this from ${r.ledgerPath} — that file is in no backup, so it will not survive a restore or a migration.`;
     } catch (err) {
       return `subjects_merge error: ${getErrorMessage(err)}`;
     }
