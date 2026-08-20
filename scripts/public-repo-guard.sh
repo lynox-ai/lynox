@@ -141,7 +141,7 @@ mode_staged=false
 #
 # NUL-separated, because the textual default is a silent hole: git QUOTES any
 # path holding a non-ASCII byte (`docs/Übersicht.md` comes out as
-# `"docs/\303\234bersicht.md"`, quotes included). The `[ -f "$f" ]` test below
+# `"docs/\303\234bersicht.md"`, quotes included). The `[ -f "./$f" ]` test below
 # then fails on that literal, the loop `continue`s, and the file is skipped by
 # EVERY class — including the HARD ones — while the guard reports a clean tree.
 # Measured: a tracked file with an umlaut in its name and `control-staging…` in
@@ -180,7 +180,7 @@ violations=0
 while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
   is_excluded "$f" && continue
-  if printf '%s' "$f" | grep -qEi "$HARD_LOCAL_TOOLING"; then
+  if printf '%s' "$f" | grep -qEi -- "$HARD_LOCAL_TOOLING"; then
     echo "❌ HARD leak marker (operator-local tooling) in PATH: $f"
     violations=$((violations + 1))
   fi
@@ -188,10 +188,15 @@ done < <(list_files)
 
 while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
-  [ -f "$f" ] || continue
+  [ -f "./$f" ] || continue
   is_excluded "$f" && continue
-  # Skip binaries.
-  if grep -Iq . "$f" 2>/dev/null; then :; else continue; fi
+  # Skip binaries. Every file operand below is prefixed `./` so a repo-root path
+  # that begins with '-' (or is literally `-`) is an unambiguous filename: not a
+  # grep option, and — the sharper trap — not the stdin `-`, which would make grep
+  # drain THIS loop's own file listing and blind the guard for every later file.
+  # `--` additionally guards the pattern side. Same silent blind-skip class as the
+  # non-ASCII fix; `git ls-files` paths are always repo-relative, so `./` is safe.
+  if grep -Iq -- . "./$f" 2>/dev/null; then :; else continue; fi
 
   # HARD — no exemptions.
   while IFS= read -r line; do
@@ -199,7 +204,7 @@ while IFS= read -r -d '' f; do
     echo "❌ HARD leak marker in $f:"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nIE "$HARD" "$f" 2>/dev/null || true)
+  done < <(grep -nIE -- "$HARD" "./$f" 2>/dev/null || true)
 
   # HARD (operator-local tooling) — case-INSENSITIVE (the -i below), so the
   # pattern stays short without spelling out the vendor name it keeps out.
@@ -211,7 +216,7 @@ while IFS= read -r -d '' f; do
     echo "❌ HARD leak marker (operator-local tooling) in $f:"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nIEi "$HARD_LOCAL_TOOLING" "$f" 2>/dev/null || true)
+  done < <(grep -nIEi -- "$HARD_LOCAL_TOOLING" "./$f" 2>/dev/null || true)
 
   # Whole-file allow applies from here down. It sits ABOVE the reference loops on
   # purpose: those match a bracket shape that legal content can produce, and an
@@ -231,7 +236,7 @@ while IFS= read -r -d '' f; do
     echo "❌ internal cross-reference in $f (state the reason inline instead):"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nIE "$INTERNAL_REF" "$f" 2>/dev/null || true)
+  done < <(grep -nIE -- "$INTERNAL_REF" "./$f" 2>/dev/null || true)
 
   # The opening line of a link split across lines. Reported separately so the
   # message can say why it looks incomplete.
@@ -251,7 +256,7 @@ while IFS= read -r -d '' f; do
     echo "❌ internal cross-reference opened in $f and continued on the next line:"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nIE "$REF_OPENER" "$f" 2>/dev/null || true)
+  done < <(grep -nIE -- "$REF_OPENER" "./$f" 2>/dev/null || true)
 
   # SOFT — exempt if the line carries the pragma. Whole-file allow already
   # returned above, so it needs no second check here.
@@ -263,7 +268,7 @@ while IFS= read -r -d '' f; do
     echo "⚠️  internal hostname in $f (add '${PRAGMA}' with a reason if intentional):"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nIE "$SOFT" "$f" 2>/dev/null || true)
+  done < <(grep -nIE -- "$SOFT" "./$f" 2>/dev/null || true)
 done < <(list_files)
 
 if [ "$violations" -gt 0 ]; then
