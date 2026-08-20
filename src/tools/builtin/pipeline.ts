@@ -1,7 +1,7 @@
-import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier } from '../../types/index.js';
+import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier, IAgent } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { randomUUID } from 'node:crypto';
-import { validateManifest, MAX_STEPS } from '../../orchestrator/validate.js';
+import { validateManifest, maxStepsFor, parallelStepCapFor } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
@@ -11,7 +11,9 @@ import { getErrorMessage } from '../../core/utils.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { bindWorkflowParameters } from '../../orchestrator/workflow-params.js';
 import { applyModifications, type StepModification } from '../../orchestrator/workflow-edit.js';
-import type { SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { undeclaredInlineStepTier, newRunTaint, type RunTaint, type SubAgentPromptHandles } from '../../orchestrator/runtime-adapter.js';
+import { normalizeTier } from '../../types/index.js';
+import { modelCapability } from '../../types/models.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import type { IMemory } from '../../types/memory.js';
 
@@ -26,7 +28,7 @@ const MAX_EXECUTED_STATES = 50;
 const pipelineStore = new Map<string, PlannedPipeline>();
 
 // Store last executed state per pipeline for retry
-const executedStates = new Map<string, { manifest: Manifest; state: RunState }>();
+const executedStates = new Map<string, { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined }>();
 
 // Non-template reentrancy guard: a non-template (run-once) pipeline currently
 // in-flight. `executePipelineById` marks `planned.executed = true` before the
@@ -124,7 +126,7 @@ export function storePipeline(id: string, pipeline: PlannedPipeline): void {
  *  the original insertion position → FIFO, which would drop a hot entry after N
  *  other executions). Uses its OWN cap, larger than the plan cache, so a burst
  *  of distinct workflows doesn't evict each other's still-retriable state. */
-export function recordExecutedState(id: string, value: { manifest: Manifest; state: RunState }): void {
+export function recordExecutedState(id: string, value: { manifest: Manifest; state: RunState; runTaint?: RunTaint | undefined }): void {
   executedStates.delete(id);
   if (executedStates.size >= MAX_EXECUTED_STATES) {
     const oldest = executedStates.keys().next().value;
@@ -174,6 +176,7 @@ export function buildManifest(name: string, steps: InlinePipelineStep[], onFailu
       thinking: s.thinking,
       input_from: s.input_from,
       timeout_ms: s.timeout_ms,
+      tools: s.tools,
       // Deterministic-replay pair — preserved so the inline runtime can replay
       // the literal captured call instead of re-interpreting `task`.
       tool: s.tool,
@@ -348,13 +351,28 @@ function formatResult(state: RunState, name: string, resultLimit?: number): stri
  * (saved-workflow-runner), and the step rows never enter the CP cost queries, so
  * there is no double-count on the CP axis either.
  */
-function debitInSessionWorkflowCost(deps: PipelineDeps, state: RunState): void {
+function debitInSessionWorkflowCost(
+  deps: PipelineDeps,
+  state: RunState,
+  steps: ReadonlyArray<{ id: string; model?: string | undefined; role?: string | undefined }>,
+): void {
   // No metered host = self-host / BYOK → no CP balance to debit (mirrors spawn.ts).
   const meteredHost = deps.toolContext?.meteredHost;
   if (!meteredHost) return;
-  const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
-  const tier: ModelTier = deps.config.default_tier ?? 'balanced';
-  reportMeteredCost(meteredHost, randomUUID(), costUsd, tier);
+  // Per-step debit under the tier the step actually ran on (F1: an undeclared
+  // step runs `fast` now — one aggregated debit under the session tier would
+  // report fast spend as balanced, the #1155 mis-attribution on a new surface).
+  // A pinned concrete model id resolves through the capability registry; a step
+  // the id map can't place falls back to the step's own resolution rule.
+  const byId = new Map(steps.map(s => [s.id, s]));
+  for (const [stepId, output] of state.outputs) {
+    if (output.costUsd <= 0) continue;
+    const step = byId.get(stepId);
+    const tier: ModelTier = step
+      ? normalizeTier(step.model ?? '') ?? modelCapability(step.model ?? '')?.tier ?? undeclaredInlineStepTier(step)
+      : deps.config.default_tier ?? 'balanced';
+    reportMeteredCost(meteredHost, randomUUID(), output.costUsd, tier);
+  }
 }
 
 async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): Promise<string> {
@@ -363,8 +381,9 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
   if (steps.length === 0) {
     return 'Error: Workflow must have at least one step.';
   }
-  if (steps.length > MAX_STEPS) {
-    return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps (got ${steps.length}).`;
+  const maxSteps = maxStepsFor(deps.config);
+  if (steps.length > maxSteps) {
+    return `Error: Workflow exceeds maximum of ${maxSteps} steps (got ${steps.length}).`;
   }
 
   // Validate unique IDs
@@ -404,6 +423,10 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
     }
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
+    // Run-level taint (DK H4, cross-step): seeded from the calling agent, armed
+    // further by any step that reads external content, consumed by every later
+    // step's durable-write routing. See RunTaint in runtime-adapter.ts.
+    const runTaint = newRunTaint(deps.parentAgent);
     const state = await runManifest(manifest, deps.config, buildRunCtx({
       autonomy: deps.autonomy,
       parentTools: deps.tools,
@@ -415,9 +438,11 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
       secretStore: deps.secretStore,
+      limits: resolveInSessionLimits(undefined),
+      runTaint,
     }));
 
-    debitInSessionWorkflowCost(deps, state);
+    debitInSessionWorkflowCost(deps, state, steps);
     return formatResult(state, input.name ?? 'inline-pipeline', resultLimit);
   } catch (err: unknown) {
     return `Error: Workflow execution failed: ${getErrorMessage(err)}`;
@@ -482,6 +507,17 @@ export interface PipelineDeps {
    * undefined, i.e. unchanged pre-fix behaviour.
    */
   secretStore?: SecretStoreLike | undefined;
+  /**
+   * The calling agent, threaded from the `run_workflow` tool handler (its
+   * second argument) so the run's taint accumulator SEEDS from the caller's own
+   * untrusted state — a workflow started on a tainted turn must not launder a
+   * durable write through a fresh step agent (mirror of spawn.ts's parent→child
+   * seed). Only the SEED direction lives here: the way BACK is already covered,
+   * stronger, by the handler's unconditional `agent.noteUntrustedData?.()`
+   * after every run (H-002/CORE-9 — any delegated run taints the caller).
+   * Absent for headless callers → the run starts clean.
+   */
+  parentAgent?: IAgent | undefined;
 }
 
 /** Outcome of a Saved-Workflows-library "Run" action. */
@@ -513,13 +549,66 @@ export interface RunSavedWorkflowResult {
  */
 const DEFAULT_HEADLESS_WALL_CLOCK_MS = 30 * 60_000; // 30 minutes
 const DEFAULT_HEADLESS_MAX_ITERATIONS = 50;          // backstop above MAX_STEPS
+/** Width a MALFORMED stored `maxParallelSteps` falls back to, on both the
+ *  headless and the in-session resolver. Shared so the two cannot drift into
+ *  disagreeing about the same stored blob. */
+const DEFAULT_MAX_PARALLEL_STEPS = 5; // backpressure — bounds per-phase fan-out
 
 /** Merge a workflow's stored limits with the headless defaults (unset → default;
- *  `maxSpendUsd` stays opt-in). */
+ *  `maxSpendUsd` stays opt-in; an UNSET `maxParallelSteps` still passes through
+ *  as unbounded — an unattended run defaulting to unbounded fan-out is an
+ *  operator policy choice, not a bug, so no default is imposed on absence).
+ *
+ *  A MALFORMED stored width is a different thing from an absent one and gets the
+ *  same normalization as the in-session path. Without it this resolver handed
+ *  the raw value to the executor, whose fallback is `1` — so the identical
+ *  stored blob ran at width 5 in-session and fully SERIAL headless. That is not
+ *  academic here: the headless path always carries a 30-minute wall clock
+ *  (above) and `workflowBoundExceeded` re-checks it at every phase boundary, so
+ *  serializing a multi-phase run can turn a completing run into a wall-clock
+ *  ABORT. Note also that `null` — not `NaN` — is the malformed form that can
+ *  actually reach here: `JSON.stringify` writes both NaN and Infinity as null. */
 function resolveHeadlessLimits(stored: WorkflowLimits | undefined): WorkflowLimits {
   return {
     maxWallClockMs: stored?.maxWallClockMs ?? DEFAULT_HEADLESS_WALL_CLOCK_MS,
     maxIterations: stored?.maxIterations ?? DEFAULT_HEADLESS_MAX_ITERATIONS,
+    maxParallelSteps: parallelStepCapFor(stored?.maxParallelSteps, DEFAULT_MAX_PARALLEL_STEPS),
+    maxSpendUsd: stored?.maxSpendUsd,
+  };
+}
+
+/**
+ * In-session default limits — the bounds an *attended* (chat-started) pipeline
+ * runs under when it declares none. Unlike {@link resolveHeadlessLimits}
+ * (unattended: a 30-min wall-clock backstop), an in-session run is attended —
+ * the user can cancel — so wall-clock stays opt-in and the Session-level cost
+ * cap ($50 default, tenant-tunable) already bounds spend. The two defaults that
+ * DO apply:
+ *  - `maxParallelSteps` — backpressure. `runParallel`'s bare `Promise.allSettled`
+ *    launches every step of a phase at once; a phase with a handful of
+ *    independent steps spawns that many concurrent sub-agents (each a live LLM
+ *    run). Capping at 5 bounds instance load + memory without serialising small
+ *    phases. (Workflows validate to ≤ MAX_STEPS=20 steps total, so this bounds
+ *    fan-out *within* a phase, not the run.)
+ *  - `maxIterations` — defense-in-depth above MAX_STEPS (=20). Not reachable
+ *    today (a workflow can't exceed 20 steps); binds only if MAX_STEPS rises
+ *    or a future path spawns steps past validation.
+ *
+ * Both default-merge with any the workflow explicitly stored; `maxWallClockMs`
+ * and `maxSpendUsd` pass through only when set.
+ */
+const DEFAULT_INSESSION_MAX_ITERATIONS = 50; // defense-in-depth above MAX_STEPS=20
+
+function resolveInSessionLimits(stored: WorkflowLimits | undefined): WorkflowLimits {
+  return {
+    maxIterations: stored?.maxIterations ?? DEFAULT_INSESSION_MAX_ITERATIONS,
+    // `??` alone was not enough: it is NULLISH, so a stored `0`, `-1` or `null`
+    // survived it and then failed the executor's `> 0` test, silently turning
+    // the backpressure limit OFF for that workflow. An in-session run always
+    // wants a bound, so both an absent and a malformed width land on the default.
+    maxParallelSteps: parallelStepCapFor(stored?.maxParallelSteps, DEFAULT_MAX_PARALLEL_STEPS)
+      ?? DEFAULT_MAX_PARALLEL_STEPS,
+    maxWallClockMs: stored?.maxWallClockMs,
     maxSpendUsd: stored?.maxSpendUsd,
   };
 }
@@ -582,8 +671,9 @@ export async function runSavedWorkflow(
   if (steps.length === 0) {
     return { ok: false, error: 'Workflow has no steps to execute.' };
   }
-  if (steps.length > MAX_STEPS) {
-    return { ok: false, error: `Workflow exceeds maximum of ${MAX_STEPS} steps.` };
+  const maxSteps = maxStepsFor(config);
+  if (steps.length > maxSteps) {
+    return { ok: false, error: `Workflow exceeds maximum of ${maxSteps} steps.` };
   }
 
   try {
@@ -618,6 +708,10 @@ export async function runSavedWorkflow(
       capabilityContract: planned.capabilityContract,
       limits: resolveHeadlessLimits(planned.limits),
       workflowId: planned.id,
+      // Headless: no caller to seed from, but the accumulator still carries
+      // taint ACROSS steps — a saved workflow whose step 1 reads external
+      // content must not land step 2's durable write as active.
+      runTaint: newRunTaint(),
     }));
     const costUsd = [...state.outputs.values()].reduce((s, o) => s + o.costUsd, 0);
     // A2: surface per-step failures + the terminal run error so the trigger UI
@@ -679,6 +773,30 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       // buildRunCtx restores the two fields the retry path used to drop
       // (parentToolContext + userTimezone) — without them a retried step ran
       // with no tool context / wrong timezone vs its original run (§4.1).
+      // Seed from the caller AND carry the ORIGINAL run's earned taint: the
+      // retry feeds re-run steps the cached outputs of the completed steps
+      // (retryManifest's cachedOutputs), and those outputs derive from whatever
+      // the original run read. A fresh accumulator here would let a retry from
+      // a clean caller (another session, or a reloaded conversation whose
+      // sticky latch the rehydration scan cannot re-derive — H4 tools leave no
+      // wrapped marker) land a re-run step's durable write as active. Found
+      // independently by two review lenses on this PR.
+      const retryTaint = newRunTaint(deps.parentAgent);
+      if (prev.runTaint) {
+        const prevEarned = prev.runTaint.earned;
+        if (prevEarned === 'marker' || prevEarned === 'external-tool') {
+          retryTaint.earned = prevEarned;
+        }
+        // BOTH halves carry, not just earned: a run whose steps were armed by
+        // the SEED alone (tainted caller, no step read anything itself) leaves
+        // earned='none' by construction — noteStepTaint ignores the reflected
+        // 'conversation'. Its cached outputs are tainted all the same. The
+        // current caller's own cause wins when present (it is more specific
+        // about THIS retry); the carry only fills a clean one.
+        if (retryTaint.seeded === 'none') {
+          retryTaint.seeded = prev.runTaint.seeded;
+        }
+      }
       const state = await retryManifest(prev.manifest, prev.state, deps.config, buildRunCtx({
         autonomy: deps.autonomy,
         parentTools: deps.tools,
@@ -689,11 +807,13 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         userTimezone: deps.userTimezone,
         parentSessionCounters: deps.sessionCounters,
         parentMemory: deps.memory ?? null,
+        limits: resolveInSessionLimits(planned.limits),
         workflowId: planned.id,
+        runTaint: retryTaint,
       }));
 
-      recordExecutedState(planned.id, { manifest: prev.manifest, state });
-      debitInSessionWorkflowCost(deps, state);
+      recordExecutedState(planned.id, { manifest: prev.manifest, state, runTaint: retryTaint });
+      debitInSessionWorkflowCost(deps, state, prev.manifest.agents);
       return formatResult(state, planned.name, resultLimit);
     } catch (err: unknown) {
       return `Error: Workflow retry failed: ${getErrorMessage(err)}`;
@@ -734,8 +854,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return 'Error: All steps were removed. Nothing to execute.';
   }
 
-  if (steps.length > MAX_STEPS) {
-    return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps.`;
+  const maxSteps = maxStepsFor(deps.config);
+  if (steps.length > maxSteps) {
+    return `Error: Workflow exceeds maximum of ${maxSteps} steps.`;
   }
 
   try {
@@ -756,6 +877,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     }
 
     const hooks = buildProgressHooks(deps.streamHandler, manifest);
+    const runTaint = newRunTaint(deps.parentAgent);
     const state = await runManifest(manifest, deps.config, buildRunCtx({
       autonomy: deps.autonomy,
       parentTools: deps.tools,
@@ -767,15 +889,17 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
       secretStore: deps.secretStore,
+      limits: resolveInSessionLimits(planned.limits),
       workflowId: planned.id,
+      runTaint,
     }));
 
-    recordExecutedState(planned.id, { manifest, state });
+    recordExecutedState(planned.id, { manifest, state, runTaint });
     if (!isTemplate) {
       try { deps.runHistory?.markPipelineExecuted(planned.id); } catch { /* fire-and-forget */ }
     }
 
-    debitInSessionWorkflowCost(deps, state);
+    debitInSessionWorkflowCost(deps, state, manifest.agents);
     return formatResult(state, planned.name, resultLimit);
   } catch (err: unknown) {
     if (!isTemplate) planned.executed = false; // Allow retry on validation errors
@@ -827,6 +951,8 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
             properties: {
               id: { type: 'string', description: 'Unique step ID' },
               task: { type: 'string', description: 'Task description for the sub-agent' },
+              model: { type: 'string', enum: ['deep', 'balanced', 'fast'], description: 'Capability tier (omitted = fast)' },
+              tools: { type: 'array', items: { type: 'string' }, description: 'Exact tool names this step needs, from your own toolset. bash only when a shell is essential.' },
               input_from: { type: 'array', items: { type: 'string' }, description: 'Step IDs whose output flows into this step\'s context' },
               timeout_ms: { type: 'number', description: 'Timeout in ms (default: 600000)' },
             },
@@ -950,6 +1076,8 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
           // spawn_agent). `agent.secretStore` is undefined for a headless/no-vault
           // parent → unchanged behaviour.
           secretStore: agent.secretStore,
+          // Seed the run's taint accumulator from the caller (see PipelineDeps).
+          parentAgent: agent,
         })
       : await executeInlineSteps(input, {
           config: pipelineConfig,
@@ -964,6 +1092,8 @@ export const runWorkflowTool: ToolEntry<RunPipelineInput> = {
           autonomy: agent.autonomy,
           // Thread the parent agent's SecretStore (see executePipelineById above).
           secretStore: agent.secretStore,
+          // Seed the run's taint accumulator from the caller (see PipelineDeps).
+          parentAgent: agent,
         });
 
     // H-002 parity (CORE-9): a workflow's steps run sub-agents with web/http/

@@ -10,6 +10,21 @@ const HITL_REGEXES: ReadonlyArray<readonly [string, RegExp]> =
   HUMAN_IN_THE_LOOP_TOOLS.map((name) => [name, new RegExp(`\\b${name}\\b`)] as const);
 
 export function stepUsesHumanInTheLoopTool(step: InlinePipelineStep): string | undefined {
+  // A captured replay step's literal tool is the strongest signal — it WILL
+  // call exactly that tool.
+  if (step.tool !== undefined && HITL_SET.has(step.tool)) return step.tool;
+  // A declared tool set (F2) is AUTHORITATIVE, in both directions: a step that
+  // declared ask_user needs a human even if its task prose never names the
+  // tool — and a step whose declaration excludes it CANNOT call it (the
+  // runtime grants only declared names), so a prose mention must not classify
+  // the pipeline interactive.
+  if (step.tools) {
+    for (const name of step.tools) {
+      if (HITL_SET.has(name)) return name;
+    }
+    return undefined;
+  }
+  // Undeclared (legacy) steps: prose scan, the pre-F2 heuristic.
   const haystack = step.task ?? '';
   for (const [name, re] of HITL_REGEXES) {
     if (re.test(haystack)) return name;

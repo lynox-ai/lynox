@@ -20,6 +20,31 @@ export interface WorkflowLimits {
   maxIterations?: number | undefined;
   /** Abort once cumulative run cost exceeds this (opt-in; unset = no per-run cap). */
   maxSpendUsd?: number | undefined;
+  /**
+   * Max steps of one parallel phase running *concurrently* (backpressure).
+   *
+   * UNSET (or `Infinity`, the explicit "no limit" sentinel) = unbounded — every
+   * step of a phase launches at once (the existing v1.1 behaviour). A MALFORMED
+   * value (`0`, negative, `NaN`, `null`) is NOT a way to say unbounded: it is
+   * normalized to a real bound by `parallelStepCapFor`, because a limiter that
+   * silently disables itself on a bad value is worse than no limiter. This
+   * doc-comment used to say "unset (or non-positive) = unbounded", which
+   * documented the fail-open as the contract.
+   *
+   * When set, `runParallel` launches at
+   * most this many steps per phase, starting the next as each completes. The
+   * phase barrier is preserved: a phase still fully settles before the next
+   * begins. Backpressure against unbounded per-phase fan-out: a phase of N
+   * independent steps would otherwise launch N concurrent sub-agents (each a
+   * live LLM run) — capping bounds instance load + memory. (Workflows validate
+   * to ≤ MAX_STEPS=20 steps total; this bounds fan-out *within* a phase.)
+   *
+   * Distinct from the `workflowBoundExceeded` fields above — those bound
+   * spend / iterations / wall-clock *between* steps; this bounds *simultaneous*
+   * execution *within* a phase, so it is read directly in `runParallel`, not
+   * by `workflowBoundExceeded`.
+   */
+  maxParallelSteps?: number | undefined;
 }
 
 export interface InlinePipelineStep {
@@ -32,6 +57,14 @@ export interface InlinePipelineStep {
   effort?: EffortLevel | undefined;
   /** Role for agent specialization. Used by YAML manifests — not exposed to LLM. */
   role?: string | undefined;
+  /**
+   * Tools this step declared it needs (F2, PRD-COST-CONTROLS-V2 D2). The
+   * generator declares the set; the inline runtime grants ONLY these (drawn
+   * from the inline-safe pool — a declaration can narrow the pool or opt into
+   * `bash`, never widen past it). Absent (legacy manifests) = the pool minus
+   * `bash`: bash is never granted silently.
+   */
+  tools?: string[] | undefined;
   input_from?: string[] | undefined;
   timeout_ms?: number | undefined;
   /**

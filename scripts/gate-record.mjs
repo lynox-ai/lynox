@@ -40,7 +40,7 @@ import { fileURLToPath } from 'node:url';
 const MARK = ['gate', 'record'].join('-');
 
 /** Gate names the record may claim. An unknown name is a typo, not a new gate. */
-const KNOWN_GATES = new Set(['code-review', 'security', 'delta', 'prd', 'staging-walk']);
+const KNOWN_GATES = new Set(['code-review', 'security', 'delta', 'prd', 'staging-walk', 'legal']);
 
 /**
  * Paths whose change ALWAYS requires the security gate: untrusted input,
@@ -69,6 +69,19 @@ const SECURITY_PATHS = [
 ];
 
 /** A diff touching only these needs no record at all. */
+/**
+ * Texts that BIND a customer or are a statutory disclosure. In this repo that is one
+ * file — but it is the file the managed DPA contractually points customers at, and it
+ * lives in the PUBLIC repo, so a drift here is a published contradiction of a signed
+ * document. Mirrors `LEGAL_PATHS` in the pro repo, where the rest of the set lives.
+ *
+ * ⚠️ Matched BEFORE the docs-only exemption below, and that is the whole point: this is
+ * a `.md` file, so `DOC_ONLY` would otherwise wave it straight through.
+ */
+const LEGAL_PATHS = [
+  /^SUBPROCESSORS\.md$/,
+];
+
 const DOC_ONLY = [/^docs\//, /\.md$/, /^\.github\/ISSUE_TEMPLATE\//, /^LICENSE$/];
 
 function parseArgs(argv) {
@@ -130,10 +143,15 @@ export function extractRecord(body, mark = MARK) {
  */
 export function requiredGates(files) {
   if (files.length === 0) return 'empty';
+  // Legal texts are matched against the FULL file list, before the docs-only filter —
+  // the subprocessor list is markdown and would otherwise be exempt as documentation.
+  const legal = files.some((f) => LEGAL_PATHS.some((p) => p.test(f)));
   const code = files.filter((f) => !DOC_ONLY.some((p) => p.test(f)));
-  if (code.length === 0) return null; // docs-only: exempt
-  const gates = new Set(['code-review', 'delta']);
+  if (code.length === 0 && !legal) return null; // docs-only: exempt
+  const gates = new Set();
+  if (code.length > 0) { gates.add('code-review'); gates.add('delta'); }
   if (code.some((f) => SECURITY_PATHS.some((p) => p.test(f)))) gates.add('security');
+  if (legal) gates.add('legal');
   return gates;
 }
 
@@ -207,18 +225,43 @@ export function evaluate({ body, head, files, author }) {
 
   // A delta round that did not come back clean is a reason not to merge, so
   // there is exactly one accepted value.
-  if (f.delta !== 'clean') {
-    errors.push(`\`delta:\` must be \`clean\` (got \`${f.delta ?? '<missing>'}\`) — an unclean delta round is not a merge`);
+  // `delta` and `mutations` describe a CODE round, so they are demanded only when one
+  // was owed. A markdown-only legal change has neither, and forcing those fields would
+  // buy a fabricated line — a record filled in to get past CI is worth less than none.
+  if (required.has('delta')) {
+    if (f.delta !== 'clean') {
+      errors.push(`\`delta:\` must be \`clean\` (got \`${f.delta ?? '<missing>'}\`) — an unclean delta round is not a merge`);
+    }
+
+    const mut = /^\s*(\d+)\s+killed\s*[,/]\s*(\d+)\s+survived\s*$/.exec(f.mutations ?? '');
+    if (!mut) {
+      errors.push('`mutations:` must read `<n> killed, <n> survived`');
+    } else if (Number(mut[2]) > 0) {
+      errors.push(`${mut[2]} surviving mutation(s) reported — a survivor means no test covers that line`);
+    }
   }
 
-  const mut = /^\s*(\d+)\s+killed\s*[,/]\s*(\d+)\s+survived\s*$/.exec(f.mutations ?? '');
-  if (!mut) {
-    errors.push('`mutations:` must read `<n> killed, <n> survived`');
-  } else if (Number(mut[2]) > 0) {
-    errors.push(`${mut[2]} surviving mutation(s) reported — a survivor means no test covers that line`);
+  // A binding text does not ship on an assistant's judgement. `/legal-review` produces
+  // flags, never advice, and its counsel-half is explicitly not self-authorable — so the
+  // wording needs a human yes on the record before it reaches a customer.
+  //
+  // An attestation, like every line here except `head:`. It cannot prove the sign-off
+  // happened; it makes FORGETTING impossible — the failure that actually recurs — and
+  // turns the alternative into a deliberate lie rather than an oversight.
+  if (required.has('legal')) {
+    const approved = (f.approved ?? '').trim();
+    if (!approved) {
+      errors.push(
+        'this diff changes a binding customer text, so the record needs an `approved:` line',
+        'naming who signed off on the WORDING and when (e.g. `approved: rafael 2026-08-01`).',
+        'Run `/legal-review` first — its findings are what the sign-off is given on.',
+      );
+    } else if (!/\d{4}-\d{2}-\d{2}/.test(approved)) {
+      errors.push(`\`approved: ${approved}\` has no ISO date — a sign-off without one cannot be tied to this revision`);
+    }
   }
 
-  return errors.length ? { ok: false, errors } : { ok: true, notes };
+return errors.length ? { ok: false, errors } : { ok: true, notes };
 }
 
 function main() {

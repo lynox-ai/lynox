@@ -3,10 +3,30 @@ import { channel } from 'node:diagnostics_channel';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+
+// Partial mock: only spawnInline is stubbed (and only tests that run an inline
+// step WITHOUT mockResponses reach it). Everything else — including the budget
+// check and model resolution in executeStep, which run BEFORE the spawn — is
+// real, which is the point: the F1 tier-default test below drives that path.
+const mockSpawnInline = vi.fn().mockResolvedValue({ result: 'inline-r', tokensIn: 10, tokensOut: 5, durationMs: 3 });
+// spawnViaAgent is stubbed for the same reason: the taint-dispatch test below
+// must observe the runner's OWN call (a real spawnViaAgent would build a real
+// Agent and hit the network). No pre-existing test reaches it — the agent
+// runtime without an agentsDir fixture dies in loadAgentDef first.
+const mockSpawnViaAgent = vi.fn().mockResolvedValue({ result: 'agent-r', tokensIn: 10, tokensOut: 5, durationMs: 3 });
+vi.mock('./runtime-adapter.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./runtime-adapter.js')>();
+  return {
+    ...actual,
+    spawnInline: (...args: unknown[]) => mockSpawnInline(...args),
+    spawnViaAgent: (...args: unknown[]) => mockSpawnViaAgent(...args),
+  };
+});
+
 import { runManifest, retryManifest, workflowBoundExceeded } from './runner.js';
 import { RunHistory } from '../core/run-history.js';
 import type { Manifest, RunHooks, RunState, AgentOutput, GateAdapter, GateDecision, GateSubmitParams } from '../types/orchestration.js';
-import type { LynoxUserConfig } from '../types/index.js';
+import type { LynoxUserConfig, ToolEntry } from '../types/index.js';
 import type { SessionCounters } from '../types/agent.js';
 
 const CONFIG: LynoxUserConfig = { api_key: 'test-key' };
@@ -355,6 +375,105 @@ describe('runManifest — v1.1 parallel execution', () => {
     expect(Math.max(...startIndices)).toBeLessThan(Math.min(...completeIndices));
   });
 
+  it('limits concurrency to limits.maxParallelSteps within a phase (backpressure)', async () => {
+    const manifest: Manifest = {
+      manifest_version: '1.1',
+      name: 'backpressure',
+      triggered_by: 'test',
+      context: {},
+      agents: Array.from({ length: 8 }, (_, i) => ({
+        id: `s${i}`, agent: `agent-${i}`, runtime: 'mock' as const,
+      })),
+      gate_points: [],
+      on_failure: 'stop',
+    };
+    // 8 independent steps land in a single phase. onStepStart fires synchronously
+    // before the first await in executeStep, so maxActive is a faithful measure of
+    // simultaneous execution. Bare `Promise.allSettled(map)` starts all 8 at once;
+    // the worker pool must hold it to the cap.
+    let active = 0;
+    let maxActive = 0;
+    const hooks: RunHooks = {
+      onStepStart: () => { active++; maxActive = Math.max(maxActive, active); },
+      onStepComplete: () => { active--; },
+    };
+    const mockResponses = new Map(manifest.agents.map((a) => [a.agent, 'r']));
+    const state = await runManifest(manifest, CONFIG, {
+      mockResponses,
+      hooks,
+      limits: { maxParallelSteps: 3 },
+    });
+    expect(state.status).toBe('completed');
+    expect(state.outputs.size).toBe(8);
+    expect(maxActive).toBeLessThanOrEqual(3); // backpressure — kills bare allSettled
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['NaN', NaN],
+  ])('a %s maxParallelSteps does NOT fall through to full fan-out', async (_label, bad) => {
+    // The fail-open this closes: the executor used to test `cap !== undefined &&
+    // cap > 0`, and every one of these values fails `> 0`, so a caller who ASKED
+    // for a bound and supplied nonsense got the unbounded branch — the one
+    // outcome a limiter must never produce. Present-but-malformed now resolves to
+    // the tightest bound (1), so the phase runs serially instead of all at once.
+    const manifest: Manifest = {
+      manifest_version: '1.1',
+      name: 'malformed-cap',
+      triggered_by: 'test',
+      context: {},
+      agents: Array.from({ length: 8 }, (_, i) => ({
+        id: `s${i}`, agent: `agent-${i}`, runtime: 'mock' as const,
+      })),
+      gate_points: [],
+      on_failure: 'stop',
+    };
+    let active = 0;
+    let maxActive = 0;
+    const hooks: RunHooks = {
+      onStepStart: () => { active++; maxActive = Math.max(maxActive, active); },
+      onStepComplete: () => { active--; },
+    };
+    const mockResponses = new Map(manifest.agents.map((a) => [a.agent, 'r']));
+    const state = await runManifest(manifest, CONFIG, {
+      mockResponses,
+      hooks,
+      limits: { maxParallelSteps: bad },
+    });
+    // Still a correct run — the clamp bounds width, it never drops work.
+    expect(state.status).toBe('completed');
+    expect(state.outputs.size).toBe(8);
+    expect(maxActive).toBe(1);
+  });
+
+  it('an ABSENT maxParallelSteps still means unbounded (the v1.1 contract)', async () => {
+    // The counter-direction of the test above: the clamp must not turn "no
+    // limits declared" into a bound. Without this, tightening the malformed case
+    // could silently serialize every existing limit-less workflow.
+    const manifest: Manifest = {
+      manifest_version: '1.1',
+      name: 'no-cap',
+      triggered_by: 'test',
+      context: {},
+      agents: Array.from({ length: 8 }, (_, i) => ({
+        id: `s${i}`, agent: `agent-${i}`, runtime: 'mock' as const,
+      })),
+      gate_points: [],
+      on_failure: 'stop',
+    };
+    let active = 0;
+    let maxActive = 0;
+    const hooks: RunHooks = {
+      onStepStart: () => { active++; maxActive = Math.max(maxActive, active); },
+      onStepComplete: () => { active--; },
+    };
+    const mockResponses = new Map(manifest.agents.map((a) => [a.agent, 'r']));
+    const state = await runManifest(manifest, CONFIG, { mockResponses, hooks });
+    expect(state.status).toBe('completed');
+    expect(maxActive).toBe(8);
+  });
+
   it('diamond dependency: D receives both B and C outputs', async () => {
     const manifest: Manifest = {
       manifest_version: '1.1',
@@ -631,6 +750,67 @@ describe('runManifest — inline runtime', () => {
     const state = await runManifest(manifest, CONFIG, {});
     expect(state.outputs.get('step-1')?.error).toContain('no parentTools provided');
   });
+
+  it('threads options.runTaint into the inline spawner (the cross-step taint dispatch)', async () => {
+    // Pins the dispatch line itself: dropping `options.runTaint` from the
+    // spawnInline call would leave every step blind to the run's taint while
+    // all the spawner- and tool-level tests stay green.
+    const manifest: Manifest = {
+      ...MANIFEST,
+      agents: [
+        { id: 'step-1', agent: 'step-1', runtime: 'inline', task: 'Do something' },
+      ],
+    };
+    const runTaint = { seeded: 'conversation', earned: 'none' } as const;
+    mockSpawnInline.mockClear();
+    const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
+    await runManifest(manifest, CONFIG, { parentTools: tools, runTaint });
+    expect(mockSpawnInline).toHaveBeenCalledTimes(1);
+    // spawnInline's runTaint is the 15th positional argument (index 14).
+    expect(mockSpawnInline.mock.calls[0]![14]).toBe(runTaint);
+  });
+
+  it('a nested pipeline receives the SAME accumulator object (identity across nesting)', async () => {
+    // Pins two lines at once: the spawnPipeline dispatch in the runner, and
+    // spawnPipeline forwarding the object (not a copy) into the nested
+    // runManifest — a `{...runTaint}` there would keep every other test green
+    // while the inner step's taint stopped reaching the outer run's later steps.
+    const manifest: Manifest = {
+      ...MANIFEST,
+      agents: [
+        { id: 'outer', agent: 'outer', runtime: 'pipeline', pipeline: [{ id: 'inner', task: 'do inner' }] },
+      ],
+    };
+    const runTaint = { seeded: 'conversation', earned: 'none' } as const;
+    mockSpawnInline.mockClear();
+    const tools = [{ definition: { name: 'read_file', description: '', input_schema: { type: 'object' } }, handler: async () => 'x' }] as unknown as ToolEntry[];
+    await runManifest(manifest, CONFIG, { parentTools: tools, runTaint });
+    // The inner inline step of the REAL spawnPipeline lands on the stub.
+    expect(mockSpawnInline).toHaveBeenCalledTimes(1);
+    expect(mockSpawnInline.mock.calls[0]![14]).toBe(runTaint);
+  });
+
+  it('threads options.runTaint into the named-agent spawner too', async () => {
+    // The third dispatch site: spawnViaAgent's runTaint is the 15th positional
+    // argument (index 14) — dropping it there fails no other test.
+    const dir = mkdtempSync(join(tmpdir(), 'runner-taint-'));
+    try {
+      const { mkdirSync, writeFileSync } = await import('node:fs');
+      mkdirSync(join(dir, 'named'), { recursive: true });
+      writeFileSync(join(dir, 'named', 'index.js'), 'export default { name: "named", description: "", tools: [] };\n');
+      const manifest: Manifest = {
+        ...MANIFEST,
+        agents: [{ id: 'n1', agent: 'named' }],
+      };
+      const runTaint = { seeded: 'external-tool', earned: 'none' } as const;
+      mockSpawnViaAgent.mockClear();
+      await runManifest(manifest, CONFIG, { agentsDir: dir, runTaint });
+      expect(mockSpawnViaAgent).toHaveBeenCalledTimes(1);
+      expect(mockSpawnViaAgent.mock.calls[0]![14]).toBe(runTaint);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // --- retryManifest tests ---
@@ -868,6 +1048,138 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
     const dir = mkdtempSync(join(tmpdir(), 'runner-a2-'));
     return { h: new RunHistory(join(dir, 'history.db')), cleanup: () => rmSync(dir, { recursive: true, force: true }) };
   }
+
+  it('records the F1 fast default as the model_tier of an undeclared INLINE step row', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // Inline runtime + mockResponses: dispatch takes the mock path, but
+      // recordStepRow keys on step.runtime — this drives the tier the row
+      // records, which feeds getAvgStepCostByModelTier (the plan estimate).
+      const manifest: Manifest = {
+        manifest_version: '1.0',
+        name: 'tier-record',
+        triggered_by: 'test',
+        context: {},
+        agents: [
+          { id: 'undeclared', agent: 'undeclared', runtime: 'inline', task: 'paginate' },
+          { id: 'declared', agent: 'declared', runtime: 'inline', task: 'analyze', model: 'balanced', input_from: ['undeclared'] },
+        ],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      const mockResponses = new Map([['undeclared', 'ra'], ['declared', 'rb']]);
+      const state = await runManifest(manifest, CONFIG, { mockResponses, runHistory: h });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare(
+        `SELECT step_id, model_tier FROM pipeline_step_results WHERE pipeline_run_id = ? ORDER BY step_id`,
+      ).all(state.runId) as Array<{ step_id: string; model_tier: string }>;
+
+      expect(rows).toEqual([
+        { step_id: 'declared', model_tier: 'balanced' },
+        { step_id: 'undeclared', model_tier: 'fast' },
+      ]);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('records the CLAMPED band, not the declaration, when a deep step runs headless', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // The headless deep-consent clamp (#1215) rewrites a `deep` REQUEST to
+      // `balanced` before resolution, so the step runs and is billed at balanced.
+      // The row has to say what ran: it feeds getAvgStepCostByModelTier, whose
+      // average is the cost shown in the plan_task consent dialog. Stamping
+      // `step.model` filed balanced-priced spend under `deep` and dragged the
+      // deep average down — measured live 2026-08-18 (factor 4.5 on one step).
+      //
+      // No mockResponses → the real inline branch runs, so a model is actually
+      // resolved (the mock path resolves none and keeps the legacy fallback).
+      const manifest: Manifest = {
+        manifest_version: '1.0',
+        name: 'clamp-record',
+        triggered_by: 'test',
+        context: {},
+        agents: [{ id: 'wants-deep', agent: 'x', runtime: 'inline', task: 'think hard', model: 'deep' }],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      const state = await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [], autonomy: 'autonomous' });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare(
+        `SELECT step_id, model_tier FROM pipeline_step_results WHERE pipeline_run_id = ?`,
+      ).all(state.runId) as Array<{ step_id: string; model_tier: string }>;
+
+      expect(rows).toEqual([{ step_id: 'wants-deep', model_tier: 'balanced' }]);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('records `deep` for the SAME step when it is NOT headless (the clamp is what moves it)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // Counter-direction, and it is what makes the assert above mean something:
+      // without it, hard-coding `modelTier: 'balanced'` would pass. Interactive
+      // (autonomy undefined) applies no clamp, so deep IS what resolves and runs,
+      // and the row must say so.
+      const manifest: Manifest = {
+        manifest_version: '1.0',
+        name: 'clamp-record-interactive',
+        triggered_by: 'test',
+        context: {},
+        agents: [{ id: 'wants-deep', agent: 'x', runtime: 'inline', task: 'think hard', model: 'deep' }],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      const state = await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [] });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare(
+        `SELECT step_id, model_tier FROM pipeline_step_results WHERE pipeline_run_id = ?`,
+      ).all(state.runId) as Array<{ step_id: string; model_tier: string }>;
+
+      expect(rows).toEqual([{ step_id: 'wants-deep', model_tier: 'deep' }]);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('prices an undeclared INLINE step at the fast tier on the budget path (model_id stamp)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // NO mockResponses → executeStep takes the real inline branch:
+      // resolveModelForCost (with the F1 default) + checkSessionBudget run,
+      // then the stubbed spawnInline returns. The resolved model is stamped as
+      // model_id on the pipeline_step run row at finalize — reverting the
+      // budget fallback to 'balanced' stamps sonnet and this assert fails.
+      const manifest: Manifest = {
+        manifest_version: '1.0',
+        name: 'budget-tier',
+        triggered_by: 'test',
+        context: {},
+        agents: [{ id: 'undeclared', agent: 'undeclared', runtime: 'inline', task: 'paginate' }],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      const state = await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [] });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare(
+        `SELECT model_id FROM runs WHERE spawn_parent_id = ? AND run_type = 'pipeline_step'`,
+      ).all(state.runId) as Array<{ model_id: string }>;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.model_id).toContain('haiku');
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
 
   it('records a `pipeline_step` run per step (status running→completed, chained via spawn_parent_id)', async () => {
     const { h, cleanup } = tmpHistory();

@@ -11,6 +11,8 @@ export class CostGuard {
   private outputTokens = 0;
   private cacheWriteTokens = 0;
   private cacheReadTokens = 0;
+  /** Helper-call spend already priced on ITS model — see recordExternalCost. */
+  private externalCostUSD = 0;
   private iterations = 0;
   private warned = false;
 
@@ -68,14 +70,37 @@ export class CostGuard {
     this.outputTokens = 0;
     this.cacheWriteTokens = 0;
     this.cacheReadTokens = 0;
+    this.externalCostUSD = 0;
     this.iterations = 0;
     this.warned = false;
+  }
+
+  /**
+   * Charge an already-priced amount against this run's ceiling.
+   *
+   * For a helper call the run makes on a DIFFERENT model than its own — the
+   * follow-up-chip recovery runs on the `fast` tier. `recordTurn` cannot serve:
+   * it books raw tokens against `pricePerM`, which is this guard's single model,
+   * so an Opus run charging Haiku tokens at Opus rates trips its own ceiling
+   * roughly twenty times too early (and inflates the iteration count with a turn
+   * the model never took).
+   *
+   * Fails OPEN on a malformed amount — deliberately, and opposite to
+   * `isExceeded`. Storing a NaN makes `estimateCost` non-finite, which
+   * `isExceeded` reads as "over budget" and would end EVERY later turn of the
+   * run. Dropping one unpriceable helper call understates the ceiling by cents;
+   * the alternative kills the run.
+   */
+  recordExternalCost(usd: number): boolean {
+    if (Number.isFinite(usd) && usd > 0) this.externalCostUSD += usd;
+    return this.isExceeded();
   }
 
   private estimateCost(): number {
     return (this.inputTokens / 1_000_000) * this.pricePerM.input
          + (this.outputTokens / 1_000_000) * this.pricePerM.output
          + (this.cacheWriteTokens / 1_000_000) * this.pricePerM.cacheWrite
-         + (this.cacheReadTokens / 1_000_000) * this.pricePerM.cacheRead;
+         + (this.cacheReadTokens / 1_000_000) * this.pricePerM.cacheRead
+         + this.externalCostUSD;
   }
 }

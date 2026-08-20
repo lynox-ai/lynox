@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import iconv from 'iconv-lite';
-import { OAuthGmailProvider } from './oauth-gmail.js';
+import { OAuthGmailProvider, encodeMimeHeader } from './oauth-gmail.js';
 import { MailError, type MailAccountConfig, type MailEnvelope } from '../provider.js';
 import type { GoogleAuth } from '../../google/google-auth.js';
 
@@ -344,6 +344,53 @@ describe('OAuthGmailProvider — send', () => {
     expect(decoded).toMatch(/Date: \w{3}, \d{2} \w{3} \d{4}/);
   });
 
+  /** Drive a send and hand back the decoded MIME + its From line. */
+  async function sendWithDisplayName(displayName: string): Promise<{ decoded: string; fromLine: string }> {
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
+      if (init?.method === 'POST' && url.includes('messages/send')) {
+        return Promise.resolve(respondJson({ id: 'sent-1', threadId: 't' }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const provider = new OAuthGmailProvider({ ...makeAccount(), displayName }, makeAuth());
+    await provider.send({ to: [{ address: 'bob@example.com' }], subject: 'Hi', text: 'b' });
+    const call = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
+    const raw = (JSON.parse((call[1] as { body: string }).body) as { raw: string }).raw;
+    const decoded = Buffer.from(raw, 'base64').toString('utf-8');
+    return { decoded, fromLine: decoded.split(/\r?\n/).find(l => l.startsWith('From:')) ?? '' };
+  }
+
+  it('SEC: a non-ASCII display name cannot append a recipient of its own', async () => {
+    // RFC 2047 §5(3): inside a PHRASE an encoded-word may carry only
+    // alphanumerics and `!*+-/`. The encoder applied the looser `text` rule, so
+    // `<`, `>`, `@` and `,` survived literally — and a phrase is exactly where
+    // an address list is parsed. A display name is remote-authored (it can come
+    // from a contact record or an inbound header), so this is reachable.
+    const { fromLine } = await sendWithDisplayName('Ärger <attacker@evil.example>,');
+    // The hostile address must not appear in ANY parseable form.
+    expect(fromLine).not.toContain('attacker@evil.example');
+    // …and the header must still name exactly one address: the real one.
+    expect(fromLine.match(/</g) ?? []).toHaveLength(1);
+    expect(fromLine).toContain('<user@example.org>');
+  });
+
+  it('SEC: a display name ending in a backslash cannot escape its own quotes', async () => {
+    // The quoted-string branch escaped `"` but not `\`, so `Bob\` produced
+    // `"Bob\" <user@example.org>` — the `\"` is a quoted-pair, so the string
+    // never closed there and swallowed the real address. Backslash must be
+    // escaped FIRST, or escaping the quote re-introduces the problem.
+    const { fromLine } = await sendWithDisplayName('Bob\\');
+    expect(fromLine).toBe('From: "Bob\\\\" <user@example.org>');
+    expect(fromLine).toContain('<user@example.org>');
+  });
+
+  it('a plain ASCII display name is still rendered quoted and unencoded', async () => {
+    // Counter-direction: the tightening must not start encoding ordinary names.
+    const { fromLine } = await sendWithDisplayName('Rafael Burlet');
+    expect(fromLine).toBe('From: "Rafael Burlet" <user@example.org>');
+  });
+
   it('falls back to bare address when displayName is empty', async () => {
     fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
       if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
@@ -400,6 +447,116 @@ describe('OAuthGmailProvider — send', () => {
     const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
     expect(decoded).not.toMatch(/^X-Injected:/m);
     expect(decoded).toContain('"Bob \\"the Hacker\\" X-Injected: yes" <bob@example.com>');
+  });
+
+  it('RFC 2047-encodes a non-ASCII subject so Gmail does not show mojibake', async () => {
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
+      if (init?.method === 'POST' && url.includes('messages/send')) {
+        return Promise.resolve(respondJson({ id: 'sent-mime', threadId: 't' }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const provider = new OAuthGmailProvider(makeAccount(), makeAuth());
+    await provider.send({
+      to: [{ address: 'bob@example.com' }],
+      subject: 'TEST: Offert-Anfrage BVG-Anschluss — lynox GmbH',
+      text: 'body',
+    });
+    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
+    const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
+    const subjectLine = decoded.split('\r\n').find((l) => l.startsWith('Subject:'));
+    // Before the fix the em-dash rode the wire as raw UTF-8 and Gmail rendered
+    // it Latin1 → "Ã¢Â€Â™". It must now be an RFC 2047 encoded-word.
+    expect(subjectLine).toMatch(/^Subject: =\?UTF-8\?Q\?/);
+    expect(subjectLine).toContain('=E2=80=94'); // em-dash UTF-8 bytes, encoded
+    expect(subjectLine).not.toContain('—'); // raw non-ASCII must be gone
+  });
+
+  it('RFC 2047-encodes a non-ASCII From display name (account sender)', async () => {
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/profile')) return Promise.resolve(respondJson({ emailAddress: 'user@example.org' }));
+      if (init?.method === 'POST' && url.includes('messages/send')) {
+        return Promise.resolve(respondJson({ id: 'sent-name', threadId: 't' }));
+      }
+      return Promise.resolve(respondText('not stubbed', 404));
+    });
+    const account: MailAccountConfig = { ...makeAccount(), displayName: 'Björn Müller' };
+    const provider = new OAuthGmailProvider(account, makeAuth());
+    await provider.send({
+      to: [{ address: 'bob@example.com' }],
+      subject: 'Hi',
+      text: 'body',
+    });
+    const sendCall = fetchMock.mock.calls.find(c => String(c[0]).includes('messages/send'))!;
+    const decoded = Buffer.from(JSON.parse((sendCall[1] as { body: string }).body).raw, 'base64').toString('utf-8');
+    const fromLine = decoded.split('\r\n').find((l) => l.startsWith('From:'));
+    expect(fromLine).toMatch(/^From: =\?UTF-8\?Q\?/);
+    expect(fromLine).toContain('=C3=B6'); // ö
+    expect(fromLine).not.toContain('ö'); // raw umlaut gone
+  });
+});
+
+describe('encodeMimeHeader', () => {
+  it('phrase context: a pure-ASCII value with specials is still encoded (fast-path guard)', () => {
+    // The pure-ASCII shortcut must not fire in phrase context when the value
+    // carries a character a phrase may not hold literally. Without this guard
+    // an all-ASCII `Bob <x@y>,` would skip encoding entirely and reach an
+    // address header verbatim. Reached only via a direct call today —
+    // `formatAddr` gates on !ASCII_PRINTABLE — which is exactly why nothing
+    // else pins it.
+    const out = encodeMimeHeader('Bob <x@y>,', 'phrase');
+    expect(out).not.toBe('Bob <x@y>,');
+    expect(out).toContain('=3C'); // <
+    expect(out).toContain('=40'); // @
+    expect(out).toContain('=2C'); // ,
+  });
+
+  it('phrase context: a value made only of phrase-safe chars passes through', () => {
+    // Counter-direction for the guard above — it must not encode everything.
+    expect(encodeMimeHeader('Bob', 'phrase')).toBe('Bob');
+    expect(encodeMimeHeader('a-b/c*1', 'phrase')).toBe('a-b/c*1');
+  });
+
+  it('passes pure-ASCII through unchanged (no encoded-word)', () => {
+    expect(encodeMimeHeader('Hello World')).toBe('Hello World');
+    expect(encodeMimeHeader('TEST: a-b/c')).toBe('TEST: a-b/c');
+    expect(encodeMimeHeader('')).toBe('');
+  });
+  it('Q-encodes the em-dash case from the 2026-08-12 report', () => {
+    const out = encodeMimeHeader('BVG-Anschluss — lynox');
+    expect(out).toMatch(/^=\?UTF-8\?Q\?/);
+    expect(out).toMatch(/\?=$/); // encoded-word ends with ?=
+    expect(out).toContain('=E2=80=94'); // em-dash → UTF-8 bytes
+    expect(out).not.toContain('—'); // raw non-ASCII gone
+    expect(out).toContain('_lynox'); // space → underscore
+  });
+  it('encodes the encoded-word specials (=) when a value is already being encoded', () => {
+    const out = encodeMimeHeader('a = b über'); // ü forces an encoded-word
+    expect(out).toContain('=3D'); // '=' must not terminate the encoded-word early
+  });
+  it('splits a >75-char subject into multiple encoded-words, each ≤75', () => {
+    const out = encodeMimeHeader('Grüße aus München — Protokoll der Besprechung');
+    const words = out.split(' ');
+    expect(words.length).toBeGreaterThan(1); // no longer fits one encoded-word
+    for (const w of words) {
+      expect(w.length).toBeLessThanOrEqual(75);
+      expect(w).toMatch(/^=\?UTF-8\?Q\?/);
+      expect(w).toMatch(/\?=$/);
+    }
+  });
+  it('never leaves a dangling multi-byte sequence at an encoded-word boundary', () => {
+    // each char's UTF-8 hex (=XX…) is atomic; no encoded-word may end mid-byte (e.g. =C3 without its =B6)
+    const out = encodeMimeHeader('über Grüße München — '.repeat(8));
+    for (const w of out.split(' ')) {
+      const body = w.replace(/^=\?UTF-8\?Q\?/, '').replace(/\?=$/, '');
+      // after stripping every well-formed =XX, no '=' (dangling escape) may remain
+      expect(body.replace(/=[0-9A-F]{2}/g, '')).not.toContain('=');
+    }
+  });
+  it('keeps a short non-ASCII value as a single encoded-word (no needless split)', () => {
+    const out = encodeMimeHeader('BVG-Anschluss — lynox');
+    expect(out.split(' ').filter((s) => s.startsWith('=?')).length).toBe(1);
   });
 });
 

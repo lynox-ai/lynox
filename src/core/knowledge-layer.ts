@@ -30,11 +30,12 @@ import type { DataStoreBridge } from './datastore-bridge.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
 import type { EngineDb } from './engine-db.js';
-import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS } from './subject-store.js';
+import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS, isAmbiguousResolution } from './subject-store.js';
 import type { SubjectRow } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import type { RelationshipRow } from './relationship-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
+import type { TierDivergenceReport } from './memory-graph-store.js';
 import { ThreadStore } from './thread-store.js';
 import { channels } from './observability.js';
 import { deriveProvenanceTier, provenanceRank, canSupersede } from './provenance.js';
@@ -43,6 +44,26 @@ import { appendMemoryWriteDecisionLog, type WriteDecision } from './memory-write
 
 /** Dedup threshold: skip store if a memory with cosine > this exists. */
 const DEDUP_THRESHOLD = 0.95;
+
+/**
+ * Rollback sentinel for {@link KnowledgeLayer._raiseTier}. A better-sqlite3 transaction can
+ * only be aborted by throwing, and a tier-raise whose retire is refused must abort WHOLE (see
+ * `_raiseTier`) — so the refusal throws this and `_raiseTier` catches it. A unique object
+ * rather than an `Error` subclass: it is never reported, never matched by message, and must
+ * be impossible to confuse with a real failure escaping the transaction body.
+ */
+const TIER_RAISE_REFUSED = Symbol('tier-raise-refused');
+
+/**
+ * One tier disagreement a supersession mirror observed — {@link TierDivergenceReport} plus the
+ * row it concerns. Collected DURING the mirror transaction and emitted after it returns, for
+ * the reason the legacy backstop's refusals are: the sink is a fire-and-forget async append, so
+ * emitting inline would record a divergence for a transaction that can still roll back (both
+ * mirrors catch and swallow their own failures) and re-record it on the retry.
+ */
+interface MirrorTierDivergence extends TierDivergenceReport {
+  readonly existingId: string;
+}
 
 /**
  * Unified Knowledge Layer — the primary API for storing and retrieving knowledge.
@@ -340,7 +361,21 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
         if (this.memoryWriteTrustGate && wouldRaise) {
           const raisedId = this._raiseTier(candidate, trimmedText, namespace, scope, derivedTier, embeddingModel, embedding, options);
-          return { memoryId: raisedId, entities: [], relations: [], contradictions: [], stored: true, deduplicated: true };
+          if (raisedId !== null) {
+            return { memoryId: raisedId, entities: [], relations: [], contradictions: [], stored: true, deduplicated: true };
+          }
+          // `null` = the backstop refused the retire and the raise rolled back whole (see
+          // `_raiseTier`). Return here rather than falling through to the no-op-confirm
+          // below: a refusal is NOT the same event as `wouldRaise === false`. That branch
+          // means "an equal-or-lower re-assert of a row we agree about"; this one means the
+          // two stores DISAGREE about the row's tier and the authoritative one says this
+          // write ranks strictly below it. Confirming would let a write the backstop just
+          // judged unentitled to retire the row still raise that row's confidence (+0.05,
+          // capped at 1.0) and confirmation_count on every repeat — in both stores, since
+          // `_mirrorConfidence` follows. Recall ranking reads both, so that is a foothold
+          // on what gets recalled, handed to the one write we decided not to trust. Nothing
+          // happens instead, which is what a refusal should mean.
+          return { memoryId: candidate.id, entities: [], relations: [], contradictions: [], stored: false, deduplicated: true };
         }
 
         // Wave 0 (memory_scoring_v2): a dedup hit is a PLAIN no-op — no confirm.
@@ -387,6 +422,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     }
 
     // 4+5. Create memory + supersede contradicted (atomic transaction)
+    // Refusals are COLLECTED here and reported after the transaction returns: the sink is a
+    // fire-and-forget async append, so emitting inside would record a refusal for a write
+    // that a later contradiction in the same loop could still roll back — and re-record it
+    // on the retry, inflating the very rate this measurement exists to establish.
+    const refusedIds: string[] = [];
     const memoryId = this.db.transaction(() => {
       const id = this.db.createMemory({
         text: trimmedText, namespace, scopeType: scope.type, scopeId: scope.id,
@@ -401,12 +441,30 @@ export class KnowledgeLayer implements IKnowledgeLayer {
           // Backstop (defense-in-depth): the demotion above already prevents a blocked
           // pair from reaching here; this refuses a direct trust-downgrade too. Gated →
           // flag off passes trustGate:false → byte-identical.
-          this.db.supersedMemory(c.existingMemoryId, id, { trustGate: this.memoryWriteTrustGate });
+          //
+          // Its answer is CONSULTED, not discarded. The demotion above and this backstop
+          // do not read the existing row's tier from the same place — the demotion takes
+          // `c.existingSourceType` from the recall row (engine.db under the S5b read
+          // cutover, `_dedupRecall`), this looks it up in agent-memory.db — so the two can
+          // disagree and the backstop is the one holding the authoritative tier. On refusal
+          // the resolution is demoted here exactly as it would have been above: writing the
+          // supersedes edge anyway would claim a retire that did not happen, and leaving
+          // `resolution: 'superseded'` in the array would send both engine.db mirrors
+          // (`_persist*`, keyed on this SAME by-reference array) on to `markSuperseded` the
+          // old stub — the RF4 divergence trap the demotion comment above describes, one
+          // level down: retired on engine.db, active on legacy, the truth invisible under
+          // the read cutover.
+          if (!this.db.supersedMemory(c.existingMemoryId, id, { trustGate: this.memoryWriteTrustGate })) {
+            c.resolution = 'coexist';
+            refusedIds.push(c.existingMemoryId);
+            continue;
+          }
           this.db.createSupersedes(id, c.existingMemoryId, 'contradiction');
         }
       }
       return id;
     });
+    for (const refusedId of refusedIds) this._emitBackstopRefusal(derivedTier, refusedId, namespace);
 
     // Wave 1.3b: write-side tier telemetry — one JSONL line per STORED row (post-dedup),
     // gated on the measurement flag. Lets the write distribution be tracked over time
@@ -772,6 +830,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const subjects = this.subjectStore!;
     const relationships = this.relationshipStore!;
     const memoryGraph = this.memoryGraphStore!;
+    const diverged: MirrorTierDivergence[] = [];
 
     this.engineDb!.getDb().transaction(() => {
       // 1. Supersession mirror FIRST. It only flips OLD memories' stubs and is
@@ -782,7 +841,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       //    when the old memory has no stub; superseded_by is a soft column (no
       //    FK), so it may point at this memory even if it gets no stub of its own.
       for (const c of contradictions) {
-        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (c.resolution !== 'superseded') continue;
+        const report = memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (report) diverged.push({ ...report, existingId: c.existingMemoryId });
       }
 
       // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Build an
@@ -801,11 +862,20 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         // Persons route through the subset resolver: a new surface form that is an
         // unambiguous token-subset of exactly one existing person folds in as an alias
         // ("Ada" → the existing "Dr. Ada Lovelace") instead of minting a duplicate.
-        const { id: subjectId } = kind === 'engagement'
+        const resolution = kind === 'engagement'
           ? subjects.findOrCreateEngagement(e.canonicalName, this._engagementParent(subjects, threadAnchorSubjectId), { aliases: e.aliases })
           : kind === 'person'
             ? subjects.resolvePersonSubject(e.canonicalName, { aliases: e.aliases })
             : subjects.findOrCreate({ kind, name: e.canonicalName, aliases: e.aliases });
+        // Several subjects already answer to this name, so it identifies nothing. This
+        // mirror is ADDITIVE (the legacy store stays authoritative), so skipping the link
+        // costs a graph edge, not the fact — while binding it to a guess would put one
+        // entity's facts on another's record, silently and permanently.
+        if (isAmbiguousResolution(resolution)) {
+          channels.subjectAmbiguous.publish({ kind, candidateCount: resolution.candidateIds.length });
+          continue;
+        }
+        const subjectId = resolution.id;
         entityToSubject.set(e.id, subjectId);
         subjectIds.push(subjectId);
         // primary = the first person/organization the memory concerns; else the
@@ -866,6 +936,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       memoryGraph.linkSubjects(memoryId, new Set(subjectIds));
       memoryGraph.bumpCooccurrences(subjectIds);
     })();
+    this._emitMirrorDivergences(diverged, namespace);
   }
 
   /**
@@ -968,11 +1039,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     const resolvedEntities: EntityRecord[] = [];
     const resolvedRelations: RelationRecord[] = [];
     const stamp = createdAt ?? new Date().toISOString();
+    const diverged: MirrorTierDivergence[] = [];
 
     this.engineDb!.getDb().transaction(() => {
       // 1. Supersession mirror FIRST (flips OLD stubs; independent of this memory's subjects).
       for (const c of contradictions) {
-        if (c.resolution === 'superseded') memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (c.resolution !== 'superseded') continue;
+        const report = memoryGraph.markSuperseded(c.existingMemoryId, memoryId, { newTier: this.memoryWriteTrustGate ? options?.sourceType : undefined });
+        if (report) diverged.push({ ...report, existingId: c.existingMemoryId });
       }
 
       // 2. entities → subjects (kind-mapped; non-subject kinds dropped). Name-keyed so
@@ -989,11 +1063,23 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         // above) so extraction converges with set_thread_context, not a fresh row.
         // Person subset-resolver (see the twin above) so "Ada" folds into an existing
         // "Dr. Ada Lovelace" as an alias rather than a duplicate person row.
-        const { id: subjectId } = kind === 'engagement'
+        const resolution = kind === 'engagement'
           ? subjects.findOrCreateEngagement(e.name, this._engagementParent(subjects, threadAnchorSubjectId), { aliases: e.aliases })
           : kind === 'person'
             ? subjects.resolvePersonSubject(e.name, { aliases: e.aliases })
             : subjects.findOrCreate({ kind, name: e.name, aliases: e.aliases });
+        // Same decision as the twin above, but NOT the same cost, and the difference
+        // matters: this path is the AUTHORITATIVE persistence (no legacy entity write
+        // runs beside it), so a skipped entity is not merely an unwritten edge — that
+        // entity does not enter the graph at all. It is still the right call: the
+        // alternative is attaching it to one of several subjects that answer to the
+        // name, which corrupts a real record instead of omitting one. The memory itself
+        // is unaffected and the skip is counted.
+        if (isAmbiguousResolution(resolution)) {
+          channels.subjectAmbiguous.publish({ kind, candidateCount: resolution.candidateIds.length });
+          continue;
+        }
+        const subjectId = resolution.id;
         nameToSubject.set(e.name.toLowerCase(), subjectId);
         subjectIds.push(subjectId);
         resolvedEntities.push({
@@ -1049,6 +1135,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       memoryGraph.linkSubjects(memoryId, new Set(subjectIds));
       memoryGraph.bumpCooccurrences(subjectIds);
     })();
+    this._emitMirrorDivergences(diverged, namespace);
 
     return { resolvedEntities, resolvedRelations };
   }
@@ -1699,6 +1786,53 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * Report that `AgentMemoryDb.supersedMemory` REFUSED a retire the caller's own decision
+   * had already cleared — the observable of a legacy/engine.db tier disagreement.
+   *
+   * `existingTier` is deliberately the tier the BACKSTOP compared (read from
+   * agent-memory.db), not the one the decision used. The decision's side is already on
+   * record: a refusal is by construction preceded by this write's `supersede`/`tier-raise`
+   * line for the same `existingId`, and that line carries the recall row's tier. Emitting
+   * the same side twice would log the disagreement as an agreement, which is what the first
+   * cut of this did. Reading it back is one indexed lookup on a path that only runs when the
+   * two stores have already disagreed.
+   *
+   * Emits nothing if the row cannot be read: the backstop's own guard needs BOTH rows to
+   * exist before it can refuse, so an unreadable row means something else changed underneath
+   * us, and a fabricated tier is worse than a missing line in a sink whose only job is to
+   * count. There is no honest placeholder — every `ProvenanceKind` asserts a trust level.
+   */
+  private _emitBackstopRefusal(newTier: ProvenanceKind, existingId: string, namespace: MemoryNamespace): void {
+    const authoritative = this.db.getMemory(existingId)?.source_type;
+    if (authoritative === undefined) return;
+    this._emitWriteDecision('backstop-refused', newTier, authoritative as ProvenanceKind, existingId, namespace);
+  }
+
+  /**
+   * Report the tier disagreements a supersession mirror COMPARED AND SAW — the runtime
+   * observable `DEF-dk-trust-gate-consistency` (a) was missing, where the mirror refused with
+   * a bare `return` and told no one.
+   *
+   * "Compared" is the limit, and it is narrower than "every mirror": the consolidation mirror
+   * in {@link consolidateMemories} passes no `newTier` at all, so it runs no comparison and
+   * can report nothing. Its keeper-sort ranks tiers inside agent-memory.db, which is exactly
+   * the store a stub can drift from — so that path is a known blind spot, not a covered one
+   * (`DEF-mirror-consolidation-tier-blind`).
+   *
+   * Reporting is ALL this does. The retire went through (see
+   * {@link MemoryGraphStore.markSuperseded} for why a mirror cannot be a gate), so unlike
+   * {@link _emitBackstopRefusal} there is no write here that was stopped — which is exactly
+   * why the two get different decision names. Takes the tiers from the store's own return
+   * rather than re-reading the stub: the read would happen after the retire and after the
+   * transaction, so it could only ever agree with itself.
+   */
+  private _emitMirrorDivergences(diverged: readonly MirrorTierDivergence[], namespace: MemoryNamespace): void {
+    for (const d of diverged) {
+      this._emitWriteDecision('mirror-tier-diverged', d.newTier, d.stubTier, d.existingId, namespace);
+    }
+  }
+
+  /**
    * P1b — raise a deduped row's trust tier via SUPERSEDE-NOT-MUTATE. Stores the fresh
    * higher-trust row (write-once evidence intact), retires the old lower-trust one
    * (`canSupersede(new, old)` holds → the backstop passes), and carries forward the old
@@ -1707,7 +1841,22 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * the retired row). Reversible pre-GC (un-retire the tombstone until `gc()` reaps it — the
    * same soft-delete semantics as every supersede here); NO evidence overwrite → the
    * Wave-1 re-derivable-tier invariant holds. Done inline (not via `store()` recursion, which
-   * would re-enter dedup and re-find the same ≥0.95 row). Returns the fresh row's id.
+   * would re-enter dedup and re-find the same ≥0.95 row).
+   *
+   * Returns the fresh row's id, or **null when the backstop refused the retire** — in which
+   * case NOTHING happened: the transaction is rolled back, no row, no edge, no confirmation
+   * transfer, no mirror. The caller then takes the plain dedup no-op path, which is the same
+   * outcome as `wouldRaise === false`.
+   *
+   * The refusal is REACHABLE, and the parenthetical above ("`canSupersede(new, old)` holds →
+   * the backstop passes") is exactly why it must be handled rather than assumed away: the
+   * caller computes `wouldRaise` from `candidate.source_type` as the RECALL returned it —
+   * engine.db under the S5b read cutover — while the backstop reads the tier of the same id
+   * from agent-memory.db. When the two stores disagree about a row's tier, so do the two
+   * checks. Half-applying the raise then leaves two active rows of one fact, a supersedes
+   * edge claiming a retire that never ran, the old row's confirmations copied onto a row that
+   * did not replace it, and `_mirrorTierRaise` retiring the engine.db stub whose legacy twin
+   * is still active. All-or-nothing is the only shape with no wrong intermediate state.
    */
   private _raiseTier(
     candidate: ScoredMemoryRow,
@@ -1724,20 +1873,30 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       sourceUntrusted?: boolean | undefined;
       sourceToolName?: string | undefined;
     } | undefined,
-  ): string {
-    const newId = this.db.transaction(() => {
-      const id = this.db.createMemory({
-        text, namespace, scopeType: scope.type, scopeId: scope.id,
-        sourceRunId: options?.sourceRunId, sourceThreadId: options?.sourceThreadId,
-        sourceType: derivedTier, sourceToolName: options?.sourceToolName,
-        sourceChannel: options?.sourceChannel, sourceUntrusted: options?.sourceUntrusted,
-        embeddingModel, provider: this.embeddingProvider.name, embedding,
+  ): string | null {
+    let newId: string;
+    try {
+      newId = this.db.transaction(() => {
+        const id = this.db.createMemory({
+          text, namespace, scopeType: scope.type, scopeId: scope.id,
+          sourceRunId: options?.sourceRunId, sourceThreadId: options?.sourceThreadId,
+          sourceType: derivedTier, sourceToolName: options?.sourceToolName,
+          sourceChannel: options?.sourceChannel, sourceUntrusted: options?.sourceUntrusted,
+          embeddingModel, provider: this.embeddingProvider.name, embedding,
+        });
+        // The new row must exist BEFORE this call: the backstop looks both tiers up by id and
+        // short-circuits (`existing && incoming`) when either row is missing, so retiring
+        // first would make it silently pass. Order is load-bearing, not stylistic.
+        if (!this.db.supersedMemory(candidate.id, id, { trustGate: true })) throw TIER_RAISE_REFUSED;
+        this.db.createSupersedes(id, candidate.id, 'tier-raise');
+        this.db.addConfirmations(id, candidate.confirmation_count);
+        return id;
       });
-      this.db.supersedMemory(candidate.id, id, { trustGate: true });
-      this.db.createSupersedes(id, candidate.id, 'tier-raise');
-      this.db.addConfirmations(id, candidate.confirmation_count);
-      return id;
-    });
+    } catch (err: unknown) {
+      if (err !== TIER_RAISE_REFUSED) throw err;
+      this._emitBackstopRefusal(derivedTier, candidate.id, namespace);
+      return null;
+    }
     this._mirrorTierRaise(candidate, newId, text, namespace, scope, derivedTier, embeddingModel, embedding, options);
     return newId;
   }
@@ -1766,11 +1925,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   ): void {
     if (!this.subjectGraphEnabled || !this.memoryGraphStore) return;
     const memoryGraph = this.memoryGraphStore;
+    const diverged: MirrorTierDivergence[] = [];
     try {
       const oldSubject = memoryGraph.getStub(candidate.id)?.subject_id ?? null;
       const oldMentions = memoryGraph.getLinkedSubjectIds(candidate.id);
       this.engineDb!.getDb().transaction(() => {
-        memoryGraph.markSuperseded(candidate.id, newId, { newTier: derivedTier });
+        const report = memoryGraph.markSuperseded(candidate.id, newId, { newTier: derivedTier });
+        if (report) diverged.push({ ...report, existingId: candidate.id });
         memoryGraph.upsertStub({
           id: newId, text, namespace, scopeType: scope.type, scopeId: scope.id,
           subjectId: oldSubject,
@@ -1786,6 +1947,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
         });
         if (oldMentions.length > 0) memoryGraph.linkSubjects(newId, oldMentions);
       })();
+      this._emitMirrorDivergences(diverged, namespace);
     } catch (err: unknown) {
       process.stderr.write(
         `[lynox:subject-graph] tier-raise mirror failed for ${newId}: ${err instanceof Error ? err.message : String(err)}\n`,

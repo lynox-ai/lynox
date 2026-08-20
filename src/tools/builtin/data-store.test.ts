@@ -141,7 +141,7 @@ describe('DataStore tools', () => {
     it('accepts a subject column with a valid subjectKind and resolves through insert', async () => {
       ds.setSubjectBridge({
         resolve: (name, kind) => `subj:${kind}:${name.toLowerCase()}`,
-        find: () => null,
+        findAll: () => [],
         name: () => null,
       });
 
@@ -381,7 +381,7 @@ describe('DataStore tools', () => {
           if (id === undefined) { n += 1; id = `s${String(n)}`; idByKey.set(k, id); nameById.set(id, name); }
           return id;
         },
-        find(name, kind) { return idByKey.get(key(name, kind)) ?? null; },
+        findAll(name, kind) { const id = idByKey.get(key(name, kind)); return id === undefined ? [] : [id]; },
         name(id) { return nameById.get(id) ?? null; },
       });
     }

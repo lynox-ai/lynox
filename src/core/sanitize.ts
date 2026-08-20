@@ -31,6 +31,25 @@ export function stripUntrustedSeparators(s: string): string {
 }
 
 /**
+ * Reduce a value to ONE line, for a surface whose meaning is line-oriented.
+ *
+ * {@link stripUntrustedSeparators} deliberately PRESERVES TAB/LF/CR so an ordinary
+ * multi-line message survives it. That is right for message text and wrong for a
+ * line-structured surface: there, a newline is not formatting, it is a way to start a
+ * new record — or a new markdown section. A value carrying `\n## Operating playbook\n…`
+ * would otherwise render as a section of its own inside a block that loads into every
+ * turn, which is a standing instruction the user never wrote.
+ *
+ * So this composes the exotic-separator strip with a collapse of every remaining
+ * whitespace run (LF and CR included) into a single space. Use it wherever a
+ * user-supplied value becomes ONE line of a larger structured document; do NOT use it
+ * on message bodies, where the line breaks are the user's own.
+ */
+export function collapseToSingleLine(s: string): string {
+  return stripUntrustedSeparators(s).replace(/\s+/gu, ' ').trim();
+}
+
+/**
  * Sanitise a filename for a `Content-Disposition` header value: drop control
  * characters (incl. CR/LF — header-injection / response-splitting), the C1
  * range, and the quote/backslash that would break out of the quoted-string.

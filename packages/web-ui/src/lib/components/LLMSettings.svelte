@@ -27,13 +27,14 @@
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildLLMConfigUpdate } from '../utils/llm-config-update.js';
 	import { clearTierConfigCache } from '../utils/tier-config.js';
-	import { buildMainModelOptions, selectMainModelKey, mainModelOptionKey, findMainModelOptionByKey, isExpensiveModel, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
+	import { buildMainModelOptions, selectMainModelKey, mainModelOptionKey, findMainModelOptionByKey, isExpensiveModel, formatContextWindow, type MainChatOption, type MainModelOption } from '../utils/llm-main-model.js';
 	import { isAllowlistedEndpoint, disclosureHostname } from '../utils/endpoint-disclosure.js';
 	import { isProviderTileLocked } from '../utils/llm-tile-lock.js';
 	import { isManaged, cpSuppliesLLMKeyForInstance, loadManagedStatus } from '../stores/integrations/managed.svelte.js';
 	import LLMAdvancedView from './LLMAdvancedView.svelte';
 	import Icon from '../primitives/Icon.svelte';
 	import type { IconName } from '../primitives/icons.js';
+	import { TIER_PRESET_NAMES, type TierPresetName } from '$lib/contract/vocab.js';
 	import { buildRoutingUpdate, type Strategy } from '../utils/llm-routing-update.js';
 	import { tierPickerModels, defaultTierModelId, isHybridTierOption, presetTierSeed } from '../utils/llm-tier-picker.js';
 	// Shared vocabulary from the vendored wire-contract copy (byte-identical to
@@ -135,9 +136,16 @@
 		// routing_mode === 'hybrid'. An unset tier falls back to the base provider.
 		tier_set?: TierSet;
 		// Named hybrid strategy (model-presets W4). Config-sugar: the engine expands
-		// it to {routing_mode:'hybrid', tier_set} at load. Returned verbatim by GET,
-		// so the "Modell-Strategie" cards read it to highlight the active preset.
-		tier_preset?: string;
+		// it to {routing_mode:'hybrid', tier_set} at load, so the "Modell-Strategie"
+		// cards read it to highlight the active preset.
+		//
+		// LOADER-resolved, not the raw config.json — which is what makes `null`
+		// meaningful here rather than merely absent. A CP-pinned instance has no
+		// `tier_preset` in its file at all; while GET reported the file, the cards
+		// fell through to "Eigene" beside an `active_model` that named the preset's
+		// model. `null` now says "the engine is running no preset", and the routing
+		// beside it is the engine's too.
+		tier_preset?: string | null;
 		// Server-persisted disclosure acceptances for non-allowlisted custom
 		// endpoints (host + timestamp). Read from /api/config; replaces the old
 		// per-tab sessionStorage flag so acceptance survives reload / new device.
@@ -201,11 +209,14 @@
 		tiers: PresetTierInfo[];
 		available: boolean;
 	}
-	// The five strategy cards. 'standard' = one provider, lynox routes per turn;
-	// the three preset names are hybrid tier_presets; 'custom' = manual hybrid.
+	// The strategy cards: Standard, one per contract preset, and Eigene. 'standard' = one provider, lynox routes per turn;
+	// the contract's preset names are hybrid tier_presets; 'custom' = manual hybrid.
 	// `Strategy` + `buildRoutingUpdate` (the persistence mapping) live in a plain
 	// .ts helper so the body-building is unit-testable (this .svelte has no seam).
-	const PRESET_NAMES: ReadonlyArray<'efficient' | 'balanced' | 'max-quality'> = ['efficient', 'balanced', 'max-quality'];
+	// From the vendored contract, NOT a literal: a hand-copied list here silently
+	// dropped `eu-sovereign` on 2026-08-10 (no card, load fell through to 'custom',
+	// next save CLEARED the preset). See the note on `Strategy`.
+	const PRESET_NAMES: ReadonlyArray<TierPresetName> = TIER_PRESET_NAMES;
 
 	let providers = $state<CatalogProvider[]>([]);
 	let config = $state<UserConfig>({});
@@ -223,6 +234,12 @@
 	// Per-provider key cache (UI-only — kept in vault, sent on save).
 	let keys = $state<Record<string, string>>({});
 	let loaded = $state(false);
+	// DEF-dk-capture-tool-dependence: server-computed flag (GET /api/config
+	// capabilities) — DK is on AND the active balanced model is a measured-weak
+	// capture caller (Mistral Medium), so `remember` rarely fires and the
+	// knowledge store stays silently inert. Drives the warning banner at the
+	// point the operator can fix it: switch the balanced model.
+	let captureDegraded = $state(false);
 	let testing = $state(false);
 	let saving = $state(false);
 	// PR 4.6: deferred mount of embedded LLMAdvancedView — avoids the duplicate
@@ -367,10 +384,11 @@
 			if (!catRes.ok || !configRes.ok) throw new Error(`HTTP ${catRes.status} / ${configRes.status}`);
 			const catBody = (await catRes.json()) as { providers: CatalogProvider[] };
 			providers = catBody.providers;
-			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks; available_tier_presets?: Record<string, PresetInfo> };
+			const configBody = (await configRes.json()) as UserConfig & { locks?: Locks; available_tier_presets?: Record<string, PresetInfo>; capabilities?: { durable_memory_capture_degraded?: boolean } };
 			config = configBody;
 			locks = configBody.locks ?? {};
 			availablePresets = configBody.available_tier_presets ?? {};
+			captureDegraded = configBody.capabilities?.durable_memory_capture_degraded === true;
 			// F1b: when env-pinned the provider isn't on disk, so fall back to the
 			// effective `active_provider` the engine surfaces. An env-pinned
 			// provider IS an explicit choice (just made via env) → count it for
@@ -523,15 +541,26 @@
 	// controls show (provider picker for Standard, per-tier editor for Eigene, the
 	// inline detail for a preset); what persists is decided in runSaveConfig from it.
 	//
-	// The five cards (order = Standard → cheap → flagship → manual). `key` is the
+	// Order = Standard → the contract presets in their vocab order → manual Eigene. `key` is the
 	// i18n stem (hyphenated ids can't be a translation-key segment). Icons are the
-	// monochrome set: ✓ Standard · ⚡ Efficient · ⚖️ Balanced · 💎 Max-Quality ·
-	// sliders for the manual Eigene.
+	// monochrome set: ✓ Standard · ⚡ Efficient · ⚖️ Balanced ·
+	// 💎 Max-Quality · sliders for the manual Eigene.
+	// A RECORD over the contract's preset names, not an array literal — a Record must
+	// be TOTAL, so a preset added to the contract without a card here fails to build.
+	// The array form typed each element but let the list be one short: a delta review
+	// added a preset to the contract and both `tsc` and `svelte-check` stayed at zero
+	// errors while it rendered no card at all (2026-08-10). Importing TIER_PRESET_NAMES
+	// for `PRESET_NAMES` fixed the data-loss half of that bug and left this half open.
+	const PRESET_CARDS: Record<TierPresetName, { key: string; icon: IconName }> = {
+		'efficient': { key: 'efficient', icon: 'bolt' },
+		'balanced': { key: 'balanced', icon: 'scale' },
+		'max-quality': { key: 'max_quality', icon: 'gem' },
+	};
+	// Standard and Eigene bracket the presets: they are routing MODES, not presets, so
+	// they are not in the contract list and are named here.
 	const STRATEGY_CARDS: ReadonlyArray<{ id: Strategy; key: string; icon: IconName; recommended?: boolean }> = [
 		{ id: 'standard', key: 'standard', icon: 'check_circle', recommended: true },
-		{ id: 'efficient', key: 'efficient', icon: 'bolt' },
-		{ id: 'balanced', key: 'balanced', icon: 'scale' },
-		{ id: 'max-quality', key: 'max_quality', icon: 'gem' },
+		...TIER_PRESET_NAMES.map((n) => ({ id: n as Strategy, key: PRESET_CARDS[n].key, icon: PRESET_CARDS[n].icon })),
 		{ id: 'custom', key: 'custom', icon: 'sliders' },
 	];
 	/** The server preset signal for a card, or undefined for Standard/Custom. */
@@ -1062,6 +1091,20 @@
 		</div>
 	{/if}
 
+	{#if captureDegraded}
+		<!-- DEF-dk-capture-tool-dependence: DK is on but the active balanced model
+		     is a measured-weak capture caller (Mistral Medium 2/12 vs Sonnet 12/12).
+		     The durable knowledge store stays silently empty because the model rarely
+		     invokes `remember`. Warn here, at the model picker, where it is fixable. -->
+		<!-- Dominant state-surface shape (shapes.contract.json `state`): a tint + a
+		     same-colour border at LOW opacity, not a full-strength one — this is a
+		     standing advisory, not one of the five full-strength warning exceptions. -->
+		<div role="status" class="border border-warning/20 bg-warning/10 rounded p-3 text-sm text-warning">
+			<p class="font-medium">{t('llm.capture_degraded_title')}</p>
+			<p class="text-text-muted mt-1">{t('llm.capture_degraded_body')}</p>
+		</div>
+	{/if}
+
 	{#if showEmptyState}
 		<!--
 			Empty-state CTA — PRD-IA-V2 P1-PR-A1 acceptance: SetupBanner cold-start
@@ -1368,7 +1411,7 @@
 									aria-label={t('llm.model')}
 									class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
 									{#each entry ? tierPickerModels(entry) : [] as m (m.id)}
-										<option value={m.id}>{m.label} — ${m.pricing?.input ?? '?'}/M in · ${m.pricing?.output ?? '?'}/M out{isExpensive(m) ? ' ⚡' : ''}</option>
+										<option value={m.id}>{m.label} — ${m.pricing?.input ?? '?'}/M in · ${m.pricing?.output ?? '?'}/M out{formatContextWindow(m.context_window) ? ` · ${formatContextWindow(m.context_window)} ctx` : ''}{isExpensive(m) ? ' ⚡' : ''}</option>
 									{/each}
 								</select>
 							</div>
@@ -1423,7 +1466,7 @@
 							class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
 							{#each mainModelOptions as opt (mainModelOptionKey(opt))}
 								<option value={mainModelOptionKey(opt)} disabled={opt.overCeiling}>
-									{opt.label}{#if opt.pricing} — ${opt.pricing.input}/M in · ${opt.pricing.output}/M out{/if}{#if opt.expensive} ⚡{/if}{#if opt.notRecommended} · {t('llm.main_model.fast_suffix')}{/if}{#if opt.overCeiling} · {t('llm.main_model.locked_suffix')}{/if}
+									{opt.label}{#if opt.pricing} — ${opt.pricing.input}/M in · ${opt.pricing.output}/M out{/if}{#if opt.contextWindow} · {formatContextWindow(opt.contextWindow)} ctx{/if}{#if opt.expensive} ⚡{/if}{#if opt.notRecommended} · {t('llm.main_model.fast_suffix')}{/if}{#if opt.overCeiling} · {t('llm.main_model.locked_suffix')}{/if}
 								</option>
 							{/each}
 						</select>

@@ -24,12 +24,13 @@ import type {
   MailConnectPromptData,
   PromptMeta,
   PromptText,
+  ToolCallRecorder,
 } from '../types/index.js';
 import { effectiveContextWindow } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
-import { Agent, RunAbortedError } from './agent.js';
+import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
@@ -178,6 +179,11 @@ export interface SessionOptions {
   tenantId?: string | undefined;
   messages?: BetaMessageParam[] | undefined;
   systemPromptSuffix?: string | undefined;
+  /** Web UI: recover the end-of-turn follow-up chips when the model ignores the
+   *  `suggest_follow_ups` instruction. Set alongside the Web-UI prompt suffix —
+   *  the suffix asks for the chips, this catches the models that do not deliver.
+   *  See `Agent.followUpFallback`. */
+  followUpFallback?: boolean | undefined;
   costGuard?: import('../types/index.js').CostGuardConfig | undefined;
 }
 
@@ -195,6 +201,16 @@ export interface RunUsageSummary {
   cacheWrite: number;
   costUsd: number;
   model: string;
+  /** Spend of every sub-agent this run spawned, at any depth. Absent when the
+   *  run delegated nothing.
+   *
+   *  Kept SEPARATE from `costUsd` on purpose: each child run is its own row in
+   *  RunHistory, and a thread total is the sum over rows, so folding children
+   *  into the parent's cost would double-count the thread. The UI adds the two
+   *  for the "what did this answer cost" figure and names the split in the
+   *  tooltip — before this, a delegated turn under-reported by whatever the
+   *  children spent (measured: $0.38 shown, $0.45 actually billed). */
+  spawnCostUsd?: number;
   /** Diagnostics (opt-in UI panel): the run's id for log/Bugsink correlation
    *  and its wall-to-wall agent duration. Persisted via setMessageUsage so the
    *  diagnostics detail survives a thread resume. */
@@ -237,6 +253,7 @@ export class Session {
     continuationPrompt?: string | undefined;
     excludeTools?: string[] | undefined;
     systemPromptSuffix?: string | undefined;
+    followUpFallback?: boolean | undefined;
     autonomy?: import('../types/index.js').AutonomyLevel | undefined;
     costGuard?: import('../types/index.js').CostGuardConfig | undefined;
   } = {};
@@ -250,6 +267,15 @@ export class Session {
    *  the run's duration; cleared in the run() finally. */
   private _onPersistCheckpoint: (() => void) | null = null;
   private runToolCallSeq = 0;
+  /** Per-run sequence numbers for calls booked onto a run that is NOT this
+   *  Session's own — today that means spawned children, each numbering its own
+   *  row from 0. Bounded by the number of children in one run and cleared with
+   *  the run. */
+  private _foreignRunSeq = new Map<string, number>();
+  /** The one sink for this Session's tool-call persistence, injected into the
+   *  agent (and inherited by any child it spawns). Null when no RunHistory is
+   *  configured. See the construction site for why this replaced a subscriber. */
+  private _toolCallRecorder: ToolCallRecorder | null = null;
   private _userWaitMs = 0;
   private _runToolNames = new Set<string>();
   private _retrievedMemoryIds: string[] = [];
@@ -390,6 +416,9 @@ export class Session {
     if (opts?.systemPromptSuffix) {
       this.agentOverrides.systemPromptSuffix = opts.systemPromptSuffix;
     }
+    if (opts?.followUpFallback) {
+      this.agentOverrides.followUpFallback = true;
+    }
     if (opts?.autonomy) {
       this.agentOverrides.autonomy = opts.autonomy;
     }
@@ -398,16 +427,63 @@ export class Session {
     }
     this._createAgent();
 
-    // Each Session subscribes once to record tool calls against its own run.
-    // The closures read session-local fields, so concurrent sessions don't interfere.
+    // Tool-call persistence is INJECTED into the agent, not subscribed from a
+    // channel. The agent hands each finished call to this sink together with the
+    // run it was working under, which is the one thing a listener could never
+    // determine for itself.
+    //
+    // What this replaced, and why it had to: `lynox:tool:end` is a
+    // `node:diagnostics_channel`, so every Session's callback ran for every tool
+    // call in the PROCESS. Each Session then booked whatever arrived onto its own
+    // open run. A thread-id filter narrowed that to one conversation, but could
+    // not fix a spawned child — a child shares its parent's thread by design, so
+    // no filter can tell the two apart, and its calls landed on the parent's run.
+    // Nothing ever unsubscribed either, so the callback outlived the Session.
+    //
+    // The sink resolves neither problem by guessing: the child arrives carrying
+    // its own run id, and the closure dies with the Session that made it.
     const runHistory = engine.getRunHistory();
     if (runHistory) {
-      setupHistorySubscriptions(
-        runHistory,
-        () => this.currentRunId,
-        () => this.runToolCallSeq++,
-        (ms: number) => { this._userWaitMs += ms; },
-      );
+      this._toolCallRecorder = (call): void => {
+        // `call.runId` is the CALLER's run — a spawned child's own row. Absent
+        // means an agent with no run of its own, which keeps landing on this
+        // Session's open run exactly as it did before.
+        const runId = call.runId ?? this.currentRunId;
+        if (!runId) return;
+        // ask_user blocks on a human. The wall-clock is subtracted from this
+        // run's duration even when a CHILD raised the prompt, because this run
+        // really did sit idle waiting for the same answer.
+        if (call.toolName === 'ask_user') this._userWaitMs += call.durationMs;
+        // Sequence numbers are per-run, so a child starts at 0 on its own row
+        // instead of continuing the parent's numbering.
+        //
+        // `runToolCallSeq` advances ONLY for this Session's own run because it
+        // is also `runs.tool_call_count`. Now that a child's calls live on the
+        // child's row, counting them here too would claim them twice — once as
+        // rows under the child, once as a number under the parent. A run's own
+        // count plus its descendants' is how spend is already reported
+        // (`getDescendantCostUsd`); the two now agree.
+        let sequenceOrder: number;
+        if (runId === this.currentRunId) {
+          sequenceOrder = this.runToolCallSeq++;
+        } else {
+          sequenceOrder = this._foreignRunSeq.get(runId) ?? 0;
+          this._foreignRunSeq.set(runId, sequenceOrder + 1);
+        }
+        try {
+          runHistory.insertToolCall({
+            runId,
+            toolName: call.toolName,
+            inputJson: call.inputJson || '{}',
+            outputJson: call.outputJson,
+            durationMs: call.durationMs,
+            sequenceOrder,
+          });
+        } catch {
+          // Fire-and-forget
+        }
+      };
+      setupHistorySubscriptions(runHistory);
     }
 
     // Create persistent thread record (idempotent — OR IGNORE)
@@ -737,6 +813,7 @@ export class Session {
     const model = runSnap.modelId;
     const startTime = Date.now();
     this.runToolCallSeq = 0;
+    this._foreignRunSeq.clear();
     this._userWaitMs = 0;
     this._runToolNames.clear();
     this._retrievedMemoryIds = [];
@@ -796,6 +873,10 @@ export class Session {
     // Thread run ID and session ID to agent so spawn tool and memory extraction can use them
     this.agent.currentRunId = this.currentRunId ?? undefined;
     this.agent.currentThreadId = this.sessionId;
+    // Same reason as `currentRunId` below/above: set HERE rather than at agent
+    // construction, so an agent rebuilt mid-session (`_recreateAgent`, e.g. on a
+    // model switch) does not silently stop recording its tool calls.
+    this.agent.recordToolCall = this._toolCallRecorder ?? undefined;
     // Wave 1.2 replay (c): mark an internal (compaction summary) run so its end-of-run
     // extraction abstains — the summary is machinery, not user knowledge. Threaded HERE,
     // after every `_recreateAgent` above, so a rebuilt agent still carries it (mirrors
@@ -936,6 +1017,35 @@ export class Session {
         cache_read_input_tokens: cacheRead,
       });
 
+      // In-run helper calls (the follow-up-chip recovery) spend on the pool key without
+      // producing tokens in `this.usage`, so the deltas above cannot see them.
+      //
+      // ⚠ This is a DISPLAY term and must never reach `onAfterRun`. `costUsd` above is the
+      // value the managed hook DEBITS, and the helper already debited itself through its own
+      // `reportMeteredCost` call (`metered-request.ts`, `debitInRunHelperCost`) under a fresh
+      // run id. `managed-hook.ts` dedups per run id, so adding the same dollars to `costUsd`
+      // bills the tenant twice — which a first version of this did, on the belief that the
+      // CP figure was the one missing them. It was the other way round: the CP was right and
+      // the numbers the CUSTOMER reads were short.
+      //
+      // Dollars rather than tokens: the helper is priced on the FAST model, and folding its
+      // tokens into this run's counts would re-price them at the run's own `pricePerM`.
+      // `?.()` on the METHOD, not just on `agent`: several tests and the pipeline path put a
+      // partial double there, and `agent?.m()` guards only a missing agent. (The accounting itself is
+      // pinned by `engine-session.test.ts` H2b/H2c, in both directions and on both paths.)
+      const displayCostUsd = costUsd + (this.agent?.getHelperCostUsd?.() ?? 0);
+
+      // What this run's sub-agents spent, if it delegated. Read from RunHistory
+      // rather than tracked in memory: the children are already rows there,
+      // written before `spawn_agent` returns (the parent blocks on them), so by
+      // this line the figure is complete. Best-effort — a cost line must never
+      // be the reason a turn fails.
+      let spawnCostUsd = 0;
+      if (runHistory && this.currentRunId) {
+        try { spawnCostUsd = runHistory.getDescendantCostUsd(this.currentRunId); }
+        catch { spawnCostUsd = 0; }
+      }
+
       // Snapshot this run's usage in the UI footer's convention (tokensIn =
       // base input + both cache buckets). Stashed for getLastRunUsage() so the
       // HTTP API can echo it in the `done` event — a fallback that renders the
@@ -945,8 +1055,9 @@ export class Session {
         tokensOut,
         cacheRead,
         cacheWrite,
-        costUsd,
+        costUsd: displayCostUsd,
         model,
+        ...(spawnCostUsd > 0 ? { spawnCostUsd } : {}),
         ...(this.currentRunId ? { runId: this.currentRunId } : {}),
         durationMs,
       };
@@ -963,7 +1074,7 @@ export class Session {
             tokensOut,
             tokensCacheRead: cacheRead,
             tokensCacheWrite: cacheWrite,
-            costUsd,
+            costUsd: displayCostUsd,
             toolCallCount: this.runToolCallSeq,
             durationMs,
             userWaitMs: this._userWaitMs,
@@ -1007,7 +1118,7 @@ export class Session {
           const rollupTokens = threadTotals
             ? threadTotals.tokens_in + threadTotals.tokens_out
             : this.usage.input_tokens + this.usage.output_tokens;
-          const rollupCost = threadTotals ? threadTotals.cost_usd : costUsd;
+          const rollupCost = threadTotals ? threadTotals.cost_usd : displayCostUsd;
           if (newMessages.length > 0) {
             // Combined append + rollup in one transaction (P1). Seqs start at
             // MAX(seq)+1 (deletion-safe), message_count tracks total rows.
@@ -1114,6 +1225,14 @@ export class Session {
       // path. Record it distinctly as 'aborted' (not the scary 'failed') and
       // surface a calm interruption note instead of a provider-error banner.
       const isAbort = err instanceof RunAbortedError;
+      // A hard loop break is an abort by the guard, not the user — same calm
+      // rendering, but its OWN note code so the thread says WHY (the tool call
+      // that was repeated past all warnings) instead of a bare "interrupted".
+      const isLoopBreak = err instanceof ToolLoopBreakError;
+      // A continuation loop (truncated responses repeating without progress)
+      // is the same calm family — its own code so the note names the repeated
+      // prefix instead of a bare "interrupted".
+      const isContinuationLoop = err instanceof ContinuationLoopError;
       // Bugsink capture — structured error with tags
       void import('./error-reporting.js').then(({ captureLynoxError, captureError: captureReportedError }) => {
         if (err instanceof LynoxError) {
@@ -1160,7 +1279,26 @@ export class Session {
             tokensOut: failedTokensOut,
             tokensCacheRead: failedCacheRead,
             tokensCacheWrite: failedCacheWrite,
-            costUsd: failedCostUsd,
+            // Display, like the success path: the helper already debited itself, so this
+            // number must include it while `onAfterRun` below must not.
+            costUsd: failedCostUsd + (this.agent?.getHelperCostUsd?.() ?? 0),
+            // The tool calls this run made before it failed. The success path has
+            // always stamped this; the failure path did not, so a failed run
+            // reported 0 tools no matter how much work it had done. That reads as
+            // "this run did nothing and still cost money" in exactly the place the
+            // number matters most — a cost review looks at the priciest runs
+            // first, and those are disproportionately the ones that failed. A real
+            // case: a 28-minute run that made 60 http_request calls and died on
+            // the per-run cost ceiling was recorded as 0 tool calls, and the first
+            // reading of the day blamed a runaway loop rather than a ceiling that
+            // cut off genuine work (war, 2026-08-10).
+            //
+            // This is now this run's OWN tool calls and nothing else. The
+            // caveat that stood here — that the count came off a process-global
+            // channel and so could include another session's or a child's calls
+            // — was resolved by moving persistence to the injected sink: it
+            // advances this counter only for calls carrying this run's id.
+            toolCallCount: this.runToolCallSeq,
             durationMs: Date.now() - startTime,
             userWaitMs: this._userWaitMs,
             status: isAbort ? 'aborted' : 'failed',
@@ -1242,7 +1380,7 @@ export class Session {
         error: err,
         // An abort renders a calm "interrupted" note; a real error keeps the
         // provider-error banner + sanitized detail.
-        noteCode: isAbort ? 'run_interrupted' : 'provider_error',
+        noteCode: isContinuationLoop ? 'continuation_loop' : isLoopBreak ? 'tool_loop_break' : isAbort ? 'run_interrupted' : 'provider_error',
         // An internal (compaction) run must NOT surface a visible note — the
         // success path skips persisting its messages entirely (_persistMessages +
         // the end-of-run append both no-op for an internal run), so mirror that
@@ -1422,8 +1560,12 @@ export class Session {
 
     // Evict large tool results into the blob store BEFORE the reset, so the
     // verbatim payloads survive the history wipe and stay recallable via
-    // `recall_tool_result`. Eviction runs only here (O4/O5) — never
-    // mid-conversation — so the warm prompt cache is untouched between turns.
+    // `recall_tool_result`. Eviction never runs against a WARM cache — that
+    // would cost a prefix invalidation between turns for nothing. Here (O4/O5)
+    // the history is about to be reset anyway; the other entry point,
+    // `Agent._truncateHistory`, collapses in place but only once the context is
+    // already at 85%, i.e. only where a front-drop would have run and paid the
+    // same invalidation.
     const thresholdChars = this.engine.getUserConfig().tool_result_blob_threshold_chars
       ?? DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS;
     this._toolResultBlobStore.evictFrom(preCompactionMessages, thresholdChars);
@@ -1929,6 +2071,9 @@ export class Session {
       // session-lifetime — carried unless this call supplies a new value
       maxIterations: supplied.maxIterations ?? this.agentOverrides.maxIterations,
       systemPromptSuffix: supplied.systemPromptSuffix ?? this.agentOverrides.systemPromptSuffix,
+      // Travels WITH the suffix: the suffix asks for the chips, this recovers
+      // them. A rebuild that dropped it would silently stop recovering mid-thread.
+      followUpFallback: this.agentOverrides.followUpFallback,
       autonomy: supplied.autonomy ?? this.agentOverrides.autonomy,
       costGuard: this.agentOverrides.costGuard, // never a caller's to set here
       // per-rebuild — reset unless this call supplies one
@@ -2274,6 +2419,10 @@ export class Session {
     // Per-thread override takes precedence over global config
     if (this._skipMemoryExtractionOverride !== null) {
       this.agent.skipMemoryExtraction = this._skipMemoryExtractionOverride;
+    }
+    // Web-UI surfaces only: catch a turn that ended without the chips.
+    if (this.agentOverrides.followUpFallback === true) {
+      this.agent.followUpFallback = true;
     }
   }
 

@@ -177,6 +177,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactHistoryTool: { definition: { name: 'artifact_history' }, handler: vi.fn() },
   artifactRestoreTool: { definition: { name: 'artifact_restore' }, handler: vi.fn() },
   recallToolResultTool: { definition: { name: 'recall_tool_result' }, handler: vi.fn() },
+  calendarReadTool: { definition: { name: 'calendar_read' }, handler: vi.fn() },
+  CALENDAR_FEED_PREFIX: 'CALENDAR_FEED_',
   suggestFollowUpsTool: { definition: { name: 'suggest_follow_ups' }, handler: vi.fn() },
   mediaProcessTool: { definition: { name: 'media_process' }, handler: vi.fn() },
 }));
@@ -494,5 +496,66 @@ describe('disabled_tools invariant: narrow-only, never widens', () => {
     const exclude = lastAgentExcludeTools();
     expect(exclude).toContain('mail_send'); // user disable still in force
     expect(exclude).not.toContain('spawn_agent'); // session disable correctly lifted
+  });
+});
+
+/**
+ * Follow-up chip recovery — the WIRING, not the behaviour.
+ *
+ * Lives in this file because it needs the same thing the tests above need: a
+ * real Engine + Session with the heavy dependencies mocked, so `_createAgent`
+ * actually runs and we can inspect what the Session handed the Agent.
+ *
+ * These exist because the first version of this feature shipped with twelve
+ * green tests that all called the recovery method directly — so when the wiring
+ * from `SessionOptions` through `agentOverrides` to `Agent.followUpFallback`
+ * was severed at BOTH ends, the entire suite (9000 tests) stayed green and the
+ * feature was silently dead. The behaviour is covered in
+ * `agent-follow-up-fallback.test.ts`; what follows covers the chain that
+ * decides whether that behaviour is ever reached.
+ */
+describe('followUpFallback wiring: SessionOptions → agentOverrides → Agent', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRegister.mockReturnThis();
+    currentUserConfig = {};
+  });
+
+  /** The flag lands on the Agent INSTANCE (not the ctor config), so read it back. */
+  function agentFlag(session: import('./session.js').Session): boolean | undefined {
+    const inner = session as unknown as { agent: { followUpFallback?: boolean } | null };
+    return inner.agent?.followUpFallback;
+  }
+
+  it('a Web-UI session (followUpFallback: true) reaches the Agent', async () => {
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession({ followUpFallback: true });
+    expect(agentFlag(session)).toBe(true);
+  });
+
+  it('a session that did NOT ask for it leaves the Agent default-off (CLI / headless)', async () => {
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession();
+    // Not `undefined`-tolerant on purpose: the Agent field defaults to false, and
+    // a surface that never asked must never pay for a recovery call.
+    expect(agentFlag(session)).toBeFalsy();
+  });
+
+  it('SURVIVES a rebuild — the flag is session identity, not a per-rebuild option', async () => {
+    // `_recreateAgent` rebuilds the Agent on a registry hot-reload, a provider
+    // swap, a tier change. It reconstructs `agentOverrides` field by field, so a
+    // flag omitted from that list is silently dropped and the thread stops
+    // recovering chips mid-conversation.
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession({ followUpFallback: true });
+    session._recreateAgent({});
+    expect(agentFlag(session)).toBe(true);
+  });
+
+  it('a rebuild does not INVENT it for a session that never asked', async () => {
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession();
+    session._recreateAgent({});
+    expect(agentFlag(session)).toBeFalsy();
   });
 });

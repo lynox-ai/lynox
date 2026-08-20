@@ -187,14 +187,69 @@ describe('CostGuard', () => {
     });
   });
 
+  /**
+   * A run may make a helper call on a DIFFERENT model than its own (the
+   * follow-up-chip recovery runs on the fast tier). Those dollars belong on this
+   * run's ceiling, but their TOKENS must never be priced here: this guard holds a
+   * single `pricePerM`, the run's own.
+   */
+  describe('recordExternalCost', () => {
+    it('charges the ceiling in dollars, at no token price of its own', () => {
+      const cg = new CostGuard({ maxBudgetUSD: 10 }, 'claude-opus-4-6');
+      cg.recordExternalCost(2.5);
+      const snap = cg.snapshot();
+      // Exact, not `toBeGreaterThan`: the amount is already priced, so anything
+      // that re-prices it (booking it as tokens against opus rates) lands
+      // somewhere else entirely.
+      expect(snap.estimatedCostUSD).toBe(2.5);
+      expect(snap.inputTokens).toBe(0);
+      expect(snap.outputTokens).toBe(0);
+    });
+
+    it('does not count as an iteration — the model never took this turn', () => {
+      const cg = new CostGuard({ maxIterations: 2 }, 'claude-opus-4-6');
+      cg.recordExternalCost(0.01);
+      cg.recordExternalCost(0.01);
+      cg.recordExternalCost(0.01);
+      // Implemented via recordTurn (or with an `iterations++`), three helper
+      // calls would end the run at its iteration cap having done no work.
+      expect(cg.snapshot().iterationsUsed).toBe(0);
+      expect(cg.isExceeded()).toBe(false);
+    });
+
+    it('trips the ceiling on its own, with no turn ever recorded', () => {
+      const cg = new CostGuard({ maxBudgetUSD: 1 }, 'claude-opus-4-6');
+      expect(cg.recordExternalCost(0.4)).toBe(false);
+      expect(cg.recordExternalCost(0.7)).toBe(true);
+      expect(cg.isExceeded()).toBe(true);
+    });
+
+    it('ignores a non-finite or non-positive amount instead of poisoning the ceiling', () => {
+      const cg = new CostGuard({ maxBudgetUSD: 10 }, 'claude-opus-4-6');
+      cg.recordExternalCost(NaN);
+      cg.recordExternalCost(Infinity);
+      cg.recordExternalCost(-5);
+      // A stored NaN makes `estimateCost` non-finite, and `isExceeded` fails
+      // CLOSED on that — one malformed price would end every later turn of the
+      // run with a budget error. A negative one would refund the ceiling.
+      expect(cg.snapshot().estimatedCostUSD).toBe(0);
+      expect(cg.isExceeded()).toBe(false);
+      cg.recordExternalCost(1);
+      expect(cg.snapshot().estimatedCostUSD).toBe(1);
+    });
+  });
+
   describe('reset', () => {
     it('clears all accumulated state', () => {
       const cg = new CostGuard({ maxBudgetUSD: 10 }, 'claude-opus-4-6');
       cg.recordTurn(usage(1000, 2000, 500, 300));
+      cg.recordExternalCost(3);
       cg.reset();
       const snap = cg.snapshot();
       expect(snap.inputTokens).toBe(0);
       expect(snap.outputTokens).toBe(0);
+      // Helper spend included: it is accumulated state like any other, and a
+      // field the reset forgets keeps charging the next run for the last one.
       expect(snap.estimatedCostUSD).toBe(0);
       expect(snap.iterationsUsed).toBe(0);
     });

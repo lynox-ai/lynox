@@ -1,9 +1,5 @@
-import type { ToolEntry, IAgent } from '../../types/index.js';
-
-interface FollowUpSuggestion {
-  label: string;
-  task: string;
-}
+import type { ToolEntry, IAgent, FollowUpSuggestion } from '../../types/index.js';
+import { FOLLOW_UP_TOOL_NAME } from '../../core/follow-up-fallback.js';
 
 interface SuggestFollowUpsInput {
   suggestions?: FollowUpSuggestion[] | undefined;
@@ -33,7 +29,7 @@ interface SuggestFollowUpsInput {
 export const suggestFollowUpsTool: ToolEntry<SuggestFollowUpsInput> = {
   endsTurn: true,
   definition: {
-    name: 'suggest_follow_ups',
+    name: FOLLOW_UP_TOOL_NAME,
     description:
       'Web UI only. Emit end-of-turn follow-up chips (2-4). Terminal — ENDS your turn; ' +
       'call it last. See the Web UI Mode instructions for when and how.',

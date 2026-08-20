@@ -29,6 +29,25 @@ export function isExpensiveModel(pricing: { output: number } | undefined): boole
   return typeof pricing?.output === 'number' && pricing.output >= 20;
 }
 
+/**
+ * Human context-window shorthand for picker labels: 1_000_000 → "1M",
+ * 262_144 → "256k", 200_000 → "200k". Mirror of core `catalog.ts`
+ * `formatContextWindow` — the file architecture forbids direct core imports
+ * here (see the type-mirror comment in LLMSettings); keep both in lockstep.
+ */
+export function formatContextWindow(n: number | undefined): string {
+  if (!n || n <= 0) return '';
+  if (n % 1_000_000 === 0) return `${n / 1_000_000}M`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  // Decimal thousands FIRST: 256_000 is divisible by 1024 too (1024×250), and
+  // the binary branch rendered it "250k" — factually wrong for a model
+  // advertised as 256k (pr-review #1165). Binary windows (262_144, 131_072)
+  // are never divisible by 1000, so they still reach the 1024 branch.
+  if (n % 1000 === 0) return `${n / 1000}k`;
+  if (n % 1024 === 0) return `${n / 1024}k`;
+  return `${Math.round(n / 1000)}k`;
+}
+
 /** One server-computed main-chat option (mirrors catalog.ts `MainChatModel`). */
 export interface MainChatOption {
   id: string;
@@ -39,7 +58,7 @@ export interface MainChatOption {
 /** The subset of a catalog provider entry this module needs (structural). */
 export interface ProviderLike {
   main_chat_models?: MainChatOption[];
-  models: Array<{ id: string; label: string; pricing?: { input: number; output: number } }>;
+  models: Array<{ id: string; label: string; pricing?: { input: number; output: number }; context_window?: number }>;
 }
 
 /** A picker option ready to render: option + resolved label/pricing + UI flags. */
@@ -49,6 +68,8 @@ export interface MainModelOption {
   balanced_model?: string;
   label: string;
   pricing?: { input: number; output: number };
+  /** Registry context window (catalog `context_window`) — rendered as "· 1M" in the picker. */
+  contextWindow?: number;
   expensive: boolean;
   /** Above the tenant's `max_tier` ceiling → rendered disabled with a tooltip. */
   overCeiling: boolean;
@@ -76,6 +97,7 @@ export function buildMainModelOptions(
       ...(opt.balanced_model ? { balanced_model: opt.balanced_model } : {}),
       label: m?.label ?? opt.id,
       ...(m?.pricing ? { pricing: m.pricing } : {}),
+      ...(typeof m?.context_window === 'number' ? { contextWindow: m.context_window } : {}),
       expensive: isExpensiveModel(m?.pricing),
       overCeiling: ceilingRank !== null && TIER_RANK[opt.tier] > ceilingRank,
       notRecommended: opt.tier === 'fast',

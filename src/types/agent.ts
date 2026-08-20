@@ -13,15 +13,28 @@ export interface TabQuestion {
 }
 
 /**
+ * Who asked. A confirmation prompt raised from inside a pipeline step has no
+ * visible cause in the thread — the step's tool calls carry an empty
+ * `context_id` and never enter `thread_messages` — so the dialog has to carry
+ * its own provenance or the user sees a bare "Allow / Deny" for a command
+ * nothing on screen asked for. Populated by the pipeline spawners; the
+ * main-agent path leaves every field undefined (there the cause IS on screen).
+ */
+export interface PromptOrigin {
+  /** The workflow that owns `stepId`, as the user named it. */
+  workflowName?: string | undefined;
+  stepId?: string | undefined;
+  stepTask?: string | undefined;
+}
+
+/**
  * Optional metadata threaded through prompt callbacks so the surfacing
  * layer (HTTP API SSE, MCP, CLI) can tag the prompt with the originating
  * pipeline step. Sub-agent spawners populate this when a pipeline step
  * triggers ask_user / ask_secret; the main-agent ask_user path leaves it
  * undefined.
  */
-export interface PromptMeta {
-  stepId?: string | undefined;
-  stepTask?: string | undefined;
+export interface PromptMeta extends PromptOrigin {
   /** Render the option pills as MULTI-select (toggle several, then an explicit
    *  Send) instead of single-select auto-send. The answer comes back as a
    *  JSON-encoded string[] of the chosen labels. Default false. */
@@ -58,6 +71,28 @@ export interface PromptText {
  */
 export type PromptUserFn = (question: string | PromptText, options?: string[], meta?: PromptMeta) => Promise<string>;
 export type PromptTabsFn = (questions: TabQuestion[], meta?: PromptMeta) => Promise<string[]>;
+
+/**
+ * Sink for one completed tool call — see {@link AgentConfig.recordToolCall}.
+ *
+ * `runId` is the run the CALLER was working under when it made the call, which
+ * is why it travels with the call instead of being read from ambient state: a
+ * spawned child runs concurrently with its parent, so anything the sink looked
+ * up at write time would already be the wrong answer. Absent (a bare Agent with
+ * no run) means the sink decides — the Session substitutes its own open run so
+ * an unattributed call keeps landing where it always did.
+ *
+ * Recording is best-effort throughout: a sink that throws must never break the
+ * run it is observing.
+ */
+export type ToolCallRecorder = (call: {
+  runId?: string | undefined;
+  toolName: string;
+  inputJson: string;
+  outputJson: string;
+  durationMs: number;
+  isError: boolean;
+}) => void;
 
 /** Four distinct outcomes for an ask_secret prompt:
  *  - 'saved'           : user submitted, vault accepted
@@ -211,6 +246,10 @@ export interface IAgent {
   promptMailConnect?: PromptMailConnectFn | undefined;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
+  /** Sink this agent's finished tool calls are handed to — read by `spawn_agent`
+   *  so a child inherits it and books onto its own run. See
+   *  {@link ToolCallRecorder}. */
+  recordToolCall?: ToolCallRecorder | undefined;
   /** Wave 1.2: has this run seen wrapped untrusted content? Read by the memory tools
    *  (`sourceUntrusted` evidence) and by spawn to propagate a child's taint to a parent
    *  that shares its Memory. */
@@ -228,8 +267,15 @@ export interface IAgent {
    *  child inherits the flag (else a sub-agent on an ON tenant would still run legacy extraction). */
   readonly durableMemoryEnabled?: boolean | undefined;
   /** Wave 1.2: mark this run as having seen untrusted content — used by spawn to
-   *  propagate a shared-Memory child's taint onto the parent. */
+   *  propagate a shared-Memory child's taint onto the parent. Arms the run-scoped
+   *  marker AND the sticky conversation latch; use {@link restoreConversationTaint}
+   *  when only the latter is true. */
   noteUntrustedData?(): void;
+  /** Arm ONLY the sticky conversation latch. The gate is the same either way (both OR into
+   *  `deriveTurnUntrusted`) — the difference is what gets REPORTED: the review chip names the
+   *  cause, so arming the marker for a taint that was merely inherited tells the operator this
+   *  turn read something external when nothing did. */
+  restoreConversationTaint?(): void;
   readonly spawnDepth?: number | undefined;
   readonly secretStore?: SecretStoreLike | undefined;
   readonly userId?: string | undefined;
@@ -249,6 +295,13 @@ export interface IAgent {
    * {@link SessionCounters}.
    */
   readonly sessionCounters: SessionCounters;
+  /**
+   * Return and clear the tier downgrade chosen at the most recent permission GO
+   * ("Run on balanced" on a deep-tier consent gate), if any. The spawn handler
+   * reads this to clamp deep specs to the cheaper tier. Optional: ad-hoc agents
+   * built outside a Session never produce one.
+   */
+  consumePendingDowngrade?: () => import('./models.js').ModelTier | undefined;
   /**
    * Per-conversation store of large tool results evicted at the last
    * compaction. The `recall_tool_result` tool reads it to re-fetch a payload

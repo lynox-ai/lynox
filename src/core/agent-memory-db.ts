@@ -434,6 +434,40 @@ export class AgentMemoryDb {
     return this.db.prepare('SELECT * FROM entities WHERE id = ?').get(id) as EntityRow | undefined ?? null;
   }
 
+  /**
+   * Whether this entity is DORMANT: it was mentioned by memories once, and none of
+   * those memories is active any more.
+   *
+   * `entities` has no `is_active` of its own — an entity's liveness is derived from its
+   * mentions, and `memory_delete` deactivates the memory without touching the entity
+   * row. So a deleted memory's entity survives until {@link gc} reaps it as an orphan,
+   * and `gc` may not run for a long time. Callers on the READ side use this to keep such
+   * an entity out of what reaches the model.
+   *
+   * ⚠️ Dormant is NOT the same as "has no active mentions", and the difference is a
+   * regression waiting to happen: entities that never had a mention at all are perfectly
+   * legitimate. `DataStoreBridge.registerCollection` creates one per collection and never
+   * calls `createMention`, so treating mention-less as dead would silently drop every
+   * DataStore hint from the context graph. Only an entity that HAD mentions and has lost
+   * them all is dormant.
+   *
+   * Deliberately NOT applied inside `EntityResolver.resolve`: the same call also serves
+   * extraction, where refusing to match a dormant entity would create a duplicate instead
+   * of reusing it. The filter belongs at the query site, not the resolver.
+   */
+  entityIsDormant(entityId: string): boolean {
+    const row = this.db.prepare(`
+      SELECT
+        EXISTS(SELECT 1 FROM mentions WHERE entity_id = ?) AS ever,
+        EXISTS(
+          SELECT 1 FROM mentions
+          JOIN memories ON memories.id = mentions.memory_id
+          WHERE mentions.entity_id = ? AND memories.is_active = 1
+        ) AS live
+    `).get(entityId, entityId) as { ever: number; live: number };
+    return row.ever === 1 && row.live === 0;
+  }
+
   incrementEntityMentions(entityId: string): void {
     const now = new Date().toISOString();
     this.db.prepare(`
@@ -1335,13 +1369,24 @@ export class AgentMemoryDb {
       'SELECT COUNT(*) as cnt FROM memories WHERE is_active = 0',
     ).get() as { cnt: number }).cnt;
 
+    // An orphan is an entity that HAD mentions and has lost them all — the same definition
+    // {@link entityIsDormant} uses, and for the reason its docstring already gives: an entity
+    // that never had a mention is perfectly legitimate. `DataStoreBridge.registerCollection`
+    // creates one per collection and `indexRecords` one per person/organization it extracts
+    // from a record, and NEITHER calls `createMention`.
+    //
+    // Without the first EXISTS this deletes every one of them, together with their
+    // `has_data_in` relations, on every single run — and `runStartupReap` runs it at every
+    // process start. So a tenant who connected a data source lost the whole graph derived
+    // from it at the next restart, silently, and rebuilt it only by re-importing.
     const orphanRows = this.db.prepare(`
       SELECT e.id FROM entities e
-      WHERE NOT EXISTS (
-        SELECT 1 FROM mentions mn
-        JOIN memories m ON mn.memory_id = m.id
-        WHERE mn.entity_id = e.id AND m.is_active = 1
-      )
+      WHERE EXISTS (SELECT 1 FROM mentions WHERE entity_id = e.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM mentions mn
+          JOIN memories m ON mn.memory_id = m.id
+          WHERE mn.entity_id = e.id AND m.is_active = 1
+        )
     `).all() as Array<{ id: string }>;
 
     if (dryRun) {

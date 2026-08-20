@@ -237,3 +237,36 @@ export async function runGraphGc(
 
   return result;
 }
+
+/**
+ * The REAP half of storage maintenance, run once per process start.
+ *
+ * Separate from {@link runGraphGc} on purpose. That one also runs cross-scope memory
+ * CONSOLIDATION — merging a user's memories — which is not something a reboot should do
+ * silently. This does only the removal the store already promises.
+ *
+ * Why a startup hook exists at all: the periodic trigger is `runCount % 50` and
+ * `runCount` is an in-memory field that resets to 0 on every restart, so an instance
+ * doing fewer than fifty runs between restarts reaps nothing, ever. Measured on a
+ * production instance: 288 deactivated rows (28% of the table) with the file untouched
+ * for nine days. The counter resets on restart, so the restart has to do the work.
+ *
+ * Scope note: the LEGACY store only. The durable knowledge store has no periodic purge
+ * by design — retirement there is an audit record it explicitly promises to keep
+ * (`knowledge-store.ts`), so sweeping it would break a documented guarantee.
+ *
+ * Returns the outcome rather than swallowing it: the caller decides how loud to be, and
+ * a maintenance step whose failure is invisible is exactly how the original gap survived.
+ */
+export async function runStartupReap(
+  knowledgeLayer: IKnowledgeLayer | null | undefined,
+): Promise<{ reaped: boolean; error: unknown }> {
+  if (!knowledgeLayer) return { reaped: false, error: null };
+  try {
+    await knowledgeLayer.gc();
+    return { reaped: true, error: null };
+  } catch (error: unknown) {
+    // Non-critical: the run-count trigger remains, so this degrades rather than breaks.
+    return { reaped: false, error };
+  }
+}

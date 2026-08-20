@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo, translateMessages } from './openai-adapter.js';
+import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo, translateMessages, REASONING_SUPPRESSION_MAX_TOKENS } from './openai-adapter.js';
 import { modelCapability } from '../types/models.js';
 import { StreamProcessor } from './stream.js';
 import type Anthropic from '@anthropic-ai/sdk';
@@ -922,6 +922,185 @@ describe('OpenAIAdapter', () => {
     });
   });
 
+  // Reasoning channel of an OpenAI-compat reasoning model. Every chunk shape
+  // below was OBSERVED on the wire against
+  // `accounts/fireworks/models/glm-5p2` (2026-08-02) — the ordering (reasoning
+  // first, `content` empty until reasoning ends, a tool call terminating the
+  // reasoning phase with `content` never arriving at all) is the model's real
+  // behaviour, not a guess about it. Before this, the adapter read only
+  // `delta.content` and the whole channel was billed and discarded: a plain
+  // answer split 3242 chars of reasoning against 492 of content (87% lost).
+  describe('reasoning channel → thinking blocks', () => {
+    /** Run one SSE script through the adapter and return the events. */
+    async function runStream(chunks: unknown[]): Promise<BetaRawMessageStreamEvent[]> {
+      const server = await createMockServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        for (const c of chunks) res.write(sseChunk(c));
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+      try {
+        const adapter = new OpenAIAdapter({
+          baseURL: `http://localhost:${server.port}`, apiKey: 'test-key', modelId: 'glm-5p2',
+        });
+        return await collectEvents(adapter.beta.messages.stream({
+          model: 'glm-5p2', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+        }));
+      } finally { server.close(); }
+    }
+
+    const thinkingDeltas = (evs: BetaRawMessageStreamEvent[]): string[] => evs
+      .filter(e => e.type === 'content_block_delta')
+      .map(e => (e as { delta: { type?: string; thinking?: string } }).delta)
+      .filter(d => d.type === 'thinking_delta')
+      .map(d => d.thinking ?? '');
+
+    const textDeltas = (evs: BetaRawMessageStreamEvent[]): string[] => evs
+      .filter(e => e.type === 'content_block_delta')
+      .map(e => (e as { delta: { type?: string; text?: string } }).delta)
+      .filter(d => d.type === 'text_delta')
+      .map(d => d.text ?? '');
+
+    it('emits reasoning_content as thinking deltas instead of discarding it', async () => {
+      const events = await runStream([
+        { id: 'r-1', choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: 'Der Nutzer fragt' }, finish_reason: null }] },
+        { id: 'r-1', choices: [{ index: 0, delta: { reasoning_content: ' nach Caching.' }, finish_reason: null }] },
+        { id: 'r-1', choices: [{ index: 0, delta: { content: 'Caching senkt' }, finish_reason: null }] },
+        { id: 'r-1', choices: [{ index: 0, delta: { content: ' die Kosten.' }, finish_reason: 'stop' }] },
+      ]);
+
+      expect(thinkingDeltas(events)).toEqual(['Der Nutzer fragt', ' nach Caching.']);
+      // The text channel must be untouched by the change.
+      expect(textDeltas(events)).toEqual(['Caching senkt', ' die Kosten.']);
+    });
+
+    it('opens a thinking block and closes it when content starts', async () => {
+      const events = await runStream([
+        { id: 'r-2', choices: [{ index: 0, delta: { reasoning_content: 'denk' }, finish_reason: null }] },
+        { id: 'r-2', choices: [{ index: 0, delta: { content: 'Antwort' }, finish_reason: 'stop' }] },
+      ]);
+
+      const starts = events.filter(e => e.type === 'content_block_start')
+        .map(e => (e as { index: number; content_block: { type: string } }));
+      expect(starts.map(s => s.content_block.type)).toEqual(['thinking', 'text']);
+      // Separate indices — a shared one makes StreamProcessor append the text
+      // onto the thinking block.
+      expect(starts[0]?.index).toBe(0);
+      expect(starts[1]?.index).toBe(1);
+      expect(events.filter(e => e.type === 'content_block_stop')).toHaveLength(2);
+    });
+
+    it('closes the thinking block when a tool call ends the reasoning phase', async () => {
+      // The observed glm-5p2 tool-calling turn: reasoning, then tool_calls,
+      // and `delta.content` never arrives at all.
+      const events = await runStream([
+        { id: 'r-3', choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: 'Ich brauche das Tool.' }, finish_reason: null }] },
+        { id: 'r-3', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'web_research', arguments: '' } }] }, finish_reason: null }] },
+        { id: 'r-3', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '{"action":"read"}' } }] }, finish_reason: 'tool_calls' }] },
+      ]);
+
+      const starts = events.filter(e => e.type === 'content_block_start')
+        .map(e => (e as { index: number; content_block: { type: string } }));
+      expect(starts.map(s => s.content_block.type)).toEqual(['thinking', 'tool_use']);
+      expect(starts[0]?.index).toBe(0);
+      expect(starts[1]?.index).toBe(1);
+
+      // StreamProcessor must still parse the tool input — a thinking block that
+      // stole the tool's index would corrupt `rawInputs`.
+      const processor = new StreamProcessor(async () => { /* no-op */ }, 'test-agent');
+      const result = await processor.process(
+        (async function* () { for (const e of events) yield e; })(),
+      );
+      const toolUse = result.content.find(b => b.type === 'tool_use') as BetaToolUseBlock | undefined;
+      expect(toolUse?.name).toBe('web_research');
+      expect(toolUse?.input).toEqual({ action: 'read' });
+    });
+
+    it('closes a reasoning-only turn that never produces content', async () => {
+      const events = await runStream([
+        { id: 'r-4', choices: [{ index: 0, delta: { reasoning_content: 'nur denken' }, finish_reason: null }] },
+        { id: 'r-4', choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 900 } },
+      ]);
+
+      expect(thinkingDeltas(events)).toEqual(['nur denken']);
+      // Unbalanced start/stop leaves StreamProcessor with an open block.
+      expect(events.filter(e => e.type === 'content_block_start')).toHaveLength(1);
+      expect(events.filter(e => e.type === 'content_block_stop')).toHaveLength(1);
+    });
+
+    it("accepts OpenRouter's `reasoning` spelling of the same channel", async () => {
+      const events = await runStream([
+        { id: 'r-5', choices: [{ index: 0, delta: { reasoning: 'via openrouter' }, finish_reason: null }] },
+        { id: 'r-5', choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] },
+      ]);
+      expect(thinkingDeltas(events)).toEqual(['via openrouter']);
+    });
+
+    it('keeps the channel when a proxy sends an EMPTY reasoning_content beside `reasoning`', async () => {
+      // `?? ` would pick the empty string and lose the channel. Not observed at
+      // any provider — insurance on a field two vendors spell differently.
+      const events = await runStream([
+        { id: 'r-8', choices: [{ index: 0, delta: { reasoning_content: '', reasoning: 'über den proxy' }, finish_reason: null }] },
+        { id: 'r-8', choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] },
+      ]);
+      expect(thinkingDeltas(events)).toEqual(['über den proxy']);
+    });
+
+    it('keeps block indices disjoint when reasoning arrives BETWEEN two content deltas', async () => {
+      // glm-5p2 does reasoning-then-content, so this ordering is not observed
+      // there — but the code handles it (the text-block close above the
+      // reasoning branch exists for nothing else), so it needs a test. A shared
+      // index here would make StreamProcessor append text onto the thinking
+      // block.
+      const events = await runStream([
+        { id: 'r-9', choices: [{ index: 0, delta: { content: 'Die Rechnung ' }, finish_reason: null }] },
+        { id: 'r-9', choices: [{ index: 0, delta: { reasoning_content: 'Moment.' }, finish_reason: null }] },
+        { id: 'r-9', choices: [{ index: 0, delta: { content: 'betraegt 1200 Euro.' }, finish_reason: 'stop' }] },
+      ]);
+
+      const starts = events.filter(e => e.type === 'content_block_start')
+        .map(e => (e as { index: number; content_block: { type: string } }));
+      expect(starts.map(s => s.content_block.type)).toEqual(['text', 'thinking', 'text']);
+      expect(starts.map(s => s.index)).toEqual([0, 1, 2]);
+      expect(events.filter(e => e.type === 'content_block_stop')).toHaveLength(3);
+
+      // The user-visible text must survive the split intact. (The next request's
+      // history does NOT — `translateMessages` joins text parts with a newline
+      // and plants one mid-sentence. Pre-existing, tracked separately; asserted
+      // here only so the split itself is not blamed for it later.)
+      const processor = new StreamProcessor(async () => { /* no-op */ }, 'test-agent');
+      const result = await processor.process(
+        (async function* () { for (const e of events) yield e; })(),
+      );
+      const text = result.content.filter(b => b.type === 'text')
+        .map(b => (b as { text: string }).text).join('');
+      expect(text).toBe('Die Rechnung betraegt 1200 Euro.');
+    });
+
+    it('leaves a non-reasoning provider byte-identical (no thinking block)', async () => {
+      const events = await runStream([
+        { id: 'r-6', choices: [{ index: 0, delta: { role: 'assistant', content: 'Hallo' }, finish_reason: null }] },
+        { id: 'r-6', choices: [{ index: 0, delta: { content: ' Welt' }, finish_reason: 'stop' }] },
+      ]);
+      expect(thinkingDeltas(events)).toEqual([]);
+      expect(textDeltas(events)).toEqual(['Hallo', ' Welt']);
+      const starts = events.filter(e => e.type === 'content_block_start')
+        .map(e => (e as { content_block: { type: string } }).content_block.type);
+      expect(starts).toEqual(['text']);
+    });
+
+    it('never lets a non-string reasoning field reach the thinking channel', async () => {
+      // Same leak guard as `delta.content`: an object coerced downstream bakes
+      // "[object Object]" into the block.
+      const events = await runStream([
+        { id: 'r-7', choices: [{ index: 0, delta: { reasoning_content: { unexpected: 'shape' } }, finish_reason: null }] },
+        { id: 'r-7', choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] },
+      ]);
+      expect(thinkingDeltas(events)).toEqual([]);
+      expect(textDeltas(events)).toEqual(['ok']);
+    });
+  });
+
   // T2-P1: OpenAI/Mistral/Ollama spec uses 'length' for max-tokens-hit; the
   // Anthropic event spec uses 'max_tokens'. Without the translation the
   // downstream Agent loop silently drops the truncated turn.
@@ -970,6 +1149,133 @@ describe('OpenAIAdapter', () => {
   // T2-P2: tool_choice was ignored — forced tool-use (llm-helper /
   // dag-planner / process-capture / entity-extractor-v2) was silently
   // downgraded to "auto", breaking structured-extraction contracts.
+  describe('reasoning_effort forwarding (double-gated)', () => {
+    // The registry flag is deliberately absent on every model today; the test
+    // flips it on GLM's shared features object for its own duration. `features`
+    // is FIREWORKS_TEXT_FEATURES, shared across the Fireworks entries — the
+    // unflagged case therefore uses a MISTRAL model (its own features object).
+    const GLM = 'accounts/fireworks/models/glm-5p2';
+
+    async function captureBody(model: string, outputConfig: unknown, maxTokens = 100): Promise<Record<string, unknown>> {
+      let captured = '';
+      const server = await createMockServer((req, res) => {
+        let body = '';
+        req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+        req.on('end', () => {
+          captured = body;
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.write(sseChunk({
+            id: 're-1', choices: [{ index: 0, delta: { content: 'OK' }, finish_reason: 'stop' }],
+          }));
+          res.write('data: [DONE]\n\n');
+          res.end();
+        });
+      });
+      try {
+        const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'key', modelId: model });
+        await collectEvents(adapter.beta.messages.stream({
+          model, max_tokens: maxTokens,
+          messages: [{ role: 'user', content: 'Go.' }],
+          ...(outputConfig !== undefined ? { output_config: outputConfig } : {}),
+        } as unknown as Parameters<typeof adapter.beta.messages.stream>[0]));
+      } finally {
+        server.close();
+      }
+      return JSON.parse(captured) as Record<string, unknown>;
+    }
+
+    function withFlag<T>(fn: () => Promise<T>): Promise<T> {
+      const features = modelCapability(GLM)!.features as { reasoningEffort?: boolean };
+      features.reasoningEffort = true;
+      return fn().finally(() => { delete features.reasoningEffort; });
+    }
+
+    it('forwards effort for a flagged model', async () => {
+      const body = await withFlag(() => captureBody(GLM, { effort: 'high' }));
+      expect(body['reasoning_effort']).toBe('high');
+    });
+
+    it("clamps the Anthropic-only 'max' tier to the wire ceiling 'high'", async () => {
+      const body = await withFlag(() => captureBody(GLM, { effort: 'max' }));
+      expect(body['reasoning_effort']).toBe('high');
+    });
+
+    it("clamps 'xhigh' to 'high' too — both Anthropic-only tiers, one wire ceiling", async () => {
+      const body = await withFlag(() => captureBody(GLM, { effort: 'xhigh' }));
+      expect(body['reasoning_effort']).toBe('high');
+    });
+
+    it('sends nothing when the caller sent no effort — the model stays self-adaptive', async () => {
+      const body = await withFlag(() => captureBody(GLM, undefined));
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+
+    it('drops a malformed effort value instead of forwarding it', async () => {
+      const body = await withFlag(() => captureBody(GLM, { effort: 'turbo' }));
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+
+    // ── defaultReasoningEffort ────────────────────────────────────────────
+    // A hybrid-reasoning model whose thinking floor is bigger than its callers'
+    // output budgets answers HTTP 200 with an EMPTY string. Measured against the
+    // live Fireworks API on 2026-08-18: 4 of 6 fast-tier callers came back empty
+    // at their real max_tokens, each having spent 100% of the budget on
+    // reasoning tokens. These pin the suppression that fixes it.
+    const FAST = 'accounts/fireworks/models/deepseek-v4-flash-0731';
+    const NO_DEFAULT = 'accounts/fireworks/models/minimax-m3';
+
+    it("sends reasoning_effort:'none' for a model that declares the default", async () => {
+      const body = await captureBody(FAST, undefined);
+      expect(body['reasoning_effort']).toBe('none');
+    });
+
+    it('applies the default even when the caller sent an effort — the model is not ladder-flagged', async () => {
+      // Documents the real precedence rather than the one the field name
+      // suggests. `'low'` was measured NOT to suppress the floor, so a caller
+      // able to override down to it would reinstate the empty-response bug.
+      const body = await captureBody(FAST, { effort: 'high' });
+      expect(body['reasoning_effort']).toBe('none');
+    });
+
+    it('wins over the ladder when a model sets both — `features` is a SHARED object', async () => {
+      // Flagging any ONE Fireworks model for the ladder flags all six (they
+      // point at the same FIREWORKS_TEXT_FEATURES reference), and the agent's
+      // post-run effort restore would then put `medium` on this wire. `'low'`
+      // was measured not to suppress the floor, so yielding here would make the
+      // empty-response bug reachable from an unrelated model's flag.
+      const cap = modelCapability(FAST)! as { features: { reasoningEffort?: boolean } };
+      cap.features.reasoningEffort = true;
+      try {
+        const body = await captureBody(FAST, { effort: 'high' });
+        expect(body['reasoning_effort']).toBe('none');
+      } finally {
+        delete cap.features.reasoningEffort;
+      }
+    });
+
+    it('leaves a call above the budget bound self-adaptive — a spawned sub-agent keeps its thinking', async () => {
+      const body = await captureBody(FAST, undefined, REASONING_SUPPRESSION_MAX_TOKENS + 1);
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+
+    it('still suppresses exactly AT the bound', async () => {
+      const body = await captureBody(FAST, undefined, REASONING_SUPPRESSION_MAX_TOKENS);
+      expect(body['reasoning_effort']).toBe('none');
+    });
+
+    it('sends nothing for a model that declares no default', async () => {
+      const body = await captureBody(NO_DEFAULT, undefined);
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+
+    it('drops effort for an unflagged model — the registry default keeps today\'s wire byte-identical', async () => {
+      // mistral-medium is registered but NOT flagged (own features object, not
+      // the mutated Fireworks one) — the Agent's default effort must not reach it.
+      const body = await captureBody('mistral-medium-2604', { effort: 'high' });
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+  });
+
   describe('tool_choice translation (T2-P2)', () => {
     async function captureRequestBody(toolChoice: unknown): Promise<{ tool_choice?: unknown }> {
       let captured = '';
@@ -1387,6 +1693,36 @@ describe('translateMessages — user content is never silently dropped', () => {
     ).toThrow(/cannot process images/i);
   });
 
+  // Fireworks vision candidates (2026-08-14): registry → adapter, same shape as
+  // the Mistral #2 guard. The online test (tests/online/fireworks-vision.test.ts)
+  // proves the wire against the real Fireworks endpoint but skips without
+  // FIREWORKS_API_KEY — this CI-visible twin catches a flip-back to
+  // FIREWORKS_TEXT_FEATURES on the three candidate entries.
+  it('fireworks: kimi-k3 / qwen3p7-plus / minimax-m3 resolve vision:true → adapter translates the image', () => {
+    for (const id of ['accounts/fireworks/models/kimi-k3', 'accounts/fireworks/models/qwen3p7-plus', 'accounts/fireworks/models/minimax-m3']) {
+      const visionSupport = modelCapability(id)?.features?.vision;
+      expect(visionSupport, id).toBe(true);
+      const out = translateMessages(undefined, [{ role: 'user', content: [{ type: 'text', text: 'hi' }, IMG] }], {
+        visionSupport, modelLabel: id,
+      });
+      const parts = out.find((m) => m.role === 'user')!.content as Array<{ type: string }>;
+      expect(parts.some((p) => p.type === 'image_url'), id).toBe(true);
+    }
+  });
+
+  it('fireworks: genuinely non-vision siblings stay vision:false → adapter throws (no shared-object flip)', () => {
+    // GLM 5.2 / DeepSeek v4 / gpt-oss-120b have no image input on Fireworks. If
+    // someone "fixes" the candidates by flipping FIREWORKS_TEXT_FEATURES itself,
+    // these models would silently start receiving images their pages disavow.
+    for (const id of ['accounts/fireworks/models/glm-5p2', 'accounts/fireworks/models/deepseek-v4-pro', 'accounts/fireworks/models/deepseek-v4-flash-0731', 'accounts/fireworks/models/gpt-oss-120b']) {
+      const visionSupport = modelCapability(id)?.features?.vision;
+      expect(visionSupport, id).toBe(false);
+      expect(() =>
+        translateMessages(undefined, [{ role: 'user', content: [IMG] }], { visionSupport, modelLabel: id }),
+      ).toThrow(/cannot process images/i);
+    }
+  });
+
   it('DEF-0074: preserves user text that shares a turn with a tool_result', () => {
     const out = translateMessages(undefined, [
       { role: 'user', content: [
@@ -1400,6 +1736,48 @@ describe('translateMessages — user content is never silently dropped', () => {
     expect(tool.tool_call_id).toBe('call_1');
     const user = out.find((m) => m.role === 'user')!;
     expect(user.content).toBe('and here is my follow-up');
+  });
+
+  it('DEF-openai-wire-toolerr: prefixes an is_error tool_result so the model sees the failure', () => {
+    // The Anthropic wire carries is_error on tool_result; the OpenAI wire has no
+    // such field on role:'tool'. Without a marker, agent.ts error results
+    // ('Permission denied', tool exceptions) reach the model as ordinary
+    // success-shaped text on every openai-compat provider.
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'call_e', content: 'Permission denied', is_error: true },
+      ] },
+    ]);
+    expect(out).toEqual([{ role: 'tool', tool_call_id: 'call_e', content: '[Tool error] Permission denied' }]);
+  });
+
+  it('DEF-openai-wire-toolerr: prefixes is_error with block-array content too', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [
+        {
+          type: 'tool_result', tool_use_id: 'call_b', is_error: true,
+          content: [{ type: 'text', text: 'HTTP 403' }, { type: 'text', text: 'forbidden' }],
+        },
+      ] },
+    ]);
+    const tool = out.find((m) => m.role === 'tool')!;
+    expect(tool.content).toBe('[Tool error] HTTP 403\nforbidden');
+  });
+
+  it('DEF-openai-wire-toolerr: an is_error result with empty content still carries the marker', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_x', is_error: true }] },
+    ]);
+    // '[Tool error] ' with a trailing space would be the only content on the
+    // message — assert the bare marker instead.
+    expect(out).toEqual([{ role: 'tool', tool_call_id: 'call_x', content: '[Tool error]' }]);
+  });
+
+  it('DEF-openai-wire-toolerr: a successful tool_result carries no prefix', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_ok', content: 'fine', is_error: false }] },
+    ]);
+    expect(out).toEqual([{ role: 'tool', tool_call_id: 'call_ok', content: 'fine' }]);
   });
 
   it('byte-parity: a text-only user message stays a plain string (no array)', () => {
@@ -1474,4 +1852,85 @@ describe('OpenAIAdapter — request idle timeout (DEF-openai-adapter-timeout)', 
       ).rejects.toThrow();
     } finally { server.close(); }
   }, 5000);
+});
+
+describe('OpenAIAdapter — the non-streaming call every extraction path uses', () => {
+  /**
+   * `createLLMClient` returns `new OpenAIAdapter(...) as unknown as Anthropic` for every tenant
+   * whose provider maps to the openai wire client — Mistral and OpenAI. The cast makes the
+   * compiler agree with any shape, so a method the adapter simply did not have failed at
+   * RUNTIME and only there: `client.beta.messages.create is not a function`.
+   *
+   * Three callers reach it — `llm-helper.ts` (save_workflow extraction), `process-capture.ts`,
+   * and the inbox classifier — and two of them use the UN-prefixed `client.messages.create`,
+   * which is a different property. Both are covered here for that reason; testing one would
+   * have left half the callers broken while looking green.
+   */
+  function toolCallServer(): Promise<{ port: number; close: () => void }> {
+    return createMockServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(sseChunk({
+        id: 'x-1', choices: [{
+          index: 0,
+          delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_1', function: { name: 'extract', arguments: '{"ok":true}' } }] },
+          finish_reason: null,
+        }],
+      }));
+      res.write(sseChunk({
+        id: 'x-1', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+        usage: { prompt_tokens: 7, completion_tokens: 3 },
+      }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+  }
+
+  it.each([
+    ['beta.messages.create', (a: OpenAIAdapter) => a.beta.messages.create],
+    ['messages.create',      (a: OpenAIAdapter) => a.messages.create],
+  ])('%s returns an assembled message with the fields its callers read', async (_label, pick) => {
+    const server = await toolCallServer();
+    try {
+      const adapter = new OpenAIAdapter({
+        baseURL: `http://localhost:${server.port}`, apiKey: 'test-key', modelId: 'test-model',
+      });
+      const msg = await pick(adapter)({
+        model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+      });
+
+      // Exactly what the three call sites destructure: the content blocks and the usage.
+      expect(msg.stop_reason).toBe('tool_use');
+      expect(msg.content.find(b => b.type === 'tool_use')?.name).toBe('extract');
+      expect(msg.usage.input_tokens).toBe(7);
+      expect(msg.usage.output_tokens).toBe(3);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe('OpenAIAdapter — a truncated stream must not assemble into a plausible message', () => {
+  it('throws instead of returning end_turn with zero usage', async () => {
+    // The upstream ends mid-answer: content arrived, no finish_reason ever did. Before this,
+    // `finalMessage()` returned partial content with `stop_reason: 'end_turn'` and usage 0/0 —
+    // indistinguishable from a short, cheap, successful call. `process-capture.ts` debits from
+    // that usage, so it recorded a real API call as costing nothing and accepted the truncated
+    // extraction as the answer.
+    const server = await createMockServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(sseChunk({ id: 't-1', choices: [{ index: 0, delta: { role: 'assistant', content: 'Half a th' }, finish_reason: null }] }));
+      res.write('data: [DONE]\n\n');
+      res.end();
+    });
+    try {
+      const adapter = new OpenAIAdapter({
+        baseURL: `http://localhost:${server.port}`, apiKey: 'test-key', modelId: 'test-model',
+      });
+      await expect(adapter.messages.create({
+        model: 'test-model', max_tokens: 100, messages: [{ role: 'user', content: 'Hi' }],
+      })).rejects.toThrow(/incomplete/);
+    } finally {
+      server.close();
+    }
+  });
 });

@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { EngineDb } from '../../core/engine-db.js';
 import { SubjectStore } from '../../core/subject-store.js';
 import { DataStore } from '../../core/data-store.js';
@@ -18,19 +20,6 @@ import type { PromptText } from '../../types/index.js';
  * promptUser and fails closed with no interactive channel; it shares the merge
  * runner's ledger (hermetic here via setDataDir into a tmp dir).
  */
-/**
- * Every string `subjects_merge` shows a model or a user, pinned as one value.
- * Regenerate deliberately, never by pasting a failure diff:
- *   LYNOX_EMIT_SURFACE=/tmp/s.txt npx vitest run src/tools/builtin/subjects-merge.test.ts
- * and read the module header before you accept the new wording.
- */
-const EXPECTED_SURFACE = [
-  "{\"name\":\"subjects_merge\",\"description\":\"Merge two person entries that are the SAME real person into one (e.g. a bare first name \\\"Ada\\\" and the fuller \\\"Dr. Ada Lovelace\\\"), moving all their notes, tasks and mentions onto the kept entry. Use ONLY when confident they are one person. Pass the shorter/duplicate name as `duplicate` and the fuller/correct name as `canonical`. You will be asked to confirm. Undoing needs a command-line rollback from a ledger file that is not in any backup.\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"duplicate\":{\"type\":\"string\",\"description\":\"The duplicate person to fold away (kept as an alias of the canonical).\"},\"canonical\":{\"type\":\"string\",\"description\":\"The correct / fuller person entry to keep.\"}},\"required\":[\"duplicate\",\"canonical\"]}}",
-  "Never tell the user a merge is reversible, undoable or can be rolled back from chat. It cannot: the rollback is a command-line step against a ledger file under ~/.lynox/sweeps/, and that file is in no backup and in neither migration list, so a restore or a tenant migration ends the possibility silently. Say what the result message says.",
-  "Merge \"\u0001\" into \"\u0001\"? Every note, task and mention of \"\u0001\" moves to \"\u0001\", and \"\u0001\" is archived. Undoing it needs a command-line rollback \u2014 not something you can do from chat.",
-  "Merged \"Ada\" into \"Dr. Ada Lovelace\" \u2014 one person now. An operator can reverse this from <LEDGER> \u2014 that file is not included in backups, so keep it if this may need undoing.",
-].join('\n<<<>>>\n');
-
 describe('subjects_merge tool (PR-C3)', () => {
   const tmpDirs: string[] = [];
   let dir: string;
@@ -71,47 +60,66 @@ describe('subjects_merge tool (PR-C3)', () => {
   // `backup.ts`'s three lists and in neither the migration export set nor the
   // import whitelist — so a migration or a restore silently makes every past
   // merge unreversible.
-  // ── ONE pin over EVERY string this tool puts in front of a model or a user ──
+  // ── The axis that kept escaping: a NEW string promising an undo ────────────
   //
-  // Four review rounds each found the same defect one field over: the description,
-  // then detailedGuidance, then the schema property descriptions, then the runtime
-  // strings. Every round I pinned the field that had just been caught and left the
-  // others on patterns — and a pattern is only ever as wide as the synonyms someone
-  // thought of ("merges ARE reversible" escaped a substring; "fully recoverable"
-  // escaped a root denylist).
+  // Four rounds each pinned the field that had just been caught, by equality.
+  // The fifth showed why that loses: four pinned fields left EIGHT of this
+  // module's strings unpinned — `Cancelled`, the refusal, the error paths — and
+  // an undo promise dropped into the success message's own `record cells` branch
+  // stayed green. Enumerating the fields is the thing that keeps being wrong.
   //
-  // Enumerating fields loses because the set of fields is what I keep getting wrong.
-  // So pin the SURFACE: every model-visible and user-visible string, together, by
-  // equality. A new string anywhere in this tool changes the snapshot, which is the
-  // point — adding one has to be a deliberate edit here.
-  it('pins every model- and user-visible string as one surface', async () => {
-    const agent = makeAgent('Merge');
-    const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);
-    const arg = (agent.promptUser as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
-    const segs = (arg as { segments: Array<{ kind: string; text: string }> }).segments;
-    const ledger = readdirSync(join(dir, 'sweeps')).find((f) => f.startsWith('merge-'))!;
+  // So assert over ALL of them. Every string literal in the module is collected
+  // through the TypeScript AST, which never yields a comment — so the undo
+  // vocabulary in the prose above can neither trip this test nor satisfy it, the
+  // failure mode a `readFileSync` + regex guard would have. Of those literals,
+  // the ones carrying undo vocabulary must be EXACTLY the clauses below.
+  //
+  // Its honest limit, so nobody reads more into a green run: it matches
+  // VOCABULARY. A promise phrased without any of these words ("you can always get
+  // the old entry back") passes. It buys every literal in the file on the one
+  // axis that has actually failed five times — not a proof that no promise can be
+  // phrased at all.
+  const UNDO_VOCABULARY = /revers|undo|permanent|recoverab|restor|rollback|roll(?:ed|s|ing)? back/i;
 
-    const surface = [
-      // name + description + the whole input_schema, i.e. the cached wire definition
-      JSON.stringify(subjectsMergeTool.definition),
-      // the on-use instruction — pinned by CONTENT, not merely by existence: the
-      // round-3 fix pinned that it exists, and inverting it to "Reassure the user
-      // that a merge is fully reversible" then left the whole suite green.
-      subjectsMergeTool.detailedGuidance,
-      // the consent prompt's literal wording (frames only; the values are the two
-      // KG-derived names and are asserted separately as values, below)
-      segs.filter((sg) => sg.kind === 'frame').map((sg) => sg.text).join('\u0001'),
-      // the result, with the one genuinely variable part replaced
-      res.replace(join(dir, 'sweeps', ledger), '<LEDGER>'),
-    ].join('\n<<<>>>\n');
+  /** The clauses allowed to speak about undoing — fragments, as the source concatenates them. */
+  const ALLOWED_UNDO_CLAUSES = [
+    ' — that file is not included in backups, so keep it if this may need undoing.',
+    '" is archived. Undoing it needs a command-line rollback — not something you can do from chat.',
+    'An operator can reverse this from ',
+    'Never tell the user a merge is reversible, undoable or can be rolled back from chat. It ',
+    '`kind` if they are not people. You will be asked to confirm. It cannot be undone from chat.',
+    'and that file is in no backup and in neither migration list, so a restore or a tenant ',
+    'cannot: the rollback is a command-line step against a ledger file under ~/.lynox/sweeps/, ',
+  ];
 
-    expect(surface, [
-      'A string this tool shows a model or a user changed.',
-      'That is allowed — but not silently: this tool promised users an undo it did not have,',
-      'in THREE separate strings, and four review rounds each caught one more.',
-      'If the new wording still avoids promising an undo from chat, update EXPECTED_SURFACE.',
-      'If it promises one, it is wrong — see the module header.',
-    ].join(' ')).toBe(EXPECTED_SURFACE);
+  it('lets no string in this module speak about undoing except the vetted clauses', () => {
+    const file = fileURLToPath(new URL('./subjects-merge.ts', import.meta.url));
+    const sf = ts.createSourceFile(file, readFileSync(file, 'utf-8'), ts.ScriptTarget.Latest, true);
+
+    const literals: string[] = [];
+    const walk = (node: ts.Node): void => {
+      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) literals.push(node.text);
+      else if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) literals.push(node.text);
+      ts.forEachChild(node, walk);
+    };
+    walk(sf);
+
+    // Guards the guard: if the collector silently stopped seeing this module's
+    // strings, every assertion below would pass vacuously — the swallowed-outage
+    // shape. This tool has ~75 literals; a collapse to a handful is a broken
+    // collector, not a cleaned-up file.
+    expect(literals.length).toBeGreaterThan(40);
+
+    expect(
+      literals.filter((lit) => UNDO_VOCABULARY.test(lit)).sort(),
+      [
+        'A string in subjects_merge started (or stopped) speaking about undoing a merge.',
+        'There IS no undo from chat: rollbackMergeRun has one non-test caller (the subject-sweep',
+        'CLI), and its ledger is in no backup and in neither migration list — so a restore or a',
+        'tenant migration ends the possibility silently. If the new wording says that honestly,',
+        'add it to ALLOWED_UNDO_CLAUSES. If it promises the user an undo, it is wrong.',
+      ].join(' '),
+    ).toEqual([...ALLOWED_UNDO_CLAUSES].sort());
   });
 
   it('names the real undo route instead of claiming reversibility', async () => {
@@ -230,6 +238,51 @@ describe('subjects_merge tool (PR-C3)', () => {
 
   it('declares destructive metadata (defense-in-depth flag for the permission layer)', () => {
     expect(subjectsMergeTool.destructive).toEqual({ mode: 'data' });
+  });
+
+  it('merges ORGANIZATIONS when told the kind, and is UNREACHABLE for them without it', async () => {
+    // The tool resolved `person` only, while `organization` is the durable-knowledge
+    // write path's DEFAULT kind and the bulk of a real graph — so the one user-reachable
+    // way to fix a duplicate could not name most of what needed fixing.
+    // Both halves are asserted, and they catch DIFFERENT regressions: hardcoding `kind`
+    // back to 'person' is caught by the without-kind half below (it would stop erroring),
+    // while the with-kind half catches a silent cross-kind fallback — a resolver that
+    // ignores the kind and finds the person 'Ada' when asked for an organization.
+    const id = (r: { ambiguous: boolean } & Record<string, unknown>): string => {
+      if (r.ambiguous) throw new Error('fixture should not be ambiguous');
+      return r['id'] as string;
+    };
+    const canon = id(subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG' }));
+    const dup = id(subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau' }));
+    const other = id(subjects.findOrCreate({ kind: 'organization', name: 'Nordberg AG' }));
+
+    const withoutKind = await subjectsMergeTool.handler(
+      { duplicate: 'Meridian Bau', canonical: 'Meridian Bau AG' }, makeAgent('Merge'));
+    expect(withoutKind).toMatch(/no person named/);
+    expect(subjects.getSubject(dup)!.merged_into).toBeNull();
+
+    const res = await subjectsMergeTool.handler(
+      { duplicate: 'Meridian Bau', canonical: 'Meridian Bau AG', kind: 'organization' }, makeAgent('Merge'));
+    expect(res).not.toMatch(/^Error/);
+    expect(subjects.getSubject(dup)!.merged_into).toBe(canon);
+    expect(subjects.getSubject(other)!.merged_into).toBeNull();   // untouched
+  });
+
+  it('refuses a kind it must not merge by name', async () => {
+    // `engagement` identity is provider×client×period, not the name; merging two by
+    // name would fold distinct pieces of work that merely share a title.
+    const agent = makeAgent('Merge');
+    const res = await subjectsMergeTool.handler(
+      { duplicate: 'A', canonical: 'B', kind: 'engagement' }, agent);
+    expect(res).toMatch(/`kind` must be one of/);
+    expect(agent.promptUser).not.toHaveBeenCalled();
+  });
+
+  it('still defaults to person when no kind is given', async () => {
+    const agent = makeAgent('Merge');
+    const res = await subjectsMergeTool.handler({ duplicate: 'Ada', canonical: 'Dr. Ada Lovelace' }, agent);
+    expect(res).not.toMatch(/^Error/);
+    expect(subjects.getSubject(dupId)!.merged_into).toBe(canonId);
   });
 
   it('hard-refuses in autonomous mode even WITH a wired promptUser (no rubber-stamp notification)', async () => {

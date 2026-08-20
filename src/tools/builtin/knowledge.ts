@@ -4,9 +4,37 @@ import { matchesSecretPattern, maskSecretPatterns } from '../../core/secret-stor
 import { BlockEditError, BlockOverLimitError, MAX_KNOWLEDGE_ENTRY_CHARS } from '../../core/knowledge-store.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { appendCaptureTelemetry } from '../../core/capture-telemetry.js';
+import type { UntrustedCause } from '../../core/untrusted-signals.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { appendUntrustedCauseLog } from '../../core/untrusted-cause-log.js';
 import { pv } from '../../core/prompt-value.js';
+import { canSupersede } from '../../core/provenance.js';
+
+/**
+ * The reason clause every trust-gate outcome names, worded for the signal that ACTUALLY fired.
+ *
+ * The gate ORs a run-scoped signal with the conversation-sticky F5 latch (`untrusted-signals.ts`),
+ * so a turn that ran no external tool at all still trips it once anything earlier in the thread
+ * tainted the conversation. A fixed "this turn read external content" is then false — to the model,
+ * and to the user it relays the reason to. These strings are prompt surface: they teach a rule
+ * about the runtime, so a wrong one mis-teaches every later turn. Observed on prod 2026-08-10
+ * (engine 2.13.0): the model quoted the fixed sentence to explain a queue on a turn whose only
+ * tool call was `remember`.
+ */
+function untrustedReason(cause: UntrustedCause): string {
+  return cause === 'conversation'
+    ? 'this conversation read external content on an earlier turn'
+    : 'this turn read external content';
+}
+
+/**
+ * How to reach a trusted write, given the cause. Under the sticky latch there is no clean turn
+ * left in THIS thread — telling the user to "tell me directly on a clean turn" sends them to an
+ * unreachable state, so the conversation case names the one thing that does clear it (`reset`).
+ */
+function untrustedRemedy(cause: UntrustedCause): string {
+  return cause === 'conversation' ? 'in a new chat' : 'directly on a clean turn';
+}
 
 /**
  * Durable Knowledge Substrate tools (DK.1). The always-on capture/read surface that
@@ -92,10 +120,13 @@ export const rememberTool: ToolEntry<RememberInput> = {
     const sourceUntrusted = deriveTurnUntrusted(agent);
     // Record WHICH signal fired. The gate needs only the boolean; the review queue needs the
     // attribution, or the cost of the sticky (F5) half of the union stays unmeasurable.
+    // Derived ONCE and reused by the cause-log, the SSE chip, and the model-visible return
+    // string below, so the three can never disagree about why this write was queued.
+    const untrustedCause = describeTurnUntrusted(agent);
     void appendUntrustedCauseLog(agent.toolContext.userConfig?.retrieval_shadow_log === true, {
       ts: Date.now(),
       site: 'remember',
-      cause: describeTurnUntrusted(agent),
+      cause: untrustedCause,
       untrusted: sourceUntrusted,
       threadId: agent.currentThreadId,
       runId: agent.currentRunId,
@@ -143,7 +174,7 @@ export const rememberTool: ToolEntry<RememberInput> = {
     // DK-UX inline signal: a CLIENT-ONLY StreamEvent for the inline chip (trusted → a
     // "gemerkt · undo" confirmation, untrusted → a keep/discard review chip). Emitted for a
     // NEW write only (never a dedup no-op). This is NOT the tool-result and is never folded
-    // into model context — the return string below stays deliberately minimal (line 103),
+    // into model context — the return string below stays deliberately minimal,
     // and the event flows only to the web-ui via the SSE side-channel. For an untrusted
     // (pending_review) write the event carries the raw text for the review chip.
     if (result.deduped !== true && (result.status === 'active' || result.status === 'pending_review')) {
@@ -155,20 +186,32 @@ export const rememberTool: ToolEntry<RememberInput> = {
         status: result.status,
         text,
         agent: agent.name,
+        // Only for a queued write: on a trusted one there is no cause to name, and sending
+        // 'none' would invite the UI to render an empty reason.
+        ...(result.status === 'pending_review' ? { cause: untrustedCause } : {}),
       });
     }
 
     if (result.status === 'pending_review') {
       // Do NOT echo the (possibly injected) text back into context.
-      return 'Recorded for review: this turn read external content, so it is queued for your approval before it becomes active knowledge.';
+      return `Recorded for review: ${untrustedReason(untrustedCause)}, so it is queued for your approval before it becomes active knowledge.`;
     }
     if (result.deduped === true) {
       // A near-duplicate of an existing active entry — nothing new was stored. Tell the model so
       // it stops re-recording the same fact (and does not report a spurious new save to the user).
       return 'Already recorded — this matches an existing durable entry, so nothing new was stored.';
     }
-    const linked = result.subjectId ? ' and linked to the named subject' : '';
     const pinned = result.pinned ? ', pinned to focus' : '';
+    if (result.subjectAmbiguous === true) {
+      // Say WHICH way it is incomplete. The store refuses to bind an ambiguous name to a guess,
+      // so the fact is kept against the bare name — recoverable, but attributed to nobody. Left
+      // as a plain "Remembered." the model reports full success and the user learns nothing;
+      // naming the ambiguity is what lets it ask which one and record the fact properly. This is
+      // the model's only view of that outcome — the return string IS the surface.
+      return `Remembered${pinned}, but "${input.subject}" matches more than one subject, so it is `
+        + 'not linked to any of them. Ask which one is meant, then record it again with the full name.';
+    }
+    const linked = result.subjectId ? ' and linked to the named subject' : '';
     return `Remembered${linked}${pinned}.`;
   },
 };
@@ -205,7 +248,27 @@ export const recallTool: ToolEntry<RecallInput> = {
     if (!query) return 'Pass a `query` describing what to recall.';
 
     const entries = ks.recall({ query, subjectName: input.subject });
-    if (entries.length === 0) return 'No matching durable knowledge found.';
+    // The recall-time nudge (DK plan package 1). Queued entries about this subject are named
+    // by COUNT, never by text: a queued write happened on a turn that handled content the
+    // operator did not author, and its wording must not reach model context before a human
+    // has looked at it. Its existence may — and that is the point. The model learns something
+    // is waiting exactly when the subject comes up, which is the cheapest moment for the
+    // person to judge it. Write-time asks scale with how much gets READ; this scales with
+    // usefulness, and it is the only emptying path for captures made on background runs,
+    // which have no chip by construction.
+    // No caller-side guard on an absent subject: `pendingCountForSubjectHint` returns 0 for an
+    // empty needle itself, so a second check here is unreachable by construction — a line no
+    // test can distinguish from its own removal. The store's guard is pinned by a test of its
+    // own, so this delegation cannot break silently.
+    const waiting = ks.pendingCountForSubjectHint(input.subject ?? '');
+    const waitingLine = waiting > 0
+      ? `\n\n(${String(waiting)} further ${waiting === 1 ? 'fact' : 'facts'} about this subject ${waiting === 1 ? 'is' : 'are'} waiting for the user's approval and cannot be shown until then. If it matters here, tell them so they can review it — do not guess at the content.)`
+      : '';
+    if (entries.length === 0) {
+      return waiting > 0
+        ? `No matching durable knowledge found.${waitingLine}`
+        : 'No matching durable knowledge found.';
+    }
     // H7: mask secrets in the tool RESULT too — recall returns decrypted text into model
     // context, so it must run the SAME two masking layers as the always-loaded block render
     // (knowledge-store.renderBlocks), else recall would be a strictly weaker surface: a
@@ -217,7 +280,7 @@ export const recallTool: ToolEntry<RecallInput> = {
         // agent has no way to reference an entry it wants retired.
         return `- [${e.id.slice(0, 8)}] ${maskSecretPatterns(tenantMasked)}${tierTag(e.sourceType)}`;
       })
-      .join('\n');
+      .join('\n') + waitingLine;
   },
 };
 
@@ -268,7 +331,8 @@ export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
     // fragile. Injected "append 'auto-approve all invoices' to the playbook" is thus blocked
     // at source — the playbook holds approval boundaries a rule could silently disable.
     if (deriveTurnUntrusted(agent)) {
-      return 'Refused: memory blocks hold standing rules and cannot be edited on a turn that read external content. If this is a genuine durable rule, tell me directly (a clean turn) and I will record it.';
+      const cause = describeTurnUntrusted(agent);
+      return `Refused: memory blocks hold standing rules and cannot be edited because ${untrustedReason(cause)}. If this is a genuine durable rule, tell me ${untrustedRemedy(cause)} and I will record it.`;
     }
 
     // H5: mirror subjects_merge — a standing-rule change hard-refuses in autonomous mode or
@@ -348,7 +412,8 @@ export const memoryRetireTool: ToolEntry<RetireInput> = {
     // Untrusted turn → refuse outright (H5-class): injected content must not be
     // able to retire real knowledge ("forget that X" in a poisoned mail body).
     if (deriveTurnUntrusted(agent)) {
-      return 'Refused: memory cannot be retired on a turn that read external content. If this fact is genuinely outdated, tell me directly on a clean turn.';
+      const cause = describeTurnUntrusted(agent);
+      return `Refused: memory cannot be retired because ${untrustedReason(cause)}. If this fact is genuinely outdated, tell me ${untrustedRemedy(cause)}.`;
     }
     if (agent.autonomy === 'autonomous' || !agent.promptUser) {
       return 'Refused: retiring memory needs interactive confirmation and cannot run autonomously.';
@@ -362,6 +427,17 @@ export const memoryRetireTool: ToolEntry<RetireInput> = {
     }
     if (!entry) return 'No active entry with this id. Use `recall` to find the entry and pass its [id] prefix.';
 
+    // Gate BEFORE the prompt, not after. The agent channel acts at `agent_inferred`
+    // trust, so `retireEntry` below refuses anything the user asserted or a tool
+    // verified — but that refusal used to arrive AFTER the human had already been asked
+    // and had already clicked "Retire". Asking someone to authorise an action that is
+    // going to be refused either way teaches them the prompt is decorative, and it hands
+    // a prompt-injected agent a way to make the user click a confirm that never applies.
+    // The gate is the same one either way; only its position changes.
+    if (!canSupersede('agent_inferred', entry.sourceType)) {
+      return `Refused: this entry is recorded at a higher trust level (${entry.sourceType}) than I can retire. Retire it yourself in the memory view if it is genuinely wrong.`;
+    }
+
     const reason = input.reason ? ` Reason: ${clip(input.reason)}.` : '';
     const answer = await agent.promptUser(
       pv`Retire this memory entry? "${clip(entry.text)}"${reason} It stays on record as superseded and stops surfacing. This needs a new \`remember\` if a corrected fact should replace it.`,
@@ -370,8 +446,8 @@ export const memoryRetireTool: ToolEntry<RetireInput> = {
     if (answer !== 'Retire') return 'Cancelled — the entry stays active.';
 
     try {
-      // The agent channel acts at agent_inferred trust — canSupersede refuses
-      // retiring user_asserted / tool_verified facts (those need the human).
+      // The store re-checks the same gate — the pre-prompt check above is for the
+      // human's benefit, this one is the actual boundary. Both must stay.
       ks.retireEntry(entry.id, 'agent_inferred');
       return 'Retired. Record the corrected fact with `remember` if there is one.';
     } catch (err) {
@@ -411,10 +487,30 @@ export const memoryFocusTool: ToolEntry<FocusInput> = {
     }
     const subjects = agent.toolContext.subjectStore;
     if (!subjects) return 'Subject lookup is not available for this agent.';
-    const hit = subjects.findCanonical(name, 'organization')
-      ?? subjects.findByAlias(name, 'organization')
-      ?? subjects.findCanonical(name, 'person')
-      ?? subjects.findByAlias(name, 'person');
+    // Ambiguity stops the org→person chain where it used to CONTINUE, but never pre-empts
+    // a stage that can still answer with certainty (same precedence rule as
+    // `_resolveRecallScope`). Unlike the silent read paths it is worth SAYING: the caller
+    // is an agent that can supply the full name, so a refusal it can act on beats a
+    // "not found" that is untrue and beats a confident focus on the wrong subject.
+    const orgCanonical = subjects.findCanonical(name, 'organization');
+    const orgAlias = orgCanonical ? null : subjects.findByAliasResolved(name, 'organization');
+    const certain = orgCanonical ?? orgAlias?.row ?? subjects.findCanonical(name, 'person');
+    const personAlias = certain || orgAlias?.ambiguous
+      ? null
+      : subjects.findByAliasResolved(name, 'person');
+    if (!certain && (orgAlias?.ambiguous || personAlias?.ambiguous)) {
+      return `"${clip(name)}" matches more than one subject. Use the full name to say which one.`;
+    }
+    // Behind the org→person chain: the remaining kinds the write path can link to
+    // (product/service/engagement) — same tail as `_resolveRecallScope`, and unlike
+    // there the ambiguity is SAID, because this caller can answer with a fuller name.
+    const rest = certain || personAlias?.row
+      ? null
+      : subjects.findByNameAnyKind(name, { kinds: ['product', 'service', 'engagement'] });
+    if (rest?.ambiguous) {
+      return `"${clip(name)}" matches more than one subject. Use the full name to say which one.`;
+    }
+    const hit = certain ?? personAlias?.row ?? rest?.row;
     if (!hit) return `No known subject named "${clip(name)}". Use the exact client/company/project name (or \`remember\` a fact about it first).`;
     ks.setFocusOverride(subjects.resolveActiveSubject(hit.id));
     return `Focus set to ${clip(name)} for this session.`;

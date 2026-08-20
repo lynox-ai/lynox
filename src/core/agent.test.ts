@@ -37,6 +37,7 @@ vi.mock('./stream.js', () => ({
 
 vi.mock('../tools/permission-guard.js', () => ({
   isDangerous: vi.fn().mockReturnValue(null),
+  isDangerousDetailed: vi.fn().mockReturnValue(null),
 }));
 
 vi.mock('./observability.js', () => ({
@@ -56,14 +57,14 @@ vi.mock('./observability.js', () => ({
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),
 }));
 
-import { Agent, RunAbortedError, LAZY_DEFERRED_TOOLS } from './agent.js';
+import { Agent, RunAbortedError, ToolLoopBreakError, LAZY_DEFERRED_TOOLS } from './agent.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { flattenPrompt } from './prompt-value.js';
 import type { PromptText } from '../types/index.js';
 import { buildDedupReference } from './tool-result-hygiene.js';
 import { TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { getBetasForProvider } from '../types/index.js';
-import { isDangerous } from '../tools/permission-guard.js';
+import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { ToolCallTracker } from './output-guard.js';
 import { createToolContext } from './tool-context.js';
 import { CONTEXT_COST_LOG_FILE } from './context-cost-log.js';
@@ -138,7 +139,17 @@ function makeTool(name: string, handler?: ToolEntry['handler']): ToolEntry {
       // default for real tools but opts these out via additionalProperties.
       input_schema: { type: 'object' as const, properties: {}, additionalProperties: true },
     },
-    handler: handler ?? vi.fn().mockResolvedValue('tool result'),
+    // Default handler returns a FRESH result per call (per-tool counter). A
+    // constant default made every repeated same-input call a "no progress"
+    // streak, which the RepeatCallGuard hard-breaks since 2026-08-14 — tests
+    // that exercise OTHER mechanics (loop caps, truncation, stamping) would
+    // trip the break for a reason their fixture never meant to model. No test
+    // asserts the literal result string; tests that WANT identical results
+    // pass an explicit handler (see the loop-guard repros).
+    handler: handler ?? (() => {
+      let n = 0;
+      return vi.fn().mockImplementation(() => Promise.resolve(`tool result #${String(n++)}`));
+    })(),
   };
 }
 
@@ -528,12 +539,16 @@ describe('Agent', () => {
     it('returns the truncated text, not the notice, when an exhausted turn still has text', async () => {
       // The notice only replaces an *empty* exhausted turn. When the final
       // truncated turn carries visible text, that text must come through.
+      // Varying text per turn: the continuation-loop detector breaks runs
+      // whose truncated prefix REPEATS identically with no tool progress —
+      // this test is about the cap path, not that detector (its own spec
+      // lives in continuation-loop.test.ts).
       for (let i = 0; i < 11; i++) {
-        mockProcess.mockResolvedValueOnce(maxTokensResponse('partial'));
+        mockProcess.mockResolvedValueOnce(maxTokensResponse(`partial ${String(i)}`));
       }
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
       const result = await agent.send('a task that keeps getting truncated');
-      expect(result).toBe('partial');
+      expect(result).toContain('partial'); // final turn varies by design
       expect(mockProcess).toHaveBeenCalledTimes(11);
     });
 
@@ -554,41 +569,47 @@ describe('Agent', () => {
       expect(mockProcess).toHaveBeenCalledTimes(2);
     });
 
-    it('loop guard: skips an identical tool call that keeps returning the same result', async () => {
+    it('loop guard: escalates, then hard-breaks an identical-call loop', async () => {
       // Regression repro for the 2026-07-26 prod loop: the agent called
       // `api_setup view` with a hallucinated id 20× in a row, each returning the
       // SAME ordinary (non-is_error) "not found. Use action list" string, making
-      // no progress. The deterministic RepeatCallGuard must break it: after
-      // REPEAT_LIMIT identical (call → result) pairs, the next identical call is
-      // NOT dispatched to the handler — an escalated result is returned instead.
+      // no progress. The deterministic RepeatCallGuard escalates after
+      // REPEAT_LIMIT identical (call → result) pairs (handler no longer runs),
+      // AND — since the 2026-08-14 RECURRENCE, where the model read the
+      // escalation and re-issued anyway 25× (thread 861f3e4b) — the run now
+      // ends with ToolLoopBreakError after BREAK_AFTER_ESCALATIONS ignored
+      // escalations, instead of looping to the iteration cap.
       const notFound = 'API profile "wrong" not found. Use action "list" to see available profiles.';
       const handler = vi.fn().mockResolvedValue(notFound);
       const tool = makeTool('test_lookup', handler);
 
-      const REPEATS = 8; // model insists 8×; guard must cap handler at REPEAT_LIMIT
+      // Queue EXACTLY the 5 turns the guard allows (3 executed + 2 escalated
+      // skips). More would leak unconsumed once-values into the file-scoped
+      // mock queue and cascade into unrelated tests after this one.
+      const REPEATS = 5;
       for (let i = 0; i < REPEATS; i++) {
         mockProcess.mockResolvedValueOnce(
           toolUseResponse([{ id: `tu_${String(i)}`, name: 'test_lookup', input: { action: 'view', id: 'wrong' } }]),
         );
       }
-      mockProcess.mockResolvedValueOnce(endTurnResponse('gave up looping'));
 
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
-      const result = await agent.send('check the api');
-      expect(result).toBe('gave up looping');
+      await expect(agent.send('check the api')).rejects.toThrow(ToolLoopBreakError);
 
-      // The handler ran only REPEAT_LIMIT times, not REPEATS — the loop was cut.
+      // 3 dispatched executions (streak → limit) + 2 escalated skips = 5 model
+      // turns, then the break — the model never gets a 6th turn to loop in.
       expect(handler).toHaveBeenCalledTimes(3);
+      expect(mockProcess).toHaveBeenCalledTimes(5);
 
-      // The skipped calls returned an escalated, is_error tool_result telling the
-      // agent to stop repeating (visible in the thread as a user/tool_result msg).
-      const escalated = agent.getMessages().some(
+      // The escalated is_error results lived in the rolled-back carrier (the
+      // abort-style rollback is pinned in tool-loop-break.test.ts); on disk they
+      // become the display-only tool_loop_break note (pinned in
+      // eager-persist.test.ts) — nothing of the loop re-enters API context.
+      expect(agent.getMessages().some(
         m => m.role === 'user' && Array.isArray(m.content) && m.content.some(
-          b => b.type === 'tool_result' && b.is_error === true
-            && typeof b.content === 'string' && /not change the outcome|do not call it again/i.test(b.content),
+          b => (b as { type?: string }).type === 'tool_result',
         ),
-      );
-      expect(escalated).toBe(true);
+      )).toBe(false);
     });
 
     it('loop guard: does NOT throttle identical calls that make progress', async () => {
@@ -1158,7 +1179,7 @@ describe('Agent', () => {
     });
 
     it('isDangerous + promptUser: y allows execution', async () => {
-      vi.mocked(isDangerous).mockReturnValueOnce('Dangerous: rm -rf /');
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous: rm -rf /' });
       const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
       const promptUser = vi.fn().mockResolvedValue('y');
 
@@ -1179,7 +1200,7 @@ describe('Agent', () => {
     });
 
     it('isDangerous + promptUser: deny blocks execution', async () => {
-      vi.mocked(isDangerous).mockReturnValueOnce('Dangerous command');
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous command' });
       const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
       const promptUser = vi.fn().mockResolvedValue('no');
 
@@ -1207,7 +1228,7 @@ describe('Agent', () => {
     });
 
     it('isDangerous without promptUser: blocks with non-interactive denial', async () => {
-      vi.mocked(isDangerous).mockReturnValueOnce('Dangerous');
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous' });
       const tool = makeTool('bash');
 
       mockProcess
@@ -1227,6 +1248,86 @@ describe('Agent', () => {
       const results = (toolResultsMsg as { content: Array<{ content: string; is_error: boolean }> }).content;
       expect(results[0]!.content).toContain('Permission denied (non-interactive)');
       expect(results[0]!.is_error).toBe(true);
+      expect(tool.handler).not.toHaveBeenCalled();
+    });
+
+    it('deep-consent 3-way GO: "Run on balanced" sets the downgrade for the handler (mutate options → 2-way)', async () => {
+      // A danger carrying payload.downgradeTo offers a 3-way GO. "Run on balanced"
+      // must stash the tier so the upcoming handler can clamp. Mutate the option
+      // list back to the 2-way ['Allow','Deny','\x00'] and the assertion on the
+      // 3-way args fails — the wiring this test pins.
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({
+        warning: '⚠ spawn_agent: deep',
+        payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
+      });
+      let consumed: unknown = undefined;
+      const tool = makeTool('spawn_agent', vi.fn().mockImplementation((_input, agent) => {
+        consumed = agent.consumePendingDowngrade?.();
+        return 'spawned';
+      }));
+      const promptUser = vi.fn().mockResolvedValue('run on balanced');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_sp', name: 'spawn_agent', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
+      await agent.send('Spawn deep');
+      expect(promptUser).toHaveBeenCalledWith('⚠ spawn_agent: deep', ['Allow deep', 'Run on balanced', 'Cancel', '\x00']);
+      expect(tool.handler).toHaveBeenCalled();
+      expect(consumed).toBe('balanced');
+    });
+
+    it('deep-consent 3-way GO: "Allow deep" proceeds WITHOUT a downgrade', async () => {
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({
+        warning: '⚠ spawn_agent: deep',
+        payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
+      });
+      let consumed: unknown = 'untouched';
+      const tool = makeTool('spawn_agent', vi.fn().mockImplementation((_input, agent) => {
+        consumed = agent.consumePendingDowngrade?.();
+        return 'spawned';
+      }));
+      const promptUser = vi.fn().mockResolvedValue('allow deep');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_sp', name: 'spawn_agent', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Done'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
+      await agent.send('Spawn deep');
+      // Allow deep → no downgrade stashed (the handler runs deep as-authorised).
+      // Mutate the 'allow deep' branch to also set the downgrade and consumed reads 'balanced'.
+      expect(tool.handler).toHaveBeenCalled();
+      expect(consumed).toBeUndefined();
+    });
+
+    it('deep-consent 3-way GO: "Cancel" denies — handler never runs', async () => {
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({
+        warning: '⚠ spawn_agent: deep',
+        payload: { message: '⚠ spawn_agent: deep', tier: 'deep', downgradeTo: 'balanced' },
+      });
+      const tool = makeTool('spawn_agent', vi.fn().mockResolvedValue('spawned'));
+      const promptUser = vi.fn().mockResolvedValue('cancel');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_sp', name: 'spawn_agent', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Denied'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
+      await agent.send('Spawn deep');
+      // Cancel is outside the allow-set → denied. Mutate the deny branch to allow
+      // 'cancel' and the handler IS called (the regression).
+      expect(tool.handler).not.toHaveBeenCalled();
+    });
+
+    it('2-way GO does NOT accept "allow deep" — that answer is spawn-consent-only', async () => {
+      // A danger WITHOUT payload.downgradeTo is the ordinary 2-way gate; 'allow deep'
+      // is a spawn 3-way answer and must NOT authorise it. Mutate Fix 2 back to a
+      // shared allow-set (['y','yes','allow','allow deep'] unconditionally) and this
+      // allows — a CLI 'allow deep' on a bash prompt would run.
+      vi.mocked(isDangerousDetailed).mockReturnValueOnce({ warning: 'Dangerous: bash' });
+      const tool = makeTool('bash', vi.fn().mockResolvedValue('executed'));
+      const promptUser = vi.fn().mockResolvedValue('allow deep');
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu_b', name: 'bash', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('Denied'));
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool], promptUser });
+      await agent.send('Do it');
       expect(tool.handler).not.toHaveBeenCalled();
     });
 
@@ -2007,6 +2108,144 @@ describe('Agent', () => {
       expect(call).toBeDefined();
       const data = call![0] as { input?: string };
       expect(data.input!.length).toBeLessThanOrEqual(2000);
+    });
+  });
+
+  describe('recordToolCall sink', () => {
+    type RecordedCall = { runId?: string | undefined; toolName: string; inputJson: string; outputJson: string; durationMs: number; isError: boolean };
+
+    it('stamps the call with the run the agent is working under', async () => {
+      // The link the whole attribution change rests on. A spawned child is
+      // constructed with its OWN `currentRunId`; if the agent did not put that
+      // id on the call, every child's calls would land back on whatever run the
+      // sink defaulted to — which is exactly the behaviour being replaced.
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu1', name: 'my_tool', input: { key: 'value' } }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'child',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        currentRunId: 'child-run-42',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const call = recorded.find(c => c.toolName === 'my_tool');
+      expect(call, 'the sink must receive the call').toBeDefined();
+      expect(call!.runId, 'the call carries THIS agent\'s run, not the sink\'s default').toBe('child-run-42');
+      expect(call!.isError).toBe(false);
+      expect(call!.inputJson).toContain('value');
+    });
+
+    it('records a failed tool call too — it spent the same budget', async () => {
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('fail_tool', vi.fn().mockRejectedValue(new Error('oops')));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu2', name: 'fail_tool', input: { cmd: 'bad' } }]))
+        .mockResolvedValueOnce(endTurnResponse('handled'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        currentRunId: 'run-7',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const call = recorded.find(c => c.toolName === 'fail_tool');
+      expect(call, 'a failed call still counts against the rate limits').toBeDefined();
+      expect(call!.runId).toBe('run-7');
+      expect(call!.isError).toBe(true);
+      expect(call!.outputJson, 'the error text is what the row records as output').toContain('oops');
+    });
+
+    it('leaves the run id absent when the agent has none, rather than inventing one', async () => {
+      // An ad-hoc Agent has no run. The sink decides where those land; the agent
+      // must not guess, or an unattributed call would be indistinguishable from
+      // one that genuinely belongs to a run.
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu3', name: 'my_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'adhoc',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      expect(recorded.find(c => c.toolName === 'my_tool')?.runId).toBeUndefined();
+    });
+
+    it('counts what it handed to the sink, so the column can agree with the rows', async () => {
+      // `getRecordedToolCallCount` exists so spawn can stamp the CHILD's
+      // `runs.tool_call_count`. It must count the same events the sink received
+      // — not `_loopToolCount`, which excludes turn-ending tools for the
+      // memory-extraction heuristic and would undercount here.
+      const recorded: unknown[] = [];
+      const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([
+          { id: 'a', name: 'my_tool', input: {} },
+          { id: 'b', name: 'my_tool', input: {} },
+        ]))
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'c', name: 'my_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        recordToolCall: (c) => { recorded.push(c); },
+      });
+      await agent.send('go');
+
+      expect(agent.getRecordedToolCallCount()).toBe(3);
+      expect(agent.getRecordedToolCallCount(), 'the count IS the number of rows caused').toBe(recorded.length);
+    });
+
+    it('counts nothing when there is no sink, so the column matches the absent rows', async () => {
+      const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'a', name: 'my_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+      await agent.send('go');
+
+      expect(agent.getRecordedToolCallCount()).toBe(0);
+    });
+
+    it('a throwing sink never breaks the run it observes', async () => {
+      // Recording is best-effort. A history write that fails must not take the
+      // user's turn down with it.
+      const tool = makeTool('my_tool', vi.fn().mockResolvedValue('ok'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'tu4', name: 'my_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test',
+        model: 'claude-sonnet-4-6',
+        tools: [tool],
+        recordToolCall: () => { throw new Error('history is down'); },
+      });
+
+      await expect(agent.send('go')).resolves.toContain('done');
     });
   });
 
@@ -3293,6 +3532,30 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     expect(agent.sawUntrustedData).toBe(true);
   });
 
+  it('the latch is armed BEFORE the tool_result stream event fires (mid-run fold ordering)', async () => {
+    // The orchestrator's cross-sibling arming (runtime-adapter.ts, noteStepTaintLive)
+    // folds a step's taint into the run accumulator AT the tool_result stream event
+    // and relies on dispatch having armed the latch first (_executeOneInner, before
+    // the tool runs). If that ordering ever flips, the mid-run fold silently
+    // degrades to finally-only and a parallel sibling's durable write can land
+    // active instead of pending_review.
+    const seenAtEvent: boolean[] = [];
+    let agentRef: Agent | undefined;
+    const httpTool = makeTool('http_request', vi.fn().mockResolvedValue('payload'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'http_request', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({
+      name: 'test', model: 'claude-sonnet-4-6', tools: [httpTool],
+      onStream: (e) => {
+        if (e.type === 'tool_result') seenAtEvent.push(agentRef!.sawExternalContentTool);
+      },
+    });
+    agentRef = agent;
+    await agent.send('fetch that');
+    expect(seenAtEvent).toEqual([true]);
+  });
+
   it('sets sawExternalContentTool when a stored-read-back tool runs (DK.1 H4 denylist)', async () => {
     // Regression guard (/security-deep-dive S5): a `data_store_query` can surface content a
     // prior tainted turn seeded, so it MUST taint the turn for a later `remember` even though
@@ -3321,6 +3584,21 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [arch] });
     expect(agent.sawExternalContentTool).toBe(false);
     await agent.send('search the archive for ACME');
+    expect(agent.sawExternalContentTool).toBe(true);
+  });
+
+  it('sets sawExternalContentTool when calendar_read runs (invitation-authored text)', async () => {
+    // Anyone who can send the operator a calendar invitation chooses the SUMMARY and LOCATION
+    // this tool reads back — an ingest channel needing no compromise, only their address. The
+    // tool wraps its result too, so this is the second of two independent signals; they fail
+    // differently, and a calendar is precisely where "meeting note" reads as a durable fact.
+    const cal = makeTool('calendar_read', vi.fn().mockResolvedValue('- 2026-08-12 14:00–15:00 Termin'));
+    mockProcess
+      .mockResolvedValueOnce(toolUseResponse([{ id: 't1', name: 'calendar_read', input: {} }]))
+      .mockResolvedValueOnce(endTurnResponse('done'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [cal] });
+    expect(agent.sawExternalContentTool).toBe(false);
+    await agent.send('what is on this week');
     expect(agent.sawExternalContentTool).toBe(true);
   });
 
@@ -3382,6 +3660,39 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [plainTool] });
     await agent.send('do math');
     expect(agent.sawUntrustedData).toBe(false);
+  });
+
+  it('a user turn carrying wrapped content arms the run marker — an UPLOAD is untrusted', async () => {
+    // Every other seat for the marker is on the tool path, and the sticky latch is only
+    // re-derived on load. An uploaded document arrives as a content block on the USER
+    // message, so without this the turn reads clean and a `remember` on it lands active and
+    // pinnable instead of in the review queue.
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await agent.send([
+      { type: 'text', text: 'Was steht da drin?' },
+      { type: 'text', text: wrapUntrustedData('[File: vertrag.pdf]\nZahlungsziel 30 Tage', 'file_upload') },
+    ] as unknown[]);
+    expect(agent.sawUntrustedData).toBe(true);
+    expect(agent.conversationSawUntrusted).toBe(true);
+  });
+
+  it('a plain user turn does NOT arm it', async () => {
+    // The pair: arming unconditionally would also pass the test above, and would put every
+    // ordinary message into the review queue.
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await agent.send([{ type: 'text', text: 'Merk dir: Zahlungsziel 30 Tage' }] as unknown[]);
+    expect(agent.sawUntrustedData).toBe(false);
+  });
+
+  it('a plain STRING user turn carrying the marker arms it too', async () => {
+    // `send` accepts both shapes; the block-array branch is the upload path, but a caller
+    // passing a pre-composed string must not slip past.
+    mockProcess.mockResolvedValueOnce(endTurnResponse('ok'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await agent.send(wrapUntrustedData('some fetched page text', 'web'));
+    expect(agent.sawUntrustedData).toBe(true);
   });
 
   it('noteUntrustedData() latches the flag (spawn propagates a shared-Memory child\'s taint here)', () => {
@@ -3477,4 +3788,58 @@ describe('Agent — untrusted-data run latch (Wave 1.2)', () => {
     ]);
     expect(agent.conversationSawUntrusted).toBe(false);
   });
+});
+
+describe('F5: artifact-body eviction (next-turn, D4)', () => {
+	const BIGBODY = 'y'.repeat(3000);
+	const SAVE_RESULT = 'Saved artifact "R" (id: aa11, v1).\nFile: /workspace/artifacts/aa11.md';
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+	});
+
+	it('keeps the body through the turn that saved it and evicts at the NEXT send', async () => {
+		mockProcess
+			.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_save', name: 'artifact_save', input: { title: 'R', content: BIGBODY } }]))
+			.mockResolvedValueOnce(endTurnResponse('saved.'))
+			.mockResolvedValueOnce(endTurnResponse('next answer'));
+		const saveTool = makeTool('artifact_save', vi.fn().mockResolvedValue(SAVE_RESULT));
+		const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [saveTool] });
+
+		await agent.send('save my report');
+		// D4's "one turn of overlap": the model may still be composing against
+		// the body it just wrote — it survives the turn that produced it.
+		expect(JSON.stringify(agent.getMessages())).toContain(BIGBODY);
+
+		await agent.send('what next?');
+		const after = JSON.stringify(agent.getMessages());
+		expect(after).not.toContain(BIGBODY);
+		expect(after).toContain('[evicted after successful save');
+	});
+
+	it('a FAILED save keeps its body across turns (it is the only copy left)', async () => {
+		mockProcess
+			.mockResolvedValueOnce(toolUseResponse([{ id: 'tu_save', name: 'artifact_save', input: { title: 'R', content: BIGBODY } }]))
+			.mockResolvedValueOnce(endTurnResponse('could not save.'))
+			.mockResolvedValueOnce(endTurnResponse('ok'));
+		const saveTool = makeTool('artifact_save', vi.fn().mockResolvedValue('Artifact store not available.'));
+		const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6', tools: [saveTool] });
+
+		await agent.send('save my report');
+		await agent.send('and now?');
+		expect(JSON.stringify(agent.getMessages())).toContain(BIGBODY);
+	});
+
+	it('loadMessages evicts on resume hydration (a resume must not re-send every body)', () => {
+		const agent = new Agent({ name: 't', model: 'claude-sonnet-4-6' });
+		agent.loadMessages([
+			{ role: 'user', content: 'save it' },
+			{ role: 'assistant', content: [{ type: 'tool_use', id: 'tu_1', name: 'artifact_save', input: { title: 'R', content: BIGBODY } }] },
+			{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: SAVE_RESULT }] },
+			{ role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+		]);
+		const loaded = JSON.stringify(agent.getMessages());
+		expect(loaded).not.toContain(BIGBODY);
+		expect(loaded).toContain('[evicted after successful save');
+	});
 });

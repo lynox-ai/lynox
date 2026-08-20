@@ -12,7 +12,7 @@
 
 import type { DataStore } from './data-store.js';
 import type { EngineDb } from './engine-db.js';
-import { SubjectStore } from './subject-store.js';
+import { SubjectStore, ambiguityError } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 
 // ── Types ──
@@ -258,14 +258,22 @@ export class CRM {
     const subjects = this.subjectStore!;
     const relationships = this.relationshipStore!;
     engine.getDb().transaction(() => {
-      const { id: personId } = subjects.findOrCreate({ kind: 'person', name });
+      // A contact whose name several people answer to cannot be filed against one of them
+      // by guess. Both callers of this mirror SWALLOW the throw and log it (the contact
+      // itself is still saved — only the graph mirror is skipped), so the message must
+      // carry no names: those log lines promise data minimisation. The transaction rolls
+      // back, leaving no half-linked contact behind.
+      const person = subjects.findOrCreate({ kind: 'person', name });
+      if (person.ambiguous) throw ambiguityError('person', person.candidateIds);
+      const personId = person.id;
       if (c.email || c.phone || c.type) {
         subjects.setPersonDetail(personId, { email: c.email, phone: c.phone, type: c.type });
       }
       const company = c.company?.trim();
       if (company) {
-        const { id: orgId } = subjects.findOrCreate({ kind: 'organization', name: company });
-        relationships.createRelationship({ fromSubjectId: personId, toSubjectId: orgId, kind: 'works_for' });
+        const org = subjects.findOrCreate({ kind: 'organization', name: company });
+        if (org.ambiguous) throw ambiguityError('organization', org.candidateIds);
+        relationships.createRelationship({ fromSubjectId: personId, toSubjectId: org.id, kind: 'works_for' });
       }
     })();
   }
@@ -315,6 +323,65 @@ export class CRM {
       collection: 'contacts',
       filter: { source: 'knowledge_graph' },
     });
+  }
+
+  /**
+   * Remove one contact by its row id. Returns true when a row was removed.
+   *
+   * Until this existed the CRM had no removal path of ANY kind: `contacts_save` upserts on
+   * email, so a wrong contact could only be overwritten — and only if it HAS an email, since
+   * a NULL email never collides and every save inserts another row. A contact the agent
+   * researched off a web page has no email as often as not, so "just save it again" was not
+   * a repair, it was a duplicate.
+   *
+   * A hard delete, unlike the durable-knowledge store's `retireEntry`, which supersedes and
+   * keeps the row. The reason is what the two hold: a knowledge entry is a claim whose
+   * history is worth auditing, while a contact row is a person's name, address and phone —
+   * data whose right answer to "remove this" is that it is gone.
+   *
+   * The interactions and deals keyed to this contact go WITH it, and that is the difference
+   * between removing a contact and hiding one. `interactions.summary` is free text about the
+   * person — what was discussed, what they wanted — and both collections stay readable by name
+   * through their own routes, so leaving them behind would answer "remove this person" by
+   * deleting the row that holds their phone number and keeping the notes about them. Re-saving
+   * the same name would then silently re-adopt the old history.
+   *
+   * The engine.db subject mirror (S1c, flag-gated) is deliberately NOT touched. It is
+   * additive, and a subject can be referenced by durable knowledge entries written long
+   * after the contact; deleting it here would cut those loose to repair one CRM row. A
+   * subject with no contact behind it is inert — the focus block renders only pinned
+   * knowledge, never contact fields.
+   */
+  deleteContact(id: number): boolean {
+    this.ensureSchema();
+    // Read the name BEFORE the row goes: interactions and deals are keyed by name, not by id.
+    const result = this.ds.queryRecords({ collection: 'contacts', filter: { _id: id }, limit: 1 });
+    const contact = (result.rows[0] as unknown as ContactRecord | undefined) ?? null;
+    if (this.ds.deleteRecords({ collection: 'contacts', filter: { _id: id } }) === 0) return false;
+    if (contact?.name) {
+      // Cascade ONLY when no other contact answers to this name.
+      //
+      // interactions and deals are keyed by `contact_name`, not by contact id — so the
+      // cascade cannot distinguish two people called the same thing. Deleting one Michael
+      // Müller took the other one's entire history with it: a surviving contact, silently
+      // stripped of every interaction and every deal, with nothing to restore it from. The
+      // rows are gone, not orphaned.
+      //
+      // Checked AFTER the delete, so the departing contact is already out of the count and a
+      // genuinely unique name still cascades exactly as before. When the name IS shared, the
+      // history stays — attached to a name that still has an owner. Leaving a row behind is
+      // recoverable; deleting a third party's data is not, so the tie goes to keeping it.
+      const namesakes = this.ds.queryRecords({
+        collection: 'contacts',
+        filter: { name: contact.name },
+        limit: 1,
+      });
+      if (namesakes.rows.length === 0) {
+        this.ds.deleteRecords({ collection: 'interactions', filter: { contact_name: contact.name } });
+        this.ds.deleteRecords({ collection: 'deals', filter: { contact_name: contact.name } });
+      }
+    }
+    return true;
   }
 
   /** List contacts with optional filter. */

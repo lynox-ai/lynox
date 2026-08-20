@@ -262,7 +262,11 @@ export class SubjectGraphBackfill {
       }
       return id;
     }
-    return this.subjects.findOrCreate({ kind, name: e.canonical_name, aliases }).id;
+    // Backfill mirrors history into the graph; an unidentifying name gets no row rather
+    // than an invented one. Returning null skips this entity's edge, exactly as the live
+    // mirror does, so a re-run after the names are disambiguated picks it up.
+    const r = this.subjects.findOrCreate({ kind, name: e.canonical_name, aliases });
+    return r.ambiguous ? null : r.id;
   }
 
   private _parseAliases(raw: string): string[] {

@@ -38,7 +38,7 @@ vi.mock('../../src/core/stream.js', () => ({
 }));
 
 vi.mock('../../src/tools/permission-guard.js', () => ({
-  isDangerous: vi.fn().mockReturnValue(null),
+  isDangerous: vi.fn().mockReturnValue(null), isDangerousDetailed: vi.fn().mockReturnValue(null),
 }));
 
 vi.mock('../../src/core/observability.js', () => ({

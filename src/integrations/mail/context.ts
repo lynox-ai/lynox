@@ -48,6 +48,18 @@ export interface TestAccountResult {
   ok: boolean;
   error?: string | undefined;
   code?: string | undefined;
+  /**
+   * Which leg failed, so the caller can say so instead of guessing. Absent on
+   * success and on failures that precede either connection (unknown account,
+   * missing credentials).
+   */
+  stage?: 'imap' | 'smtp' | undefined;
+  /**
+   * Which legs were actually exercised. `smtp: false` on a passing result means
+   * the account type is receive-only and the send path was deliberately not
+   * probed — not that it was probed and passed.
+   */
+  checked?: { imap: boolean; smtp: boolean } | undefined;
 }
 
 /** Safe projection used by the HTTP layer — no secrets. */
@@ -586,9 +598,17 @@ export class MailContext {
   }
 
   /**
-   * Verify that the configured credentials can open an IMAP session and a
-   * SMTP connection. Does not store anything — the caller uses this as a
-   * pre-save check in the onboarding UI.
+   * Verify that the configured credentials can open an IMAP session AND an
+   * SMTP session. Does not store anything — the caller uses this as a pre-save
+   * check in the onboarding UI.
+   *
+   * Both legs are probed because they fail independently: IMAP on 993 is
+   * reachable from anywhere, while outbound SMTP on 465 is blocked by many
+   * hosting providers. Testing only IMAP produced a green setup whose first
+   * send timed out silently, with nothing in the flow pointing at the port.
+   * Receive-only account types skip the SMTP leg — they are refused at the
+   * send path anyway (see isReceiveOnlyType), so requiring a working submission
+   * server for them would reject valid setups.
    *
    * Accepts either an already-saved account id or a draft config+credentials
    * pair (preferred in UI flows — no write-then-rollback needed).
@@ -611,16 +631,26 @@ export class MailContext {
       credentials = input.credentials;
     }
 
+    const probeSmtp = !isReceiveOnlyType(config.type);
     const probe = new ImapSmtpProvider(config, () => credentials);
+    let stage: 'imap' | 'smtp' = 'imap';
     try {
       // list() exercises IMAP auth end-to-end without fetching bodies
       await probe.list({ limit: 1 });
-      return { ok: true };
-    } catch (err) {
-      if (err instanceof MailError) {
-        return { ok: false, error: err.message, code: err.code };
+      if (probeSmtp) {
+        stage = 'smtp';
+        // Connect + AUTH on the submission server, sending nothing.
+        await probe.verifySmtp();
       }
-      return { ok: false, error: err instanceof Error ? err.message : String(err), code: 'unknown' };
+      return { ok: true, checked: { imap: true, smtp: probeSmtp } };
+    } catch (err) {
+      // A failure on the IMAP leg means the SMTP leg never ran, whatever
+      // probeSmtp said — `checked` reports what happened, not what was planned.
+      const base = { ok: false as const, stage, checked: { imap: true, smtp: stage === 'smtp' } };
+      if (err instanceof MailError) {
+        return { ...base, error: err.message, code: err.code };
+      }
+      return { ...base, error: err instanceof Error ? err.message : String(err), code: 'unknown' };
     } finally {
       await probe.close();
     }

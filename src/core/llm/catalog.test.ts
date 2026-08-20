@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import type { LLMProvider } from '../../types/models.js';
 import { MODEL_CAPABILITIES, MODEL_MAP, VERTEX_MODEL_MAP, MISTRAL_MODEL_MAP, resolveBalancedModel } from '../../types/models.js';
-import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, vaultSlotForEndpoint, endpointNeedsCredential, mainChatTierLabels, mainChatTierLabelsFromTierSet } from './catalog.js';
+import { LLM_CATALOG, getCatalogForProvider, getCatalogEntryByKey, catalogEntryKey, resolveCatalogKey, vaultSlotForEndpoint, endpointNeedsCredential, providerIdentity, mainChatTierLabels, mainChatTierLabelsFromTierSet, formatContextWindow } from './catalog.js';
 import type { TierSet } from '../../types/config.js';
 import type { CatalogProviderEntry } from './catalog.js';
 import { isAllowlistedEndpoint } from './endpoint-allowlist.js';
@@ -160,10 +160,11 @@ describe('LLM_CATALOG', () => {
       if (!cap) continue; // custom / provider-specific ids not in the registry
       checked++;
       expect(model.context_window, `${model.id} context_window`).toBe(cap.contextWindow);
-      if (model.pricing) {
-        expect(model.pricing.input, `${model.id} pricing.input`).toBe(cap.pricing.input);
-        expect(model.pricing.output, `${model.id} pricing.output`).toBe(cap.pricing.output);
-      }
+      // Registry-backed entries must CARRY pricing — a truthy-guard here let a
+      // deleted pricing field skip the drift check silently (pr-review #1162).
+      expect(model.pricing, `${model.id} must carry pricing`).toBeDefined();
+      expect(model.pricing!.input, `${model.id} pricing.input`).toBe(cap.pricing.input);
+      expect(model.pricing!.output, `${model.id} pricing.output`).toBe(cap.pricing.output);
     }
     expect(checked).toBeGreaterThan(0); // the guard actually exercised the registry-backed entries
   });
@@ -271,17 +272,34 @@ describe('LLM_CATALOG', () => {
 });
 
 describe('LLM_CATALOG.tier_models (per-tier picker options on a free-text tile)', () => {
-  it('fireworks pins exactly the two measured preset-slot models — no tier tag', () => {
+  it('fireworks pins exactly the served preset-slot/candidate models — no tier tag', () => {
     const entry = getCatalogEntryByKey('fireworks')!;
     expect((entry.tier_models ?? []).map((m) => m.id)).toEqual([
       'accounts/fireworks/models/glm-5p2',
       'accounts/fireworks/models/deepseek-v4-pro',
+      // Candidates (2026-08-09, rafael canary) — replay measurement owed before
+      // any preset pins them; presence here only makes them picker-selectable.
+      'accounts/fireworks/models/kimi-k3',
+      'accounts/fireworks/models/deepseek-v4-flash-0731',
+      'accounts/fireworks/models/qwen3p7-plus',
+      'accounts/fireworks/models/gpt-oss-120b',
+      'accounts/fireworks/models/kimi-k2p6',
+      'accounts/fireworks/models/kimi-k2p7-code',
+      'accounts/fireworks/models/minimax-m3',
     ]);
     for (const m of entry.tier_models ?? []) {
-      // Both are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no
+      // All are `tier: null` in MODEL_CAPABILITIES (preset-slot models, no
       // measured tier map) — a `tier` tag here would fake a band mapping.
       expect(m.tier, `${m.id} must not fake a tier band`).toBeUndefined();
-      expect(m.capabilities).toEqual(['tool_use']);   // text-only on Fireworks
+      // Vision (2026-08-14): the three candidates whose wire was validated
+      // live (fireworks-vision online test) carry 'vision'; the genuinely
+      // text-only siblings stay ['tool_use'].
+      const visionIds = new Set([
+        'accounts/fireworks/models/kimi-k3',
+        'accounts/fireworks/models/qwen3p7-plus',
+        'accounts/fireworks/models/minimax-m3',
+      ]);
+      expect(m.capabilities, m.id).toEqual(visionIds.has(m.id) ? ['vision', 'tool_use'] : ['tool_use']);
       expect(m.residency).toContain('Fireworks');
     }
   });
@@ -414,25 +432,27 @@ describe('LLM_CATALOG.main_chat_models (standard-mode picker options)', () => {
 describe('mainChatTierLabels (composer picker — DEF-0082 name-enrichment + hide)', () => {
   it('anthropic: per-tier labels, balanced defaults to the configured Sonnet 4.6', () => {
     const entry = getCatalogForProvider('anthropic')!;
+    // Labels carry the registry context window (rafael 2026-08-09: every model
+    // picker states the window — "· 200k" / "· 1M").
     expect(mainChatTierLabels(entry, resolveBalancedModel({}))).toEqual({
-      fast: 'Haiku 4.5',
-      balanced: 'Sonnet 4.6',
-      deep: 'Opus 4.6',
+      fast: 'Haiku 4.5 · 200k',
+      balanced: 'Sonnet 4.6 · 200k',
+      deep: 'Opus 4.6 · 1M',
     });
   });
 
   it('anthropic: balanced label follows the tenant-selected Sonnet variant (5)', () => {
     const entry = getCatalogForProvider('anthropic')!;
     const resolved = resolveBalancedModel({ balanced_model: 'claude-sonnet-5' });
-    expect(mainChatTierLabels(entry, resolved)?.balanced).toBe('Sonnet 5');
+    expect(mainChatTierLabels(entry, resolved)?.balanced).toBe('Sonnet 5 · 1M');
   });
 
   it('mistral: the three tier representatives, labelled', () => {
     const entry = getCatalogEntryByKey('mistral')!;
     expect(mainChatTierLabels(entry, resolveBalancedModel({}))).toEqual({
-      fast: 'Ministral 8B',
-      balanced: 'Mistral Medium 3.5',
-      deep: 'Mistral Medium 3.5',
+      fast: 'Ministral 8B · 256k',
+      balanced: 'Mistral Medium 3.5 · 256k',
+      deep: 'Mistral Medium 3.5 · 256k',
     });
   });
 
@@ -508,9 +528,9 @@ describe('mainChatTierLabelsFromTierSet (hybrid picker — labels follow the tie
       deep: { provider: 'anthropic', model_id: 'claude-sonnet-5' },
     };
     expect(mainChatTierLabelsFromTierSet(tierSet, 'anthropic')).toEqual({
-      fast: 'Haiku 4.5',
-      balanced: 'Mistral Large 3', // NOT the base-provider "Sonnet 5"
-      deep: 'Sonnet 5', // NOT the base-provider "Opus 4.6"
+      fast: 'Haiku 4.5 · 200k',
+      balanced: 'Mistral Large 3 · 256k', // NOT the base-provider "Sonnet 5"
+      deep: 'Sonnet 5 · 1M', // NOT the base-provider "Opus 4.6"
     });
   });
 
@@ -518,9 +538,9 @@ describe('mainChatTierLabelsFromTierSet (hybrid picker — labels follow the tie
     // Only balanced is overridden; fast/deep fall back to the base (anthropic).
     const tierSet: TierSet = { balanced: { provider: 'mistral', model_id: 'mistral-large-2512' } };
     const out = mainChatTierLabelsFromTierSet(tierSet, 'anthropic');
-    expect(out?.balanced).toBe('Mistral Large 3');
-    expect(out?.fast).toBe('Haiku 4.5');
-    expect(out?.deep).toBe('Opus 4.6');
+    expect(out?.balanced).toBe('Mistral Large 3 · 256k');
+    expect(out?.fast).toBe('Haiku 4.5 · 200k');
+    expect(out?.deep).toBe('Opus 4.6 · 1M');
   });
 
   it('labels a Fireworks slot via tier_models — never the raw accounts/… path', () => {
@@ -537,8 +557,22 @@ describe('mainChatTierLabelsFromTierSet (hybrid picker — labels follow the tie
       },
     };
     const out = mainChatTierLabelsFromTierSet(tierSet, 'anthropic');
-    expect(out?.deep).toBe('GLM 5.2');
-    expect(out?.fast).toBe('Haiku 4.5');
+    expect(out?.deep).toBe('GLM 5.2 · 1M');
+    expect(out?.fast).toBe('Haiku 4.5 · 200k');
+  });
+
+  it('formatContextWindow: the shorthand behind every picker label', () => {
+    // Decimal-k windows (256_000 → 256k) win over the binary divisor trap; binary
+    // windows render conventionally; exact millions to M. '' for unknown.
+    expect(formatContextWindow(1_000_000)).toBe('1M');
+    expect(formatContextWindow(262_144)).toBe('256k');
+    expect(formatContextWindow(131_072)).toBe('128k');
+    expect(formatContextWindow(524_288)).toBe('512k');
+    expect(formatContextWindow(200_000)).toBe('200k');
+    expect(formatContextWindow(256_000)).toBe('256k');
+    expect(formatContextWindow(128_000)).toBe('128k');
+    expect(formatContextWindow(undefined)).toBe('');
+    expect(formatContextWindow(0)).toBe('');
   });
 });
 
@@ -627,5 +661,112 @@ describe('resolveCatalogKey', () => {
     // openai-compat is the only preset with requires_base_url=true.
     expect(resolveCatalogKey('openai', undefined)).toBe('openai-compat');
     expect(resolveCatalogKey('openai', '')).toBe('openai-compat');
+  });
+});
+
+describe('providerIdentity', () => {
+  // The status bar prints one name per provider an instance actually routes to,
+  // and must count each provider once. Before this existed the name came from two
+  // hard-coded slots in http-api, so a hybrid tenant on Mistral + Fireworks +
+  // Anthropic saw exactly one of them.
+  const label = (p: string, url?: string): string => providerIdentity(p, url).label;
+  const key = (p: string, url?: string): string => providerIdentity(p, url).key;
+
+  it('names a pinned host by its catalog brand', () => {
+    expect(label('openai', 'https://api.mistral.ai/v1')).toBe('Mistral');
+    expect(label('openai', 'https://api.fireworks.ai/inference/v1')).toBe('Fireworks AI');
+    expect(label('openai', 'https://api.groq.com/openai/v1')).toBe('Groq');
+    expect(label('openai', 'http://localhost:11434/v1')).toBe('Ollama (local)');
+  });
+
+  it('names the native providers without needing an endpoint', () => {
+    expect(label('anthropic')).toBe('Anthropic');
+    expect(label('vertex')).toBe('Google Vertex AI');
+    expect(label('mistral')).toBe('Mistral');
+  });
+
+  it('gives the first-class mistral key the SAME identity as the pinned host', () => {
+    // The registry key and `openai` + api.mistral.ai are one provider. Two keys
+    // here would print "Mistral · Mistral" in the footer.
+    expect(key('mistral')).toBe(key('openai', 'https://api.mistral.ai/v1'));
+  });
+
+  it('refuses to lend a brand to a host that only LOOKS like one', () => {
+    // The security direction, and the reason a brand may come only from an entry
+    // with a `base_url_default`: the generic openai-compat tile matches ANY host,
+    // so a fall-through must never be allowed to print "Mistral".
+    expect(label('openai', 'https://api.mistral.ai.attacker.com/v1')).toBe('OpenAI-compatible');
+    expect(label('openai', 'https://attacker.example.com/?proxy=mistral.ai')).toBe('OpenAI-compatible');
+    expect(label('openai', 'not-a-url')).toBe('OpenAI-compatible');
+  });
+
+  it('refuses a brand claimed by the PROVIDER KEY itself, in any casing', () => {
+    // `tier_set` can arrive from LYNOX_TIER_SET_JSON. An exact-case ladder let a
+    // single capital letter skip every branch above and fall through to the
+    // raw-key path, which printed the claimed brand verbatim — one keystroke
+    // defeating the endpoint pinning this function exists for.
+    expect(label('Mistral', 'https://evil.example/v1')).toBe('Mistral');
+    expect(key('Mistral', 'https://evil.example/v1')).toBe(key('mistral'));
+    expect(label('MiStRaL')).toBe('Mistral');
+    // A key that merely IMPERSONATES a brand — not a registered provider at all —
+    // must not print it.
+    expect(label('Fireworks AI')).toBe('Unknown provider');
+    // Compared in SANITISED form on both sides. Against the raw display_name,
+    // every brand containing a stripped character walked straight through:
+    // 'Ollama (local)' sanitises to 'Ollama local', matched nothing, and was
+    // printed verbatim — a borrowed brand wearing one less bracket.
+    expect(label('Ollama (local)')).toBe('Unknown provider');
+    expect(label('vLLM (self-hosted)')).toBe('Unknown provider');
+    expect(label('Google Vertex AI (Claude)')).toBe('Unknown provider');
+    expect(label('anthropic ')).toBe('Anthropic');
+    expect(label('Google Vertex AI')).toBe('Unknown provider');
+  });
+
+  it('falls back to the wire label when no endpoint is configured', () => {
+    expect(label('openai')).toBe('OpenAI-compatible');
+    expect(label('custom')).toBe('Custom');
+    expect(label('custom', 'https://proxy.internal/v1')).toBe('Custom');
+  });
+
+  it('keeps two unpinned endpoints apart even though they share a label', () => {
+    // Both print 'OpenAI-compatible'. Keying the dedup on that string would drop
+    // the second proxy — and with it any outage it is reporting.
+    expect(label('openai', 'https://proxy-a.internal/v1')).toBe(label('openai', 'https://proxy-b.internal/v1'));
+    expect(key('openai', 'https://proxy-a.internal/v1')).not.toBe(key('openai', 'https://proxy-b.internal/v1'));
+    // Same host, different path/scheme spelling → still one provider.
+    expect(key('openai', 'https://proxy-a.internal/v1')).toBe(key('openai', 'https://proxy-a.internal/openai/v1'));
+  });
+
+  it('does not answer a PROTOTYPE key with a garbage identity', () => {
+    // The lookup key arrives from LYNOX_TIER_SET_JSON, and `{}['constructor']`
+    // is a truthy Object.prototype member. An object-literal table answered
+    // these with `{key: undefined, label: undefined}` — a blank provider name in
+    // the response, and one shared dedup key collapsing two real providers.
+    for (const hostile of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+      const id = providerIdentity(hostile);
+      // Treated as what it is — an unregistered provider key — not as a table hit.
+      expect(id.key).toBe(`provider:${hostile.toLowerCase()}`);
+      expect(typeof id.label).toBe('string');
+      expect(id.label.length).toBeGreaterThan(0);
+    }
+    // …and two of them still identify as two different providers, rather than
+    // collapsing onto one `undefined` key and silently dropping the second.
+    expect(key('constructor')).not.toBe(key('toString'));
+  });
+
+  it('normalises a trailing root dot into the same endpoint', () => {
+    // `api.example.com.` and `api.example.com` are one host; two keys would list
+    // one provider twice.
+    expect(key('openai', 'https://gw.internal./v1')).toBe(key('openai', 'https://gw.internal/v1'));
+  });
+
+  it('bounds and sanitises an unregistered provider key', () => {
+    // `ProviderKey` is open and LYNOX_TIER_SET_JSON is an untrusted boundary, so
+    // whatever it carries reaches the status bar. Print it, but bounded and
+    // without control characters or markup.
+    expect(label('gemini')).toBe('gemini');
+    expect(label('<img src=x onerror=alert(1)>')).toBe('img srcx onerroralert1');
+    expect(label('x'.repeat(200))).toBe('x'.repeat(24));
+    expect(label('\u0000\u0007')).toBe('Unknown provider');
   });
 });

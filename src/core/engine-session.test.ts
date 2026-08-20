@@ -30,15 +30,38 @@ const mockLoadMessages = vi.fn();
 const mockSetContinuationPrompt = vi.fn();
 const mockSetKnowledgeContext = vi.fn();
 
-vi.mock('./agent.js', () => ({
-  // Real class so `err instanceof RunAbortedError` in session.ts (which imports
-  // from this same mocked module) matches the instances the tests construct.
-  RunAbortedError: class RunAbortedError extends Error {
+vi.mock('./agent.js', () => {
+  // Real classes so `err instanceof RunAbortedError` /
+  // `err instanceof ToolLoopBreakError` in session.ts (which imports from this
+  // same mocked module) match the instances the tests construct. The loop-break
+  // subclass extends the mocked RunAbortedError for the same reason session.ts
+  // treats it as an abort-family error.
+  class MockRunAbortedError extends Error {
     constructor(message = 'Run interrupted before completion') {
       super(message);
       this.name = 'RunAbortedError';
     }
-  },
+  }
+  class MockToolLoopBreakError extends MockRunAbortedError {
+    readonly loopKey: string;
+    constructor(loopKey: string) {
+      super('Run stopped: the same tool call was repeated after repeated warnings');
+      this.name = 'ToolLoopBreakError';
+      this.loopKey = loopKey;
+    }
+  }
+  class MockContinuationLoopError extends MockRunAbortedError {
+    readonly loopPrefix: string;
+    constructor(loopPrefix: string) {
+      super('Run stopped: truncated-response continuations repeated without progress');
+      this.name = 'ContinuationLoopError';
+      this.loopPrefix = loopPrefix;
+    }
+  }
+  return {
+    RunAbortedError: MockRunAbortedError,
+    ToolLoopBreakError: MockToolLoopBreakError,
+    ContinuationLoopError: MockContinuationLoopError,
   Agent: vi.fn().mockImplementation(function (config: {
     toolResultBlobStore?: unknown;
     onStream?: ((event: unknown) => void | Promise<void>) | undefined;
@@ -101,7 +124,8 @@ vi.mock('./agent.js', () => ({
     // @ts-expect-error mock constructor
     this.setThinking = vi.fn();
   }),
-}));
+  };
+});
 
 vi.mock('./memory.js', () => ({
   Memory: vi.fn().mockImplementation(function () {
@@ -201,6 +225,8 @@ vi.mock('../tools/builtin/index.js', () => ({
   artifactHistoryTool: { definition: { name: 'artifact_history' }, handler: vi.fn() },
   artifactRestoreTool: { definition: { name: 'artifact_restore' }, handler: vi.fn() },
   recallToolResultTool: { definition: { name: 'recall_tool_result' }, handler: vi.fn() },
+  calendarReadTool: { definition: { name: 'calendar_read' }, handler: vi.fn() },
+  CALENDAR_FEED_PREFIX: 'CALENDAR_FEED_',
   suggestFollowUpsTool: { definition: { name: 'suggest_follow_ups' }, handler: vi.fn() },
   mediaProcessTool: { definition: { name: 'media_process' }, handler: vi.fn() },
 }));
@@ -318,6 +344,9 @@ vi.mock('./project.js', () => ({
 const mockInsertRun = vi.fn().mockReturnValue('run-123');
 const mockInsertPromptSnapshot = vi.fn();
 const mockInsertWireSnapshot = vi.fn();
+/** Sub-agent spend rollup (session.ts run-end). Defaults to 0 = the turn
+ *  delegated nothing; individual tests override it. */
+const mockGetDescendantCostUsd = vi.fn().mockReturnValue(0);
 
 vi.mock('./run-history.js', () => ({
   RunHistory: vi.fn().mockImplementation(function () {
@@ -343,6 +372,8 @@ vi.mock('./run-history.js', () => ({
     this.getCompactionEventsBySession = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
     this.insertToolCall = vi.fn();
+    // @ts-expect-error mock constructor — sub-agent spend rollup (session.ts run-end).
+    this.getDescendantCostUsd = mockGetDescendantCostUsd;
     // @ts-expect-error mock constructor
     this.getEmbeddings = vi.fn().mockReturnValue([]);
     // @ts-expect-error mock constructor
@@ -412,9 +443,10 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(Memory).toHaveBeenCalled();
 
       // Registry should have register called for each builtin tool.
-      // 38 builtin always (incl. edit_file + update_workflow_steps + export_workflow + import_workflow + diagnose_workflow_run + media_process + suggest_follow_ups); +1 `web_research`
+      // 39 builtin always (incl. edit_file + update_workflow_steps + export_workflow + import_workflow + diagnose_workflow_run + media_process + suggest_follow_ups); +1 `web_research`
       // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
       // isn't configured; +5 mail tools when vault is available.
+      // `calendar_read` is NOT here: it ships behind `calendar_enabled`, default off.
       expect([41, 46]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
@@ -577,6 +609,341 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(typeof failedCall![0]).toBe('string'); // the failed run's id
     });
 
+    it('a failed run records the tool calls it made, like the success path', async () => {
+      // The failure path stamped every other field the success path stamps —
+      // tokens, cost, duration, error detail — but not `toolCallCount`, so a
+      // failed run always read as "0 tools". That is wrong in the one direction
+      // that misleads: a cost review sorts by spend, and the priciest runs are
+      // disproportionately the failed ones, so the field is blank exactly where
+      // it is read hardest. It made a 60-http_request run that hit the per-run
+      // cost ceiling look like a runaway loop that had done nothing (war,
+      // 2026-08-10). The counter is session-local and only reset at run START,
+      // so its value is intact in the catch block — set it directly here, the
+      // same way the H2 test grows `session.usage`, because what is under test
+      // is the counter→updateRun wiring, not the subscription that increments it.
+      const { engine, session } = await createEngineAndSession();
+      mockSend.mockImplementationOnce(async () => {
+        (session as unknown as { runToolCallSeq: number }).runToolCallSeq = 3;
+        throw new Error('boom after three tools');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom after three tools');
+
+      const rh = engine.getRunHistory()!;
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'failed', toolCallCount: 3 }),
+      );
+    });
+
+    it('a tool call published on the global channel reaches no run at all', async () => {
+      // `lynox:tool:end` is process-global, so every Session's callback used to
+      // run for every tool call in the PROCESS and book it onto its own open
+      // run: a WorkerLoop task next to a chat wrote its calls onto the chat's
+      // run. A thread-id filter narrowed that; removing the subscriber ends it.
+      //
+      // The channel still carries diagnostics (Bugsink breadcrumbs, the debug
+      // subscriber). What it must no longer do is write history — so a publish
+      // with no sink behind it produces nothing, whatever thread it claims.
+      const { engine, session } = await createEngineAndSession();
+      mockSend.mockImplementationOnce(async () => {
+        const mine = (session as unknown as { agent?: { currentThreadId?: string } }).agent?.currentThreadId;
+        channels.toolEnd.publish({ name: 'http_request', agent: 'worker', duration: 9, success: true, threadId: 'a-different-conversation' });
+        // Even claiming THIS session's thread buys nothing — the channel is not
+        // a way into the history any more, so a forged id cannot become one.
+        channels.toolEnd.publish({ name: 'http_request', agent: 'worker', duration: 9, success: true, threadId: mine });
+        throw new Error('boom with a foreign call in flight');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom with a foreign call in flight');
+
+      const rh = engine.getRunHistory()!;
+      expect(rh.insertToolCall).not.toHaveBeenCalled();
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'failed', toolCallCount: 0 }),
+      );
+    });
+
+    it('a sub-agent\'s tool call is recorded on the CHILD\'s run, not the parent\'s', async () => {
+      // The point of the whole change. A spawned child shares its parent's
+      // thread by design, so no filter could ever separate the two and a child's
+      // calls landed on the parent's run. The child now carries its own run id
+      // and hands it to the sink.
+      //
+      // Both halves are asserted, because each alone would pass a broken build:
+      // the row must go to the CHILD, and the parent's `tool_call_count` must
+      // NOT include it — otherwise the same call is claimed twice, once as a row
+      // under the child and once as a number under the parent.
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ runId: 'child-run-1', toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 4, isError: false });
+        throw new Error('boom with a child call in flight');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom with a child call in flight');
+
+      const rh = engine.getRunHistory()!;
+      expect(rh.insertToolCall).toHaveBeenCalledWith(
+        expect.objectContaining({ runId: 'child-run-1', toolName: 'http_request' }),
+      );
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'failed', toolCallCount: 0 }),
+      );
+    });
+
+    it('a sub-agent\'s calls are still persisted — the rate limits are fed by these rows', async () => {
+      // A rate-limit invariant, not a cosmetic one. These rows feed
+      // `getToolCallCountSince`, which ENFORCES the http_request (200/hr,
+      // 2000/day) and mail-send limits. Moving a child's calls to its own run is
+      // only safe because they are still WRITTEN — a child that inherited no
+      // sink would run its fan-out unmetered, past a limit that still looked
+      // intact from the outside. That is the failure this pins: one call in, one
+      // row out, however it is attributed.
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        for (let i = 0; i < 3; i++) {
+          agent?.recordToolCall?.({ runId: `child-run-${i}`, toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        }
+        throw new Error('boom after a three-child fan-out');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom after a three-child fan-out');
+
+      const rh = engine.getRunHistory()!;
+      const written = (rh.insertToolCall as unknown as { mock: { calls: Array<[{ toolName: string }]> } }).mock.calls
+        .filter(c => c[0].toolName === 'http_request');
+      expect(written, 'every child call must still produce a row').toHaveLength(3);
+    });
+
+    it('a call with no run of its own falls back to this session\'s run', async () => {
+      // An ad-hoc Agent inside a Session has no run id of its own. Absence is
+      // not evidence of foreignness, so those keep landing where they always
+      // did rather than being dropped.
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ toolName: 'bash', inputJson: '{}', outputJson: '', durationMs: 2, isError: false });
+        throw new Error('boom with an unattributed call in flight');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom with an unattributed call in flight');
+
+      const rh = engine.getRunHistory()!;
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'failed', toolCallCount: 1 }),
+      );
+    });
+
+    it('the count on a failed run comes from real tool calls, not a set field', async () => {
+      // The two tests above set `runToolCallSeq` directly, so they pin the
+      // counter→updateRun half and nothing else: the counter in the sink could
+      // be deleted and they would both still pass. This one drives the whole
+      // path — record real calls mid-run, let the sink count them, then fail —
+      // so the end-to-end claim ("a failed run records the tool calls it made")
+      // rests on a covered link rather than on two halves that are each tested
+      // against the other's absence.
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 5, isError: false });
+        agent?.recordToolCall?.({ toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 7, isError: false });
+        throw new Error('boom after two real tool calls');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom after two real tool calls');
+
+      const rh = engine.getRunHistory()!;
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'failed', toolCallCount: 2 }),
+      );
+    });
+
+    it('sequence numbers restart per run, so a child does not continue the parent\'s numbering', async () => {
+      // `sequenceOrder` orders calls WITHIN a run. Sharing one counter across
+      // runs left each child's rows numbered from wherever the parent happened
+      // to be, so a child's own history read as if it were missing its first n
+      // calls.
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ toolName: 'bash', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        agent?.recordToolCall?.({ toolName: 'bash', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        agent?.recordToolCall?.({ runId: 'child-a', toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        agent?.recordToolCall?.({ runId: 'child-a', toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        agent?.recordToolCall?.({ runId: 'child-b', toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        throw new Error('boom after a mixed batch');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom after a mixed batch');
+
+      const rh = engine.getRunHistory()!;
+      const calls = (rh.insertToolCall as unknown as { mock: { calls: Array<[{ runId: string; sequenceOrder: number }]> } }).mock.calls.map(c => c[0]);
+      const seqFor = (runId: string): number[] => calls.filter(c => c.runId === runId).map(c => c.sequenceOrder);
+      expect(seqFor('child-a'), 'child A numbers its own rows from 0').toEqual([0, 1]);
+      expect(seqFor('child-b'), 'child B is numbered independently of child A').toEqual([0]);
+      // The parent's own two calls keep the session counter, which is also its
+      // `tool_call_count` — so it must have advanced by exactly two, not five.
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'failed', toolCallCount: 2 }),
+      );
+    });
+
+    it('an ask_user call adds its wall-clock to the run\'s user wait', async () => {
+      // `duration_ms − user_wait_ms` is rendered as "AI time" in the history
+      // view, so a prompt the human sat on for minutes would otherwise be
+      // charged to the model. The sink is the only place this is now tallied.
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ toolName: 'ask_user', inputJson: '{}', outputJson: '', durationMs: 60_000, isError: false });
+        agent?.recordToolCall?.({ toolName: 'bash', inputJson: '{}', outputJson: '', durationMs: 5, isError: false });
+        throw new Error('boom after a long human pause');
+      });
+
+      await expect(session.run('go')).rejects.toThrow('boom after a long human pause');
+
+      const rh = engine.getRunHistory()!;
+      // Only the ask_user duration counts — bash is machine time.
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'failed', userWaitMs: 60_000 }),
+      );
+    });
+
+    it('per-run sequence numbers are cleared between runs, not carried into the next', async () => {
+      // `_foreignRunSeq` is reset at run start. Without that reset it would grow
+      // for the life of the Session and — worse — a child in a LATER run would
+      // continue the numbering of a same-id child from an earlier one. The
+      // boundedness argument in the field's own doc rests on this clear.
+      const { engine, session } = await createEngineAndSession();
+      const agent = (session as unknown as { agent?: { recordToolCall?: (c: unknown) => void } }).agent;
+
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ runId: 'child-x', toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        agent?.recordToolCall?.({ runId: 'child-x', toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        throw new Error('first run done');
+      });
+      await expect(session.run('one')).rejects.toThrow('first run done');
+
+      const rh = engine.getRunHistory()!;
+      (rh.insertToolCall as unknown as { mockClear: () => void }).mockClear();
+
+      // A second run, same child run id — it must start over at 0.
+      mockSend.mockImplementationOnce(async () => {
+        agent?.recordToolCall?.({ runId: 'child-x', toolName: 'http_request', inputJson: '{}', outputJson: '', durationMs: 1, isError: false });
+        throw new Error('second run done');
+      });
+      await expect(session.run('two')).rejects.toThrow('second run done');
+
+      const seqs = (rh.insertToolCall as unknown as { mock: { calls: Array<[{ sequenceOrder: number }]> } }).mock.calls
+        .map(c => c[0].sequenceOrder);
+      expect(seqs, 'the second run restarts the numbering rather than continuing at 2').toEqual([0]);
+    });
+
+    it('an aborted run records its tool calls too', async () => {
+      // Same field, the other terminal status. `aborted` is the commoner of the
+      // two (every stop-button press), so leaving it blank here would keep the
+      // hole open for the majority of non-completed runs even with `failed` fixed.
+      const { engine, session } = await createEngineAndSession();
+      mockSend.mockImplementationOnce(async () => {
+        (session as unknown as { runToolCallSeq: number }).runToolCallSeq = 7;
+        throw new RunAbortedError();
+      });
+
+      await expect(session.run('go')).rejects.toBeInstanceOf(RunAbortedError);
+
+      const rh = engine.getRunHistory()!;
+      expect(rh.updateRun).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ status: 'aborted', toolCallCount: 7 }),
+      );
+    });
+
+    it('H2b: an in-run helper cost is SHOWN to the customer but not debited a second time', async () => {
+      // The two roles of the run's cost number pull in opposite directions, and a first
+      // version of this got it exactly backwards.
+      //
+      // A helper call (the follow-up-chip recovery) spends on the pool key WITHOUT producing
+      // tokens in `session.usage`. It debits itself through `reportMeteredCost`, under its own
+      // fresh run id — so the control plane is already correct. What was short were the
+      // numbers the CUSTOMER reads, which are derived from the usage deltas.
+      //
+      // Adding the helper dollars to the value handed to `onAfterRun` therefore does not fix
+      // the display: it bills the tenant twice, because `managed-hook` dedups per run id and
+      // these are two different ids. This test pins both halves at once.
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+
+      const HELPER_USD = 0.25;
+      mockSend.mockImplementationOnce(async () => {
+        session.usage.input_tokens += 1000;
+        session.usage.output_tokens += 500;
+        return 'done';
+      });
+      // Stand in for the recovery having spent on the pool key during this run.
+      const agent = (session as unknown as { agent?: { getHelperCostUsd?: () => number } }).agent;
+      if (agent) agent.getHelperCostUsd = () => HELPER_USD;
+
+      await session.run('go');
+
+      // The number the customer sees CARRIES the helper spend. `run()` returns the reply text;
+      // the figure the UI and the thread rollup read is the last run's usage summary.
+      const shown = (session as unknown as { _lastRunUsage?: { costUsd: number } })._lastRunUsage;
+      expect(shown, 'the run must record a usage summary').toBeDefined();
+      expect(shown!.costUsd).toBeGreaterThanOrEqual(HELPER_USD);
+
+      // The number the control plane DEBITS does not — the helper already debited itself.
+      const runCall = after.mock.calls.find(c => (c[2] as { modelTier?: string })?.modelTier !== 'fast');
+      expect(runCall, 'the run must still fire onAfterRun').toBeDefined();
+      expect(runCall![1] as number).toBeLessThan(HELPER_USD);
+    });
+
+    it('H2c: the ABORTED path shows the helper spend too, and still debits without it', async () => {
+      // The success path is pinned by H2b. The failure path repeats the same split by hand,
+      // and nothing held it — removing the helper term there left the suite green, which
+      // silently reopens the under-display this whole change exists to close, on every
+      // errored or cancelled turn. Three guards went in with no failing-capable test; this is
+      // the third.
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+
+      const HELPER_USD = 0.25;
+      mockSend.mockImplementationOnce(async () => {
+        session.usage.input_tokens += 1000;
+        session.usage.output_tokens += 500;
+        throw Object.assign(new Error('mid-turn boom'), { status: 500, type: 'api_error' });
+      });
+      const agent = (session as unknown as { agent?: { getHelperCostUsd?: () => number } }).agent;
+      if (agent) agent.getHelperCostUsd = () => HELPER_USD;
+
+      await expect(session.run('go')).rejects.toThrow('mid-turn boom');
+
+      const failed = after.mock.calls.find(c => (c[2] as { modelTier?: string })?.modelTier !== 'fast');
+      expect(failed, 'the aborted run must still fire onAfterRun').toBeDefined();
+      // Debited WITHOUT the helper term — it already debited itself, same as the success path.
+      expect(failed![1] as number).toBeLessThan(HELPER_USD);
+
+      // And the RECORDED number — the one the customer reads back — carries it. Asserting only
+      // the debit above let the display term be deleted with the suite still green, which is
+      // how this test first shipped: it pinned one half of a split whose whole point is that
+      // the two halves differ.
+      const rh = engine.getRunHistory()!;
+      const recorded = (rh.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls
+        .map(c => c[1] as { costUsd?: number; status?: string })
+        .find(a => a?.status === 'failed' || a?.status === 'aborted');
+      expect(recorded, 'the aborted run must be recorded').toBeDefined();
+      expect(recorded!.costUsd ?? 0).toBeGreaterThanOrEqual(HELPER_USD);
+    });
+
     it('Tier 2: a manual compaction records a compaction event (trigger=manual)', async () => {
       const { engine, session } = await createEngineAndSession();
       mockSend.mockResolvedValueOnce('summary text');   // the internal summary run
@@ -715,6 +1082,40 @@ describe('Engine + Session (Orchestrator)', () => {
         model: 'claude-sonnet-4-6',
       });
     });
+
+    /**
+     * The WIRING for the sub-agent cost rollup. The pieces either side of it are
+     * unit-tested (the SQL in run-history.test.ts, the projection in
+     * render-projection.test.ts, the formatter in chat-cost-footer.test.ts), but
+     * without these two the whole feature could be deleted from `Session.run`
+     * with every one of those still green — the run-end read is best-effort and
+     * swallows its own errors, so a missing call is indistinguishable from a
+     * turn that delegated nothing.
+     */
+    it('rolls sub-agent spend into the run usage, keyed on the CURRENT run id', async () => {
+      const { session } = await createEngineAndSession();
+      mockGetDescendantCostUsd.mockClear().mockReturnValue(0.0698);
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('delegate something');
+
+      // Asked RunHistory for THIS run's descendants — not a stale or empty id.
+      expect(mockGetDescendantCostUsd).toHaveBeenCalledWith('run-123');
+      // ...and the answer reached the payload the `done` event echoes.
+      expect(session.getLastRunUsage()?.spawnCostUsd).toBe(0.0698);
+    });
+
+    it('omits spawnCostUsd entirely when the turn delegated nothing', async () => {
+      // Absent, not 0: the footer keys "did this turn delegate?" off presence,
+      // and a stored 0 would put an empty split in the tooltip.
+      const { session } = await createEngineAndSession();
+      mockGetDescendantCostUsd.mockClear().mockReturnValue(0);
+
+      mockSend.mockResolvedValueOnce('response');
+      await session.run('no delegation here');
+
+      expect(session.getLastRunUsage()).not.toHaveProperty('spawnCostUsd');
+    });
   });
 
   // -- registerPipelineTools --
@@ -726,6 +1127,32 @@ describe('Engine + Session (Orchestrator)', () => {
       // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
       // isn't configured; +5 mail tools when vault is available.
       expect([41, 46]).toContain(mockRegister.mock.calls.length);
+    });
+
+    it('does NOT register calendar_read while the flag is off', async () => {
+      // Off must be byte-identical, not merely inert: an unregistered tool is absent from the
+      // decision space AND from the prefix every turn pays for. A handler that refuses when
+      // called would satisfy neither.
+      await createEngineAndSession();
+      const names = mockRegister.mock.calls.map(c => (c[0] as { definition?: { name?: string } })?.definition?.name);
+      expect(names).not.toContain('calendar_read');
+    });
+
+    it('registers calendar_read when the flag is on', async () => {
+      // Driven through the config the engine actually reads: the flag lives in the USER config
+      // (`loadConfig()`), not in the runtime `LynoxConfig` the constructor takes. Setting the
+      // latter looked like it worked and tested nothing — the tool stayed unregistered and the
+      // assertion caught it.
+      const engine = new Engine({} as import('../types/index.js').LynoxConfig);
+      engine.getUserConfig().calendar_enabled = true;
+      try {
+        await engine.init();   // registration happens here, not in registerPipelineTools()
+        const names = mockRegister.mock.calls.map(c => (c[0] as { definition?: { name?: string } })?.definition?.name);
+        expect(names).toContain('calendar_read');
+      } finally {
+        // loadConfig() memoises a singleton — reset so the flag does not leak into later tests.
+        delete engine.getUserConfig().calendar_enabled;
+      }
     });
 
     it('registerPipelineTools is idempotent after init', async () => {

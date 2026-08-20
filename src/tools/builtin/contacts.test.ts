@@ -91,6 +91,34 @@ describe('contacts tools', () => {
     });
   });
 
+  describe('provenance', () => {
+    it('records that the AGENT wrote it, not that a person did', () => {
+      // `source` used to read 'manual' for every write on this path, which claimed the person
+      // entered the contact themselves — never true here. It is a consulted field
+      // (`purgeKnowledgeGraphContacts` filters on it), so a false value is worse than none.
+      void contactsSaveTool.handler({ name: 'Dana', email: 'dana@acme.com' }, mockAgent);
+      expect(crm.listContacts()[0]?.source).toBe('agent');
+    });
+
+    it('marks a contact written on a turn that read external content', async () => {
+      // The row you look at twice: lead research writes contacts off pages the agent read,
+      // not out of a conversation the operator had.
+      const tainted = {
+        toolContext: mockAgent.toolContext,
+        sawExternalContentTool: true,
+      } as unknown as IAgent;
+      await contactsSaveTool.handler({ name: 'Researched Lead', company: 'Some Clinic' }, tainted);
+      expect(crm.listContacts()[0]?.source).toBe('agent_external');
+    });
+
+    it('never claims manual', async () => {
+      // The pair: keeping the old literal would pass neither of the above only if they assert
+      // the exact values — this states the property that was actually wrong.
+      await contactsSaveTool.handler({ name: 'Dana', email: 'dana@acme.com' }, mockAgent);
+      expect(crm.listContacts()[0]?.source).not.toBe('manual');
+    });
+  });
+
   describe('contacts_search', () => {
     beforeEach(async () => {
       await contactsSaveTool.handler({ name: 'Grace Hopper', email: 'grace@navy.mil', company: 'US Navy' }, mockAgent);

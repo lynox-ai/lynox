@@ -99,11 +99,23 @@ export interface ApiAuth {
   } | undefined;
   /**
    * For 'basic': how the credential is stored.
-   * - 'user_pass_split' — separate username + password fields combined at call time.
-   * - 'pre_encoded_b64' — single secret already Base64-encoded as `user:pass` (DataForSEO pattern).
+   * - 'user_pass_split' — separate username + password vault keys, combined and Base64-encoded
+   *   by the ENGINE at call time (see the basic branch in `http.ts`). The model cannot do this
+   *   itself: it never holds the plaintext, only `secret:NAME` references, and you cannot
+   *   Base64-encode a value you do not have. Keys come from `username_key`/`password_key`, or
+   *   from the first two `vault_keys` in order.
+   * - 'pre_encoded_b64' — single secret already Base64-encoded as `user:pass` (DataForSEO
+   *   pattern). Use when the credential arrives pre-encoded; otherwise prefer the split form,
+   *   which keeps the two halves separately rotatable and spares the operator a manual encode.
    */
   basic_format?: 'user_pass_split' | 'pre_encoded_b64' | undefined;
-  /** Header name for 'header' type (e.g. 'X-Api-Key'). Default: 'Authorization'. */
+  /** For 'basic' + 'user_pass_split': vault key holding the username. Falls back to `vault_keys[0]`. */
+  username_key?: string | undefined;
+  /** For 'basic' + 'user_pass_split': vault key holding the password. Falls back to `vault_keys[1]`. */
+  password_key?: string | undefined;
+  /** Header name for 'header' type. Default: 'X-Api-Key' — matches what the profile
+   *  description shows the model and what `api_setup bootstrap` writes. The engine
+   *  fills this slot from `vault_keys[0]`; see the attach in `http.ts`. */
   header_name?: string | undefined;
   /** Query parameter name for 'query' type. */
   query_param?: string | undefined;
@@ -889,7 +901,7 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
         : p.auth.type === 'basic'
           ? p.auth.basic_format === 'pre_encoded_b64'
             ? 'Basic Auth (pre-encoded Base64 secret — send as-is in Authorization header)'
-            : 'Basic Auth (username:password base64)'
+            : 'Basic Auth — the ENGINE attaches it from the stored username + password. Do NOT set an Authorization header yourself and do NOT try to Base64-encode anything; you do not hold the values.'
         : p.auth.type === 'bearer' ? 'Bearer Token in Authorization header'
         : p.auth.type === 'header' ? `API key in header: ${p.auth.header_name ?? 'X-Api-Key'}`
         : p.auth.type === 'oauth2' ? 'OAuth2 (managed refresh-token flow)'

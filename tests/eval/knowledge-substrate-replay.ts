@@ -34,7 +34,8 @@ import {
 } from '../../src/tools/builtin/knowledge.js';
 import { DURABLE_MEMORY_PROMPT_SUFFIX } from '../../src/core/prompts.js';
 import type { ToolEntry, PromptUserFn } from '../../src/types/index.js';
-import type { CapturedEntry, GoldThread, MatchJudge } from './knowledge-substrate-runner.js';
+import type { CapturedEntry, CoverageJudge, GoldThread, MatchJudge } from './knowledge-substrate-runner.js';
+import { JUDGE_SYSTEM_PROMPT, buildMatchJudgePrompt, buildCoverageJudgePrompt, parseJudgeVerdict } from './knowledge-substrate-runner.js';
 
 /**
  * The replay system prompt = a minimal role preamble + the REAL production
@@ -346,17 +347,49 @@ export function makeLlmJudge(cfg: ReplayProviderConfig): MatchJudge {
       model: cfg.model,
       apiKey: cfg.apiKey,
       maxIterations: 1,
-      systemPrompt: 'You compare two short business notes. Answer strictly with a single word: "yes" if the CANDIDATE records the same underlying fact as the GOLD note — paraphrase counts, and so does a statement that clearly ENTAILS the gold fact (e.g. "prefers X over Y, will not use Y" entails "dislikes Y"). Answer "no" if it records a different, missing, or contradictory fact. Output only "yes" or "no".',
+      systemPrompt: JUDGE_SYSTEM_PROMPT,
       ...providerAgentFields(cfg),
     });
     let verdict = false;
     try {
-      const out = await sendWithRetry(judge, `GOLD: ${gold}\nCANDIDATE: ${candidate}\n\nSame fact? yes or no.`, 'judge');
-      verdict = /\byes\b/i.test(out) && !/\bno\b/i.test(out);
+      const out = await sendWithRetry(judge, buildMatchJudgePrompt(gold, candidate), 'judge');
+      verdict = parseJudgeVerdict(out);
     } catch (err) {
       process.stderr.write(`  [judge] failed, scoring as no-match: ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}\n`);
       verdict = false;
     }
+    cache.set(key, verdict);
+    return verdict;
+  };
+}
+
+/**
+ * The COVERAGE variant of the LLM judge: the candidate is everything a thread
+ * stored, and the question is whether the gold fact is recorded anywhere in it.
+ * Same judge prompt as {@link makeLlmJudge} (instrument continuity with the
+ * §5.6.3 measurement rounds) with the block framing spelled out.
+ *
+ * Deliberately DIFFERENT error handling: a failed call THROWS instead of
+ * scoring "no". `scoreTieredCoverage` counts a thrown verdict as MISSING —
+ * folding it into the miss column would bias whichever run happened to hit the
+ * flaky call.
+ */
+export function makeLlmCoverageJudge(cfg: ReplayProviderConfig): CoverageJudge {
+  const cache = new Map<string, boolean>();
+  return async (gold: string, candidateBlock: string): Promise<boolean> => {
+    const key = JSON.stringify([gold, candidateBlock]);
+    const cached = cache.get(key);
+    if (cached !== undefined) return cached;
+    const judge = new Agent({
+      name: 'knowledge-coverage-judge',
+      model: cfg.model,
+      apiKey: cfg.apiKey,
+      maxIterations: 1,
+      systemPrompt: JUDGE_SYSTEM_PROMPT,
+      ...providerAgentFields(cfg),
+    });
+    const out = await sendWithRetry(judge, buildCoverageJudgePrompt(gold, candidateBlock), 'coverage-judge');
+    const verdict = parseJudgeVerdict(out);
     cache.set(key, verdict);
     return verdict;
   };

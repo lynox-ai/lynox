@@ -25,6 +25,7 @@ export { default as MailSettings } from './components/MailSettings.svelte';
 export { default as GoogleSettings } from './components/GoogleSettings.svelte';
 export { default as NotificationsSettings } from './components/NotificationsSettings.svelte';
 export { default as SearchSettings } from './components/SearchSettings.svelte';
+export { default as CalendarSettings } from './components/CalendarSettings.svelte';
 export { default as KnowledgeGraphView } from './components/KnowledgeGraphView.svelte';
 export { default as SubjectsView } from './components/SubjectsView.svelte';
 export { default as MemoryInsightsView } from './components/MemoryInsightsView.svelte';

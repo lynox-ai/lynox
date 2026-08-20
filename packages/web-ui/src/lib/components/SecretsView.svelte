@@ -37,6 +37,12 @@
 	const CHANNEL_MANAGED_PREFIXES: ReadonlyArray<string> = [
 		'MAIL_ACCOUNT_',
 		'GOOGLE_OAUTH_',
+		// The calendar page owns these and says so in its own header; without the prefix the
+		// feed address also appeared in the generic key list, with an "Ändern" button writing
+		// through a different code path than the channel's own form. This hides it from the
+		// LIST — it does not stop `saveSecret`, which is the same limit the two prefixes above
+		// have always had.
+		'CALENDAR_FEED_',
 	];
 	function isChannelManaged(name: string): boolean {
 		return CHANNEL_MANAGED_PREFIXES.some((prefix) => name.startsWith(prefix));

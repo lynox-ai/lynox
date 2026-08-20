@@ -23,8 +23,9 @@ import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
 import { debitInRunHelperCost } from '../../core/metered-request.js';
 import { isFeatureEnabled } from '../../core/features.js';
-import { isAllowlistedEndpoint, describeDisclosure, isEndpointAcked } from '../../core/llm/endpoint-allowlist.js';
+import { describeDisclosure, isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { pv } from '../../core/prompt-value.js';
+import { isInfraSecret, isProtectedSecretWrite } from '../../core/secret-store.js';
 
 /** Cap on the OpenAPI spec body — generous for real-world specs, blocks DoS via huge response. Exported so tests can use it as a single source of truth. */
 export const OPENAPI_SPEC_MAX_BYTES = 5 * 1024 * 1024;
@@ -84,6 +85,9 @@ interface ApiSetupInput {
 const REQUIRED_FIELDS: Array<keyof ApiProfile> = ['id', 'name', 'base_url', 'description'];
 const VALID_AUTH_TYPES = new Set(['none', 'basic', 'bearer', 'header', 'query', 'oauth2']);
 const VALID_BASIC_FORMATS = new Set(['user_pass_split', 'pre_encoded_b64']);
+/** Vault key names are UPPER_SNAKE_CASE. Mirrors the bootstrap input schema, applied on the
+ *  create/update path too — that schema only ever guarded the Haiku draft. */
+const VAULT_KEY_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 // `graphql` accepted 2026-05-18 as alias for `reduce` with GraphQL-shaped
 // include paths (e.g. "data.products.edges[*].node"). The reducer treats
@@ -117,6 +121,25 @@ function validateProfile(profile: ApiProfile): string | null {
     }
     if (profile.auth.basic_format !== undefined && !VALID_BASIC_FORMATS.has(profile.auth.basic_format)) {
       return `Invalid auth.basic_format "${profile.auth.basic_format}": must be user_pass_split or pre_encoded_b64`;
+    }
+    // The two keys a `user_pass_split` profile hands the engine at call time. Validated
+    // HERE as well as at the attach, so a bad profile fails loudly at setup — when the
+    // operator is present and can fix it — instead of at the first request. Both halves
+    // matter: the SHAPE (a vault key name), and the refusal to name an infrastructure
+    // secret. The latter is the one that matters: these names come from the profile, which
+    // a prompt-injected agent can author, and `resolve()` — unlike `resolveSecretRefs` —
+    // has no infra filter of its own.
+    for (const [field, key] of [
+      ['auth.username_key', profile.auth.username_key],
+      ['auth.password_key', profile.auth.password_key],
+    ] as const) {
+      if (key === undefined) continue;
+      if (!VAULT_KEY_PATTERN.test(key)) {
+        return `Invalid ${field} "${key}": must be an UPPER_SNAKE_CASE vault key name`;
+      }
+      if (isInfraSecret(key)) {
+        return `Invalid ${field} "${key}": that is an infrastructure secret managed by the platform. It is never attached to an outbound request — use a credential the user supplied for this API.`;
+      }
     }
     if (profile.auth.type === 'oauth2' && (!profile.auth.vault_keys || profile.auth.vault_keys.length === 0)) {
       return 'auth.vault_keys is required for auth.type="oauth2" (lists the vault key names the OAuth grant will resolve)';
@@ -344,6 +367,8 @@ const DOCS_EXTRACT_SCHEMA: ExtractSchema = {
         // to dodge the create-action's "no auth specified" warning.
         type: { type: 'string', enum: ['none', 'basic', 'bearer', 'header', 'query', 'oauth2'] as const },
         basic_format: { type: 'string', enum: ['user_pass_split', 'pre_encoded_b64'] as const },
+        username_key: { type: 'string', pattern: '^[A-Z][A-Z0-9_]*$' },
+        password_key: { type: 'string', pattern: '^[A-Z][A-Z0-9_]*$' },
         header_name: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9-]*$' },
         query_param: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_-]*$' },
         instructions: { type: 'string' },
@@ -402,6 +427,8 @@ interface DocsExtracted {
   auth?: {
     type: 'none' | 'basic' | 'bearer' | 'header' | 'query' | 'oauth2';
     basic_format?: 'user_pass_split' | 'pre_encoded_b64';
+    username_key?: string;
+    password_key?: string;
     header_name?: string;
     query_param?: string;
     instructions?: string;
@@ -801,7 +828,12 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
       agent,
       // Honour the operator model blocklist: without this a managed trial that
       // blocks premium Anthropic ids would still run the Sonnet default here on
-      // the CP pool key (the resolved model falls back to the fast tier).
+      // the CP pool key. Note what this does NOT say: the fast-tier fallback
+      // happens only when the blocklist rejects the resolved id. With no
+      // blocklist — the ordinary case — this extraction runs
+      // `MODEL_MAP.balanced`. An earlier version of this comment read as though
+      // fast were the norm, and that reading survived into the billing label
+      // one line below (see `result.tier`).
       ...(agent.toolContext.userConfig?.blocked_model_ids !== undefined
         ? { blockedModelIds: agent.toolContext.userConfig.blocked_model_ids }
         : {}),
@@ -811,7 +843,13 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
     // This pool-key extraction runs on a separate stream inside the (already
     // gated) tool run — account its spend to the local session cap + the tenant
     // balance so it isn't invisible to billing. No-op on self-host / BYOK.
-    debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, 'fast');
+    //
+    // The tier comes from the helper, not from here. This call site used to pass
+    // a literal `'fast'` while `callForStructuredJson` defaults to
+    // `MODEL_MAP.balanced` — so a real customer's $0.3848 Sonnet extraction was
+    // reported to the control plane as Haiku spend, and every per-tier breakdown
+    // understated `balanced` by exactly the helper calls it could not see.
+    debitInRunHelperCost(agent.toolContext.meteredHost, agent.sessionCounters, costUsd, result.tier);
   } catch (err: unknown) {
     if (err instanceof BudgetError) {
       return `Error: extraction budget exceeded (estimated $${err.estimatedCostUsd.toFixed(4)} > $${DOCS_EXTRACT_BUDGET_USD.toFixed(2)}). Try a smaller / more focused docs URL.`;
@@ -919,7 +957,7 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         },
         profile: {
           type: 'object',
-          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: none|basic|bearer|header|query|oauth2 (use "none" for public APIs like HN-Algolia or arXiv), basic_format: user_pass_split|pre_encoded_b64, header_name, query_param, vault_keys[]}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}, concurrency {parallel_ok, max_in_flight, batchable_via_endpoint}, output_volume (small|medium|large|streaming), cost {model: per_call|per_token|per_unit, rate_usd, output_ratio}, provenance {source: openapi|docs_url|manual, source_url, validated_at, schema_version: 2}.',
+          description: 'API profile data. Required: id (lowercase, alphanumeric), name, base_url, description. Optional: auth {type: none|basic|bearer|header|query|oauth2 (use "none" for public APIs like HN-Algolia or arXiv), basic_format: user_pass_split|pre_encoded_b64, username_key, password_key, header_name, query_param, vault_keys[]}, rate_limit, endpoints [{method, path, description}], guidelines [], avoid [], notes [], response_shape {kind, include, reduce, max_array_items, max_string_chars, max_chars}, concurrency {parallel_ok, max_in_flight, batchable_via_endpoint}, output_volume (small|medium|large|streaming), cost {model: per_call|per_token|per_unit, rate_usd, output_ratio}, provenance {source: openapi|docs_url|manual, source_url, validated_at, schema_version: 2}.',
         },
         id: {
           type: 'string',
@@ -947,7 +985,9 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
   },
   detailedGuidance:
     'bootstrap: pass EITHER `openapi_url` (OpenAPI 3.x JSON spec, preferred when available) OR `docs_url` (human-readable docs landing page; gated behind `api-setup-v2` flag; runs a single Haiku extraction to populate v2 fields including concurrency / cost / output_volume). It returns a DRAFT profile — enrich it with extra guidelines/avoid/response_shape from reading the docs, then call `create`.\n' +
-    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled.',
+    'fetch_token: drives the OAuth client_credentials (or refresh_token) grant using the profile\'s `auth.oauth` metadata — resolves client_id / client_secret from the vault, POSTs to `token_url`, stores the resulting access_token in the vault as `${id.toUpperCase()}_ACCESS_TOKEN`. AFTER fetch_token: every http_request to this profile\'s hostname gets `Authorization: Bearer …` auto-attached by the engine — do NOT set the Authorization header yourself and do NOT reference `secret:<id>_ACCESS_TOKEN` manually. Just call http_request with URL + body; auth is handled.' +
+    ' basic + basic_format="user_pass_split": name the two vault keys in `username_key` and `password_key` (or list them in `vault_keys`, username first). The ENGINE combines and Base64-encodes them onto every http_request to this host — do NOT set an Authorization header and do NOT try to encode anything; you never hold the plaintext, only `secret:` references, so you cannot. Use `pre_encoded_b64` only when the credential genuinely arrives already Base64-encoded.' +
+    ' bearer / header: name the vault key holding the token in `vault_keys` (first entry; for `header` also set `header_name`, default X-Api-Key). The ENGINE attaches it to every http_request to this host — do NOT set the header yourself and do NOT pass `secret:NAME` in one. Hand-setting it is not merely redundant: the value resolves before the egress scanner runs, so a token shaped like a known credential (a JWT, `ghp_…`, `sk-…`) gets the request blocked as exfiltration. Store the value with ask_secret, then just call http_request.',
   handler: async (input: ApiSetupInput, agent: IAgent): Promise<string> => {
     const apisDir = getApisDir();
 
@@ -1107,14 +1147,20 @@ Next steps before calling create:
       // there. Gating base_url alone let a profile pair an allowlisted base_url
       // with an arbitrary token_url and egress the client_secret past the
       // allowlist. validateProfile() has already verified base_url and (for
-      // oauth2 profiles) token_url parse as URLs, so isAllowlistedEndpoint()
-      // returns false here only for genuinely non-allowlisted hosts.
+      // oauth2 profiles) token_url parse as URLs, so isVettedEgressHost()
+      // returns false here only for genuinely non-vetted hosts.
       const egressUrls: string[] = [profile.base_url];
       if (profile.auth?.type === 'oauth2' && profile.auth.oauth?.token_url) {
         egressUrls.push(profile.auth.oauth.token_url);
       }
-      const nonAllowlisted = egressUrls.filter((u) => !isAllowlistedEndpoint(u));
-      if (nonAllowlisted.length > 0) {
+      // isVettedEgressHost, not isAllowlistedEndpoint: the credential attach in
+      // http.ts asks the same function, and the two MUST agree. While this asked the
+      // broader one, an `*.openai.azure.com` profile saved with no prompt and no ack,
+      // and the attach then refused it with advice ("re-save and accept when
+      // prompted") that could never be followed — the prompt was unreachable and the
+      // else-branch below deleted any ack that did exist.
+      const nonVetted = egressUrls.filter((u) => !isVettedEgressHost(u));
+      if (nonVetted.length > 0) {
         // Controller-responsibility acceptance MUST be a real OUT-OF-BAND human
         // confirmation — NEVER an agent-supplied tool argument. A prompt-injected
         // agent (malicious mail/page/doc) that could self-approve would repoint an
@@ -1123,8 +1169,8 @@ Next steps before calling create:
         // auto-attaches by hostname). So we ask the human out-of-band via
         // `promptUser` (PromptStore ask_user) — the agent cannot supply this
         // answer — and fail CLOSED when no interactive prompt exists. Disclose
-        // EVERY non-allowlisted egress host so the single accept is informed.
-        const disclosure = nonAllowlisted.map((u) => describeDisclosure(u)).join('\n\n');
+        // EVERY non-vetted egress host so the single accept is informed.
+        const disclosure = nonVetted.map((u) => describeDisclosure(u)).join('\n\n');
         if (!agent.promptUser) {
           return `Blocked: profile "${profile.id}" egresses to a non-vetted sub-processor, and saving it requires explicit user acceptance of controller-responsibility — but no interactive prompt is available (autonomous/background mode).\n\n${disclosure}`;
         }
@@ -1145,10 +1191,10 @@ Next steps before calling create:
       // overwrite it unconditionally here. Bound to the specific hosts so a
       // later `token_url`/`base_url` swap to a different non-vetted host does
       // not inherit this ack — it re-gates.
-      if (nonAllowlisted.length > 0) {
+      if (nonVetted.length > 0) {
         // Reachable only after the human accepted above (else returned).
         const ackHosts = Array.from(new Set(
-          nonAllowlisted
+          nonVetted
             .map((u) => { try { return new URL(u).hostname; } catch { return null; } })
             .filter((h): h is string => h !== null),
         ));
@@ -1252,10 +1298,10 @@ Next steps before calling create:
       // to token_url. The save-time allowlist gate covers profiles created via
       // this tool, but a profile can re-enter the store WITHOUT passing it —
       // loadFromDirectory at boot, or a JSON written into the apis dir — so
-      // re-verify here fail-closed: a non-allowlisted token_url is refused unless
+      // re-verify here fail-closed: a non-vetted token_url is refused unless
       // the profile carries a persisted acceptance covering that exact host.
       // Refuse BEFORE resolving any vault secret so nothing leaks on the way out.
-      if (!isAllowlistedEndpoint(oauth.token_url) && !isEndpointAcked(profile.custom_endpoint_ack, oauth.token_url)) {
+      if (!isVettedEgressHost(oauth.token_url) && !isEndpointAcked(profile.custom_endpoint_ack, oauth.token_url)) {
         let host = oauth.token_url;
         try { host = new URL(oauth.token_url).hostname; } catch { /* keep raw value */ }
         return `Error: profile "${input.id}" token_url points at a non-vetted sub-processor (${host}) with no recorded acceptance — fetch_token is refused because it would POST the client_secret to an unaccepted host. Re-save the profile via api_setup({ action: 'update', ... }); you'll be prompted to accept controller-responsibility, which records the acceptance and unblocks fetch_token.`;
@@ -1404,13 +1450,31 @@ Next steps before calling create:
       if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(outputName)) {
         return `Error: output_secret_name "${outputName}" is not valid UPPER_SNAKE_CASE.`;
       }
+      // The same refusal `validateProfile` makes for `vault_keys` — this path had only the
+      // shape check, so a well-formed name was enough to write over any platform secret.
+      // `secretStore.set` below overwrites without asking, and the agent chooses the name:
+      // one injected `fetch_token` could replace a mail credential or a feed address with an
+      // OAuth token, and the only symptom is the feature quietly failing afterwards.
+      // Worth stating because it is what makes this a gap rather than a gap-by-omission: this
+      // release ADDS entries to `INFRA_SECRET_PATTERNS` and applies them at the sibling site,
+      // so the protected set grew while this door stayed open.
+      if (isProtectedSecretWrite(outputName)) {
+        return `Error: output_secret_name "${outputName}" would overwrite a credential the tenant cannot recover (a platform secret, or the slot holding their own provider key) — pick a name for this API's own token.`;
+      }
       if (!secretStore.set) {
         return 'Error: secret store has no write path in this context — cannot persist the access_token.';
       }
       secretStore.set(outputName, accessToken);
       // Stash refresh_token too if the response carries one (for later refresh_token grants).
       if (parsed.refresh_token && typeof parsed.refresh_token === 'string') {
+        // Derived from the profile id rather than chosen — but `ID_PATTERN` permits ids like
+        // `google-oauth` or `mail-account-x`, so the derived name lands inside a protected
+        // prefix just as easily as a chosen one. Guarding only the caller-supplied name would
+        // close the door and leave the window.
         const refreshName = `${input.id.toUpperCase().replace(/-/g, '_')}_REFRESH_TOKEN`;
+        if (isProtectedSecretWrite(refreshName)) {
+          return `Token exchange OK, but the refresh token was NOT stored: "${refreshName}" would overwrite a credential the tenant cannot recover. Rename the api_profile so its derived key does not collide.`;
+        }
         secretStore.set(refreshName, parsed.refresh_token);
       }
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';

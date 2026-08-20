@@ -3,9 +3,11 @@ import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
 import type { SubjectStore, SubjectKind, SubjectRow } from './subject-store.js';
 import { canSupersede, deriveProvenanceTier, provenanceRank } from './provenance.js';
+import type { ProvenanceEvidence } from './provenance.js';
 import { subjectsDisagree } from './contradiction-detector.js';
 import { maskSecretPatterns, matchesSecretPattern, matchesSecretPatternStrict } from './secret-store.js';
 import type { ProvenanceKind } from '../types/memory.js';
+import { collapseToSingleLine } from './sanitize.js';
 import type { SecretStoreLike } from '../types/security.js';
 import {
   type KnowledgeEntry,
@@ -113,6 +115,24 @@ export class KnowledgeStore {
   // ── Write path (req 2/3, D-2/D-3, H1/H4/H6) ──
 
   /**
+   * Kind-agnostic subject link for the durable write surface, which carries a NAME and
+   * no kind: reuse the one existing subject of ANY kind bearing it (a `remember` about
+   * a known product/person/engagement must not mint a same-named organization twin —
+   * the graph fragmentation this store measurably produced), mint an `organization`
+   * only for a name the graph does not know at all, and hand a multi-candidate name
+   * back as ambiguous exactly like {@link SubjectStore.findOrCreate} does.
+   */
+  private _resolveWriteSubject(name: string):
+    | { ambiguous: false; id: string }
+    | { ambiguous: true } {
+    const existing = this.subjects.findByNameAnyKind(name);
+    if (existing.ambiguous) return { ambiguous: true };
+    if (existing.row) return { ambiguous: false, id: existing.row.id };
+    const minted = this.subjects.findOrCreate({ kind: 'organization', name });
+    return minted.ambiguous ? { ambiguous: true } : { ambiguous: false, id: minted.id };
+  }
+
+  /**
    * Record a durable knowledge entry. A direct insert — never publishes
    * `channels.memoryStore`. Trusted turn → `active` (+ deliberate `findOrCreate` subject
    * link, H1); untrusted turn → `pending_review` (+ `subject_hint` only, H4). Pin is a
@@ -125,22 +145,33 @@ export class KnowledgeStore {
     if (params.text.length > MAX_KNOWLEDGE_ENTRY_CHARS) {
       throw new Error(`knowledge entry text is ${params.text.length} chars, over the ${MAX_KNOWLEDGE_ENTRY_CHARS}-char store limit.`);
     }
-    const tier = deriveProvenanceTier({
-      sourceChannel: params.sourceChannel,
-      sourceUntrusted: params.sourceUntrusted,
-    });
+    // Through the shared mapper like every other derivation site: a fresh write has no review
+    // action yet, and saying so explicitly is what keeps this path from becoming a second,
+    // slightly-different definition of the same evidence.
+    const tier = deriveProvenanceTier(knowledgeEvidence({
+      sourceChannel: params.sourceChannel ?? null,
+      sourceUntrusted: params.sourceUntrusted === true,
+      reviewAction: null,
+    }));
     // Rule 1 of provenance.ts already maps sourceUntrusted → external_unverified; the routing
     // gate keys off the SAME signal, so an untrusted write is queued, never trusted-written.
     const status: KnowledgeStatus = params.sourceUntrusted === true ? 'pending_review' : 'active';
 
     let subjectId: string | null = null;
     let subjectHint: string | null = null;
+    let subjectAmbiguous = false;
     const name = params.subjectName?.trim();
     if (name) {
       if (status === 'active') {
         // H1: the deliberate authored recording IS the salience signal — findOrCreate, not
         // find-only. Decoupled from the extraction *channel*, not from findOrCreate itself.
-        subjectId = this.subjects.findOrCreate({ kind: params.subjectKind ?? 'organization', name }).id;
+        // An unidentifying name routes to the SAME place a pending entry does: keep the
+        // text as a hint and leave the link unmade. The write is not lost and nothing is
+        // bound to a guess; whoever resolves the hint later has the full name to work with.
+        const r = params.subjectKind !== undefined
+          ? this.subjects.findOrCreate({ kind: params.subjectKind, name })
+          : this._resolveWriteSubject(name);
+        if (r.ambiguous) { subjectId = null; subjectHint = name; subjectAmbiguous = true; } else { subjectId = r.id; }
       } else {
         // Pending-entry hygiene (acceptance §2): link by hint; findOrCreate on approval only,
         // so a rejected queue entry never leaves an empty minted subject behind.
@@ -155,7 +186,16 @@ export class KnowledgeStore {
     // the subject from the text both improves attribution AND lets the dedup below catch the
     // restatement (a cross-turn, subject-null duplicate that neither the subject nor the run
     // clause would otherwise reach). Conservative: only when EXACTLY ONE subject is mentioned.
-    if (status === 'active' && !subjectId) {
+    // NOT when the caller NAMED a subject and that name was ambiguous. Deriving from the text
+    // there is not a better guess, it is a different one: "Meier owes Nordberg AG 5000" with
+    // `subject: 'Meier'` mentions exactly one known subject — Nordberg — so the fact would be
+    // filed against the party it is owed TO. The caller said which subject they meant; that it
+    // resolved to several is a question to ask, not a licence to pick a third.
+    //
+    // An earlier version of this fix did exactly that, and worse: it also cleared the hint, so
+    // the name was gone, `subjectAmbiguous` was suppressed by the now-set id, and the model was
+    // told "Remembered and linked to the named subject". Wrong client, no signal, unrecoverable.
+    if (status === 'active' && !subjectId && !subjectAmbiguous) {
       const mentioned = this._deriveFocusSubjects(params.text, null, null);
       if (mentioned.length === 1) subjectId = mentioned[0]!;
     }
@@ -210,7 +250,7 @@ export class KnowledgeStore {
       params.sourceRunId ?? null,
     );
 
-    return { id, status, tier, subjectId, pinned: pinned === 1 };
+    return { id, status, tier, subjectId, pinned: pinned === 1, ...(subjectAmbiguous && !subjectId ? { subjectAmbiguous: true } : {}) };
   }
 
   /**
@@ -279,6 +319,21 @@ export class KnowledgeStore {
     const rows = scopeIds === null
       ? this._selectActiveGlobal()
       : this._selectActiveForSubjects(scopeIds);
+
+    // An ACTIVE row can carry an unresolved `subject_hint` instead of a link: `write()` refuses
+    // to bind an ambiguous name to a guess and parks the plain name instead. Such a row matches
+    // no `subject_id`, so the scoped read above cannot reach it — and an ambiguous name resolves
+    // to an EMPTY scope, which is exactly the case where the caller asked BY THAT NAME. Two
+    // "Meier" organizations, `remember` a fact about "Meier", then ask about "Meier": the fact
+    // is stored, reported as remembered, and invisible. Union those rows in by hint.
+    //
+    // Not a cross-subject bleed, which is the thing the empty scope exists to prevent: the hint
+    // IS the queried name and the row was never attributed to anyone else, so returning it
+    // cannot surface another client's fact.
+    const seen = new Set(rows.map(r => r.id));
+    for (const row of this._selectActiveByHint(params.subjectName)) {
+      if (!seen.has(row.id)) rows.push(row);
+    }
 
     const queryTokens = new Set(KnowledgeStore.tokenize(params.query));
     const scored = rows.map(row => {
@@ -400,12 +455,74 @@ export class KnowledgeStore {
     return row.n;
   }
 
+  /**
+   * How many QUEUED entries name this subject — count only, never their text.
+   *
+   * The recall-time nudge (DK plan package 1). A queued entry is not knowledge yet: it was
+   * written on a turn that handled content the operator did not author, so its wording must
+   * not enter model context before a human has looked at it. But its EXISTENCE can, and that
+   * is the whole trick — the model learns there is something waiting exactly when the subject
+   * comes up, which is the moment the person can judge it cheaply. Write-time asks scale with
+   * reads; this scales with usefulness.
+   *
+   * Matched on `subject_hint`, because that is all a queued row has: `findOrCreate` runs on
+   * APPROVAL (a rejected entry must not leave a minted subject behind), so `subject_id` is
+   * null until then. Exact, case-insensitive, trimmed — deliberately not fuzzy. A count that
+   * is sometimes about a different client is worse than no count.
+   */
+  pendingCountForSubjectHint(name: string): number {
+    const needle = name.trim().toLowerCase();
+    if (!needle) return 0;
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM knowledge_entries WHERE status = 'pending_review' AND lower(trim(subject_hint)) = ?",
+    ).get(needle) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * How many queued entries came from THIS thread — count only, never their text.
+   *
+   * The chip that announced them is client-only by design (the raw wording must not be
+   * re-injected on a resume), so a reload loses it and the entries become invisible in the
+   * place they were made. The global queue badge does not fill that gap: it answers "there is
+   * something, somewhere", not "there is something HERE", and those are different questions
+   * for someone who has just come back to one conversation.
+   *
+   * Thread is the granularity the data actually supports. `source_thread_id` is on the row;
+   * the MESSAGE is not — `thread_messages` carries no run id, so re-attaching a chip to its
+   * message would mean guessing from timestamps. A count that is sometimes about the wrong
+   * turn is worse than a count about the thread.
+   */
+  pendingCountForThread(threadId: string): number {
+    const id = threadId.trim();
+    if (!id) return 0;
+    const row = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM knowledge_entries WHERE status = 'pending_review' AND source_thread_id = ?",
+    ).get(id) as { n: number };
+    return row.n;
+  }
+
   /** The review queue (DK.2 UI): queued entries oldest-first, decrypted. */
   listPending(limit = 100): KnowledgeEntry[] {
     const capped = Math.max(1, Math.min(limit, 500));
     const rows = this.db.prepare(
       "SELECT * FROM knowledge_entries WHERE status = 'pending_review' ORDER BY created_at ASC LIMIT ?",
     ).all(capped) as KnowledgeRow[];
+    return rows.map(r => this._rowToEntry(r));
+  }
+
+  /** Thread-scoped queue read (DEF-dk-review-chip-resume-invisible). Filters
+   *  in SQL BEFORE the limit: a limit-then-filter made a thread's entries
+   *  invisible once 100+ pending rows of OTHER threads crowded the window,
+   *  while the unbounded thread COUNT still counted them — pill and chips
+   *  disagreed past queue depth 100 (review F2). */
+  listPendingForThread(threadId: string, limit = 100): KnowledgeEntry[] {
+    const id = threadId.trim();
+    if (!id) return [];
+    const capped = Math.max(1, Math.min(limit, 500));
+    const rows = this.db.prepare(
+      "SELECT * FROM knowledge_entries WHERE status = 'pending_review' AND source_thread_id = ? ORDER BY created_at ASC LIMIT ?",
+    ).all(id, capped) as KnowledgeRow[];
     return rows.map(r => this._rowToEntry(r));
   }
 
@@ -417,6 +534,19 @@ export class KnowledgeStore {
    * is a display surface, unlike the review queue ({@link listPending}) which shows raw
    * text for human judgement. `limit` bounds the row count (1..500).
    */
+  /**
+   * The review queue with secrets MASKED — for surfaces that hand the text to a file rather
+   * than to a person deciding about it.
+   *
+   * {@link listPending} deliberately returns raw text, because a reviewer cannot judge what they
+   * cannot see. A GDPR export is the other case: it is a download that sits on a disk and gets
+   * forwarded, and shipping the queue raw beside a MASKED active list means the same fact is
+   * redacted when approved and in the clear while it waits.
+   */
+  listPendingMasked(limit = 100): KnowledgeEntry[] {
+    return this.listPending(limit).map(e => ({ ...e, text: this._maskText(e.text) }));
+  }
+
   listActive(limit = 200): Array<KnowledgeEntry & { subjectName: string | null }> {
     const capped = Math.max(1, Math.min(limit, 500));
     const rows = this.db.prepare(
@@ -451,13 +581,25 @@ export class KnowledgeStore {
    *  masked), so a re-onboarding whose key already has an active fact skips. A bounded
    *  scan over active rows — onboarding runs once and the active set is small. */
   hasActiveFactWithPrefix(prefix: string): boolean {
+    return this.findActiveFactWithPrefix(prefix) !== null;
+  }
+
+  /**
+   * The ACTIVE entry whose decrypted text begins with `prefix`, with its trust tier —
+   * or null. The tier travels WITH the text because the callers that put this text on a
+   * higher-privilege surface have to make a trust decision, and re-deriving it from the
+   * text is impossible: an entry can reach `active` by being written on a clean turn OR
+   * by being approved out of the review queue, and only the row knows which.
+   */
+  findActiveFactWithPrefix(prefix: string): { text: string; sourceType: ProvenanceKind } | null {
     const rows = this.db.prepare(
-      "SELECT text FROM knowledge_entries WHERE status = 'active'",
-    ).all() as { text: string }[];
+      "SELECT text, source_type FROM knowledge_entries WHERE status = 'active'",
+    ).all() as { text: string; source_type: string }[];
     for (const r of rows) {
-      if (this.engine.dec(r.text).startsWith(prefix)) return true;
+      const text = this.engine.dec(r.text);
+      if (text.startsWith(prefix)) return { text, sourceType: r.source_type as ProvenanceKind };
     }
-    return false;
+    return null;
   }
 
   /** The always-loaded blocks (profile + playbook) for the read-surface, decrypted AND
@@ -511,27 +653,44 @@ export class KnowledgeStore {
     let subjectId: string | null = row.subject_id;
     const hint = row.subject_hint?.trim();
     if (!subjectId && hint) {
-      subjectId = this.subjects.findOrCreate({ kind: 'organization', name: hint }).id;
+      // Approval path: an unidentifying hint stays a hint rather than becoming a wrong
+      // link — the entry still activates, it simply keeps no subject edge. Kind-agnostic
+      // like the write path: approval of a fact about a known product/person must not
+      // mint the organization twin the queue deliberately avoided creating.
+      const r = this._resolveWriteSubject(hint);
+      subjectId = r.ambiguous ? null : r.id;
     }
 
     // Only rewrite the ciphertext when the reviewer actually EDITED the text — a plain approve
     // leaves it unchanged, and re-encrypting produces a fresh (IV-randomised) ciphertext for no
     // reason. edit_approve → write the new text; approve → keep the stored ciphertext.
+    // DERIVE the approved tier rather than assert it. The two are the same value today (rule 0
+    // returns `user_asserted`), so this is not about the result — it is about there being ONE
+    // source for it. A hardcoded `'user_asserted'` here is a second, silent definition of the
+    // tier that the evidence columns cannot reproduce, which is exactly the invariant
+    // `deriveProvenanceTier` documents: the tier is a pure function of persisted evidence, so a
+    // derivation change is a recomputation and never a migration. Running it through the
+    // function keeps stored and re-derived in step by construction, including if rule 0 moves.
+    const approvedTier = deriveProvenanceTier(knowledgeEvidence({
+      sourceChannel: row.source_channel,
+      sourceUntrusted: row.source_untrusted === 1,
+      reviewAction: action,
+    }));
     if (action === 'edit_approve') {
       this.db.prepare(`
         UPDATE knowledge_entries
-        SET status = 'active', source_type = 'user_asserted', text = ?, subject_id = ?, subject_hint = NULL,
+        SET status = 'active', source_type = ?, text = ?, subject_id = ?, subject_hint = NULL,
             reviewed_at = datetime('now'), review_action = ?, updated_at = datetime('now')
         WHERE id = ?
-      `).run(this.engine.enc(text), subjectId, action, id);
+      `).run(approvedTier, this.engine.enc(text), subjectId, action, id);
       return this.getEntry(id);
     }
     this.db.prepare(`
       UPDATE knowledge_entries
-      SET status = 'active', source_type = 'user_asserted', subject_id = ?, subject_hint = NULL,
+      SET status = 'active', source_type = ?, subject_id = ?, subject_hint = NULL,
           reviewed_at = datetime('now'), review_action = ?, updated_at = datetime('now')
       WHERE id = ?
-    `).run(subjectId, action, id);
+    `).run(approvedTier, subjectId, action, id);
     return this.getEntry(id);
   }
 
@@ -574,7 +733,122 @@ export class KnowledgeStore {
       SET status = 'superseded', superseded_by = ?, pinned = 0, updated_at = datetime('now')
       WHERE id = ?
     `).run(supersededBy ?? null, entry.id);
+    // ONLY the user-asserted channel may reach into the `profile` block.
+    //
+    // That block loads into every single turn and holds operator identity and durable
+    // preferences, which is why `memory_block_edit` guards it with an untrusted-refuse and a
+    // preview the operator has to confirm. Dropping a line by verbatim text match is a second
+    // write path onto the same surface, and `memory_retire`'s confirmation never mentions the
+    // block at all — so an agent retiring an entry it wrote itself could delete a line the
+    // operator authored, through a dialogue that said nothing about it.
+    //
+    // Text equality is the wrong key for the same reason: two facts can read identically and
+    // come from different places. Provenance is the right one, and `user_asserted` is exactly
+    // the channel that seeded those lines. The UI/HTTP retire path keeps working; the agent's
+    // own `agent_inferred` retire no longer touches the block.
+    if (retiringTier === 'user_asserted') this._dropSeededProfileLine(entry.text);
     return this.getEntry(entry.id)!;
+  }
+
+  /**
+   * Drop a retired entry's line from the `profile` block, if the block still carries it
+   * verbatim.
+   *
+   * The onboarding promotion seeds that block from an entry, so a fact can live in two
+   * places at once — and retirement only ever touched one of them. Measured: retire the
+   * entry, and it leaves the active list while the block keeps loading it into every turn.
+   * The user's removal appears to work and does not. That is worse than no removal button,
+   * because it teaches that the control works.
+   *
+   * Only an EXACT match of the seeded form is dropped. If the operator has since edited
+   * that line, it is theirs and it stays — retiring the entry it grew from is not a mandate
+   * to rewrite their words. Best-effort: a block failure must not undo the retire, which is
+   * already committed above.
+   */
+  private _dropSeededProfileLine(entryText: string): void {
+    try {
+      const block = this.getBlock('profile');
+      if (!block || !block.content) return;
+      const seeded = collapseToSingleLine(entryText);
+      if (!seeded) return;
+      const kept = block.content.split('\n').filter(l => l.trim() !== seeded);
+      if (kept.length === block.content.split('\n').length) return;
+      this.setBlockContent('profile', kept.join('\n').trim());
+    } catch (err: unknown) {
+      process.stderr.write(
+        `[lynox:knowledge] could not drop the retired line from the profile block: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
+  // ── Erasure ──
+  //
+  // Until these existed the store had NO delete path of any kind: `retireEntry` above
+  // sets `status = 'superseded'` and its own docstring says the entry is never deleted,
+  // and there was no `DELETE FROM knowledge_entries` anywhere in the codebase. A store
+  // whose strongest removal is a status flag cannot answer an erasure request, and the
+  // published retention text described a purge that had no implementation on this side.
+
+  // There is deliberately NO periodic purge of `superseded` rows here, and this store is
+  // therefore NOT symmetric with the legacy one (`AgentMemoryDb.gc` really does
+  // `DELETE FROM memories WHERE is_active = 0`). Retirement is an audit record by design:
+  // `memory_retire` tells the user the entry "is marked superseded, never deleted"
+  // (`tools/builtin/knowledge.ts`), and `KnowledgeStatus` says `rejected`/`superseded` are
+  // "kept (auditable), not deleted" (`types/memory.ts`). A sweep would quietly break both.
+  // Erasure is MEANT to be served by the targeted deletes below — no production caller
+  // reaches them yet (tracked; the GDPR export half shipped first). They are correct for the
+  // day they are wired, which is why the block-line drop belongs in them now rather than
+  // being remembered later. Which is the shape a data-subject
+  // request actually arrives in — retire-then-wait could never answer one anyway.
+
+  /**
+   * Hard-delete one entry by exact id, whatever its status. The targeted erasure a
+   * single data-subject request needs — retire-then-wait cannot answer one, because
+   * retirement leaves the text in place.
+   *
+   * Not reachable from an agent tool by design: erasure is a human act. Returns whether
+   * a row was removed.
+   */
+  deleteEntry(id: string): boolean {
+    // Read the text BEFORE the row is gone — erasure has to reach the copy in the
+    // always-loaded `profile` block too. `retireEntry` does this and deletion did not, so an
+    // erasure request removed the entry and left its text loading into every subsequent turn:
+    // the one place the subject's data is guaranteed to keep being read. Unconditional here,
+    // unlike in `retireEntry`: retiring is a routine downgrade where provenance decides who
+    // may touch the block, while a deletion IS the request to be forgotten.
+    const doomed = this.getEntry(id);
+    const gone = this.db.prepare('DELETE FROM knowledge_entries WHERE id = ?').run(id).changes > 0;
+    if (gone && doomed) this._dropSeededProfileLine(doomed.text);
+    return gone;
+  }
+
+  /**
+   * Hard-delete every entry attached to a subject, whatever its status.
+   *
+   * `subject_id` is the only handle that gathers "everything this store holds about one
+   * person" — the shape an erasure request actually arrives in. Entries that were never
+   * resolved to a subject carry a plaintext `subject_hint` instead and are NOT reached
+   * by this; they need {@link deleteEntry}. Returns the number of rows removed.
+   *
+   * Follows merges first, like every other subject read in this file. A merge repoints
+   * `knowledge_entries.subject_id` onto the canonical (`subject-store.ts` REPOINT_TARGETS),
+   * so a request keyed on the merged-away id would otherwise delete nothing and report
+   * success — the worst possible answer for an erasure request.
+   */
+  deleteBySubject(subjectId: string): number {
+    const canonical = this.subjects.resolveActiveSubject(subjectId);
+    // Same reason as {@link deleteEntry}: collect the texts first, because after the DELETE
+    // there is nothing left to match against the always-loaded `profile` block — and that
+    // block is precisely where a surviving copy would keep being read, every turn, after the
+    // subject asked to be erased.
+    const doomed = this.db.prepare(
+      'SELECT text FROM knowledge_entries WHERE subject_id = ?',
+    ).all(canonical) as Array<{ text: string }>;
+    const removed = this.db.prepare('DELETE FROM knowledge_entries WHERE subject_id = ?').run(canonical).changes;
+    if (removed > 0) {
+      for (const row of doomed) this._dropSeededProfileLine(this.engine.dec(row.text));
+    }
+    return removed;
   }
 
   // ── Focus derivation (H2-gated) ──
@@ -682,10 +956,35 @@ export class KnowledgeStore {
   private _resolveRecallScope(query: string, subjectName: string | undefined): string[] | null {
     const explicit = subjectName?.trim();
     if (explicit) {
-      const hit = this.subjects.findCanonical(explicit, 'organization')
-        ?? this.subjects.findByAlias(explicit, 'organization')
-        ?? this.subjects.findCanonical(explicit, 'person')
-        ?? this.subjects.findByAlias(explicit, 'person');
+      // An ambiguous ORGANIZATION alias must not fall THROUGH to the person namespace —
+      // answering an org-scoped query out of it is a wrong-scope read the caller cannot
+      // see. But it must not PRE-EMPT a certain answer either: `subjectName` carries no
+      // kind, so the org-first order is a heuristic, not an assertion about which
+      // namespace was meant, and a person who canonically bears the name is a
+      // higher-confidence hit than a name two organizations merely share. So the chain
+      // keeps its original order and ambiguity only stops it where it used to CONTINUE:
+      // after the canonical stages, before the person-alias stage.
+      const orgCanonical = this.subjects.findCanonical(explicit, 'organization');
+      const orgAlias = orgCanonical ? null : this.subjects.findByAliasResolved(explicit, 'organization');
+      const certain = orgCanonical
+        ?? orgAlias?.row
+        ?? this.subjects.findCanonical(explicit, 'person');
+      if (!certain && orgAlias?.ambiguous) return [];
+      // After the org→person chain: the remaining kinds a durable entry can be linked to
+      // (product/service/engagement). The write path can produce such links since it
+      // resolves kind-agnostically, so a name-scoped read must reach them — an entry
+      // filed under a product would otherwise be unreachable by the very name that
+      // filed it. Appended BEHIND the existing chain, not replacing it, so org/person
+      // precedence (and its documented ambiguity semantics) is byte-identical — which
+      // requires the RESOLVED person-alias form here: the old `findByAlias` collapsed
+      // an ambiguous person alias to null and the chain ENDED on it; with a tail
+      // behind it, that null must stay a stop (two persons sharing the alias is a
+      // question), not become a fall-through that picks a same-named product.
+      const personAlias = certain ? null : this.subjects.findByAliasResolved(explicit, 'person');
+      if (!certain && personAlias?.ambiguous) return [];
+      const hit = certain
+        ?? personAlias?.row
+        ?? this._resolveRemainingKinds(explicit);
       // Named an explicit subject we don't know → return an EMPTY scope, NOT a global scan.
       // A scoped query that fell back to global would surface OTHER clients' facts — the exact
       // cross-client bleed the substrate exists to prevent (§1). No match ⇒ no results.
@@ -700,6 +999,16 @@ export class KnowledgeStore {
     return [...all];
   }
 
+  /** The tail of the recall chain: product/service/engagement by name. Ambiguous
+   *  (several candidates) reads as a miss — the silent read path cannot ask back,
+   *  and a wrong-scope answer is worse than an empty one (same rule as the
+   *  org-ambiguity stop above). */
+  private _resolveRemainingKinds(name: string): { id: string } | null {
+    const rest = this.subjects.findByNameAnyKind(name, { kinds: ['product', 'service', 'engagement'] });
+    if (rest.ambiguous || rest.row === null) return null;
+    return { id: rest.row.id };
+  }
+
   private _withAncestors(subjectId: string): string[] {
     return [subjectId, ...this.subjects.getAncestors(subjectId).map(a => a.id)];
   }
@@ -710,6 +1019,17 @@ export class KnowledgeStore {
     return this.db.prepare(
       `SELECT * FROM knowledge_entries WHERE status = 'active' AND subject_id IN (${placeholders})`,
     ).all(...subjectIds) as KnowledgeRow[];
+  }
+
+  /** ACTIVE rows parked on an unresolved `subject_hint` equal to `name`, case- and
+   *  space-insensitively. `subject_id IS NULL` is part of the predicate on purpose: an approved
+   *  pending row keeps neither, and a linked row is already reachable through its subject. */
+  private _selectActiveByHint(name: string | undefined): KnowledgeRow[] {
+    const hint = name?.trim().toLowerCase();
+    if (!hint) return [];
+    return this.db.prepare(
+      "SELECT * FROM knowledge_entries WHERE status = 'active' AND subject_id IS NULL AND lower(trim(subject_hint)) = ?",
+    ).all(hint) as KnowledgeRow[];
   }
 
   private _selectActiveGlobal(): KnowledgeRow[] {
@@ -774,6 +1094,29 @@ export class KnowledgeStore {
 
 // ── Types + module helpers ──
 
+/**
+ * A knowledge entry's evidence, in the shape {@link deriveProvenanceTier} consumes. The one
+ * place that maps those columns → evidence: the fresh write, the approve path when it derives
+ * the tier to store, and anything re-deriving it afterwards.
+ *
+ * Shared on purpose: if the write side and the read side each assembled their own evidence, the
+ * invariant "a stored tier is reproducible from its own stored columns" would hold only as long
+ * as two mappings agreed, and nothing would notice when they stopped. `review_action` is the
+ * audit column the review UPDATE already writes — rule 0 reads a value that was persisted
+ * anyway, which is why closing (d) needed no new column.
+ */
+export function knowledgeEvidence(
+  e: { sourceChannel: string | null; sourceUntrusted: boolean; reviewAction: string | null },
+): ProvenanceEvidence {
+  return {
+    sourceChannel: e.sourceChannel ?? undefined,
+    sourceUntrusted: e.sourceUntrusted,
+    // `reject` is deliberately absent: a rejected entry is not vouched for, and its status keeps
+    // it out of recall anyway. Only the two accepting actions count as a human vouching.
+    reviewApproved: e.reviewAction === 'approve' || e.reviewAction === 'edit_approve',
+  };
+}
+
 export interface KnowledgeWriteParams {
   text: string;
   subjectName?: string | undefined;
@@ -798,6 +1141,11 @@ export interface KnowledgeWriteResult {
   /** True when the write was a near-duplicate of an existing active entry and was NOT inserted;
    *  `id` then points at that existing entry. */
   deduped?: boolean;
+  /** True when a `subjectName` was given but names more than one subject, so no link was made
+   *  and the row is parked on `subject_hint`. Present ONLY on that outcome, so a caller cannot
+   *  confuse it with "no subject was named at all" — the two look identical in `subjectId`, and
+   *  telling the model apart from them is the whole point (it can ask WHICH one). */
+  subjectAmbiguous?: true;
 }
 
 /** The raw v9 `knowledge_entries` row (text still enc()'d). */

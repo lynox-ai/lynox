@@ -464,6 +464,13 @@ export class SecretVault {
    * tenant's vault cannot decrypt another's.
    *
    * Usage: pass the returned hex string as `masterKey` to a new SecretVault instance.
+   *
+   * NOT WIRED — no production caller. Multi-tenant deployments do not route
+   * through here: each instance is handed its own independently generated vault
+   * key at provisioning, so the isolation comes from keys that never shared a
+   * root, not from derivation. Read this helper as an available alternative,
+   * never as a description of how tenants are currently separated — compliance
+   * text citing it by name as the live mechanism was corrected on 2026-08-01.
    */
   static deriveTenantKey(masterKey: string, tenantId: string): string {
     if (!masterKey) throw new Error('masterKey is required for tenant key derivation');

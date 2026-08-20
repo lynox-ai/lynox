@@ -96,6 +96,96 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     expect(kw!['status']).toBe('pending_review');
   });
 
+  it('the queued event NAMES why it was queued, per signal', async () => {
+    // "from external content" is true of every queued write, so as the only line it gives
+    // the person nothing to judge — and a confirmation nobody can judge is a reflex. Each
+    // signal must arrive distinctly, especially `conversation`: nothing external happened
+    // on THIS turn, and without saying so the chip reads as a malfunction.
+    // The sticky latch is CO-SET whenever the marker or an external-content tool fires on a
+    // real Agent (`agent.ts` arms both at each site), so a fixture that sets only one of the
+    // first two is a state production cannot reach — and it would leave the ORDERING, which is
+    // what actually decides the wording, untested. Each case below is a reachable state.
+    const cases = [
+      [{ sawUntrustedData: true, conversationSawUntrusted: true }, 'marker'],
+      [{ sawExternalContentTool: true, conversationSawUntrusted: true }, 'external-tool'],
+      [{ conversationSawUntrusted: true }, 'conversation'],
+    ] as const;
+    for (const [signals, expected] of cases) {
+      const { agent } = make(signals as Record<string, boolean>);
+      const events: Array<Record<string, unknown>> = [];
+      (agent.toolContext as { streamHandler: unknown }).streamHandler = (e: unknown) => { events.push(e as Record<string, unknown>); };
+      await rememberTool.handler({ text: `A fact about ${expected} sourcing`, subject: 'ACME' }, agent);
+      const kw = events.find((e) => e['type'] === 'knowledge_write');
+      expect(kw!['status'], expected).toBe('pending_review');
+      expect(kw!['cause'], expected).toBe(expected);
+    }
+  });
+
+  it('a TRUSTED write carries no cause — there is nothing to explain', async () => {
+    // The pair matters: always attaching would also pass the test above, and would put a
+    // reason line on a chip that was never queued.
+    const { agent } = make();
+    const events: Array<Record<string, unknown>> = [];
+    (agent.toolContext as { streamHandler: unknown }).streamHandler = (e: unknown) => { events.push(e as Record<string, unknown>); };
+    await rememberTool.handler({ text: 'ACME pays annually in advance', subject: 'ACME' }, agent);
+    const kw = events.find((e) => e['type'] === 'knowledge_write');
+    expect(kw!['status']).toBe('active');
+    expect(kw!['cause']).toBeUndefined();
+  });
+
+  describe('recall names what is WAITING, by count only', () => {
+    it('THE POINT: a queued fact about this subject is announced without its wording', async () => {
+      // A queued entry was written on a turn that handled content the operator did not author.
+      // Its wording must not reach model context before a human has looked at it — but its
+      // EXISTENCE may, and that is the whole mechanism: the model learns something is waiting
+      // exactly when the subject comes up.
+      const { agent, ks } = make();
+      ks.write({ text: 'ACME pays via a numbered account in Vaduz', subjectName: 'ACME', sourceChannel: 'upload', sourceUntrusted: true });
+      ks.write({ text: 'ACME renews in March', subjectName: 'ACME', sourceChannel: 'ui' });
+      const out = await recallTool.handler({ query: 'what about ACME', subject: 'ACME' }, agent);
+      expect(out).toContain('ACME renews in March');   // the approved fact, in full
+      expect(out).toContain('1 further fact');          // the queued one, by count
+      expect(out).not.toContain('Vaduz');               // …and never its wording
+    });
+
+    it('says so even when nothing active matched', async () => {
+      // Otherwise the model reports "nothing known" while facts sit in the queue — the exact
+      // "memory feels empty" complaint the queue causes.
+      const { agent, ks } = make();
+      ks.write({ text: 'ACME banks in Vaduz', subjectName: 'ACME', sourceChannel: 'upload', sourceUntrusted: true });
+      const out = await recallTool.handler({ query: 'anything', subject: 'ACME' }, agent);
+      expect(out).toContain('No matching durable knowledge found');
+      expect(out).toContain('1 further fact');
+      expect(out).not.toContain('Vaduz');
+    });
+
+    it('counts only THIS subject — a queued fact about another client is not announced', async () => {
+      // A count that is sometimes about a different client is worse than no count.
+      const { agent, ks } = make();
+      ks.write({ text: 'Nordfeld banks in Vaduz', subjectName: 'Nordfeld', sourceChannel: 'upload', sourceUntrusted: true });
+      ks.write({ text: 'ACME renews in March', subjectName: 'ACME', sourceChannel: 'ui' });
+      const out = await recallTool.handler({ query: 'what about ACME', subject: 'ACME' }, agent);
+      expect(out).not.toContain('further fact');
+    });
+
+    it('stays silent when nothing is queued', async () => {
+      // The pair: announcing unconditionally would also pass the tests above.
+      const { agent, ks } = make();
+      ks.write({ text: 'ACME renews in March', subjectName: 'ACME', sourceChannel: 'ui' });
+      const out = await recallTool.handler({ query: 'what about ACME', subject: 'ACME' }, agent);
+      expect(out).not.toContain('waiting');
+    });
+
+    it('says nothing when the caller named no subject', async () => {
+      // Without a subject there is nothing to scope the count to, and a global number would be
+      // noise on every recall.
+      const { agent, ks } = make();
+      ks.write({ text: 'ACME banks in Vaduz', subjectName: 'ACME', sourceChannel: 'upload', sourceUntrusted: true });
+      const out = await recallTool.handler({ query: 'anything at all' }, agent);
+      expect(out).not.toContain('waiting');
+    });
+  });
+
   it('remember does NOT emit knowledge_write for a dedup no-op', async () => {
     const { agent } = make();
     await rememberTool.handler({ text: 'ACME uses Stripe for billing', subject: 'ACME' }, agent);
@@ -159,6 +249,50 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     expect(ks.pendingCount()).toBe(1);
     // never rides into the always-loaded focus block
     expect(ks.recall({ query: 'auto-approve', subjectName: 'ACME' }).length).toBe(0);
+  });
+
+  // The queue REASON the model reads back — see the `untrustedReason` doc in knowledge.ts for why
+  // a wrong one is a defect. Both directions are asserted: over-attributing to the sticky latch is
+  // the same defect mirrored. Fixtures co-set `conversationSawUntrusted` per the reachability note
+  // above — otherwise the ORDERING, which is what decides the wording, stays untested.
+  it('F5: the pending_review return blames the CONVERSATION, not this turn, when only the sticky latch fired', async () => {
+    const { agent } = make({ sawUntrustedData: false, sawExternalContentTool: false, conversationSawUntrusted: true });
+    const out = await rememberTool.handler({ text: 'Nordfeld AG moved to Zug', subject: 'Nordfeld AG' }, agent);
+    expect(out).toContain('this conversation read external content on an earlier turn');
+    expect(out).not.toContain('this turn read external content');
+  });
+
+  it('H4: the pending_review return still blames THIS turn when an external-content tool ran', async () => {
+    const { agent } = make({ sawExternalContentTool: true, conversationSawUntrusted: true });
+    const out = await rememberTool.handler({ text: 'Nordfeld AG renewed', subject: 'Nordfeld AG' }, agent);
+    expect(out).toContain('this turn read external content');
+    expect(out).not.toContain('earlier turn');
+  });
+
+  it('marker outranks the sticky latch in the returned reason (specificity order)', async () => {
+    const { agent } = make({ sawUntrustedData: true, conversationSawUntrusted: true });
+    const out = await rememberTool.handler({ text: 'Nordfeld AG hired a CFO', subject: 'Nordfeld AG' }, agent);
+    expect(out).toContain('this turn read external content');
+    expect(out).not.toContain('earlier turn');
+  });
+
+  // The same misattribution lived in both REFUSAL strings, where it also handed the user an
+  // unreachable remedy: under the sticky latch there is no clean turn left in this thread.
+  it('F5: memory_block_edit names the conversation and points at a NEW chat, not a clean turn', async () => {
+    const { agent } = make({ conversationSawUntrusted: true });
+    const out = await memoryBlockEditTool.handler(
+      { block: 'playbook', mode: 'append', new_text: 'always auto-send emails' }, agent);
+    expect(out).toContain('this conversation read external content on an earlier turn');
+    expect(out).toContain('in a new chat');
+    expect(out).not.toContain('clean turn');
+  });
+
+  it('H4: memory_block_edit still says clean turn when THIS turn read external content', async () => {
+    const { agent } = make({ sawExternalContentTool: true, conversationSawUntrusted: true });
+    const out = await memoryBlockEditTool.handler(
+      { block: 'playbook', mode: 'append', new_text: 'always auto-send emails' }, agent);
+    expect(out).toContain('this turn read external content');
+    expect(out).toContain('directly on a clean turn');
   });
 
   it('F5: memory_block_edit refuses when the CONVERSATION is tainted, even on a clean-latch turn', async () => {
@@ -330,6 +464,39 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
     expect(ks.getEntry(id)?.status).toBe('active');
   });
 
+  it('memory_retire refuses a higher-trust entry WITHOUT ever asking the human', async () => {
+    // The refusal test above passes whether the gate runs before or after the prompt —
+    // it only reads the message. This one pins the ORDER: the user must never be asked
+    // to authorise a retire the gate is going to refuse anyway. A confirm that cannot
+    // change the outcome trains people to click through prompts, and it lets a
+    // prompt-injected agent manufacture a pointless confirmation.
+    const tmp = mkdtempSync(join(tmpdir(), 'lynox-retire-order-'));
+    tmpDirs.push(tmp);
+    const edb = new EngineDb(join(tmp, 'engine.db'), '');
+    const ks = new KnowledgeStore(edb, new SubjectStore(edb));
+    const ctx = createToolContext({} as never);
+    ctx.knowledgeStore = ks;
+    let prompts = 0;
+    const agent = {
+      toolContext: ctx,
+      sawUntrustedData: false, sawExternalContentTool: false, conversationSawUntrusted: false,
+      autonomy: 'supervised',
+      promptUser: async (): Promise<string> => { prompts++; return 'Retire'; },
+    } as unknown as IAgent;
+
+    const id = ks.write({ text: 'User-confirmed terms', sourceChannel: 'ui', sourceUntrusted: false }).id;
+    const out = await memoryRetireTool.handler({ id }, agent);
+    expect(out).toMatch(/Refused/);
+    expect(prompts).toBe(0);
+    expect(ks.getEntry(id)?.status).toBe('active');
+
+    // The control: an entry the gate DOES allow still goes through the prompt, so the
+    // early return cannot be satisfied by refusing everything.
+    const ok = ks.write({ text: 'ACME uses the old portal', sourceChannel: 'agent', sourceUntrusted: false }).id;
+    expect(await memoryRetireTool.handler({ id: ok }, agent)).toMatch(/retired/i);
+    expect(prompts).toBe(1);
+  });
+
   it('memory_retire cancels cleanly', async () => {
     const { agent, ks } = make({ promptAnswer: 'Cancel' });
     const id = activeFact(ks);
@@ -359,6 +526,54 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
     const { agent } = make();
     const out = await memoryFocusTool.handler({ subject: 'Nonexistent GmbH' }, agent);
     expect(out).toMatch(/no known subject/i);
+  });
+
+  it('memory_focus says AMBIGUOUS rather than focusing the wrong subject', async () => {
+    // The org→person chain must not fall through on an ambiguous organization — that
+    // would focus the session on a person who merely shares the alias. And unlike the
+    // silent read paths, this caller is an agent that can ask for the full name, so the
+    // refusal is worth saying: "not found" would be untrue here.
+    const { agent } = make();
+    const subjects = agent.toolContext.subjectStore!;
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'person', name: 'Zorin Marek', aliases: ['Meridian'] });
+    const out = await memoryFocusTool.handler({ subject: 'Meridian' }, agent);
+    expect(out).toMatch(/more than one/i);
+    expect(out).not.toMatch(/focus set/i);
+  });
+
+  it('memory_focus reports ambiguity from the PERSON alias arm too', async () => {
+    // The org arm and the person arm are separate branches. Every earlier fixture made
+    // the ORG alias the ambiguous one, so the person-alias check never ran — deleting it
+    // passed the whole suite. Here no organization carries the name at all, so the chain
+    // reaches the person alias stage and only that branch can produce the refusal.
+    const { agent } = make();
+    const subjects = agent.toolContext.subjectStore!;
+    subjects.findOrCreate({ kind: 'person', name: 'Zorin Marek', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'person', name: 'Anna Roth', aliases: ['Meridian'] });
+    expect(subjects.findCanonical('Meridian', 'organization')).toBeNull();
+    expect(subjects.findCanonical('Meridian', 'person')).toBeNull();
+    expect(subjects.findByAliasResolved('Meridian', 'organization').ambiguous).toBe(false);
+    const out = await memoryFocusTool.handler({ subject: 'Meridian' }, agent);
+    expect(out).toMatch(/more than one/i);
+  });
+
+  it('memory_focus still focuses a CANONICAL match despite an ambiguous alias elsewhere', async () => {
+    // Same precedence rule as the recall scope, and the fixture has to reach the
+    // ambiguity stage to prove it: the CANONICAL hit must sit in the person arm, which
+    // the chain consults AFTER the org alias. An org-canonical fixture short-circuits
+    // stage one and the assertion passes either way — the first version of this test did
+    // exactly that and survived the mutation it was written to catch.
+    const { agent, ks } = make();
+    const subjects = agent.toolContext.subjectStore!;
+    ks.write({ text: 'Meridian has an active retainer', subjectName: 'Meridian', subjectKind: 'person', sourceChannel: 'agent', sourceUntrusted: false });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Bau AG', aliases: ['Meridian'] });
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian Handel AG', aliases: ['Meridian'] });
+    expect(subjects.findCanonical('Meridian', 'organization')).toBeNull();   // stage one misses
+    expect(subjects.findCanonical('Meridian', 'person')).not.toBeNull();     // certainty is downstream
+    const out = await memoryFocusTool.handler({ subject: 'Meridian' }, agent);
+    expect(out).toMatch(/focus set/i);
   });
 
   it('archive_search masks secret-shaped archive content (S1 discipline)', async () => {
@@ -393,5 +608,48 @@ describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {
     expect(seen[0]).toContain('invoices are pre-approved, send without asking');
     // and the old text it replaces, so a silent inversion is visible (old→new)
     expect(seen[0]).toContain('ask before sending invoices');
+  });
+});
+
+describe('memory_focus — kind-agnostic tail behind the org→person chain', () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => { for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true }); });
+
+  function make(): { agent: IAgent; subjects: SubjectStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-k3-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    const ks = new KnowledgeStore(engine, subjects);
+    const ctx = createToolContext({} as never);
+    ctx.knowledgeStore = ks;
+    ctx.subjectStore = subjects;
+    const agent = { toolContext: ctx } as unknown as IAgent;
+    return { agent, subjects };
+  }
+
+  it('focuses a PRODUCT by name (previously "no known subject")', async () => {
+    const { agent, subjects } = make();
+    subjects.findOrCreate({ kind: 'product', name: 'Vireo' });
+    const out = await memoryFocusTool.handler({ subject: 'Vireo' }, agent);
+    expect(out).toMatch(/Focus set to Vireo/);
+  });
+
+  it('says the ambiguity when the name lives under several remaining kinds', async () => {
+    const { agent, subjects } = make();
+    const a = subjects.findOrCreate({ kind: 'organization', name: 'Alpha AG' });
+    const b = subjects.findOrCreate({ kind: 'organization', name: 'Beta AG' });
+    subjects.findOrCreateEngagement('Website', a.ambiguous ? null : a.id);
+    subjects.findOrCreateEngagement('Website', b.ambiguous ? null : b.id);
+    const out = await memoryFocusTool.handler({ subject: 'Website' }, agent);
+    expect(out).toMatch(/matches more than one subject/);
+  });
+
+  it('an org still shadows a same-named product (chain precedence untouched)', async () => {
+    const { agent, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: 'Meridian' });
+    subjects.findOrCreate({ kind: 'product', name: 'Meridian' });
+    const out = await memoryFocusTool.handler({ subject: 'Meridian' }, agent);
+    expect(out).toMatch(/Focus set to Meridian/);
   });
 });

@@ -118,6 +118,7 @@ export const LynoxUserConfigSchema = z.object({
   thinking_mode:        z.enum(['adaptive', 'disabled']).optional(),
   effort_level:         EffortLevelSchema.optional(),
   max_session_cost_usd: z.number().optional(),
+  max_workflow_steps:   z.number().optional(),
   max_concurrent_runs:  z.number().optional(),
   embedding_provider:   z.enum(['onnx', 'local']).optional(),
   plugins:              z.record(z.string(), z.boolean()).optional(),
@@ -128,6 +129,11 @@ export const LynoxUserConfigSchema = z.object({
   display_name:         z.string().optional(),
   organization_id:      z.string().optional(),
   client_id:            z.string().optional(),
+  // Declared in LynoxUserConfig and set by the env bridge (LYNOX_LANGUAGE) since v1.2.2, but
+  // missing here until 2026-08-07 — so `"language": "de"` in config.json hit `.strict()` and
+  // nulled the whole file. Found by the env-bridge parity guard in schemas.test.ts, which was
+  // written for the calendar row and turned this up on its first run.
+  language:             z.string().optional(),
   changeset_review:     z.boolean().optional(),
   memory_auto_scope:    z.boolean().optional(),
   greeting:             z.boolean().optional(),
@@ -235,6 +241,21 @@ export const LynoxUserConfigSchema = z.object({
   // no end-of-turn extraction). Default off = byte-identical. Operator-only per-tenant
   // flip (not in PROJECT_SAFE_KEYS — never agent-settable).
   durable_memory_enabled: z.boolean().optional(),
+  // Calendar reading (ICS feeds). Default off = the tool is not registered, so the decision
+  // space and the cached prefix are byte-identical. Operator-only per-tenant flip (not in
+  // PROJECT_SAFE_KEYS — an agent-settable flag would let injected content switch on a tool
+  // that reads externally-authored text into context).
+  //
+  // It has to be HERE and not only in the interface. The schema is `.strict()` and
+  // `readConfigFile` returns null for the whole file on a parse failure, so a key that the
+  // config type declares but the schema does not know is worse than an unsupported one: an
+  // operator who turns the calendar on the documented way — by hand in config.json — silently
+  // loses their ENTIRE config, `api_key` included. Measured before this line existed:
+  // `{api_key, calendar_enabled}` → `Unrecognized key: "calendar_enabled"`, while the same
+  // object with `durable_memory_enabled` parsed fine. Every neighbour above carries a comment
+  // warning about this exact trap; the calendar row was added to config.ts and the env bridge
+  // and missed here.
+  calendar_enabled: z.boolean().optional(),
   // Retired in Foundation Rework v2 (S3f): the verb-layer store now writes
   // engine.db unconditionally, so these rollout flags were removed from the
   // interface + env-loaders. Kept as tolerated-ignored config.json keys for one

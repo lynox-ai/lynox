@@ -114,35 +114,24 @@ export function configureBudgetAndRateLimits(
   process.stderr.write(`${guardedCapableBootLine(resolvedPolicy)}\n`);
 }
 
+/**
+ * Genealogy recording for a Session.
+ *
+ * Tool calls used to be recorded here too, from a `lynox:tool:end` subscriber.
+ * They are not any more: that channel is process-global, so every Session's
+ * callback ran for every tool call in the process and each booked what arrived
+ * onto its own open run. A thread-id filter narrowed it to one conversation but
+ * could not separate a spawned child from its parent — they share a thread by
+ * design — so a child's calls landed on the parent's run. Persistence now goes
+ * through a sink the agent is given (`AgentConfig.recordToolCall`), which
+ * receives the caller's own run id instead of inferring one.
+ *
+ * `spawn:end` stays on the channel because its payload already names both runs
+ * it is relating, so a listener needs nothing from its own ambient state.
+ */
 export function setupHistorySubscriptions(
   history: RunHistory,
-  getCurrentRunId: () => string | null,
-  getAndIncrementSeq: () => number,
-  addUserWaitMs?: (ms: number) => void,
 ): void {
-  // tool:end → fire-and-forget tool call recording
-  channels.toolEnd.subscribe((msg: unknown) => {
-    const runId = getCurrentRunId();
-    if (!runId) return;
-    const data = msg as { name: string; duration: number; success: boolean; error?: string | undefined; input?: string | undefined };
-    // Track user wait time from interactive tools
-    if (data.name === 'ask_user' && addUserWaitMs) {
-      addUserWaitMs(Math.round(data.duration));
-    }
-    try {
-      history.insertToolCall({
-        runId,
-        toolName: data.name,
-        inputJson: data.input ?? '{}',
-        outputJson: data.success ? '' : (data.error ?? 'unknown error'),
-        durationMs: Math.round(data.duration),
-        sequenceOrder: getAndIncrementSeq(),
-      });
-    } catch {
-      // Fire-and-forget
-    }
-  });
-
   // spawn:end → genealogy tracking
   channels.spawnEnd.subscribe((msg: unknown) => {
     const data = msg as {

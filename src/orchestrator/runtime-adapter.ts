@@ -1,7 +1,7 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { Agent } from '../core/agent.js';
-import { getModelId, clampTier, normalizeTier } from '../types/index.js';
-import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike } from '../types/index.js';
+import { getModelId, clampTier, normalizeTier, modelCapability } from '../types/index.js';
+import type { IAgent, ToolEntry, ToolContext, LynoxUserConfig, ModelTier, ThinkingMode, StreamEvent, PreApprovalSet, InlinePipelineStep, CapabilityContract, LLMProvider, SecretStoreLike, AutonomyLevel } from '../types/index.js';
 import type { PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMeta } from '../types/agent.js';
 import type { IMemory } from '../types/memory.js';
 import { getActiveProvider } from '../core/llm-client.js';
@@ -13,6 +13,8 @@ import { resolveTools } from '../tools/resolve-tools.js';
 import { isHumanInTheLoopTool } from './human-in-the-loop.js';
 import type { PromptBudget } from './prompt-budget.js';
 import { withCurrentTimePrefix, GROUNDING_PROMPT_BLOCK } from '../core/prompts.js';
+import { describeTurnUntrusted } from '../core/untrusted-signals.js';
+import type { UntrustedCause, UntrustedSignals } from '../core/untrusted-signals.js';
 
 const INLINE_EXCLUDED_TOOLS = new Set(['spawn_agent', 'run_workflow']);
 
@@ -43,6 +45,184 @@ export const INLINE_CORE_TOOLS = new Set([
   // opt-in per-step, like memory_block_edit.
   'recall',
 ]);
+
+/**
+ * Run-level untrusted-content accumulator for a pipeline run — the cross-step
+ * counterpart of spawn.ts's parent↔child taint seed. Each step runs as a FRESH
+ * Agent whose latches start clean, and a step's final answer flows into later
+ * steps' input WITHOUT the wrapped-untrusted marker (the marker rides tool
+ * RESULTS inside a step, never its output). Without a run-scoped signal, a
+ * workflow whose step 1 reads external content and whose step 2 records a fact
+ * lands that fact as trusted/active — an H4 pending_review bypass one seam over
+ * from the spawn one that IS closed.
+ *
+ * `seeded` is the caller's cause at run start ('none' for headless runs);
+ * `earned` is the most specific cause any STEP acquired during the run. The
+ * split does two jobs: {@link noteStepTaint} needs it to tell a step's OWN
+ * external read apart from our seed reflected back off a fresh agent (only the
+ * former escalates), and the retry path carries the original run's taint —
+ * BOTH halves — forward so a re-run fed that run's cached outputs stays armed
+ * even under a clean caller.
+ * The way back to the caller is NOT this object's job — the `run_workflow`
+ * handler already taints the caller unconditionally after every run (H-002).
+ */
+export interface RunTaint {
+  seeded: UntrustedCause;
+  earned: UntrustedCause;
+  /**
+   * The run's LIVE step agents — registered at spawn, removed in the spawn's
+   * finally. Same-phase PARALLEL siblings are all spawned before any of them
+   * folds (runner.ts `Promise.allSettled`), so the spawn-time seed alone leaves
+   * a sibling that spawned clean unprotected against a sibling that reads
+   * external content mid-phase. When {@link noteStepTaintLive} arms the
+   * accumulator, every live agent's sticky latch is armed too — arming only,
+   * never disarming (the one-way rule the compaction path already states).
+   * Lazily created by the spawners so the plain `{seeded, earned}` shape of
+   * {@link newRunTaint} — which callers and tests compare structurally — is
+   * unchanged for runs that never spawn a step.
+   */
+  live?: Set<TaintPeer>;
+}
+
+/** A live step agent the run can arm mid-flight — the one capability the
+ *  cross-sibling push needs. */
+export interface TaintPeer {
+  restoreConversationTaint(): void;
+}
+
+/** Build a run's taint accumulator, seeded from the calling agent (or clean when headless). */
+export function newRunTaint(caller?: UntrustedSignals | undefined): RunTaint {
+  return { seeded: caller ? describeTurnUntrusted(caller) : 'none', earned: 'none' };
+}
+
+/** Whether any signal — seed or step-earned — puts this run on the untrusted side. */
+export function runTaintArmed(taint: RunTaint): boolean {
+  return taint.seeded !== 'none' || taint.earned !== 'none';
+}
+
+/**
+ * Fold a finished step's signals into the run accumulator. Only causes the step
+ * EARNED itself (marker / external-tool) escalate; 'conversation' is what our own
+ * seed reflects back off a fresh step agent and carries no new information.
+ */
+export function noteStepTaint(taint: RunTaint, stepAgent: UntrustedSignals): void {
+  const cause = describeTurnUntrusted(stepAgent);
+  if (cause === 'marker') taint.earned = 'marker';
+  else if (cause === 'external-tool' && taint.earned !== 'marker') taint.earned = 'external-tool';
+}
+
+/**
+ * The MID-RUN fold: called from a step's stream handler on every tool event,
+ * so an external read escalates the accumulator at the moment it happens —
+ * not in the step's `finally`, which for same-phase parallel siblings is too
+ * late (all siblings are spawned before any finally runs). On the transition
+ * to armed, every LIVE sibling's sticky latch is armed as well, so a sibling
+ * already mid-send routes its durable writes to `pending_review` from here on.
+ *
+ * Why this closes the race completely for the store-then-recall chain: the
+ * leak needs sibling A's external content to reach sibling B via the shared
+ * memory (A: external read → A: memory_store → B: memory_recall → B: durable
+ * write). A's `tool_result` stream event fires before A can dispatch the
+ * store, and this fold runs synchronously inside that event — so B is armed
+ * strictly before the leaked value is even writable, let alone readable.
+ * A `tool_call` event fires before the dispatch arms A's own latch and folds
+ * nothing yet; it is included so the hook does not depend on emit order.
+ */
+export function noteStepTaintLive(taint: RunTaint, stepAgent: UntrustedSignals): void {
+  const wasArmed = runTaintArmed(taint);
+  noteStepTaint(taint, stepAgent);
+  if (!wasArmed && runTaintArmed(taint) && taint.live) {
+    for (const peer of taint.live) {
+      // Per-peer isolation: a throwing peer must not leave the REMAINING
+      // siblings unarmed — the transition fires exactly once (`earned` is set
+      // now, so `wasArmed` is true on every later call), so a skipped peer
+      // would stay clean for good, and the throw would surface inside the
+      // EMITTING step's stream handler. Unreachable for real Agents (the
+      // restore is a boolean set), guarded because the failure direction is
+      // silent under-tainting.
+      try { peer.restoreConversationTaint(); } catch { /* arm the rest */ }
+    }
+  }
+}
+
+/**
+ * Per-step live-taint wiring, shared by `spawnViaAgent` and `spawnInline` so
+ * the two paths cannot diverge: the stream hook that folds mid-run, the live
+ * registration at spawn, and the finally-side release (deregister + the
+ * backstop fold for arming sources that emit no tool event, e.g. spawn's
+ * child hand-off). The holder exists because the stream handler is an Agent-
+ * constructor argument, so the agent binding does not exist yet when the
+ * closure is built; events only fire during send(), after `register` ran.
+ */
+function wireStepTaint(runTaint: RunTaint | undefined): {
+  onToolActivity: (() => void) | undefined;
+  register: (agent: Agent) => void;
+  release: (agent: Agent) => void;
+} {
+  const holder: { agent?: Agent } = {};
+  return {
+    onToolActivity: runTaint
+      ? () => { if (holder.agent) noteStepTaintLive(runTaint, holder.agent); }
+      : undefined,
+    register: (agent) => {
+      holder.agent = agent;
+      if (runTaint) (runTaint.live ??= new Set()).add(agent);
+    },
+    release: (agent) => {
+      runTaint?.live?.delete(agent);
+      if (runTaint) noteStepTaintLive(runTaint, agent);
+    },
+  };
+}
+
+/**
+ * F1 (PRD-COST-CONTROLS-V2, D1): a pipeline step that declares no tier runs
+ * `fast`. A step is a scoped, described unit of work — if neither the step nor
+ * its role justifies a premium tier, the default must not supply one silently.
+ * The session `default_tier` deliberately does NOT reach steps: an undeclared
+ * step inheriting the session's `balanced` is exactly how a 2000-contact
+ * pagination loop ran on Sonnet. The main conversation loop keeps its own
+ * default; agent-runtime steps keep their declared `AgentDef.defaultTier`.
+ */
+const UNDECLARED_STEP_TIER: ModelTier = 'fast';
+
+/**
+ * The tier an inline step runs on when `step.model` is absent: the role's
+ * declared tier, else `fast`. Shared by the spawn path, the runner's budget
+ * check, the step-row record and the plan-time estimate so none of the four
+ * can disagree about what an undeclared step costs.
+ */
+export function undeclaredInlineStepTier(step: Pick<ManifestStep, 'role'>): ModelTier {
+  return (step.role ? getRole(step.role)?.model : undefined) ?? UNDECLARED_STEP_TIER;
+}
+
+/**
+ * F2 (PRD-COST-CONTROLS-V2, D2): which tool NAMES an inline step may draw from
+ * the parent set. A step that declares `tools` gets exactly the declared names
+ * that exist in the inline-safe pool — a declaration can NARROW the pool or opt
+ * into `bash`, never widen past the sandbox (destructive opt-ins like
+ * `memory_delete` still require a role's allowTools). A step that declares
+ * nothing (legacy manifests, hand-written YAML without roles) gets the pool
+ * minus `bash`: bash is granted only by declaration, never silently — four
+ * unexplainable bash approval dialogs on a customer's pagination step are how
+ * this rule got here. A declared EMPTY array is a declaration too — a
+ * pure-reasoning step that names zero tools gets zero, not the default pool.
+ * A captured replay step's `tool` is always admitted from the pool (the step
+ * exists to replay exactly that call).
+ */
+const INLINE_DEFAULT_TOOL_NAMES: ReadonlySet<string> = new Set(
+  [...INLINE_CORE_TOOLS].filter(name => name !== 'bash'),
+);
+
+function inlineStepToolNames(step: Pick<ManifestStep, 'tools' | 'tool'>): ReadonlySet<string> {
+  const replayTool = step.tool !== undefined && INLINE_CORE_TOOLS.has(step.tool) ? step.tool : undefined;
+  if (!step.tools && replayTool === undefined) return INLINE_DEFAULT_TOOL_NAMES;
+  const admitted = new Set(
+    step.tools ? step.tools.filter(name => INLINE_CORE_TOOLS.has(name)) : INLINE_DEFAULT_TOOL_NAMES,
+  );
+  if (replayTool !== undefined) admitted.add(replayTool);
+  return admitted;
+}
 
 /**
  * A2 observability: a step's tool calls are recorded under its own
@@ -91,12 +271,21 @@ function boundedJson(value: unknown, max = 4000): string {
 export function createStepStreamHandler(opts: {
   onTokens: (inputDelta: number, outputDelta: number) => void;
   recordToolCall?: StepToolRecorder | undefined;
+  /** Called on every tool event (call AND result) so the spawner can fold the
+   *  step's taint into the run accumulator MID-RUN — see {@link noteStepTaintLive}.
+   *  Runs for sub-agent events too: a child's taint reaches this step's own
+   *  latch via spawn's hand-off, and the fold reads the latch, so the extra
+   *  calls are cheap re-checks, never a mis-attribution. */
+  onToolActivity?: (() => void) | undefined;
 }): (event: StreamEvent) => void {
   const pending: Array<{ name: string; input: unknown; start: number }> = [];
   return (event: StreamEvent): void => {
     if (event.type === 'turn_end') {
       opts.onTokens(event.usage.input_tokens, event.usage.output_tokens);
       return;
+    }
+    if (event.type === 'tool_call' || event.type === 'tool_result') {
+      opts.onToolActivity?.();
     }
     const record = opts.recordToolCall;
     if (!record) return;
@@ -125,12 +314,17 @@ export interface SubAgentPromptHandles {
   parentPromptTabs?: PromptTabsFn | undefined;
   parentPromptSecret?: PromptSecretFn | undefined;
   promptBudget?: PromptBudget | undefined;
+  /** Name of the workflow whose steps these callbacks serve. Stamped onto every
+   *  prompt a step raises so the dialog can say which workflow asked — see
+   *  {@link PromptOrigin}. Set by `runManifest`; undefined for callers that
+   *  spawn a step outside a manifest. */
+  workflowName?: string | undefined;
 }
 
 /**
  * Build the per-step Agent prompt callbacks. Wraps the parent callbacks so
- * each prompt is tagged with the originating step's id + task. Returns
- * undefined for callbacks the parent didn't provide (autonomous run).
+ * each prompt is tagged with the originating workflow name, step id and task.
+ * Returns undefined for callbacks the parent didn't provide (autonomous run).
  *
  * If a PromptBudget is attached, every successful prompt consumes one slot;
  * once the budget is exhausted the wrapper throws PromptBudgetExceededError
@@ -142,7 +336,7 @@ export function buildSubAgentPromptCallbacks(
   parent: SubAgentPromptHandles | undefined,
 ): { promptUser?: PromptUserFn | undefined; promptTabs?: PromptTabsFn | undefined; promptSecret?: PromptSecretFn | undefined } {
   if (!parent) return {};
-  const meta: PromptMeta = { stepId: step.id, stepTask: step.task };
+  const meta: PromptMeta = { stepId: step.id, stepTask: step.task, workflowName: parent.workflowName };
   const budget = parent.promptBudget;
   // Budget is checked up-front (so a saturated budget rejects without ever
   // touching the parent), then refunded if the parent rejects/aborts —
@@ -274,6 +468,97 @@ export function resolveModel(stepModel: string | undefined, defaultTier: ModelTi
 }
 
 /**
+ * Deep-consent parity for pipeline steps (the spawn-side D2 control, applied at
+ * the step-resolution sites). A headless (`autonomy: 'autonomous'`) run never
+ * executes the deep tier without explicit consent: the spawn gate cannot fire
+ * there (the permission-guard check returns null in autonomous), and until this
+ * clamp the SAME fan-out expressed as workflow steps bypassed the gate
+ * spawn_agent got — a consent boundary a sibling tool bypasses is not a
+ * boundary.
+ *
+ * Returns the (possibly rewritten) `requested` for the caller to hand to
+ * `resolveRunModel` — the clamp is a REQUEST rewrite, exactly like spawn's
+ * `spec.model = 'balanced'`, NOT a post-hoc substitution of the resolved pair.
+ * That distinction is load-bearing: resolveRunModel re-applies `maxTier` +
+ * `blockedModelIds` to the rewritten request, so the consent clamp can never
+ * land a step ABOVE the tenant ceiling or on a blocked model (a substituting
+ * clamp would have).
+ *
+ * Two paths, mirroring `specResolvesDeep` + the spawn handler in spawn.ts:
+ *  1. a SUBSTITUTABLE deep request — `step.model` naming the deep tier (or its
+ *     legacy alias), or a deep default reaching an undeclared step (including
+ *     `model: ''`, which resolveRunModel already treats as "no override") — is
+ *     rewritten down to `balanced`.
+ *  2. a deep-band RAW model id pins a specific endpoint and cannot be
+ *     substituted down, so it is REFUSED headless — the same rule the spawn
+ *     profile guard applies. Unknown-band ids are deliberately PASSED: they are
+ *     overwhelmingly self-host pins (local gateways absent from
+ *     MODEL_CAPABILITIES), the per-step cost guard still bounds them, and
+ *     refusing them would break every existing autonomous workflow on a local
+ *     model. (The spawn profile rule treats unknown as deep because profiles
+ *     are operator-managed entries; a step pin is not.)
+ *     What "unknown" must NOT cover is a REGISTERED deep model wearing a date
+ *     suffix — see {@link rawIdIsDeepBand}.
+ *
+ * Interactive requests are returned UNCHANGED: the interactive consent prompt
+ * for steps (a GO at the run_workflow surface, like spawn's) is the full-parity
+ * follow-up — see the deferred register — and clamping interactively would
+ * silently change runs a user is watching.
+ */
+/**
+ * Is this raw model id in the deep cost band?
+ *
+ * Direct registry hit first. Then one fallback, and it is the whole point of
+ * this helper: `normalizeModelId` strips only the **Vertex** version suffix
+ * (`@YYYYMMDD`), so an Anthropic-style DASH-dated snapshot of a registered deep
+ * model — `claude-opus-5-20260601`, the same shape as the registered
+ * `claude-haiku-4-5-20251001` — misses the registry entirely and reads as
+ * "unknown". Unknown is the branch that PASSES headless, so without this an
+ * operator could pin a dated Opus in a step and have it run autonomously at the
+ * deep rate with no consent, on any instance without a `max_tier` ceiling
+ * (self-host / BYOK; managed is covered by `modelIdExceedsMaxTier`).
+ *
+ * Deliberately NOT the spawn side's "unknown ⇒ deep" rule: that would refuse
+ * every local-gateway pin and break existing autonomous workflows on self-host
+ * models. A genuinely unregistered id still passes — only one that resolves to
+ * a registered deep model once the date is removed is refused. `undated !== id`
+ * keeps the fallback from re-testing an id that carried no date.
+ */
+function rawIdIsDeepBand(id: string): boolean {
+  if (modelCapability(id)?.tier === 'deep') return true;
+  const undated = id.replace(/-\d{8}$/, '');
+  return undated !== id && modelCapability(undated)?.tier === 'deep';
+}
+
+export function headlessStepModelOverride(
+  requested: string | undefined,
+  defaultTier: ModelTier,
+  autonomy: AutonomyLevel | undefined,
+): string | undefined {
+  if (autonomy !== 'autonomous') return requested;
+  // Same empty-string coercion resolveRunModel applies: `model: ''` is
+  // type-legal and means "no override", so the deep DEFAULT must reach it.
+  const req = requested ? requested : undefined;
+  if (req !== undefined) {
+    const requestedTier = normalizeTier(req);
+    if (requestedTier === undefined) {
+      // A raw id: only a REGISTERED deep band refuses headless (see note above),
+      // where "registered" tolerates a dated snapshot suffix.
+      if (rawIdIsDeepBand(req)) {
+        const shownId = req.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 80);
+        throw new Error(
+          `Step model "${shownId}" is in the deep cost band and cannot run autonomously without explicit consent — a specific model id pins an endpoint and cannot be substituted down to balanced. Run this workflow interactively (where you can approve it), or declare the step's model as a tier (fast/balanced) instead.`,
+        );
+      }
+      return req;
+    }
+    if (requestedTier !== 'deep') return req;
+    return 'balanced';
+  }
+  return defaultTier === 'deep' ? 'balanced' : req;
+}
+
+/**
  * Resolve the per-step Agent wire + creds for an already-resolved tier under the
  * active routing mode. In STANDARD mode (no hybrid tier_set) the result is
  * `crossProviderSlot:false` and the caller keeps its base `config.*` values, so
@@ -341,6 +626,7 @@ export async function spawnViaAgent(
   stepRunId?: string | undefined,
   recordToolCall?: StepToolRecorder | undefined,
   secretStore?: SecretStoreLike | undefined,
+  runTaint?: RunTaint | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -348,8 +634,12 @@ export async function spawnViaAgent(
 
   // Single chokepoint: override gate (now a pass-through, D8) + clamp to
   // max_tier + map to the provider's id. The clamp is the cost cap that applies.
+  // Headless deep-consent parity: the step-side twin of spawn's D2 clamp, as a
+  // REQUEST rewrite BEFORE resolution — resolveRunModel then re-applies the
+  // tenant ceiling + model blocklist to the rewritten request, so the consent
+  // clamp can never land a step above max_tier or on a blocked model.
   const runModel = resolveRunModel({
-    requested: step.model,
+    requested: headlessStepModelOverride(step.model, agentDef.defaultTier, autonomy),
     defaultTier: agentDef.defaultTier,
     accountTier: config.account_tier,
     maxTier: config.max_tier,
@@ -404,6 +694,7 @@ export async function spawnViaAgent(
     : { type: 'adaptive' };
 
   const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
+  const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({
     name: step.agent,
@@ -435,6 +726,12 @@ export async function spawnViaAgent(
     preApproval,
     autonomy,
     capabilityContract,
+    // One flag governs the whole run: a step on a DK-on tenant must stand its
+    // legacy end-of-turn extraction down exactly like the main agent and
+    // spawned children do (spawn.ts threads the same flag). This path builds
+    // the agent without `memory`, so the extractor is inert here either way —
+    // the flag rides along so the two step paths cannot diverge.
+    durableMemoryEnabled: config.durable_memory_enabled === true,
     // Share the parent agent's SecretStore so this step's tools resolve
     // `secret:NAME` refs against the vault AND the fail-loud unresolved-secret
     // guard (agent.ts) fires. Without it the whole secret block is skipped: the
@@ -453,10 +750,25 @@ export async function spawnViaAgent(
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
+      onToolActivity: taintWiring.onToolActivity,
     }),
   });
 
   activePipelineAgents.add(agent);
+  // Register as a LIVE peer so a same-phase parallel sibling's external read
+  // arms this agent mid-run (the spawn-time seed below covers only taint that
+  // existed BEFORE this step spawned).
+  taintWiring.register(agent);
+  // Cross-step taint seed (mirror of spawn.ts's parent→child seed): once the
+  // run's accumulator is armed — by the caller's own taint or by an earlier
+  // step reading external content — this step starts with its STICKY latch
+  // armed, so a durable write inside it routes to pending_review instead of
+  // landing active. `restoreConversationTaint`, never `noteUntrustedData`: the
+  // step inherited the taint, it did not read external content itself, and the
+  // run-scoped marker is what the review chip REPORTS as the cause.
+  if (runTaint && runTaintArmed(runTaint)) {
+    agent.restoreConversationTaint();
+  }
   const timeoutMs = step.timeout_ms ?? 1_800_000;
   let timedOut = false;
   const timeoutId = setTimeout(() => {
@@ -484,6 +796,13 @@ export async function spawnViaAgent(
   } finally {
     clearTimeout(timeoutId);
     activePipelineAgents.delete(agent);
+    // Deregister + fold what this step SAW into the run accumulator — in
+    // finally, because a step that read external content and then failed/timed
+    // out still read it, and under on_failure:'continue' later steps still
+    // run. Over-taints only in the safe direction. The fold stays alongside
+    // the mid-run one as the backstop for arming sources that emit no tool
+    // event (e.g. spawn's child hand-off).
+    taintWiring.release(agent);
   }
 }
 
@@ -531,6 +850,7 @@ export async function spawnInline(
   stepRunId?: string | undefined,
   recordToolCall?: StepToolRecorder | undefined,
   secretStore?: SecretStoreLike | undefined,
+  runTaint?: RunTaint | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   let tokensIn = 0;
   let tokensOut = 0;
@@ -542,14 +862,18 @@ export async function spawnInline(
     throw new Error(`Unknown role "${step.role}" on step "${step.id}". Available roles: ${getRoleNames().join(', ')}.`);
   }
 
-  // Single chokepoint: step > role > user config > default, then the override
-  // gate (now a pass-through, D8) + CLAMP to max_tier + map to the provider's
-  // id. The cost-guard bucket below uses the same resolved tier so the budget
-  // can't disagree with the chosen model.
-  const configTier = config.default_tier;
+  // Single chokepoint: step > role > `fast` (F1/D1 — the session default_tier
+  // deliberately does not reach steps), then the override gate (now a
+  // pass-through, D8) + CLAMP to max_tier + map to the provider's id. The
+  // cost-guard bucket below uses the same resolved tier so the budget can't
+  // disagree with the chosen model. Headless deep-consent parity (see
+  // spawnViaAgent): the inline path is the run_workflow fan-out — without this
+  // rewrite it ran `model: 'deep'` headless where spawn_agent clamps to
+  // balanced; rewriting the REQUEST (not the resolved pair) keeps ceiling +
+  // blocklist applied to the clamped run.
   const runModel = resolveRunModel({
-    requested: step.model,
-    defaultTier: (resolved?.model ?? configTier ?? 'balanced') as ModelTier,
+    requested: headlessStepModelOverride(step.model, undeclaredInlineStepTier(step), autonomy),
+    defaultTier: undeclaredInlineStepTier(step),
     accountTier: config.account_tier,
     maxTier: config.max_tier,
     blockedModelIds: config.blocked_model_ids,
@@ -563,11 +887,15 @@ export async function spawnInline(
   // A2: pipeline steps carry the grounding block too (they previously ran on a
   // bare task prompt with no provenance discipline).
   const systemPrompt = `${GROUNDING_PROMPT_BLOCK}\n\nYou are a focused task agent. Complete the task precisely. Return structured data (JSON, Markdown tables) over verbose prose. When creating artifacts, keep HTML/SVG minimal — use plain data + CSS, avoid large JS chart libraries inline. Optimize for clarity, not visual complexity.`;
-  // Use minimal tool set for inline steps unless role specifies custom tools
+  // Tool grant (narrowest wins): a role's allowTools passes the full parent set
+  // to the profile filter (existing YAML surface, can widen deliberately);
+  // otherwise the step draws from `inlineStepToolNames` — its declared set, or
+  // the inline pool minus bash when it declared nothing (F2/D2).
   const roleProfile = resolved
     ? { allowedTools: resolved.allowTools ? [...resolved.allowTools] : undefined, deniedTools: resolved.denyTools ? [...resolved.denyTools] : undefined }
     : null;
-  const filteredParent = resolved?.allowTools ? parentTools : parentTools.filter(t => INLINE_CORE_TOOLS.has(t.definition.name));
+  const stepToolNames = inlineStepToolNames(step);
+  const filteredParent = resolved?.allowTools ? parentTools : parentTools.filter(t => stepToolNames.has(t.definition.name));
   let tools = resolveTools(undefined, roleProfile, filteredParent, INLINE_EXCLUDED_TOOLS);
   // Strip ask_user / ask_secret if no parent prompt callback (autonomous run).
   // Belt-and-suspenders: validator/scheduler should already block this path,
@@ -603,6 +931,7 @@ export async function spawnInline(
   const maxIter = 10;
 
   const promptCallbacks = buildSubAgentPromptCallbacks(step, parentPrompt);
+  const taintWiring = wireStepTaint(runTaint);
 
   const agent = new Agent({
     name: step.id,
@@ -624,6 +953,11 @@ export async function spawnInline(
     preApproval,
     autonomy,
     capabilityContract,
+    // One flag governs the whole run (mirror of spawn.ts:555): this step shares
+    // the parent's Memory below, so WITHOUT the flag a step on a DK-on tenant
+    // still ran the legacy end-of-turn extraction the main agent stands down —
+    // the one sub-agent path where the decoupling story had a hole.
+    durableMemoryEnabled: config.durable_memory_enabled === true,
     // A2: stamp guard decisions during this inline step onto the audit (see spawnViaAgent).
     currentRunId: stepRunId,
     toolContext: parentToolContext,
@@ -649,10 +983,24 @@ export async function spawnInline(
     onStream: createStepStreamHandler({
       onTokens: (i, o) => { tokensIn += i; tokensOut += o; },
       recordToolCall,
+      onToolActivity: taintWiring.onToolActivity,
     }),
   });
 
   activePipelineAgents.add(agent);
+  // Register as a LIVE peer so a same-phase parallel sibling's external read
+  // arms this agent mid-run — see spawnViaAgent.
+  taintWiring.register(agent);
+  // Cross-step taint seed (mirror of spawn.ts's parent→child seed): once the
+  // run's accumulator is armed — by the caller's own taint or by an earlier
+  // step reading external content — this step starts with its STICKY latch
+  // armed, so a durable write inside it routes to pending_review instead of
+  // landing active. `restoreConversationTaint`, never `noteUntrustedData`: the
+  // step inherited the taint, it did not read external content itself, and the
+  // run-scoped marker is what the review chip REPORTS as the cause.
+  if (runTaint && runTaintArmed(runTaint)) {
+    agent.restoreConversationTaint();
+  }
   const timeoutMs = step.timeout_ms ?? 1_800_000;
   let timedOut = false;
   const timeoutId = setTimeout(() => {
@@ -691,6 +1039,8 @@ export async function spawnInline(
   } finally {
     clearTimeout(timeoutId);
     activePipelineAgents.delete(agent);
+    // Deregister + backstop fold — see spawnViaAgent's finally.
+    taintWiring.release(agent);
   }
 }
 
@@ -728,6 +1078,7 @@ export async function spawnPipeline(
   runHistory?: import('../core/run-history.js').RunHistory | null | undefined,
   secretStore?: SecretStoreLike | undefined,
   parentRunId?: string | undefined,
+  runTaint?: RunTaint | undefined,
 ): Promise<{ result: string; tokensIn: number; tokensOut: number; durationMs: number }> {
   const { runManifest } = await import('./runner.js');
 
@@ -757,6 +1108,7 @@ export async function spawnPipeline(
       thinking: s.thinking,
       input_from: s.input_from,
       timeout_ms: s.timeout_ms,
+      tools: s.tools,
       tool: s.tool,
       input_template: s.input_template,
     })),
@@ -773,6 +1125,10 @@ export async function spawnPipeline(
     userTimezone,
     parentSessionCounters,
     parentMemory,
+    // Share the SAME accumulator with the nested run (not a copy): a nested
+    // workflow's external read must arm the OUTER run's later steps too, and
+    // the outer accumulator is what flows back to the caller at the end.
+    runTaint,
     // Thread the run's posture into the nested sub-pipeline. Without this a
     // `runtime:'pipeline'` step inside a headless `autonomous` workflow re-spawns
     // its inner steps with autonomy=undefined → a benign DANGEROUS_BASH op is
@@ -791,6 +1147,11 @@ export async function spawnPipeline(
     // 2a/B5: stamp the caller's run id so the nested pipeline_runs row links to
     // its parent and is filtered out of the top-level run list + cost stats.
     parentRunId,
+    // `subManifest.name` is the synthetic `<stepId>-sub` a few lines up — a
+    // machine id the user has never seen. A confirmation from inside this
+    // composition names the workflow they actually started instead; the step id
+    // beside it still says which step is asking.
+    originWorkflowName: parentPrompt?.workflowName,
   });
 
   // Aggregate results
