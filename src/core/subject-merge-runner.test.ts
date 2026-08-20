@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
@@ -7,7 +7,7 @@ import { SubjectStore } from './subject-store.js';
 import { DataStore } from './data-store.js';
 import { RunHistory } from './run-history.js';
 import { ThreadStore } from './thread-store.js';
-import { runMerge, rollbackMergeRun, type MergeLedgerFile } from './subject-merge-runner.js';
+import { runMerge, rollbackMergeRun, pruneExpiredLedgers, LEDGER_RETENTION_DAYS, type MergeLedgerFile } from './subject-merge-runner.js';
 
 /**
  * The subject spine spans THREE SQLite files: engine.db (SubjectStore), datastore.db
@@ -253,6 +253,107 @@ describe('runMerge — three-store repoint + crash-safe ledger', () => {
       spy.mockRestore();
     } finally {
       ds.close();
+    }
+  });
+});
+
+/**
+ * Retention on the ledger directory.
+ *
+ * Before this, nothing in the tree ever deleted a merge ledger, so `sweeps/` grew for the
+ * lifetime of an instance — and since core#1243 declares it `{ backup: true, migrate: true }`,
+ * every entry also travels into every backup and every tenant migration. Each ledger embeds
+ * the full detail row of both subjects: email and phone for people, domain and vat_id for
+ * organizations. These pin the two ways a retention sweep goes wrong — it spares nothing, or
+ * it deletes something it did not write.
+ */
+describe('pruneExpiredLedgers — bounded retention on personal data', () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); dirs.length = 0; });
+
+  const sweeps = (): string => {
+    const d = mkdtempSync(join(tmpdir(), 'sweeps-'));
+    dirs.push(d);
+    return d;
+  };
+  const age = (dir: string, name: string, daysOld: number): string => {
+    const p = join(dir, name);
+    writeFileSync(p, '{}');
+    const t = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000);
+    utimesSync(p, t, t);
+    return p;
+  };
+  const now = (): string => new Date().toISOString();
+
+  it('deletes a ledger past the window and keeps one inside it', () => {
+    const d = sweeps();
+    age(d, 'merge-old.json', LEDGER_RETENTION_DAYS + 5);
+    age(d, 'merge-recent.json', LEDGER_RETENTION_DAYS - 5);
+    pruneExpiredLedgers(d, now());
+    expect(readdirSync(d).sort()).toEqual(['merge-recent.json']);
+  });
+
+  it('spares a ledger exactly ON the boundary — the window is inclusive', () => {
+    // A merge one minute short of the cutoff must not vanish; off-by-one here silently
+    // shortens everyone's undo window.
+    const d = sweeps();
+    age(d, 'merge-edge.json', LEDGER_RETENTION_DAYS - 0.001);
+    pruneExpiredLedgers(d, now());
+    expect(readdirSync(d)).toEqual(['merge-edge.json']);
+  });
+
+  it('touches ONLY merge-*.json — it must not delete what it did not write', () => {
+    // `sweeps/` is not exclusively ours: the sweep CLI and future tooling write here too.
+    // A retention pass that widened its filter would be a silent data-loss bug.
+    const d = sweeps();
+    age(d, 'merge-old.json', LEDGER_RETENTION_DAYS + 5);
+    age(d, 'archive-old.json', LEDGER_RETENTION_DAYS + 5);
+    age(d, 'merge-old.json.bak', LEDGER_RETENTION_DAYS + 5);
+    age(d, 'notes.txt', LEDGER_RETENTION_DAYS + 5);
+    pruneExpiredLedgers(d, now());
+    expect(readdirSync(d).sort()).toEqual(['archive-old.json', 'merge-old.json.bak', 'notes.txt']);
+  });
+
+  it('uses mtime, not the filename timestamp — a rollback rewrites the file', () => {
+    // The name carries the CREATION time. A ledger created 100 days ago and rolled back
+    // yesterday is actively in use; deleting it by its name would destroy live state.
+    const d = sweeps();
+    const p = join(d, `merge-${new Date(Date.now() - 100 * 864e5).toISOString().replace(/[:.]/g, '-')}-abc123.json`);
+    writeFileSync(p, '{}');
+    pruneExpiredLedgers(d, now());
+    expect(readdirSync(d)).toHaveLength(1);
+  });
+
+  it('survives a missing directory instead of failing the merge', () => {
+    // Retention runs inside runMerge. A cleanup that throws would fail a merge that
+    // already succeeded — the cure being worse than the disease.
+    expect(() => pruneExpiredLedgers(join(tmpdir(), 'does-not-exist-' + String(Date.now())), now())).not.toThrow();
+  });
+
+  it('a REAL runMerge prunes — retention is wired, not merely exported', () => {
+    // The failure this catches, and the reason it drives a real merge instead of calling
+    // pruneExpiredLedgers directly: a correct retention function that nothing ever invokes.
+    // Registering is not wiring. Delete the call in runMerge and only this test goes red.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-prune-'));
+    dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const history = new RunHistory(join(dir, 'history.db'));
+    try {
+      const store = new SubjectStore(engine);
+      const threadStore = new ThreadStore(history.getDb());
+      mkdirSync(join(dir, 'sweeps'), { recursive: true });
+      age(join(dir, 'sweeps'), 'merge-ancient.json', LEDGER_RETENTION_DAYS + 30);
+
+      const dup = store.createSubject({ kind: 'organization', name: 'Gamma GmbH' });
+      const canon = store.createSubject({ kind: 'organization', name: 'Gamma' });
+      expect(runMerge(store, null, threadStore, dir, dup, canon).ok).toBe(true);
+
+      const left = readdirSync(join(dir, 'sweeps'));
+      expect(left).not.toContain('merge-ancient.json');   // the old one is gone…
+      expect(left).toHaveLength(1);                       // …and this merge's ledger is not
+    } finally {
+      try { engine.close(); } catch { /* noop */ }
+      try { history.close(); } catch { /* noop */ }
     }
   });
 });

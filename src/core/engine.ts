@@ -1877,8 +1877,19 @@ export class Engine {
       }
     }
 
-    // Wire Google Drive backup upload if Google auth is available
-    if (this._backupManager && this._googleAuth) {
+    // Wire Google Drive backup upload — SELF-HOSTED ONLY.
+    //
+    // On a CP-provisioned instance the control plane already runs restic backups, so a second
+    // backup path to a third party adds exposure without adding safety. Since core#1240 that
+    // exposure is concrete: the backup carries the merge ledger, which embeds email, phone,
+    // vat_id and domain.
+    //
+    // The boundary is who HOSTS, not the word "managed": BYOK (`hosted`) runs on lynox hosts
+    // too and gets the same CP backups — only the LLM key is the customer's. LYNOX_BILLING_TIER
+    // is emitted to all three CP tiers and absent on self-host, which is exactly the check the
+    // managed hook makes ~15 lines below. Same signal, same meaning, no new concept.
+    const { driveBackupAllowed } = await import('./backup-upload-gdrive.js');
+    if (this._backupManager && this._googleAuth && driveBackupAllowed()) {
       try {
         const { GDriveBackupUploader } = await import('./backup-upload-gdrive.js');
         this._backupManager.setGDriveUploader(new GDriveBackupUploader(this._googleAuth));

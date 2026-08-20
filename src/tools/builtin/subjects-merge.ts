@@ -16,10 +16,16 @@ import type { SubjectKind } from '../../core/subject-store.js';
 // merge NEVER runs unattended: no interactive channel ⇒ it fails closed.
 //
 // Undoing one is possible but NOT from chat: `subject-sweep --rollback=<ledger>` against the
-// file under `~/.lynox/sweeps/`. That file is in no backup and in neither migration list, so a
-// restore or a tenant migration ends the possibility silently. Every user-facing string here —
-// the description above, the consent prompt, the result — must say that plainly rather than the
-// bare word "reversible", which is what all three used to say.
+// file under `~/.lynox/sweeps/`. What makes it un-promisable is the ACCESS it needs — a shell on
+// the machine — not the file's fragility. Every user-facing string here (the description, the
+// consent prompt, the result) must say that plainly rather than the bare word "reversible".
+//
+// ⚠ These strings used to say the ledger "is in no backup and in neither migration list, so a
+// restore or a tenant migration ends the possibility silently". That was true when written and
+// is now FALSE in both halves: `data-dir-inventory.ts` declares `sweeps` as
+// `{ backup: true, migrate: true }`. The ledger survives both. Nobody updated the prose when the
+// inventory changed, so the tool was telling users the exact capability that had just been built
+// for them did not exist — and asking them to preserve a file that is already preserved.
 
 /**
  * The kinds this tool can fold: the name-deduped set, imported rather than restated.
@@ -57,8 +63,9 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
   detailedGuidance:
     'Never tell the user a merge is reversible, undoable or can be rolled back from chat. It '
     + 'cannot: the rollback is a command-line step against a ledger file under ~/.lynox/sweeps/, '
-    + 'and that file is in no backup and in neither migration list, so a restore or a tenant '
-    + 'migration ends the possibility silently. Say what the result message says.',
+    + 'and it needs shell access to the machine, which a chat user does not have. The ledger '
+    + 'itself is durable — it is carried by both backup and migration — so do NOT tell the user '
+    + 'the possibility disappears on a restore. Say what the result message says.',
   definition: {
     name: 'subjects_merge',
     description:
@@ -141,10 +148,11 @@ export const subjectsMergeTool: ToolEntry<SubjectsMergeInput> = {
       // `runMerge` has always returned `ledgerPath` and this line always threw it
       // away, then claimed reversibility in the abstract. Handing over the actual
       // file is what turns "reversible" from a promise into an address: it is the
-      // only input `rollbackMergeRun` takes, and it is NOT covered by backup or
-      // migration — so a user who might ever want this undone needs to keep it.
+      // only input `rollbackMergeRun` takes. It IS covered by backup and migration
+      // (`data-dir-inventory.ts`), so the honest limit is the access it needs, not
+      // the file's survival — the previous wording had that exactly backwards.
       return `Merged "${r.dupName}" into "${r.canonicalName}" — one entry now${cells}. `
-        + `An operator can reverse this from ${r.ledgerPath} — that file is in no backup, so it will not survive a restore or a migration.`;
+        + `An operator can reverse this from ${r.ledgerPath} — that needs shell access to this machine, not chat. The file is kept in backups and carried across migrations.`;
     } catch (err) {
       return `subjects_merge error: ${getErrorMessage(err)}`;
     }

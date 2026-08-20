@@ -86,14 +86,21 @@ describe('subjects_merge tool (PR-C3)', () => {
   const UNDO_VOCABULARY =
     /revers|revert|undo|unmerge|un-merge|permanent|recover|restor|rollback|roll(?:ed|s|ing|\s+it)? back|back out|not final/i;
 
-  /** The clauses allowed to speak about undoing — fragments, as the source concatenates them. */
+  /**
+   * The clauses allowed to speak about undoing — fragments, as the source concatenates them.
+   *
+   * Note what LEFT this list in the core#1243 correction: the two clauses that claimed the
+   * ledger dies on a restore. Their replacements do not appear here because they no longer
+   * use undo VOCABULARY at all — the honest limit is access ("shell access to this machine"),
+   * not disappearance. The durability claim they now make is pinned in the result test
+   * instead, so the coverage moved rather than went away.
+   */
   const ALLOWED_UNDO_CLAUSES = [
-    ' — that file is in no backup, so it will not survive a restore or a migration.',
     '" is archived. Undoing it needs a command-line rollback — not something you can do from chat.',
     'An operator can reverse this from ',
     'Never tell the user a merge is reversible, undoable or can be rolled back from chat. It ',
     '`kind` if they are not people. You will be asked to confirm. It cannot be undone from chat.',
-    'and that file is in no backup and in neither migration list, so a restore or a tenant ',
+    'the possibility disappears on a restore. Say what the result message says.',
     'cannot: the rollback is a command-line step against a ledger file under ~/.lynox/sweeps/, ',
   ];
 
@@ -229,7 +236,14 @@ describe('subjects_merge tool (PR-C3)', () => {
     // directory. Killed by this assert — `subjects-merge.test.ts`, the
     // `toContain(join(dir, 'sweeps', written[0]!))` on the next line.
     expect(res).toContain(join(dir, 'sweeps', written[0]!));
-    expect(res).toMatch(/in no backup/i);
+    // The message used to assert `/in no backup/`, and that was correct until core#1243
+    // declared `sweeps` as `{ backup: true, migrate: true }`. The prose was never updated,
+    // so this guard was pinning a claim the product had stopped making true — it told users
+    // that the durability `promise-or-undo` had just built for them did not exist. Pin the
+    // corrected claim, and keep pinning that the limit is stated at all.
+    expect(res).toMatch(/kept in backups/i);
+    expect(res).toMatch(/shell access/i);
+    expect(res).not.toMatch(/in no backup/i);
     expect(res).not.toMatch(/Reversible from the merge ledger/i);
   });
 

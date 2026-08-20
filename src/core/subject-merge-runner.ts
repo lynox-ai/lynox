@@ -1,3 +1,4 @@
+import { readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeFileAtomicSync } from './atomic-write.js';
 import type { SubjectStore, MergeLedgerEntry } from './subject-store.js';
@@ -55,6 +56,54 @@ export type MergeRunResult =
  * (never half-reverses) — the state is fully-forward (the merge applied as far as it got)
  * and `resolveActiveSubject` forwards any dangling id. Reversible via {@link rollbackMergeRun}.
  */
+/**
+ * How long a merge stays undoable. Ledgers older than this are removed on the next merge.
+ *
+ * The directory grew forever before this: nothing in the tree deleted a ledger, and since
+ * core#1243 `sweeps` is declared `{ backup: true, migrate: true }`, so every entry also
+ * travels into every backup and every tenant migration. Each one embeds the full detail row
+ * of both subjects — for `people` that is email and phone, for `organizations` domain and
+ * vat_id. Personal data with no deletion path is the Art-17 problem, and an unbounded one is
+ * the same problem multiplied by time.
+ *
+ * 90 days is the trade: long enough that a merge noticed weeks later is still reversible,
+ * short enough that the data does not accumulate indefinitely. It is a constant rather than
+ * a setting on purpose — a per-instance knob here would be an env-ABI change, and the value
+ * only matters as a bound, not as a tuning parameter.
+ */
+export const LEDGER_RETENTION_DAYS = 90;
+
+/**
+ * Delete merge ledgers older than the retention window. Best-effort by design.
+ *
+ * A merge must never fail because a cleanup could not run, so every error is swallowed: an
+ * unreadable directory, a file removed by someone else mid-loop, a permission problem. The
+ * name filter is deliberately tight (`merge-*.json`) — this function deletes files, and it
+ * must not touch anything it did not write.
+ */
+export function pruneExpiredLedgers(sweepsDir: string, nowIso: string): void {
+  const cutoff = Date.parse(nowIso) - LEDGER_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  if (!Number.isFinite(cutoff)) return;
+  let names: string[];
+  try {
+    names = readdirSync(sweepsDir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith('merge-') || !name.endsWith('.json')) continue;
+    const full = join(sweepsDir, name);
+    try {
+      // mtime, not the timestamp in the filename: a rollback rewrites the file (`applied`
+      // flips), and a ledger that was touched recently is one someone is still working with.
+      if (statSync(full).mtimeMs >= cutoff) continue;
+      unlinkSync(full);
+    } catch {
+      // Someone else's concurrent delete, or a file we may not remove. Neither is our problem.
+    }
+  }
+}
+
 export function runMerge(
   store: SubjectStore, dataStore: DataStore | null, threadStore: ThreadStore | null, dataDir: string,
   dupId: string, canonicalId: string,
@@ -77,6 +126,10 @@ export function runMerge(
   // Persist the reversal record BEFORE mutating, atomically (temp+fsync+rename) so a torn
   // write can't corrupt the sole record that makes the merge reversible.
   writeFileAtomicSync(ledgerPath, JSON.stringify(file, null, 2));
+
+  // Retention runs HERE, coupled to writing, because that is the only thing that makes the
+  // directory grow — no scheduler to forget, and an instance that never merges never needs it.
+  pruneExpiredLedgers(join(dataDir, 'sweeps'), createdAt);
 
   // Mutate all three stores + stamp applied inside ONE guard so any store throw folds into
   // the Result contract instead of escaping runMerge and crashing the operator CLI: an
