@@ -15,7 +15,7 @@
  *  - Migration token is one-time use
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync, readdirSync } from 'node:fs';
 import { join, resolve, sep, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLynoxDir } from './config.js';
@@ -416,6 +416,31 @@ export class MigrationImporter {
     // dropping the secret restore. No-op unless engine.db was in the set.
     if (verification.databasesRestored.includes('engine.db') && readEnvAlias('LYNOX_BILLING_TIER')) {
       ApiStore.regateMigratedApiConnections(join(this.lynoxDir, 'engine.db'), this.vaultKey);
+    }
+
+    // 6b. The SAME re-gate for the flat `apis/*.json` profiles, which now travel too.
+    // Without this the gate has a hole with a precise shape: a source from BEFORE the
+    // connections cutover ships `apis/` and no `engine.db`, so the block above no-ops, the
+    // destination boots with empty `connections`, `importFromDirectoryIfNeeded` reads the
+    // flat JSON — and the ack rides in intact, defeating the managed BYOK-endpoint
+    // disclosure gate for an operator who never saw the dialog. Same condition, same
+    // reasoning, same idempotence; a self-hosted destination keeps the ack because it is
+    // the same data owner.
+    if (readEnvAlias('LYNOX_BILLING_TIER')) {
+      const apisDir = join(this.lynoxDir, 'apis');
+      if (existsSync(apisDir) && lstatSync(apisDir).isDirectory()) {
+        for (const file of readdirSync(apisDir)) {
+          if (!file.endsWith('.json')) continue;
+          const path = join(apisDir, file);
+          try {
+            if (!lstatSync(path).isFile()) continue;
+            const profile = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+            if (profile['custom_endpoint_ack'] === undefined) continue;
+            delete profile['custom_endpoint_ack'];
+            writeFileSync(path, JSON.stringify(profile, null, 2), { mode: FILE_MODE_PRIVATE });
+          } catch { continue; }   // unparseable or vanished — it cannot carry an ack either
+        }
+      }
     }
 
     onProgress?.({ phase: 'done', currentChunk: manifest.totalChunks, totalChunks: manifest.totalChunks, currentName: '' });

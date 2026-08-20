@@ -116,6 +116,47 @@ describe('portable directories survive a migration', () => {
     expect(ok.export(Buffer.alloc(32, 1)).manifest.chunks.some(c => c.type === 'portable_dir')).toBe(true);
   });
 
+  it('strips a migrated custom_endpoint_ack from the flat api profiles on a MANAGED destination', () => {
+    // `apis/` travelling opens a hole in the BYOK-endpoint disclosure gate with a precise
+    // shape: a source from before the connections cutover ships `apis/` and no `engine.db`,
+    // so the engine.db re-gate no-ops and the ack rides in intact — accepted on behalf of an
+    // operator who never saw the dialog.
+    const srcDir = tmp('lynox-pd11-src-'); const dstDir = tmp('lynox-pd11-dst-');
+    mkdirSync(join(srcDir, 'apis'), { recursive: true });
+    writeFileSync(join(srcDir, 'apis', 'byok.json'), JSON.stringify({
+      id: 'byok', name: 'Byok', base_url: 'https://byok.example',
+      custom_endpoint_ack: { hosts: ['byok.example'], accepted_at: '2026-01-01T00:00:00Z' },
+    }), 'utf-8');
+
+    const prior = process.env['LYNOX_BILLING_TIER'];
+    process.env['LYNOX_BILLING_TIER'] = 'managed';
+    try { migrate(srcDir, dstDir); } finally {
+      if (prior === undefined) delete process.env['LYNOX_BILLING_TIER']; else process.env['LYNOX_BILLING_TIER'] = prior;
+    }
+
+    const landed = JSON.parse(readFileSync(join(dstDir, 'apis', 'byok.json'), 'utf-8')) as Record<string, unknown>;
+    expect(landed['custom_endpoint_ack'], 'the ack was inherited — the disclosure gate is bypassed').toBeUndefined();
+    // The profile itself still migrates; only the per-instance acceptance is dropped.
+    expect(landed['base_url']).toBe('https://byok.example');
+  });
+
+  it('keeps the ack on a SELF-HOSTED destination — same data owner', () => {
+    const srcDir = tmp('lynox-pd12-src-'); const dstDir = tmp('lynox-pd12-dst-');
+    mkdirSync(join(srcDir, 'apis'), { recursive: true });
+    writeFileSync(join(srcDir, 'apis', 'byok.json'), JSON.stringify({
+      id: 'byok', custom_endpoint_ack: { hosts: ['byok.example'] },
+    }), 'utf-8');
+
+    const prior = process.env['LYNOX_BILLING_TIER'];
+    delete process.env['LYNOX_BILLING_TIER'];
+    try { migrate(srcDir, dstDir); } finally {
+      if (prior !== undefined) process.env['LYNOX_BILLING_TIER'] = prior;
+    }
+
+    const landed = JSON.parse(readFileSync(join(dstDir, 'apis', 'byok.json'), 'utf-8')) as Record<string, unknown>;
+    expect(landed['custom_endpoint_ack'], 'a self-hosted move stripped an ack it should keep').toBeDefined();
+  });
+
   it('refuses entry keys that escape the directory', () => {
     for (const evil of ['../escape.json', 'a/../../escape.json', '/etc/passwd', 'a\\b.json', './x.json', '', 'a/./b']) {
       expect(isPortableDirEntryName(evil), `must refuse ${JSON.stringify(evil)}`).toBe(false);
