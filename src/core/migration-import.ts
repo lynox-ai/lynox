@@ -23,6 +23,7 @@ import { readEnvAlias } from './env.js';
 import { ApiStore } from './api-store.js';
 import { SecretVault } from './secret-vault.js';
 import { parsePortableMemoryKey, trimMemoryContent } from './memory-file.js';
+import { isMergeLedgerFileName } from './subject-merge-runner.js';
 import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
 import type { ExportedSecret } from './migration-export.js';
@@ -61,6 +62,8 @@ export interface ImportVerification {
   databasesRestored: string[];
   artifactsImported: number;
   memoryFilesImported: number;
+  /** Merge ledgers restored — the reversal records `rollbackMergeRun` consumes. */
+  mergeLedgersImported: number;
   configApplied: boolean;
 }
 
@@ -319,6 +322,7 @@ export class MigrationImporter {
       databasesRestored: [],
       artifactsImported: 0,
       memoryFilesImported: 0,
+      mergeLedgersImported: 0,
       configApplied: false,
     };
 
@@ -358,6 +362,14 @@ export class MigrationImporter {
     if (chunksByType.memory.length > 0) {
       onProgress?.({ phase: 'restoring', currentChunk: chunksByType.memory[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: 'memory' });
       verification.memoryFilesImported = this.restoreMemory(chunksByType.memory);
+    }
+
+    // 4b. Merge ledgers — the reversal records for `subjects_merge`. After memory and
+    // before secrets: they reference subject ids that live in engine.db, already
+    // restored in step 2, so a ledger landing here is usable the moment it lands.
+    if (chunksByType.sweeps.length > 0) {
+      onProgress?.({ phase: 'restoring', currentChunk: chunksByType.sweeps[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: 'sweeps' });
+      verification.mergeLedgersImported = this.restoreSweeps(chunksByType.sweeps);
     }
 
     // 5. Secrets (most sensitive — last)
@@ -421,6 +433,7 @@ export class MigrationImporter {
       artifacts: [],
       memory: [],
       config: [],
+      sweeps: [],
     };
 
     for (const meta of metas) {
@@ -605,6 +618,49 @@ export class MigrationImporter {
       // cap: `trimMemoryContent` cannot shrink a single line, and neither can
       // `Memory`, so a one-line giant stays possible on both paths.
       writeFileSync(filePath, trimMemoryContent(content), { encoding: 'utf-8', mode: FILE_MODE_PRIVATE });
+      written++;
+    }
+
+    return written;
+  }
+
+  /**
+   * Restore the merge ledgers. Bounded like the memory bundle for the same reason —
+   * reassembly holds several copies at once and an import must not half-write.
+   */
+  private restoreSweeps(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): number {
+    const totalBytes = chunks.reduce((n, c) => n + c.data.length, 0);
+    if (totalBytes > MAX_MEMORY_BUNDLE_BYTES) {
+      throw new Error(
+        `Merge-ledger bundle too large: ${String(totalBytes)} > ${String(MAX_MEMORY_BUNDLE_BYTES)}`,
+      );
+    }
+
+    // A part boundary can fall mid-UTF-8-sequence, so concatenate the Buffers, never
+    // decoded strings — same reason as the memory bundle.
+    const ordered = [...chunks].sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
+    const data = ordered.length === 1 ? ordered[0]!.data : Buffer.concat(ordered.map(c => c.data));
+
+    const bundle = JSON.parse(data.toString('utf-8')) as { files: Record<string, string> };
+    if (!bundle.files || typeof bundle.files !== 'object') return 0;
+
+    const sweepsDir = join(this.lynoxDir, 'sweeps');
+    const sweepsPrefix = sweepsDir + sep;
+    let written = 0;
+
+    for (const [fileName, content] of Object.entries(bundle.files)) {
+      if (typeof content !== 'string') continue;
+      // The writer's own name shape, which admits a basename only — so a crafted
+      // bundle cannot smuggle `../` or an absolute path through this key.
+      if (!isMergeLedgerFileName(fileName)) continue;
+
+      const filePath = resolve(sweepsDir, fileName);
+      // Defense-in-depth, exactly as the memory restore does it: the resolved path must
+      // sit strictly inside sweeps/. A bare startsWith would also accept `sweepsEVIL/`.
+      if (!filePath.startsWith(sweepsPrefix)) continue;
+
+      mkdirSync(sweepsDir, { recursive: true, mode: DIR_MODE_PRIVATE });
+      writeFileSync(filePath, content, { encoding: 'utf-8', mode: FILE_MODE_PRIVATE });
       written++;
     }
 

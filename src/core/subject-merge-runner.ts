@@ -14,6 +14,18 @@ import type { ThreadStore } from './thread-store.js';
  * caller OWNS every store handle's lifecycle (this never opens or closes them).
  */
 
+/**
+ * The one name shape a merge ledger has, as {@link runMerge} writes it below:
+ * `merge-<ISO with : and . replaced by ->-<suffix>.json`. Exported here so backup,
+ * migration-export and migration-import all decide "is this a merge ledger?" from the
+ * writer's own definition instead of three drifting copies — and because it doubles as
+ * the importer's path-traversal guard: it admits a BASENAME only, so no separator, no
+ * `..`, no absolute path can survive it.
+ */
+export function isMergeLedgerFileName(name: string): boolean {
+  return /^merge-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[a-z0-9]{1,16}\.json$/.test(name);
+}
+
 /** A persisted merge — same `~/.lynox/sweeps/` home + `version` shape as the archive ledger. */
 export interface MergeLedgerFile {
   version: 1; phase: 'merge'; createdAt: string;

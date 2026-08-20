@@ -26,6 +26,7 @@ import Database from 'better-sqlite3';
 import { getLynoxDir } from './config.js';
 import { SecretVault } from './secret-vault.js';
 import { parsePortableMemoryKey } from './memory-file.js';
+import { isMergeLedgerFileName } from './subject-merge-runner.js';
 import type { SecretScope } from '../types/index.js';
 import {
   encryptChunk,
@@ -171,6 +172,9 @@ export class MigrationExporter {
     // 4. Memory — the flat-file store the memory_* tools actually read
     onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'memory' });
     plaintextChunks.push(...this.collectMemory());
+
+    onProgress?.({ phase: 'collecting', currentChunk: plaintextChunks.length, totalChunks: 0, currentName: 'sweeps' });
+    plaintextChunks.push(...this.collectSweeps());
 
     // 5. Config (sanitized)
     const configChunk = this.collectConfig();
@@ -424,6 +428,33 @@ export class MigrationExporter {
     if (Object.keys(files).length === 0) return [];
 
     return splitIntoChunks(Buffer.from(JSON.stringify({ files }), 'utf-8'), 'memory', 'memory');
+  }
+
+  /**
+   * The merge ledgers under `sweeps/`. Without these a migrated instance keeps every
+   * merged subject and loses the only thing that could undo one — `rollbackMergeRun`
+   * takes a ledger file and nothing else. Sweep/archive ledgers from the operator CLI
+   * are deliberately NOT carried: they describe an archive phase against subject ids on
+   * the source instance and are not a reversal record for a merge.
+   */
+  private collectSweeps(): PlaintextChunk[] {
+    const sweepsDir = join(this.lynoxDir, 'sweeps');
+    if (!existsSync(sweepsDir)) return [];
+
+    const files: Record<string, string> = {};
+    for (const fileName of readdirSync(sweepsDir)) {
+      // Same predicate the importer applies — one source of truth, so the two sides
+      // cannot drift into exporting what cannot be restored.
+      if (!isMergeLedgerFileName(fileName)) continue;
+      const filePath = join(sweepsDir, fileName);
+      try {
+        if (!statSync(filePath).isFile()) continue;
+        files[fileName] = readFileSync(filePath, 'utf-8');
+      } catch { continue; } // vanished between readdir and read
+    }
+
+    if (Object.keys(files).length === 0) return [];
+    return splitIntoChunks(Buffer.from(JSON.stringify({ files }), 'utf-8'), 'sweeps', 'sweeps');
   }
 
   private collectConfig(): PlaintextChunk | null {
