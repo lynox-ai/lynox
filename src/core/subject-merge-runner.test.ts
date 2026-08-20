@@ -76,6 +76,56 @@ describe('runMerge — three-store repoint + crash-safe ledger', () => {
     expect(threadStore.getThread('t2')!.primary_subject_id).toBe(dup);
   });
 
+  // A rollback whose UPDATEs match nothing is indistinguishable from one that worked:
+  // SQLite reports "0 rows changed" the same way it reports success, so the whole
+  // reversal used to walk through, commit, and return {ok:true} on an instance that had
+  // never seen these subjects. The operator CLI then printed `un-merged <id> ← <id>` and
+  // the user was told an undo had happened that had not.
+  //
+  // Reachable two ways, and the second needs no second machine at all: a migrated ledger,
+  // and — because `restoreBackup` is ADDITIVE — a ledger written after a backup, which
+  // survives the restore of the older engine.db and outlives the ids it names.
+  it('rollback REFUSES a ledger whose subjects are not on this instance', () => {
+    const source = setup();
+    const dup = source.store.createSubject({ kind: 'organization', name: 'Kessler AG' });
+    const canon = source.store.createSubject({ kind: 'organization', name: 'Kessler' });
+    expect(runMerge(source.store, null, source.threadStore, source.dir, dup, canon).ok).toBe(true);
+    const ledger = readLedger(source.dir);
+
+    // A different instance: same code, none of these rows.
+    const elsewhere = setup();
+    expect(elsewhere.store.getSubject(dup)).toBeFalsy();
+
+    const res = rollbackMergeRun(elsewhere.store, null, elsewhere.threadStore, ledger);
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/cannot reverse this merge here/i);
+    expect(res.reason).toMatch(/merged-away entry/i);
+    // And it must not have half-reversed anything on the way to finding out.
+    expect(elsewhere.store.getSubject(dup)).toBeFalsy();
+    expect(elsewhere.store.getSubject(canon)).toBeFalsy();
+  });
+
+  it('rollback REFUSES when only the canonical is missing, and says which side', () => {
+    const source = setup();
+    const dup = source.store.createSubject({ kind: 'organization', name: 'Hallberg AG' });
+    const canon = source.store.createSubject({ kind: 'organization', name: 'Hallberg' });
+    expect(runMerge(source.store, null, source.threadStore, source.dir, dup, canon).ok).toBe(true);
+    const ledger = readLedger(source.dir);
+
+    // Only the dup survives — a partial-overlap instance, which a naive "does the dup
+    // exist?" check would wave through into a reversal that cannot restore the aliases.
+    const partial = setup();
+    partial.store.createSubject({ id: dup, kind: 'organization', name: 'Hallberg AG' });
+
+    const res = rollbackMergeRun(partial.store, null, partial.threadStore, ledger);
+    expect(res.ok).toBe(false);
+    // Names the side that is actually missing. Without the second clause this assert
+    // would also pass when BOTH are gone — i.e. when the fixture failed to plant the dup
+    // and the test was silently exercising the case above instead of this one.
+    expect(res.reason).toMatch(/the entry it was merged into is not/i);
+    expect(res.reason).not.toMatch(/merged-away entry/i);
+  });
+
   it('rollback REFUSES a ledger that never finished applying (crash mid-run)', () => {
     const { dir, store, threadStore } = setup();
     const dup = store.createSubject({ kind: 'organization', name: 'Gamma GmbH' });

@@ -1253,6 +1253,33 @@ export class SubjectStore {
     const { dupId, canonicalId } = entry;
     try {
       db.transaction(() => {
+      // Every reversal step below is an `UPDATE … WHERE id = ?` or an `INSERT OR IGNORE`,
+      // and SQLite reports "0 rows changed" for those exactly as it reports success. So a
+      // ledger whose subjects are not on THIS instance used to walk the whole reversal,
+      // touch nothing, commit, and return {ok:true} — while the tool told the user the
+      // merge had been undone. Assert the two rows exist first, inside the transaction so
+      // nothing can delete them between the check and the writes.
+      //
+      // This is not a hypothetical cross-machine case. `restoreBackup` is ADDITIVE — it
+      // renames the files named in the manifest and removes nothing else — so a ledger
+      // written AFTER a backup survives the restore of the older engine.db and then points
+      // at ids that database never had.
+      const present = db.prepare('SELECT id FROM subjects WHERE id IN (?, ?)').all(dupId, canonicalId) as Array<{ id: string }>;
+      const have = new Set(present.map(r => r.id));
+      const missing = [
+        ...(have.has(dupId) ? [] : ['the merged-away entry']),
+        ...(have.has(canonicalId) ? [] : ['the entry it was merged into']),
+      ];
+      if (missing.length > 0) {
+        // Deliberately says what is TRUE (the rows are not here) rather than guessing WHY.
+        // "does not belong to this instance" would be wrong for the same instance after
+        // the entry was hard-deleted — and this whole change exists because a message
+        // claimed more than it knew.
+        throw new Error(
+          `cannot reverse this merge here — ${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} not in this subject graph (a ledger from another instance, or an entry deleted since)`,
+        );
+      }
+
       // 1. restore dup archive/redirect state. A UNIQUE-index collision here THROWS →
       //    the transaction rolls back atomically (no partial reversal).
       db.prepare("UPDATE subjects SET merged_into = ?, archived_at = ?, updated_at = datetime('now') WHERE id = ?")
