@@ -50,10 +50,16 @@ const THREAD_BOOST = 0.10;
  * (graph/FTS/run-surfaced facts are EXEMPT — a bare cosine floor would drop graph-reachable
  * `user_asserted` truths; refute RF-ARCH1).
  *
- * ⚠️ Stays 0 (measure-only, byte-identical: `rawCosine >= 0` is always true) until the ≥2-week
- * shadow window closes (~2026-07-26, DEF-0010) and the constant is DERIVED from the
- * `retrieval-shadow.jsonl` cosine distribution. Setting it is a SEPARATE reviewed change +
- * operator GO — never a hot env knob (a fat-fingered high floor silences recall).
+ * ⚠️ Stays 0 (measure-only, byte-identical: `rawCosine >= 0` is always true) — and stays there
+ * for THIS embedding model. The shadow window was measured, not guessed (DEF-0010, rafael prod,
+ * 2026-08-20: 60 retrievals, 3000 scored candidates, `multilingual-e5-small`): candidates the
+ * admission gate PASSES and candidates it FAILS sit on the same raw-cosine band (p10/p50/p90 =
+ * 0.803/0.829/0.854 vs 0.805/0.831/0.854, both floored at 0.75, identical per provenance
+ * tier). The axis does not separate poison from signal, so no floor value can — the lever is
+ * scope / subject anchoring, which the durable-knowledge substrate does natively. Kept dormant:
+ * a different embedding model with a wide-spread baseline may make it usable, and that is a
+ * SEPARATE reviewed change + re-measurement — never a hot env knob (a fat-fingered high floor
+ * silences recall).
  */
 const MEMORY_READ_COSINE_FLOOR = 0;
 

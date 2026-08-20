@@ -294,3 +294,100 @@ describe('MemoryGraphStore (Foundation Rework v2 — S1b)', () => {
     engine.close();
   });
 });
+
+// ── DEF-0015: the orphan-subject reap rides INSIDE the hard memory deletes ────
+import { vi } from 'vitest';
+import type { SubjectExternalRefs } from './subject-store.js';
+
+describe('MemoryGraphStore orphan-subject reap (DEF-0015)', () => {
+  const tmpDirs: string[] = [];
+  const NONE: SubjectExternalRefs = { isThreadAnchor: () => false, hasRecords: () => false };
+
+  function make(): { engine: EngineDb; mem: MemoryGraphStore; subs: SubjectStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-memgraph-reap-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    return { engine, mem: new MemoryGraphStore(engine), subs: new SubjectStore(engine) };
+  }
+  function stub(mem: MemoryGraphStore, id: string, o?: { subjectId?: string; isActive?: boolean }): void {
+    mem.upsertStub({ id, text: `t-${id}`, namespace: 'knowledge', scopeType: 'context', scopeId: 'c', subjectId: o?.subjectId ?? null, isActive: o?.isActive === false ? 0 : 1 });
+  }
+  afterEach(() => {
+    for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  it('no reaper installed → purge deletes the memory and leaves the subject (fail-closed default)', () => {
+    const { engine, mem, subs } = make();
+    const solo = subs.createSubject({ kind: 'organization', name: 'Solo' });
+    stub(mem, 'm1'); mem.linkSubjects('m1', [solo]);
+    expect(mem.purgeMemories(['m1'])).toBe(1);
+    expect(subs.getSubject(solo)).not.toBeNull();
+    engine.close();
+  });
+
+  it('purgeMemories reaps the subject only the erased memory held — via the junction AND via the primary column — and keeps a shared one', () => {
+    const { engine, mem, subs } = make();
+    mem.setOrphanSubjectReaper(ids => subs.reapOrphans(ids, NONE));
+    const solo = subs.createSubject({ kind: 'organization', name: 'Solo' });
+    const primaryOnly = subs.createSubject({ kind: 'organization', name: 'PrimaryOnly' });
+    const shared = subs.createSubject({ kind: 'organization', name: 'Shared' });
+    stub(mem, 'm1'); mem.linkSubjects('m1', [solo, shared]);
+    stub(mem, 'm2', { subjectId: primaryOnly });     // primary subject, no junction row
+    stub(mem, 'm3'); mem.linkSubjects('m3', [shared]); // survives → keeps Shared
+
+    expect(mem.purgeMemories(['m1', 'm2'])).toBe(2);
+    expect(subs.getSubject(solo)).toBeNull();
+    expect(subs.getSubject(primaryOnly)).toBeNull();
+    expect(subs.getSubject(shared)).not.toBeNull();
+    expect(mem.getLinkedSubjectIds('m3')).toEqual([shared]);
+    engine.close();
+  });
+
+  it('the reaper is called AFTER the delete with exactly the linked subjects, and a throwing reaper rolls the memory delete back', () => {
+    const { engine, mem, subs } = make();
+    const a = subs.createSubject({ kind: 'organization', name: 'A' });
+    const b = subs.createSubject({ kind: 'organization', name: 'B' });
+    const untouched = subs.createSubject({ kind: 'organization', name: 'U' });
+    stub(mem, 'm1'); mem.linkSubjects('m1', [a]);
+    stub(mem, 'm2', { subjectId: b });
+    stub(mem, 'm3'); mem.linkSubjects('m3', [untouched]);
+
+    const seen: string[][] = [];
+    const stubsAtCall: Array<ReturnType<MemoryGraphStore['getStub']>> = [];
+    mem.setOrphanSubjectReaper(ids => { seen.push([...ids].sort()); stubsAtCall.push(mem.getStub('m1')); throw new Error('reaper boom'); });
+
+    expect(() => mem.purgeMemories(['m1', 'm2'])).toThrow('reaper boom');
+    expect(seen).toEqual([[a, b].sort()]);   // candidates = linked subjects of the deleted ids, never U
+    expect(stubsAtCall).toEqual([null]);      // ran after the DELETE …
+    expect(mem.getStub('m1')).not.toBeNull(); // … but the transaction rolled it back
+    expect(mem.getStub('m2')).not.toBeNull();
+    expect(subs.getSubject(a)).not.toBeNull();
+    engine.close();
+  });
+
+  it('gcInactiveStubs reaps the subject of a hard-deleted inactive stub and keeps the one an active stub still holds', () => {
+    const { engine, mem, subs } = make();
+    mem.setOrphanSubjectReaper(ids => subs.reapOrphans(ids, NONE));
+    const dead = subs.createSubject({ kind: 'organization', name: 'Dead' });
+    const alive = subs.createSubject({ kind: 'organization', name: 'Alive' });
+    stub(mem, 'old', { isActive: false }); mem.linkSubjects('old', [dead]);
+    stub(mem, 'old2', { subjectId: alive, isActive: false });
+    stub(mem, 'cur'); mem.linkSubjects('cur', [alive]);
+
+    expect(mem.gcInactiveStubs()).toBe(2);
+    expect(subs.getSubject(dead)).toBeNull();
+    expect(subs.getSubject(alive)).not.toBeNull();
+    engine.close();
+  });
+
+  it('gcInactiveStubs with nothing inactive never calls the reaper', () => {
+    const { engine, mem } = make();
+    const reaper = vi.fn(() => []);
+    mem.setOrphanSubjectReaper(reaper);
+    stub(mem, 'cur');
+    expect(mem.gcInactiveStubs()).toBe(0);
+    expect(reaper).not.toHaveBeenCalled();
+    engine.close();
+  });
+});

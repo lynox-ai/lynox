@@ -162,3 +162,159 @@ describe('KnowledgeLayer.eraseByPattern (Erasure — hard delete)', () => {
     expect(layer.getDb().getMemory(stored.memoryId)).not.toBeNull(); // untouched
   });
 });
+
+// ── DEF-0015: the orphan-subject reap, end to end through the layer ──────────
+//
+// The layer is the one that can see EVERY reference a subject may still have — engine.db,
+// the history.db thread anchor (via runHistory) and datastore.db (via the bridge) — so it
+// installs the reaper. These tests wire all three and prove: the subject an erased memory
+// minted goes, a subject anything else still holds stays, and without the cross-DB oracle
+// the reap is fail-closed (subject kept, one stderr line), never a guess.
+import { RunHistory } from './run-history.js';
+import { ThreadStore } from './thread-store.js';
+import { DataStore } from './data-store.js';
+import { DataStoreBridge } from './datastore-bridge.js';
+import { SubjectStore, makeSubjectColumnBridge } from './subject-store.js';
+
+describe('KnowledgeLayer erase → orphan-subject reap (DEF-0015)', () => {
+  const provider = new LocalProvider();
+  const scope: MemoryScopeRef = { type: 'context', id: 'proj-1' };
+  const dirs: string[] = [];
+  const closers: Array<() => void | Promise<void>> = [];
+  const ORG = (name: string): ExtractionResult => ({ entities: [{ name, type: 'organization', confidence: 0.9 }], relations: [] });
+
+  afterEach(async () => {
+    for (const c of closers.reverse()) { try { await c(); } catch { /* already closed */ } }
+    closers.length = 0;
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    dirs.length = 0;
+    mock.extraction = { entities: [], relations: [] };
+    vi.restoreAllMocks();
+  });
+
+  async function wired(o: { history: boolean; bridge: boolean }): Promise<{
+    layer: KnowledgeLayer; engine: EngineDb; subjects: SubjectStore; threads: ThreadStore | null; ds: DataStore | null;
+  }> {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-reap-e2e-'));
+    dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), 'vault-key-reap');
+    closers.push(() => engine.close());
+    const history = o.history ? new RunHistory(join(dir, 'history.db')) : undefined;
+    if (history) closers.push(() => history.close());
+    const layer = new KnowledgeLayer(join(dir, 'mem.db'), provider, undefined, history, engine, true, true);
+    closers.push(() => layer.close());
+    await layer.init();
+    const subjects = new SubjectStore(engine);
+    let ds: DataStore | null = null;
+    if (o.bridge) {
+      ds = new DataStore(join(dir, 'datastore.db'));
+      const theDs = ds;
+      closers.push(() => theDs.close());
+      ds.setSubjectBridge(makeSubjectColumnBridge(subjects));
+      layer.setDataStoreBridge(new DataStoreBridge(layer.getDb(), layer.getEntityResolver(), ds));
+    }
+    const threads = history ? new ThreadStore(history.getDb()) : null;
+    return { layer, engine, subjects, threads, ds };
+  }
+
+  it('erasing the only memory that minted a subject reaps the subject; a subject a surviving memory holds stays', async () => {
+    const { layer, subjects } = await wired({ history: true, bridge: true });
+    mock.extraction = ORG('Solo Corp');
+    await layer.store('Solo Corp churned this week.', 'knowledge', scope);
+    mock.extraction = ORG('Acme Studio');
+    await layer.store('Acme Studio signed on Monday.', 'knowledge', scope);
+    await layer.store('Acme Studio paid the invoice.', 'knowledge', scope);
+    const solo = subjects.findCanonical('Solo Corp', 'organization')!.id;
+    const acme = subjects.findCanonical('Acme Studio', 'organization')!.id;
+
+    expect(await layer.eraseByPattern('Solo Corp churned')).toBe(1);
+    expect(subjects.getSubject(solo)).toBeNull();          // the plaintext name is gone
+    expect(subjects.getSubject(acme)).not.toBeNull();
+
+    expect(await layer.eraseByPattern('signed on Monday')).toBe(1);
+    expect(subjects.getSubject(acme)).not.toBeNull();      // one Acme memory survives → Acme stays
+    expect(await layer.eraseByPattern('paid the invoice')).toBe(1);
+    expect(subjects.getSubject(acme)).toBeNull();          // the last holder went → Acme goes
+  });
+
+  it('a history.db thread anchor keeps the subject through an erase (the cross-DB ref engine.db cannot see)', async () => {
+    const { layer, subjects, threads } = await wired({ history: true, bridge: true });
+    mock.extraction = ORG('Anchor AG');
+    await layer.store('Anchor AG is the client on this thread.', 'knowledge', scope);
+    const anchor = subjects.findCanonical('Anchor AG', 'organization')!.id;
+    threads!.createThread('thread-1', { title: 't' });
+    threads!.updateThread('thread-1', { primary_subject_id: anchor });
+
+    expect(await layer.eraseByPattern('client on this thread')).toBe(1);
+    expect(subjects.getSubject(anchor)).not.toBeNull();
+    expect(subjects.referenceReason(anchor, { isThreadAnchor: () => false, hasRecords: () => false })).toBeNull(); // nothing in engine.db holds it — only the anchor did
+  });
+
+  it('a datastore.db record linking the subject keeps it through an erase', async () => {
+    const { layer, subjects, ds } = await wired({ history: true, bridge: true });
+    mock.extraction = ORG('Tabelle GmbH');
+    await layer.store('Tabelle GmbH appears in a CRM table.', 'knowledge', scope);
+    const org = subjects.findCanonical('Tabelle GmbH', 'organization')!.id;
+    ds!.createCollection({
+      name: 'kunden', scope: { type: 'context', id: '' },
+      columns: [{ name: 'firma', type: 'subject', subjectKind: 'organization' }, { name: 'note', type: 'string' }],
+    });
+    ds!.insertRecords({ collection: 'kunden', records: [{ firma: 'Tabelle GmbH', note: 'x' }] });
+    expect(ds!.hasRecordsForSubject(org)).toBe(true);       // the bridge resolved the name to THIS id
+
+    expect(await layer.eraseByPattern('CRM table')).toBe(1);
+    expect(subjects.getSubject(org)).not.toBeNull();
+  });
+
+  it('a CRM contact detail (email) keeps a person through an erase', async () => {
+    const { layer, subjects } = await wired({ history: true, bridge: true });
+    mock.extraction = { entities: [{ name: 'Petra Muster', type: 'person', confidence: 0.9 }], relations: [] };
+    await layer.store('Petra Muster asked for the offer.', 'knowledge', scope);
+    const petra = subjects.findCanonical('Petra Muster', 'person')!.id;
+    subjects.setPersonDetail(petra, { email: 'petra@example.com' });
+    expect(await layer.eraseByPattern('asked for the offer')).toBe(1);
+    expect(subjects.getSubject(petra)).not.toBeNull();
+  });
+
+  it('without the cross-DB oracle the reap is FAIL-CLOSED: subject kept, one stderr line per process, erase still succeeds', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    for (const variant of [{ history: false, bridge: true }, { history: true, bridge: false }]) {
+      const { layer, subjects } = await wired(variant);
+      mock.extraction = ORG('Orphan Ltd');
+      await layer.store('Orphan Ltd would be reaped with the oracle.', 'knowledge', scope);
+      await layer.store('Orphan Ltd second line.', 'knowledge', scope);
+      const id = subjects.findCanonical('Orphan Ltd', 'organization')!.id;
+      expect(await layer.eraseByPattern('would be reaped')).toBe(1);
+      expect(await layer.eraseByPattern('second line')).toBe(1);
+      expect(subjects.getSubject(id)).not.toBeNull();
+    }
+    const skips = stderr.mock.calls.filter(c => String(c[0]).includes('[lynox:subject-reap] skipped'));
+    expect(skips).toHaveLength(2); // one per layer (process-wide would be one; each layer warns once)
+  });
+
+  it('purgeThread (private mode) reaps the thread-only subject and keeps the cross-thread one', async () => {
+    const { layer, subjects } = await wired({ history: true, bridge: true });
+    mock.extraction = ORG('Acme Studio');
+    await layer.store('Acme Studio signed on Monday.', 'knowledge', scope, { sourceThreadId: 'thread-A' });
+    await layer.store('Acme Studio paid the invoice.', 'knowledge', scope, { sourceThreadId: 'thread-B' });
+    mock.extraction = ORG('Solo Corp');
+    await layer.store('Solo Corp churned this week.', 'knowledge', scope, { sourceThreadId: 'thread-A' });
+    const acme = subjects.findCanonical('Acme Studio', 'organization')!.id;
+    const solo = subjects.findCanonical('Solo Corp', 'organization')!.id;
+
+    expect(layer.purgeThread('thread-A')).toBe(2);
+    expect(subjects.getSubject(solo)).toBeNull();
+    expect(subjects.getSubject(acme)).not.toBeNull();
+  });
+
+  it('an oracle READ FAILURE keeps the subject (answers "referenced"), never fails the erase', async () => {
+    const { layer, subjects, threads } = await wired({ history: true, bridge: true });
+    mock.extraction = ORG('Fragile AG');
+    await layer.store('Fragile AG sits behind a broken anchor store.', 'knowledge', scope);
+    const id = subjects.findCanonical('Fragile AG', 'organization')!.id;
+    // Make the history.db anchor probe throw (a pre-v46 history.db has no such table/column).
+    threads!['db'].exec('DROP TABLE threads');
+    expect(await layer.eraseByPattern('broken anchor store')).toBe(1); // the erase still completes
+    expect(subjects.getSubject(id)).not.toBeNull();                      // … and keeps the subject
+  });
+});

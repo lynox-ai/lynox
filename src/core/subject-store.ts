@@ -350,11 +350,47 @@ const DETAIL_MONEY_PAIRS: Record<string, { amount: string; currency: string }> =
 };
 
 /**
+ * When does a 1:1 detail row carry SUBSTANTIVE data — data that makes the subject a record
+ * in its own right, so the orphan reap (DEF-0015) must keep it even with no memory left?
+ * Not every non-NULL column qualifies: `people.type` / `organizations.type` are NOT NULL
+ * with a default ('contact' / 'other'), so a bare row minted by an ingest has them set
+ * without anyone having said anything; they count only when set to a NON-default value (a
+ * deliberate classification). `currency` pairs with its amount and says nothing alone.
+ * Static SQL fragments over static column names (never input) — same injection argument as
+ * REPOINT_TARGETS. `scripts/subject-sweep.ts` `blockReason` carries a narrower hand copy of
+ * this idea (email/phone/domain/vat_id/sku/price/rate); folding it onto this predicate is a
+ * registered follow-up, not done here.
+ */
+const DETAIL_SUBSTANTIVE_PREDICATE: Record<string, string> = {
+  person:       "email IS NOT NULL OR phone IS NOT NULL OR role IS NOT NULL OR type <> 'contact'",
+  organization: "domain IS NOT NULL OR vat_id IS NOT NULL OR country IS NOT NULL OR type <> 'other'",
+  engagement:   'provider_subject_id IS NOT NULL OR client_subject_id IS NOT NULL OR started_at IS NOT NULL OR ended_at IS NOT NULL OR budget_cents IS NOT NULL OR billing_model IS NOT NULL',
+  product:      'sku IS NOT NULL OR price_cents IS NOT NULL',
+  service:      'hourly_rate_cents IS NOT NULL',
+};
+
+/**
  * The complete before-image of ONE merge — enough to reverse it byte-for-byte.
  * Captured read-only by {@link SubjectStore.planMerge} BEFORE any mutation, so the
  * caller can persist it FIRST (same crash-safety discipline as the archive sweep:
  * a mutate-then-crash-before-persist would otherwise be irreversible).
  */
+/**
+ * Cross-database soft references to a subject that engine.db's own FKs cannot see — both
+ * are LIVE user data outside engine.db: the history.db thread anchor
+ * (`threads.primary_subject_id`; engine.db's `threads` mirror is empty pre-S2) and
+ * datastore.db `subject`-typed cells (record-on-spine). The orphan reap consults them
+ * through this seam so a subject a thread or a table still points at is never erased out
+ * from under its owner. An implementation that cannot answer MUST say `true` (referenced):
+ * keeping a name is today's state, erasing a live anchor would be new damage.
+ */
+export interface SubjectExternalRefs {
+  /** Is `subjectId` the `primary_subject_id` of ANY history.db thread? */
+  isThreadAnchor(subjectId: string): boolean;
+  /** Does ANY datastore.db record link `subjectId` through a `subject`-typed column? */
+  hasRecords(subjectId: string): boolean;
+}
+
 export interface MergeLedgerEntry {
   dupId: string;
   canonicalId: string;
@@ -834,6 +870,88 @@ export class SubjectStore {
     ).all(...subjectIds) as { id: string; n: number }[];
     for (const r of rows) counts.set(r.id, r.n);
     return counts;
+  }
+
+  // ── Orphan-subject reap (DEF-0015) ────────────────────────────
+
+  /**
+   * Why (if at all) a subject is still REFERENCED — the single reference oracle behind the
+   * orphan-subject reap. Returns a short reason, `'missing'` for an unknown id, or `null`
+   * when NOTHING holds the row: then its only content is its plaintext `name`, and an
+   * erasure that just deleted the memories which minted it may delete the subject too.
+   *
+   * What counts as a reference — every column {@link REPOINT_TARGETS} lists (the same list
+   * a merge repoints, so the two never drift apart), the `memory_subjects` junction, a
+   * `merged_into` redirect onto it, the operator self, the cross-DB anchors the caller
+   * supplies via {@link SubjectExternalRefs}, and a 1:1 detail row carrying substantive data
+   * (a CRM contact with an email is a record in its own right, memory or not).
+   *
+   * What deliberately does NOT count: `subject_cooccurrences`. It is a DERIVED
+   * materialization of the junction ({@link MemoryGraphStore.rebuildCooccurrences}
+   * recomputes it from scratch); counting it would keep every once-co-mentioned subject
+   * alive forever, and on a real corpus the reap would never fire (rafael's engine.db:
+   * 1171 cooccurrence rows over 574 subjects). `archived_at` is not a reference either —
+   * an archived row still carries the name.
+   */
+  referenceReason(subjectId: string, external: SubjectExternalRefs): string | null {
+    const row = this.getSubject(subjectId);
+    if (!row) return 'missing';
+    if (row.is_self === 1) return 'is_self';
+    if (external.isThreadAnchor(subjectId)) return 'thread-anchor';
+    if (external.hasRecords(subjectId)) return 'record';
+    if (this.db.prepare('SELECT 1 FROM memory_subjects WHERE subject_id = ? LIMIT 1').get(subjectId)) {
+      return 'referenced-by-memory_subjects';
+    }
+    for (const t of REPOINT_TARGETS) {
+      // Table/column names are the STATIC literals above, never input — same injection
+      // argument as the merge repoint.
+      if (this.db.prepare(`SELECT 1 FROM "${t.table}" WHERE "${t.column}" = ? LIMIT 1`).get(subjectId)) {
+        return `referenced-by-${t.table}.${t.column}`;
+      }
+    }
+    if (this.db.prepare('SELECT 1 FROM subjects WHERE merged_into = ? LIMIT 1').get(subjectId)) return 'merge-target';
+    const detail = DETAIL_TABLE[row.kind];
+    const substantive = DETAIL_SUBSTANTIVE_PREDICATE[row.kind];
+    if (detail && substantive) {
+      if (this.db.prepare(`SELECT 1 FROM "${detail.table}" WHERE subject_id = ? AND (${substantive}) LIMIT 1`).get(subjectId)) {
+        return 'has-detail';
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Hard-delete every candidate {@link referenceReason} finds unreferenced — the
+   * orphan-subject reap an erasure owes (DEF-0015: after a GDPR erase the `subjects` row
+   * survived with its plaintext name). Runs to a FIXPOINT: deleting one candidate can
+   * release another (a parent whose only child was itself a candidate), and the outcome
+   * must not depend on iteration order. Bounded by the candidate count per pass.
+   *
+   * The CALLER owns the transaction — this is meant to run INSIDE the memory delete, so a
+   * failure here rolls the whole erase back (and the erase's re-throw contract makes it
+   * retryable) instead of leaving memories gone and subjects half-reaped. The DELETE
+   * cascades through the schema (detail row, junction, cooccurrences, relationships) and
+   * SET-NULLs the soft pointers — by construction none of those exist for an unreferenced
+   * subject except the derived cooccurrence rows, which is exactly the residue that should
+   * go with it. Returns the ids actually deleted.
+   */
+  reapOrphans(candidateIds: Iterable<string>, external: SubjectExternalRefs): string[] {
+    const pending = new Set(candidateIds);
+    const reaped: string[] = [];
+    const del = this.db.prepare('DELETE FROM subjects WHERE id = ?');
+    let progressed = true;
+    while (progressed && pending.size > 0) {
+      progressed = false;
+      for (const id of [...pending]) {
+        const reason = this.referenceReason(id, external);
+        if (reason === 'missing') { pending.delete(id); continue; }
+        if (reason !== null) continue;
+        if (del.run(id).changes > 0) reaped.push(id);
+        pending.delete(id);
+        progressed = true;
+      }
+    }
+    return reaped;
   }
 
   /** Soft-archive (queries default to active; cascades remain via FK ON DELETE on hard purge). */

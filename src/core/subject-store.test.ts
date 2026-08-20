@@ -669,3 +669,203 @@ describe('findByNameAnyKind — one name, any kind', () => {
     expect(s.findByNameAnyKind('Vireo', { kinds: ['organization'] })).toEqual({ ambiguous: false, row: null });
   });
 });
+
+// ── DEF-0015: the reference oracle + the orphan reap ──────────────────────────
+//
+// After a GDPR erase the legacy orphan-entity delete reaped the entity; engine.db's cascade
+// runs memory→junction only, so the minted `subjects` row survived with its plaintext name.
+// `referenceReason` is the ONE oracle that decides whether anything still holds a subject;
+// `reapOrphans` deletes what nothing holds. Every reference kind below is a row that MUST keep
+// a subject alive — and the cooccurrence case is the one that must NOT (derived data; counting
+// it would make the reap a no-op on every real corpus).
+import { MemoryGraphStore } from './memory-graph-store.js';
+import { RelationshipStore } from './relationship-store.js';
+import type { SubjectExternalRefs } from './subject-store.js';
+
+describe('SubjectStore.referenceReason + reapOrphans (DEF-0015 orphan-subject reap)', () => {
+  const tmpDirs: string[] = [];
+  const NONE: SubjectExternalRefs = { isThreadAnchor: () => false, hasRecords: () => false };
+
+  function make(): { store: SubjectStore; engine: EngineDb; mem: MemoryGraphStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-subj-reap-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    return { store: new SubjectStore(engine), engine, mem: new MemoryGraphStore(engine) };
+  }
+  function stub(mem: MemoryGraphStore, id: string, subjectId?: string): void {
+    mem.upsertStub({ id, text: `t-${id}`, namespace: 'knowledge', scopeType: 'context', scopeId: 'c', subjectId: subjectId ?? null });
+  }
+
+  afterEach(() => {
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  it('an unreferenced subject has no reason — archived or not; a missing id says so', () => {
+    const { store, engine } = make();
+    const id = store.createSubject({ kind: 'organization', name: 'Ghost GmbH' });
+    expect(store.referenceReason(id, NONE)).toBeNull();
+    store.archiveSubject(id);
+    // An archived row still carries the plaintext name → still reapable.
+    expect(store.referenceReason(id, NONE)).toBeNull();
+    expect(store.referenceReason('no-such-id', NONE)).toBe('missing');
+    engine.close();
+  });
+
+  it('every engine.db holder keeps a subject — junction, primary, knowledge entry, each verb-layer column, hierarchy, merge redirect, detail, self', () => {
+    const { store, engine, mem } = make();
+    const db = engine.getDb();
+    const org = (n: string): string => store.createSubject({ kind: 'organization', name: n });
+
+    // memory_subjects junction
+    const a = org('A'); stub(mem, 'm-a'); mem.linkSubjects('m-a', [a]);
+    expect(store.referenceReason(a, NONE)).toBe('referenced-by-memory_subjects');
+    // memories.subject_id (primary, no junction row)
+    const b = org('B'); stub(mem, 'm-b', b);
+    expect(store.referenceReason(b, NONE)).toBe('referenced-by-memories.subject_id');
+    // knowledge_entries.subject_id (the durable-knowledge store)
+    const c = org('C');
+    db.prepare("INSERT INTO knowledge_entries (id, subject_id, text) VALUES ('k1', ?, 'x')").run(c);
+    expect(store.referenceReason(c, NONE)).toBe('referenced-by-knowledge_entries.subject_id');
+    // tasks — both columns
+    const d = org('D'); db.prepare("INSERT INTO tasks (id, title, subject_id) VALUES ('t1', 'x', ?)").run(d);
+    expect(store.referenceReason(d, NONE)).toBe('referenced-by-tasks.subject_id');
+    const d2 = store.createSubject({ kind: 'person', name: 'Dana' });
+    db.prepare("INSERT INTO tasks (id, title, assignee_subject_id) VALUES ('t2', 'x', ?)").run(d2);
+    expect(store.referenceReason(d2, NONE)).toBe('referenced-by-tasks.assignee_subject_id');
+    // triggers / connections / artifacts / engine.db threads mirror
+    const e = org('E'); db.prepare("INSERT INTO triggers (id, title, subject_id) VALUES ('tr1', 'x', ?)").run(e);
+    expect(store.referenceReason(e, NONE)).toBe('referenced-by-triggers.subject_id');
+    const f = org('F'); db.prepare("INSERT INTO connections (id, kind, name, subject_id) VALUES ('cn1', 'api', 'x', ?)").run(f);
+    expect(store.referenceReason(f, NONE)).toBe('referenced-by-connections.subject_id');
+    const g = org('G'); db.prepare("INSERT INTO artifacts (id, type, subject_id) VALUES ('ar1', 'doc', ?)").run(g);
+    expect(store.referenceReason(g, NONE)).toBe('referenced-by-artifacts.subject_id');
+    const h = org('H'); db.prepare("INSERT INTO threads (id, primary_subject_id) VALUES ('th1', ?)").run(h);
+    expect(store.referenceReason(h, NONE)).toBe('referenced-by-threads.primary_subject_id');
+    // relationships — either end
+    const i = org('I'); const j = org('J');
+    new RelationshipStore(engine).createRelationship({ fromSubjectId: i, toSubjectId: j, kind: 'partner_of' });
+    expect(store.referenceReason(i, NONE)).toBe('referenced-by-relationships.from_subject_id');
+    expect(store.referenceReason(j, NONE)).toBe('referenced-by-relationships.to_subject_id');
+    // engagements — provider / client pointers
+    const k = org('K'); const eng = store.createSubject({ kind: 'engagement', name: 'Projekt K' });
+    db.prepare('INSERT INTO engagements (subject_id, client_subject_id) VALUES (?, ?)').run(eng, k);
+    expect(store.referenceReason(k, NONE)).toBe('referenced-by-engagements.client_subject_id');
+    // hierarchy: a child keeps its parent
+    const parent = org('Parent'); const child = store.createSubject({ kind: 'engagement', name: 'Child', parentId: parent });
+    expect(store.referenceReason(parent, NONE)).toBe('referenced-by-subjects.parent_id');
+    // merge redirect: a dup pointing at its canonical keeps the canonical
+    const canon = org('Canon'); const dup = org('Dup');
+    db.prepare('UPDATE subjects SET merged_into = ? WHERE id = ?').run(canon, dup);
+    expect(store.referenceReason(canon, NONE)).toBe('merge-target');
+    // detail WITH data keeps; a detail row of all NULLs does not
+    const p1 = store.createSubject({ kind: 'person', name: 'Petra' }); store.setPersonDetail(p1, { email: 'p@example.com' });
+    expect(store.referenceReason(p1, NONE)).toBe('has-detail');
+    const p2 = store.createSubject({ kind: 'person', name: 'Paul' }); store.setPersonDetail(p2, {});
+    expect(store.referenceReason(p2, NONE)).toBeNull();
+    // the operator self is never reapable
+    const self = store.createSubject({ kind: 'organization', name: 'My Firm', isSelf: true });
+    expect(store.referenceReason(self, NONE)).toBe('is_self');
+    // the engagement subject itself (detail row exists, client pointer set) keeps via detail
+    expect(store.referenceReason(eng, NONE)).toBe('has-detail');
+    void child;
+    engine.close();
+  });
+
+  it('the cross-DB anchors keep a subject: a history.db thread anchor, a datastore.db record', () => {
+    const { store, engine } = make();
+    const x = store.createSubject({ kind: 'organization', name: 'X' });
+    expect(store.referenceReason(x, { isThreadAnchor: id => id === x, hasRecords: () => false })).toBe('thread-anchor');
+    expect(store.referenceReason(x, { isThreadAnchor: () => false, hasRecords: id => id === x })).toBe('record');
+    engine.close();
+  });
+
+  it('a cooccurrence row is DERIVED and does NOT keep a subject — both ends stay reapable', () => {
+    const { store, engine, mem } = make();
+    const a = store.createSubject({ kind: 'organization', name: 'A' });
+    const b = store.createSubject({ kind: 'organization', name: 'B' });
+    mem.bumpCooccurrences([a, b]);
+    expect(engine.getDb().prepare('SELECT count(*) c FROM subject_cooccurrences').get()).toEqual({ c: 1 });
+    expect(store.referenceReason(a, NONE)).toBeNull();
+    expect(store.referenceReason(b, NONE)).toBeNull();
+    // and the reap takes the derived rows with it (cascade)
+    expect(store.reapOrphans([a, b], NONE).sort()).toEqual([a, b].sort());
+    expect(engine.getDb().prepare('SELECT count(*) c FROM subject_cooccurrences').get()).toEqual({ c: 0 });
+    engine.close();
+  });
+
+  it('reapOrphans runs to a fixpoint — a parent released by its reaped child goes too, in either order', () => {
+    for (const order of ['parent-first', 'child-first'] as const) {
+      const { store, engine } = make();
+      const parent = store.createSubject({ kind: 'organization', name: 'Kunde' });
+      const child = store.createSubject({ kind: 'engagement', name: 'Projekt', parentId: parent });
+      const ids = order === 'parent-first' ? [parent, child] : [child, parent];
+      expect(store.reapOrphans(ids, NONE).sort()).toEqual([parent, child].sort());
+      expect(store.getSubject(parent)).toBeNull();
+      expect(store.getSubject(child)).toBeNull();
+      engine.close();
+    }
+  });
+
+  it('reapOrphans keeps a parent whose child is still held, skips missing ids, never touches self', () => {
+    const { store, engine, mem } = make();
+    const parent = store.createSubject({ kind: 'organization', name: 'Kunde' });
+    const child = store.createSubject({ kind: 'engagement', name: 'Projekt', parentId: parent });
+    stub(mem, 'm1'); mem.linkSubjects('m1', [child]);
+    const self = store.createSubject({ kind: 'person', name: 'Me', isSelf: true });
+    expect(store.reapOrphans([parent, child, self, 'gone'], NONE)).toEqual([]);
+    expect(store.getSubject(parent)).not.toBeNull();
+    expect(store.getSubject(child)).not.toBeNull();
+    expect(store.getSubject(self)).not.toBeNull();
+    engine.close();
+  });
+
+  it('hasRecordsForSubject — the datastore.db half of the oracle — sees a subject-typed cell and nothing else', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-subj-reap-ds-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const store = new SubjectStore(engine);
+    const ds = new DataStore(join(dir, 'datastore.db'));
+    ds.setSubjectBridge(makeSubjectColumnBridge(store));
+    ds.createCollection({
+      name: 'appointments',
+      scope: { type: 'context', id: '' },
+      columns: [{ name: 'note', type: 'string' }, { name: 'patient', type: 'subject', subjectKind: 'person' }],
+    });
+    ds.insertRecords({ collection: 'appointments', records: [{ note: 'first', patient: 'Anna Meier' }] });
+    const anna = store.findCanonical('Anna Meier', 'person')!.id;
+    const other = store.createSubject({ kind: 'person', name: 'Nobody' });
+    expect(ds.hasRecordsForSubject(anna)).toBe(true);
+    expect(ds.hasRecordsForSubject(other)).toBe(false);
+    // a collection without a subject column is skipped, not scanned
+    ds.createCollection({ name: 'plain', scope: { type: 'context', id: '' }, columns: [{ name: 'x', type: 'string' }] });
+    ds.insertRecords({ collection: 'plain', records: [{ x: anna }] });
+    expect(ds.hasRecordsForSubject(other)).toBe(false);
+    ds.close();
+    engine.close();
+  });
+});
+
+describe('SubjectStore.referenceReason — detail-row defaults (DEF-0015)', () => {
+  const tmpDirs: string[] = [];
+  const NONE: SubjectExternalRefs = { isThreadAnchor: () => false, hasRecords: () => false };
+  afterEach(() => { for (const d of tmpDirs) rmSync(d, { recursive: true, force: true }); tmpDirs.length = 0; });
+
+  it('a bare detail row (only the NOT NULL default classifier) is no reference; a deliberate non-default type is', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-subj-detail-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const store = new SubjectStore(engine);
+    const p = store.createSubject({ kind: 'person', name: 'Plain' });
+    store.setPersonDetail(p, {});                                  // type = DEFAULT 'contact'
+    expect(store.referenceReason(p, NONE)).toBeNull();
+    store.setPersonDetail(p, { type: 'customer' });                // a deliberate classification
+    expect(store.referenceReason(p, NONE)).toBe('has-detail');
+    const o = store.createSubject({ kind: 'organization', name: 'Org' });
+    store.setOrganizationDetail(o, {});                            // type = DEFAULT 'other'
+    expect(store.referenceReason(o, NONE)).toBeNull();
+    store.setOrganizationDetail(o, { country: 'CH' });
+    expect(store.referenceReason(o, NONE)).toBe('has-detail');
+    engine.close();
+  });
+});
