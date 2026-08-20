@@ -63,7 +63,10 @@ export const DATA_DIR_INVENTORY: readonly DataDirEntry[] = [
   { name: 'history.db', kind: 'sqlite', backup: true, migrate: true },
   { name: 'datastore.db', kind: 'sqlite', backup: true, migrate: true },
   { name: 'agent-memory.db', kind: 'sqlite', backup: true, migrate: true },
-  { name: 'mail-state.db', kind: 'sqlite', backup: true, migrate: true },
+  {
+    name: 'mail-state.db', kind: 'sqlite', backup: true, migrate: false,
+    why: 'HELD BACK deliberately, and this row is the record of why. Carrying it is WANTED — a migrating customer otherwise loses their correspondence and its processing state — but `mail_accounts` holds live IMAP/SMTP hosts and `collectSecrets` ships the WHOLE vault, so the destination would boot with working credentials and begin polling a mailbox the source may still be polling. The wanted shape is "migrate, but land the accounts PAUSED", and there is no paused state to land them in: the table has no such column. Shipping the unpaused half would be shipping the thing that was rejected, so this waits for a disabled/paused flag on `mail_accounts` plus an import step that sets it.',
+  },
   { name: 'memory', kind: 'dir', backup: true, migrate: true },
   { name: 'artifacts', kind: 'dir', backup: true, migrate: true },
   { name: 'apis', kind: 'dir', backup: true, migrate: true },

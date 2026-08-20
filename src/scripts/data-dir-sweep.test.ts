@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { sweepDataDir } from './data-dir-sweep.js';
+import { sweepDataDir, OVERSIZE_BYTES } from './data-dir-sweep.js';
 
 /**
  * The runtime half of the coverage mechanism. It exists because the static gate reads the
@@ -53,5 +53,26 @@ describe('data-dir sweep', () => {
     expect(res.undeclared).toEqual([]);
     expect(res.declaredButAbsent).toContain('vault.db');
     expect(res.declaredButAbsent).not.toContain('engine.db');
+  });
+
+  it('flags a backed-up directory that has grown past the oversize bar', () => {
+    const dir = tmp();
+    mkdirSync(join(dir, 'workspace'));
+    writeFileSync(join(dir, 'workspace', 'big.bin'), Buffer.alloc(OVERSIZE_BYTES + 1024));
+    mkdirSync(join(dir, 'memory'));
+    writeFileSync(join(dir, 'memory', 'small.txt'), 'x', 'utf-8');
+
+    const res = sweepDataDir(dir);
+    expect(res.oversize.map(f => f.name)).toEqual(['workspace']);
+    // It is declared, so it must NOT also be reported as an unknown store.
+    expect(res.undeclared).toEqual([]);
+  });
+
+  it('does not flag an entry that is large but NOT in any backup', () => {
+    const dir = tmp();
+    mkdirSync(join(dir, 'backups'));
+    writeFileSync(join(dir, 'backups', 'big.bin'), Buffer.alloc(OVERSIZE_BYTES + 1024));
+    // `backups/` is declared and deliberately not carried — its size costs nothing per run.
+    expect(sweepDataDir(dir).oversize).toEqual([]);
   });
 });

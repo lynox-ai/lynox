@@ -29,7 +29,19 @@ export interface SweepResult {
   dataDir: string;
   undeclared: SweepFinding[];
   declaredButAbsent: string[];
+  /** Declared entries that are carried by a backup and have grown past `OVERSIZE_BYTES`. */
+  oversize: SweepFinding[];
 }
+
+/**
+ * A backed-up directory past this size is worth an operator's attention. `workspace/` is the
+ * agent's own file area — written by the fs tools and by `bash`, with no cap and no
+ * exclusions — and every backup copies it recursively, checksums each file, optionally
+ * encrypts each, and optionally uploads the result to Google Drive, daily, kept 30 days.
+ * Measured at 12 KiB today; the risk is what it becomes, so the sweep says so before the
+ * bill does.
+ */
+export const OVERSIZE_BYTES = 100 * 1024 * 1024;
 
 /** SQLite sidecars belong to their database, not to the entry they would otherwise look like. */
 const SIDECAR = /\.(db-wal|db-shm)$/;
@@ -60,10 +72,18 @@ export function sweepDataDir(dataDir: string): SweepResult {
     undeclared.push({ name, kind: isDir ? 'dir' : 'file', bytes: sizeOf(path) });
   }
 
+  const oversize: SweepFinding[] = [];
+  for (const entry of DATA_DIR_INVENTORY) {
+    if (!entry.backup || !present.has(entry.name)) continue;
+    const bytes = sizeOf(join(dataDir, entry.name));
+    if (bytes > OVERSIZE_BYTES) oversize.push({ name: entry.name, kind: entry.kind === 'dir' ? 'dir' : 'file', bytes });
+  }
+
   return {
     dataDir,
     undeclared: undeclared.sort((a, b) => b.bytes - a.bytes),
     declaredButAbsent: DATA_DIR_INVENTORY.map(e => e.name).filter(n => !present.has(n)).sort(),
+    oversize: oversize.sort((a, b) => b.bytes - a.bytes),
   };
 }
 
@@ -84,6 +104,9 @@ export function main(): void {
       for (const f of result.undeclared) {
         process.stdout.write(`    ${f.kind === 'dir' ? 'DIR ' : 'FILE'} ${f.name}  ${String(Math.round(f.bytes / 1024))} KiB\n`);
       }
+    }
+    for (const f of result.oversize) {
+      process.stdout.write(`  OVERSIZE ${f.name} is ${String(Math.round(f.bytes / (1024 * 1024)))} MiB and rides EVERY backup (checksummed, optionally encrypted, optionally uploaded)\n`);
     }
     if (result.declaredButAbsent.length > 0) {
       process.stdout.write(`  declared but absent here (fine — most entries are created on demand): ${result.declaredButAbsent.join(', ')}\n`);

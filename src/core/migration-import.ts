@@ -16,7 +16,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync, readdirSync } from 'node:fs';
-import { join, resolve, sep, dirname } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLynoxDir } from './config.js';
 import { readEnvAlias } from './env.js';
