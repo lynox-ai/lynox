@@ -54,7 +54,12 @@ export interface BackupConfig {
 // pre-existing omission (inbox/mail state was never backed up). At S2 the legacy
 // files fold into engine.db and are deleted; trim this list to the 3-file set then.
 const SQLITE_DBS = ['engine.db', 'history.db', 'vault.db', 'datastore.db', 'agent-memory.db', 'mail-state.db', 'push-subscriptions.db'] as const;
-const COPY_DIRS = ['memory', 'sessions'] as const;
+// `sweeps` holds the merge ledgers — the ONLY record that makes a `subjects_merge`
+// reversible (`rollbackMergeRun` takes a ledger file and nothing else). It was absent
+// here, so a restore silently ended the possibility for every past merge while the tool
+// was telling users the merge was reversible. Restoring it is what makes the honest
+// wording true rather than merely honest.
+const COPY_DIRS = ['memory', 'sessions', 'sweeps'] as const;
 const COPY_FILES = ['config.json', 'vapid-keys.json'] as const;
 
 export class BackupManager {
@@ -487,6 +492,14 @@ export class BackupManager {
     for (const entry of entries) {
       const srcPath = join(src, entry.name);
       const destPath = join(dest, entry.name);
+      // Symlinks are skipped, not followed, and this is deliberately fixed HERE rather
+      // than in one caller: it applies to every COPY_DIRS entry at once. Following one
+      // would (a) copy whatever it points at INTO the backup as a plain file — and
+      // backups are optionally uploaded to Google Drive — and (b) hard-fail the whole
+      // backup on a dangling link or a link to a directory (ENOENT / ENOTSUP from
+      // copyFileSync), losing every other file in the run. `isDirectory()` is dirent-
+      // based, so a symlink-to-directory takes the file branch and hits exactly that.
+      if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
         this.copyDirRecursive(srcPath, destPath);
       } else {

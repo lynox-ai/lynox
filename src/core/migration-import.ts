@@ -15,7 +15,7 @@
  *  - Migration token is one-time use
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, lstatSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { getLynoxDir } from './config.js';
@@ -23,6 +23,7 @@ import { readEnvAlias } from './env.js';
 import { ApiStore } from './api-store.js';
 import { SecretVault } from './secret-vault.js';
 import { parsePortableMemoryKey, trimMemoryContent } from './memory-file.js';
+import { isMergeLedgerFileName } from './subject-merge-runner.js';
 import { verifySqliteIntegrity } from './backup-verify.js';
 import { FILE_MODE_PRIVATE, DIR_MODE_PRIVATE } from './constants.js';
 import type { ExportedSecret } from './migration-export.js';
@@ -61,6 +62,8 @@ export interface ImportVerification {
   databasesRestored: string[];
   artifactsImported: number;
   memoryFilesImported: number;
+  /** Merge ledgers restored — the reversal records `rollbackMergeRun` consumes. */
+  mergeLedgersImported: number;
   configApplied: boolean;
 }
 
@@ -99,6 +102,11 @@ const MAX_TOTAL_BYTES = 500 * 1024 * 1024;
  * `scopeDirs × 4 namespaces × MAX_MEMORY_FILE_BYTES`, so this allows 64 scopes.
  */
 const MAX_MEMORY_BUNDLE_BYTES = 64 * 1024 * 1024;
+/**
+ * Ledger COUNT cap. One merge writes one ledger, so this is generous for a real instance
+ * and still bounds the file/inode blast radius the byte cap alone leaves open.
+ */
+const MAX_MERGE_LEDGERS = 50_000;
 
 /** Whitelist of allowed database file names — prevents path traversal via crafted manifests.
  *  engine.db (Foundation Rework v2 subject-graph) is portable user data — mirrors the export set. */
@@ -319,6 +327,7 @@ export class MigrationImporter {
       databasesRestored: [],
       artifactsImported: 0,
       memoryFilesImported: 0,
+      mergeLedgersImported: 0,
       configApplied: false,
     };
 
@@ -358,6 +367,14 @@ export class MigrationImporter {
     if (chunksByType.memory.length > 0) {
       onProgress?.({ phase: 'restoring', currentChunk: chunksByType.memory[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: 'memory' });
       verification.memoryFilesImported = this.restoreMemory(chunksByType.memory);
+    }
+
+    // 4b. Merge ledgers — the reversal records for `subjects_merge`. After memory and
+    // before secrets: they reference subject ids that live in engine.db, already
+    // restored in step 2, so a ledger landing here is usable the moment it lands.
+    if (chunksByType.sweeps.length > 0) {
+      onProgress?.({ phase: 'restoring', currentChunk: chunksByType.sweeps[0]!.meta.seq, totalChunks: manifest.totalChunks, currentName: 'sweeps' });
+      verification.mergeLedgersImported = this.restoreSweeps(chunksByType.sweeps);
     }
 
     // 5. Secrets (most sensitive — last)
@@ -421,6 +438,7 @@ export class MigrationImporter {
       artifacts: [],
       memory: [],
       config: [],
+      sweeps: [],
     };
 
     for (const meta of metas) {
@@ -605,6 +623,91 @@ export class MigrationImporter {
       // cap: `trimMemoryContent` cannot shrink a single line, and neither can
       // `Memory`, so a one-line giant stays possible on both paths.
       writeFileSync(filePath, trimMemoryContent(content), { encoding: 'utf-8', mode: FILE_MODE_PRIVATE });
+      written++;
+    }
+
+    return written;
+  }
+
+  /**
+   * Restore the merge ledgers. Bounded like the memory bundle because reassembly holds
+   * several copies of the payload at once.
+   *
+   * Deliberately NOT claimed: that throwing here leaves nothing half-written. This runs at
+   * step 4b, so config, the SQLite databases and memory have already landed — a throw here
+   * aborts the import with those in place. That is the pre-existing shape of `restore()`,
+   * not something this step introduces, and the operator retries; the bound exists to stop
+   * the heap being exhausted, not to make the import transactional.
+   */
+  private restoreSweeps(chunks: Array<{ meta: MigrationChunkMeta; data: Buffer }>): number {
+    const totalBytes = chunks.reduce((n, c) => n + c.data.length, 0);
+    if (totalBytes > MAX_MEMORY_BUNDLE_BYTES) {
+      throw new Error(
+        `Merge-ledger bundle too large: ${String(totalBytes)} > ${String(MAX_MEMORY_BUNDLE_BYTES)}`,
+      );
+    }
+
+    // A part boundary can fall mid-UTF-8-sequence, so concatenate the Buffers, never
+    // decoded strings — same reason as the memory bundle.
+    const ordered = [...chunks].sort((a, b) => partNumber(a.meta.name) - partNumber(b.meta.name));
+    const data = ordered.length === 1 ? ordered[0]!.data : Buffer.concat(ordered.map(c => c.data));
+
+    const bundle = JSON.parse(data.toString('utf-8')) as { files: Record<string, string> };
+    if (!bundle.files || typeof bundle.files !== 'object') return 0;
+
+    const sweepsDir = join(this.lynoxDir, 'sweeps');
+    const sweepsPrefix = sweepsDir + sep;
+
+    // A bundle arrives from another machine and its contents are attacker-shaped in the
+    // threat model this importer already assumes. Two symlink shapes defeat a purely
+    // lexical path check, so both are closed before anything is written:
+    //   1. `sweeps/` ITSELF a symlink — `resolve()` is lexical and `mkdirSync(recursive)`
+    //      no-ops on an existing link, so every ledger would land outside the data dir
+    //      while `startsWith(sweepsPrefix)` still passed.
+    //   2. an individual `merge-*.json` already a symlink — `writeFileSync` opens
+    //      O_CREAT|O_TRUNC, which FOLLOWS, so bundle content would overwrite the target.
+    if (existsSync(sweepsDir) && !lstatSync(sweepsDir).isDirectory()) {
+      throw new Error('Refusing to restore merge ledgers: ~/.lynox/sweeps is not a real directory.');
+    }
+
+    // Bound the FILE COUNT, not only the bytes. A minimal entry costs ~43 bytes, so the
+    // byte cap alone permits ~1.4M files — each one a separate write, and each one then
+    // copied + SHA-256'd + manifested by every future backup, which would brick the
+    // backup path from a single import.
+    const fileCount = Object.keys(bundle.files).length;
+    if (fileCount > MAX_MERGE_LEDGERS) {
+      throw new Error(`Too many merge ledgers: ${String(fileCount)} > ${String(MAX_MERGE_LEDGERS)}`);
+    }
+
+    let written = 0;
+
+    for (const [fileName, content] of Object.entries(bundle.files)) {
+      if (typeof content !== 'string') continue;
+      // The writer's own name shape, which admits a basename only — so a crafted
+      // bundle cannot smuggle `../` or an absolute path through this key.
+      if (!isMergeLedgerFileName(fileName)) continue;
+
+      // The filename says "merge ledger"; that is not evidence the payload is one. The
+      // export doc-comment claims sweep/archive ledgers are deliberately not carried, and
+      // enforcing that on the NAME alone leaves a `phase: 'archive'` body importable under
+      // a `merge-*.json` name — which `subject-sweep --rollback` then dispatches on by
+      // name. Cheap to close, so close it.
+      let parsed: unknown;
+      try { parsed = JSON.parse(content); } catch { continue; }
+      const led = parsed as { version?: unknown; phase?: unknown };
+      if (led?.version !== 1 || led.phase !== 'merge') continue;
+
+      const filePath = resolve(sweepsDir, fileName);
+      // Defense-in-depth, exactly as the memory restore does it: the resolved path must
+      // sit strictly inside sweeps/. A bare startsWith would also accept `sweepsEVIL/`.
+      if (!filePath.startsWith(sweepsPrefix)) continue;
+
+      mkdirSync(sweepsDir, { recursive: true, mode: DIR_MODE_PRIVATE });
+      // Drop any existing entry rather than truncating it: `writeFileSync` follows a
+      // symlink, so writing onto one would put bundle content into its target. unlink
+      // removes the LINK, and 'wx' then refuses to follow anything raced in afterwards.
+      try { unlinkSync(filePath); } catch { /* not there — the normal case */ }
+      writeFileSync(filePath, content, { encoding: 'utf-8', mode: FILE_MODE_PRIVATE, flag: 'wx' });
       written++;
     }
 
