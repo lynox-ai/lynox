@@ -55,21 +55,16 @@ export function abortSpawnedAgents(): void {
 }
 
 /**
- * Estimate the cost for a single spawn agent so `checkSessionBudget` can
- * refuse a fan-out that would blow the session ceiling. Models input as
- * ~4K tokens/turn (cache reduces this further after turn 1, not modelled)
- * and output as {@link SPAWN_OUTPUT_FILL_RATIO} × `model.maxOutput` per turn.
- */
-/**
  * Map the child's `send()` outcome onto the `runs.stop_reason` column. Until
  * 2026-08-20 spawn stamped `'end_turn'` unconditionally on the completed path,
  * so a child stopped by its turn cap with a tool call still pending was
  * indistinguishable in the ledger from one that finished on its own — every
- * empty sub-agent in rafael's prod thread `d8047252` read `end_turn` while in
- * truth `max_turns` had run out. The column is free text (the failure path
- * already writes error messages into it); its readers are display-only (the
- * web-ui diagnostics panel, the debug export, this file's own tests), so two new
- * words here break nothing and name the knob the operator has to turn.
+ * empty sub-agent of the production thread this was found in read `end_turn`
+ * while in truth `max_turns` had run out. The column is free text (the failure
+ * path already writes error messages into it) and nothing in either repo
+ * switches on its value (the debug export passes it through; the web-ui reads
+ * the live `turn_end` stream field, not this column), so two new words here
+ * break nothing and name the knob the operator has to turn.
  */
 export function ledgerStopReason(stop: SendStop | null): string {
   switch (stop?.cause) {
@@ -85,6 +80,12 @@ export function ledgerStopReason(stop: SendStop | null): string {
   }
 }
 
+/**
+ * Estimate the cost for a single spawn agent so `checkSessionBudget` can
+ * refuse a fan-out that would blow the session ceiling. Models input as
+ * ~4K tokens/turn (cache reduces this further after turn 1, not modelled)
+ * and output as {@link SPAWN_OUTPUT_FILL_RATIO} × `model.maxOutput` per turn.
+ */
 function estimateSpawnCost(model: string, maxIterations: number): number {
   const pricing = getPricing(model);
   const expectedOutput = getDefaultMaxTokens(model) * SPAWN_OUTPUT_FILL_RATIO;
@@ -1191,8 +1192,7 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // formally a success, indistinguishable from "worked, found nothing to
         // say".
         //
-        // Measured on rafael's production instance, thread `d8047252`,
-        // engine 2.14.2: 3 of 8 sub-agents returned `''` at
+        // Measured on a production instance (engine 2.14.2, 2026-08-18): 3 of 8 sub-agents returned `''` at
         // `status=completed`, `stop_reason=end_turn`, `error_text=NULL`,
         // `tokens_out` 113-669 — on TWO different models, one of them the
         // instance's own balanced default. The parent could only guess, and
@@ -1221,23 +1221,44 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
         // bytes of child content, and the real child→parent taint hand-off is
         // content-based, one frame up (`describeTurnUntrusted` → the parent's
         // `noteUntrustedData`, above), not marker-based.
-        if (stop?.cause === 'iteration_cap' || stop?.cause === 'budget_cap' || stop?.cause === 'absolute_cap') {
-          // 2026-08-20: the cause behind all three of those empties turned out to
-          // be THIS — the child was STOPPED by its turn cap (each had made exactly
-          // `max_turns - 1` tool calls; the last turn's tool_use was dropped). The
+        if (
+          (stop?.cause === 'iteration_cap' || stop?.cause === 'budget_cap' || stop?.cause === 'absolute_cap')
+          && stop.pendingToolCount > 0
+        ) {
+          // 2026-08-20: the cause behind the empties measured above turned out to
+          // be THIS — the child was STOPPED by its turn cap while still calling
+          // tools (each had made exactly `max_turns - 1` tool calls; the last
+          // turn's tool_use was dropped). `pendingToolCount > 0` is load-bearing:
+          // a cap that coincides with a turn the model finished by itself is the
+          // most common SUCCESSFUL shape and takes the normal path below. The
           // section is read by the parent model, which acts on it: it has to name
           // the knob and the remedy, or the parent keeps diagnosing a model defect.
-          // Tool names are model-emitted — escaped and capped before they land
-          // outside the envelope, the same class of hole #1237 closed for `spec.name`.
+          // Tool names arrive charset-gated and capped from `SendStop`; escaped
+          // again here because they land OUTSIDE the envelope (the class of hole
+          // #1237 closed for `spec.name`).
+          //
+          // Why "at least 2N": a failed tool call costs two more model calls to
+          // recover from (the retry, and the turn that reads its result), so
+          // doubling is the smallest step that turns "one more call" into "one
+          // more recoverable failure". N+1 moves the cap by exactly the call that
+          // was dropped; 3N and up invite the re-spawn loop the "once" below
+          // exists to prevent. Clamped to the schema maximum — prescribing a value
+          // the validator rejects would send the parent into an error instead.
           const isBudget = stop.cause === 'budget_cap';
           const turns = spec.max_turns ?? DEFAULT_SPAWN_MAX_TURNS;
           const budget = spec.max_budget_usd ?? DEFAULT_SPAWN_BUDGET_USD;
           const knob = isBudget ? `max_budget_usd=${String(budget)}` : `max_turns=${String(turns)}`;
-          const tools = stop.pendingTools.map((t: string) => escapeXml(t).slice(0, 64)).join(', ');
-          const whileDoing = tools ? ` and was still calling tools (${tools}) when it was stopped` : ' and was stopped before it answered';
+          const tools = stop.pendingTools.map((t) => escapeXml(t)).join(', ');
+          const whileDoing = ` and was still calling tools (${tools || 'unnamed'}) when it was stopped`;
+          const raisedTurns = Math.min(turns * 2, MAX_SPAWN_TURNS);
+          const raisedBudget = Math.min(budget * 2, MAX_SPAWN_BUDGET_USD);
           const raise = isBudget
-            ? `a higher max_budget_usd (at least ${String(budget * 2)})`
-            : `a higher max_turns (at least ${String(turns * 2)})`;
+            ? (raisedBudget > budget
+              ? `a higher max_budget_usd (at least ${String(raisedBudget)})`
+              : `a narrower task (max_budget_usd is already at its maximum of ${String(MAX_SPAWN_BUDGET_USD)})`)
+            : (raisedTurns > turns
+              ? `a higher max_turns (at least ${String(raisedTurns)})`
+              : `a narrower task (max_turns is already at its maximum of ${String(MAX_SPAWN_TURNS)})`);
           const partial = stop.text.trim().length > 0
             ? `\n\nPartial text it produced before stopping:\n\n${wrapUntrustedData(stop.text, `sub_agent:${spec.name}`)}`
             : '';

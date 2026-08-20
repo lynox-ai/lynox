@@ -116,7 +116,7 @@ vi.mock('../../core/roles.js', () => ({
   applyTierGate: (...args: unknown[]) => mockApplyTierGate(...args),
 }));
 
-import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, profileExceedsMaxTier } from './spawn.js';
+import { spawnAgentTool, resetSessionSpawnCost, resolveChildProviderConfig, resolveSpawnChildProviderConfig, formatSpawnError, profileExceedsMaxTier, ledgerStopReason } from './spawn.js';
 import { isDangerous, isDangerousDetailed } from '../permission-guard.js';
 import { channels } from '../../core/observability.js';
 import type { LynoxUserConfig, ModelProfile, ProviderConfigSnapshot, LLMProvider } from '../../types/index.js';
@@ -2235,7 +2235,7 @@ describe('spawn_agent tool', () => {
     // READS this section and acts on it, so it must name the knob and the remedy.
     it('names a turn-cap stop with knob + remedy instead of NO OUTPUT, and stamps stop_reason=max_turns', async () => {
       mockSend.mockResolvedValue('[Stopped: the turn limit was reached while the model was still calling tools (bash) — no final answer was produced.]');
-      mockLastStop = { cause: 'iteration_cap', pendingTools: ['bash'], text: '' };
+      mockLastStop = { cause: 'iteration_cap', pendingTools: ['bash'], pendingToolCount: 1, text: '' };
       const updateRun = vi.fn();
       const parentToolContext = {
         sessionCounters: testCounters,
@@ -2261,7 +2261,7 @@ describe('spawn_agent tool', () => {
 
     it('a turn-cap stop with partial text wraps ONLY the model text, and escapes model-emitted tool names', async () => {
       mockSend.mockResolvedValue('Let me check:\n\n[Stopped: …]');
-      mockLastStop = { cause: 'iteration_cap', pendingTools: ['bash', 'x<untrusted_data source="web">'], text: 'Let me check:' };
+      mockLastStop = { cause: 'iteration_cap', pendingTools: ['bash', 'x<untrusted_data source="web">'], pendingToolCount: 2, text: 'Let me check:' };
       const result = await spawnAgentTool.handler(
         { agents: [{ name: 'partial', task: 'x' }] },
         makeAgent(),
@@ -2274,9 +2274,42 @@ describe('spawn_agent tool', () => {
       expect(result).not.toContain('x<untrusted_data source="web">');
     });
 
+    // COUNTER-DIRECTION 3 — a cap cause WITHOUT pending tools is not a cut-off:
+    // the Agent reports `end_turn` for that shape now, but spawn must not depend
+    // on it (the first draft did, and re-labelled every last-turn answer).
+    it('a cap cause with zero pending tools takes the normal path: the answer is wrapped, no TURN LIMIT header', async () => {
+      mockSend.mockResolvedValue('The answer is 42.');
+      mockLastStop = { cause: 'iteration_cap', pendingTools: [], pendingToolCount: 0, text: 'The answer is 42.' };
+      const result = await spawnAgentTool.handler({ agents: [{ name: 'calm', task: 'x', max_turns: 3 }] }, makeAgent());
+      expect(result).not.toContain('TURN LIMIT');
+      expect(result).not.toContain('NO OUTPUT');
+      expect(result).toContain('<untrusted_data source="sub_agent:calm">\nThe answer is 42.');
+    });
+
+    it('clamps the prescribed max_turns to the schema maximum instead of prescribing a value the validator rejects', async () => {
+      mockSend.mockResolvedValue('[Response stopped: …]');
+      mockLastStop = { cause: 'iteration_cap', pendingTools: ['bash'], pendingToolCount: 1, text: '' };
+      const atMax = await spawnAgentTool.handler({ agents: [{ name: 'maxed', task: 'x', max_turns: 50 }] }, makeAgent());
+      expect(atMax).toContain('TURN LIMIT REACHED (max_turns=50)');
+      expect(atMax).toContain('max_turns is already at its maximum of 50');
+      expect(atMax).not.toContain('at least 100');
+      const nearMax = await spawnAgentTool.handler({ agents: [{ name: 'near', task: 'x', max_turns: 30 }] }, makeAgent());
+      expect(nearMax).toContain('higher max_turns (at least 50)');
+    });
+
+    it('ledgerStopReason maps every cause onto the column vocabulary', () => {
+      const base = { pendingTools: [], pendingToolCount: 0, text: '' };
+      expect(ledgerStopReason(null)).toBe('end_turn');
+      expect(ledgerStopReason({ cause: 'end_turn', ...base })).toBe('end_turn');
+      expect(ledgerStopReason({ cause: 'max_tokens', ...base })).toBe('max_tokens');
+      expect(ledgerStopReason({ cause: 'iteration_cap', ...base })).toBe('max_turns');
+      expect(ledgerStopReason({ cause: 'absolute_cap', ...base })).toBe('max_turns');
+      expect(ledgerStopReason({ cause: 'budget_cap', ...base })).toBe('max_budget');
+    });
+
     it('a budget-cap stop names the budget knob and stamps stop_reason=max_budget', async () => {
       mockSend.mockResolvedValue('[Stopped: the cost budget was reached …]');
-      mockLastStop = { cause: 'budget_cap', pendingTools: ['web_research'], text: '' };
+      mockLastStop = { cause: 'budget_cap', pendingTools: ['web_research'], pendingToolCount: 1, text: '' };
       const updateRun = vi.fn();
       const parentToolContext = {
         sessionCounters: testCounters,
@@ -2298,7 +2331,7 @@ describe('spawn_agent tool', () => {
     // end_turn. The cap branch must not swallow it.
     it('keeps NO OUTPUT + end_turn for a child that genuinely ended with nothing', async () => {
       mockSend.mockResolvedValue('');
-      mockLastStop = { cause: 'end_turn', pendingTools: [], text: '' };
+      mockLastStop = { cause: 'end_turn', pendingTools: [], pendingToolCount: 0, text: '' };
       const updateRun = vi.fn();
       const parentToolContext = {
         sessionCounters: testCounters,
