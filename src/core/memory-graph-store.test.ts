@@ -1,9 +1,9 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { SubjectStore, entityTypeToSubjectKind } from './subject-store.js';
+import { SubjectStore, entityTypeToSubjectKind, type SubjectExternalRefs } from './subject-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
 
 describe('entityTypeToSubjectKind (Foundation Rework v2 — S1b)', () => {
@@ -296,8 +296,6 @@ describe('MemoryGraphStore (Foundation Rework v2 — S1b)', () => {
 });
 
 // ── DEF-0015: the orphan-subject reap rides INSIDE the hard memory deletes ────
-import { vi } from 'vitest';
-import type { SubjectExternalRefs } from './subject-store.js';
 
 describe('MemoryGraphStore orphan-subject reap (DEF-0015)', () => {
   const tmpDirs: string[] = [];
@@ -388,6 +386,51 @@ describe('MemoryGraphStore orphan-subject reap (DEF-0015)', () => {
     stub(mem, 'cur');
     expect(mem.gcInactiveStubs()).toBe(0);
     expect(reaper).not.toHaveBeenCalled();
+    engine.close();
+  });
+
+  it('deactivateByIds (the SOFT delete) never calls the reaper — the subject stays linked', () => {
+    const { engine, mem, subs } = make();
+    const reaper = vi.fn(() => []);
+    mem.setOrphanSubjectReaper(reaper);
+    const solo = subs.createSubject({ kind: 'organization', name: 'Solo' });
+    stub(mem, 'm1'); mem.linkSubjects('m1', [solo]);
+    expect(mem.deactivateByIds(['m1'])).toBe(1);
+    expect(reaper).not.toHaveBeenCalled();
+    expect(subs.getSubject(solo)).not.toBeNull();
+    expect(mem.getLinkedSubjectIds('m1')).toEqual([solo]);
+    engine.close();
+  });
+
+  it('gcInactiveStubs: a throwing reaper is logged and swallowed, and the stubs are STILL deleted', () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const { engine, mem, subs } = make();
+      mem.setOrphanSubjectReaper(() => { throw new Error('reaper boom'); });
+      const dead = subs.createSubject({ kind: 'organization', name: 'Dead' });
+      stub(mem, 'old', { isActive: false }); mem.linkSubjects('old', [dead]);
+      expect(mem.gcInactiveStubs()).toBe(1);          // no throw, stub count reported
+      expect(mem.getStub('old')).toBeNull();          // the delete committed on its own
+      expect(subs.getSubject(dead)).not.toBeNull();   // the candidate was left in place
+      expect(stderr.mock.calls.some(c => String(c[0]).includes('[lynox:subject-reap] gc reap failed, 1 candidate'))).toBe(true);
+      engine.close();
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('purgeMemories collects candidates from EVERY chunk, not only the first (501 ids)', () => {
+    const { engine, mem, subs } = make();
+    const seen: string[] = [];
+    mem.setOrphanSubjectReaper(ids => { seen.push(...ids); return []; });
+    const first = subs.createSubject({ kind: 'organization', name: 'First' });
+    const last = subs.createSubject({ kind: 'organization', name: 'Last' });
+    const ids: string[] = [];
+    for (let i = 0; i < 501; i++) { const id = `m-${i}`; ids.push(id); stub(mem, id); }
+    mem.linkSubjects('m-0', [first]);
+    mem.linkSubjects('m-500', [last]);                // lands in the SECOND chunk
+    expect(mem.purgeMemories(ids)).toBe(501);
+    expect(seen.sort()).toEqual([first, last].sort());
     engine.close();
   });
 });

@@ -69,8 +69,9 @@ const MEMORY_READ_COSINE_FLOOR = 0;
  * (`vectorScore === 0`) is EXEMPT — the floor never drops a graph-surfaced `user_asserted`
  * truth (refute RF-ARCH1). A purely-vector candidate must clear `floor` on its RAW cosine
  * (`vectorScore / VECTOR_WEIGHT`, undoing the `VECTOR_WEIGHT` scaling). Exported so the LOGIC
- * is tested at multiple floor values while the production constant stays 0 until the shadow
- * window closes (a reviewed constant, not a hot knob).
+ * is tested at multiple floor values while the production constant stays 0 — the measured
+ * distribution gave it no usable value (see {@link MEMORY_READ_COSINE_FLOOR}); a reviewed
+ * constant, not a hot knob.
  */
 export function passesReadCosineFloor(
   c: { vectorScore: number; graphBoost: number; ftsScore: number; runBoost: number },
@@ -235,8 +236,9 @@ export class RetrievalEngine {
      * Memory Foundation Wave 2 (P2). When true, a raw-cosine FLOOR
      * ({@link MEMORY_READ_COSINE_FLOOR}) is applied to purely-vector-surfaced candidates
      * (graph/FTS/run-surfaced facts exempt). Default false → the legacy `threshold*0.3`
-     * gate alone (byte-identical). The floor constant is 0 until the shadow window closes,
-     * so even ON this is byte-identical until the constant is set (a separate reviewed GO).
+     * gate alone (byte-identical). The floor constant is 0 — the shadow window measured no
+     * separating value for it — so even ON this is byte-identical unless a future
+     * re-measurement on another embedding model sets it (a separate reviewed GO).
      */
     private readonly memoryWriteTrustGate: boolean = false,
   ) {}

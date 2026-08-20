@@ -1422,6 +1422,11 @@ export class Engine {
     try {
       this._dataStore = new DataStore();
       this._toolContext.dataStore = this._dataStore;
+      // DEF-0015: the orphan-subject reap needs the record store to answer "does a table
+      // row still link this subject?". Handed over HERE, not in _initKnowledge(): that step
+      // runs before this one, which is why the `initDataStoreBridge` attach there (guarded
+      // on `this._dataStore`) has never fired in production — the reap must not ride on it.
+      this.knowledgeLayer?.setRecordStore(this._dataStore);
       // Drop empty CRM-shaped collections (`contacts` / `deals` / `interactions`
       // …) that older agent sessions left behind. They duplicate the dedicated
       // CRM tab in the UI and confuse users. Non-empty ones are preserved.

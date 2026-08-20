@@ -357,8 +357,8 @@ const DETAIL_MONEY_PAIRS: Record<string, { amount: string; currency: string }> =
  * without anyone having said anything; they count only when set to a NON-default value (a
  * deliberate classification). `currency` pairs with its amount and says nothing alone.
  * Static SQL fragments over static column names (never input) — same injection argument as
- * REPOINT_TARGETS. `scripts/subject-sweep.ts` `blockReason` carries a narrower hand copy of
- * this idea (email/phone/domain/vat_id/sku/price/rate); folding it onto this predicate is a
+ * REPOINT_TARGETS. `src/scripts/subject-sweep.ts` `blockReason` carries a narrower hand copy
+ * of this idea (email/phone/domain/vat_id/sku/price/rate); folding it onto this predicate is a
  * registered follow-up, not done here.
  */
 const DETAIL_SUBSTANTIVE_PREDICATE: Record<string, string> = {
@@ -370,11 +370,28 @@ const DETAIL_SUBSTANTIVE_PREDICATE: Record<string, string> = {
 };
 
 /**
- * The complete before-image of ONE merge — enough to reverse it byte-for-byte.
- * Captured read-only by {@link SubjectStore.planMerge} BEFORE any mutation, so the
- * caller can persist it FIRST (same crash-safety discipline as the archive sweep:
- * a mutate-then-crash-before-persist would otherwise be irreversible).
+ * Every engine.db column that points at `subjects(id)`, partitioned by how the orphan reap
+ * treats it — exported so a schema sweep (`PRAGMA foreign_key_list` over every table) can
+ * fail the build the day a new FK column appears that none of the three lists knows. Without
+ * that guard the next `subject_id` column would be invisible to the reap and the subject it
+ * holds would be over-erased.
+ *  - `counted`: a row here is a reference ({@link SubjectStore.referenceReason} keeps the subject).
+ *  - `detail`:  the 1:1 kind-detail rows (PK = subject_id) — part of the subject itself; a
+ *               reference only when they carry substantive data (`DETAIL_SUBSTANTIVE_PREDICATE`).
+ *  - `derived`: recomputable materializations that must NOT count (cooccurrences).
  */
+export function subjectReferenceCoverage(): { counted: string[]; detail: string[]; derived: string[] } {
+  return {
+    counted: [
+      ...REPOINT_TARGETS.map(t => `${t.table}.${t.column}`),
+      'memory_subjects.subject_id',
+      'subjects.merged_into',
+    ],
+    detail: Object.values(DETAIL_TABLE).map(d => `${d.table}.subject_id`),
+    derived: ['subject_cooccurrences.subject_a_id', 'subject_cooccurrences.subject_b_id'],
+  };
+}
+
 /**
  * Cross-database soft references to a subject that engine.db's own FKs cannot see — both
  * are LIVE user data outside engine.db: the history.db thread anchor
@@ -391,6 +408,12 @@ export interface SubjectExternalRefs {
   hasRecords(subjectId: string): boolean;
 }
 
+/**
+ * The complete before-image of ONE merge — enough to reverse it byte-for-byte.
+ * Captured read-only by {@link SubjectStore.planMerge} BEFORE any mutation, so the
+ * caller can persist it FIRST (same crash-safety discipline as the archive sweep:
+ * a mutate-then-crash-before-persist would otherwise be irreversible).
+ */
 export interface MergeLedgerEntry {
   dupId: string;
   canonicalId: string;
@@ -897,8 +920,9 @@ export class SubjectStore {
     const row = this.getSubject(subjectId);
     if (!row) return 'missing';
     if (row.is_self === 1) return 'is_self';
-    if (external.isThreadAnchor(subjectId)) return 'thread-anchor';
-    if (external.hasRecords(subjectId)) return 'record';
+    // engine.db probes first — all indexed, same connection, and the junction alone settles
+    // the common case; the two cross-DB probes (separate handles, a schema scan on the
+    // datastore side) come last so they run only for a subject nothing local holds.
     if (this.db.prepare('SELECT 1 FROM memory_subjects WHERE subject_id = ? LIMIT 1').get(subjectId)) {
       return 'referenced-by-memory_subjects';
     }
@@ -917,7 +941,31 @@ export class SubjectStore {
         return 'has-detail';
       }
     }
+    if (external.isThreadAnchor(subjectId)) return 'thread-anchor';
+    if (external.hasRecords(subjectId)) return 'record';
     return null;
+  }
+
+  /**
+   * The transitive set of merged-away duplicates redirecting (via `merged_into`) onto
+   * `canonicalId` — the archived shells {@link executeMerge} leaves behind, whose own
+   * links were all repointed onto the canonical. A BFS so a chain (A→B→C) is one closure.
+   */
+  private _mergeDupClosure(canonicalId: string): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>([canonicalId]);
+    const queue = [canonicalId];
+    const dupsOf = this.db.prepare('SELECT id FROM subjects WHERE merged_into = ?');
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      for (const { id } of dupsOf.all(cur) as Array<{ id: string }>) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        out.push(id);
+        queue.push(id);
+      }
+    }
+    return out;
   }
 
   /**
@@ -945,6 +993,27 @@ export class SubjectStore {
       for (const id of [...pending]) {
         const reason = this.referenceReason(id, external);
         if (reason === 'missing') { pending.delete(id); continue; }
+        if (reason === 'merge-target') {
+          // A canonical that absorbed duplicates is pointed at by their archived shells
+          // (`merged_into`) forever — the shells' own links were all repointed onto it, so
+          // they never become candidates themselves. Read literally, `merge-target` would
+          // make every once-merged subject unreapable and keep BOTH plaintext names. So a
+          // canonical goes together with its whole shell closure when nothing but that
+          // closure holds any of them; a shell something else still holds (a thread anchor
+          // a failed repoint left on the dup id) keeps the canonical too. Rolling the merge
+          // back is moot once the canonical itself is erased.
+          const closure = this._mergeDupClosure(id);
+          const shellHeld = closure.some(dup => {
+            const r = this.referenceReason(dup, external);
+            return r !== null && r !== 'merge-target';
+          });
+          if (shellHeld) continue;
+          for (const dup of closure) if (del.run(dup).changes > 0) reaped.push(dup);
+          if (del.run(id).changes > 0) reaped.push(id);
+          pending.delete(id);
+          progressed = true;
+          continue;
+        }
         if (reason !== null) continue;
         if (del.run(id).changes > 0) reaped.push(id);
         pending.delete(id);

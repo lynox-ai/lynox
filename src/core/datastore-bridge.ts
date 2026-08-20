@@ -36,15 +36,6 @@ export class DataStoreBridge {
   ) {}
 
   /**
-   * Record-on-spine: does ANY collection still link `subjectId` through a `subject`-typed
-   * column? The datastore.db half of the orphan-subject reference oracle (DEF-0015) — a
-   * subject a table row points at is live user data and must survive a memory erase.
-   */
-  hasRecordsForSubject(subjectId: string): boolean {
-    return this.dataStore.hasRecordsForSubject(subjectId);
-  }
-
-  /**
    * Register a DataStore collection as an entity in the Knowledge Graph.
    */
   async registerCollection(

@@ -27,6 +27,7 @@ import { extractEntitiesV2, shouldExtractV2 } from './entity-extractor-v2.js';
 import { fireBeforeRunGate, reportMeteredCost, type HookHost } from './metered-request.js';
 import { detectContradictions, hasHeuristicContradiction, subjectsDisagree, properNounTokens, subjectTokensDisagree } from './contradiction-detector.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
+import type { DataStore } from './data-store.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
 import type { EngineDb } from './engine-db.js';
@@ -151,11 +152,13 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   private _anchorThreadStore: ThreadStore | null | undefined;
   /**
    * DEF-0015 — the datastore.db half of the orphan-subject reference oracle. Set by
-   * {@link setDataStoreBridge} (the engine attaches it right after construction, before
-   * the HTTP surface serves). `null` means the oracle cannot answer and the reap skips.
+   * {@link setRecordStore} from `Engine._initCoreTools()` the moment the DataStore exists
+   * (before the HTTP surface serves). Deliberately NOT the `DataStoreBridge`: that attach
+   * sits in `_initKnowledge()`, which runs before the DataStore is constructed, so it has
+   * never fired in production. `null` means the oracle cannot answer and the reap skips.
    */
-  private _dataStoreBridge: DataStoreBridge | null = null;
-  /** One stderr line per process when the reap has to skip, not one per erase. */
+  private _recordStore: DataStore | null = null;
+  /** One stderr line per layer instance when the reap has to skip, not one per erase. */
   private _reapSkipWarned = false;
 
   constructor(
@@ -257,10 +260,18 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   /** Access the entity resolver (for DataStore bridge). */
   getEntityResolver(): EntityResolver { return this.entityResolver; }
 
-  /** Connect DataStore bridge to retrieval engine for data hints (+ the reap's record oracle). */
+  /** Connect DataStore bridge to retrieval engine for data hints. */
   setDataStoreBridge(bridge: DataStoreBridge): void {
-    this._dataStoreBridge = bridge;
     this.retrievalEngine.setDataStoreBridge(bridge);
+  }
+
+  /**
+   * DEF-0015 — hand the layer the live DataStore so the orphan reap can ask whether a
+   * table row still links a subject. Called by the engine as soon as the DataStore exists;
+   * until then (and forever on an engine without one) the reap stays fail-closed.
+   */
+  setRecordStore(store: DataStore): void {
+    this._recordStore = store;
   }
 
   /**
@@ -782,18 +793,20 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    */
   private _subjectExternalRefs(): SubjectExternalRefs | null {
     const threads = this._getAnchorThreadStore();
-    const bridge = this._dataStoreBridge;
-    if (!threads || !bridge) return null;
+    const records = this._recordStore;
+    if (!threads || !records) return null;
     return {
       isThreadAnchor: (id) => { try { return threads.listBySubjectId(id, 1).length > 0; } catch { return true; } },
-      hasRecords: (id) => { try { return bridge.hasRecordsForSubject(id); } catch { return true; } },
+      hasRecords: (id) => { try { return records.hasRecordsForSubject(id); } catch { return true; } },
     };
   }
 
   /**
    * DEF-0015 — the reaper {@link MemoryGraphStore} calls inside every hard memory delete.
-   * Fail-closed: without the cross-DB oracle the candidates are left standing (one stderr
-   * line per process), never guessed at. Returns the subject ids actually deleted.
+   * Fail-closed: without the cross-DB oracle the candidates are left standing — logged once
+   * per layer instance with the count, because a skipped candidate is permanent residue (the
+   * deleted memory is never a candidate again) and should at least be quantifiable — never
+   * guessed at. Returns the subject ids actually deleted.
    */
   private _reapOrphanSubjects(candidates: readonly string[]): readonly string[] {
     if (!this.subjectStore) return [];
@@ -802,7 +815,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       if (!this._reapSkipWarned) {
         this._reapSkipWarned = true;
         process.stderr.write(
-          '[lynox:subject-reap] skipped: cross-DB reference oracle unavailable (no history.db handle or DataStore bridge) — orphan subjects left in place\n',
+          `[lynox:subject-reap] skipped: cross-DB reference oracle unavailable (no history.db handle or record store) — ${candidates.length} candidate subject(s) left in place\n`,
         );
       }
       return [];

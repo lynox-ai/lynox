@@ -511,6 +511,10 @@ export class MemoryGraphStore {
    */
   purgeMemories(ids: string[]): number {
     if (ids.length === 0) return 0;
+    // `.immediate()`: the transaction now OPENS with a read (the candidate collection) and
+    // then writes. Under WAL a deferred transaction that reads first and writes after a
+    // concurrent commit raises SQLITE_BUSY_SNAPSHOT, which busy_timeout cannot absorb; taking
+    // the write lock up front makes the open wait instead (same discipline as executeMerge).
     return this.db.transaction(() => {
       let deleted = 0;
       const candidates = new Set<string>();
@@ -530,7 +534,7 @@ export class MemoryGraphStore {
       }
       if (this.orphanReaper && candidates.size > 0) this.orphanReaper([...candidates]);
       return deleted;
-    })();
+    }).immediate();
   }
 
   /**
@@ -562,20 +566,36 @@ export class MemoryGraphStore {
   /**
    * Delete superseded/inactive stubs (`is_active = 0`) — the engine.db port of the
    * legacy {@link AgentMemoryDb.gc} memory sweep. Cascades reap the children, and the
-   * orphan-subject reap runs here too (same discipline as {@link purgeMemories}: a
-   * `memory_delete` soft-deletes, gc hard-deletes, and it is the hard delete that would
-   * otherwise leave the minted subject's name behind). One transaction. Returns the
+   * orphan-subject reap runs here too (a `memory_delete` soft-deletes, gc hard-deletes,
+   * and it is the hard delete that would otherwise leave the minted subject's name
+   * behind).
+   *
+   * Unlike {@link purgeMemories} the reap is NOT in the delete's transaction: gc is a
+   * best-effort sweep whose caller (`KnowledgeLayer.gc`) swallows failures, so a reaper
+   * error coupled to the DELETE would roll the stub delete back and leave superseded
+   * content silently recallable — a regression the bare DELETE never had. The stubs go
+   * first and stay gone; a reap failure is logged with the candidate count and the
+   * candidates remain (a lingering name is the pre-reap state, never worse). Returns the
    * number of stubs deleted.
    */
   gcInactiveStubs(): number {
-    return this.db.transaction(() => {
-      const candidates = this.orphanReaper
+    const { deleted, candidates } = this.db.transaction(() => {
+      const found = this.orphanReaper
         ? this._linkedSubjectIds('SELECT id FROM memories WHERE is_active = 0', [])
         : [];
-      const deleted = this.db.prepare('DELETE FROM memories WHERE is_active = 0').run().changes;
-      if (this.orphanReaper && candidates.length > 0) this.orphanReaper(candidates);
-      return deleted;
-    })();
+      const changes = this.db.prepare('DELETE FROM memories WHERE is_active = 0').run().changes;
+      return { deleted: changes, candidates: found };
+    }).immediate();
+    if (this.orphanReaper && candidates.length > 0) {
+      try {
+        this.orphanReaper(candidates);
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:subject-reap] gc reap failed, ${candidates.length} candidate subject(s) left in place: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+    return deleted;
   }
 
   // ── S5b recall reads (engine.db) ──────────────────────────────

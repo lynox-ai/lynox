@@ -3,7 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { SubjectStore, makeSubjectColumnBridge, NAME_DEDUPED_SUBJECT_KINDS, normalizeSubjectName } from './subject-store.js';
+import { SubjectStore, makeSubjectColumnBridge, NAME_DEDUPED_SUBJECT_KINDS, normalizeSubjectName, subjectReferenceCoverage } from './subject-store.js';
+import type { SubjectExternalRefs } from './subject-store.js';
+import { MemoryGraphStore } from './memory-graph-store.js';
+import { RelationshipStore } from './relationship-store.js';
 import { DataStore } from './data-store.js';
 import type { DataStoreSubjectKind } from '../types/index.js';
 
@@ -678,10 +681,6 @@ describe('findByNameAnyKind — one name, any kind', () => {
 // `reapOrphans` deletes what nothing holds. Every reference kind below is a row that MUST keep
 // a subject alive — and the cooccurrence case is the one that must NOT (derived data; counting
 // it would make the reap a no-op on every real corpus).
-import { MemoryGraphStore } from './memory-graph-store.js';
-import { RelationshipStore } from './relationship-store.js';
-import type { SubjectExternalRefs } from './subject-store.js';
-
 describe('SubjectStore.referenceReason + reapOrphans (DEF-0015 orphan-subject reap)', () => {
   const tmpDirs: string[] = [];
   const NONE: SubjectExternalRefs = { isThreadAnchor: () => false, hasRecords: () => false };
@@ -712,63 +711,32 @@ describe('SubjectStore.referenceReason + reapOrphans (DEF-0015 orphan-subject re
     engine.close();
   });
 
-  it('every engine.db holder keeps a subject — junction, primary, knowledge entry, each verb-layer column, hierarchy, merge redirect, detail, self', () => {
-    const { store, engine, mem } = make();
-    const db = engine.getDb();
-    const org = (n: string): string => store.createSubject({ kind: 'organization', name: n });
+  // One case per holder so a failing holder names itself instead of masking the ones after it.
+  const HOLDERS: Array<[string, (s: SubjectStore, db: import('better-sqlite3').Database, mem: MemoryGraphStore, engine: EngineDb) => string, string | null]> = [
+    ['memory_subjects junction', (s, _db, mem) => { const a = s.createSubject({ kind: 'organization', name: 'A' }); stub(mem, 'm-a'); mem.linkSubjects('m-a', [a]); return a; }, 'referenced-by-memory_subjects'],
+    ['memories.subject_id (primary, no junction row)', (s, _db, mem) => { const b = s.createSubject({ kind: 'organization', name: 'B' }); stub(mem, 'm-b', b); return b; }, 'referenced-by-memories.subject_id'],
+    ['knowledge_entries.subject_id', (s, db) => { const c = s.createSubject({ kind: 'organization', name: 'C' }); db.prepare("INSERT INTO knowledge_entries (id, subject_id, text) VALUES ('k1', ?, 'x')").run(c); return c; }, 'referenced-by-knowledge_entries.subject_id'],
+    ['tasks.subject_id', (s, db) => { const d = s.createSubject({ kind: 'organization', name: 'D' }); db.prepare("INSERT INTO tasks (id, title, subject_id) VALUES ('t1', 'x', ?)").run(d); return d; }, 'referenced-by-tasks.subject_id'],
+    ['tasks.assignee_subject_id', (s, db) => { const d = s.createSubject({ kind: 'person', name: 'Dana' }); db.prepare("INSERT INTO tasks (id, title, assignee_subject_id) VALUES ('t2', 'x', ?)").run(d); return d; }, 'referenced-by-tasks.assignee_subject_id'],
+    ['triggers.subject_id', (s, db) => { const e = s.createSubject({ kind: 'organization', name: 'E' }); db.prepare("INSERT INTO triggers (id, title, subject_id) VALUES ('tr1', 'x', ?)").run(e); return e; }, 'referenced-by-triggers.subject_id'],
+    ['connections.subject_id', (s, db) => { const f = s.createSubject({ kind: 'organization', name: 'F' }); db.prepare("INSERT INTO connections (id, kind, name, subject_id) VALUES ('cn1', 'api', 'x', ?)").run(f); return f; }, 'referenced-by-connections.subject_id'],
+    ['artifacts.subject_id', (s, db) => { const g = s.createSubject({ kind: 'organization', name: 'G' }); db.prepare("INSERT INTO artifacts (id, type, subject_id) VALUES ('ar1', 'doc', ?)").run(g); return g; }, 'referenced-by-artifacts.subject_id'],
+    ['threads.primary_subject_id (engine.db mirror)', (s, db) => { const h = s.createSubject({ kind: 'organization', name: 'H' }); db.prepare("INSERT INTO threads (id, primary_subject_id) VALUES ('th1', ?)").run(h); return h; }, 'referenced-by-threads.primary_subject_id'],
+    ['relationships.from_subject_id', (s, _db, _mem, engine) => { const i = s.createSubject({ kind: 'organization', name: 'I' }); const j = s.createSubject({ kind: 'organization', name: 'J' }); new RelationshipStore(engine).createRelationship({ fromSubjectId: i, toSubjectId: j, kind: 'partner_of' }); return i; }, 'referenced-by-relationships.from_subject_id'],
+    ['relationships.to_subject_id', (s, _db, _mem, engine) => { const i = s.createSubject({ kind: 'organization', name: 'I' }); const j = s.createSubject({ kind: 'organization', name: 'J' }); new RelationshipStore(engine).createRelationship({ fromSubjectId: i, toSubjectId: j, kind: 'partner_of' }); return j; }, 'referenced-by-relationships.to_subject_id'],
+    ['engagements.client_subject_id', (s, db) => { const k = s.createSubject({ kind: 'organization', name: 'K' }); const eng = s.createSubject({ kind: 'engagement', name: 'Projekt K' }); db.prepare('INSERT INTO engagements (subject_id, client_subject_id) VALUES (?, ?)').run(eng, k); return k; }, 'referenced-by-engagements.client_subject_id'],
+    ['subjects.parent_id (a child keeps its parent)', (s) => { const parent = s.createSubject({ kind: 'organization', name: 'Parent' }); s.createSubject({ kind: 'engagement', name: 'Child', parentId: parent }); return parent; }, 'referenced-by-subjects.parent_id'],
+    ['merged_into (a dup shell keeps its canonical)', (s, db) => { const canon = s.createSubject({ kind: 'organization', name: 'Canon' }); const dup = s.createSubject({ kind: 'organization', name: 'Dup' }); db.prepare('UPDATE subjects SET merged_into = ? WHERE id = ?').run(canon, dup); return canon; }, 'merge-target'],
+    ['people detail WITH data', (s) => { const p = s.createSubject({ kind: 'person', name: 'Petra' }); s.setPersonDetail(p, { email: 'p@example.com' }); return p; }, 'has-detail'],
+    ['people detail of all NULLs (default type only)', (s) => { const p = s.createSubject({ kind: 'person', name: 'Paul' }); s.setPersonDetail(p, {}); return p; }, null],
+    ['engagement detail row (client pointer set)', (s, db) => { const k = s.createSubject({ kind: 'organization', name: 'K' }); const eng = s.createSubject({ kind: 'engagement', name: 'Projekt K' }); db.prepare('INSERT INTO engagements (subject_id, client_subject_id) VALUES (?, ?)').run(eng, k); return eng; }, 'has-detail'],
+    ['the operator self', (s) => s.createSubject({ kind: 'organization', name: 'My Firm', isSelf: true }), 'is_self'],
+  ];
 
-    // memory_subjects junction
-    const a = org('A'); stub(mem, 'm-a'); mem.linkSubjects('m-a', [a]);
-    expect(store.referenceReason(a, NONE)).toBe('referenced-by-memory_subjects');
-    // memories.subject_id (primary, no junction row)
-    const b = org('B'); stub(mem, 'm-b', b);
-    expect(store.referenceReason(b, NONE)).toBe('referenced-by-memories.subject_id');
-    // knowledge_entries.subject_id (the durable-knowledge store)
-    const c = org('C');
-    db.prepare("INSERT INTO knowledge_entries (id, subject_id, text) VALUES ('k1', ?, 'x')").run(c);
-    expect(store.referenceReason(c, NONE)).toBe('referenced-by-knowledge_entries.subject_id');
-    // tasks — both columns
-    const d = org('D'); db.prepare("INSERT INTO tasks (id, title, subject_id) VALUES ('t1', 'x', ?)").run(d);
-    expect(store.referenceReason(d, NONE)).toBe('referenced-by-tasks.subject_id');
-    const d2 = store.createSubject({ kind: 'person', name: 'Dana' });
-    db.prepare("INSERT INTO tasks (id, title, assignee_subject_id) VALUES ('t2', 'x', ?)").run(d2);
-    expect(store.referenceReason(d2, NONE)).toBe('referenced-by-tasks.assignee_subject_id');
-    // triggers / connections / artifacts / engine.db threads mirror
-    const e = org('E'); db.prepare("INSERT INTO triggers (id, title, subject_id) VALUES ('tr1', 'x', ?)").run(e);
-    expect(store.referenceReason(e, NONE)).toBe('referenced-by-triggers.subject_id');
-    const f = org('F'); db.prepare("INSERT INTO connections (id, kind, name, subject_id) VALUES ('cn1', 'api', 'x', ?)").run(f);
-    expect(store.referenceReason(f, NONE)).toBe('referenced-by-connections.subject_id');
-    const g = org('G'); db.prepare("INSERT INTO artifacts (id, type, subject_id) VALUES ('ar1', 'doc', ?)").run(g);
-    expect(store.referenceReason(g, NONE)).toBe('referenced-by-artifacts.subject_id');
-    const h = org('H'); db.prepare("INSERT INTO threads (id, primary_subject_id) VALUES ('th1', ?)").run(h);
-    expect(store.referenceReason(h, NONE)).toBe('referenced-by-threads.primary_subject_id');
-    // relationships — either end
-    const i = org('I'); const j = org('J');
-    new RelationshipStore(engine).createRelationship({ fromSubjectId: i, toSubjectId: j, kind: 'partner_of' });
-    expect(store.referenceReason(i, NONE)).toBe('referenced-by-relationships.from_subject_id');
-    expect(store.referenceReason(j, NONE)).toBe('referenced-by-relationships.to_subject_id');
-    // engagements — provider / client pointers
-    const k = org('K'); const eng = store.createSubject({ kind: 'engagement', name: 'Projekt K' });
-    db.prepare('INSERT INTO engagements (subject_id, client_subject_id) VALUES (?, ?)').run(eng, k);
-    expect(store.referenceReason(k, NONE)).toBe('referenced-by-engagements.client_subject_id');
-    // hierarchy: a child keeps its parent
-    const parent = org('Parent'); const child = store.createSubject({ kind: 'engagement', name: 'Child', parentId: parent });
-    expect(store.referenceReason(parent, NONE)).toBe('referenced-by-subjects.parent_id');
-    // merge redirect: a dup pointing at its canonical keeps the canonical
-    const canon = org('Canon'); const dup = org('Dup');
-    db.prepare('UPDATE subjects SET merged_into = ? WHERE id = ?').run(canon, dup);
-    expect(store.referenceReason(canon, NONE)).toBe('merge-target');
-    // detail WITH data keeps; a detail row of all NULLs does not
-    const p1 = store.createSubject({ kind: 'person', name: 'Petra' }); store.setPersonDetail(p1, { email: 'p@example.com' });
-    expect(store.referenceReason(p1, NONE)).toBe('has-detail');
-    const p2 = store.createSubject({ kind: 'person', name: 'Paul' }); store.setPersonDetail(p2, {});
-    expect(store.referenceReason(p2, NONE)).toBeNull();
-    // the operator self is never reapable
-    const self = store.createSubject({ kind: 'organization', name: 'My Firm', isSelf: true });
-    expect(store.referenceReason(self, NONE)).toBe('is_self');
-    // the engagement subject itself (detail row exists, client pointer set) keeps via detail
-    expect(store.referenceReason(eng, NONE)).toBe('has-detail');
-    void child;
+  it.each(HOLDERS)('holder: %s', (_name, setup, expected) => {
+    const { store, engine, mem } = make();
+    const id = setup(store, engine.getDb(), mem, engine);
+    expect(store.referenceReason(id, NONE)).toBe(expected);
     engine.close();
   });
 
@@ -868,4 +836,70 @@ describe('SubjectStore.referenceReason — detail-row defaults (DEF-0015)', () =
     expect(store.referenceReason(o, NONE)).toBe('has-detail');
     engine.close();
   });
+});
+
+describe('SubjectStore reference oracle — schema sweep + merge closure (DEF-0015)', () => {
+  const tmpDirs: string[] = [];
+  const NONE: SubjectExternalRefs = { isThreadAnchor: () => false, hasRecords: () => false };
+  function make(): { store: SubjectStore; engine: EngineDb; mem: MemoryGraphStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-subj-sweep-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    return { store: new SubjectStore(engine), engine, mem: new MemoryGraphStore(engine) };
+  }
+  afterEach(() => { for (const d of tmpDirs) rmSync(d, { recursive: true, force: true }); tmpDirs.length = 0; });
+
+  it('every FK column onto subjects(id) in the live schema is known to the oracle (counted, detail or derived)', () => {
+    const { engine } = make();
+    const db = engine.getDb();
+    const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string }>).map(r => r.name);
+    const fkCols = new Set<string>();
+    for (const t of tables) {
+      for (const fk of db.prepare(`PRAGMA foreign_key_list("${t}")`).all() as Array<{ table: string; from: string }>) {
+        if (fk.table === 'subjects') fkCols.add(`${t}.${fk.from}`);
+      }
+    }
+    const cov = subjectReferenceCoverage();
+    const known = new Set([...cov.counted, ...cov.detail, ...cov.derived]);
+    const unknown = [...fkCols].filter(c => !known.has(c)).sort();
+    expect(fkCols.size).toBeGreaterThanOrEqual(20); // the sweep really enumerated the schema
+    expect(unknown).toEqual([]);                     // a new subject FK column must be classified here first
+    // and the lists do not name phantom columns either
+    expect([...known].filter(c => !fkCols.has(c)).sort()).toEqual([]);
+    engine.close();
+  });
+
+  it('a once-merged canonical goes TOGETHER with its archived dup shells when nothing else holds any of them', () => {
+    const { store, engine, mem } = make();
+    const canon = store.createSubject({ kind: 'organization', name: 'Schmidt GmbH' });
+    const dup = store.createSubject({ kind: 'organization', name: 'Schmidt' });
+    const dup2 = store.createSubject({ kind: 'organization', name: 'Schmidt AG' });
+    engine.getDb().prepare("UPDATE subjects SET merged_into = ?, archived_at = datetime('now') WHERE id = ?").run(canon, dup);
+    engine.getDb().prepare("UPDATE subjects SET merged_into = ?, archived_at = datetime('now') WHERE id = ?").run(dup, dup2); // a chain: dup2 → dup → canon
+    stub(mem, 'm1'); mem.linkSubjects('m1', [canon]);
+    expect(store.referenceReason(canon, NONE)).toBe('referenced-by-memory_subjects');
+    mem.purgeMemories(['m1']); // no reaper installed here — just drop the holder
+    expect(store.referenceReason(canon, NONE)).toBe('merge-target');
+    expect(store.reapOrphans([canon], NONE).sort()).toEqual([canon, dup, dup2].sort());
+    expect(store.getSubject(canon)).toBeNull();
+    expect(store.getSubject(dup)).toBeNull();
+    expect(store.getSubject(dup2)).toBeNull();
+    engine.close();
+  });
+
+  it('a dup shell something else still holds (a thread anchor a failed repoint left) keeps the canonical', () => {
+    const { store, engine } = make();
+    const canon = store.createSubject({ kind: 'organization', name: 'Schmidt GmbH' });
+    const dup = store.createSubject({ kind: 'organization', name: 'Schmidt' });
+    engine.getDb().prepare("UPDATE subjects SET merged_into = ?, archived_at = datetime('now') WHERE id = ?").run(canon, dup);
+    const anchorOnDup: SubjectExternalRefs = { isThreadAnchor: id => id === dup, hasRecords: () => false };
+    expect(store.reapOrphans([canon], anchorOnDup)).toEqual([]);
+    expect(store.getSubject(canon)).not.toBeNull();
+    expect(store.getSubject(dup)).not.toBeNull();
+    engine.close();
+  });
+
+  function stub(mem: MemoryGraphStore, id: string): void {
+    mem.upsertStub({ id, text: `t-${id}`, namespace: 'knowledge', scopeType: 'context', scopeId: 'c' });
+  }
 });
