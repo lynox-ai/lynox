@@ -303,7 +303,12 @@ export function rollback(engineDb: EngineDb, ledger: Ledger): { restored: number
   return { restored: ledger.archived.length - collidedIds.size, collisions };
 }
 
-function main(): void {
+/**
+ * Exported for the exit-code test. A refusal on the rollback path used to print to stdout
+ * and exit 0, so a script could not tell a reversal that happened from one that was
+ * refused — and no test could see that, because only the helpers above were reachable.
+ */
+export function main(): void {
   const args = parseArgs(process.argv.slice(2));
   if (args.dataDir) setDataDir(args.dataDir);
   const dir = getLynoxDir();
@@ -314,8 +319,18 @@ function main(): void {
       const parsed = JSON.parse(readFileSync(args.rollback, 'utf8')) as Ledger | MergeLedgerFile;
       if (parsed.phase === 'merge') {
         const r = rollbackMergeFile(engineDb, dir, parsed);
+        // A refusal has to reach a SCRIPT, not just a human reading the terminal. This
+        // used to print `FAILED: …` to stdout and exit 0, so `--rollback=… && echo OK`
+        // printed OK on a reversal that never happened — the same shape as the silent
+        // {ok:true} this whole change exists to end. `--merge` already does it this way.
+        if (!r.ok) {
+          process.stderr.write(`[subject-sweep] ROLLBACK-MERGE refused: ${r.reason}\n`);
+          if (args.json) process.stdout.write(JSON.stringify({ mode: 'rollback-merge', ...r }) + '\n');
+          process.exitCode = 1;
+          return;
+        }
         process.stdout.write(args.json ? JSON.stringify({ mode: 'rollback-merge', ...r }) + '\n'
-          : `[subject-sweep] ROLLBACK-MERGE — ${r.ok ? `un-merged ${parsed.entry.dupId} ← ${parsed.entry.canonicalId}` : `FAILED: ${r.reason}`}.\n`);
+          : `[subject-sweep] ROLLBACK-MERGE — un-merged ${parsed.entry.dupId} ← ${parsed.entry.canonicalId}.\n`);
         return;
       }
       const r = rollback(engineDb, parsed);

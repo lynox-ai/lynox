@@ -105,6 +105,61 @@ describe('runMerge — three-store repoint + crash-safe ledger', () => {
     expect(elsewhere.store.getSubject(canon)).toBeFalsy();
   });
 
+  // The case a presence check waves through, and it CORRUPTS rather than no-ops: merge
+  // A→B, reverse it, merge A→C, then replay the FIRST ledger. Both rows exist, so
+  // "do these rows exist" passes — and the reversal un-archives A while C still holds A's
+  // aliases. Reported as a successful undo. Found by an adversarial round on this very PR,
+  // which is why the predicate is `merged_into === canonicalId` and not row presence.
+  it('rollback REFUSES a stale ledger after the entry was merged somewhere else', () => {
+    const { dir, store, threadStore } = setup();
+    const a = store.createSubject({ kind: 'organization', name: 'Aurelva AG' });
+    const b = store.createSubject({ kind: 'organization', name: 'Aurelva' });
+    const c = store.createSubject({ kind: 'organization', name: 'Aurelva Group' });
+
+    expect(runMerge(store, null, threadStore, dir, a, b).ok).toBe(true);
+    const staleLedger = readLedger(dir);
+    expect(rollbackMergeRun(store, null, threadStore, staleLedger).ok).toBe(true);
+
+    // A is live again and now folded into a DIFFERENT canonical.
+    expect(runMerge(store, null, threadStore, dir, a, c).ok).toBe(true);
+    expect(store.getSubject(a)?.merged_into).toBe(c);
+
+    const res = rollbackMergeRun(store, null, threadStore, staleLedger);
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/not in effect/i);
+    // And the graph is untouched — the corruption this refusal prevents.
+    expect(store.getSubject(a)?.merged_into).toBe(c);
+    expect(store.getSubject(a)?.archived_at).toBeTruthy();
+  });
+
+  it('rollback REFUSES the same ledger twice — the second is not a second undo', () => {
+    const { dir, store, threadStore } = setup();
+    const dup = store.createSubject({ kind: 'organization', name: 'Brunner AG' });
+    const canon = store.createSubject({ kind: 'organization', name: 'Brunner' });
+    expect(runMerge(store, null, threadStore, dir, dup, canon).ok).toBe(true);
+    const ledger = readLedger(dir);
+
+    expect(rollbackMergeRun(store, null, threadStore, ledger).ok).toBe(true);
+    const second = rollbackMergeRun(store, null, threadStore, ledger);
+    expect(second.ok).toBe(false);
+    expect(second.reason).toMatch(/already been reversed/i);
+  });
+
+  it('rollback REFUSES a ledger naming the same entry on both sides', () => {
+    const { dir, store, threadStore } = setup();
+    const dup = store.createSubject({ kind: 'organization', name: 'Cordis AG' });
+    const canon = store.createSubject({ kind: 'organization', name: 'Cordis' });
+    expect(runMerge(store, null, threadStore, dir, dup, canon).ok).toBe(true);
+    const led = readLedger(dir);
+    // An operator-supplied ledger file is arbitrary JSON; `planMerge`'s self-merge refusal
+    // never runs on this path.
+    const selfLedger = { ...led, entry: { ...led.entry, canonicalId: led.entry.dupId } };
+
+    const res = rollbackMergeRun(store, null, threadStore, selfLedger);
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/same entry on both sides/i);
+  });
+
   it('rollback REFUSES when only the canonical is missing, and says which side', () => {
     const source = setup();
     const dup = source.store.createSubject({ kind: 'organization', name: 'Hallberg AG' });

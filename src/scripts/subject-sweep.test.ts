@@ -1,12 +1,13 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from '../core/engine-db.js';
+import { setDataDir } from '../core/config.js';
 import { SubjectStore } from '../core/subject-store.js';
 import { DataStore } from '../core/data-store.js';
 import { MemoryGraphStore } from '../core/memory-graph-store.js';
-import { planArchive, applyArchive, rollback, parseArgs, planPersonSubsetPairs, doMerge, rollbackMergeFile } from './subject-sweep.js';
+import { planArchive, applyArchive, rollback, parseArgs, planPersonSubsetPairs, doMerge, rollbackMergeFile, main } from './subject-sweep.js';
 import type { MergeLedgerFile } from './subject-sweep.js';
 import { readFileSync } from 'node:fs';
 
@@ -244,5 +245,48 @@ describe('subject-sweep — slice 2 (person subset merge, CONFIRM class)', () =>
     const ds3 = new DataStore(join(dir, 'datastore.db'));
     expect(ds3.queryRecords({ collection: 'invoices' }).rows[0]!['client']).toBe(dup);   // reversed
     ds3.close();
+  });
+});
+
+
+describe('subject-sweep — a refused rollback must reach a SCRIPT, not just a reader', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+    dirs.length = 0;
+    process.exitCode = undefined;
+    delete process.env['LYNOX_DATA_DIR'];
+  });
+
+  it('exits non-zero when the merge ledger cannot be reversed here', () => {
+    // A ledger from an instance this data dir has never seen. Before the exit-code fix
+    // this printed `FAILED: …` on stdout and exited 0, so `--rollback=… && echo OK`
+    // printed OK for a reversal that never happened — the same class of silent success
+    // the guard in rollbackMerge exists to end.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-sweep-exit-'));
+    dirs.push(dir);
+    new EngineDb(join(dir, 'engine.db'), '').close();
+
+    const foreign = {
+      version: 1, phase: 'merge' as const, createdAt: new Date().toISOString(),
+      entry: {
+        dupId: 'aaaaaaaa-0000-4000-8000-000000000001',
+        canonicalId: 'aaaaaaaa-0000-4000-8000-000000000002',
+        kind: 'organization', ownerUserId: 'default',
+        dupArchivedAtWas: null, dupMergedIntoWas: null,
+        canonicalAliasesWas: '[]', canonicalParentWasDup: false,
+        repoints: [], memorySubjects: { dupRows: [], canonicalMemoryIdsBefore: [] },
+        cooccurrences: [], detail: null,
+      },
+      dataStore: [], threadAnchors: [], applied: true,
+    };
+    const ledgerPath = join(dir, 'foreign-merge.json');
+    writeFileSync(ledgerPath, JSON.stringify(foreign), 'utf-8');
+
+    const argv = process.argv;
+    process.argv = ['node', 'subject-sweep', `--rollback=${ledgerPath}`, `--data-dir=${dir}`];
+    try { main(); } finally { process.argv = argv; setDataDir(null); }
+
+    expect(process.exitCode, 'a refused rollback exited 0 — a script cannot see it').toBe(1);
   });
 });
