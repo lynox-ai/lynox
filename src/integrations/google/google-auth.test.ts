@@ -181,9 +181,10 @@ describe('GoogleAuth', () => {
       expect(mockFetch).toHaveBeenCalledTimes(2);
     });
 
-    // Audit S-CR-M2 / memory feedback_oauth_refresh_token_loss:
-    // transient 5xx/429 must NOT wipe the refresh token. Only the
-    // permanent `invalid_grant` / `invalid_client` cases delete the vault.
+    // Audit S-CR-M2 / memory fb_oauth_refresh: transient 5xx/429 must NOT
+    // wipe the refresh token. `invalid_grant` is the ONLY code that does —
+    // `invalid_client` is our own misconfiguration and leaves the user's
+    // grant at Google untouched, so wiping it would destroy recoverable data.
     it('keeps the refresh token on a 503 transient failure', async () => {
       const vault = makeVaultWithExpiredTokens();
       const vaultAuth = new GoogleAuth({
@@ -224,6 +225,74 @@ describe('GoogleAuth', () => {
       );
       await expect(vaultAuth.getAccessToken()).rejects.toThrow(/invalid_grant/);
       expect(vault.delete).toHaveBeenCalledWith('GOOGLE_OAUTH_TOKENS');
+    });
+
+    it('does NOT wipe the vault on invalid_client — our credentials are wrong, the grant is not', async () => {
+      const vault = makeVaultWithExpiredTokens();
+      const vaultAuth = new GoogleAuth({
+        clientId: 'wrong-id',
+        clientSecret: 'wrong-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ error: 'invalid_client', error_description: 'The OAuth client was not found.' }),
+          { status: 401, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+      await expect(vaultAuth.getAccessToken()).rejects.toThrow(/invalid_client/);
+      expect(vault.delete).not.toHaveBeenCalledWith('GOOGLE_OAUTH_TOKENS');
+    });
+
+    it('tells the user their connection is intact rather than sending them back through consent', async () => {
+      const vault = makeVaultWithExpiredTokens();
+      const vaultAuth = new GoogleAuth({
+        clientId: 'wrong-id',
+        clientSecret: 'wrong-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: 'invalid_client' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      // The remedy the user reads must name the real fix. "Re-connect your
+      // Google account" would be a lie here — re-consenting changes nothing
+      // while the app's own credentials are wrong.
+      // ONE call, ONE mocked response, both directions asserted on the same
+      // string — a second `getAccessToken()` here would hit an unmocked fetch
+      // and any assertion on its message would pass for the wrong reason.
+      const err = await vaultAuth.getAccessToken().catch((e: unknown) => e as Error);
+      expect(err.message).toMatch(/connection is intact/);
+      expect(err.message).not.toMatch(/Re-connect your Google account/);
+    });
+
+    // The point of keeping the token: once the credentials are corrected the
+    // connection heals with no user action. Under the old behaviour the vault
+    // entry was already gone by then, so this could not pass.
+    it('recovers on the next refresh once the credentials are fixed', async () => {
+      const vault = makeVaultWithExpiredTokens();
+      const vaultAuth = new GoogleAuth({
+        clientId: 'wrong-id',
+        clientSecret: 'wrong-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: 'invalid_client' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      await expect(vaultAuth.getAccessToken()).rejects.toThrow(/invalid_client/);
+
+      mockFetch.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ access_token: 'healed-token-cccccccc', expires_in: 3600, scope: 'https://www.googleapis.com/auth/gmail.readonly' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+      await expect(vaultAuth.getAccessToken()).resolves.toBe('healed-token-cccccccc');
     });
   });
 

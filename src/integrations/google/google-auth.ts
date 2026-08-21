@@ -164,25 +164,53 @@ function deleteTokenData(vault?: SecretVault | undefined): void {
  * different `error` codes for transient ones. Anchoring on the `error`
  * field is what every Google client library does; the HTTP status
  * alone is ambiguous (invalid_grant returns 400 just like a transient
- * billing-limit-exceeded would). See memory
- * `feedback_oauth_refresh_token_loss.md`.
+ * billing-limit-exceeded would).
+ *
+ * Three kinds, because two of them used to be one and that cost data.
+ * `invalid_grant` is the only code that means the GRANT is gone: the user
+ * revoked it or it expired, and nothing we change here brings it back —
+ * Google's own remedy is "Authenticate the user again and ask for user
+ * consent to obtain new tokens". `invalid_client` means OUR client
+ * credentials are wrong; the user's grant at Google is untouched and
+ * Google's remedy is "Review the OAuth client configuration, including
+ * the client ID and secret used for this request"
+ * (developers.google.com/identity/protocols/oauth2/web-server, read
+ * 2026-08-21 — that page nowhere tells an app to discard a refresh token
+ * on `invalid_client`). Deleting on a condition WE can fix turns a
+ * recoverable outage into permanent, silent data loss for every affected
+ * user at once — one wrong secret in the control plane would have wiped
+ * the fleet. See memory `fb_oauth_refresh`.
  */
-function isPermanentRefreshFailure(httpStatus: number, body: string): boolean {
-  if (httpStatus >= 500 || httpStatus === 429) return false;
+type RefreshFailureKind = 'grant-revoked' | 'client-misconfigured' | 'transient';
+
+/**
+ * The remedy per failure kind. A Record over the union rather than a chain of
+ * ternaries, so adding a kind is a compile error until it has a remedy.
+ */
+const REFRESH_FAILURE_REMEDY: Record<RefreshFailureKind, string> = {
+  'grant-revoked': ' Re-connect your Google account in Settings → Channels → Google.',
+  'client-misconfigured':
+    ' Your Google connection is intact — the app\'s own client credentials are wrong'
+    + ' (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET) and need to be corrected.',
+  transient: ' Retry in a moment — the refresh token is still on file.',
+};
+
+function classifyRefreshFailure(httpStatus: number, body: string): RefreshFailureKind {
+  if (httpStatus >= 500 || httpStatus === 429) return 'transient';
   try {
     const parsed = JSON.parse(body) as { error?: unknown };
     if (typeof parsed.error === 'string') {
-      return parsed.error === 'invalid_grant' || parsed.error === 'invalid_client';
+      if (parsed.error === 'invalid_grant') return 'grant-revoked';
+      if (parsed.error === 'invalid_client') return 'client-misconfigured';
     }
   } catch {
     // Non-JSON body — Google may be returning an HTML error page from a
     // proxy. Don't wipe the token on the basis of unparseable output.
-    return false;
+    return 'transient';
   }
-  // 4xx with a JSON body that doesn't say invalid_grant/invalid_client →
-  // unknown failure mode. Conservative default: keep the token, force
-  // an explicit re-auth only on the recognised permanent codes.
-  return false;
+  // 4xx with a JSON body naming neither code → unknown failure mode.
+  // Conservative default: keep the token.
+  return 'transient';
 }
 
 function base64url(input: string | Buffer): string {
@@ -680,18 +708,15 @@ export class GoogleAuth {
 
     if (!response.ok) {
       const text = await response.text();
-      // Only wipe the vault when Google says the refresh token itself is
-      // dead (invalid_grant) or our client credentials are bad
-      // (invalid_client). Transient errors — 503, 429, network blips — used
-      // to delete the token too, forcing the user back through the full
-      // OAuth flow for what was a recoverable failure (memory:
-      // `feedback_oauth_refresh_token_loss.md`).
-      const isPermanent = isPermanentRefreshFailure(response.status, text);
-      if (isPermanent) {
+      // Wipe the vault ONLY when the grant itself is gone. A bad client
+      // secret (`invalid_client`) and a network blip both leave the user's
+      // grant intact, so both keep the token — see `classifyRefreshFailure`.
+      const failure = classifyRefreshFailure(response.status, text);
+      if (failure === 'grant-revoked') {
         this.tokenData = null;
         deleteTokenData(this.vault);
       }
-      throw new Error(`Token refresh failed: ${response.status} ${text}.${isPermanent ? ' Re-connect your Google account in Settings → Channels → Google.' : ' Retry in a moment — the refresh token is still on file.'}`);
+      throw new Error(`Token refresh failed: ${response.status} ${text}.${REFRESH_FAILURE_REMEDY[failure]}`);
     }
 
     const refreshed = validateTokenResponse(await response.json());
