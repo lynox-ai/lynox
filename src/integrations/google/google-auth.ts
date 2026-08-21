@@ -154,33 +154,6 @@ function deleteTokenData(vault?: SecretVault | undefined): void {
   }
 }
 
-/**
- * Classify a /token refresh failure as permanent (refresh token itself
- * is dead → wipe the vault) vs transient (503/429/network → keep the
- * token, surface a retry-friendly error).
- *
- * Google returns a JSON body like `{"error":"invalid_grant", ...}` for
- * permanent failures and a 4xx/5xx status with no useful body or
- * different `error` codes for transient ones. Anchoring on the `error`
- * field is what every Google client library does; the HTTP status
- * alone is ambiguous (invalid_grant returns 400 just like a transient
- * billing-limit-exceeded would).
- *
- * Three kinds, because two of them used to be one and that cost data.
- * `invalid_grant` is the only code that means the GRANT is gone: the user
- * revoked it or it expired, and nothing we change here brings it back —
- * Google's own remedy is "Authenticate the user again and ask for user
- * consent to obtain new tokens". `invalid_client` means OUR client
- * credentials are wrong; the user's grant at Google is untouched and
- * Google's remedy is "Review the OAuth client configuration, including
- * the client ID and secret used for this request"
- * (developers.google.com/identity/protocols/oauth2/web-server, read
- * 2026-08-21 — that page nowhere tells an app to discard a refresh token
- * on `invalid_client`). Deleting on a condition WE can fix turns a
- * recoverable outage into permanent, silent data loss for every affected
- * user at once — one wrong secret in the control plane would have wiped
- * the fleet. See memory `fb_oauth_refresh`.
- */
 type RefreshFailureKind = 'grant-revoked' | 'client-misconfigured' | 'transient';
 
 /**
@@ -189,11 +162,49 @@ type RefreshFailureKind = 'grant-revoked' | 'client-misconfigured' | 'transient'
  */
 const REFRESH_FAILURE_REMEDY: Record<RefreshFailureKind, string> = {
   'grant-revoked': ' Re-connect your Google account in Settings → Channels → Google.',
+  // Deliberately operator-facing and free of credential NAMES: this string is
+  // returned inside tool results (`google-drive.ts`, `google-sheets.ts`), so
+  // the model reads it. `GOOGLE_CLIENT_*` are infra-walled (`secret-store.ts`)
+  // precisely so the agent never learns to go asking for them.
   'client-misconfigured':
-    ' Your Google connection is intact — the app\'s own client credentials are wrong'
-    + ' (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET) and need to be corrected.',
+    ' Your Google connection is intact — this instance\'s Google client credentials'
+    + ' are not valid, so it cannot refresh until an operator corrects them.',
   transient: ' Retry in a moment — the refresh token is still on file.',
 };
+
+/** How long a `client-misconfigured` verdict suppresses further token POSTs. */
+const CLIENT_MISCONFIGURED_COOLDOWN_MS = 60_000;
+
+/**
+ * Classify a `/token` refresh failure. Anchoring on the `error` field is what
+ * every Google client library does; the HTTP status alone is ambiguous
+ * (`invalid_grant` returns 400 just like a transient billing-limit would).
+ *
+ * The three kinds exist because two of them used to be one, and the pair that
+ * was merged pulled in opposite directions:
+ *
+ * - `invalid_grant` — the GRANT is gone (revoked or expired). Nothing we
+ *   change brings it back, so the stored token is worthless and is deleted.
+ *   Google's remedy: "Authenticate the user again and ask for user consent to
+ *   obtain new tokens."
+ * - `invalid_client` (and the sibling client-config codes) — OUR credentials
+ *   are wrong. The user's grant at Google is untouched. Google's remedy:
+ *   "Review the OAuth client configuration, including the client ID and secret
+ *   used for this request." Deleting here would destroy a working grant over a
+ *   condition we can fix ourselves.
+ *
+ * Quotes read at developers.google.com/identity/protocols/oauth2/web-server on
+ * 2026-08-21 — dated because a vendor page is a moving claim, and the note this
+ * replaces cited a guidance that page does not contain (memory `fb_oauth_refresh`).
+ *
+ * **Scope, stated because the neighbouring comment used to overstate it:** this
+ * separates failures by their `error` CODE, not by their cause. A wrong client
+ * *secret* surfaces as `invalid_client` and is covered. A syntactically valid
+ * but WRONG client *id* authenticates fine and makes Google reject the token as
+ * foreign — reported as `invalid_grant`, indistinguishable here from a real
+ * revocation, because `TokenData` does not record the id that minted it. That
+ * case still deletes. Closing it needs the minting `client_id` persisted.
+ */
 
 function classifyRefreshFailure(httpStatus: number, body: string): RefreshFailureKind {
   if (httpStatus >= 500 || httpStatus === 429) return 'transient';
@@ -201,7 +212,12 @@ function classifyRefreshFailure(httpStatus: number, body: string): RefreshFailur
     const parsed = JSON.parse(body) as { error?: unknown };
     if (typeof parsed.error === 'string') {
       if (parsed.error === 'invalid_grant') return 'grant-revoked';
-      if (parsed.error === 'invalid_client') return 'client-misconfigured';
+      // `unauthorized_client` / `deleted_client` are the same class as
+      // `invalid_client`: our app registration is wrong. Telling the user to
+      // "retry in a moment" would be a lie — retrying never fixes any of them.
+      if (parsed.error === 'invalid_client'
+        || parsed.error === 'unauthorized_client'
+        || parsed.error === 'deleted_client') return 'client-misconfigured';
     }
   } catch {
     // Non-JSON body — Google may be returning an HTML error page from a
@@ -689,9 +705,28 @@ export class GoogleAuth {
     return this.refreshInFlight;
   }
 
+  /** Set when Google rejected OUR client credentials; see `_doRefresh`. */
+  private _clientMisconfiguredUntil: number | null = null;
+
   private async _doRefresh(): Promise<void> {
     if (!this.tokenData?.refresh_token) {
       throw new Error('No refresh token available. Re-connect your Google account in Settings → Channels → Google.');
+    }
+
+    // Keeping the token on `client-misconfigured` removed a circuit breaker
+    // nobody had designed: the old wipe made the NEXT call fail locally at
+    // `getAccessToken`, so a bad client secret stopped hitting Google after one
+    // attempt. Without it, every caller retries — `oauth-gmail` asks per request
+    // and its watcher ticks every 120 s — so a fleet-wide bad secret would turn
+    // into every instance POSTing Google's token endpoint forever. The cool-down
+    // restores the brake WITHOUT the data loss. It cannot outlive a fix:
+    // `clientId`/`clientSecret` are readonly, so corrected credentials arrive as
+    // a new GoogleAuth and this window dies with the old instance.
+    if (this._clientMisconfiguredUntil !== null) {
+      if (Date.now() < this._clientMisconfiguredUntil) {
+        throw new Error(`Token refresh suppressed.${REFRESH_FAILURE_REMEDY['client-misconfigured']}`);
+      }
+      this._clientMisconfiguredUntil = null;
     }
 
     const response = await fetch(TOKEN_URL, {
@@ -715,6 +750,8 @@ export class GoogleAuth {
       if (failure === 'grant-revoked') {
         this.tokenData = null;
         deleteTokenData(this.vault);
+      } else if (failure === 'client-misconfigured') {
+        this._clientMisconfiguredUntil = Date.now() + CLIENT_MISCONFIGURED_COOLDOWN_MS;
       }
       throw new Error(`Token refresh failed: ${response.status} ${text}.${REFRESH_FAILURE_REMEDY[failure]}`);
     }
