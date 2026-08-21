@@ -172,8 +172,14 @@ const REFRESH_FAILURE_REMEDY: Record<RefreshFailureKind, string> = {
   transient: ' Retry in a moment — the refresh token is still on file.',
 };
 
-/** How long a `client-misconfigured` verdict suppresses further token POSTs. */
-const CLIENT_MISCONFIGURED_COOLDOWN_MS = 60_000;
+/**
+ * How long a `client-misconfigured` verdict suppresses further token POSTs.
+ *
+ * Longer than the 120 s mail-watch tick (`providers/oauth-gmail.ts`), on
+ * purpose: at 60 s every tick landed after the window had expired, so the
+ * brake did nothing for the one caller that polls on its own.
+ */
+const CLIENT_MISCONFIGURED_COOLDOWN_MS = 300_000;
 
 /**
  * Classify a `/token` refresh failure. Anchoring on the `error` field is what
@@ -719,14 +725,18 @@ export class GoogleAuth {
     // attempt. Without it, every caller retries — `oauth-gmail` asks per request
     // and its watcher ticks every 120 s — so a fleet-wide bad secret would turn
     // into every instance POSTing Google's token endpoint forever. The cool-down
-    // restores the brake WITHOUT the data loss. It cannot outlive a fix:
-    // `clientId`/`clientSecret` are readonly, so corrected credentials arrive as
-    // a new GoogleAuth and this window dies with the old instance.
-    if (this._clientMisconfiguredUntil !== null) {
-      if (Date.now() < this._clientMisconfiguredUntil) {
-        throw new Error(`Token refresh suppressed.${REFRESH_FAILURE_REMEDY['client-misconfigured']}`);
-      }
-      this._clientMisconfiguredUntil = null;
+    // restores the brake WITHOUT the data loss.
+    //
+    // It dies with the instance — `clientId`/`clientSecret` are readonly, so
+    // corrected credentials arrive as a new GoogleAuth. That is NOT the same as
+    // "a fix always clears it": `reloadGoogle()` swaps the engine's own
+    // `_googleAuth`, but `MailContext.googleAuth` is readonly and bound at
+    // construction (`mail/context.ts:258`), so the Gmail path keeps this
+    // instance — and this window — until the process restarts. That is the
+    // already-known `restart_required` limitation of `reloadGoogle`, not
+    // something the cool-down adds; it just inherits it.
+    if (this._clientMisconfiguredUntil !== null && Date.now() < this._clientMisconfiguredUntil) {
+      throw new Error(`Token refresh suppressed.${REFRESH_FAILURE_REMEDY['client-misconfigured']}`);
     }
 
     const response = await fetch(TOKEN_URL, {

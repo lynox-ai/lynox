@@ -291,6 +291,56 @@ describe('GoogleAuth', () => {
       },
     );
 
+    it('does NOT arm the brake on a transient failure', async () => {
+      // The brake is `else if (client-misconfigured)`. Weakened to a bare
+      // `else`, a single 503 would suppress refreshes for five minutes while
+      // still telling the user to "retry in a moment" — and every other test
+      // here fires exactly one call, so nothing else would notice.
+      const vault = makeVaultWithExpiredTokens();
+      const vaultAuth = new GoogleAuth({
+        clientId: 'test-id',
+        clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockImplementation(() => Promise.resolve(new Response('Service unavailable', { status: 503 })));
+      await expect(vaultAuth.getAccessToken()).rejects.toThrow(/503/);
+      const afterFirst = mockFetch.mock.calls.length;
+      await expect(vaultAuth.getAccessToken()).rejects.toThrow(/503/);
+      expect(mockFetch.mock.calls.length).toBeGreaterThan(afterFirst);
+    });
+
+    it('holds the brake past the 120s mail-watch tick, then lets a retry through', async () => {
+      const vault = makeVaultWithExpiredTokens();
+      const vaultAuth = new GoogleAuth({
+        clientId: 'wrong-id',
+        clientSecret: 'wrong-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockImplementation(() => Promise.resolve(
+        new Response(JSON.stringify({ error: 'invalid_client' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ));
+      await expect(vaultAuth.getAccessToken()).rejects.toThrow(/invalid_client/);
+      const armed = mockFetch.mock.calls.length;
+
+      // A window shorter than the watch interval is a brake the watcher never
+      // feels — this is the assertion that fails if the constant is lowered.
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(Date.now() + 121_000);
+        await expect(vaultAuth.getAccessToken()).rejects.toThrow(/suppressed/);
+        expect(mockFetch.mock.calls.length).toBe(armed);
+
+        vi.setSystemTime(Date.now() + 301_000);
+        await expect(vaultAuth.getAccessToken()).rejects.toThrow(/invalid_client/);
+        expect(mockFetch.mock.calls.length).toBeGreaterThan(armed);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('stops hammering Google once it has said our credentials are wrong', async () => {
       // Keeping the token removed the accidental circuit breaker the wipe
       // provided. Without a cool-down every caller retries forever — this is
@@ -301,12 +351,12 @@ describe('GoogleAuth', () => {
         clientSecret: 'wrong-secret',
         vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
       });
-      mockFetch.mockResolvedValue(
+      mockFetch.mockImplementation(() => Promise.resolve(
         new Response(JSON.stringify({ error: 'invalid_client' }), {
           status: 401,
           headers: { 'Content-Type': 'application/json' },
         }),
-      );
+      ));
       await expect(vaultAuth.getAccessToken()).rejects.toThrow(/invalid_client/);
       const callsAfterFirst = mockFetch.mock.calls.length;
 
