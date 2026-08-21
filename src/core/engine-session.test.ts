@@ -21,6 +21,10 @@ vi.mock('@anthropic-ai/sdk', () => ({
 
 const mockSend = vi.fn().mockResolvedValue('response');
 const mockReset = vi.fn();
+// Provider billing/quota classification the Agent exposes to Session on the
+// failure path. Defaults to null; a test sets it per-call to assert Session
+// carries it onto the RunContext (link 2 of DEF-provider-billing-alert).
+const mockGetLastProviderFailure = vi.fn().mockReturnValue(null);
 const mockAbort = vi.fn();
 const mockGetMessages = vi.fn().mockReturnValue([]);
 // Shared so an override survives the compaction-tier `_recreateAgent` swap (the
@@ -74,6 +78,8 @@ vi.mock('./agent.js', () => {
     this.onWireSnapshot = (config as { onWireSnapshot?: unknown })?.onWireSnapshot;
     // @ts-expect-error mock constructor
     this.send = mockSend;
+    // @ts-expect-error mock constructor — read by Session's failure path onto RunContext.
+    this.getLastProviderFailure = mockGetLastProviderFailure;
     // @ts-expect-error mock constructor
     this.reset = mockReset;
     // @ts-expect-error mock constructor
@@ -607,6 +613,44 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(failedCall, 'onAfterRun must fire on the failure path').toBeDefined();
       expect(failedCall![1] as number).toBeGreaterThan(0); // partial cost debited
       expect(typeof failedCall![0]).toBe('string'); // the failed run's id
+    });
+
+    it('link 2: a failed run carries the agent\'s provider-billing failure onto the RunContext', async () => {
+      // The wiring fb_boot_wiring_test warns about: Session must actually READ
+      // agent.getLastProviderFailure() and put it on the context it hands the
+      // managed hook — not just have the field exist. Session is real here (only
+      // Agent is mocked), so this drives Session's real failure-path code.
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+
+      mockGetLastProviderFailure.mockReturnValueOnce({
+        kind: 'provider_billing', providerHost: 'api.fireworks.ai', status: 412,
+      });
+      mockSend.mockRejectedValueOnce(new Error('provider billing outage'));
+
+      await expect(session.run('go')).rejects.toThrow('provider billing outage');
+
+      const failedCall = after.mock.calls.find(c => (c[2] as { modelTier?: string })?.modelTier !== 'fast');
+      expect(failedCall, 'onAfterRun must fire on the failure path').toBeDefined();
+      expect((failedCall![2] as { failure?: unknown }).failure).toEqual({
+        kind: 'provider_billing', providerHost: 'api.fireworks.ai', status: 412,
+      });
+    });
+
+    it('link 2: a failed run with NO provider-billing classification leaves failure unset', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+
+      // getLastProviderFailure returns null (the default) → no failure on context.
+      mockSend.mockRejectedValueOnce(new Error('some other error'));
+
+      await expect(session.run('go')).rejects.toThrow('some other error');
+
+      const failedCall = after.mock.calls.find(c => (c[2] as { modelTier?: string })?.modelTier !== 'fast');
+      expect(failedCall).toBeDefined();
+      expect((failedCall![2] as { failure?: unknown }).failure).toBeUndefined();
     });
 
     it('a failed run records the tool calls it made, like the success path', async () => {

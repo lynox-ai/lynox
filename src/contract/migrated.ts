@@ -70,6 +70,7 @@ export const MIGRATED: readonly MigratedSymbol[] = [
   { name: 'UsageReportRun', contractFile: 'http.ts', twinPattern: typeTwin('UsageReportRun') },
   { name: 'UsageFlushRequest', contractFile: 'http.ts', twinPattern: typeTwin('UsageFlushRequest') },
   { name: 'UsageFlushResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageFlushResponse') },
+  { name: 'SpendGate', contractFile: 'http.ts', twinPattern: typeTwin('SpendGate') },
   { name: 'UsageStatusResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageStatusResponse') },
   { name: 'UsageSummaryPeriod', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryPeriod') },
   { name: 'UsageSummaryResponse', contractFile: 'http.ts', twinPattern: typeTwin('UsageSummaryResponse') },

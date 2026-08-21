@@ -1326,6 +1326,12 @@ export class Session {
       // the success path fired onAfterRun and then threw before returning bills a
       // single debit either way.
       if (this.currentRunId) {
+        // A provider billing/quota stop for this run's LLM call, if the agent
+        // classified one before giving up. Carries to the managed hook via the
+        // RunContext so the control plane learns the provider account is down —
+        // the failure class that otherwise stays invisible (0-token failure, and
+        // /api/health stays green).
+        const providerFailure = this.agent?.getLastProviderFailure?.() ?? null;
         const failedRunContext: RunContext = {
           runId: this.currentRunId,
           contextId: context?.id ?? '',
@@ -1333,6 +1339,7 @@ export class Session {
           durationMs: Date.now() - startTime,
           source: context?.source ?? 'cli',
           ...(this._tenantId ? { tenantId: this._tenantId } : {}),
+          ...(providerFailure ? { failure: providerFailure } : {}),
         };
         for (const hook of this.engine.getHooks()) {
           if (hook.onAfterRun) {

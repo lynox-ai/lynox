@@ -21,6 +21,7 @@ process.emit = function (event: string, ...args: unknown[]) {
 } as typeof process.emit;
 // === Module exports ===
 export { Agent } from './core/agent.js';
+export type { SendStop, SendStopCause } from './core/agent.js';
 export { StreamProcessor } from './core/stream.js';
 export { Memory } from './core/memory.js';
 export { Engine } from './core/engine.js';
@@ -72,6 +73,7 @@ export type { RoleConfig } from './core/roles.js';
 export { isFeatureEnabled, getFeatureFlags, getFeatureEnvVar, registerFeature, clearDynamicFeatures } from './core/features.js';
 export type { FeatureFlag } from './core/features.js';
 export type { LynoxHooks, RunContext, AccumulatedUsage } from './core/engine.js';
+export type { RunFailure, ProviderBillingFailure } from './core/provider-failure.js';
 export { NotificationRouter } from './core/notification-router.js';
 export type { NotificationChannel, NotificationMessage } from './core/notification-router.js';
 export { WorkerLoop } from './core/worker-loop.js';

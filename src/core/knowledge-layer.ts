@@ -27,11 +27,12 @@ import { extractEntitiesV2, shouldExtractV2 } from './entity-extractor-v2.js';
 import { fireBeforeRunGate, reportMeteredCost, type HookHost } from './metered-request.js';
 import { detectContradictions, hasHeuristicContradiction, subjectsDisagree, properNounTokens, subjectTokensDisagree } from './contradiction-detector.js';
 import type { DataStoreBridge } from './datastore-bridge.js';
+import type { DataStore } from './data-store.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
 import type { EngineDb } from './engine-db.js';
 import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS, isAmbiguousResolution } from './subject-store.js';
-import type { SubjectRow } from './subject-store.js';
+import type { SubjectRow, SubjectExternalRefs } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import type { RelationshipRow } from './relationship-store.js';
 import { MemoryGraphStore } from './memory-graph-store.js';
@@ -149,6 +150,18 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * `undefined` = not yet attempted; `null` = unavailable (no runHistory / build failed).
    */
   private _anchorThreadStore: ThreadStore | null | undefined;
+  /**
+   * DEF-0015 — the datastore.db half of the orphan-subject reference oracle. Set by
+   * {@link setRecordStore} from `Engine._initCoreTools()` the moment the DataStore exists
+   * (before the HTTP surface serves). Deliberately NOT the `DataStoreBridge`: that attach
+   * sits in `_initKnowledge()`, which runs before the DataStore is constructed, so it has
+   * never fired in production. `null` means the oracle cannot answer and the reap skips.
+   */
+  private _recordStore: DataStore | null = null;
+  /** One stderr line per layer instance when the reap has to skip, not one per erase. */
+  private _reapSkipWarned = false;
+  /** Same, for a cross-DB probe that throws (answers "referenced" while it fails). */
+  private _oracleFailWarned = false;
 
   constructor(
     dbPath: string,
@@ -189,6 +202,12 @@ export class KnowledgeLayer implements IKnowledgeLayer {
       this.subjectStore = new SubjectStore(this.engineDb);
       this.relationshipStore = new RelationshipStore(this.engineDb);
       this.memoryGraphStore = new MemoryGraphStore(this.engineDb);
+      // DEF-0015: the orphan-subject reap rides INSIDE every engine.db memory delete
+      // (erase / thread-purge / gc). Installed here because only this layer can see every
+      // reference a subject may still have — engine.db, the history.db thread anchor and
+      // the datastore.db cells — and it is fail-closed: with either cross-DB oracle
+      // unavailable the reap skips (logged once) rather than guessing.
+      this.memoryGraphStore.setOrphanSubjectReaper(candidates => this._reapOrphanSubjects(candidates));
       this.retrievalEngine.setMemoryGraphReads(
         this.memoryGraphStore, this.subjectStore, this.memoryReadsActive,
       );
@@ -246,6 +265,15 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   /** Connect DataStore bridge to retrieval engine for data hints. */
   setDataStoreBridge(bridge: DataStoreBridge): void {
     this.retrievalEngine.setDataStoreBridge(bridge);
+  }
+
+  /**
+   * DEF-0015 — hand the layer the live DataStore so the orphan reap can ask whether a
+   * table row still links a subject. Called by the engine as soon as the DataStore exists;
+   * until then (and forever on an engine without one) the reap stays fail-closed.
+   */
+  setRecordStore(store: DataStore): void {
+    this._recordStore = store;
   }
 
   /**
@@ -741,6 +769,79 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   }
 
   /**
+   * The history.db ThreadStore the anchor read and the orphan reap share — built lazily
+   * over `this.runHistory`'s handle (where live `threads.primary_subject_id` lives), so a
+   * layer without runHistory (tests, mock histories) never touches `getDb()`. `null` =
+   * unavailable (no runHistory / build failed).
+   */
+  private _getAnchorThreadStore(): ThreadStore | null {
+    if (!this.runHistory) return null;
+    if (this._anchorThreadStore === undefined) {
+      try {
+        this._anchorThreadStore = new ThreadStore(this.runHistory.getDb());
+      } catch {
+        this._anchorThreadStore = null;
+      }
+    }
+    return this._anchorThreadStore;
+  }
+
+  /**
+   * DEF-0015 — the cross-DB half of the subject reference oracle, or `null` when it cannot
+   * be answered (no history.db handle, or no record store handed over yet). `null` means
+   * the reap must NOT run. Each probe answers `true` (referenced) on a read failure — e.g.
+   * a pre-v46 history.db without the anchor column — so an oracle error can never fail
+   * the erase or over-erase; it only keeps the subject.
+   */
+  private _subjectExternalRefs(): SubjectExternalRefs | null {
+    const threads = this._getAnchorThreadStore();
+    const records = this._recordStore;
+    if (!threads || !records) return null;
+    // A probe that throws answers "referenced" — and says so once per layer, because a
+    // permanently failing probe (a pre-v46 history.db, a locked datastore) keeps every
+    // subject forever and would otherwise be indistinguishable from a real holder.
+    const keptOnFailure = (probe: string, err: unknown): true => {
+      if (!this._oracleFailWarned) {
+        this._oracleFailWarned = true;
+        process.stderr.write(
+          `[lynox:subject-reap] ${probe} probe failed — subjects are KEPT while it fails: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+      return true;
+    };
+    return {
+      isThreadAnchor: (id) => { try { return threads.listBySubjectId(id, 1).length > 0; } catch (err: unknown) { return keptOnFailure('thread-anchor', err); } },
+      hasRecords: (id) => { try { return records.hasRecordsForSubject(id); } catch (err: unknown) { return keptOnFailure('record', err); } },
+    };
+  }
+
+  /**
+   * DEF-0015 — the reaper {@link MemoryGraphStore} calls inside every hard memory delete.
+   * Fail-closed: without the cross-DB oracle the candidates are left standing — logged once
+   * per layer instance with the count, because a skipped candidate is permanent residue (the
+   * deleted memory is never a candidate again) and should at least be quantifiable — never
+   * guessed at. Returns the subject ids actually deleted.
+   */
+  private _reapOrphanSubjects(candidates: readonly string[]): readonly string[] {
+    if (!this.subjectStore) return [];
+    const external = this._subjectExternalRefs();
+    if (!external) {
+      if (!this._reapSkipWarned) {
+        this._reapSkipWarned = true;
+        process.stderr.write(
+          `[lynox:subject-reap] skipped: cross-DB reference oracle unavailable (no history.db handle or record store) — ${candidates.length} candidate subject(s) left in place\n`,
+        );
+      }
+      return [];
+    }
+    const reaped = this.subjectStore.reapOrphans(candidates, external);
+    if (reaped.length > 0) {
+      process.stderr.write(`[lynox:subject-reap] reaped ${reaped.length} orphan subject(s) after a memory delete\n`);
+    }
+    return reaped;
+  }
+
+  /**
    * Slice B — resolve the current thread's anchor subject (the project/client the
    * thread is scoped to via `set_thread_context`). Returns the thread's
    * `primary_subject_id`, or null when the thread is unanchored / unknown / the
@@ -749,17 +850,11 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * a ThreadStore. Never throws — a read failure degrades to the heuristic.
    */
   private _readThreadAnchor(threadId: string | undefined): string | null {
-    if (!threadId || !this.runHistory) return null;
-    if (this._anchorThreadStore === undefined) {
-      try {
-        this._anchorThreadStore = new ThreadStore(this.runHistory.getDb());
-      } catch {
-        this._anchorThreadStore = null;
-      }
-    }
-    if (!this._anchorThreadStore) return null;
+    if (!threadId) return null;
+    const threads = this._getAnchorThreadStore();
+    if (!threads) return null;
     try {
-      const rawAnchorId = this._anchorThreadStore.getThread(threadId)?.primary_subject_id ?? null;
+      const rawAnchorId = threads.getThread(threadId)?.primary_subject_id ?? null;
       if (!rawAnchorId) return null;
       // Resolve the v7 merge redirect FORWARD: if the anchor's subject was folded into a
       // canonical (merged_into), use the canonical — so a thread anchored to a since-merged
@@ -1149,7 +1244,8 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // store — else the purged (privacy) statement text lingers there. id-parity
     // bridge: read the thread's ids from legacy (which owns source_thread_id)
     // BEFORE the legacy purge deletes them, then delete the same stub ids from
-    // engine.db (cascades reap the junction; durable subjects survive).
+    // engine.db (cascades reap the junction; a subject nothing else references is reaped
+    // with it, DEF-0015 — a cross-thread / verb-layer subject survives).
     //
     // Gated on the STORE existing, NOT the reversible `subjectGraphEnabled` write
     // flag: stubs are durable rows, so a stub written during a flag-ON window must
@@ -1570,12 +1666,14 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * RE-THROW, so an awaiting caller fails the delete instead of reporting a false success.
    * The legacy purge cascade reaps mentions, relations, supersedes and orphan entities.
    *
-   * KNOWN residue (engine.db): `purgeMemories` deletes `memories` only; the schema's
-   * ON DELETE CASCADE reaps memory_subjects/supersedes/conflicts, but an orphaned SUBJECT
-   * (plaintext `name`) and a relationship whose source was the erased memory
-   * (`source_memory_id` ON DELETE SET NULL, keeps its `description`) are NOT reaped — the
-   * orphan-subject sweep is deferred to the subject-lifecycle design (memory-graph-store.ts).
-   * The memory TEXT is erased from both stores; that derived residue is a tracked follow-up.
+   * engine.db residue, closed (DEF-0015): `purgeMemories` reaps the relationships SOURCED
+   * from the erased memories in the same step, and — inside the same transaction — hands
+   * every subject they were linked to the orphan-subject reaper installed in the
+   * constructor, which deletes the ones NOTHING else references (verb layer, knowledge
+   * entries, thread anchor, records, detail rows — `SubjectStore.referenceReason`). So the
+   * plaintext `name` a minted subject carried goes with the memory that minted it, while a
+   * subject anything else still holds survives. A reaper failure aborts the whole engine.db
+   * step, which this method's re-throw contract below already makes retryable.
    *
    * Returns the number of memories matched + erased.
    */

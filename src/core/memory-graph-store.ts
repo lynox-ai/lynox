@@ -14,6 +14,17 @@ export interface MemoryStubRow {
 }
 
 /**
+ * The orphan-subject reap an engine.db memory delete owes (DEF-0015). Called INSIDE the
+ * delete transaction with the subject ids the deleted memories were linked to; deletes
+ * only what nothing else references and returns the ids it removed. Installed via
+ * {@link MemoryGraphStore.setOrphanSubjectReaper} by the owner that can see EVERY
+ * reference — `KnowledgeLayer`, which holds engine.db, the history.db thread anchor and
+ * the datastore.db bridge. A thrown error aborts the memory delete with it (the caller's
+ * re-throw contract makes the erase retryable).
+ */
+export type OrphanSubjectReaper = (candidateSubjectIds: readonly string[]) => readonly string[];
+
+/**
  * The at-rest ciphertext marker — mirrors `ENCRYPTED_PREFIX` in engine-db.ts.
  * `EngineDb.dec()` returns its input UNCHANGED when it can't decrypt (keyless /
  * browse-mode, or wrong key / corrupt), so a row whose decrypted text is
@@ -113,6 +124,8 @@ export interface TierDivergenceReport {
  */
 export class MemoryGraphStore {
   private readonly db: Database.Database;
+  /** DEF-0015 — installed by the owner that can see every reference; null = no reap. */
+  private orphanReaper: OrphanSubjectReaper | null = null;
 
   constructor(private readonly engine: EngineDb) {
     this.db = engine.getDb();
@@ -439,14 +452,40 @@ export class MemoryGraphStore {
   // The DELETE side of the memory cutover. Under the mirror flag the engine.db stub
   // store is the authoritative RECALL source, so a thread-purge (privacy) and a
   // dead-stub GC must reap it too — else purged/superseded content lingers in the
-  // recall store. Both delete `memories` rows ONLY; the schema's ON DELETE CASCADE
-  // reaps memory_subjects + supersedes + conflicts, and relationships.source_memory_id
-  // SET-NULLs — a cross-thread SUBJECT is never touched (the cascade runs
-  // memory→junction, not junction→subject), so durable subjects survive. A subject
-  // left with no memory is NOT reaped here: subjects are durable substrate referenced
-  // across the verb layer (tasks/triggers/connections/threads/artifacts), so an
-  // orphan-subject sweep is a deferred slice gated on the subject-lifecycle design,
-  // not a mechanical port of the legacy orphan-entity delete.
+  // recall store. Both delete `memories` rows; the schema's ON DELETE CASCADE reaps
+  // memory_subjects + supersedes + conflicts, and relationships.source_memory_id
+  // SET-NULLs. The cascade runs memory→junction, not junction→subject, so on its own it
+  // leaves a subject the deleted memory minted standing with its plaintext `name` — the
+  // DEF-0015 residue. That is closed by the ORPHAN-SUBJECT REAP below: inside the same
+  // transaction, every subject the deleted memories were linked to is handed to the
+  // installed {@link OrphanSubjectReaper}, which deletes only what NOTHING else references
+  // (verb layer, knowledge entries, thread anchors, records, detail rows — the
+  // reference-counted discipline the legacy orphan-entity delete had, now over every
+  // store a subject can live in). A cross-thread / verb-layer subject still survives.
+
+  /**
+   * Remember the reaper the owner installs. Absent reaper = no reap — fail-closed: a
+   * lingering name is today's state, a guessed delete would be new damage. Only
+   * `KnowledgeLayer` can see every reference a subject may still have (engine.db plus
+   * the history.db thread anchor plus datastore.db), so it is the one that installs.
+   */
+  setOrphanSubjectReaper(reaper: OrphanSubjectReaper | null): void {
+    this.orphanReaper = reaper;
+  }
+
+  /**
+   * The subjects a set of memories is linked to — the junction rows plus the primary
+   * `memories.subject_id` — collected BEFORE the delete cascades them away. `memorySql`
+   * is a static subquery / placeholder list (never input); `params` bind it twice.
+   */
+  private _linkedSubjectIds(memorySql: string, params: readonly unknown[]): string[] {
+    const rows = this.db.prepare(`
+      SELECT subject_id FROM memory_subjects WHERE memory_id IN (${memorySql})
+      UNION
+      SELECT subject_id FROM memories WHERE subject_id IS NOT NULL AND id IN (${memorySql})
+    `).all(...params, ...params) as Array<{ subject_id: string }>;
+    return rows.map(r => r.subject_id);
+  }
 
   /**
    * Hard-delete memory stubs by id — the id-parity reap behind both the S5b'-c
@@ -460,17 +499,32 @@ export class MemoryGraphStore {
    * ON DELETE SET NULL, so without this the relationship row would SURVIVE the memory
    * delete carrying its `description`/`notes` text — derived content a hard delete must
    * remove too. memory_subjects / supersedes / conflicts still ride their ON DELETE
-   * CASCADE. Orphaned SUBJECTS (durable cross-verb-layer substrate) are a deferred
-   * lifecycle slice — see the header note above. Returns the number of stubs deleted.
+   * CASCADE.
+   *
+   * Then the orphan-subject reap (DEF-0015): the subjects these memories were linked to
+   * are collected BEFORE the delete (the cascade takes the junction with it) and handed to
+   * the installed reaper AFTER it, inside the same transaction — so a subject whose only
+   * holder was the erased memory goes with it, a subject anything else still references
+   * stays, and a reaper failure rolls the memory delete back too (the caller's re-throw
+   * makes the erase retryable, see `KnowledgeLayer.eraseByPattern`). Returns the number of
+   * stubs deleted.
    */
   purgeMemories(ids: string[]): number {
     if (ids.length === 0) return 0;
+    // `.immediate()`: the transaction now OPENS with a read (the candidate collection) and
+    // then writes. Under WAL a deferred transaction that reads first and writes after a
+    // concurrent commit raises SQLITE_BUSY_SNAPSHOT, which busy_timeout cannot absorb; taking
+    // the write lock up front makes the open wait instead (same discipline as executeMerge).
     return this.db.transaction(() => {
       let deleted = 0;
+      const candidates = new Set<string>();
       const CHUNK = 500;
       for (let i = 0; i < ids.length; i += CHUNK) {
         const chunk = ids.slice(i, i + CHUNK);
         const placeholders = chunk.map(() => '?').join(',');
+        if (this.orphanReaper) {
+          for (const sid of this._linkedSubjectIds(placeholders, chunk)) candidates.add(sid);
+        }
         this.db.prepare(
           `DELETE FROM relationships WHERE source_memory_id IN (${placeholders})`,
         ).run(...chunk);
@@ -478,8 +532,9 @@ export class MemoryGraphStore {
           `DELETE FROM memories WHERE id IN (${placeholders})`,
         ).run(...chunk).changes;
       }
+      if (this.orphanReaper && candidates.size > 0) this.orphanReaper([...candidates]);
       return deleted;
-    })();
+    }).immediate();
   }
 
   /**
@@ -510,11 +565,41 @@ export class MemoryGraphStore {
 
   /**
    * Delete superseded/inactive stubs (`is_active = 0`) — the engine.db port of the
-   * legacy {@link AgentMemoryDb.gc} memory sweep. Cascades reap the children.
-   * Returns the number of stubs deleted.
+   * legacy {@link AgentMemoryDb.gc} memory sweep. Cascades reap the children, and the
+   * orphan-subject reap runs here too (a `memory_delete` soft-deletes, gc hard-deletes,
+   * and it is the hard delete that would otherwise leave the minted subject's name
+   * behind).
+   *
+   * Unlike {@link purgeMemories} the reap is NOT in the delete's transaction: gc is a
+   * best-effort sweep whose caller (`KnowledgeLayer.gc`) swallows failures, so a reaper
+   * error coupled to the DELETE would roll the stub delete back and leave superseded
+   * content silently recallable — a regression the bare DELETE never had. The stubs go
+   * first and stay gone; a reap failure is logged with the candidate count and the
+   * candidates remain (a lingering name is the pre-reap state, never worse). Returns the
+   * number of stubs deleted.
    */
   gcInactiveStubs(): number {
-    return this.db.prepare('DELETE FROM memories WHERE is_active = 0').run().changes;
+    const { deleted, candidates } = this.db.transaction(() => {
+      const found = this.orphanReaper
+        ? this._linkedSubjectIds('SELECT id FROM memories WHERE is_active = 0', [])
+        : [];
+      const changes = this.db.prepare('DELETE FROM memories WHERE is_active = 0').run().changes;
+      return { deleted: changes, candidates: found };
+    }).immediate();
+    if (this.orphanReaper && candidates.length > 0) {
+      try {
+        // Its own transaction: the reap's fixpoint + merge-closure deletes are several
+        // statements, and a failure halfway must not leave shells gone and their canonical
+        // standing. Separate from the DELETE above on purpose (see the docblock).
+        const reaper = this.orphanReaper;
+        this.db.transaction(() => { reaper(candidates); }).immediate();
+      } catch (err: unknown) {
+        process.stderr.write(
+          `[lynox:subject-reap] gc reap failed, ${candidates.length} candidate subject(s) left in place: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    }
+    return deleted;
   }
 
   // ── S5b recall reads (engine.db) ──────────────────────────────

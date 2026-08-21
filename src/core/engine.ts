@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider } from './llm-client.js';
+import type { RunFailure } from './provider-failure.js';
 import { resolveProviderApiKey, enrichTierSetCreds } from './llm/provider-keys.js';
 import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
 import type {
@@ -125,6 +126,12 @@ export interface RunContext {
   source: ContextSource;
   /** Active tenant ID, set via Session.tenantId (Pro). */
   tenantId?: string | undefined;
+  /** Set on the FAILURE path only: a classified provider billing/quota stop for
+   *  this run's LLM call. The managed hook reports it to the control plane as an
+   *  incident (see managed-hook.ts) — the failure class that today reaches a
+   *  customer before it reaches us. `undefined` on success and on non-billing
+   *  failures. */
+  failure?: RunFailure | undefined;
 }
 
 /**
@@ -1444,6 +1451,13 @@ export class Engine {
       process.stderr.write(`[lynox] DataStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
       this._dataStore = null;
     }
+    // DEF-0015: the orphan-subject reap needs the record store to answer "does a table row
+    // still link this subject?". Handed over HERE — after the DataStore init block succeeded
+    // (a store whose init threw is null by then, so the reap stays fail-closed) and not in
+    // _initKnowledge(): that step runs before this one, which is why the `initDataStoreBridge`
+    // attach there (guarded on `this._dataStore`) has never fired in production. The reap must
+    // not ride on it.
+    if (this._dataStore) this.knowledgeLayer?.setRecordStore(this._dataStore);
 
     // Initialize ArtifactStore (best-effort)
     try {
