@@ -729,3 +729,128 @@ describe('managed-hook contract fixtures (K-W2)', () => {
     await hook.onShutdown?.();
   });
 });
+/**
+ * DEF-provider-billing-alert: a provider billing/quota stop must reach the CP as
+ * an incident even though it spent 0 tokens — the failure class that otherwise
+ * stays invisible (a per-request error the CP never sees, /api/health green).
+ * Emission is gated on the CP FUNDING this instance (spend_gate balance/none),
+ * so a BYOK tenant's own-account failure never raises a pooled-provider alert.
+ */
+describe('managed-hook provider incident', () => {
+  beforeEach(() => {
+    process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.test';
+    process.env['LYNOX_MANAGED_INSTANCE_ID'] = 'inst-1';
+    process.env['LYNOX_HTTP_SECRET'] = 'secret';
+    delete process.env['LYNOX_MANAGED_FLUSH_INTERVAL_MS'];
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
+    delete process.env['LYNOX_MANAGED_INSTANCE_ID'];
+    delete process.env['LYNOX_HTTP_SECRET'];
+  });
+
+  /** A fetch mock that routes by URL: /status returns the given spend_gate (so
+   *  onInit sets cpFunded), /incident returns `incidentOk` (false → reject),
+   *  everything else returns a benign ok. */
+  function routingFetch(spendGate: string, incidentOk = true): ReturnType<typeof vi.fn> {
+    return vi.fn().mockImplementation((url: string) => {
+      if (String(url).endsWith('/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ allowed: true, spend_gate: spendGate, balance_cents: 5000 }) });
+      }
+      if (String(url).endsWith('/incident')) {
+        return incidentOk ? Promise.resolve({ ok: true }) : Promise.reject(new Error('cp down'));
+      }
+      return Promise.resolve({ ok: true, json: async () => ({ allowed: true }) });
+    });
+  }
+
+  function incidentCalls(spy: ReturnType<typeof vi.fn>): Array<[string, RequestInit]> {
+    return spy.mock.calls.filter(([url]) => String(url).endsWith('/incident')) as Array<[string, RequestInit]>;
+  }
+
+  const billing = (providerHost: string, status = 412): RunContext =>
+    ({ modelTier: 'balanced', failure: { kind: 'provider_billing', providerHost, status } } as unknown as RunContext);
+
+  /** A CP-FUNDED hook (spend_gate balance), onInit'd so cpFunded is set. */
+  async function fundedHook(spy: ReturnType<typeof vi.fn>) {
+    vi.stubGlobal('fetch', spy);
+    const hook = createManagedHook();
+    await hook.onInit?.();
+    return hook;
+  }
+
+  const flushMicrotasks = () => new Promise((r) => setTimeout(r, 0));
+
+  it('reports the incident with cost 0 — the cost skip must NOT drop it', async () => {
+    const spy = routingFetch('balance');
+    const hook = await fundedHook(spy);
+    // costUsd = 0: a billing failure spends no tokens. The usage-report path skips
+    // it; the incident path must not.
+    hook.onAfterRun?.('run-1', 0, billing('api.fireworks.ai', 412));
+    await hook.onShutdown?.();
+
+    const calls = incidentCalls(spy);
+    expect(calls).toHaveLength(1);
+    const [url, init] = calls[0]!;
+    expect(url).toBe('https://cp.test/internal/usage/inst-1/incident');
+    expect((init.headers as Record<string, string>)['x-instance-secret']).toBe('secret');
+    expect(JSON.parse(String(init.body))).toEqual({
+      kind: 'provider_billing', provider_host: 'api.fireworks.ai', status: 412,
+    });
+  });
+
+  it('coalesces repeated failures on the SAME host into one report', async () => {
+    const spy = routingFetch('balance');
+    const hook = await fundedHook(spy);
+    for (let i = 0; i < 5; i++) hook.onAfterRun?.(`run-${i}`, 0, billing('api.fireworks.ai'));
+    await hook.onShutdown?.();
+    expect(incidentCalls(spy)).toHaveLength(1);
+  });
+
+  it('reports each distinct provider host separately', async () => {
+    const spy = routingFetch('balance');
+    const hook = await fundedHook(spy);
+    hook.onAfterRun?.('run-a', 0, billing('api.fireworks.ai'));
+    hook.onAfterRun?.('run-b', 0, billing('api.anthropic.com', 400));
+    await hook.onShutdown?.();
+    const hosts = incidentCalls(spy).map(([, init]) => JSON.parse(String(init.body)).provider_host).sort();
+    expect(hosts).toEqual(['api.anthropic.com', 'api.fireworks.ai']);
+  });
+
+  it('does NOT report an incident for a normal (non-failure) run', async () => {
+    const spy = routingFetch('balance');
+    const hook = await fundedHook(spy);
+    hook.onAfterRun?.('run-ok', 0.01, { modelTier: 'balanced' } as unknown as RunContext);
+    await hook.onShutdown?.();
+    expect(incidentCalls(spy)).toHaveLength(0);
+  });
+
+  it('does NOT emit for a BYOK/unfunded instance — even on a real billing failure', async () => {
+    // The source-side gate: spend_gate 'unfunded' → the tenant runs on their own
+    // key, so a 402/credit-balance is theirs, not the CP's pooled account. This is
+    // also the forge defence: a tenant who owns their endpoint cannot raise a
+    // pooled-provider alert.
+    const spy = routingFetch('unfunded');
+    const hook = await fundedHook(spy); // onInit runs, but cpFunded stays false
+    hook.onAfterRun?.('run-byok', 0, billing('api.fireworks.ai', 402));
+    await hook.onShutdown?.();
+    expect(incidentCalls(spy)).toHaveLength(0);
+  });
+
+  it('a failed incident POST is handled and clears the coalesce stamp so the next failure retries', async () => {
+    // Replaces a weak "never throws" assertion: `void fetch().catch()` cannot
+    // throw synchronously regardless. The real contract is that a rejected POST
+    // (a) does not crash and (b) does not suppress the host for the whole window.
+    const spy = routingFetch('balance', /* incidentOk */ false);
+    const hook = await fundedHook(spy);
+    expect(() => hook.onAfterRun?.('run-1', 0, billing('api.fireworks.ai'))).not.toThrow();
+    await flushMicrotasks(); // let the .then/.catch clear the stamp
+    // Second failure on the same host: the stamp was cleared, so it re-POSTs
+    // instead of being coalesced away.
+    hook.onAfterRun?.('run-2', 0, billing('api.fireworks.ai'));
+    await hook.onShutdown?.();
+    expect(incidentCalls(spy)).toHaveLength(2);
+  });
+})

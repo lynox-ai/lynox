@@ -26,12 +26,23 @@ import type {
   UsageFlushRequest,
   UsageFlushResponse,
   UsageStatusResponse,
+  ProviderIncidentRequest,
 } from '../contract/http.js';
+import type { ProviderBillingFailure } from './provider-failure.js';
 
 const DEFAULT_FLUSH_INTERVAL_MS = 30_000;
 const FLUSH_BATCH_SIZE = 10;
 const MAX_PENDING = 500;
 const FLUSH_TIMEOUT_MS = 15_000;
+// Coalesce provider-incident reports per host: every tenant on a down provider
+// fails at once, so a burst of runs must not storm the CP — one POST per host per
+// window (the CP dedups again on its side).
+const PROVIDER_INCIDENT_COALESCE_MS = 10 * 60_000;
+// Cap on distinct hosts tracked for incident coalescing. Bounded in practice (a
+// funded instance talks to ~1 pooled provider), the cap just stops a misconfigured
+// or hostile host-cycling proxy from growing the map without bound — same shape as
+// SEEN_RUN_IDS_CAP.
+const INCIDENT_HOSTS_CAP = 100;
 const SYNC_TIMEOUT_MS = 5_000;
 // Stale threshold: how long we trust the cached `allowed` flag when the
 // control plane is unreachable. After this, fail-closed on new runs.
@@ -78,6 +89,9 @@ export function createManagedHook(): LynoxHooks {
   // Previously this was `true`, so a fresh-boot CP outage left the engine
   // burning credit indefinitely until the first successful flush.
   let allowed = false;
+  // Set from /status: does the CP fund this instance's LLM spend (a pooled key)?
+  // Gates provider-incident emission — see reportProviderIncident.
+  let cpFunded = false;
   let lastSyncedAtMs = 0;
   const flushIntervalMs = parsePositiveIntEnv(
     'LYNOX_MANAGED_FLUSH_INTERVAL_MS',
@@ -240,6 +254,12 @@ export function createManagedHook(): LynoxHooks {
         const data = (await res.json()) as UsageStatusResponse;
         allowed = data.allowed;
         lastSyncedAtMs = Date.now();
+        // Whether the control plane FUNDS this instance's LLM spend (a pooled
+        // key). Only a CP-funded instance's provider failure is the CP's account
+        // to alert on; a BYOK/hosted instance (`spend_gate: 'unfunded'`) runs on
+        // the tenant's own key, so its billing failure is the tenant's problem and
+        // must NOT raise a pooled-provider incident. Gates reportProviderIncident.
+        cpFunded = data.spend_gate === 'balance' || data.spend_gate === 'none';
         // Re-anchor the mirror off the AUTHORITATIVE /status balance (flush's
         // balance is unreliable — an all-skipped/dedup batch returns 0). The
         // mirror is that balance minus the two LOCAL in-flight buckets the CP
@@ -282,6 +302,55 @@ export function createManagedHook(): LynoxHooks {
     // a real sync having happened.
     if (lastSyncedAtMs === 0) return true;
     return Date.now() - lastSyncedAtMs > staleThresholdMs;
+  }
+
+  // ── Provider-incident reporting (DEF-provider-billing-alert) ────────────────
+  // A provider billing/quota stop (a suspended or credit-exhausted pooled account)
+  // is a full outage for every tenant on that provider, and it surfaces only as a
+  // per-request error the CP never sees. Report it so the CP can alert the operator
+  // naming the provider — but ONLY for a CP-funded instance (see below).
+  const lastIncidentAtMsByHost = new Map<string, number>();
+
+  function reportProviderIncident(failure: ProviderBillingFailure): void {
+    // SOURCE-SIDE gate, not a reliance on the CP filtering it (DEF-provider-billing-alert
+    // security review): only a CP-funded instance's provider failure is the CP's
+    // account to alert on. A BYOK/hosted instance runs on the tenant's own key, so
+    // its 402/credit-balance is the tenant's problem — and a tenant who controls
+    // their endpoint could otherwise forge an incident with an arbitrary host/status.
+    if (!cpFunded) return;
+
+    const host = failure.providerHost || 'unknown';
+    const now = Date.now();
+    const last = lastIncidentAtMsByHost.get(host);
+    if (last !== undefined && now - last < PROVIDER_INCIDENT_COALESCE_MS) return;
+    lastIncidentAtMsByHost.set(host, now);
+    // Bound the map (host is normally a single pooled provider; the cap only stops
+    // a host-cycling proxy from growing it). FIFO evict, like seenRunIds.
+    if (lastIncidentAtMsByHost.size > INCIDENT_HOSTS_CAP) {
+      const oldest = lastIncidentAtMsByHost.keys().next().value;
+      if (oldest !== undefined) lastIncidentAtMsByHost.delete(oldest);
+    }
+
+    const url = `${controlPlaneUrl}/internal/usage/${instanceId}/incident`;
+    const body: ProviderIncidentRequest = {
+      kind: 'provider_billing',
+      provider_host: host,
+      status: failure.status,
+    };
+    // Fire-and-forget and NEVER requeued: unlike a usage report, an incident is
+    // not money owed — it is a liveness signal that repeats on the next failing
+    // run. On a FAILED post (network error OR a non-2xx from the CP) clear the
+    // coalesce stamp so the next failing run retries immediately instead of waiting
+    // out the window; on success the stamp holds for the window. Its failure must
+    // never surface into the caller's run-failure path.
+    void fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-instance-secret': secret },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(FLUSH_TIMEOUT_MS),
+    })
+      .then((res) => { if (!res.ok) lastIncidentAtMsByHost.delete(host); })
+      .catch(() => { lastIncidentAtMsByHost.delete(host); });
   }
 
   return {
@@ -348,6 +417,13 @@ export function createManagedHook(): LynoxHooks {
     },
 
     onAfterRun(runId: string, costUsd: number, context: RunContext) {
+      // A provider billing/quota stop is reported BEFORE the cost skip below: a
+      // billing failure spent 0 tokens, so gating this on cost would drop exactly
+      // the signal that matters. Independent of the usage-report path.
+      if (context.failure?.kind === 'provider_billing') {
+        reportProviderIncident(context.failure);
+      }
+
       if (!Number.isFinite(costUsd) || costUsd <= 0) return; // Skip zero/negative/NaN
 
       // Idempotency: a re-fire of the same run (the failed-run double-fire window)
