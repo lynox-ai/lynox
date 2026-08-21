@@ -49,7 +49,12 @@ is_excluded() {
 # A doc path is "alive" if it exists relative to the repo root OR as a suffix
 # of any tracked path — docs legitimately use package-relative paths
 # (e.g. `src/lib/...` meaning packages/web-ui/src/lib/...).
-ALL_TRACKED="$(git ls-files)"
+# `-c core.quotePath=false`, not `-z`: this is a newline-joined list consumed by
+# the here-string grep in exists_path, not a read loop. Without it a tracked path
+# with a non-ASCII byte comes back quoted (`"docs/\303\234bersicht.md"`) and a doc
+# that references it would be falsely reported dead. (`-z` is the right tool for a
+# read loop, but the suffix grep here is line-oriented, so quotePath is the fix.)
+ALL_TRACKED="$(git -c core.quotePath=false ls-files)"
 exists_path() {
   local p="${1%/}"
   [ -e "$p" ] && return 0
@@ -69,23 +74,29 @@ violations=0
 # ── A. Merge-conflict markers (every tracked text file) ──────────────────
 # Match only the unambiguous git markers (<<<<<<< and >>>>>>> at col 0); the
 # ======= separator is skipped to avoid clashing with markdown setext rules.
-while IFS= read -r f; do
+# NUL-separated listing + `read -d ''` so a path with a non-ASCII byte (which git
+# quotes under the default core.quotePath) is scanned, not skipped silently — the
+# same blind-skip class core#1184 closed in public-repo-guard.sh. Every file
+# operand is prefixed `./` and passed after `--` so a '-'-leading or literal-`-`
+# path is an unambiguous filename, never an option and never the stdin `-` that
+# would drain the loop's listing (git paths are always repo-relative → `./` safe).
+while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
-  [ -f "$f" ] || continue
+  [ -f "./$f" ] || continue
   is_excluded "$f" && continue
-  grep -Iq . "$f" 2>/dev/null || continue
+  grep -Iq -- . "./$f" 2>/dev/null || continue
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     echo "❌ A/merge-conflict marker in $f:"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nE '^(<<<<<<<|>>>>>>>)' "$f" 2>/dev/null || true)
-done < <(git ls-files)
+  done < <(grep -nE -- '^(<<<<<<<|>>>>>>>)' "./$f" 2>/dev/null || true)
+done < <(git ls-files -z)
 
 # ── B. Removed feature in a LIVE doc (outside archive/) ───────────────────
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
-  [ -f "$f" ] || continue
+  [ -f "./$f" ] || continue
   case "$f" in */archive/*) continue ;; esac
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -93,13 +104,13 @@ while IFS= read -r f; do
     echo "⚠️  B/removed-feature in LIVE doc $f (move to archive/ or add '${PRAGMA}'):"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nIE "$REMOVED" "$f" 2>/dev/null || true)
-done < <(git ls-files 'docs/src/content/docs/*')
+  done < <(grep -nIE -- "$REMOVED" "./$f" 2>/dev/null || true)
+done < <(git ls-files -z 'docs/src/content/docs/*')
 
 # ── C. Dead doc-path references in CLAUDE.md / docs / READMEs ─────────────
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
-  [ -f "$f" ] || continue
+  [ -f "./$f" ] || continue
   is_excluded "$f" && continue
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
@@ -117,8 +128,8 @@ while IFS= read -r f; do
         violations=$((violations + 1))
       fi
     done < <(printf '%s\n' "$rest" | grep -oE "$PATH_RE" || true)
-  done < <(grep -nE "$PATH_RE" "$f" 2>/dev/null || true)
-done < <(git ls-files '*CLAUDE.md' '*README.md' 'docs/src/content/docs/*')
+  done < <(grep -nE -- "$PATH_RE" "./$f" 2>/dev/null || true)
+done < <(git ls-files -z '*CLAUDE.md' '*README.md' 'docs/src/content/docs/*')
 
 # ── D. README provider-verification matrix vs the LLM catalog ─────────────
 # The public README claims which OpenAI-compat presets are "verified"; the

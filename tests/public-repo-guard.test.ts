@@ -48,10 +48,14 @@ const SOFT_HOST = ['engine', 'lynox', 'cloud'].join('.');
 
 let dir: string;
 
+// Pin git config to /dev/null so a developer's global core.quotePath / hooksPath
+// cannot make a case vacuous or run foreign hooks on the fixture commits.
+const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+
 /** Run the guard in --staged mode inside `dir`; return the exit code. */
 function runStaged(): number {
   try {
-    execFileSync('bash', [SCRIPT, '--staged'], { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+    execFileSync('bash', [SCRIPT, '--staged'], { cwd: dir, env: GIT_ENV, encoding: 'utf8', stdio: 'pipe' });
     return 0;
   } catch (err) {
     return (err as { status?: number }).status ?? -1;
@@ -61,7 +65,7 @@ function runStaged(): number {
 /** Run the guard inside `dir`; return the exit code (0 = clean). */
 function runGuard(): number {
   try {
-    execFileSync('bash', [SCRIPT], { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+    execFileSync('bash', [SCRIPT], { cwd: dir, env: GIT_ENV, encoding: 'utf8', stdio: 'pipe' });
     return 0;
   } catch (err) {
     return (err as { status?: number }).status ?? -1;
@@ -72,7 +76,9 @@ function commitFile(relPath: string, content: string): void {
   const abs = join(dir, relPath);
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, content);
-  execFileSync('git', ['add', relPath], { cwd: dir });
+  // `--` so a path beginning with '-' (the dash-name case below) is a pathspec,
+  // not a `git add` option.
+  execFileSync('git', ['add', '--', relPath], { cwd: dir, env: GIT_ENV });
 }
 
 beforeEach(() => {
@@ -144,6 +150,32 @@ describe('public-repo-guard — fires on planted leaks', () => {
     // Same defect, second entry point: the staged listing quotes identically.
     commitFile('Über.md', `const h = '${INFRA_HOST}';\n`);
     expect(runStaged()).not.toBe(0);
+  });
+
+  it('scans a file whose NAME begins with a dash', () => {
+    // The twin of the non-ASCII case: a repo-root path like `-x.ts` reached the
+    // class greps as a leading-dash operand, which grep read as an option →
+    // error → `2>/dev/null` swallowed it → the loop `continue`d, skipping a HARD
+    // marker silently. The `./$f` prefix makes it an unambiguous filename. Only a
+    // repo-root name is dangerous (a nested `sub/-y.ts` carries a slash).
+    commitFile('-x.ts', `const h = '${INFRA_HOST}';\n`);
+    expect(runGuard()).not.toBe(0);
+  });
+
+  it('scans a dash-named path in --staged mode too', () => {
+    commitFile('-y.ts', `const h = '${INFRA_HOST}';\n`);
+    expect(runStaged()).not.toBe(0);
+  });
+
+  it('still scans later files when a path is literally "-" (no stdin drain)', () => {
+    // The sharpest edge, and why `--` alone was not enough: a file named exactly
+    // `-` is still STDIN to grep even after `--`, and inside the loop stdin is the
+    // NUL file listing — grep drains it and every later file is skipped, so the
+    // guard reports a clean tree. `./-` is a real path, not stdin. `zz-` sorts
+    // after `-`, so the marker only surfaces if the loop survived the `-` entry.
+    commitFile('-', 'nothing suspicious\n');
+    commitFile('zz-leak.ts', `const h = '${INFRA_HOST}';\n`);
+    expect(runGuard()).not.toBe(0);
   });
 
   it('--staged scans only what is staged, not the committed tree', () => {
