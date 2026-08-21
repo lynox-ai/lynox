@@ -30,6 +30,7 @@ import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
 import { CostGuard } from './cost-guard.js';
+import { classifyProviderFailure, type RunFailure } from './provider-failure.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from './untrusted-signals.js';
 import { appendUntrustedCauseLog } from './untrusted-cause-log.js';
 import { channels, measureTool } from './observability.js';
@@ -341,6 +342,10 @@ export class Agent implements IAgent {
    *  first send completes; reset at the start of every send and set on every
    *  return path of `_loop`. */
   private _lastStop: SendStop | null = null;
+  /** A provider BILLING/quota failure from the last `send()`'s LLM call, or `null`.
+   *  Set only when the retry layer gives up on a classified billing error; read by
+   *  `session.ts` into `RunContext.failure` for the managed hook. Reset per send. */
+  private _lastProviderFailure: RunFailure | null = null;
   private continuationPrompt: string | undefined;
   private readonly excludeTools: string[] | undefined;
   /** Optional user-preferred max context window — clamps the trim budget below the model's native window. */
@@ -805,6 +810,22 @@ export class Agent implements IAgent {
   /** Why and how the last `send()` ended — `null` before the first send. */
   getLastStop(): SendStop | null {
     return this._lastStop;
+  }
+
+  /** A provider billing/quota stop from the last send's LLM call, or `null`. */
+  getLastProviderFailure(): RunFailure | null {
+    return this._lastProviderFailure;
+  }
+
+  /** The hostname the LLM request targets — a config value, so trustworthy for
+   *  billing-vocabulary classification. Empty string when it cannot be resolved
+   *  (then only status-based signals classify). */
+  private _providerHost(): string {
+    if (this.inheritedApiBaseURL) {
+      try { return new URL(this.inheritedApiBaseURL).hostname.toLowerCase(); } catch { /* fall through */ }
+    }
+    // No base URL → the direct Anthropic API (provider 'anthropic').
+    return this.provider === 'anthropic' ? 'api.anthropic.com' : '';
   }
 
   /**
@@ -1512,6 +1533,7 @@ export class Agent implements IAgent {
     this._sawUntrustedData = false;
     this._sawFollowUpCall = false;
     this._lastStop = null;
+    this._lastProviderFailure = null;
     // The USER turn can itself carry untrusted content. An uploaded document's extracted
     // text is third-party-authored — the person attached the file, they did not write what
     // is in it — and it arrives as a content block on this message, not as a tool result.
@@ -2524,6 +2546,13 @@ export class Agent implements IAgent {
           await sleep(delay, signal);
           continue;
         }
+        // Terminal LLM failure (not retryable, or retries exhausted). Classify a
+        // provider billing/quota stop so the run's RunContext can carry it to the
+        // managed hook — the failure class that today reaches the customer before
+        // it reaches us. Only set on this give-up path, so a transient that later
+        // succeeds leaves it null; classifyProviderFailure returns null for
+        // everything that is not a billing stop.
+        this._lastProviderFailure = classifyProviderFailure(err, this._providerHost());
         throw err;
       }
     }

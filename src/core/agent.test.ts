@@ -3996,3 +3996,45 @@ describe('F5: artifact-body eviction (next-turn, D4)', () => {
 		expect(loaded).toContain('[evicted after successful save');
 	});
 });
+
+describe('getLastProviderFailure — provider billing classification wiring', () => {
+  it('records a provider billing stop from a terminal LLM failure (Anthropic 400 credit-balance)', async () => {
+    const { APIError: MockAPIError } = await import('@anthropic-ai/sdk');
+    // The measured Anthropic shape: 400 invalid_request_error, credit-balance body.
+    mockProcess.mockRejectedValue(
+      new MockAPIError(
+        400,
+        { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API' },
+        'Your credit balance is too low to access the Anthropic API',
+        undefined,
+      ),
+    );
+    // Default agent → provider 'anthropic' → host api.anthropic.com (a trusted host).
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await expect(agent.send('go')).rejects.toBeInstanceOf(MockAPIError);
+    expect(agent.getLastProviderFailure()).toEqual({
+      kind: 'provider_billing', providerHost: 'api.anthropic.com', status: 400,
+    });
+  });
+
+  it('leaves it null for a terminal failure that is NOT a billing stop', async () => {
+    mockProcess.mockRejectedValue(new Error('boom'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await expect(agent.send('go')).rejects.toThrow('boom');
+    expect(agent.getLastProviderFailure()).toBeNull();
+  });
+
+  it('resets on the next send, so a later clean turn does not report a stale failure', async () => {
+    const { APIError: MockAPIError } = await import('@anthropic-ai/sdk');
+    mockProcess
+      .mockRejectedValueOnce(
+        new MockAPIError(400, { type: 'invalid_request_error', message: 'Your credit balance is too low' }, 'credit', undefined),
+      )
+      .mockResolvedValue(endTurnResponse('recovered'));
+    const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6' });
+    await expect(agent.send('first')).rejects.toBeInstanceOf(MockAPIError);
+    expect(agent.getLastProviderFailure()).not.toBeNull();
+    await agent.send('second');
+    expect(agent.getLastProviderFailure()).toBeNull();
+  });
+})

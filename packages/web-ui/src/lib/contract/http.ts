@@ -46,6 +46,29 @@ export interface UsageFlushResponse {
   allowed: boolean;
 }
 
+// === Provider incident — POST /internal/usage/:instanceId/incident (engine → CP) ===
+
+/**
+ * The engine reports a PROVIDER-LEVEL failure the control plane cannot see any
+ * other way: on managed hosting the CP pays the LLM bill, so a suspended or
+ * credit-exhausted provider account is a full chat outage for every tenant on
+ * that provider — and it surfaces only as a per-request error while `/api/health`
+ * stays green. The CP raises an operator alert naming the provider on the FIRST
+ * such report, not a fleet-wide pattern.
+ *
+ * `kind` is the literal `'provider_billing'` — the only kind the engine emits
+ * today. The CP parses it tolerantly (an unrecognised future kind is ignored, not
+ * an error), which is why a widened union here would stay backward-compatible.
+ * `provider_host` is the host the failing call targeted (e.g. `api.fireworks.ai`),
+ * which the CP maps to a display label. `status` is the HTTP status that carried
+ * the signal. No secrets, no run content — a class signal, not a payload.
+ */
+export interface ProviderIncidentRequest {
+  kind: 'provider_billing';
+  provider_host: string;
+  status: number;
+}
+
 // === Usage status — GET /internal/usage/:instanceId/status (engine ← CP) ===
 
 /**
