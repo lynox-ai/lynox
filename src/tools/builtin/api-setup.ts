@@ -1073,9 +1073,21 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
       // shape instead of the guidance below. A misconfigured server produces that
       // without any malice. The echoed value is bounded for the same reason the
       // reason phrase was dropped — it is remote-authored text.
-      if (typeof spec.openapi !== 'string' || !spec.openapi.startsWith('3.')) {
-        const seen = typeof spec.openapi === 'string' ? spec.openapi.slice(0, 40) : typeof spec.openapi;
-        return `Error: unsupported spec version (openapi: "${seen}"). This bootstrapper expects OpenAPI 3.x. Swagger 2.0 specs need conversion first, or build the profile manually via "create".`;
+      // Guard `spec` itself, not just its field: `JSON.parse('null')` is null and
+      // `JSON.parse('"hi"')` is a string, so a 200 with either body dereferenced
+      // null/undefined here — PAST this handler's try/catch, which closes above.
+      // That route matters beyond ergonomics: the dispatcher's catch path returns
+      // `cause.message` WITHOUT `scanToolResult`, so a throw is the one way out of
+      // this tool that the scan does not see. A misconfigured server produces it
+      // with no malice.
+      if (typeof spec !== 'object' || spec === null || typeof spec.openapi !== 'string') {
+        return `Error: spec has no string "openapi" version field. This bootstrapper expects OpenAPI 3.x. Swagger 2.0 specs need conversion first, or build the profile manually via "create".`;
+      }
+      if (!spec.openapi.startsWith('3.')) {
+        // Render the real value (bounded) — reporting `typeof` would tell the agent
+        // the server declared a version of "number", and send it looking for a field
+        // that says no such thing.
+        return `Error: unsupported spec version (openapi: "${spec.openapi.slice(0, 40)}"). This bootstrapper expects OpenAPI 3.x. Swagger 2.0 specs need conversion first, or build the profile manually via "create".`;
       }
 
       let draft: ApiProfile;

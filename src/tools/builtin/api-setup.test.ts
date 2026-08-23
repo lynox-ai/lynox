@@ -654,7 +654,12 @@ describe('api_setup tool', () => {
           { action: 'bootstrap', openapi_url: 'https://example.com/swagger.json' },
           agent,
         );
-        expect(result).toContain('unsupported spec version');
+        // A Swagger 2.0 body carries NO `openapi` key. The old message reported
+        // `openapi: "undefined"` — a version the spec never declared, sending the
+        // agent to look for an absent field. Missing-key and wrong-version are now
+        // separate messages; this is the missing-key one.
+        expect(result).toContain('no string "openapi" version field');
+        expect(result).toContain('OpenAPI 3.x');
       } finally {
         fetchSpy.mockRestore();
       }
@@ -678,6 +683,56 @@ describe('api_setup tool', () => {
       }
     });
 
+    it.each([
+      ['null body', 'null'],
+      ['string body', '"hello"'],
+      ['array body', '[]'],
+      ['number body', '3'],
+    ])('does not throw past the handler on a %s', async (_label, body) => {
+      // `JSON.parse` returns null / a string / an array for these, and the version
+      // check runs OUTSIDE the parse try/catch — so dereferencing `spec.openapi`
+      // threw and escaped the handler. The throw route is the one exit from this
+      // tool the dispatcher does NOT run through scanToolResult, which is why it
+      // is worth closing rather than tolerating as an ergonomics wart.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(body, { status: 200 }),
+      );
+
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json' },
+          agent,
+        );
+        expect(result).toContain('Error:');
+        expect(result).not.toContain('Cannot read properties');
+        expect(result).not.toContain('is not a function');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('names the real version value, not its typeof', async () => {
+      // Reporting `typeof` told the agent the server declared version "number" —
+      // a field the spec never contained, sending it to look for something absent.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ openapi: '2.0', paths: {} }), { status: 200 }),
+      );
+
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json' },
+          agent,
+        );
+        expect(result).toContain('unsupported spec version');
+        expect(result).toContain('2.0');
+        expect(result).not.toContain('"string"');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('handles a non-string openapi version without throwing past the handler', async () => {
       // `{"openapi": 3}` is truthy but has no `.startsWith`. The version check sits
       // OUTSIDE the JSON.parse try/catch, so it threw a TypeError and the agent got a
@@ -693,7 +748,7 @@ describe('api_setup tool', () => {
           { action: 'bootstrap', openapi_url: 'https://example.com/spec.json' },
           agent,
         );
-        expect(result).toContain('unsupported spec version');
+        expect(result).toContain('no string "openapi" version field');
         expect(result).not.toContain('is not a function');
       } finally {
         fetchSpy.mockRestore();
