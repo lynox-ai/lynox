@@ -23,7 +23,25 @@
  * `\s` and the C0 class both miss. This matches the server sanitiser byte-for-byte
  * so the two layers behave identically.
  */
+/**
+ * Bidi marks, overrides and isolates. The whitespace/control class above does
+ * not reach them, so a framing field could render in an order it is not written
+ * in — text that reads as a reassurance on screen and as gibberish in the store
+ * or an export. `prompt-origin.ts` strips exactly this set for the other
+ * untrusted field of the credential dialog; the two agree deliberately.
+ *
+ * This does cost something in right-to-left text: LRM/RLM (U+200E/200F) are
+ * legitimate there for ordering neutral characters like digits and punctuation.
+ * It is taken anyway, for the same reason `prompt-origin.ts` takes it — these
+ * are short LABELS, not prose, and a label that can lie about its own direction
+ * is worse than one that renders a phone number's punctuation the wrong way.
+ * Do not copy this into a sanitiser for message BODIES.
+ */
+const BIDI_CHARS = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+
 export function sanitizeFramingField(s: string, max = 200): string {
-	const flat = s.replace(/[\s\x00-\x1f\x7f-\x9f]+/g, ' ').trim();
-	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+	const flat = s.replace(/[\s\x00-\x1f\x7f-\x9f]+/g, ' ').replace(BIDI_CHARS, '').trim();
+	// Cut by code point so a truncation cannot end on a lone surrogate.
+	const points = [...flat];
+	return points.length > max ? `${points.slice(0, max - 1).join('')}…` : flat;
 }

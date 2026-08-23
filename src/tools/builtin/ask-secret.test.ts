@@ -65,6 +65,40 @@ describe('askSecretTool', () => {
       }
     });
 
+    it('strips the bidi overrides that let a span render backwards', async () => {
+      const promptSecret = vi.fn().mockResolvedValue('saved');
+      const agent = makeAgent({ promptSecret });
+
+      // RLO + isolates: the box would read forwards on screen while the stored
+      // string reads as gibberish, so a quote of the agent is no longer a quote.
+      const bidi = [8206, 8207, 8234, 8235, 8236, 8237, 8238, 8294, 8295, 8296, 8297];
+      await askSecretTool.handler(
+        { name: 'A_KEY', prompt: `Enter key${bidi.map((c) => String.fromCodePoint(c)).join('')}tail` },
+        agent,
+      );
+
+      const [, text] = promptSecret.mock.calls[0] as [string, string, string | undefined];
+      for (const cp of bidi) {
+        expect(text, `code point ${String(cp)} should not survive`).not.toContain(String.fromCodePoint(cp));
+      }
+      expect(text).toContain('tail');
+    });
+
+    it('cuts on a code-point boundary, never mid-surrogate', async () => {
+      const promptSecret = vi.fn().mockResolvedValue('saved');
+      const agent = makeAgent({ promptSecret });
+
+      // A UTF-16 slice at 299 lands inside the emoji's surrogate pair and the
+      // lone half round-trips to U+FFFD.
+      await askSecretTool.handler({ name: 'A_KEY', prompt: `${'a'.repeat(298)}😀 tail` }, agent);
+
+      const [, text] = promptSecret.mock.calls[0] as [string, string, string | undefined];
+      expect(text).toBe(Buffer.from(text, 'utf-8').toString('utf-8'));
+      expect(text).not.toContain('\uFFFD');
+      for (const ch of text) expect(ch.codePointAt(0)).not.toBeNaN();
+      expect(/[\uD800-\uDFFF]/.test(text.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, ''))).toBe(false);
+    });
+
     it('bounds the length, and says it cut', async () => {
       const promptSecret = vi.fn().mockResolvedValue('saved');
       const agent = makeAgent({ promptSecret });

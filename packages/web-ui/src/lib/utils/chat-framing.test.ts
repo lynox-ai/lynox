@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { sanitizeFramingField } from './chat-framing.js';
 
 // Control chars built explicitly so the source stays pure-ASCII and unambiguous.
@@ -45,5 +47,38 @@ describe('sanitizeFramingField', () => {
 
 	it('trims surrounding whitespace', () => {
 		expect(sanitizeFramingField('   spaced   ')).toBe('spaced');
+	});
+});
+
+describe('bidi hardening', () => {
+	// A framing field is a LABEL. One that can lie about its own direction reads
+	// as a reassurance on screen while the stored string says something else, so
+	// an export or an audit disagrees with what the user was shown.
+	const BIDI = [0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069];
+
+	it('strips every bidi mark, override and isolate', () => {
+		for (const cp of BIDI) {
+			const out = sanitizeFramingField(`before${String.fromCodePoint(cp)}after`);
+			expect(out, `U+${cp.toString(16).toUpperCase()} survived`).toBe('beforeafter');
+		}
+	});
+
+	it('agrees with prompt-origin, which cleans the other field of the same dialog', () => {
+		const src = readFileSync(fileURLToPath(new URL('./prompt-origin.ts', import.meta.url)), 'utf-8');
+		const theirs = /const BIDI_CHARS = (\/\[[^\]]+\]\/g);/.exec(src)?.[1];
+		const ours = /const BIDI_CHARS = (\/\[[^\]]+\]\/g);/.exec(
+			readFileSync(fileURLToPath(new URL('./chat-framing.ts', import.meta.url)), 'utf-8'),
+		)?.[1];
+		expect(theirs, 'prompt-origin no longer declares BIDI_CHARS').toBeDefined();
+		expect(ours, 'chat-framing no longer declares BIDI_CHARS').toBeDefined();
+		// Two halves of one dialog disagreeing on what may render is the bug this
+		// pins — not the exact class, but that they are the SAME class.
+		expect(ours).toBe(theirs);
+	});
+
+	it('truncates on a code-point boundary', () => {
+		const out = sanitizeFramingField(`${'a'.repeat(198)}\u{1F600}tail`, 200);
+		expect(out).not.toContain('\uFFFD');
+		expect(/[\uD800-\uDFFF]/.test(out.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, ''))).toBe(false);
 	});
 });

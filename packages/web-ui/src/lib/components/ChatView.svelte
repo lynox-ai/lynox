@@ -1642,6 +1642,25 @@
 	const pendingPermission = $derived(getPendingPermission());
 	const pendingTabsPrompt = $derived(getPendingTabsPrompt());
 	const pendingSecret = $derived(getPendingSecretPrompt());
+
+	/**
+	 * The agent's own words for the credential dialog, cleaned once so the guard
+	 * and the render agree. Guarding on the RAW string and rendering the cleaned
+	 * one lets a prompt of `"​"` open a box labelled "the assistant's
+	 * reason" with nothing in it — a frame around nothing reads worse than no
+	 * frame.
+	 *
+	 * The bound is 1200, not the 400 it started at, and the number matters: the
+	 * TOOL already caps the agent's own span at 300 server-side, so everything
+	 * past that is the engine's own "this key is already in the vault" hint,
+	 * appended after it. A 400 cap therefore did not bound the agent — it
+	 * truncated the one line in the box the agent does NOT author, and it grew
+	 * worse the more sibling keys the vault held. This cap exists only as a
+	 * backstop for prompts restored from before the server-side bound.
+	 */
+	const secretAgentText = $derived(
+		pendingSecret ? sanitizeFramingField(pendingSecret.prompt, 1200) : '',
+	);
 	const pendingMailConnect = $derived(getPendingMailConnect());
 	const chatError = $derived(getChatError());
 	const chatErrorDetail = $derived(getChatErrorDetail());
@@ -1700,7 +1719,16 @@
 		setPromptAttention(key, {
 			badge: t('attention.badge'),
 			notifyTitle: t('attention.notify_title'),
-			notifyBody: head?.question || t('attention.notify_body'),
+			// A credential prompt's `question` is written by the AGENT, and this body
+			// goes into an OS notification titled with product copy — outside the
+			// page, outside the frame the dialog now puts around that text, and with
+			// more authority than either. It is also delivered exactly when the tab
+			// is hidden, i.e. when the user has the least context. The notification's
+			// job is to get attention; the wording belongs in the dialog, where it is
+			// labelled as the assistant's.
+			notifyBody: head?.kind === 'secret'
+				? t('attention.notify_body')
+				: head?.question || t('attention.notify_body'),
 		});
 	});
 	// Clear the signal on unmount (navigating away mid-prompt must not strand a badge).
@@ -3373,14 +3401,14 @@
 						<span class="text-text-muted">{t('chat.secret_key_label')}</span>
 						<span class="font-mono [overflow-wrap:anywhere]">{pendingSecret.name}</span>
 					</div>
-					{#if pendingSecret.prompt}
+					{#if secretAgentText}
 						<div class="space-y-0.5 pt-1">
 							<div class="text-text-muted">{t('chat.secret_agent_said')}</div>
 							<!-- Second half of a pair: the tool already collapsed and bounded
 							     this on the server. Applied again here because the client is
 							     where it is rendered, and a prompt restored from the store
 							     predates that change. -->
-							<div class="max-h-24 overflow-y-auto [overflow-wrap:anywhere]">{sanitizeFramingField(pendingSecret.prompt, 400)}</div>
+							<div class="max-h-24 overflow-y-auto [overflow-wrap:anywhere]">{secretAgentText}</div>
 						</div>
 					{/if}
 				</div>
@@ -3406,7 +3434,7 @@
 							bind:this={secretInputEl}
 							onkeydown={(e) => { if (e.key === 'Enter') handleSecretSave(); }}
 							class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text focus:border-accent focus:outline-none font-mono"
-							aria-label="{t('chat.secret_title')} — {pendingSecret.name}"
+							aria-label={t('chat.secret_title')}
 							placeholder={pendingSecret.name}
 							autocomplete="off"
 							data-1p-ignore

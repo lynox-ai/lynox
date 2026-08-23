@@ -80,14 +80,44 @@ describe('the credential dialog frames the agent, it does not let the agent fram
     );
   });
 
-  it('renders the agent text only through the framing sanitiser', () => {
-    // Every appearance of the agent's text in this block goes through
-    // `sanitizeFramingField`. A bare `{pendingSecret.prompt}` anywhere is the
-    // regression this pins.
+  it('renders the agent text only through the cleaned derivation', () => {
+    // The block must never reach for the raw string. It renders
+    // `secretAgentText`, which is `sanitizeFramingField(...)` computed once so
+    // the `{#if}` guard and the render agree on the same value.
     const bareUses = secretBlock.match(/\{pendingSecret\.prompt\b(?![\w.])/g) ?? [];
-    const sanitised = secretBlock.match(/sanitizeFramingField\(pendingSecret\.prompt/g) ?? [];
     expect(bareUses.length, 'agent text is rendered without the framing sanitiser').toBe(0);
-    expect(sanitised.length).toBeGreaterThan(0);
+    expect(secretBlock).toContain('{secretAgentText}');
+    expect(CHATVIEW).toMatch(/const secretAgentText = \$derived\([\s\S]{0,120}sanitizeFramingField\(pendingSecret\.prompt/);
+  });
+
+  it('guards the box on the CLEANED text, not the raw string', () => {
+    // Guarding on the raw string and rendering the cleaned one opens a box
+    // labelled "the assistant's reason" containing nothing, for a prompt that
+    // is only zero-width characters. A frame around nothing reads worse than
+    // no frame.
+    expect(secretBlock).toContain('{#if secretAgentText}');
+    expect(secretBlock).not.toContain('{#if pendingSecret.prompt}');
+  });
+
+  it('does not size the render cap to the agent span', () => {
+    // The tool caps the AGENT's own text at 300 server-side. Everything past
+    // that in this string is the engine's "already in the vault" hint, appended
+    // after it — so a cap near 300 truncates the one line in the box the agent
+    // does not author, and truncates more the more sibling keys exist. The
+    // client cap is a backstop for prompts restored from before the server
+    // bound, not a second bound on the agent.
+    const cap = /sanitizeFramingField\(pendingSecret\.prompt,\s*(\d+)\)/.exec(CHATVIEW)?.[1];
+    expect(cap, 'the render no longer caps the agent text at all').toBeDefined();
+    expect(Number(cap), 'the cap is small enough to eat the engine hint').toBeGreaterThanOrEqual(1000);
+  });
+
+  it('keeps the agent sentence out of the OS notification', () => {
+    // The notification is titled with product copy and fires when the tab is
+    // hidden — outside the page and outside this frame. Its body must not be
+    // the agent's wording for a credential prompt.
+    expect(CHATVIEW).toMatch(
+      /notifyBody:[\s\S]{0,400}head\?\.kind === 'secret'[\s\S]{0,80}t\('attention\.notify_body'\)/,
+    );
   });
 
   it('labels the agent text as the assistant’s, inside the muted box', () => {
@@ -95,10 +125,15 @@ describe('the credential dialog frames the agent, it does not let the agent fram
     expect(secretBlock).toContain('bg-bg-muted');
   });
 
-  it('gives a screen reader the product label, not the agent sentence', () => {
-    // The input's accessible name is the same slot in audio.
-    expect(secretBlock).toMatch(/aria-label="\{t\('chat\.secret_title'\)\} — \{pendingSecret\.name\}"/);
+  it('gives a screen reader the product label alone', () => {
+    // The input's accessible name is the same slot in audio. It is the product
+    // string and nothing else: welding the agent-CHOSEN key name into the same
+    // string with an em dash reproduces the defect one level down —
+    // `LYNOX_VERIFIED_ENTER_YOUR_ACCOUNT_PASSWORD` announced as part of our own
+    // label. The key name is already on screen in its own element.
+    expect(secretBlock).toMatch(/aria-label=\{t\('chat\.secret_title'\)\}/);
     expect(secretBlock).not.toMatch(/aria-label=\{pendingSecret\.prompt/);
+    expect(secretBlock).not.toMatch(/aria-label="[^"]*pendingSecret\.name/);
   });
 
   it('bounds the agent text so it cannot push the controls off screen', () => {

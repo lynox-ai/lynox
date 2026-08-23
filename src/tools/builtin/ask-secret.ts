@@ -33,10 +33,25 @@ const NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
  */
 const PROMPT_MAX_CHARS = 300;
 
+/**
+ * Bidi overrides and isolates reorder text at render time, so a span can read
+ * forwards on screen while being stored backwards — which defeats the point of
+ * quoting the agent verbatim. `collapseToSingleLine` does not touch them (it
+ * covers C0/C1 and the exotic separators). `prompt-origin.ts` in the web-ui,
+ * which cleans the OTHER untrusted field of this same dialog, strips exactly
+ * this set; matching it keeps two halves of one dialog from disagreeing.
+ */
+const BIDI_CHARS = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+
 /** Collapse to one line and bound the length, ellipsising when it had to cut. */
 function boundPromptText(s: string): string {
-  const flat = collapseToSingleLine(s);
-  return flat.length > PROMPT_MAX_CHARS ? `${flat.slice(0, PROMPT_MAX_CHARS - 1)}…` : flat;
+  const flat = collapseToSingleLine(s).replace(BIDI_CHARS, '');
+  // Cut by CODE POINT, not by UTF-16 unit: `'a'.repeat(298) + '😀'` sliced at
+  // 299 units ends on a lone high surrogate, which round-trips to U+FFFD.
+  const points = [...flat];
+  return points.length > PROMPT_MAX_CHARS
+    ? `${points.slice(0, PROMPT_MAX_CHARS - 1).join('')}…`
+    : flat;
 }
 
 export const askSecretTool: ToolEntry<AskSecretInput> = {
