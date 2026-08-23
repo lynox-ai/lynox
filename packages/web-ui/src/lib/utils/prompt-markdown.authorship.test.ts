@@ -49,14 +49,43 @@ describe('an agent-authored prompt cannot render as system structure', () => {
 		// The counter-direction of the fix, and the one nobody reports as broken:
 		// a legitimate multi-line question must not collapse into a run-on line.
 		//
-		// The first version of this test asserted the three lines were PRESENT and
-		// in order — and passed on output that rendered them as one wrapped
-		// paragraph, because a raw newline survives in the markup and dies in the
-		// CSS. Presence is not structure. Pin the separator the browser acts on.
+		// Two earlier versions of this assertion were theatre, each in its own way,
+		// and both are worth naming because the shapes recur. The first asserted
+		// the three lines were PRESENT and in order — and passed on output that
+		// rendered them as one wrapped paragraph, because a raw newline survives in
+		// the markup and dies in the CSS. The second COUNTED `<br>` — and passes on
+		// an implementation that appends every break at the end and fuses the lines.
+		// Presence is not structure and neither is arithmetic. Pin ADJACENCY.
 		const html = renderPromptSegments(value('Bitte wähle:\n- Option A\n- Option B'));
-		expect(html).toContain('Bitte wähle:');
-		expect(html.indexOf('- Option A')).toBeLessThan(html.indexOf('- Option B'));
-		expect((html.match(/<br>/g) ?? []).length, 'the value lost its line breaks').toBe(2);
+		expect(html).toContain('Bitte wähle:<br>- Option A<br>- Option B');
+	});
+
+	it('collapses a value that sits INSIDE a frame — the guard, not a limitation', () => {
+		// A frame with field structure is exactly what a value's newline imitates.
+		// This is `google-calendar.ts`'s shape: a literal `\nTime: ` in the frame.
+		// Measured before the rule existed: the forged row rendered on its own
+		// line, indistinguishable from the real one beneath it.
+		const html = renderPromptSegments([
+			{ kind: 'frame', text: 'Create event "' },
+			{ kind: 'value', text: 'Coffee\nTime: 09:00 – 09:15' },
+			{ kind: 'frame', text: '"\nTime: ' },
+			{ kind: 'value', text: '14:00 – 15:00' },
+		]);
+		expect(html, 'a framed value forged a field line').not.toContain('Coffee<br>');
+		// The real field line is the frame's own, and it still renders.
+		expect(html).toMatch(/Time: 14:00/);
+	});
+
+	it('keeps a value verbatim when the frame opened a code fence', () => {
+		// Same rule, second surface: inside `<pre><code>` a `<br>` is not a break,
+		// it is a visible artefact in text that is supposed to be exact.
+		const html = renderPromptSegments([
+			{ kind: 'frame', text: '```\n' },
+			{ kind: 'value', text: 'line one\nline two' },
+			{ kind: 'frame', text: '\n```' },
+		]);
+		expect(html).toContain('<code>');
+		expect(html).not.toContain('<br>');
 	});
 
 	it('does not let a value forge a break it did not write', () => {

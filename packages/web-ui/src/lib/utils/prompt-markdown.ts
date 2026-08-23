@@ -349,30 +349,44 @@ export function renderPromptSegments(segments: readonly RenderablePromptSegment[
 	const parts = html.split(VALUE_SLOT);
 	if (parts.length - 1 !== values.length) return plainTextPrompt(segments);
 
+	// A value may show its own line breaks only when it IS the whole prompt.
+	// See `escapeValueText`.
+	const lone = segments.length === 1 && segments[0]?.kind === 'value';
+
 	let index = 0;
 	return parts.reduce((acc, part, i) => {
 		if (i === 0) return part;
 		const value = values[index++] ?? '';
-		return acc + escapeValueText(value) + part;
+		return acc + escapeValueText(value, lone) + part;
 	}, '');
 }
 
 /**
- * A value is text — including its line breaks.
+ * A value is text. Whether its line breaks are allowed to SHOW depends on what
+ * surrounds it, and the distinction is the whole of this function.
  *
- * Escaping alone left raw newlines inside the `<p>` the frame renders, where CSS
- * collapses them, so a multi-line value displayed as one run-on line. The
- * markdown branch does not have that problem (`breaks: true` turns a newline
- * into a `<br>`), so migrating a caller from all-frame to a value silently cost
- * it its line structure — measured on the rendered page, not in the HTML, which
- * is where it is invisible: the newline IS in the markup.
+ * **Alone** — the prompt is one value and nothing else — the text is prose the
+ * agent wrote, and its newlines are part of it. Escaping alone left them raw
+ * inside the `<p>`, where CSS collapses them, so `ask_user`'s three-line
+ * question rendered as one run-on line. That is invisible in the markup (the
+ * newline IS there) and only shows on the rendered page.
  *
- * The `<br>` is emitted by US, after escaping, so it grants the value nothing:
- * it cannot open a construct, close one, or introduce an element. All it can do
- * is break its own lines, which is what the newline it wrote already meant.
+ * **Inside a frame** they stay collapsed, and that is not a limitation — it is
+ * the guard. A frame with field structure (`google-calendar.ts` writes a
+ * literal `\nTime: `) is exactly what a value's newline can imitate: measured,
+ * `summary = 'Coffee\nTime: 09:00'` renders its forged `Time:` row on its own
+ * line, indistinguishable from the real one below. Collapsing was what made
+ * that impossible, and `prompt-value.ts` documents the attack it prevents.
+ * The same rule also keeps a value verbatim when a frame opened a code fence.
+ *
+ * So the test is structural, not per-caller: nobody has to remember to clip a
+ * field, and nobody has to remember to allow prose. The `<br>` is emitted by US
+ * after escaping either way, so it grants the value nothing — it cannot open a
+ * construct, close one, or introduce an element.
  */
-function escapeValueText(value: string): string {
-	return escapeHtml(value).split('\n').join('<br>');
+function escapeValueText(value: string, lone: boolean): string {
+	const escaped = escapeHtml(value);
+	return lone ? escaped.split('\n').join('<br>') : escaped;
 }
 
 /**
