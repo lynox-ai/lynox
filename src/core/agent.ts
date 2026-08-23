@@ -2704,6 +2704,12 @@ export class Agent implements IAgent {
     return out;
   }
 
+  /** Cap on the ledger-facing `reason` of a soft tool failure before it is
+   *  persisted. The field is diagnostic — a short cause, not a payload — and
+   *  `ToolSoftFailure` is exported, so an out-of-tree tool can supply any
+   *  length. Matches the order of magnitude of the audited input cap beside it. */
+  private static readonly MAX_LEDGER_REASON_CHARS = 2000;
+
   private static readonly MAX_PARALLEL_TOOL_CALLS = 10;
 
   /**
@@ -3243,9 +3249,21 @@ export class Agent implements IAgent {
       const softRaw = softFailureReason === null
         ? null
         : (softFailureReason.trim() === '' ? `${tc.name} reported a failure without a reason` : softFailureReason);
-      const softMasked = softRaw !== null && this.secretStore
+      // Bounded before it is persisted, like the input beside it (`slice(0,2000)`)
+      // and the result above it (`toolResultLimit`). The reason had no bound at
+      // all, and the export in this same change is what makes that reachable: a
+      // plugin or a pro-side integration can now construct a `ToolSoftFailure`
+      // and put an unbounded string into `tool_calls.output_json`. The in-tree
+      // tools happen to be short — `web_research` slices to 200 itself — but
+      // that is caller courtesy, not a guarantee, and the writer is where a
+      // guarantee belongs. Masking runs FIRST so truncation cannot cut a secret
+      // in half and leave the tail unmatched. (Security round, 2026-08-23.)
+      const softMaskedFull = softRaw !== null && this.secretStore
         ? this.secretStore.maskSecrets(softRaw)
         : softRaw;
+      const softMasked = softMaskedFull !== null
+        ? softMaskedFull.slice(0, Agent.MAX_LEDGER_REASON_CHARS)
+        : null;
       this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null);
       channels.toolEnd.publish(
         softMasked === null

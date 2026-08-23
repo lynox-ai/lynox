@@ -2479,6 +2479,83 @@ describe('Agent', () => {
       expect(row!.outputJson).toContain('mute_tool');
     });
 
+    it('bounds the ledger reason before persisting it', async () => {
+      // Security round on this change. The reason had no length bound, and the
+      // entry-point export in this same PR is what makes that reachable: an
+      // out-of-tree tool can construct a ToolSoftFailure with any string and put
+      // it straight into a persisted column. The input beside it is capped at
+      // 2000 chars and the result above it at `toolResultLimit`; this field was
+      // the one unbounded write on the path.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string; isError: boolean };
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('huge_tool', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('payload', 'x'.repeat(50_000)),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'hg1', name: 'huge_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-huge-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'huge_tool');
+      expect(row).toBeDefined();
+      expect(row!.outputJson.length, 'an unbounded reason must not reach the row').toBeLessThanOrEqual(2000);
+      expect(row!.isError).toBe(true);
+    });
+
+    it('masks BEFORE truncating, so a cut cannot leave a secret tail exposed', async () => {
+      // Order matters: truncate-then-mask would slice a credential in half and
+      // hand the masker a fragment its pattern no longer matches, persisting the
+      // remainder verbatim.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string };
+      const recorded: RecordedCall[] = [];
+      // The real `maskSecrets` replaces STORED VALUES, not a prefix pattern —
+      // that is what makes the order observable. Cutting first hands the masker
+      // `SUPERSECRETV`, a fragment that matches no stored value, so it is
+      // persisted verbatim. (A prefix-regex stub would mask either way and the
+      // mutation would be equivalent — measured, not assumed.)
+      const secret = 'SUPERSECRETVALUE1234';
+      const tool = makeTool('cut_tool', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('payload', 'y'.repeat(1988) + secret),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ct1', name: 'cut_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-cut-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+        secretStore: {
+          getMasked: vi.fn().mockReturnValue('***'),
+          resolve: vi.fn().mockReturnValue('v'),
+          listNames: vi.fn().mockReturnValue([]),
+          containsSecret: vi.fn().mockReturnValue(false),
+          maskSecrets: vi.fn().mockImplementation((t: string) => t.split(secret).join('[REDACTED]')),
+          recordConsent: vi.fn(),
+          hasConsent: vi.fn().mockReturnValue(false),
+          isExpired: vi.fn().mockReturnValue(false),
+          findUnresolvedSecretRefs: vi.fn().mockReturnValue([]),
+          extractSecretNames: vi.fn().mockReturnValue([]),
+          findNameMatches: vi.fn().mockReturnValue([]),
+        } as unknown as import('../types/index.js').SecretStoreLike,
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'cut_tool');
+      expect(row).toBeDefined();
+      expect(row!.outputJson, 'no fragment of the credential survives the cut').not.toContain('SUPERSEC');
+    });
+
     it('leaves a genuinely successful call recorded as success — the counter-direction', async () => {
       // A fix against "failures look like successes" must not turn into
       // "successes look like failures": that would flip every dashboard the
