@@ -3232,9 +3232,20 @@ export class Agent implements IAgent {
       // only the channel. The write path moved since. Re-applying the original
       // patch here would have merged cleanly and recorded nothing — the reason
       // it targets both, and the reason the mutation below aims at THIS line.
-      const softMasked = softFailureReason !== null && this.secretStore
-        ? this.secretStore.maskSecrets(softFailureReason)
-        : softFailureReason;
+      // Invariant this row must satisfy: `isError` is true EXACTLY when
+      // `outputJson` is non-empty. `run-history-analytics` derives error_count
+      // from `output_json != ''` alone and never reads the flag, so a row with
+      // the flag set and an empty output claims a failure that nothing counts —
+      // the same silent-success shape, one layer in. `ToolSoftFailure` does not
+      // validate its `reason`, so an empty one is reachable from any tool; the
+      // fallback keeps the two fields in step rather than trusting callers.
+      // (Found in the delta round on this fix, 2026-08-23.)
+      const softRaw = softFailureReason === null
+        ? null
+        : (softFailureReason.trim() === '' ? `${tc.name} reported a failure without a reason` : softFailureReason);
+      const softMasked = softRaw !== null && this.secretStore
+        ? this.secretStore.maskSecrets(softRaw)
+        : softRaw;
       this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null);
       channels.toolEnd.publish(
         softMasked === null

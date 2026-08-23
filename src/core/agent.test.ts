@@ -2448,6 +2448,37 @@ describe('Agent', () => {
       expect(row!.isError).toBe(true);
     });
 
+    it('never records an error flag with an empty reason — the two fields stay in step', async () => {
+      // `run-history-analytics` derives error_count from `output_json != ''` and
+      // never reads `isError`. A row with the flag set and an empty output would
+      // therefore claim a failure that nothing counts — the same silent-success
+      // shape this change removes, one layer in. `ToolSoftFailure` does not
+      // validate its reason, so an empty one is reachable from any tool.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string; isError: boolean };
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('mute_tool', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('the payload', '   '),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'mu1', name: 'mute_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-mute-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'mute_tool');
+      expect(row).toBeDefined();
+      expect(row!.isError).toBe(true);
+      expect(row!.outputJson, 'an error row must carry something the counter can see').not.toBe('');
+      expect(row!.outputJson).toContain('mute_tool');
+    });
+
     it('leaves a genuinely successful call recorded as success — the counter-direction', async () => {
       // A fix against "failures look like successes" must not turn into
       // "successes look like failures": that would flip every dashboard the
