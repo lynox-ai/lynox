@@ -28,8 +28,13 @@ const MAX_TASK = 160;
 /** C0/C1 controls — a newline would turn one label into several lines. */
 // eslint-disable-next-line no-control-regex -- removing them is the point
 const CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/g;
-/** Bidi marks and overrides — they render text in an order it is not written in. */
-const BIDI_CHARS = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+/**
+ * Bidi marks and overrides — they render text in an order it is not written in —
+ * plus the zero-width formatters, which fill a label that looks empty. This
+ * field is a workflow label and never a person's name, so unlike the shared
+ * `sanitizeFramingField` it can afford to drop LRM/RLM as well.
+ */
+const BIDI_CHARS = /[\u200E\u200F\u202A-\u202E\u2066-\u2069\u200B-\u200D\uFEFF]/g;
 
 /**
  * Strip what can forge a label rather than fill it, then bound the length.

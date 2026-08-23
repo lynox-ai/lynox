@@ -1659,6 +1659,51 @@ describe('spawn_agent tool', () => {
       expect(ctorArg.promptTabs).toBe(promptTabs);
     });
 
+    it('a spawned child can raise a credential prompt of its own', async () => {
+      // The barrier on a credential prompt sits on the NAME, not on the caller,
+      // so handing `promptSecret` to children does not weaken it — but it does
+      // MULTIPLY the triggers, and that is the fact worth pinning.
+      //
+      // What this asserts is the child's TOOL LIST, because that is the only
+      // half a parent-side test cannot already prove. An earlier version ran
+      // `askSecretTool.handler` against a stub holding `ctorArg.promptSecret`
+      // and called that "the child path" — but `:1658` already pins that the
+      // callback IS the parent's, so that stub was `makeAgent({ promptSecret })`
+      // by definition and the whole thing re-ran the parent test through a
+      // longer route. It could not have failed for a child-specific reason.
+      // This one fails if `ask_secret` ever lands in SPAWN_EXCLUDED or is
+      // filtered out of a child's resolved set.
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const promptSecret = vi.fn().mockResolvedValue('saved');
+      // The parent holds the real tool, so what is under test is whether
+      // `resolveTools` + SPAWN_EXCLUDED let it through to a child — not whether
+      // the harness happens to stub it in.
+      const { askSecretTool } = await import('./ask-secret.js');
+      const parent = makeAgent({
+        promptSecret: promptSecret as unknown as IAgent['promptSecret'],
+        tools: [makeTool('bash'), askSecretTool as unknown as ToolEntry<unknown>, makeTool('spawn_agent')],
+      });
+
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'asker', task: 'Set up an integration' }] },
+        parent,
+      );
+
+      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as {
+        promptSecret: unknown;
+        tools: ToolEntry<unknown>[];
+      };
+      expect(ctorArg.promptSecret, 'the child must get the parent callback').toBe(promptSecret);
+      const names = ctorArg.tools.map((t) => t.definition.name);
+      expect(names, 'a child that cannot ask is a trigger this row does not cover').toContain(
+        'ask_secret',
+      );
+      // And the control: SPAWN_EXCLUDED is not vacuous here — `spawn_agent` was
+      // in the parent's list and does NOT reach the child. Without this, a
+      // resolveTools that simply returned its input would pass the line above.
+      expect(names, 'the exclusion set is not being applied at all').not.toContain('spawn_agent');
+    });
+
     it('mints currentRunId via insertRun and passes it to ctor + spawn-parent linkage', async () => {
       const { Agent: MockAgent } = await import('../../core/agent.js');
       const MINTED_ID = 'run-child-mint-123';

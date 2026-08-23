@@ -1,4 +1,5 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
+import { collapseToSingleLine } from '../../core/sanitize.js';
 
 interface AskSecretInput {
   name?: string | undefined;
@@ -8,6 +9,53 @@ interface AskSecretInput {
 }
 
 const NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * The agent writes the text of a credential dialog, so the text is untrusted
+ * input on a security surface — treat it like one at the point where it enters.
+ *
+ * `name` was already constrained (NAME_PATTERN); `prompt` was not, in any way:
+ * no character filter, no length bound, no line bound. That matters because the
+ * dialog is line-structured — an icon, one line of text, then the consent row.
+ * A prompt carrying newlines could write what looks like further lines of the
+ * dialog, and `collapseToSingleLine`'s own doc names the shape: a value that
+ * "would otherwise render as a section of its own … a standing instruction the
+ * user never wrote". Same argument, a different surface.
+ *
+ * This is the SERVER half of a pair. The client half is the framing sanitiser
+ * the dialog now applies when it renders (`chat-framing.ts`), and neither is
+ * load-bearing alone — `src/core/sanitize.ts` calls itself "defense-in-depth
+ * behind the client-side framing sanitiser" for exactly this reason.
+ *
+ * Neither half is what makes the dialog honest, though. That is the product
+ * frame in the UI, which the agent cannot write. These two only keep the
+ * agent's own span inside the box it was given.
+ */
+const PROMPT_MAX_CHARS = 300;
+
+/**
+ * What forges a quote rather than filling it: bidi overrides and isolates
+ * (a span that reads forwards on screen and backwards in the store, so the
+ * quote is no longer a quote) and the zero-width formatters (a box that looks
+ * empty but is not). `collapseToSingleLine` covers neither — it handles C0/C1
+ * and the exotic separators. LRM/RLM are left alone; see the note on the
+ * client half in `chat-framing.ts`.
+ */
+const FORGING_CHARS = /[\u202A-\u202E\u2066-\u2069\u200B-\u200D\uFEFF]/g;
+
+/** Collapse to one line and bound the length, ellipsising when it had to cut. */
+function boundPromptText(s: string): string {
+  // Strip BEFORE collapsing — removing a character from between two spaces after
+  // the collapse leaves both spaces behind, and a leading override leaves a
+  // leading space.
+  const flat = collapseToSingleLine(s.replace(FORGING_CHARS, ''));
+  // Cut by CODE POINT, not by UTF-16 unit: `'a'.repeat(298) + '😀'` sliced at
+  // 299 units ends on a lone high surrogate, which round-trips to U+FFFD.
+  const points = [...flat];
+  return points.length > PROMPT_MAX_CHARS
+    ? `${points.slice(0, PROMPT_MAX_CHARS - 1).join('')}…`
+    : flat;
+}
 
 export const askSecretTool: ToolEntry<AskSecretInput> = {
   definition: {
@@ -99,8 +147,19 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
         `${exactMatches.map(n => `"${n}"`).join(', ')}. Reference ${refs} instead of collecting a duplicate. ` +
         `Only collect again if you genuinely need a separate key under a clearly different name.`;
     }
+    // Bounded, and the bound is not cosmetic: this hint is appended AFTER the
+    // agent's (capped) text, so it is the tail of the string the dialog renders.
+    // Left unbounded it grows ~64 chars per sibling key, and a vault with a
+    // dozen keys under one vendor pushes the whole hint past the render cap —
+    // truncating the one line in that box the agent does NOT author. Three names
+    // is what a person reads; the rest are a count.
+    const HINT_NAMES_SHOWN = 3;
+    const shown = nearMatches.slice(0, HINT_NAMES_SHOWN);
+    const overflow = nearMatches.length - shown.length;
+    const nameList = shown.map(n => `"${n}"`).join(', ')
+      + (overflow > 0 ? ` and ${String(overflow)} more` : '');
     const vendorHint = nearMatches.length > 0
-      ? ` (Related keys already in the vault under the same vendor: ${nearMatches.map(n => `"${n}"`).join(', ')} — ` +
+      ? ` (Related keys already in the vault under the same vendor: ${nameList} — ` +
         `reference one of those with secret:NAME if this is the same credential; otherwise continue to store the new key.)`
       : '';
 
@@ -108,7 +167,17 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       return 'Secure secret input is not available in this context. Ask the user to enter the key in Settings → API Keys instead. Do NOT ask the user to paste the secret into chat.';
     }
 
-    const outcome = await agent.promptSecret(input.name, `${input.prompt}${vendorHint}`, input.key_type);
+    // `vendorHint` is engine-composed and follows the agent's own text. Both
+    // land in the dialog's quoted-from-the-assistant box, so the hint is shown
+    // as slightly less trusted than it is — the safe direction, and stated here
+    // rather than left for a reader to notice. Separating the two on the wire
+    // needs `segments_json` (the column exists; `insertAskSecret` never fills
+    // it) and is a bigger cut than the frame this change is about.
+    const outcome = await agent.promptSecret(
+      input.name,
+      `${boundPromptText(input.prompt)}${vendorHint}`,
+      input.key_type,
+    );
 
     switch (outcome) {
       case 'saved':

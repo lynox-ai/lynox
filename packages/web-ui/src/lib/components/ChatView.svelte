@@ -82,6 +82,7 @@
 	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { isIosSafari } from '../utils/ios-safari.js';
+	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
 	import { isArtifactContentInline, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
@@ -1641,6 +1642,19 @@
 	const pendingPermission = $derived(getPendingPermission());
 	const pendingTabsPrompt = $derived(getPendingTabsPrompt());
 	const pendingSecret = $derived(getPendingSecretPrompt());
+
+	/**
+	 * Cleaned once, so the `{#if}` guard and the render agree — guarding on the
+	 * raw string opens a labelled box containing nothing for a zero-width prompt.
+	 *
+	 * 1200 is a backstop, not a bound: the tool caps the AGENT's span at 300
+	 * server-side, and everything past that is the engine's own "already in the
+	 * vault" hint. A cap near 300 would truncate the one line here the agent does
+	 * not author.
+	 */
+	const secretAgentText = $derived(
+		pendingSecret ? sanitizeFramingField(pendingSecret.prompt, 1200) : '',
+	);
 	const pendingMailConnect = $derived(getPendingMailConnect());
 	const chatError = $derived(getChatError());
 	const chatErrorDetail = $derived(getChatErrorDetail());
@@ -1699,7 +1713,16 @@
 		setPromptAttention(key, {
 			badge: t('attention.badge'),
 			notifyTitle: t('attention.notify_title'),
-			notifyBody: head?.question || t('attention.notify_body'),
+			// A credential prompt's `question` is written by the AGENT, and this body
+			// goes into an OS notification titled with product copy — outside the
+			// page, outside the frame the dialog now puts around that text, and with
+			// more authority than either. It is also delivered exactly when the tab
+			// is hidden, i.e. when the user has the least context. The notification's
+			// job is to get attention; the wording belongs in the dialog, where it is
+			// labelled as the assistant's.
+			notifyBody: head?.kind === 'secret'
+				? t('attention.notify_body')
+				: head?.question || t('attention.notify_body'),
 		});
 	});
 	// Clear the signal on unmount (navigating away mid-prompt must not strand a badge).
@@ -3352,9 +3375,32 @@
 		<div data-pending-prompt data-prompt-kind="secret" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-3">
 				{@render promptOrigin(pendingSecret.origin)}
+				<!-- Product copy: the agent must never own this slot. -->
 				<div class="flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-warning shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
-					<span class="text-sm font-medium text-text">{pendingSecret.prompt}</span>
+					<span class="text-sm font-medium text-text">{t('chat.secret_title')}</span>
+				</div>
+
+				<!-- Attributed, not demoted. Taking the title back is the security fix;
+				     burying the reason with it would break the ordinary case, where this
+				     sentence is the ONLY thing saying why a credential is wanted. It keeps
+				     body weight and sits directly under the title, quoted by the same
+				     left rule this file uses elsewhere for words that are not ours. -->
+				{#if secretAgentText}
+					<div class="border-l-2 border-border pl-3 space-y-0.5">
+						<div class="text-xs text-text-muted">{t('chat.secret_agent_said')}</div>
+						<div class="text-sm text-text-subtle max-h-32 overflow-y-auto [overflow-wrap:anywhere]">{secretAgentText}</div>
+					</div>
+				{/if}
+
+				<!-- Machine metadata, which is what this muted box is for in the
+				     mail-connect dialog below. The key name is also the input's
+				     placeholder, so it is the redundant element here, not the reason. -->
+				<div class="rounded-[var(--radius-sm)] bg-bg-muted px-3 py-2 text-xs text-text-subtle">
+					<div class="flex justify-between gap-2">
+						<span class="text-text-muted">{t('chat.secret_key_label')}</span>
+						<span class="font-mono [overflow-wrap:anywhere]">{pendingSecret.name}</span>
+					</div>
 				</div>
 
 				{#if !secretConsented}
@@ -3367,6 +3413,8 @@
 						<button onclick={handleSecretCancel} class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-subtle hover:text-text transition-all">{t('chat.secret_cancel')}</button>
 					</div>
 				{:else}
+					<!-- Product copy only: the agent's sentence as this field's accessible
+					     name is the same slot confusion, in audio. -->
 					<div class="flex gap-2">
 						<input
 							type="password"
@@ -3374,7 +3422,7 @@
 							bind:this={secretInputEl}
 							onkeydown={(e) => { if (e.key === 'Enter') handleSecretSave(); }}
 							class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text focus:border-accent focus:outline-none font-mono"
-							aria-label={pendingSecret.prompt || pendingSecret.name}
+							aria-label={t('chat.secret_title')}
 							placeholder={pendingSecret.name}
 							autocomplete="off"
 							data-1p-ignore
