@@ -131,12 +131,23 @@ function measureStaticPrefixTokens(): number {
 
 // ── Budget constants ─────────────────────────────────────────────────────
 //
-// Each budget = measured baseline + ~15 % headroom. The headroom is wide
-// enough that an ordinary small prompt tweak (a sentence, a clarifying
-// clause, a tightened tool description) does NOT trip the guard, but tight
-// enough that a real bloat — a new heavy tool, a multi-KB prompt section,
-// a verbose schema — does. Bumping a budget is an intentional, one-line,
-// reviewable change.
+// STATIC_PREFIX_BUDGET is a RATCHET, not a ceiling with slack: it carries the
+// exact current measurement, so ANY growth of the static prefix trips it and
+// has to be bumped deliberately. That is the "intentional, one-line,
+// reviewable change" below, and it is what the values in this file have
+// actually done — on origin/main the budget was 23634 against a measured
+// 23634, to the token.
+//
+// This paragraph used to open "measured baseline + ~15 % headroom … an
+// ordinary small prompt tweak does NOT trip the guard", which contradicted
+// both the next sentence and every value under it. Corrected 2026-08-23 to
+// describe the guard that exists — no value moved for it. If the ratchet is
+// ever the wrong design, that is a deliberate change to make, and the fix is
+// to widen the values, not to keep prose that tells the next reader their
+// prompt edit will sail through when it will not.
+//
+// The per-tool budget below is a different shape and does carry slack —
+// it bounds the largest single tool definition, not a sum.
 //
 // Baselines measured on origin/main @ 8560d3b3, 2026-05-21, via
 // `estimateTokens` (≈3.5 chars/token):
@@ -318,8 +329,9 @@ function measureStaticPrefixTokens(): number {
 // The MECHANISM (ledger path, absent from backup and migration) stays on
 // `detailedGuidance` where the on-use split puts it — the full-mechanism wording in the
 // description measured 23649, i.e. +15 more for prose the model does not need to decide.
-// +184 (23634 → 23818): the no-install policy in `## Tools`, plus the bash
-// description losing "package management" and gaining the pointer to it.
+// +183 (23634 → 23817): the no-install policy in `## Tools`, plus the bash
+// description losing "package management" and gaining the rule that replaces
+// it. Measured, not estimated.
 // WHAT IT BUYS, measured rather than argued — the chain is a `read this PDF`
 // task followed by three distinct missing-tool failures (pdftotext, PyPDF2,
 // pdf-parse), n=4 per arm:
@@ -337,7 +349,20 @@ function measureStaticPrefixTokens(): number {
 // +291 and was cut to +184 with the effect re-verified on the exact shipped text.
 // Whether the "offer what exists" half earns its share is pinned by tests but has
 // no behaviour measurement of its own.
-const STATIC_PREFIX_BUDGET = 23818;
+const STATIC_PREFIX_BUDGET = 23817;
+
+/**
+ * How far ABOVE the measurement the budget may sit before the ratchet is a
+ * fiction. Without this, the guard has a silent escape hatch: bumping the
+ * budget to a round number well past the measurement keeps every test green
+ * while banking headroom nobody reviewed — the exact mutation this file's
+ * comment claims cannot happen ("ANY growth trips it"). A claim in prose that
+ * nothing enforces is not a rule, so it is enforced here.
+ *
+ * 50 tokens ≈ 0.2 % — room for a one-word edit landing between a measurement
+ * and its commit, not room for a paragraph.
+ */
+const STATIC_PREFIX_SLACK = 50;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
@@ -354,6 +379,17 @@ describe('Tier-1 cost-regression guard', () => {
   });
 
   // Guard A — static cacheable-prefix budget.
+  it('keeps STATIC_PREFIX_BUDGET pinned to the measurement, not parked above it', () => {
+    const measured = measureStaticPrefixTokens();
+    expect(
+      STATIC_PREFIX_BUDGET - measured,
+      `STATIC_PREFIX_BUDGET is ${STATIC_PREFIX_BUDGET} against a measured ${measured} — ` +
+        `${STATIC_PREFIX_BUDGET - measured} tokens of unreviewed headroom. ` +
+        `Set the budget to the measurement (${measured}); the guard is a ratchet, ` +
+        `not a ceiling with slack.`,
+    ).toBeLessThanOrEqual(STATIC_PREFIX_SLACK);
+  });
+
   it('keeps the static cacheable prefix within STATIC_PREFIX_BUDGET', () => {
     const measured = measureStaticPrefixTokens();
     expect(

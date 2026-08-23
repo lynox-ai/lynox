@@ -819,9 +819,20 @@ describe('the no-install policy (DEF-bash-install-workaround)', () => {
   // the policy in place, both providers stop and report after a chain of
   // missing-tool failures instead of continuing to engineer around the gap
   // (Anthropic 4/4 → 0/4 still calling tools, Mistral 1/4 → 0/4).
+  /** The policy paragraph alone — asserting against the whole SYSTEM_PROMPT made
+   *  two of these vacuous: `pip` matches "pipeline" and `web_research` appears
+   *  seven other times, so both stayed green with the paragraph deleted. */
+  const policy = (() => {
+    const start = SYSTEM_PROMPT.indexOf('**Never install software**');
+    expect(start, 'the no-install policy is missing from SYSTEM_PROMPT').toBeGreaterThan(-1);
+    const rest = SYSTEM_PROMPT.slice(start);
+    const end = rest.indexOf('\n\n**');
+    return end === -1 ? rest : rest.slice(0, end);
+  })();
+
   it('forbids installing software, naming the managers a model actually reaches for', () => {
     for (const manager of ['apt-get', 'npm install', 'pip', 'brew', 'cargo', 'gem']) {
-      expect(SYSTEM_PROMPT, `the policy should name ${manager}`).toContain(manager);
+      expect(policy, `the policy should name ${manager}`).toContain(manager);
     }
   });
 
@@ -829,15 +840,15 @@ describe('the no-install policy (DEF-bash-install-workaround)', () => {
     // The dogfood thread did not open with `apt-get`; it arrived there after
     // three other things failed. A policy that only covers the opening move
     // would not have changed that thread.
-    expect(SYSTEM_PROMPT).toMatch(/not as a first attempt and not as a fallback/i);
+    expect(policy).toMatch(/not as a first attempt and not as a fallback/i);
   });
 
   it('offers the paths that actually exist instead of only forbidding', () => {
     // A prohibition with no alternative just moves the model to the next
     // workaround — which in the measured thread was hand-rolling a parser.
-    expect(SYSTEM_PROMPT).toMatch(/attach the file to the chat/i);
-    expect(SYSTEM_PROMPT).toContain('web_research');
+    expect(policy).toMatch(/attach the file to the chat/i);
+    expect(policy).toContain('web_research');
     // And it must frame a missing capability as something to REPORT.
-    expect(SYSTEM_PROMPT).toMatch(/fact to REPORT/i);
+    expect(policy).toMatch(/fact to REPORT/i);
   });
 });

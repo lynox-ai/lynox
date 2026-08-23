@@ -141,10 +141,19 @@ export const bashTool: ToolEntry<BashInput> = {
     //
     // What replaces it is a POLICY, not a claim about the environment: a local
     // `npx lynox` run may well have a working apt or npm, so "you cannot install"
-    // would be false there. "Do not install" is true everywhere, and the reason —
-    // plus what to do instead — belongs in the system prompt, where there is room
-    // to say it.
-    description: 'Execute a shell command for system operations, git, or process control. NEVER use for file reads/writes (use read_file/write_file), web searches (use web_research), or installing packages (see the tools section of your instructions).',
+    // would be false there. "Do not install" is true everywhere.
+    //
+    // It has to be SELF-CONTAINED. A first draft ended "(see the tools section of
+    // your instructions)" and that pointer dangles for most holders of this tool:
+    // a spawned child gets GROUNDING_PROMPT_BLOCK and its own role prompt, never
+    // SYSTEM_PROMPT (spawn.ts), while inheriting the parent's tool list — bash
+    // included. Same for a workflow step declaring `tools:['bash']` and for any
+    // deployment that sets its own `config.systemPrompt`. Pointing at a document
+    // the reader does not have is the same failure as advertising a capability the
+    // runtime does not have, one step along. The system prompt keeps the REASON
+    // and the alternatives, for the agent that has it; the rule travels with the
+    // tool, for everyone.
+    description: 'Execute a shell command for system operations, git, or process control. NEVER use for file reads/writes (use read_file/write_file), web searches (use web_research), or installing packages — report the missing capability instead.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,

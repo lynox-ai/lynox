@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execSync } from 'node:child_process';
 import { bashTool, buildSafeEnv } from './bash.js';
+import { GROUNDING_PROMPT_BLOCK } from '../../core/prompts.js';
 
 vi.mock('node:child_process', () => ({
   execSync: vi.fn(),
@@ -351,5 +352,28 @@ describe('bash tool description (DEF-bash-install-workaround)', () => {
     // distrust the description. "Do not install" is true in every deployment.
     expect(description).toMatch(/installing packages/i);
     expect(description).not.toMatch(/no package manager|cannot install|not available/i);
+  });
+
+  it('stands alone — it does not defer to text the holder may not have', () => {
+    // The first draft of this description ended "(see the tools section of your
+    // instructions)". That pointer is dead for most holders of the tool: a
+    // spawned child is given GROUNDING_PROMPT_BLOCK plus its own role prompt and
+    // never SYSTEM_PROMPT (spawn.ts), and so is a workflow step
+    // (runtime-adapter.ts), while both inherit the parent's tool list including
+    // bash. Pointing at a document the reader does not have is the same class of
+    // defect as advertising a capability the runtime does not have.
+    expect(description).not.toMatch(
+      /see the .*(section|instructions)|your instructions|the system prompt/i,
+    );
+  });
+
+  it('reaches a spawned child, which gets the grounding block and not SYSTEM_PROMPT', () => {
+    // The invariant is about the HOLDER, not about one file: whatever a child is
+    // handed, together with this description, has to carry the rule. Written as
+    // the union so it still passes if the rule ever moves into the grounding
+    // block — and fails if it lives in neither, which is the case that ships a
+    // child that does not know.
+    const whatAChildReceives = `${GROUNDING_PROMPT_BLOCK}\n\n${description}`;
+    expect(whatAChildReceives).toMatch(/installing packages|never install/i);
   });
 });
