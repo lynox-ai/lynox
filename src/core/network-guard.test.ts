@@ -532,11 +532,15 @@ describe('assertHostPolicy (network_policy SSOT)', () => {
     }
   });
 
-  it('deny-all blocks BOTH surfaces incl. discovery (air-gap, P4)', () => {
+  it('deny-all blocks BOTH surfaces incl. discovery, naming the tool scope (P4)', () => {
     const ctx = policyCtx({ networkPolicy: 'deny-all' });
-    expect(() => assertHostPolicy('https://api.example.com', 'full-control', ctx)).toThrow(/air-gapped isolation/);
+    // Pins the SCOPE, not just the refusal: the message must say this TOOL is
+    // blocked. It used to read "air-gapped isolation", i.e. a claim about the
+    // machine — a stronger promise than `network_policy` makes, since it covers
+    // three tools and nothing else.
+    expect(() => assertHostPolicy('https://api.example.com', 'full-control', ctx)).toThrow(/for this tool \(network_policy=deny-all\)/);
     // web_research (discovery) must NOT be a deny-all bypass.
-    expect(() => assertHostPolicy('https://api.example.com', 'discovery', ctx)).toThrow(/air-gapped isolation/);
+    expect(() => assertHostPolicy('https://api.example.com', 'discovery', ctx)).toThrow(/for this tool \(network_policy=deny-all\)/);
   });
 
   it('allow-list stays authoritative + uniform across surfaces', () => {

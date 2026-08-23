@@ -30,7 +30,7 @@ const MAX_REDIRECTS = 5;
 /**
  * Egress gate for the web_research tool surface — used by BOTH the content/page
  * fetch (below) AND the search-query path (search-provider.ts), so an
- * air-gapped / allow-listed policy can't be bypassed by phrasing exfil as a
+ * deny-all / allow-listed policy can't be bypassed by phrasing exfil as a
  * search query. web_research is a DISCOVERY surface: open under `guarded`
  * (credential-free reads) but still SSRF/enforce_https gated and fully blocked
  * under `deny-all`. Delegates to the shared network-guard SSOT so the policy

@@ -194,9 +194,16 @@ export function assertHostPolicy(
     case 'allow-all':
       break;
     case 'deny-all':
-      // 'air-gapped' keeps the friendly-message mapping match; blocks EVERY
-      // surface incl. discovery (web_research), unlike guarded.
-      throw new Error('Blocked: network access denied (air-gapped isolation)');
+      // Blocks EVERY surface this policy reaches, incl. discovery (web_research),
+      // unlike guarded. The wording says "for this tool" deliberately, and the
+      // reason is not cosmetic: `network_policy` gates `http_request`, `api_setup`
+      // and `web_research` — and nothing else (engine-init.ts states the scope).
+      // The engine's own outbound paths (LLM, mail, push, backup) and anything a
+      // shell command starts are outside it. The previous text, "air-gapped
+      // isolation", claimed the machine had no network; that is a stronger promise
+      // than the policy makes, and it is the phrase this string is graded against.
+      // `deny-all` is the mapping key in http.ts's friendlyBlockMessage.
+      throw new Error('Blocked: network access denied for this tool (network_policy=deny-all)');
     case 'allow-list':
       // Authoritative operator allow-list, uniform across surfaces.
       if (!ctx || !hostInFloor(hostname, ctx)) {

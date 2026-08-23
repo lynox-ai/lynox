@@ -996,12 +996,19 @@ describe('httpRequestTool', () => {
       expect(result).toContain('HTTP 200');
     });
 
-    it('blocks every host under deny-all (air-gapped)', async () => {
+    it('blocks every host under deny-all, and says the TOOL is blocked — not the machine', async () => {
       applyNetworkPolicy(testCtx, 'deny-all', undefined);
       mockDnsPublic();
-      // deny-all → friendly-rewritten via the 'Blocked:'-prefixed message.
-      await expect(handler({ url: 'https://api.example.com' }, makeAgent()))
-        .rejects.toThrow('Network access is disabled in this security mode');
+      // This message is the tool RESULT, so the model reads it and learns a rule
+      // from it. It used to say "Network access is disabled in this security
+      // mode" — a claim about the machine, while `network_policy` covers three
+      // tools and nothing else. A model that believes the machine is offline
+      // either abandons work it could legitimately do, or finds another route,
+      // succeeds, and concludes the policy is decorative. Both assertions matter:
+      // the scope must be named, and the over-broad phrasing must be gone.
+      const err = await handler({ url: 'https://api.example.com' }, makeAgent()).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe('Network access is disabled for this tool in the current security mode.');
     });
 
     it('allows a listed host under allow-list', async () => {

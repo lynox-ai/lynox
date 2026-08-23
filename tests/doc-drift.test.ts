@@ -171,3 +171,53 @@ describe('env-ABI consume-side: renamed vars keep their legacy read-alias (src/c
 
 // The former BEHAVIOR_CONSUMERS block (#830) is retired the same way — its five
 // triples are registry rows now, asserted by the generated forward test.
+
+describe('doc<->code drift: what network_policy does NOT cover (docs/daily-use/configuration.md)', () => {
+  // The failure this pins is a promise, not a value. `network_policy` gates
+  // `http_request`, `api_setup` and `web_research` — and nothing else. Everything
+  // the engine itself dials (LLM, mail, push, backup) and anything a shell
+  // command starts is outside it, which `engine-init.ts` states in its own
+  // comment. A reader who takes `deny-all` for "this machine is offline" has been
+  // given a stronger promise than the setting keeps, and that reading is the one
+  // that gets acted on: it is why the guard's own error text used to say
+  // "air-gapped isolation".
+  const doc = read('docs/src/content/docs/daily-use/configuration.md');
+  // Bounded at the NEXT heading. Unbounded, the slice ran to end-of-file and
+  // picked up matches from later sections — deleting `the LLM provider, ` from
+  // the exclusion list stayed green off `### LLM Provider` further down, so the
+  // assertion was reading the wrong part of the document.
+  const secStart = doc.indexOf('### Network Policy');
+  const secEnd = doc.indexOf('\n### ', secStart + 1);
+  const section = secEnd === -1 ? doc.slice(secStart) : doc.slice(secStart, secEnd);
+
+  it('names the shell as a path the policy does not reach', () => {
+    expect(section).toMatch(/`bash`/);
+    expect(section.toLowerCase()).toContain('does not cover');
+  });
+
+  it('names the engine\'s own outbound paths as uncovered too', () => {
+    // Not just bash: a reader who closes the shell hole still has these.
+    for (const term of ['LLM', 'mail', 'backup']) {
+      expect(section, `the exclusion list should name ${term}`).toContain(term);
+    }
+  });
+
+  it('the guard\'s deny-all message states the tool scope, not an offline machine', () => {
+    // The doc half is above; this is the code half, so the two cannot drift
+    // apart. The wire itself is pinned in network-guard.test.ts and http.test.ts;
+    // what this adds is that the OVER-BROAD phrasing cannot come back.
+    const guard = read('src/core/network-guard.ts');
+    const denyAllThrow = guard.slice(guard.indexOf("case 'deny-all':"), guard.indexOf("case 'allow-list':"));
+    const guardCode = denyAllThrow.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+    expect(guardCode).toContain('for this tool');
+    expect(guardCode, 'the deny-all message must not claim the machine is air-gapped').not.toContain('air-gapped');
+
+    // BOTH halves, because there are two strings and reverting either one alone
+    // used to leave this green: the guard throws the technical message, and
+    // http.ts rewrites it into the one the model actually reads.
+    const http = read('src/tools/builtin/http.ts');
+    const mapLine = http.split('\n').find((l) => l.includes("technical.includes('network_policy=deny-all')"));
+    expect(mapLine, 'the friendly-message mapping for deny-all is gone').toBeDefined();
+    expect(mapLine).toContain('for this tool');
+  });
+});
