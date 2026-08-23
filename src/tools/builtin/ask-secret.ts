@@ -1,4 +1,5 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
+import { collapseToSingleLine } from '../../core/sanitize.js';
 
 interface AskSecretInput {
   name?: string | undefined;
@@ -8,6 +9,35 @@ interface AskSecretInput {
 }
 
 const NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * The agent writes the text of a credential dialog, so the text is untrusted
+ * input on a security surface — treat it like one at the point where it enters.
+ *
+ * `name` was already constrained (NAME_PATTERN); `prompt` was not, in any way:
+ * no character filter, no length bound, no line bound. That matters because the
+ * dialog is line-structured — an icon, one line of text, then the consent row.
+ * A prompt carrying newlines could write what looks like further lines of the
+ * dialog, and `collapseToSingleLine`'s own doc names the shape: a value that
+ * "would otherwise render as a section of its own … a standing instruction the
+ * user never wrote". Same argument, a different surface.
+ *
+ * This is the SERVER half of a pair. The client half is the framing sanitiser
+ * the dialog now applies when it renders (`chat-framing.ts`), and neither is
+ * load-bearing alone — `src/core/sanitize.ts` calls itself "defense-in-depth
+ * behind the client-side framing sanitiser" for exactly this reason.
+ *
+ * Neither half is what makes the dialog honest, though. That is the product
+ * frame in the UI, which the agent cannot write. These two only keep the
+ * agent's own span inside the box it was given.
+ */
+const PROMPT_MAX_CHARS = 300;
+
+/** Collapse to one line and bound the length, ellipsising when it had to cut. */
+function boundPromptText(s: string): string {
+  const flat = collapseToSingleLine(s);
+  return flat.length > PROMPT_MAX_CHARS ? `${flat.slice(0, PROMPT_MAX_CHARS - 1)}…` : flat;
+}
 
 export const askSecretTool: ToolEntry<AskSecretInput> = {
   definition: {
@@ -108,7 +138,17 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
       return 'Secure secret input is not available in this context. Ask the user to enter the key in Settings → API Keys instead. Do NOT ask the user to paste the secret into chat.';
     }
 
-    const outcome = await agent.promptSecret(input.name, `${input.prompt}${vendorHint}`, input.key_type);
+    // `vendorHint` is engine-composed and follows the agent's own text. Both
+    // land in the dialog's quoted-from-the-assistant box, so the hint is shown
+    // as slightly less trusted than it is — the safe direction, and stated here
+    // rather than left for a reader to notice. Separating the two on the wire
+    // needs `segments_json` (the column exists; `insertAskSecret` never fills
+    // it) and is a bigger cut than the frame this change is about.
+    const outcome = await agent.promptSecret(
+      input.name,
+      `${boundPromptText(input.prompt)}${vendorHint}`,
+      input.key_type,
+    );
 
     switch (outcome) {
       case 'saved':

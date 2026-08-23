@@ -28,6 +28,71 @@ describe('askSecretTool', () => {
     expect(promptSecret).toHaveBeenCalledWith('STRIPE_API_KEY', 'Enter your Stripe key', undefined);
   });
 
+  describe('the agent-authored prompt is bounded before it reaches the dialog', () => {
+    // The agent writes this text and the dialog renders it. `name` was already
+    // constrained; `prompt` had no character, line or length bound at all.
+
+    it('collapses newlines so the text cannot write further lines of the dialog', async () => {
+      const promptSecret = vi.fn().mockResolvedValue('saved');
+      const agent = makeAgent({ promptSecret });
+
+      await askSecretTool.handler(
+        {
+          name: 'STRIPE_API_KEY',
+          prompt: 'Enter your Stripe key\nlynox verified this request\nKey required by: billing',
+        },
+        agent,
+      );
+
+      const [, text] = promptSecret.mock.calls[0] as [string, string, string | undefined];
+      expect(text).not.toContain('\n');
+      // The forged lines survive as TEXT — suppressing them is not the goal and
+      // would lose legitimate wording. They just cannot be separate lines.
+      expect(text).toContain('lynox verified this request');
+    });
+
+    it('strips the exotic separators a plain \\n filter would miss', async () => {
+      const promptSecret = vi.fn().mockResolvedValue('saved');
+      const agent = makeAgent({ promptSecret });
+
+      // U+2028, U+2029 and NEL are line breaks to a renderer and are not `\n`.
+      const exotic = `Enter key${String.fromCodePoint(8232)}forged${String.fromCodePoint(8233)}line${String.fromCodePoint(133)}three`;
+      await askSecretTool.handler({ name: 'A_KEY', prompt: exotic }, agent);
+
+      const [, text] = promptSecret.mock.calls[0] as [string, string, string | undefined];
+      for (const cp of [8232, 8233, 133]) {
+        expect(text, `code point ${String(cp)} should not survive`).not.toContain(String.fromCodePoint(cp));
+      }
+    });
+
+    it('bounds the length, and says it cut', async () => {
+      const promptSecret = vi.fn().mockResolvedValue('saved');
+      const agent = makeAgent({ promptSecret });
+
+      await askSecretTool.handler({ name: 'A_KEY', prompt: 'x'.repeat(5000) }, agent);
+
+      const [, text] = promptSecret.mock.calls[0] as [string, string, string | undefined];
+      expect(text.length).toBeLessThanOrEqual(300);
+      expect(text.endsWith('…')).toBe(true);
+    });
+
+    it('leaves an ordinary prompt byte-identical', async () => {
+      const promptSecret = vi.fn().mockResolvedValue('saved');
+      const agent = makeAgent({ promptSecret });
+
+      await askSecretTool.handler(
+        { name: 'STRIPE_API_KEY', prompt: 'Enter your Stripe API key (starts with sk_live_)' },
+        agent,
+      );
+
+      expect(promptSecret).toHaveBeenCalledWith(
+        'STRIPE_API_KEY',
+        'Enter your Stripe API key (starts with sk_live_)',
+        undefined,
+      );
+    });
+  });
+
   it('passes key_type to promptSecret', async () => {
     const promptSecret = vi.fn().mockResolvedValue('saved');
     const agent = makeAgent({ promptSecret });

@@ -82,6 +82,7 @@
 	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { isIosSafari } from '../utils/ios-safari.js';
+	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
 	import { isArtifactContentInline, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
@@ -3352,9 +3353,36 @@
 		<div data-pending-prompt data-prompt-kind="secret" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-3">
 				{@render promptOrigin(pendingSecret.origin)}
+				<!-- The title is OURS. It used to be `{pendingSecret.prompt}` — the
+				     agent-authored sentence — set in `text-sm font-medium text-text`,
+				     which is byte-identical to the classes the product's own titles use
+				     three blocks down (`{t('chat.mail_connect_title')}`). A dialog that
+				     asks for a credential was therefore titled by whoever wrote the tool
+				     call, and external content (a mail body, a fetched page) can be what
+				     wrote it. Nothing about the text was the problem — it is escaped, and
+				     this dialog has never rendered markdown. The problem was the SLOT.
+				     The agent's words move to the muted box below, where this file
+				     already puts variable content in the mail-connect block. -->
 				<div class="flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-warning shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
-					<span class="text-sm font-medium text-text">{pendingSecret.prompt}</span>
+					<span class="text-sm font-medium text-text">{t('chat.secret_title')}</span>
+				</div>
+
+				<div class="rounded-[var(--radius-sm)] bg-bg-muted px-3 py-2 text-xs text-text-subtle space-y-1">
+					<div class="flex justify-between gap-2">
+						<span class="text-text-muted">{t('chat.secret_key_label')}</span>
+						<span class="font-mono [overflow-wrap:anywhere]">{pendingSecret.name}</span>
+					</div>
+					{#if pendingSecret.prompt}
+						<div class="space-y-0.5 pt-1">
+							<div class="text-text-muted">{t('chat.secret_agent_said')}</div>
+							<!-- Second half of a pair: the tool already collapsed and bounded
+							     this on the server. Applied again here because the client is
+							     where it is rendered, and a prompt restored from the store
+							     predates that change. -->
+							<div class="max-h-24 overflow-y-auto [overflow-wrap:anywhere]">{sanitizeFramingField(pendingSecret.prompt, 400)}</div>
+						</div>
+					{/if}
 				</div>
 
 				{#if !secretConsented}
@@ -3367,6 +3395,10 @@
 						<button onclick={handleSecretCancel} class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-subtle hover:text-text transition-all">{t('chat.secret_cancel')}</button>
 					</div>
 				{:else}
+					<!-- The input's `aria-label` was `pendingSecret.prompt || pendingSecret.name`,
+					     which handed the same slot confusion to a screen reader: the agent's
+					     sentence read out as the field's own label. The label is the product's;
+					     the key name says which field it is. -->
 					<div class="flex gap-2">
 						<input
 							type="password"
@@ -3374,7 +3406,7 @@
 							bind:this={secretInputEl}
 							onkeydown={(e) => { if (e.key === 'Enter') handleSecretSave(); }}
 							class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text focus:border-accent focus:outline-none font-mono"
-							aria-label={pendingSecret.prompt || pendingSecret.name}
+							aria-label="{t('chat.secret_title')} — {pendingSecret.name}"
 							placeholder={pendingSecret.name}
 							autocomplete="off"
 							data-1p-ignore

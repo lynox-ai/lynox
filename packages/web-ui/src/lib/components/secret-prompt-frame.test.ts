@@ -1,0 +1,125 @@
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+
+/**
+ * The credential dialog's title has to be OURS.
+ *
+ * It used to render `{pendingSecret.prompt}` — the sentence the AGENT wrote — in
+ * `text-sm font-medium text-text`, the same classes the product's own titles use
+ * a few blocks down in this file. So a dialog asking for a credential was titled
+ * by whoever wrote the tool call, and external content the agent read (a mail
+ * body, a fetched page) can be what wrote it. The text was never the hole: it is
+ * escaped, and this dialog has never rendered markdown. The SLOT was.
+ *
+ * There is no component renderer in this package's tests, so a source assertion
+ * is the only instrument for a Svelte template — the same one
+ * `prompt-markdown.test.ts` uses on this file, for the same reason. To keep it
+ * from being a string count, it pins the STRUCTURE: which expression sits in the
+ * title slot, and where the agent's text is allowed to appear.
+ */
+const CHATVIEW = readFileSync(
+  fileURLToPath(new URL('./ChatView.svelte', import.meta.url)),
+  'utf-8',
+);
+
+const I18N = readFileSync(
+  fileURLToPath(new URL('../i18n.svelte.ts', import.meta.url)),
+  'utf-8',
+);
+
+/**
+ * The secret block alone, bounded by its OWN closing tag — the `{#if
+ * pendingSecret}` block sits at one tab, so `\n\t{/if}` closes it and nothing
+ * else. Deliberately not bounded by "the next `{#if pending…}`": the first
+ * such marker after the opener is the block's own inner conditional, so that
+ * boundary silently truncated the slice to the title row and made four
+ * assertions below pass on absence. A boundary that keys on a NEIGHBOUR — or,
+ * as there, on a CHILD — is the recurring bug in this shape, so the length is
+ * asserted at both ends.
+ */
+const secretBlock = (() => {
+  const start = CHATVIEW.indexOf('{#if pendingSecret}');
+  expect(start, 'the secret prompt block is gone from ChatView').toBeGreaterThan(-1);
+  const rest = CHATVIEW.slice(start);
+  const end = rest.indexOf('\n\t{/if}');
+  const raw = end === -1 ? rest : rest.slice(0, end);
+  // Strip markup comments: this guard measures the TEMPLATE, not prose about it.
+  // The block's own comment quotes the old `{pendingSecret.prompt}` title while
+  // explaining why it is gone, and an unstripped scan read that quotation as a
+  // live occurrence — the guard failing on its own documentation.
+  return raw.replace(/<!--[\s\S]*?-->/g, '');
+})();
+
+describe('the credential dialog frames the agent, it does not let the agent frame it', () => {
+  it('slices only its own block — the whole of it, and no more', () => {
+    expect(secretBlock).toContain('data-prompt-kind="secret"');
+    // Lower bound: the slice must reach the save button, i.e. the end of the
+    // dialog. Without this, a truncated slice makes the assertions below pass
+    // by absence — which is exactly what the first version of this file did.
+    expect(secretBlock, 'the slice stops before the end of the dialog').toContain(
+      `{t('chat.secret_save')}`,
+    );
+    // Upper bound: it must not have swallowed the next dialog.
+    expect(secretBlock, 'the slice has grown past the secret block').not.toContain(
+      'pendingMailConnect',
+    );
+  });
+
+  it('puts a product string in the title slot', () => {
+    // The title span: icon row, `text-sm font-medium text-text`.
+    expect(secretBlock).toMatch(
+      /<span class="text-sm font-medium text-text">\{t\('chat\.secret_title'\)\}<\/span>/,
+    );
+  });
+
+  it('never renders the agent text in the title slot', () => {
+    expect(secretBlock).not.toMatch(
+      /<span class="text-sm font-medium text-text">\{pendingSecret\.prompt\}<\/span>/,
+    );
+  });
+
+  it('renders the agent text only through the framing sanitiser', () => {
+    // Every appearance of the agent's text in this block goes through
+    // `sanitizeFramingField`. A bare `{pendingSecret.prompt}` anywhere is the
+    // regression this pins.
+    const bareUses = secretBlock.match(/\{pendingSecret\.prompt\b(?![\w.])/g) ?? [];
+    const sanitised = secretBlock.match(/sanitizeFramingField\(pendingSecret\.prompt/g) ?? [];
+    expect(bareUses.length, 'agent text is rendered without the framing sanitiser').toBe(0);
+    expect(sanitised.length).toBeGreaterThan(0);
+  });
+
+  it('labels the agent text as the assistant’s, inside the muted box', () => {
+    expect(secretBlock).toContain(`{t('chat.secret_agent_said')}`);
+    expect(secretBlock).toContain('bg-bg-muted');
+  });
+
+  it('gives a screen reader the product label, not the agent sentence', () => {
+    // The input's accessible name is the same slot in audio.
+    expect(secretBlock).toMatch(/aria-label="\{t\('chat\.secret_title'\)\} — \{pendingSecret\.name\}"/);
+    expect(secretBlock).not.toMatch(/aria-label=\{pendingSecret\.prompt/);
+  });
+
+  it('bounds the agent text so it cannot push the controls off screen', () => {
+    expect(secretBlock).toMatch(/max-h-\d+ overflow-y-auto/);
+    expect(secretBlock).toContain('[overflow-wrap:anywhere]');
+  });
+
+  it('ships both languages for every new key', () => {
+    // `translations` is module-private, so this reads the table's source. Each
+    // key must carry a non-empty de AND en, and they must differ — a key copied
+    // from one language into the other is the failure this catches, and it is
+    // the one the repo's own i18n rule warns about ("write each language
+    // natively … never translate one from the other").
+    for (const key of ['chat.secret_title', 'chat.secret_key_label', 'chat.secret_agent_said']) {
+      const line = I18N.split('\n').find((l) => l.includes(`'${key}':`));
+      expect(line, `${key} is missing from the translation table`).toBeDefined();
+      const de = /\bde:\s*'((?:[^'\\]|\\.)*)'/.exec(line!)?.[1];
+      const en = /\ben:\s*'((?:[^'\\]|\\.)*)'/.exec(line!)?.[1];
+      expect(de, `${key} has no German`).toBeTruthy();
+      expect(en, `${key} has no English`).toBeTruthy();
+      expect(de, `${key} is the same string in both languages`).not.toBe(en);
+    }
+  });
+});

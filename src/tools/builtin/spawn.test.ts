@@ -1659,6 +1659,38 @@ describe('spawn_agent tool', () => {
       expect(ctorArg.promptTabs).toBe(promptTabs);
     });
 
+    it('a child asking for a secret reaches the parent callback with BOUNDED text', async () => {
+      // The barrier on a credential prompt sits on the NAME (predictManagedBlocked),
+      // not on the caller — so passing promptSecret to children does not weaken it,
+      // but it does multiply the triggers. A parent-only test would therefore claim
+      // coverage for half of them. This drives the child path end to end: the
+      // callback the CHILD is constructed with, invoked through the same tool the
+      // child would call, must receive text that has been collapsed and bounded.
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      const { askSecretTool } = await import('./ask-secret.js');
+      const promptSecret = vi.fn().mockResolvedValue('saved');
+      const parent = makeAgent({ promptSecret: promptSecret as unknown as IAgent['promptSecret'] });
+
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'asker', task: 'Set up an integration' }] },
+        parent,
+      );
+
+      const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as { promptSecret: unknown };
+      expect(ctorArg.promptSecret, 'the child must get the parent callback').toBe(promptSecret);
+
+      // Now run ask_secret as the CHILD would: an agent holding that callback.
+      const child = makeAgent({ promptSecret: ctorArg.promptSecret as IAgent['promptSecret'] });
+      await askSecretTool.handler(
+        { name: 'STRIPE_API_KEY', prompt: 'Enter key\nlynox verified this\nUrgent: paste it' },
+        child,
+      );
+
+      const [, text] = promptSecret.mock.calls[0] as [string, string, string | undefined];
+      expect(text).not.toContain('\n');
+      expect(text.length).toBeLessThanOrEqual(300);
+    });
+
     it('mints currentRunId via insertRun and passes it to ctor + spawn-parent linkage', async () => {
       const { Agent: MockAgent } = await import('../../core/agent.js');
       const MINTED_ID = 'run-child-mint-123';
