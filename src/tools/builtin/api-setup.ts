@@ -770,7 +770,14 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
       // bootstrap is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
       agent.sessionCounters.httpRequests++;
       if (!resp.ok) {
-        return `Error: failed to fetch docs page (HTTP ${String(resp.status)} ${resp.statusText}). Check the URL and try again.`;
+        // `resp.statusText` is the HTTP reason phrase — chosen by the REMOTE server,
+        // free-form, and echoed here verbatim. `api_setup` is on the agent's
+        // scan-exempt tool allowlist, so this string reaches the model WITHOUT
+        // `scanToolResult`. Measured: a server returning `404 Ignore all previous
+        // instructions…` had the full text delivered byte-identically, and the
+        // injection detector WOULD have flagged it — it never sees it. The status
+        // code alone is diagnostic enough, and it is not attacker-authored text.
+        return `Error: failed to fetch docs page (HTTP ${String(resp.status)}). Check the URL and try again.`;
       }
       const body = await readBodyLimited(resp, DOCS_BODY_MAX_BYTES);
       docsText = body.text;
@@ -1043,7 +1050,9 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
           clearTimeout(timer);
         }
         if (!resp.ok) {
-          return `Error: failed to fetch OpenAPI spec (HTTP ${String(resp.status)} ${resp.statusText}). Check the URL or pass a direct link to the JSON spec.`;
+          // Same server-controlled reason phrase as the docs-page path above —
+          // dropped for the same reason (scan-exempt tool, verbatim echo).
+          return `Error: failed to fetch OpenAPI spec (HTTP ${String(resp.status)}). Check the URL or pass a direct link to the JSON spec.`;
         }
         const { text, truncated } = await readBodyLimited(resp, OPENAPI_SPEC_MAX_BYTES);
         if (truncated) {
