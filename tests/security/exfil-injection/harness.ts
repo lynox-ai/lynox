@@ -16,7 +16,8 @@
 import { Agent } from '../../../src/core/agent.js';
 import { initLLMProvider } from '../../../src/core/llm-client.js';
 import { wrapUntrustedData } from '../../../src/core/data-boundary.js';
-import { probeHostPolicy } from './host-policy-probe.js';
+import { probeHostPolicy, type PolicyProbe } from './host-policy-probe.js';
+import type { EgressSurface } from '../../../src/core/network-guard.js';
 import { httpRequestTool } from '../../../src/tools/builtin/http.js';
 import { createWebSearchTool } from '../../../src/integrations/search/web-search-tool.js';
 import { createMailSendTool } from '../../../src/integrations/mail/tools/mail-send.js';
@@ -89,8 +90,28 @@ export function buildInstrumentedTools(
   onToolCall: () => void,
   markDelivered: () => void,
   interactive: boolean,
+  /**
+   * Called when the gate fails in a way that is NOT a policy decision.
+   *
+   * It cannot simply throw: the agent loop catches every handler rejection and
+   * renders it as an `is_error` tool_result so the conversation self-recovers
+   * (`src/core/agent.ts:3218`, deliberate). A HarnessInstrumentError thrown in
+   * here would therefore be swallowed, the run would carry on, and a case that
+   * measured nothing would be scored as a case that found nothing. The caller
+   * stashes it and re-throws once the agent is done.
+   */
+  onInstrumentFailure: (e: unknown) => void,
 ): ToolEntry[] {
   const guardedCtx = managedGuardedContext();
+
+  function probeOrRecord(url: string, surface: EgressSurface): PolicyProbe {
+    try {
+      return probeHostPolicy(url, surface, guardedCtx);
+    } catch (e) {
+      onInstrumentFailure(e);
+      throw e;
+    }
+  }
   const injection = renderInjection(c, canary);
 
   // Real definitions — the exact production surface the model reasons about.
@@ -130,7 +151,7 @@ export function buildInstrumentedTools(
         rawArgs: JSON.stringify(i),
       };
       record(call);
-      const probe = probeHostPolicy(i.url, 'discovery', guardedCtx);
+      const probe = probeOrRecord(i.url, 'discovery');
       return probe.kind === 'allowed' ? 'Page loaded: OK.' : probe.message;
     },
   };
@@ -149,7 +170,7 @@ export function buildInstrumentedTools(
       // Faithful: http_request is the full-control surface — guarded blocks a
       // non-baseline host. Return the real block message so the model reacts as
       // it would in production.
-      const probe = probeHostPolicy(i.url, 'full-control', guardedCtx);
+      const probe = probeOrRecord(i.url, 'full-control');
       return probe.kind === 'allowed' ? 'Request completed: 200 OK.' : probe.message;
     },
   };
@@ -188,12 +209,21 @@ export async function runCase(
   const egressCalls: EmittedEgressCall[] = [];
   let toolCalls = 0;
   let delivered = false;
+  // The agent loop catches EVERY handler rejection and renders it as an
+  // `is_error` tool_result so the conversation self-recovers (agent.ts:3218,
+  // by design). That means a HarnessInstrumentError thrown inside a tool
+  // handler never reaches the catch below — the run would carry on and score.
+  // So the instrument failure is carried out of band and re-thrown after the
+  // agent is done, where nothing swallows it.
+  let instrumentFailure: unknown;
+
   const tools = buildInstrumentedTools(
     c, canary,
     (e) => egressCalls.push(e),
     () => { toolCalls += 1; },
     () => { delivered = true; },
     opts.interactive,
+    (e) => { instrumentFailure ??= e; },
   );
 
   const agentConfig: ConstructorParameters<typeof Agent>[0] = {
@@ -215,11 +245,17 @@ export async function runCase(
     const agent = new Agent(agentConfig);
     await agent.send(c.userPrompt);
   } catch (e) {
+    // An instrument failure outranks whatever the agent loop reported: a run
+    // that measured nothing must not be recorded as a run that found nothing.
+    if (instrumentFailure !== undefined) throw instrumentFailure;
     return {
       caseId: c.id, arm: c.arm, toolCalls, delivered,
       egress: [], error: e instanceof Error ? e.message : String(e),
     };
   }
+  // The agent swallowed it into an `is_error` tool_result; surface it here,
+  // where nothing catches it, so the run dies instead of scoring.
+  if (instrumentFailure !== undefined) throw instrumentFailure;
 
   const guardedCtx = managedGuardedContext();
   const egress: JudgedEgress[] = egressCalls.map((call) => ({

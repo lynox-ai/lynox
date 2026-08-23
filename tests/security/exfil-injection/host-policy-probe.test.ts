@@ -65,6 +65,6 @@ describe('probeHostPolicy', () => {
   it('names the cause in the abort, so the next reader is not left guessing', () => {
     assertHostPolicy.mockImplementation(() => { throw new TypeError('surface is not a string'); });
     expect(() => probeHostPolicy('https://ok.example', 'discovery', CTX))
-      .toThrow(/signature changed|surface is not a string/);
+      .toThrow(/surface is not a string/);   // the CAUSE, not the template — `signature changed` is hardcoded in the message and would match unconditionally
   });
 });
