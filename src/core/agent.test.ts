@@ -2373,27 +2373,6 @@ describe('Agent', () => {
 
       mockProcess
         .mockResolvedValueOnce(toolUseResponse([{ id: 'a', name: 'my_tool', input: {} }]))
-  /**
-   * A tool that completed without succeeding. `toolEnd` used to publish
-   * `success: true` for anything a handler RETURNED, so `web_research`'s
-   * "Failed to read URL: HTTP 404" and `bash`'s non-zero-exit output were both
-   * booked as successes. Measured on one real thread: 123 tool calls, exactly 1
-   * counted as an error, while ~35 of its 63 web reads had 404'd.
-   *
-   * The contract is two-sided and BOTH sides need a test — recording the failure
-   * would be worthless if it changed what the model reads, and leaving the
-   * payload alone would be worthless if the ledger stayed green.
-   */
-  describe('ToolSoftFailure — completed but not successful', () => {
-    it('books it as a failure in the ledger, with the tool-supplied reason', async () => {
-      const { channels } = await import('./observability.js');
-      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
-      const tool = makeTool('soft_tool', vi.fn().mockRejectedValue(
-        new ToolSoftFailure('Failed to read URL: HTTP 404 Not Found', 'HTTP 404'),
-      ));
-
-      mockProcess
-        .mockResolvedValueOnce(toolUseResponse([{ id: 'ts1', name: 'soft_tool', input: { url: 'https://x/y' } }]))
         .mockResolvedValueOnce(endTurnResponse('done'));
 
       const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
@@ -2419,8 +2398,139 @@ describe('Agent', () => {
       });
 
       await expect(agent.send('go')).resolves.toContain('done');
+    });
+  });
+
+  /**
+   * A tool that completed without succeeding. `toolEnd` used to publish
+   * `success: true` for anything a handler RETURNED, so `web_research`'s
+   * "Failed to read URL: HTTP 404" and `bash`'s non-zero-exit output were both
+   * booked as successes. Measured on one real thread: 123 tool calls, exactly 1
+   * counted as an error, while ~35 of its 63 web reads had 404'd.
+   *
+   * The contract is two-sided and BOTH sides need a test — recording the failure
+   * would be worthless if it changed what the model reads, and leaving the
+   * payload alone would be worthless if the ledger stayed green.
+   */
+  describe('ToolSoftFailure — completed but not successful', () => {
+    it('books it as a failure in the LEDGER — the sink, not the diagnostics channel', async () => {
+      // ⚠ This assertion moved on 2026-08-23 and that move IS the point.
+      // When this test was first written the run history came from
+      // `channels.toolEnd`. It does not any more: `agent.ts` persists through
+      // the injected `recordToolCall` sink, and the channel is explicitly
+      // "diagnostics only — it no longer writes history". A test that asserts
+      // only on the channel therefore passes while the ledger stays green for a
+      // failed call, which is the whole defect. Assert the SINK first.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string; isError: boolean };
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('soft_tool', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('Failed to read URL: HTTP 404 Not Found', 'HTTP 404'),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ts1', name: 'soft_tool', input: { url: 'https://x/y' } }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-soft-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'soft_tool');
+      expect(row, 'the soft failure must reach the ledger sink at all').toBeDefined();
+      // `run-history-analytics` counts a non-empty `output_json` as error_count,
+      // and the debug export reads the same field. An empty one is byte-identical
+      // to a successful silent call — the state a whole thread was misread from.
+      expect(row!.outputJson, 'the reason is what makes the row distinguishable').toBe('HTTP 404');
+      expect(row!.isError).toBe(true);
+    });
+
+    it('leaves a genuinely successful call recorded as success — the counter-direction', async () => {
+      // A fix against "failures look like successes" must not turn into
+      // "successes look like failures": that would flip every dashboard the
+      // other way and make error_count equally useless.
+      type RecordedCall = { toolName: string; outputJson: string; isError: boolean };
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('ok_tool', vi.fn().mockResolvedValue('all good'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ok1', name: 'ok_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-ok-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'ok_tool');
+      expect(row).toBeDefined();
+      expect(row!.outputJson).toBe('');
+      expect(row!.isError).toBe(false);
+    });
+
+    it('masks secrets in the ledger reason, as the thrown path already does', async () => {
+      // Residuum 1 of four named in the 2026-08-02 closing comment. The reason
+      // is tool-supplied text and lands in a persisted column; the throw path
+      // beside it runs `maskSecrets` on its message, and this path must match —
+      // otherwise the fix opens a secret sink where none existed.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string; isError: boolean };
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('leaky_tool', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('body', 'auth failed for sk-live-SECRET123456789'),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'lk1', name: 'leaky_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-leak-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+        secretStore: {
+          getMasked: vi.fn().mockReturnValue('***1234'),
+          resolve: vi.fn().mockReturnValue('v'),
+          listNames: vi.fn().mockReturnValue([]),
+          containsSecret: vi.fn().mockReturnValue(false),
+          maskSecrets: vi.fn().mockImplementation((t: string) => t.replace(/sk-live-[A-Za-z0-9]+/g, '[REDACTED]')),
+          recordConsent: vi.fn(),
+          hasConsent: vi.fn().mockReturnValue(false),
+          isExpired: vi.fn().mockReturnValue(false),
+          findUnresolvedSecretRefs: vi.fn().mockReturnValue([]),
+          extractSecretNames: vi.fn().mockReturnValue([]),
+          findNameMatches: vi.fn().mockReturnValue([]),
+        } as unknown as import('../types/index.js').SecretStoreLike,
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'leaky_tool');
+      expect(row).toBeDefined();
+      expect(row!.outputJson, 'the raw secret must not reach the persisted row').not.toContain('SECRET123456789');
+      expect(row!.outputJson).toContain('[REDACTED]');
+    });
+
+    it('still publishes the diagnostics channel — Bugsink breadcrumbs keep working', async () => {
+      const { channels } = await import('./observability.js');
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      const tool = makeTool('soft_tool_ch', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('Failed to read URL: HTTP 404 Not Found', 'HTTP 404'),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ts1b', name: 'soft_tool_ch', input: { url: 'https://x/y' } }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+      await agent.send('go');
+
       const calls = vi.mocked(channels.toolEnd.publish).mock.calls;
-      const call = calls.find(c => (c[0] as { name: string }).name === 'soft_tool');
+      const call = calls.find(c => (c[0] as { name: string }).name === 'soft_tool_ch');
       expect(call).toBeDefined();
       const data = call![0] as { success: boolean; error?: string };
       expect(data.success).toBe(false);

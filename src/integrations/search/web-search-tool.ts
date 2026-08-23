@@ -155,7 +155,9 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
     handler: async (input: WebSearchInput, agent: IAgent): Promise<string> => {
       const ctx = agent.toolContext;
       if (input.action === 'search') {
-        if (!input.query) return 'Error: "query" is required for action "search".';
+        if (!input.query) {
+          throw new ToolSoftFailure('Error: "query" is required for action "search".', 'missing query');
+        }
         try {
           let results = await provider.search(input.query, {
             maxResults: input.max_results,
@@ -201,7 +203,9 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
       }
 
       if (input.action === 'read') {
-        if (!input.url) return 'Error: "url" is required for action "read".';
+        if (!input.url) {
+          throw new ToolSoftFailure('Error: "url" is required for action "read".', 'missing url');
+        }
         try {
           const result = await extractContent(input.url, undefined, ctx);
           const parts = [`# ${result.title}`, `Source: ${result.url}`, `Words: ${result.wordCount}`];
@@ -221,7 +225,15 @@ Use topic to narrow: "news" for current events, "science" for papers/research. F
         }
       }
 
-      return 'Error: action must be "search" or "read".';
+      // Residuum 3 of four (closing comment 2026-08-02): the three plain
+      // `Error:` returns in this file were the same defect as the ones above —
+      // a call that did nothing, booked as a success.
+      //
+      // `formatSearchResults`' 'No results found.' is deliberately NOT among
+      // them: a search that ran and matched nothing is a RESULT, not a failure.
+      // Booking it as an error would be this same bug pointing the other way,
+      // and would make error_count useless in the opposite direction.
+      throw new ToolSoftFailure('Error: action must be "search" or "read".', 'invalid action');
     },
   };
 }

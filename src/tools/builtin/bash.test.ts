@@ -46,6 +46,44 @@ describe('bashTool', () => {
   // AGENT reads is unchanged — that is what these still assert, via
   // `agentVisibleResult`. `agentSeesOnFailure` fails loudly if the handler ever
   // goes back to returning, so this cannot silently regress into a no-op.
+  /** The ledger `reason` of a soft failure — the only trace of WHY a call failed. */
+  async function ledgerReason(command: string, timeoutMs?: number): Promise<string> {
+    try {
+      const r = await bashTool.handler(
+        timeoutMs === undefined ? { command } : { command, timeout_ms: timeoutMs },
+        {} as never,
+      );
+      throw new Error(`expected a ToolSoftFailure, got a plain return: ${r}`);
+    } catch (err: unknown) {
+      if (!isToolSoftFailure(err)) throw err;
+      return err.reason;
+    }
+  }
+
+  it('names a TIMEOUT as a timeout, not as an exit code', async () => {
+    // Residuum 2 of four (closing comment 2026-08-02). `execSync` kills the
+    // child on timeout: `status` is null, `signal` is SIGTERM. The old text read
+    // "bash exited non-zero" — the single reason a reader would rule OUT a
+    // timeout, on the one field that records why the call failed.
+    const err = Object.assign(new Error('timed out'), {
+      status: null, signal: 'SIGTERM', stdout: '', stderr: '',
+    });
+    mockedExecSync.mockImplementation(() => { throw err; });
+    const reason = await ledgerReason('sleep 999', 1500);
+    expect(reason).toContain('SIGTERM');
+    expect(reason).toContain('1500');
+    expect(reason, 'a killed child never "exited"').not.toContain('exited');
+  });
+
+  it('still names a real exit code when there is one', async () => {
+    // Counter-direction: naming timeouts must not swallow the ordinary case.
+    const err = Object.assign(new Error('failed'), {
+      status: 2, signal: null, stdout: '', stderr: 'boom',
+    });
+    mockedExecSync.mockImplementation(() => { throw err; });
+    expect(await ledgerReason('false')).toBe('bash exited 2');
+  });
+
   async function agentSeesOnFailure(command: string): Promise<string> {
     try {
       const returned = await bashTool.handler({ command }, {} as never);

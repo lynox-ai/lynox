@@ -46,6 +46,24 @@ async function agentSees(
   }
 }
 
+
+/**
+ * The three validation paths now signal via `ToolSoftFailure` instead of a plain
+ * return, so the run ledger stops booking a call that did nothing as a success.
+ * What the AGENT reads must not change — that is the contract these assertions
+ * pin: same text, carried on the failure instead of the return value.
+ */
+async function expectSoftFailure(run: () => Promise<string>): Promise<string> {
+  const { isToolSoftFailure } = await import('../../core/tool-soft-failure.js');
+  try {
+    const r = await run();
+    throw new Error(`expected a ToolSoftFailure, got a plain return: ${r}`);
+  } catch (err: unknown) {
+    if (!isToolSoftFailure(err)) throw err;
+    return err.agentVisibleResult;
+  }
+}
+
 describe('createWebSearchTool', () => {
   it('creates tool with correct definition', () => {
     const tool = createWebSearchTool(mockProvider());
@@ -107,9 +125,9 @@ describe('search action', () => {
     }, undefined);
   });
 
-  it('returns error when query is missing', async () => {
+  it('signals a soft failure when query is missing — same text, now countable', async () => {
     const tool = createWebSearchTool(mockProvider());
-    const result = await tool.handler({ action: 'search' }, {} as never);
+    const result = await expectSoftFailure(() => tool.handler({ action: 'search' }, {} as never));
     expect(result).toContain('Error');
     expect(result).toContain('query');
   });
@@ -137,7 +155,7 @@ describe('search action', () => {
 describe('read action', () => {
   it('returns error when url is missing', async () => {
     const tool = createWebSearchTool(mockProvider());
-    const result = await tool.handler({ action: 'read' }, {} as never);
+    const result = await expectSoftFailure(() => tool.handler({ action: 'read' }, {} as never));
     expect(result).toContain('Error');
     expect(result).toContain('url');
   });
@@ -200,7 +218,7 @@ describe('failed fetches are signalled, not booked as successes', () => {
 describe('invalid action', () => {
   it('returns error for unknown action', async () => {
     const tool = createWebSearchTool(mockProvider());
-    const result = await tool.handler({ action: 'delete' as 'search' }, {} as never);
+    const result = await expectSoftFailure(() => tool.handler({ action: 'delete' as 'search' }, {} as never));
     expect(result).toContain('Error');
   });
 });
@@ -387,7 +405,7 @@ describe('search edge cases', () => {
 describe('read edge cases', () => {
   it('returns error for empty string URL', async () => {
     const tool = createWebSearchTool(mockProvider());
-    const result = await tool.handler({ action: 'read', url: '' }, {} as never);
+    const result = await expectSoftFailure(() => tool.handler({ action: 'read', url: '' }, {} as never));
     expect(result).toContain('Error');
   });
 });

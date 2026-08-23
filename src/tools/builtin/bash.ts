@@ -192,11 +192,23 @@ export const bashTool: ToolEntry<BashInput> = {
         // One real thread logged 123 tool calls and exactly 1 error while a long
         // run of `wget` calls was failing. `status` is the exit code when
         // execSync provides it.
+        // A TIMEOUT is not an exit code. `execSync` kills the child on timeout,
+        // leaving `status: null` and `signal: 'SIGTERM'` — the old text then read
+        // "bash exited non-zero", which is the one reason a reader would rule OUT
+        // a timeout. The ledger reason is the only trace of why a call failed, so
+        // it has to name the actual cause. (Residuum 2 of four, closing comment
+        // 2026-08-02.)
         const status = (err as { status?: unknown }).status;
-        const code = typeof status === 'number' ? String(status) : 'non-zero';
+        const signal = (err as { signal?: unknown }).signal;
+        const limitMs = input.timeout_ms ?? DEFAULT_BASH_TIMEOUT_MS;
+        const reason = typeof status === 'number'
+          ? `bash exited ${String(status)}`
+          : typeof signal === 'string' && signal.length > 0
+            ? `bash killed by ${signal} after ${String(limitMs)}ms`
+            : 'bash failed without an exit code';
         throw new ToolSoftFailure(
           combined || `Command failed: ${input.command}`,
-          `bash exited ${code}`,
+          reason,
         );
       }
       const cause = err instanceof Error ? err : new Error(String(err));

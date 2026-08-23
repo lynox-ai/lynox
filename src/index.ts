@@ -23,6 +23,12 @@ process.emit = function (event: string, ...args: unknown[]) {
 export { Agent } from './core/agent.js';
 export type { SendStop, SendStopCause } from './core/agent.js';
 export { StreamProcessor } from './core/stream.js';
+// Residuum 4 of four (closing comment 2026-08-02). A tool OUTSIDE this
+// package — a plugin, an integration in pro — cannot signal "completed but
+// did not succeed" without this symbol, so its calls stay booked as
+// successes no matter what the ledger does. Exporting it is what makes the
+// contract available rather than internal.
+export { ToolSoftFailure, isToolSoftFailure } from './core/tool-soft-failure.js';
 export { Memory } from './core/memory.js';
 export { Engine } from './core/engine.js';
 export { Session } from './core/session.js';
