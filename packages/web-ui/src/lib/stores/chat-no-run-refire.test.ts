@@ -64,7 +64,7 @@ describe('chat store — no client-side run re-fire', () => {
 		// The retry machinery of the old pre-run path is gone entirely.
 		expect(body).not.toContain('retryRes');
 		// The whole recovery block (outer if) is thread-scoped …
-		const blockStart = body.indexOf('if (!sawTerminal && isStreaming && _userStopEpoch !== epoch)');
+		const blockStart = body.indexOf('if (shouldProbeServerAfterStream({');
 		if (blockStart < 0) throw new Error('anchor lost: recovery block head');
 		const blockWindow = body.slice(blockStart, blockStart + 5500);
 		// Exact statement shape — a substring check would let a neutered guard
@@ -76,7 +76,7 @@ describe('chat store — no client-side run re-fire', () => {
 		// …and the failed-turn fallback (tap-to-retry) sits AFTER it in the same
 		// block — marking the turn failed before asking the server would regress
 		// to a client-side guess about liveness, the exact bug this guards.
-		const fallbackWindow = body.slice(reattachCall, reattachCall + 4500);
+		const fallbackWindow = body.slice(reattachCall, reattachCall + 7000);
 		expect(fallbackWindow).toContain('!.failed = true');
 		// …and only for a turn that is honestly unsent: a run that FINISHED in
 		// the drop window is absent from /runs/active with its answer already
@@ -100,6 +100,16 @@ describe('chat store — no client-side run re-fire', () => {
 		const answeredBranch = fallbackWindow.slice(fallbackWindow.indexOf('} else {'));
 		expect(answeredBranch).toContain('await reconcileThread();');
 		expect(answeredBranch).toContain('messages.splice(assistantIdx, 1);');
+		// …and the two lines that make that call DO anything. `reconcileThread`
+		// opens with `if (isStreaming) return`, and at this point in _executeRun
+		// `isStreaming` is still true — it is cleared further down, after this
+		// whole block. Without the reset the call is a guaranteed no-op: the
+		// empty bubble stays and the billed answer stays invisible, i.e. exactly
+		// the bug the branch claims to fix. Asserted as ORDER, not presence.
+		const reset = answeredBranch.indexOf('isStreaming = false;');
+		const reconcile = answeredBranch.indexOf('await reconcileThread();');
+		expect(reset).toBeGreaterThan(-1);
+		expect(reset).toBeLessThan(reconcile);
 	});
 
 	it('a failure marked on a blind guess is labelled as one', () => {
@@ -108,11 +118,18 @@ describe('chat store — no client-side run re-fire', () => {
 		// run never started". Only the second one is a guess, and only the guess
 		// may not be auto-re-sent.
 		const body = executeRunBody();
-		expect(body).toContain("reattachOutcome === 'unreachable'");
 		expect(body).toContain('failedOffline');
-		// The label has to depend on BOTH probes: a reachable transcript answers
-		// the question outright, whatever /runs/active did.
-		expect(body).toMatch(/failedOffline = reattachOutcome === 'unreachable' && !transcriptReached/);
+		// The label depends on the TRANSCRIPT alone. It used to be conjoined with
+		// `reattachOutcome === 'unreachable'`, which scored `no-run` + unreachable
+		// transcript as "verified" — but `no-run` only answers "nothing is live",
+		// never "and nothing was persisted", which is the question this branch
+		// decides. Conversely a reached transcript settles it on its own, since
+		// this branch only runs when it said `!answered`.
+		expect(body).toMatch(/failedOffline = !transcriptReached/);
+		// And the transcript counts as reached only once its body PARSED as our
+		// shape — a captive portal answers 200 with HTML, which is precisely what
+		// sits in the path at the moment a network returns.
+		expect(body).toContain('Array.isArray(md.messages)');
 	});
 
 	it('the reconnect refire is gated on a server re-check, not on the guess', () => {
@@ -123,13 +140,80 @@ describe('chat store — no client-side run re-fire', () => {
 		const listener = SRC.slice(onlineListener, onlineEnd);
 		// It asks the transcript…
 		expect(listener).toContain('/threads/${enc}/messages');
+		// …AND whether a run is still live. The transcript alone cannot answer
+		// that: a still-executing run has not persisted its assistant message, so
+		// the thread legitimately ends on the user turn — indistinguishable from
+		// "never started" by role, and re-POSTing there earns a 409 and a
+		// minutes-long poll duplicating the run it waits for.
+		expect(listener).toContain('/runs/active');
 		// …and hands the decision to the pure, unit-tested rule rather than
 		// re-deriving it inline, where it could drift from the tests above.
-		expect(listener).toContain('shouldRefireOfflineTurn({ reached, lastRole })');
+		expect(listener).toContain('shouldRefireOfflineTurn({ reached, lastRole, activeRun })');
+		// `reached` means the body PARSED as our shape, not merely that the status
+		// line said 200 — the same captive-portal guard the drop path carries. It
+		// needs its own assert here: the two probes are separate code, and a
+		// mutation of this one alone left the drop path's assert green.
+		expect(listener).toContain('Array.isArray(md.messages)');
+		// The probe is single-flight. `online` fires in bursts (a Wi-Fi↔cellular
+		// handover emits several) and the pre-async interlock — clearing `failed`
+		// synchronously — no longer holds across the await.
+		expect(listener).toContain('if (_offlineProbeInFlight) return;');
+		// Every mutation is pinned to the thread the decision was made for:
+		// `refireFailedTurn` → `_executeRun` resolves the CURRENT session, so a
+		// thread switch mid-probe would post thread A's prompt into thread B.
+		expect(listener).toContain('if (sessionId !== probeSid) return;');
 		// The refire is INSIDE that decision, never before it.
 		const decision = listener.indexOf('shouldRefireOfflineTurn(');
 		const refire = listener.indexOf('refireFailedTurn(lastFailed)', decision);
 		expect(refire).toBeGreaterThan(decision);
+	});
+
+	it('an engine `error` does not decide the turn is dead — the server does', () => {
+		// THE regression this PR's second half exists for (2026-08-23, thread
+		// 22edd8ee). `stream.ts` emits `type:'error'` for an unparsable tool
+		// input, substitutes `input:{}` and CONTINUES the turn; `agent.ts` emits
+		// the SAME event type for a genuinely dead run. The wire does not
+		// distinguish them, so the client must not guess: it shows the error and
+		// asks the server what became of the turn.
+		//
+		// Measured cost of guessing: run e2684d2e ran 152 s, spawned four
+		// sub-agents and finished `completed`/`end_turn`, while its bubble read
+		// "not sent — tap to retry". The only offered action was buying it twice.
+
+		// 1) The read loop must not count `error` as a terminal end …
+		const body = executeRunBody();
+		expect(body).toMatch(/if \(eventType === 'done'\) sawTerminal = true;/);
+		expect(body).toMatch(/else if \(eventType === 'error'\) sawErrorEvent = true;/);
+
+		// 2) … and `_executeRun` must hand the turn's fate to the probe rather
+		// than let the event handler settle it inline. Asserted on the ARGUMENT:
+		// flipping it to false restores the exact old behaviour while every
+		// other assert in this file stays green.
+		expect(body).toContain('{ deferErrorDisposition: true }');
+
+		// 3) The handler must actually honour the flag — the opt-in is worthless
+		// if the disposition runs anyway. Pin the guard AND what it guards.
+		const h = SRC.indexOf('function handleSSEEvent(');
+		if (h < 0) throw new Error('anchor lost: handleSSEEvent');
+		const errCase = SRC.indexOf("case 'error': {", h);
+		if (errCase < 0) throw new Error('anchor lost: error case');
+		const errBody = SRC.slice(errCase, errCase + 2200);
+		expect(errBody).toContain('if (!opts?.deferErrorDisposition) {');
+		const guard = errBody.indexOf('if (!opts?.deferErrorDisposition) {');
+		const mark = errBody.indexOf('!.failed = true', guard);
+		expect(mark).toBeGreaterThan(guard);
+		// The toast is NOT behind the guard: the user still learns something went
+		// wrong immediately. Only the "this turn is dead" verdict is deferred.
+		expect(errBody.indexOf('addToast(')).toBeLessThan(guard);
+
+		// 4) The OTHER caller keeps the immediate behaviour on purpose —
+		// `reattachRun` has no post-stream probe, so deferring there would lose
+		// the failure marking entirely instead of relocating it.
+		const re = SRC.indexOf('async function reattachRun(');
+		if (re < 0) throw new Error('anchor lost: reattachRun');
+		const reBody = SRC.slice(re, SRC.indexOf('\nexport ', re + 40));
+		expect(reBody).toContain('handleSSEEvent(eventType, data, assistantIdx, userIdx);');
+		expect(reBody).not.toContain('deferErrorDisposition');
 	});
 
 	it('a deliberate stop is never mistaken for a transport drop', () => {
@@ -147,8 +231,12 @@ describe('chat store — no client-side run re-fire', () => {
 		const abortFetch = abortBody.indexOf('sessions/${sessionId}/abort');
 		if (abortFetch < 0) throw new Error('anchor lost: abort fetch');
 		expect(stamp).toBeLessThan(abortFetch);
-		// And the run's cleanup actually consults it.
-		expect(executeRunBody()).toContain('_userStopEpoch !== epoch');
+		// And the run's cleanup actually consults it — now as the `userStopped`
+		// input of the pure probe rule (see shouldProbeServerAfterStream), which
+		// returns false for a stop before it looks at anything else. Asserted on
+		// the ARGUMENT, so deleting the input from the call site fails here even
+		// though the rule itself stays green in its own unit tests.
+		expect(executeRunBody()).toContain('userStopped: _userStopEpoch === epoch');
 	});
 
 	it('queue entries originate only from a user send or the reconnect retry', () => {

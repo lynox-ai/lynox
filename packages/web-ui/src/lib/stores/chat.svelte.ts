@@ -25,7 +25,7 @@ import { loadThreads } from './threads.svelte.js';
 import { addToast } from './toast.svelte.js';
 import { suppressSessionExpiredBanner } from './session.svelte.js';
 import { selectPendingPromptHead } from '../utils/pipeline-status.js';
-import { selectReattachTarget, shouldRefireOfflineTurn, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
+import { selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream, type ReattachTarget, type ReattachOutcome } from '../utils/active-runs.js';
 import { originFromEvent, originFromPending, type PromptOrigin } from '../utils/prompt-origin.js';
 
 // Re-export the canonical UsageInfo + helpers from the pure module so existing
@@ -555,6 +555,9 @@ let retryStatus = $state<{ attempt: number; maxAttempts: number; reason?: 'retry
 // thread switch can cut it short without waiting for the 3s tick or the
 // 6 min cap to elapse. Kept at module scope alongside _resumeController.
 let _queuePollController: AbortController | null = null;
+/** Held for the duration of the reconnect probe so a burst of `online` events
+ *  cannot start two probes — and therefore two billed refires — for one turn. */
+let _offlineProbeInFlight = false;
 // streamEpoch of the run the user DELIBERATELY stopped (abortRun). Set
 // SYNCHRONOUSLY, before the /abort round-trip: the server ends an aborted
 // run's stream cleanly WITHOUT a done/error terminal (RunAbortedError →
@@ -599,32 +602,64 @@ if (typeof window !== 'undefined') {
 			// engine may well have finished while we were offline. Now that the
 			// network is back the question is answerable, so answer it.
 			if (lastFailed.failedOffline) {
+				// Re-entrancy lock, taken SYNCHRONOUSLY. In the pre-async version the
+				// interlock was `failed = false`, set on the spot — a second `online`
+				// found nothing to retry. Moving the decision behind an await removed
+				// that without replacing it: `failed` now stays true for the whole
+				// round trip, and browsers fire `online` in bursts (a Wi-Fi↔cellular
+				// handover emits several). Two events, two probes, two billed runs.
+				if (_offlineProbeInFlight) return;
+				_offlineProbeInFlight = true;
+				// Pin the thread this decision belongs to. Every mutation below is
+				// guarded on it, because `refireFailedTurn` → `_executeRun` resolves
+				// the session through `ensureSession()` — i.e. the CURRENT one. Switch
+				// threads while the probe is in flight and thread A's prompt is sent
+				// into thread B, which no amount of later reconciling undoes.
+				const probeSid = sessionId;
 				void (async () => {
-					let reached = false;
-					let lastRole: string | undefined;
 					try {
-						const enc = encodeURIComponent(sessionId ?? '');
-						const r = await fetch(`${getApiBase()}/threads/${enc}/messages`);
-						if (r.ok) {
-							reached = true;
-							const md = await r.json() as { messages?: Array<{ role?: string }> };
-							lastRole = md.messages?.at(-1)?.role;
+						let reached = false;
+						let lastRole: string | undefined;
+						let activeRun: boolean | undefined;
+						if (!probeSid) return;
+						try {
+							const ar = await fetch(`${getApiBase()}/runs/active`);
+							if (ar.ok) activeRun = selectReattachTarget(await ar.json(), probeSid) !== null;
+						} catch { /* leave undefined — treated as blind, not as "no run" */ }
+						try {
+							const enc = encodeURIComponent(probeSid);
+							const r = await fetch(`${getApiBase()}/threads/${enc}/messages`);
+							if (r.ok) {
+								const md = await r.json() as { messages?: Array<{ role?: string }> };
+								// Parsed shape, not just status — see the same guard on the
+								// drop path: a captive portal answers 200 with HTML.
+								if (Array.isArray(md.messages)) {
+									reached = true;
+									lastRole = md.messages.at(-1)?.role;
+								}
+							}
+						} catch { /* still blind — shouldRefireOfflineTurn declines */ }
+						if (sessionId !== probeSid) return; // thread switched mid-probe
+						if (!shouldRefireOfflineTurn({ reached, lastRole, activeRun })) {
+							// Answered, still running, or still unverifiable. Either way this
+							// turn does not get sent again by itself; the failed bubble keeps
+							// its tap-to-retry, which is the user's explicit decision.
+							// Only CLEAR the failed state when the server actually told us
+							// something — a live run or a persisted answer both mean the
+							// bubble is lying.
+							if (reached || activeRun === true) {
+								lastFailed.failed = false;
+								lastFailed.failedOffline = false;
+								chatError = null;
+								await reconcileThread();
+							}
+							return;
 						}
-					} catch { /* still blind — shouldRefireOfflineTurn declines */ }
-					if (!shouldRefireOfflineTurn({ reached, lastRole })) {
-						// Answered, or still unverifiable. Either way this turn does not
-						// get sent again by itself; the failed bubble keeps its
-						// tap-to-retry, which is the user's explicit decision.
-						if (reached) {
-							lastFailed.failed = false;
-							lastFailed.failedOffline = false;
-							chatError = null;
-							await reconcileThread();
-						}
-						return;
+						lastFailed.failedOffline = false;
+						refireFailedTurn(lastFailed);
+					} finally {
+						_offlineProbeInFlight = false;
 					}
-					lastFailed.failedOffline = false;
-					refireFailedTurn(lastFailed);
 				})();
 				return;
 			}
@@ -1088,10 +1123,24 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	const decoder = new TextDecoder();
 	let buffer = '';
 	lastAppliedSeq = 0; // fresh run → reset the resume checkpoint
-	// Set when a terminal `done`/`error` event arrives → the run reached a real
-	// end. If the stream instead ends WITHOUT one (EOF/throw), it dropped mid-run
-	// and we try to re-attach to the still-live run (#83) instead of ending blind.
+	// Set when a terminal `done` event arrives → the run reached a real end. If
+	// the stream instead ends WITHOUT one (EOF/throw), it dropped mid-run and we
+	// try to re-attach to the still-live run (#83) instead of ending blind.
+	//
+	// `error` is DELIBERATELY not terminal here (it was until 2026-08-23). The
+	// engine emits `type:'error'` for two different things and the wire does not
+	// distinguish them: a dead turn (`agent.ts` absolute-iteration limit) and a
+	// non-fatal incident it recovers from — `stream.ts` reports an unparsable
+	// tool input, substitutes `input:{}` and CONTINUES the turn. Counting the
+	// second as terminal short-circuited this whole block, so the run kept going
+	// (measured: 152 s, four spawned sub-agents, `completed`/`end_turn`) while the
+	// user's bubble read "not sent — tap to retry". The only offered action was
+	// the expensive one, on a turn that was already being billed.
+	// Which of the two it was is the SERVER's to answer, exactly as for a dropped
+	// stream — so an `error` now routes into the same probe instead of deciding
+	// blind. See DEF-stream-error-channel-ambiguous for the wire-side half.
 	let sawTerminal = false;
+	let sawErrorEvent = false;
 
 	try {
 		while (true) {
@@ -1115,8 +1164,9 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 				} else if (line.startsWith('data: ') && eventType) {
 					try {
 						const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
-						if (eventType === 'done' || eventType === 'error') sawTerminal = true;
-						handleSSEEvent(eventType, data, assistantIdx, userMsgIdx);
+						if (eventType === 'done') sawTerminal = true;
+						else if (eventType === 'error') sawErrorEvent = true;
+						handleSSEEvent(eventType, data, assistantIdx, userMsgIdx, { deferErrorDisposition: true });
 						if (eventSeq > 0) lastAppliedSeq = eventSeq;
 					} catch { /* skip malformed SSE events */ }
 					eventType = '';
@@ -1154,7 +1204,15 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	// resumable stream so the continuation AND any pending prompt recover live —
 	// the user never has to reload from history (the #83 bug).
 	let reconciledAfterDrop = false;
-	if (!sawTerminal && isStreaming && _userStopEpoch !== epoch) {
+	// The condition itself lives in `shouldProbeServerAfterStream` — a pure
+	// function, so the rule that decides whether a turn gets asked about can be
+	// asserted directly instead of through a source-text match on this file.
+	if (shouldProbeServerAfterStream({
+		sawDone: sawTerminal,
+		sawErrorEvent,
+		isStreaming,
+		userStopped: _userStopEpoch === epoch,
+	})) {
 		if (sessionId === sid) {
 			const reattachOutcome = await reattachToActiveRun(sid, assistantIdx);
 			if (reattachOutcome === 'took-over') {
@@ -1183,11 +1241,19 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 					const enc = encodeURIComponent(sid);
 					const r = await fetch(`${getApiBase()}/threads/${enc}/messages`);
 					if (r.ok) {
-						transcriptReached = true;
 						const md = await r.json() as { messages?: Array<{ role?: string }> };
-						answered = md.messages?.at(-1)?.role === 'assistant';
+						// Set only AFTER the body parses as OUR shape. A 200 whose body is
+						// not our JSON is the signature of a captive portal — precisely
+						// what sits between client and server at the moment a network
+						// comes back. Marking "reached" on the status line alone turns
+						// that into "the server confirmed an unanswered thread", which is
+						// the strongest licence there is to re-fire a billed turn.
+						if (Array.isArray(md.messages)) {
+							transcriptReached = true;
+							answered = md.messages.at(-1)?.role === 'assistant';
+						}
 					}
-				} catch { /* unreachable transcript — see failedOffline below */ }
+				} catch { /* unreachable or unparseable — see failedOffline below */ }
 				if (!answered) {
 					messages.splice(assistantIdx, 1);
 					if (messages[userMsgIdx]) {
@@ -1199,17 +1265,41 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 						// failing together is not an edge case: it is the normal shape
 						// of "the network went away", which is also the commonest reason
 						// the SSE stream dropped in the first place.
-						messages[userMsgIdx]!.failedOffline = reattachOutcome === 'unreachable' && !transcriptReached;
+						// The predicate is the TRANSCRIPT alone, not a conjunction with
+						// the registry outcome. `no-run` means the registry answered
+						// "nothing live" — it does NOT answer "and nothing was ever
+						// persisted", which is the question this branch is deciding.
+						// `no-run` + unreachable transcript is therefore just as blind as
+						// `unreachable` + unreachable transcript, but the conjunction
+						// scored it `false` and sent it down the unverified path.
+						// Conversely a REACHED transcript settles it on its own: we are
+						// in the `!answered` branch, so the server said the thread still
+						// ends on our user message.
+						messages[userMsgIdx]!.failedOffline = !transcriptReached;
 					}
-					chatError = t('chat.error_connection');
-					chatErrorDetail = null;
+					// An `error` event already put the upstream reason in `chatError`
+					// (provider 401, content policy, …). Overwriting it with the generic
+					// connection copy would replace a specific, actionable message with a
+					// wrong one — the stream did not drop, the engine reported.
+					if (!sawErrorEvent) {
+						chatError = t('chat.error_connection');
+						chatErrorDetail = null;
+					}
 				} else {
 					// The run FINISHED in the drop window and its answer is persisted.
 					// Doing nothing here left the empty assistant bubble standing and
 					// the billed answer invisible until a manual reload — the exact
 					// outcome the sibling non-takeover path fixes with reconcileThread()
-					// one screen up. Mirror it.
+					// one screen up. Mirror it — INCLUDING the two lines that make it
+					// work: `reconcileThread` opens with `if (isStreaming) return`, and
+					// at this point in `_executeRun` `isStreaming` is still true (it is
+					// only cleared below, after this whole block). Copying the call
+					// without the state reset made it a guaranteed no-op — the bubble
+					// stayed and the answer stayed invisible, i.e. exactly the bug this
+					// branch claims to fix.
 					messages.splice(assistantIdx, 1);
+					isStreaming = false;
+					streamingActivity = 'idle';
 					await reconcileThread();
 					reconciledAfterDrop = true;
 				}
@@ -1310,7 +1400,12 @@ function syncSpawnContext(msg: ChatMessage): void {
 	});
 }
 
-function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number, userIdx: number): void {
+/** `deferErrorDisposition`: do NOT decide the turn's fate on an `error` event —
+ *  show it, but leave "is this turn dead" to the caller, which asks the server.
+ *  Only `_executeRun` passes it (it owns the post-stream probe); `reattachRun`
+ *  has no such probe, so it keeps the previous immediate behaviour rather than
+ *  silently losing its failure marking. */
+function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number, userIdx: number, opts?: { deferErrorDisposition?: boolean }): void {
 	// Any event arriving counts as proof the connection is alive. Drives the
 	// "Verbindung scheint langsam" hint in StreamingActivityBar when the gap
 	// grows beyond the server heartbeat interval (~10s).
@@ -1838,9 +1933,16 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// noisy provider doesn't blow up the toast layout.
 			const detailSnippet = rawErr.length > 140 ? `${rawErr.slice(0, 140)}…` : rawErr;
 			addToast(`${t('chat.error_toast_prefix')}: ${detailSnippet}`, 'error', 8000);
-			// Remove empty assistant message and mark user message as failed
-			if (messages[idx] && !messages[idx]!.content) messages.splice(idx, 1);
-			if (messages[userIdx]) messages[userIdx]!.failed = true;
+			// Remove empty assistant message and mark user message as failed —
+			// UNLESS the caller owns that decision. The engine emits `error` both
+			// for a dead turn and for an incident it recovers from (see the
+			// `sawErrorEvent` declaration), and marking the user's message failed
+			// here is what offered "tap to retry" on a run that was still executing
+			// and being billed. `_executeRun` defers this and asks the server.
+			if (!opts?.deferErrorDisposition) {
+				if (messages[idx] && !messages[idx]!.content) messages.splice(idx, 1);
+				if (messages[userIdx]) messages[userIdx]!.failed = true;
+			}
 			break;
 		}
 		case 'changeset_ready':
