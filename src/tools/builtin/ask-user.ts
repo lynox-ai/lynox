@@ -1,4 +1,5 @@
 import type { ToolEntry, IAgent, TabQuestion, StepHint } from '../../types/index.js';
+import { promptValue } from '../../core/prompt-value.js';
 
 /** An option can be a plain string or an object with an optional StepHint. */
 type AskUserOption = string | { label: string; hint?: StepHint | undefined };
@@ -171,7 +172,7 @@ export const askUserTool: ToolEntry<AskUserInput> = {
       const answers: string[] = [];
       for (const q of input.questions) {
         const labels = q.options && q.options.length > 0 ? [...toLabels(q.options), '\x00'] : undefined;
-        const answer = await agent.promptUser(q.question, labels);
+        const answer = await agent.promptUser(promptValue(q.question), labels);
         // Store hint for this answer
         const hint = findHint(q.options, answer);
         if (hint) {
@@ -192,9 +193,20 @@ export const askUserTool: ToolEntry<AskUserInput> = {
     const labels = input.options && input.options.length > 0 ? [...toLabels(input.options), '\x00'] : undefined;
     // Only pass the meta arg in the multi-select case so single-select calls
     // stay byte-identical to before (2 args) — no back-compat surprise.
+    // The question is the AGENT's text, whole and entire — so it is a VALUE, not
+    // a frame. Passing the bare string meant "all frame" (`types/agent.ts`), i.e.
+    // the claim that the system wrote it, and the renderer acted on that claim:
+    // `**…**` became <strong>, `## …` an <h2>, `> …` a <blockquote>. Measured
+    // against the real renderer, not assumed. So an injected agent could set a
+    // line that reads as lynox speaking, inside lynox's own confirmation dialog.
+    //
+    // `promptValue` was written for exactly this caller and names it in its own
+    // doc — "ask_user, whose whole text is the agent's question … without this
+    // they would have to be frame, which would be the wrong claim". It shipped
+    // in #1084 with a unit test and was never wired to either caller it names.
     const answer = input.multiSelect
-      ? await agent.promptUser(question, labels, { multiSelect: true })
-      : await agent.promptUser(question, labels);
+      ? await agent.promptUser(promptValue(question), labels, { multiSelect: true })
+      : await agent.promptUser(promptValue(question), labels);
 
     // Multi-select answers come back as a JSON-encoded string[] of labels.
     // Present them to the model as a clean comma-joined list; a step hint only

@@ -2,6 +2,22 @@ import { describe, it, expect, vi } from 'vitest';
 import { askUserTool } from './ask-user.js';
 import type { IAgent } from '../../types/index.js';
 import type { ToolContext } from '../../core/tool-context.js';
+import { isPromptText, promptSegments } from '../../core/prompt-value.js';
+
+/**
+ * The question is the agent's own text, so it travels as ONE `value` segment.
+ * Asserting the flattened string would accept a plain string too — and a plain
+ * string means "all frame", which is the claim that the SYSTEM wrote it and the
+ * thing that let `**…**` render as <strong> inside lynox's own dialog. Pin the
+ * KIND, the way `subjects-merge.test.ts` does for the same reason.
+ */
+function expectAskedAsValue(fn: ReturnType<typeof vi.fn>, text: string, callIndex = 0): void {
+	const arg = fn.mock.calls[callIndex]?.[0];
+	expect(isPromptText(arg), 'the question must reach promptUser as a PromptText').toBe(true);
+	expect(promptSegments(arg as Parameters<typeof promptSegments>[0])).toEqual([
+		{ kind: 'value', text },
+	]);
+}
 
 function makeToolContext(overrides: Partial<ToolContext> = {}): ToolContext {
   return {
@@ -46,7 +62,8 @@ describe('askUserTool', () => {
 
     const result = await askUserTool.handler({ question: 'What color?' }, agent);
     expect(result).toBe('user answer');
-    expect(promptUser).toHaveBeenCalledWith('What color?', undefined);
+    expectAskedAsValue(promptUser, 'What color?');
+    expect(promptUser.mock.calls[0]?.[1]).toBeUndefined();
   });
 
   describe('multiSelect', () => {
@@ -59,7 +76,8 @@ describe('askUserTool', () => {
       );
       expect(result).toBe('red, blue');
       // meta arg carries multiSelect; single-select calls would omit it.
-      expect(promptUser).toHaveBeenCalledWith('Which apply?', ['red', 'blue', 'green', '\x00'], { multiSelect: true });
+      expectAskedAsValue(promptUser, 'Which apply?');
+      expect(promptUser.mock.calls[0]?.slice(1)).toEqual([['red', 'blue', 'green', '\x00'], { multiSelect: true }]);
     });
 
     it('applies a step hint only when exactly one option was selected', async () => {
@@ -105,7 +123,8 @@ describe('askUserTool', () => {
       agent,
     );
     expect(result).toBe('blue');
-    expect(promptUser).toHaveBeenCalledWith('Pick a color', ['red', 'blue', 'green', '\x00']);
+    expectAskedAsValue(promptUser, 'Pick a color');
+    expect(promptUser.mock.calls[0]?.[1]).toEqual(['red', 'blue', 'green', '\x00']);
   });
 
   it('returns "Interactive input not available" when promptUser is undefined', async () => {
@@ -159,8 +178,8 @@ describe('askUserTool', () => {
     );
     expect(result).toBe('Q1: answer 1\nQ2: answer 2');
     expect(promptUser).toHaveBeenCalledTimes(2);
-    expect(promptUser).toHaveBeenCalledWith('Q1', undefined);
-    expect(promptUser).toHaveBeenCalledWith('Q2', undefined);
+    expectAskedAsValue(promptUser, 'Q1', 0);
+    expectAskedAsValue(promptUser, 'Q2', 1);
   });
 
   // --- StepHint tests ---
@@ -178,10 +197,8 @@ describe('askUserTool', () => {
     }, agent);
 
     expect(result).toBe('Deep analysis');
-    expect(promptUser).toHaveBeenCalledWith(
-      'How to proceed?',
-      ['Quick summary', 'Deep analysis', '\x00'],
-    );
+    expectAskedAsValue(promptUser, 'How to proceed?');
+    expect(promptUser.mock.calls[0]?.[1]).toEqual(['Quick summary', 'Deep analysis', '\x00']);
   });
 
   it('stores pendingStepHint on toolContext when user selects option with hint', async () => {
@@ -245,7 +262,8 @@ describe('askUserTool', () => {
     }, agent);
 
     expect(result).toBe('Yes');
-    expect(promptUser).toHaveBeenCalledWith('Proceed?', ['Yes', 'No', '\x00']);
+    expectAskedAsValue(promptUser, 'Proceed?');
+    expect(promptUser.mock.calls[0]?.[1]).toEqual(['Yes', 'No', '\x00']);
   });
 
   it('rejects malformed options (non-array) with a clear error', async () => {

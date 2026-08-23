@@ -353,8 +353,26 @@ export function renderPromptSegments(segments: readonly RenderablePromptSegment[
 	return parts.reduce((acc, part, i) => {
 		if (i === 0) return part;
 		const value = values[index++] ?? '';
-		return acc + escapeHtml(value) + part;
+		return acc + escapeValueText(value) + part;
 	}, '');
+}
+
+/**
+ * A value is text — including its line breaks.
+ *
+ * Escaping alone left raw newlines inside the `<p>` the frame renders, where CSS
+ * collapses them, so a multi-line value displayed as one run-on line. The
+ * markdown branch does not have that problem (`breaks: true` turns a newline
+ * into a `<br>`), so migrating a caller from all-frame to a value silently cost
+ * it its line structure — measured on the rendered page, not in the HTML, which
+ * is where it is invisible: the newline IS in the markup.
+ *
+ * The `<br>` is emitted by US, after escaping, so it grants the value nothing:
+ * it cannot open a construct, close one, or introduce an element. All it can do
+ * is break its own lines, which is what the newline it wrote already meant.
+ */
+function escapeValueText(value: string): string {
+	return escapeHtml(value).split('\n').join('<br>');
 }
 
 /**
