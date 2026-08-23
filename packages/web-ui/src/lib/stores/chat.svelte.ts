@@ -1300,6 +1300,15 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 					messages.splice(assistantIdx, 1);
 					isStreaming = false;
 					streamingActivity = 'idle';
+					// The turn DID answer. An error banner left standing over that
+					// answer reads "Etwas ist schiefgelaufen. Versuche es nochmal" above
+					// the very reply it is denying — and invites exactly the second,
+					// billed send this change exists to prevent. The toast already
+					// carried the incident (a lost tool call is worth telling); it is
+					// the retry-shaped banner that becomes false once the server
+					// confirms an answer.
+					chatError = null;
+					chatErrorDetail = null;
 					await reconcileThread();
 					reconciledAfterDrop = true;
 				}

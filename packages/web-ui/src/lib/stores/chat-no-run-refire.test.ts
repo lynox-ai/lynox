@@ -106,6 +106,10 @@ describe('chat store — no client-side run re-fire', () => {
 		// whole block. Without the reset the call is a guaranteed no-op: the
 		// empty bubble stays and the billed answer stays invisible, i.e. exactly
 		// the bug the branch claims to fix. Asserted as ORDER, not presence.
+		// …and the error banner is cleared in that branch. A retry-shaped banner
+		// standing over a confirmed answer invites the second billed send this
+		// whole change exists to prevent. (Delta round on this fix, 2026-08-23.)
+		expect(answeredBranch).toContain('chatError = null;');
 		const reset = answeredBranch.indexOf('isStreaming = false;');
 		const reconcile = answeredBranch.indexOf('await reconcileThread();');
 		expect(reset).toBeGreaterThan(-1);
