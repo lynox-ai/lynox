@@ -124,7 +124,8 @@ describe('promptUser callers', () => {
    * interpolation, inline or one hop away. That is a proxy for "carries
    * untrusted content", and it let through the case where the argument IS
    * untrusted content and never touched a template: `ask_user` forwarded the
-   * agent's whole question as a bare parameter for a month (fixed core#1258).
+   * agent's whole question as a bare parameter from #1084 (2026-07-28) until
+   * this rule was written, four weeks later.
    *
    * So this rule asks the question the other two only approximate: **is the
    * authorship of this argument declared?** Every accepted form says who wrote
