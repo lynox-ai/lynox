@@ -333,3 +333,42 @@ describe('buildSafeEnv', () => {
     });
   });
 });
+
+describe('bash tool description (DEF-bash-install-workaround)', () => {
+  const description = bashTool.definition.description;
+
+  it('no longer advertises package management', () => {
+    // It used to. A model reads the description as a statement of capability,
+    // and this one named a capability the managed runtime does not have —
+    // read-only root, non-root user, no package manager. The measured cost was
+    // 41 bash calls in a single thread rediscovering that.
+    expect(description).not.toMatch(/package management/i);
+  });
+
+  it('states the prohibition as a POLICY, not as a claim about the environment', () => {
+    // Deliberate: a local `npx lynox` run may well have a working apt or npm, so
+    // "you cannot install" would be false there and would teach the model to
+    // distrust the description. "Do not install" is true in every deployment.
+    expect(description).toMatch(/installing packages/i);
+    expect(description).not.toMatch(/no package manager|cannot install|not available/i);
+  });
+
+  it('stands alone — it does not defer to text the holder may not have', () => {
+    // The first draft of this description ended "(see the tools section of your
+    // instructions)". That pointer is dead for most holders of the tool: a
+    // spawned child is given GROUNDING_PROMPT_BLOCK plus its own role prompt and
+    // never SYSTEM_PROMPT (spawn.ts), and so is a workflow step
+    // (runtime-adapter.ts), while both inherit the parent's tool list including
+    // bash. Pointing at a document the reader does not have is the same class of
+    // defect as advertising a capability the runtime does not have.
+    // Forbid the DEIXIS, not the one string that was deleted. The earlier form
+    // of this test matched `see the … section|your instructions|the system
+    // prompt`, which catches the exact phrase already gone and none of the
+    // seven plausible ways to write it back: "see your system instructions",
+    // "refer to the Tools section of your prompt", "(see above)",
+    // "(per your guidelines)". A short tool description has no legitimate use
+    // for a pointer, so the verb is the invariant.
+    expect(description).not.toMatch(/\b(see|refer(s|ring)? to|as (described|noted|documented)|per your)\b/i);
+  });
+
+});

@@ -805,3 +805,68 @@ describe('safeModelId — the one sanitiser all three prompt writers share', () 
     expect(safeModelId(null)).toBe('');
   });
 });
+
+describe('the no-install policy (DEF-bash-install-workaround)', () => {
+  // The failure this pins is a COST failure, and it was measured: one dogfood
+  // thread spent 41 bash calls trying `apt-get install`, `npm install`, five
+  // hand-written PDF extractors and `strings | grep` over a binary before the
+  // agent gave up. The tool description had listed "package management" as one of
+  // bash's uses, so the model read a capability into an environment that runs
+  // read-only, as a non-root user, with no package manager.
+  //
+  // The source pins below are the cheap half. The half that matters is
+  // behavioural and cannot live in a unit test — it is recorded in the PR: with
+  // the policy in place, both providers stop and report after a chain of
+  // missing-tool failures instead of continuing to engineer around the gap
+  // (Anthropic 4/4 → 0/4 still calling tools, Mistral 1/4 → 0/4).
+  /** The policy paragraph alone — asserting against the whole SYSTEM_PROMPT made
+   *  two of these vacuous: `pip` matches "pipeline" and `web_research` appears
+   *  EIGHT other times, so both stayed green with the paragraph deleted.
+   *
+   *  Cut at the blank line, NOT at `\n\n**`. The `**` form keys on the NEXT
+   *  paragraph's formatting rather than on this one's end: turn the following
+   *  `**Label**:` paragraphs into `### Label` headings — an unremarkable
+   *  markdown edit — and the slice silently swallows them, which re-creates
+   *  exactly the vacuity above (a neighbour then supplies `web_research`).
+   *  Both forms give the same 598 chars today; only one stays correct.
+   *
+   *  No `expect` out here: a throw at describe scope is a COLLECTION error, so
+   *  vitest reports zero tests and every other guard in this file silently
+   *  stops running. Absence is asserted in its own `it` below. */
+  const policy = (() => {
+    const start = SYSTEM_PROMPT.indexOf('**Never install software**');
+    if (start === -1) return '';
+    const rest = SYSTEM_PROMPT.slice(start);
+    const end = rest.indexOf('\n\n');
+    return end === -1 ? rest : rest.slice(0, end);
+  })();
+
+  it('has a no-install policy, and the slice is bounded to it', () => {
+    expect(policy, 'the no-install policy is missing from SYSTEM_PROMPT').not.toBe('');
+    // A bound, not a pin on the wording: an ordinary edit to the paragraph
+    // passes, a slice that has swallowed a neighbour does not.
+    expect(policy.length, 'the policy slice has grown past its own paragraph').toBeLessThan(1200);
+  });
+
+  it('forbids installing software, naming the managers a model actually reaches for', () => {
+    for (const manager of ['apt-get', 'npm install', 'pip', 'brew', 'cargo', 'gem']) {
+      expect(policy, `the policy should name ${manager}`).toContain(manager);
+    }
+  });
+
+  it('rules out the fallback as well as the first attempt', () => {
+    // The dogfood thread did not open with `apt-get`; it arrived there after
+    // three other things failed. A policy that only covers the opening move
+    // would not have changed that thread.
+    expect(policy).toMatch(/not as a first attempt and not as a fallback/i);
+  });
+
+  it('offers the paths that actually exist instead of only forbidding', () => {
+    // A prohibition with no alternative just moves the model to the next
+    // workaround — which in the measured thread was hand-rolling a parser.
+    expect(policy).toMatch(/attach the file to the chat/i);
+    expect(policy).toContain('web_research');
+    // And it must frame a missing capability as something to REPORT.
+    expect(policy).toMatch(/fact to REPORT/i);
+  });
+});
