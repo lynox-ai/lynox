@@ -40,7 +40,15 @@ function friendlyBlockMessage(technical: string): string {
   if (technical.includes('private IP')) return 'That address points to an internal network and cannot be reached.';
   if (technical.includes('enforce_https')) return 'Only secure HTTPS connections are allowed. HTTP is disabled.';
   if (technical.includes('unsupported protocol')) return 'Only HTTP and HTTPS connections are supported.';
-  if (technical.includes('air-gapped')) return 'Network access is disabled in this security mode.';
+  // This string is what the MODEL reads back as the tool result, so it teaches a
+  // rule. "Network access is disabled" taught the wrong one: it describes the
+  // machine, while the policy only covers this tool — the engine's own outbound
+  // paths and anything a shell command starts are outside `network_policy`. A
+  // model that believes the machine is offline either gives up on work it could
+  // legitimately do, or tries another route, succeeds, and learns that the stated
+  // policy is decorative. Naming the scope avoids both without advertising a way
+  // around it.
+  if (technical.includes('network_policy=deny-all')) return 'Network access is disabled for this tool in the current security mode.';
   if (technical.includes('guarded egress policy')) return 'That server is not reachable under the current egress policy. Connect it as an API via api_setup, or ask your operator to allow it.';
   if (technical.includes('unrecognised egress policy')) return 'Network access is blocked by an unrecognised egress policy configuration.';
   if (technical.includes('allow-list')) return 'That server is not in the allowed list for this security mode.';
