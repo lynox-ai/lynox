@@ -34,18 +34,21 @@ const NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 const PROMPT_MAX_CHARS = 300;
 
 /**
- * Bidi overrides and isolates reorder text at render time, so a span can read
- * forwards on screen while being stored backwards — which defeats the point of
- * quoting the agent verbatim. `collapseToSingleLine` does not touch them (it
- * covers C0/C1 and the exotic separators). `prompt-origin.ts` in the web-ui,
- * which cleans the OTHER untrusted field of this same dialog, strips exactly
- * this set; matching it keeps two halves of one dialog from disagreeing.
+ * What forges a quote rather than filling it: bidi overrides and isolates
+ * (a span that reads forwards on screen and backwards in the store, so the
+ * quote is no longer a quote) and the zero-width formatters (a box that looks
+ * empty but is not). `collapseToSingleLine` covers neither — it handles C0/C1
+ * and the exotic separators. LRM/RLM are left alone; see the note on the
+ * client half in `chat-framing.ts`.
  */
-const BIDI_CHARS = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+const FORGING_CHARS = /[\u202A-\u202E\u2066-\u2069\u200B-\u200D\uFEFF]/g;
 
 /** Collapse to one line and bound the length, ellipsising when it had to cut. */
 function boundPromptText(s: string): string {
-  const flat = collapseToSingleLine(s).replace(BIDI_CHARS, '');
+  // Strip BEFORE collapsing — removing a character from between two spaces after
+  // the collapse leaves both spaces behind, and a leading override leaves a
+  // leading space.
+  const flat = collapseToSingleLine(s.replace(FORGING_CHARS, ''));
   // Cut by CODE POINT, not by UTF-16 unit: `'a'.repeat(298) + '😀'` sliced at
   // 299 units ends on a lone high surrogate, which round-trips to U+FFFD.
   const points = [...flat];
@@ -144,8 +147,19 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
         `${exactMatches.map(n => `"${n}"`).join(', ')}. Reference ${refs} instead of collecting a duplicate. ` +
         `Only collect again if you genuinely need a separate key under a clearly different name.`;
     }
+    // Bounded, and the bound is not cosmetic: this hint is appended AFTER the
+    // agent's (capped) text, so it is the tail of the string the dialog renders.
+    // Left unbounded it grows ~64 chars per sibling key, and a vault with a
+    // dozen keys under one vendor pushes the whole hint past the render cap —
+    // truncating the one line in that box the agent does NOT author. Three names
+    // is what a person reads; the rest are a count.
+    const HINT_NAMES_SHOWN = 3;
+    const shown = nearMatches.slice(0, HINT_NAMES_SHOWN);
+    const overflow = nearMatches.length - shown.length;
+    const nameList = shown.map(n => `"${n}"`).join(', ')
+      + (overflow > 0 ? ` and ${String(overflow)} more` : '');
     const vendorHint = nearMatches.length > 0
-      ? ` (Related keys already in the vault under the same vendor: ${nearMatches.map(n => `"${n}"`).join(', ')} — ` +
+      ? ` (Related keys already in the vault under the same vendor: ${nameList} — ` +
         `reference one of those with secret:NAME if this is the same credential; otherwise continue to store the new key.)`
       : '';
 

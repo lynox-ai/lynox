@@ -1644,19 +1644,13 @@
 	const pendingSecret = $derived(getPendingSecretPrompt());
 
 	/**
-	 * The agent's own words for the credential dialog, cleaned once so the guard
-	 * and the render agree. Guarding on the RAW string and rendering the cleaned
-	 * one lets a prompt of `"​"` open a box labelled "the assistant's
-	 * reason" with nothing in it — a frame around nothing reads worse than no
-	 * frame.
+	 * Cleaned once, so the `{#if}` guard and the render agree — guarding on the
+	 * raw string opens a labelled box containing nothing for a zero-width prompt.
 	 *
-	 * The bound is 1200, not the 400 it started at, and the number matters: the
-	 * TOOL already caps the agent's own span at 300 server-side, so everything
-	 * past that is the engine's own "this key is already in the vault" hint,
-	 * appended after it. A 400 cap therefore did not bound the agent — it
-	 * truncated the one line in the box the agent does NOT author, and it grew
-	 * worse the more sibling keys the vault held. This cap exists only as a
-	 * backstop for prompts restored from before the server-side bound.
+	 * 1200 is a backstop, not a bound: the tool caps the AGENT's span at 300
+	 * server-side, and everything past that is the engine's own "already in the
+	 * vault" hint. A cap near 300 would truncate the one line here the agent does
+	 * not author.
 	 */
 	const secretAgentText = $derived(
 		pendingSecret ? sanitizeFramingField(pendingSecret.prompt, 1200) : '',
@@ -3381,36 +3375,32 @@
 		<div data-pending-prompt data-prompt-kind="secret" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-3">
 				{@render promptOrigin(pendingSecret.origin)}
-				<!-- The title is OURS. It used to be `{pendingSecret.prompt}` — the
-				     agent-authored sentence — set in `text-sm font-medium text-text`,
-				     which is byte-identical to the classes the product's own titles use
-				     three blocks down (`{t('chat.mail_connect_title')}`). A dialog that
-				     asks for a credential was therefore titled by whoever wrote the tool
-				     call, and external content (a mail body, a fetched page) can be what
-				     wrote it. Nothing about the text was the problem — it is escaped, and
-				     this dialog has never rendered markdown. The problem was the SLOT.
-				     The agent's words move to the muted box below, where this file
-				     already puts variable content in the mail-connect block. -->
+				<!-- Product copy: the agent must never own this slot. -->
 				<div class="flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-warning shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
 					<span class="text-sm font-medium text-text">{t('chat.secret_title')}</span>
 				</div>
 
-				<div class="rounded-[var(--radius-sm)] bg-bg-muted px-3 py-2 text-xs text-text-subtle space-y-1">
+				<!-- Attributed, not demoted. Taking the title back is the security fix;
+				     burying the reason with it would break the ordinary case, where this
+				     sentence is the ONLY thing saying why a credential is wanted. It keeps
+				     body weight and sits directly under the title, quoted by the same
+				     left rule this file uses elsewhere for words that are not ours. -->
+				{#if secretAgentText}
+					<div class="border-l-2 border-border pl-3 space-y-0.5">
+						<div class="text-xs text-text-muted">{t('chat.secret_agent_said')}</div>
+						<div class="text-sm text-text-subtle max-h-32 overflow-y-auto [overflow-wrap:anywhere]">{secretAgentText}</div>
+					</div>
+				{/if}
+
+				<!-- Machine metadata, which is what this muted box is for in the
+				     mail-connect dialog below. The key name is also the input's
+				     placeholder, so it is the redundant element here, not the reason. -->
+				<div class="rounded-[var(--radius-sm)] bg-bg-muted px-3 py-2 text-xs text-text-subtle">
 					<div class="flex justify-between gap-2">
 						<span class="text-text-muted">{t('chat.secret_key_label')}</span>
 						<span class="font-mono [overflow-wrap:anywhere]">{pendingSecret.name}</span>
 					</div>
-					{#if secretAgentText}
-						<div class="space-y-0.5 pt-1">
-							<div class="text-text-muted">{t('chat.secret_agent_said')}</div>
-							<!-- Second half of a pair: the tool already collapsed and bounded
-							     this on the server. Applied again here because the client is
-							     where it is rendered, and a prompt restored from the store
-							     predates that change. -->
-							<div class="max-h-24 overflow-y-auto [overflow-wrap:anywhere]">{secretAgentText}</div>
-						</div>
-					{/if}
 				</div>
 
 				{#if !secretConsented}
@@ -3423,10 +3413,8 @@
 						<button onclick={handleSecretCancel} class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-subtle hover:text-text transition-all">{t('chat.secret_cancel')}</button>
 					</div>
 				{:else}
-					<!-- The input's `aria-label` was `pendingSecret.prompt || pendingSecret.name`,
-					     which handed the same slot confusion to a screen reader: the agent's
-					     sentence read out as the field's own label. The label is the product's;
-					     the key name says which field it is. -->
+					<!-- Product copy only: the agent's sentence as this field's accessible
+					     name is the same slot confusion, in audio. -->
 					<div class="flex gap-2">
 						<input
 							type="password"

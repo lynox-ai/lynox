@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { toPromptOrigin } from './prompt-origin.js';
 import { sanitizeFramingField } from './chat-framing.js';
 
 // Control chars built explicitly so the source stays pure-ASCII and unambiguous.
@@ -50,30 +49,54 @@ describe('sanitizeFramingField', () => {
 	});
 });
 
-describe('bidi hardening', () => {
-	// A framing field is a LABEL. One that can lie about its own direction reads
-	// as a reassurance on screen while the stored string says something else, so
-	// an export or an audit disagrees with what the user was shown.
-	const BIDI = [0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069];
+describe('what a framing field may not carry', () => {
+	// A framing field is a LABEL. One that can lie about its own direction, or
+	// hide content in a field that looks empty, reads as a reassurance on screen
+	// while the stored string says something else — so an export or an audit
+	// disagrees with what the user was shown.
+	const FORGING = [0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069,
+		0x200b, 0x200c, 0x200d, 0xfeff];
+	const MARKS = [0x200e, 0x200f];
 
-	it('strips every bidi mark, override and isolate', () => {
-		for (const cp of BIDI) {
+	it('strips every override, isolate and zero-width formatter', () => {
+		for (const cp of FORGING) {
 			const out = sanitizeFramingField(`before${String.fromCodePoint(cp)}after`);
 			expect(out, `U+${cp.toString(16).toUpperCase()} survived`).toBe('beforeafter');
 		}
 	});
 
-	it('agrees with prompt-origin, which cleans the other field of the same dialog', () => {
-		const src = readFileSync(fileURLToPath(new URL('./prompt-origin.ts', import.meta.url)), 'utf-8');
-		const theirs = /const BIDI_CHARS = (\/\[[^\]]+\]\/g);/.exec(src)?.[1];
-		const ours = /const BIDI_CHARS = (\/\[[^\]]+\]\/g);/.exec(
-			readFileSync(fileURLToPath(new URL('./chat-framing.ts', import.meta.url)), 'utf-8'),
-		)?.[1];
-		expect(theirs, 'prompt-origin no longer declares BIDI_CHARS').toBeDefined();
-		expect(ours, 'chat-framing no longer declares BIDI_CHARS').toBeDefined();
-		// Two halves of one dialog disagreeing on what may render is the bug this
-		// pins — not the exact class, but that they are the SAME class.
-		expect(ours).toBe(theirs);
+	it('keeps LRM/RLM, because this function also cleans real names', () => {
+		// The six other callers pass a person's or a record's name. LRM/RLM are
+		// how right-to-left text orders digits and punctuation, so stripping them
+		// reorders a legitimate Hebrew or Arabic contact. An override buys an
+		// attacker the actual reversal; a mark only nudges neutrals. That is the
+		// whole trade, and it is why this function and `prompt-origin.ts` differ.
+		for (const cp of MARKS) {
+			const out = sanitizeFramingField(`before${String.fromCodePoint(cp)}after`);
+			expect(out, `U+${cp.toString(16).toUpperCase()} was stripped`).toContain(String.fromCodePoint(cp));
+		}
+	});
+
+	it('is stricter than this one, and only in the one way that is intended', () => {
+		// Behaviour, not a regex comparison. The earlier version asserted the two
+		// source declarations were byte-equal, which pinned that the CONSTANTS
+		// matched while proving nothing about either being applied — deleting the
+		// `.replace()` call in prompt-origin left it green. It also could not have
+		// expressed what is true here: the two agree on everything that forges,
+		// and differ on LRM/RLM alone, on purpose.
+		for (const cp of MARKS) {
+			const origin = toPromptOrigin(`before${String.fromCodePoint(cp)}after`, undefined, undefined);
+			expect(origin?.workflowName, `prompt-origin kept U+${cp.toString(16)}`).toBe('beforeafter');
+		}
+		for (const cp of FORGING) {
+			const origin = toPromptOrigin(`before${String.fromCodePoint(cp)}after`, undefined, undefined);
+			expect(origin?.workflowName, `prompt-origin kept U+${cp.toString(16)}`).toBe('beforeafter');
+		}
+	});
+
+	it('strips before collapsing, so removal leaves no double space', () => {
+		expect(sanitizeFramingField('a \u202E b')).toBe('a b');
+		expect(sanitizeFramingField('\u202EEnter key')).toBe('Enter key');
 	});
 
 	it('truncates on a code-point boundary', () => {

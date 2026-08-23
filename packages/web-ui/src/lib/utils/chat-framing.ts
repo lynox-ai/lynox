@@ -24,23 +24,27 @@
  * so the two layers behave identically.
  */
 /**
- * Bidi marks, overrides and isolates. The whitespace/control class above does
- * not reach them, so a framing field could render in an order it is not written
- * in — text that reads as a reassurance on screen and as gibberish in the store
- * or an export. `prompt-origin.ts` strips exactly this set for the other
- * untrusted field of the credential dialog; the two agree deliberately.
+ * Characters that forge a label rather than fill it: the bidi OVERRIDES and
+ * ISOLATES, which render text in an order it is not written in, and the
+ * zero-width formatters, which put content in a field that looks empty.
  *
- * This does cost something in right-to-left text: LRM/RLM (U+200E/200F) are
- * legitimate there for ordering neutral characters like digits and punctuation.
- * It is taken anyway, for the same reason `prompt-origin.ts` takes it — these
- * are short LABELS, not prose, and a label that can lie about its own direction
- * is worse than one that renders a phone number's punctuation the wrong way.
- * Do not copy this into a sanitiser for message BODIES.
+ * LRM/RLM (U+200E/200F) are deliberately NOT here, and the omission is the
+ * considered half. They are legitimate in right-to-left text — an Arabic or
+ * Hebrew contact name orders its digits and punctuation with them — and this
+ * function is shared by six seed-message surfaces where the value is a real
+ * person's name. Stripping them there reorders `אבי ‎+41 79 123`. The overrides
+ * buy an attacker the actual reversal; the marks only nudge neutrals, so the
+ * trade goes the other way. `prompt-origin.ts` does strip the marks as well,
+ * because its field is a workflow label that is never a name — that difference
+ * is intended, not drift.
  */
-const BIDI_CHARS = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+const FORGING_CHARS = /[\u202A-\u202E\u2066-\u2069\u200B-\u200D\uFEFF]/g;
 
 export function sanitizeFramingField(s: string, max = 200): string {
-	const flat = s.replace(/[\s\x00-\x1f\x7f-\x9f]+/g, ' ').replace(BIDI_CHARS, '').trim();
+	// Strip BEFORE collapsing: removing a character between two spaces after the
+	// collapse leaves the two spaces behind, so `'a \u200E b'` would keep a double
+	// space and `'\u202E x'` a leading one.
+	const flat = s.replace(FORGING_CHARS, '').replace(/[\s\x00-\x1f\x7f-\x9f]+/g, ' ').trim();
 	// Cut by code point so a truncation cannot end on a lone surrogate.
 	const points = [...flat];
 	return points.length > max ? `${points.slice(0, max - 1).join('')}…` : flat;
