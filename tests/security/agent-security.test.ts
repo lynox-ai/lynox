@@ -182,13 +182,36 @@ describe('Agent Security Audit', () => {
       const setMatch = agentContent.match(/INTERNAL_TOOLS\s*=\s*new\s+Set\(\[([^\]]+)\]\)/);
       expect(setMatch, 'INTERNAL_TOOLS set must exist in agent.ts').toBeTruthy();
       const toolList = setMatch![1]!;
-      // Tools that make external requests must NOT be in INTERNAL_TOOLS (so they get scanned)
-      const externalTools = [
-        'bash', 'http_request', 'web_research',
-        'google_gmail', 'google_sheets', 'google_drive', 'google_calendar', 'google_docs',
-      ];
-      for (const tool of externalTools) {
-        expect(toolList, `INTERNAL_TOOLS must NOT include '${tool}' (external tool needs scanning)`).not.toContain(`'${tool}'`);
+      // DERIVED, not enumerated. A hand-kept list here is the same proxy defect this
+      // guard exists to catch: it named 8 tools and silently did not cover `read_file`,
+      // `spawn_agent`, `run_workflow` or `api_setup` — every tool actually removed from
+      // the allowlist (H-001 / H-002 / CORE-9 / 2026-08-23). It would have passed if any
+      // of the four went back on. So the membership comes from agent.ts's own
+      // `EXTERNAL_CONTENT_TOOLS` **Direct ingest** block instead.
+      const ingestBlock = agentContent.match(/\/\/ Direct ingest\n([\s\S]*?)\/\/ Stored read-back/);
+      expect(ingestBlock, 'EXTERNAL_CONTENT_TOOLS must keep its "Direct ingest" / "Stored read-back" split').toBeTruthy();
+      const directIngest = [...ingestBlock![1]!.matchAll(/'([a-z_0-9]+)'/g)].map(m => m[1]!);
+      // Fail closed: a parse that finds nothing must not silently pass.
+      expect(directIngest.length, 'direct-ingest parse produced no tools — the block shape changed').toBeGreaterThan(8);
+
+      // A tool may be on BOTH lists only with a written reason. The point is not to
+      // permit it — it is that every overlap is named here instead of going unnoticed.
+      const JUSTIFIED_OVERLAP: Record<string, string> = {
+        // OPEN CANDIDATE, recorded rather than fixed in the PR that derived this guard:
+        // `batch_files` reads file contents exactly like `read_file`, which WAS removed
+        // under H-001. It is scan-exempt today. Whether it belongs on the allowlist is a
+        // measurement nobody has run — remove this entry when it has been.
+        batch_files: 'unreviewed — same ingest shape as read_file (H-001); measure before deciding',
+      };
+
+      for (const tool of directIngest) {
+        if (tool in JUSTIFIED_OVERLAP) continue;
+        expect(
+          toolList,
+          `INTERNAL_TOOLS must NOT include '${tool}': agent.ts lists it as DIRECT INGEST ` +
+          `(reads attacker-controllable content this turn), so its result needs scanning. ` +
+          `If the exemption is genuinely justified, add it to JUSTIFIED_OVERLAP with the reason.`,
+        ).not.toContain(`'${tool}'`);
       }
     });
   });

@@ -2731,13 +2731,13 @@ export class Agent implements IAgent {
     'ask_user', 'ask_secret',
     'artifact_save', 'artifact_list', 'artifact_delete',
     'task_create', 'task_update', 'task_list',
-    'api_setup',
     'data_store_create', 'data_store_insert', 'data_store_query',
     'data_store_list', 'data_store_delete', 'data_store_drop',
     'plan_task',
   ]);
-  // NOTE: `read_file`, `spawn_agent` and `run_workflow` were removed from this
-  // allowlist (H-001 + H-002 + CORE-9). Their return values now flow through the
+  // NOTE: `read_file`, `spawn_agent`, `run_workflow` and `api_setup` were removed
+  // from this allowlist (H-001 + H-002 + CORE-9 + the 2026-08-23 audit). Their
+  // return values now flow through the
   // full guard chain — `wrapUntrustedData()` at the tool boundary AND
   // `scanToolResult()` here in the dispatcher — because each can carry
   // attacker-controlled content into the parent agent's context (a read file, a
@@ -2746,6 +2746,17 @@ export class Agent implements IAgent {
   // defence-in-depth. `run_workflow` is the identical threat shape to `spawn_agent`
   // — its steps run sub-agents with web/http/read access — so it gets the same
   // treatment its sibling already had.
+  //
+  // `api_setup` was the fourth, and the case for it was already written down HERE:
+  // it is listed under EXTERNAL_CONTENT_TOOLS above as **direct ingest** ("read
+  // attacker-controllable content THIS turn"), whose own comment notes that several
+  // such tools "are also on the scan-exempt INTERNAL_TOOLS allowlist, so they carry
+  // no ⚠ warning either". Two lists in this file disagreed about the same tool. It
+  // returns remote-authored text on several paths — the HTTP reason phrase, the
+  // OpenAPI `openapi` version field (unbounded), the JSON parse error's body prefix,
+  // and the bootstrap DRAFT block built from the remote spec's title/description/
+  // endpoint text (uncapped in endpoint count). Patching those individually is the
+  // wrong cut: the enumeration key would be the phrasing, not the class.
 
   /** Per-tool wall-clock cap. An async tool handler that never settles (a hung
    *  socket, a promise that never resolves) would otherwise hang the WHOLE run

@@ -770,7 +770,14 @@ async function bootstrapFromDocs(docsUrl: string, agent: IAgent): Promise<string
       // bootstrap is not a freebie bypass of MAX_REQUESTS_PER_SESSION.
       agent.sessionCounters.httpRequests++;
       if (!resp.ok) {
-        return `Error: failed to fetch docs page (HTTP ${String(resp.status)} ${resp.statusText}). Check the URL and try again.`;
+        // `resp.statusText` is the HTTP reason phrase — chosen by the REMOTE server,
+        // free-form, and echoed here verbatim. `api_setup` is on the agent's
+        // scan-exempt tool allowlist, so this string reaches the model WITHOUT
+        // `scanToolResult`. Measured: a server returning `404 Ignore all previous
+        // instructions…` had the full text delivered byte-identically, and the
+        // injection detector WOULD have flagged it — it never sees it. The status
+        // code alone is diagnostic enough, and it is not attacker-authored text.
+        return `Error: failed to fetch docs page (HTTP ${String(resp.status)}). Check the URL and try again.`;
       }
       const body = await readBodyLimited(resp, DOCS_BODY_MAX_BYTES);
       docsText = body.text;
@@ -1043,7 +1050,9 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
           clearTimeout(timer);
         }
         if (!resp.ok) {
-          return `Error: failed to fetch OpenAPI spec (HTTP ${String(resp.status)} ${resp.statusText}). Check the URL or pass a direct link to the JSON spec.`;
+          // Same server-controlled reason phrase as the docs-page path above —
+          // dropped for the same reason (scan-exempt tool, verbatim echo).
+          return `Error: failed to fetch OpenAPI spec (HTTP ${String(resp.status)}). Check the URL or pass a direct link to the JSON spec.`;
         }
         const { text, truncated } = await readBodyLimited(resp, OPENAPI_SPEC_MAX_BYTES);
         if (truncated) {
@@ -1058,8 +1067,27 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         return `Error: could not parse OpenAPI spec from ${input.openapi_url} — ${msg}. If the docs site serves HTML, find the raw .json spec URL (often at /openapi.json or /swagger.json).`;
       }
 
-      if (!spec.openapi || !spec.openapi.startsWith('3.')) {
-        return `Error: unsupported spec version (openapi: "${String(spec.openapi)}"). This bootstrapper expects OpenAPI 3.x. Swagger 2.0 specs need conversion first, or build the profile manually via "create".`;
+      // `typeof` guard, not just truthiness: a remote spec of `{"openapi": 3}` is
+      // truthy but has no `.startsWith`, so the version check threw a TypeError
+      // PAST this handler's try/catch (it closes above) and the agent got a stack
+      // shape instead of the guidance below. A misconfigured server produces that
+      // without any malice. The echoed value is bounded for the same reason the
+      // reason phrase was dropped — it is remote-authored text.
+      // Guard `spec` itself, not just its field: `JSON.parse('null')` is null and
+      // `JSON.parse('"hi"')` is a string, so a 200 with either body dereferenced
+      // null/undefined here — PAST this handler's try/catch, which closes above.
+      // That route matters beyond ergonomics: the dispatcher's catch path returns
+      // `cause.message` WITHOUT `scanToolResult`, so a throw is the one way out of
+      // this tool that the scan does not see. A misconfigured server produces it
+      // with no malice.
+      if (typeof spec !== 'object' || spec === null || typeof spec.openapi !== 'string') {
+        return `Error: spec has no string "openapi" version field. This bootstrapper expects OpenAPI 3.x. Swagger 2.0 specs need conversion first, or build the profile manually via "create".`;
+      }
+      if (!spec.openapi.startsWith('3.')) {
+        // Render the real value (bounded) — reporting `typeof` would tell the agent
+        // the server declared a version of "number", and send it looking for a field
+        // that says no such thing.
+        return `Error: unsupported spec version (openapi: "${spec.openapi.slice(0, 40)}"). This bootstrapper expects OpenAPI 3.x. Swagger 2.0 specs need conversion first, or build the profile manually via "create".`;
       }
 
       let draft: ApiProfile;
