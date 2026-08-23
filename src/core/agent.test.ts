@@ -2401,6 +2401,298 @@ describe('Agent', () => {
     });
   });
 
+  /**
+   * A tool that completed without succeeding. `toolEnd` used to publish
+   * `success: true` for anything a handler RETURNED, so `web_research`'s
+   * "Failed to read URL: HTTP 404" and `bash`'s non-zero-exit output were both
+   * booked as successes. Measured on one real thread: 123 tool calls, exactly 1
+   * counted as an error, while ~35 of its 63 web reads had 404'd.
+   *
+   * The contract is two-sided and BOTH sides need a test — recording the failure
+   * would be worthless if it changed what the model reads, and leaving the
+   * payload alone would be worthless if the ledger stayed green.
+   */
+  describe('ToolSoftFailure — completed but not successful', () => {
+    it('books it as a failure in the LEDGER — the sink, not the diagnostics channel', async () => {
+      // ⚠ This assertion moved on 2026-08-23 and that move IS the point.
+      // When this test was first written the run history came from
+      // `channels.toolEnd`. It does not any more: `agent.ts` persists through
+      // the injected `recordToolCall` sink, and the channel is explicitly
+      // "diagnostics only — it no longer writes history". A test that asserts
+      // only on the channel therefore passes while the ledger stays green for a
+      // failed call, which is the whole defect. Assert the SINK first.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string; isError: boolean };
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('soft_tool', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('Failed to read URL: HTTP 404 Not Found', 'HTTP 404'),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ts1', name: 'soft_tool', input: { url: 'https://x/y' } }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-soft-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'soft_tool');
+      expect(row, 'the soft failure must reach the ledger sink at all').toBeDefined();
+      // `run-history-analytics` counts a non-empty `output_json` as error_count,
+      // and the debug export reads the same field. An empty one is byte-identical
+      // to a successful silent call — the state a whole thread was misread from.
+      expect(row!.outputJson, 'the reason is what makes the row distinguishable').toBe('HTTP 404');
+      expect(row!.isError).toBe(true);
+    });
+
+    it('never records an error flag with an empty reason — the two fields stay in step', async () => {
+      // `run-history-analytics` derives error_count from `output_json != ''` and
+      // never reads `isError`. A row with the flag set and an empty output would
+      // therefore claim a failure that nothing counts — the same silent-success
+      // shape this change removes, one layer in. `ToolSoftFailure` does not
+      // validate its reason, so an empty one is reachable from any tool.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string; isError: boolean };
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('mute_tool', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('the payload', '   '),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'mu1', name: 'mute_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-mute-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'mute_tool');
+      expect(row).toBeDefined();
+      expect(row!.isError).toBe(true);
+      expect(row!.outputJson, 'an error row must carry something the counter can see').not.toBe('');
+      expect(row!.outputJson).toContain('mute_tool');
+    });
+
+    it('bounds the ledger reason before persisting it', async () => {
+      // Security round on this change. The reason had no length bound, and the
+      // entry-point export in this same PR is what makes that reachable: an
+      // out-of-tree tool can construct a ToolSoftFailure with any string and put
+      // it straight into a persisted column. The input beside it is capped at
+      // 2000 chars and the result above it at `toolResultLimit`; this field was
+      // the one unbounded write on the path.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string; isError: boolean };
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('huge_tool', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('payload', 'x'.repeat(50_000)),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'hg1', name: 'huge_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-huge-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'huge_tool');
+      expect(row).toBeDefined();
+      expect(row!.outputJson.length, 'an unbounded reason must not reach the row').toBeLessThanOrEqual(2000);
+      expect(row!.isError).toBe(true);
+    });
+
+    it('masks BEFORE truncating, so a cut cannot leave a secret tail exposed', async () => {
+      // Order matters: truncate-then-mask would slice a credential in half and
+      // hand the masker a fragment its pattern no longer matches, persisting the
+      // remainder verbatim.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string };
+      const recorded: RecordedCall[] = [];
+      // The real `maskSecrets` replaces STORED VALUES, not a prefix pattern —
+      // that is what makes the order observable. Cutting first hands the masker
+      // `SUPERSECRETV`, a fragment that matches no stored value, so it is
+      // persisted verbatim. (A prefix-regex stub would mask either way and the
+      // mutation would be equivalent — measured, not assumed.)
+      const secret = 'SUPERSECRETVALUE1234';
+      const tool = makeTool('cut_tool', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('payload', 'y'.repeat(1988) + secret),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ct1', name: 'cut_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-cut-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+        secretStore: {
+          getMasked: vi.fn().mockReturnValue('***'),
+          resolve: vi.fn().mockReturnValue('v'),
+          listNames: vi.fn().mockReturnValue([]),
+          containsSecret: vi.fn().mockReturnValue(false),
+          maskSecrets: vi.fn().mockImplementation((t: string) => t.split(secret).join('[REDACTED]')),
+          recordConsent: vi.fn(),
+          hasConsent: vi.fn().mockReturnValue(false),
+          isExpired: vi.fn().mockReturnValue(false),
+          findUnresolvedSecretRefs: vi.fn().mockReturnValue([]),
+          extractSecretNames: vi.fn().mockReturnValue([]),
+          findNameMatches: vi.fn().mockReturnValue([]),
+        } as unknown as import('../types/index.js').SecretStoreLike,
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'cut_tool');
+      expect(row).toBeDefined();
+      expect(row!.outputJson, 'no fragment of the credential survives the cut').not.toContain('SUPERSEC');
+    });
+
+    it('leaves a genuinely successful call recorded as success — the counter-direction', async () => {
+      // A fix against "failures look like successes" must not turn into
+      // "successes look like failures": that would flip every dashboard the
+      // other way and make error_count equally useless.
+      type RecordedCall = { toolName: string; outputJson: string; isError: boolean };
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('ok_tool', vi.fn().mockResolvedValue('all good'));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ok1', name: 'ok_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-ok-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'ok_tool');
+      expect(row).toBeDefined();
+      expect(row!.outputJson).toBe('');
+      expect(row!.isError).toBe(false);
+    });
+
+    it('masks secrets in the ledger reason, as the thrown path already does', async () => {
+      // Residuum 1 of four named in the 2026-08-02 closing comment. The reason
+      // is tool-supplied text and lands in a persisted column; the throw path
+      // beside it runs `maskSecrets` on its message, and this path must match —
+      // otherwise the fix opens a secret sink where none existed.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string; isError: boolean };
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('leaky_tool', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('body', 'auth failed for sk-live-SECRET123456789'),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'lk1', name: 'leaky_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-leak-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+        secretStore: {
+          getMasked: vi.fn().mockReturnValue('***1234'),
+          resolve: vi.fn().mockReturnValue('v'),
+          listNames: vi.fn().mockReturnValue([]),
+          containsSecret: vi.fn().mockReturnValue(false),
+          maskSecrets: vi.fn().mockImplementation((t: string) => t.replace(/sk-live-[A-Za-z0-9]+/g, '[REDACTED]')),
+          recordConsent: vi.fn(),
+          hasConsent: vi.fn().mockReturnValue(false),
+          isExpired: vi.fn().mockReturnValue(false),
+          findUnresolvedSecretRefs: vi.fn().mockReturnValue([]),
+          extractSecretNames: vi.fn().mockReturnValue([]),
+          findNameMatches: vi.fn().mockReturnValue([]),
+        } as unknown as import('../types/index.js').SecretStoreLike,
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'leaky_tool');
+      expect(row).toBeDefined();
+      expect(row!.outputJson, 'the raw secret must not reach the persisted row').not.toContain('SECRET123456789');
+      expect(row!.outputJson).toContain('[REDACTED]');
+    });
+
+    it('still publishes the diagnostics channel — Bugsink breadcrumbs keep working', async () => {
+      const { channels } = await import('./observability.js');
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      const tool = makeTool('soft_tool_ch', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('Failed to read URL: HTTP 404 Not Found', 'HTTP 404'),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ts1b', name: 'soft_tool_ch', input: { url: 'https://x/y' } }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({ name: 'test', model: 'claude-sonnet-4-6', tools: [tool] });
+      await agent.send('go');
+
+      const calls = vi.mocked(channels.toolEnd.publish).mock.calls;
+      const call = calls.find(c => (c[0] as { name: string }).name === 'soft_tool_ch');
+      expect(call).toBeDefined();
+      const data = call![0] as { success: boolean; error?: string };
+      expect(data.success).toBe(false);
+      expect(data.error).toBe('HTTP 404');
+    });
+
+    it('hands the model the payload verbatim, and not as an error', async () => {
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      const payload = 'Failed to read URL: HTTP 404 Not Found';
+      const tool = makeTool('soft_tool2', vi.fn().mockRejectedValue(
+        new ToolSoftFailure(payload, 'HTTP 404'),
+      ));
+
+      const streamed: Array<{ type: string; result?: string; isError?: boolean }> = [];
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ts2', name: 'soft_tool2', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        onStream: async (e) => { streamed.push(e as { type: string; result?: string; isError?: boolean }); },
+      });
+      await agent.send('go');
+
+      const toolResult = streamed.find(e => e.type === 'tool_result');
+      expect(toolResult).toBeDefined();
+      expect(toolResult!.result).toBe(payload);
+      // NOT is_error: the agent loop must behave exactly as it did when the tool
+      // returned this string, or this stops being an observability fix.
+      expect(toolResult!.isError).toBeUndefined();
+    });
+
+    it('leaves an ordinary throw on the hard-error path', async () => {
+      const { channels } = await import('./observability.js');
+      const tool = makeTool('hard_tool', vi.fn().mockRejectedValue(new Error('boom')));
+
+      const streamed: Array<{ type: string; isError?: boolean }> = [];
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ts3', name: 'hard_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        onStream: async (e) => { streamed.push(e as { type: string; isError?: boolean }); },
+      });
+      await agent.send('go');
+
+      const call = vi.mocked(channels.toolEnd.publish).mock.calls
+        .find(c => (c[0] as { name: string }).name === 'hard_tool');
+      expect((call![0] as { success: boolean }).success).toBe(false);
+      expect(streamed.find(e => e.type === 'tool_result')?.isError).toBe(true);
+    });
+  });
+
   describe('ABSOLUTE_MAX_ITERATIONS', () => {
     it('terminates loop at 500 iterations with error event', async () => {
       const tool = makeTool('loop_tool');

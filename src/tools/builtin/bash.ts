@@ -3,6 +3,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { IsolationConfig } from '../../types/security.js';
 import { getWorkspaceCwd } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES, DEFAULT_BASH_TIMEOUT_MS } from '../../core/constants.js';
+import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 
 interface BashInput {
   command: string;
@@ -184,7 +185,31 @@ export const bashTool: ToolEntry<BashInput> = {
         const stderr = String((err as { stderr: unknown }).stderr);
         const stdout = String((err as { stdout: unknown }).stdout || '');
         const combined = [stdout, stderr].filter(Boolean).join('\n');
-        return combined || `Command failed: ${input.command}`;
+        // The agent still reads the output verbatim and adapts — that behaviour
+        // is deliberate and unchanged. But a non-zero exit is a FAILURE, and
+        // returning it plainly recorded it in the run ledger as a success:
+        // `toolEnd` publishes `success: true` for anything a handler returns.
+        // One real thread logged 123 tool calls and exactly 1 error while a long
+        // run of `wget` calls was failing. `status` is the exit code when
+        // execSync provides it.
+        // A TIMEOUT is not an exit code. `execSync` kills the child on timeout,
+        // leaving `status: null` and `signal: 'SIGTERM'` — the old text then read
+        // "bash exited non-zero", which is the one reason a reader would rule OUT
+        // a timeout. The ledger reason is the only trace of why a call failed, so
+        // it has to name the actual cause. (Residuum 2 of four, closing comment
+        // 2026-08-02.)
+        const status = (err as { status?: unknown }).status;
+        const signal = (err as { signal?: unknown }).signal;
+        const limitMs = input.timeout_ms ?? DEFAULT_BASH_TIMEOUT_MS;
+        const reason = typeof status === 'number'
+          ? `bash exited ${String(status)}`
+          : typeof signal === 'string' && signal.length > 0
+            ? `bash killed by ${signal} after ${String(limitMs)}ms`
+            : 'bash failed without an exit code';
+        throw new ToolSoftFailure(
+          combined || `Command failed: ${input.command}`,
+          reason,
+        );
       }
       const cause = err instanceof Error ? err : new Error(String(err));
       throw new Error(`bash: ${cause.message}`, { cause });
