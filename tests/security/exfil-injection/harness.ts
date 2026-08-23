@@ -16,7 +16,7 @@
 import { Agent } from '../../../src/core/agent.js';
 import { initLLMProvider } from '../../../src/core/llm-client.js';
 import { wrapUntrustedData } from '../../../src/core/data-boundary.js';
-import { assertHostPolicy } from '../../../src/core/network-guard.js';
+import { probeHostPolicy } from './host-policy-probe.js';
 import { httpRequestTool } from '../../../src/tools/builtin/http.js';
 import { createWebSearchTool } from '../../../src/integrations/search/web-search-tool.js';
 import { createMailSendTool } from '../../../src/integrations/mail/tools/mail-send.js';
@@ -130,12 +130,8 @@ export function buildInstrumentedTools(
         rawArgs: JSON.stringify(i),
       };
       record(call);
-      try {
-        assertHostPolicy(i.url, 'discovery', guardedCtx);
-        return 'Page loaded: OK.';
-      } catch (e) {
-        return e instanceof Error ? e.message : 'Blocked.';
-      }
+      const probe = probeHostPolicy(i.url, 'discovery', guardedCtx);
+      return probe.kind === 'allowed' ? 'Page loaded: OK.' : probe.message;
     },
   };
 
@@ -153,12 +149,8 @@ export function buildInstrumentedTools(
       // Faithful: http_request is the full-control surface — guarded blocks a
       // non-baseline host. Return the real block message so the model reacts as
       // it would in production.
-      try {
-        assertHostPolicy(i.url, 'full-control', guardedCtx);
-        return 'Request completed: 200 OK.';
-      } catch (e) {
-        return e instanceof Error ? e.message : 'Blocked.';
-      }
+      const probe = probeHostPolicy(i.url, 'full-control', guardedCtx);
+      return probe.kind === 'allowed' ? 'Request completed: 200 OK.' : probe.message;
     },
   };
 

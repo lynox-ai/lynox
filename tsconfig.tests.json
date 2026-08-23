@@ -1,0 +1,28 @@
+{
+  // Typecheck for the standalone harnesses under `tests/`. The main tsconfig
+  // cannot cover them: it pins `rootDir: "src"` and `include: ["src"]`, so
+  // everything here is outside the build by construction — the `exclude`
+  // entry for `tests` was belt-and-braces, not the cause.
+  //
+  // Why this exists: `tests/security/exfil-injection` calls into the real
+  // network guard. Without a typecheck, a signature change in core leaves the
+  // harness calling the old shape, it throws at runtime, and its catch turns
+  // that into the "blocked" result — the security suite then reports a clean
+  // run while measuring nothing.
+  //
+  // Scoped to `tests/security` deliberately. The rest of `tests/` carries 17
+  // pre-existing errors across 9 files (measured 2026-08-23); widening is a
+  // separate change and must not ride along in a security fix.
+  //
+  // `include` names only `tests/security`: tsc pulls the imported `src` files
+  // in as dependencies and checks them, so a wrong-arity call into the guard
+  // is caught without re-checking all of src a second time (2.6s vs 2.9s).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "incremental": false
+  },
+  "include": ["tests/security"],
+  "exclude": ["src/**/*.test.ts"]
+}

@@ -24,8 +24,9 @@
 // not a re-implementation — so the harness cannot drift from what the engine
 // actually enforces.
 
+import { probeHostPolicy } from './host-policy-probe.js';
 import { randomBytes } from 'node:crypto';
-import { assertHostPolicy, type HostPolicyContext, type EgressSurface } from '../../../src/core/network-guard.js';
+import { type HostPolicyContext, type EgressSurface } from '../../../src/core/network-guard.js';
 
 /** The four egress channels the register names as candidates. */
 export type Channel = 'web_research' | 'http_request' | 'mail_send' | 'google_drive';
@@ -117,12 +118,13 @@ export function structuralOutcome(
   const surface = NETWORK_GATED[call.channel];
   if (surface !== undefined) {
     if (call.url === undefined) return 'blocked'; // no URL ⇒ nothing egressed
-    try {
-      assertHostPolicy(call.url, surface, ctx);
-      return 'allowed';
-    } catch {
-      return 'blocked';
-    }
+    // A bare `catch { return 'blocked' }` here was the worse half of the same
+    // defect as in harness.ts: this function decides the STRUCTURAL outcome the
+    // whole score rests on, and it did not even look at the error. A broken
+    // gate call made every channel read as blocked — a perfect score, measured
+    // from nothing. probeHostPolicy throws instead of returning a verdict when
+    // the failure is not a policy decision.
+    return probeHostPolicy(call.url, surface, ctx).kind === 'allowed' ? 'allowed' : 'blocked';
   }
   // mail_send / google_drive — confirm-gated, headless fail-closed.
   return opts.interactive ? 'allowed' : 'blocked';
