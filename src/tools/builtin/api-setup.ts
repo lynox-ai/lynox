@@ -1067,8 +1067,15 @@ export const apiSetupTool: ToolEntry<ApiSetupInput> = {
         return `Error: could not parse OpenAPI spec from ${input.openapi_url} — ${msg}. If the docs site serves HTML, find the raw .json spec URL (often at /openapi.json or /swagger.json).`;
       }
 
-      if (!spec.openapi || !spec.openapi.startsWith('3.')) {
-        return `Error: unsupported spec version (openapi: "${String(spec.openapi)}"). This bootstrapper expects OpenAPI 3.x. Swagger 2.0 specs need conversion first, or build the profile manually via "create".`;
+      // `typeof` guard, not just truthiness: a remote spec of `{"openapi": 3}` is
+      // truthy but has no `.startsWith`, so the version check threw a TypeError
+      // PAST this handler's try/catch (it closes above) and the agent got a stack
+      // shape instead of the guidance below. A misconfigured server produces that
+      // without any malice. The echoed value is bounded for the same reason the
+      // reason phrase was dropped — it is remote-authored text.
+      if (typeof spec.openapi !== 'string' || !spec.openapi.startsWith('3.')) {
+        const seen = typeof spec.openapi === 'string' ? spec.openapi.slice(0, 40) : typeof spec.openapi;
+        return `Error: unsupported spec version (openapi: "${seen}"). This bootstrapper expects OpenAPI 3.x. Swagger 2.0 specs need conversion first, or build the profile manually via "create".`;
       }
 
       let draft: ApiProfile;

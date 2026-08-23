@@ -678,6 +678,47 @@ describe('api_setup tool', () => {
       }
     });
 
+    it('handles a non-string openapi version without throwing past the handler', async () => {
+      // `{"openapi": 3}` is truthy but has no `.startsWith`. The version check sits
+      // OUTSIDE the JSON.parse try/catch, so it threw a TypeError and the agent got a
+      // stack shape instead of the "expects OpenAPI 3.x" guidance. A plain
+      // misconfigured server produces this — no attacker needed.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ openapi: 3, paths: {} }), { status: 200 }),
+      );
+
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json' },
+          agent,
+        );
+        expect(result).toContain('unsupported spec version');
+        expect(result).not.toContain('is not a function');
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    it('bounds the echoed openapi version string', async () => {
+      // Remote-authored text: bounded for the same reason the reason phrase was dropped.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ openapi: '2.0-' + 'A'.repeat(500), paths: {} }), { status: 200 }),
+      );
+
+      try {
+        const agent = createMockAgent(new ApiStore());
+        const result = await apiSetupTool.handler(
+          { action: 'bootstrap', openapi_url: 'https://example.com/spec.json' },
+          agent,
+        );
+        expect(result).toContain('unsupported spec version');
+        expect(result).not.toContain('A'.repeat(100));
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
     it('does not echo the server-chosen HTTP reason phrase into the tool result', async () => {
       // The reason phrase is free-form and picked by the REMOTE server. `api_setup`
       // is on the agent's scan-exempt allowlist, so anything echoed here reaches the
