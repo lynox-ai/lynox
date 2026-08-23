@@ -141,7 +141,9 @@ function measureStaticPrefixTokens(): number {
 // This paragraph used to open "measured baseline + ~15 % headroom … an
 // ordinary small prompt tweak does NOT trip the guard", which contradicted
 // both the next sentence and every value under it. Corrected 2026-08-23 to
-// describe the guard that exists — no value moved for it. If the ratchet is
+// describe the guard that exists. (The value below does move in the same
+// commit, from 23634 to 23817 — for the prompt edit that commit ships, not
+// for this correction.) If the ratchet is
 // ever the wrong design, that is a deliberate change to make, and the fix is
 // to widen the values, not to keep prose that tells the next reader their
 // prompt edit will sail through when it will not.
@@ -384,9 +386,10 @@ describe('Tier-1 cost-regression guard', () => {
     expect(
       STATIC_PREFIX_BUDGET - measured,
       `STATIC_PREFIX_BUDGET is ${STATIC_PREFIX_BUDGET} against a measured ${measured} — ` +
-        `${STATIC_PREFIX_BUDGET - measured} tokens of unreviewed headroom. ` +
-        `Set the budget to the measurement (${measured}); the guard is a ratchet, ` +
-        `not a ceiling with slack.`,
+        `${STATIC_PREFIX_BUDGET - measured} tokens of unused headroom. ` +
+        `If you SHRANK the prefix, lower the budget to ${measured}. ` +
+        `If you raised the budget, set it to the measurement instead: ` +
+        `the guard is a ratchet, not a ceiling with slack.`,
     ).toBeLessThanOrEqual(STATIC_PREFIX_SLACK);
   });
 

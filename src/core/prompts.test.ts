@@ -821,14 +821,32 @@ describe('the no-install policy (DEF-bash-install-workaround)', () => {
   // (Anthropic 4/4 → 0/4 still calling tools, Mistral 1/4 → 0/4).
   /** The policy paragraph alone — asserting against the whole SYSTEM_PROMPT made
    *  two of these vacuous: `pip` matches "pipeline" and `web_research` appears
-   *  seven other times, so both stayed green with the paragraph deleted. */
+   *  EIGHT other times, so both stayed green with the paragraph deleted.
+   *
+   *  Cut at the blank line, NOT at `\n\n**`. The `**` form keys on the NEXT
+   *  paragraph's formatting rather than on this one's end: turn the following
+   *  `**Label**:` paragraphs into `### Label` headings — an unremarkable
+   *  markdown edit — and the slice silently swallows them, which re-creates
+   *  exactly the vacuity above (a neighbour then supplies `web_research`).
+   *  Both forms give the same 598 chars today; only one stays correct.
+   *
+   *  No `expect` out here: a throw at describe scope is a COLLECTION error, so
+   *  vitest reports zero tests and every other guard in this file silently
+   *  stops running. Absence is asserted in its own `it` below. */
   const policy = (() => {
     const start = SYSTEM_PROMPT.indexOf('**Never install software**');
-    expect(start, 'the no-install policy is missing from SYSTEM_PROMPT').toBeGreaterThan(-1);
+    if (start === -1) return '';
     const rest = SYSTEM_PROMPT.slice(start);
-    const end = rest.indexOf('\n\n**');
+    const end = rest.indexOf('\n\n');
     return end === -1 ? rest : rest.slice(0, end);
   })();
+
+  it('has a no-install policy, and the slice is bounded to it', () => {
+    expect(policy, 'the no-install policy is missing from SYSTEM_PROMPT').not.toBe('');
+    // A bound, not a pin on the wording: an ordinary edit to the paragraph
+    // passes, a slice that has swallowed a neighbour does not.
+    expect(policy.length, 'the policy slice has grown past its own paragraph').toBeLessThan(1200);
+  });
 
   it('forbids installing software, naming the managers a model actually reaches for', () => {
     for (const manager of ['apt-get', 'npm install', 'pip', 'brew', 'cargo', 'gem']) {
