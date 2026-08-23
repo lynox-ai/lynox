@@ -27,7 +27,9 @@
 #                                          # no argument, so the hook does NOT take
 #                                          # this path.
 #
-# Exit 0 = clean, exit 1 = a leak marker was found.
+# Exit 0 = clean, exit 1 = a leak marker was found, exit 2 = the guard could not
+# run (its file listing failed). The third code exists so "the tree is dirty" and
+# "the gate never looked" stop being the same signal — see scripts/lib/guard-file-list.sh.
 #
 # ── Escape hatches (for legitimately public mentions) ──────────────────
 #   1. Whole-file allow: add the path to ALLOW_FILES below (only for docs
@@ -39,6 +41,10 @@
 #      HARD markers are never exempt.
 
 set -euo pipefail
+
+GUARD_NAME='public-repo-guard'
+# shellcheck source=scripts/lib/guard-file-list.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/guard-file-list.sh"
 
 PRAGMA='public-repo-guard:allow'
 
@@ -152,13 +158,19 @@ mode_staged=false
 # and `git ls-files -z` does emit raw bytes regardless of that setting. The extra
 # option only suggested it was load-bearing. `-z` additionally covers a newline
 # in a filename, which the line-based read could not.
-list_files() {
-  if $mode_staged; then
-    git diff --cached --name-only -z --diff-filter=ACM
-  else
-    git ls-files -z
-  fi
-}
+
+# Materialise the listing ONCE, via the shared helper, which checks the producer's
+# status. The old shape was `done < <(list_files)`, and a process substitution
+# hides its producer's exit status from `set -e` — see scripts/lib/guard-file-list.sh
+# for the full reasoning and for why the assertion is on the STATUS, not on the
+# count. The two scans below then read from a plain file, which cannot swallow one.
+FILE_LIST="$(mktemp)"
+trap 'rm -f "$FILE_LIST"' EXIT
+if $mode_staged; then
+  guard_list_staged_or_die "$FILE_LIST"
+else
+  guard_list_files_or_die "$FILE_LIST"
+fi
 
 is_excluded() {
   local f="$1"
@@ -184,10 +196,66 @@ while IFS= read -r -d '' f; do
     echo "❌ HARD leak marker (operator-local tooling) in PATH: $f"
     violations=$((violations + 1))
   fi
-done < <(list_files)
+done < "$FILE_LIST"
 
 while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
+  # SYMLINKS carry their payload in the BLOB, not in the file they point at. git
+  # stores a symlink as a blob whose CONTENT is the target path, so
+  # `ln -s /opt/lynox-managed/secret link.ts` commits that string into this public
+  # repo verbatim. The content scan below never sees it: `[ -f ]` follows the link,
+  # so a live link is scanned for the TARGET's content (the wrong bytes, and the
+  # target is usually outside the repo) and a dangling one fails the test and is
+  # skipped entirely — silently, the same way this guard used to skip quoted and
+  # dash-leading paths. Scan the target STRING against the two HARD classes here;
+  # the SOFT and cross-reference classes are about prose and do not apply to a path.
+  if [ -L "./$f" ]; then
+    is_excluded "$f" && continue
+    # `readlink` is a producer like any other, so its failure is checked rather
+    # than swallowed. An earlier draft of this very branch wrote `|| true`, which
+    # turned an unreadable link into an empty target, no match, and a silent skip
+    # — the exact failure this file exists to remove, reintroduced inside the fix.
+    #
+    # NOT covered by a test, and the reason is worth writing down rather than
+    # leaving as a gap: this branch only runs when `[ -L ]` was already true, and
+    # every state that makes `readlink` fail (not a symlink; parent unreadable)
+    # makes `[ -L ]` false first — measured. What remains is the TOCTOU window
+    # where the link disappears between the two, which no deterministic test can
+    # open. So the check guards a race, cannot be exercised, and must not be
+    # counted as covered.
+    if ! _target="$(readlink -- "./$f")"; then
+      echo "❌ could not read SYMLINK $f — refusing to treat an unreadable link as clean"
+      violations=$((violations + 1))
+      continue
+    fi
+    if printf '%s' "$_target" | grep -qE -- "$HARD"; then
+      echo "❌ HARD leak marker in SYMLINK TARGET of $f -> $_target"
+      violations=$((violations + 1))
+    fi
+    if printf '%s' "$_target" | grep -qEi -- "$HARD_LOCAL_TOOLING"; then
+      echo "❌ HARD leak marker (operator-local tooling) in SYMLINK TARGET of $f -> $_target"
+      violations=$((violations + 1))
+    fi
+    # The whole-file allow applies here exactly as it does below, so a doc that is
+    # permitted to name the managed service keeps that permission if it is a link.
+    is_allow_file "$f" && continue
+    # A first draft asserted that the SOFT and cross-reference classes "do not
+    # apply to a path". Measured false: a link target is an arbitrary committed
+    # byte string, and both a dual-use hostname and a doubled-bracket slug rode
+    # through it at exit 0 while being blocked in every other file. They are
+    # checked here too — as HARD blocks, because the inline pragma has nowhere to
+    # live on a symlink. There are zero such links today; if a legitimate one ever
+    # appears, ALLOW_FILES above is its escape hatch.
+    if printf '%s' "$_target" | grep -qE -- "$INTERNAL_REF"; then
+      echo "❌ internal cross-reference in SYMLINK TARGET of $f -> $_target"
+      violations=$((violations + 1))
+    fi
+    if printf '%s' "$_target" | grep -qE -- "$SOFT"; then
+      echo "⚠️  internal hostname in SYMLINK TARGET of $f -> $_target (no inline pragma is possible on a link; allow-list the path instead)"
+      violations=$((violations + 1))
+    fi
+    continue
+  fi
   [ -f "./$f" ] || continue
   is_excluded "$f" && continue
   # Skip binaries. Every file operand below is prefixed `./` so a repo-root path
@@ -269,7 +337,7 @@ while IFS= read -r -d '' f; do
     echo "     ${line}"
     violations=$((violations + 1))
   done < <(grep -nIE -- "$SOFT" "./$f" 2>/dev/null || true)
-done < <(list_files)
+done < "$FILE_LIST"
 
 if [ "$violations" -gt 0 ]; then
   echo ""
