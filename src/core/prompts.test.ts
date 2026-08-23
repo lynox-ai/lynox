@@ -805,3 +805,39 @@ describe('safeModelId — the one sanitiser all three prompt writers share', () 
     expect(safeModelId(null)).toBe('');
   });
 });
+
+describe('the no-install policy (DEF-bash-install-workaround)', () => {
+  // The failure this pins is a COST failure, and it was measured: one dogfood
+  // thread spent 41 bash calls trying `apt-get install`, `npm install`, five
+  // hand-written PDF extractors and `strings | grep` over a binary before the
+  // agent gave up. The tool description had listed "package management" as one of
+  // bash's uses, so the model read a capability into an environment that runs
+  // read-only, as a non-root user, with no package manager.
+  //
+  // The source pins below are the cheap half. The half that matters is
+  // behavioural and cannot live in a unit test — it is recorded in the PR: with
+  // the policy in place, both providers stop and report after a chain of
+  // missing-tool failures instead of continuing to engineer around the gap
+  // (Anthropic 4/4 → 0/4 still calling tools, Mistral 1/4 → 0/4).
+  it('forbids installing software, naming the managers a model actually reaches for', () => {
+    for (const manager of ['apt-get', 'npm install', 'pip', 'brew', 'cargo', 'gem']) {
+      expect(SYSTEM_PROMPT, `the policy should name ${manager}`).toContain(manager);
+    }
+  });
+
+  it('rules out the fallback as well as the first attempt', () => {
+    // The dogfood thread did not open with `apt-get`; it arrived there after
+    // three other things failed. A policy that only covers the opening move
+    // would not have changed that thread.
+    expect(SYSTEM_PROMPT).toMatch(/not as a first attempt and not as a fallback/i);
+  });
+
+  it('offers the paths that actually exist instead of only forbidding', () => {
+    // A prohibition with no alternative just moves the model to the next
+    // workaround — which in the measured thread was hand-rolling a parser.
+    expect(SYSTEM_PROMPT).toMatch(/attach the file to the chat/i);
+    expect(SYSTEM_PROMPT).toContain('web_research');
+    // And it must frame a missing capability as something to REPORT.
+    expect(SYSTEM_PROMPT).toMatch(/fact to REPORT/i);
+  });
+});

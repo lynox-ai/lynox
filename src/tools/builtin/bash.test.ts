@@ -333,3 +333,23 @@ describe('buildSafeEnv', () => {
     });
   });
 });
+
+describe('bash tool description (DEF-bash-install-workaround)', () => {
+  const description = bashTool.definition.description;
+
+  it('no longer advertises package management', () => {
+    // It used to. A model reads the description as a statement of capability,
+    // and this one named a capability the managed runtime does not have —
+    // read-only root, non-root user, no package manager. The measured cost was
+    // 41 bash calls in a single thread rediscovering that.
+    expect(description).not.toMatch(/package management/i);
+  });
+
+  it('states the prohibition as a POLICY, not as a claim about the environment', () => {
+    // Deliberate: a local `npx lynox` run may well have a working apt or npm, so
+    // "you cannot install" would be false there and would teach the model to
+    // distrust the description. "Do not install" is true in every deployment.
+    expect(description).toMatch(/installing packages/i);
+    expect(description).not.toMatch(/no package manager|cannot install|not available/i);
+  });
+});

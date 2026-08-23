@@ -318,7 +318,26 @@ function measureStaticPrefixTokens(): number {
 // The MECHANISM (ledger path, absent from backup and migration) stays on
 // `detailedGuidance` where the on-use split puts it — the full-mechanism wording in the
 // description measured 23649, i.e. +15 more for prose the model does not need to decide.
-const STATIC_PREFIX_BUDGET = 23634;
+// +184 (23634 → 23818): the no-install policy in `## Tools`, plus the bash
+// description losing "package management" and gaining the pointer to it.
+// WHAT IT BUYS, measured rather than argued — the chain is a `read this PDF`
+// task followed by three distinct missing-tool failures (pdftotext, PyPDF2,
+// pdf-parse), n=4 per arm:
+//   Anthropic Haiku 4.5 — install attempts 2/4 → 0/4 (`apt-get update &&
+//     apt-get install -y poppler-utils`), still calling tools 4/4 → 0/4.
+//   Mistral large-2512  — 0/4 → 0/4 on both. It already stopped and reported,
+//     so this text is a no-op there. The failure is model-dependent, and the
+//     honest claim is "buys something on one of the two", not "on both".
+// The reference case is a real thread: 41 bash calls spent on installs and five
+// hand-written PDF extractors before giving up. One avoided thread of that shape
+// costs far more than 184 cached-prefix tokens across the turns it would take to
+// repay — which is the whole trade, since bash is registered for EVERY tenant
+// (unlike `subjects_merge` above, which a flag can switch off).
+// NOT claimed to be minimal, and one part is unmeasured: the first draft cost
+// +291 and was cut to +184 with the effect re-verified on the exact shipped text.
+// Whether the "offer what exists" half earns its share is pinned by tests but has
+// no behaviour measurement of its own.
+const STATIC_PREFIX_BUDGET = 23818;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
