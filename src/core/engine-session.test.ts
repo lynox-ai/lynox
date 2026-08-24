@@ -608,6 +608,11 @@ describe('Engine + Session (Orchestrator)', () => {
     // other test still green.
     it('an aborted run books the tokens it burned before the abort (not cost 0)', async () => {
       const { engine, session } = await createEngineAndSession();
+      // Pin the pricing source: getPricing lazily reads ~/.lynox/pricing.json and
+      // accepts 0 as a valid rate, so a dev machine with a zeroed override entry
+      // would fail this test for a reason that has nothing to do with the product.
+      const { _resetOverridePricingForTests } = await import('./pricing.js');
+      _resetOverridePricingForTests(null);
 
       // A run that did real work and was then interrupted — the parked-prompt
       // shape, where the tokens are already spent with the provider.
@@ -627,8 +632,13 @@ describe('Engine + Session (Orchestrator)', () => {
       const booked = aborted![1] as { costUsd: number; tokensIn: number; tokensOut: number };
       expect(booked.tokensIn).toBe(30_000);
       expect(booked.tokensOut).toBe(2_000);
-      // The number that was 0 in the incident, and is the whole point of the row.
-      expect(booked.costUsd).toBeGreaterThan(0);
+      // The EXACT figure, not `> 0`. `getPricing` falls back to a non-zero table
+      // for any unknown model, so `> 0` would hold for almost any mutation that
+      // still passes a positive token count — it is degenerate with the two
+      // assertions above. 30_000 x $3/M + 2_000 x $15/M = $0.12 is deterministic,
+      // and pinning it also kills a swapped in/out, a whole-session-usage
+      // (instead of the run delta), and a dropped cache term.
+      expect(booked.costUsd).toBeCloseTo(0.12, 6);
     });
 
     it('H2: a failed run still fires onAfterRun with the partial spend (managed debit)', async () => {
