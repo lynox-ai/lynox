@@ -36,7 +36,6 @@ import { createEmbeddingProvider } from './embedding.js';
 import type { EmbeddingProvider, OnnxModelId } from './embedding.js';
 import { KnowledgeLayer } from './knowledge-layer.js';
 import type { EngineDb } from './engine-db.js';
-import { DataStoreBridge } from './datastore-bridge.js';
 import { getLynoxDir } from './config.js';
 import { FILE_MODE_PRIVATE } from './constants.js';
 import {
@@ -717,42 +716,6 @@ export async function initKnowledgeLayer(
     process.stderr.write(`[lynox:knowledge] Agent memory init failed: ${getErrorMessage(err)}\n`);
     return null;
   }
-}
-
-export function initDataStoreBridge(
-  knowledgeLayer: KnowledgeLayer,
-  dataStore: import('./data-store.js').DataStore,
-): DataStoreBridge {
-  const bridge = new DataStoreBridge(
-    knowledgeLayer.getDb(),
-    knowledgeLayer.getEntityResolver(),
-    dataStore,
-  );
-  knowledgeLayer.setDataStoreBridge(bridge);
-
-  // Subscribe to dataStoreInsert for async entity indexing
-  channels.dataStoreInsert.subscribe((msg: unknown) => {
-    const data = msg as {
-      event: string;
-      collection: string;
-      columns?: DataStoreColumnDef[];
-      records?: Record<string, unknown>[];
-      scopeType?: string;
-      scopeId?: string;
-    };
-    const scope: MemoryScopeRef = {
-      type: (data.scopeType as MemoryScopeRef['type']) ?? 'context',
-      id: data.scopeId ?? '',
-    };
-
-    if (data.event === 'collection_created' && data.columns) {
-      void bridge.registerCollection(data.collection, data.columns, scope).catch(() => {});
-    } else if (data.event === 'records_inserted' && data.records) {
-      void bridge.indexRecords(data.collection, data.records, scope).catch(() => {});
-    }
-  });
-
-  return bridge;
 }
 
 // ── Memory Store Subscription ───────────────────────────────────

@@ -446,10 +446,10 @@ export class AgentMemoryDb {
    *
    * ⚠️ Dormant is NOT the same as "has no active mentions", and the difference is a
    * regression waiting to happen: entities that never had a mention at all are perfectly
-   * legitimate. `DataStoreBridge.registerCollection` creates one per collection and never
-   * calls `createMention`, so treating mention-less as dead would silently drop every
-   * DataStore hint from the context graph. Only an entity that HAD mentions and has lost
-   * them all is dormant.
+   * legitimate — an ingest can create one without ever calling `createMention`, and treating
+   * mention-less as dead would silently drop it from the context graph. Only an entity that
+   * HAD mentions and has lost them all is dormant. (The concrete producer this was written
+   * for was the DataStore→KG bridge, removed 2026-08-24; the rule stands on its own.)
    *
    * Deliberately NOT applied inside `EntityResolver.resolve`: the same call also serves
    * extraction, where refusing to match a dormant entity would create a duplicate instead
@@ -1379,7 +1379,7 @@ export class AgentMemoryDb {
 
     // An orphan is an entity that HAD mentions and has lost them all — the same definition
     // {@link entityIsDormant} uses, and for the reason its docstring already gives: an entity
-    // that never had a mention is perfectly legitimate. `DataStoreBridge.registerCollection`
+    // that never had a mention is perfectly legitimate — an ingest can create one
     // creates one per collection and `indexRecords` one per person/organization it extracts
     // from a record, and NEITHER calls `createMention`.
     //

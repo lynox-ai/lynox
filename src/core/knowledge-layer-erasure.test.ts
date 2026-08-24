@@ -167,7 +167,7 @@ describe('KnowledgeLayer.eraseByPattern (Erasure — hard delete)', () => {
 //
 // The layer is the one that can see EVERY reference a subject may still have — engine.db,
 // the history.db thread anchor (via runHistory) and datastore.db (via `setRecordStore`, which
-// the engine calls once the DataStore exists — the older DataStoreBridge attach never fires in
+// the engine calls once the DataStore exists — the older bridge attach never fired in
 // production, see engine.ts) — so it installs the reaper. These tests wire all three and prove: the subject an erased memory
 // minted goes, a subject anything else still holds stays, and without the cross-DB oracle
 // the reap is fail-closed (subject kept, one stderr line), never a guess.

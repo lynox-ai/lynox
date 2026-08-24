@@ -26,7 +26,6 @@ import { extractEntities } from './entity-extractor.js';
 import { extractEntitiesV2, shouldExtractV2 } from './entity-extractor-v2.js';
 import { fireBeforeRunGate, reportMeteredCost, type HookHost } from './metered-request.js';
 import { detectContradictions, hasHeuristicContradiction, subjectsDisagree, properNounTokens, subjectTokensDisagree } from './contradiction-detector.js';
-import type { DataStoreBridge } from './datastore-bridge.js';
 import type { DataStore } from './data-store.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
@@ -153,9 +152,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   /**
    * DEF-0015 — the datastore.db half of the orphan-subject reference oracle. Set by
    * {@link setRecordStore} from `Engine._initCoreTools()` the moment the DataStore exists
-   * (before the HTTP surface serves). Deliberately NOT the `DataStoreBridge`: that attach
-   * sits in `_initKnowledge()`, which runs before the DataStore is constructed, so it has
-   * never fired in production. `null` means the oracle cannot answer and the reap skips.
+   * (before the HTTP surface serves) — deliberately NOT from `_initKnowledge()`, which runs
+   * BEFORE the DataStore is constructed, so anything guarded on it there can never fire.
+   * `null` means the oracle cannot answer and the reap skips.
    */
   private _recordStore: DataStore | null = null;
   /** One stderr line per layer instance when the reap has to skip, not one per erase. */
@@ -263,10 +262,6 @@ export class KnowledgeLayer implements IKnowledgeLayer {
   getEntityResolver(): EntityResolver { return this.entityResolver; }
 
   /** Connect DataStore bridge to retrieval engine for data hints. */
-  setDataStoreBridge(bridge: DataStoreBridge): void {
-    this.retrievalEngine.setDataStoreBridge(bridge);
-  }
-
   /**
    * DEF-0015 — hand the layer the live DataStore so the orphan reap can ask whether a
    * table row still links a subject. Called by the engine as soon as the DataStore exists;
