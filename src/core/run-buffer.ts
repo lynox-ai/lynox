@@ -19,13 +19,13 @@
  * type system is the guard; a unit test asserts the invariant holds.
  */
 
-import type { StreamEvent } from '../types/tools.js';
+import type { EmittedStreamEvent } from '../types/tools.js';
 
 /** One buffered, sequenced event. `seq` is a per-rendered-event counter (NOT
  * the persisted-row counter eager-persist uses — see PRD U9 seq-space note). */
 export interface BufferedEvent {
   seq: number;
-  event: StreamEvent;
+  event: EmittedStreamEvent;
 }
 
 type EventSubscriber = (e: BufferedEvent) => void;
@@ -53,7 +53,10 @@ export class RunBuffer {
    * Returns the assigned seq (for `id:` lines + lastPersistedSeq checkpoints).
    * No-op-safe after `end()` — a late onStream event past completion is dropped
    * rather than resurrecting a closed buffer. */
-  append(event: StreamEvent): number {
+  // Narrow in, narrow out: only core's own producers feed this, and a replay
+  // that handed back the wide union was where a re-attaching client lost the
+  // one field that says whether its turn is over.
+  append(event: EmittedStreamEvent): number {
     if (this._ended) return this._seq;
     const seq = ++this._seq;
     const entry: BufferedEvent = { seq, event };

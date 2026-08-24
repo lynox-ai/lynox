@@ -1957,6 +1957,10 @@ describe('LynoxHTTPApi', () => {
       const buf = mgr.create('stream-run');
       buf.append({ type: 'text', text: 'hello', agent: 'main' });            // seq 1
       buf.append({ type: 'tool_call', name: 'x', input: {}, agent: 'main' }); // seq 2
+      // seq 3: an error, because the re-attach path is exactly where a client
+      // decides whether its turn is dead. Replaying it without `fatal` is how a
+      // reload in mid-run learned nothing about a run that was still alive.
+      buf.append({ type: 'error', message: 'unparsable tool input', fatal: false, agent: 'main' });
 
       try {
         const res = await fetch(`${baseUrl}/api/runs/stream-run/stream?since=1`, { headers: authHeaders() });
@@ -1966,7 +1970,7 @@ describe('LynoxHTTPApi', () => {
 
         // Schedule a live append, then run completion, WHILE we read
         // continuously — avoids a read() that blocks past a fixed time budget.
-        setTimeout(() => buf.append({ type: 'text', text: 'more', agent: 'main' }), 150); // seq 3
+        setTimeout(() => buf.append({ type: 'text', text: 'more', agent: 'main' }), 150); // seq 4
         setTimeout(() => mgr.remove('stream-run'), 400); // ends buffer → terminal done
 
         let sse = '';
@@ -1983,7 +1987,14 @@ describe('LynoxHTTPApi', () => {
         expect(sse).toContain('id: 2');
         expect(sse).toContain('tool_call');
         expect(sse).not.toContain('id: 1');
+        // The replayed error must arrive with its discriminator. A projection in
+        // the replay writer drops it while typechecking clean (measured), so this
+        // assert is the only thing standing between a re-attaching client and a
+        // guess about whether its turn is dead.
+        expect(sse).toContain('event: error');
+        expect(sse).toContain('"fatal":false');
         expect(sse).toContain('id: 3');
+        expect(sse).toContain('id: 4');
         expect(sse).toContain('event: done');
       } finally {
         engineRef.getRunBufferManager = orig;
