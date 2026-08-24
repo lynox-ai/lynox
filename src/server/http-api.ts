@@ -3234,9 +3234,21 @@ export class LynoxHTTPApi {
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/abort', async (_req, res, params) => {
-      const session = this.sessionStore.get(params['id']!);
+      const sessionId = params['id']!;
+      const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
+      // A run PARKED on a pending prompt does not observe session.abort(): it is
+      // suspended in `waitForSettled(promptId, sessionAbortController.signal)`,
+      // and neither the prompt row nor that controller belongs to the session.
+      // Without this the route answered 200 while the run stayed parked, its
+      // `finally` never ran, and the slot below pinned the session — every later
+      // message got a 409 until the process restarted (dogfood 2026-08-24: 15 h).
+      // `takeover` is the one path that unwinds all three (expire prompt → abort
+      // controller → abort session); it is the same handle the stale-run reclaim
+      // and DELETE /api/runs/:runId already use. Idempotent: no slot, or a prompt
+      // that already settled, makes it a no-op.
+      this.runningSessions.get(sessionId)?.takeover();
       jsonResponse(res, 200, { ok: true });
     }));
 

@@ -1581,6 +1581,113 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // dogfood 2026-08-24 (rafael, prod): the stop button returned 200 while the
+    // run stayed parked on its pending prompt, and every later message came back
+    // 409 "a run is already in progress" — the thread was unusable for 15 h until
+    // the container was restarted. Measured on the instance: the run sat on an
+    // ask_user prompt, `last_activity` was seconds fresh (the SSE keepalive was
+    // still writing, so the socket was NEVER observed closed), and the slot in
+    // `runningSessions` was therefore never reclaimed by any path:
+    //   - the wall-clock is PAUSED while parked, by design (#77, test above);
+    //   - the orphan watchdog + the stale-run takeover both require
+    //     `streamAlive === false`, which only `req.on('close')` ever sets;
+    //   - PROMPT_TTL (24 h) was the sole remaining bound.
+    // The abort route did `session.abort()` and nothing else — but a parked run
+    // is not waiting on the session, it is waiting on `waitForSettled(promptId,
+    // sessionAbortController.signal)`. Only the slot's `takeover` unwinds that
+    // (expire prompt → abort controller → abort session), which is why the
+    // stale-run reclaim uses it. This test asserts the OUTCOME the user cares
+    // about: after stop, the session accepts a new message.
+    it('aborting a run parked on a pending prompt frees the slot — the next message is not 409', async () => {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+        question TEXT NOT NULL,
+        options_json TEXT,
+        questions_json TEXT,
+        segments_json TEXT,
+        partial_answers_json TEXT,
+        secret_name TEXT,
+        secret_key_type TEXT,
+        answer TEXT,
+        answer_saved INTEGER,
+        answer_error TEXT,
+        multi_select INTEGER,
+        payload_json TEXT,
+        origin_json TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        answered_at TEXT,
+        expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const realPromptStore = new PromptStore(db);
+
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => realPromptStore;
+
+      const SID = 'abort-parked-1';
+      const runningSessions = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+
+      try {
+        mockSessionRun.mockImplementationOnce(async () => {
+          const promptUser = mockSessionInstance.promptUser as
+            (q: string, o?: string[]) => Promise<string>;
+          const answer = await promptUser('Which repo did you mean?', ['lynox', 'lynox-pro']);
+          return `settled:${answer}`;
+        });
+
+        const res = await jsonFetch(`/api/sessions/${SID}/run`, {
+          method: 'POST',
+          body: JSON.stringify({ task: 'find the repo', protocol: 1 }),
+        });
+        expect(res.status).toBe(200);
+
+        // Wait until the run has actually parked — the target situation. Without
+        // this the test would pass against a run that simply finished.
+        let pending = realPromptStore.getPending(SID);
+        for (let i = 0; i < 200 && !pending; i++) {
+          await new Promise<void>((r) => setTimeout(r, 5));
+          pending = realPromptStore.getPending(SID);
+        }
+        expect(pending).toBeDefined();
+        // Precondition: parked means the slot IS held. That is correct — the 409
+        // only becomes a defect once stop cannot clear it.
+        expect(runningSessions.has(SID)).toBe(true);
+
+        // The user presses stop.
+        const abortRes = await jsonFetch(`/api/sessions/${SID}/abort`, { method: 'POST' });
+        expect(abortRes.status).toBe(200);
+
+        // (a) the run unwinds and releases the slot — no restart involved.
+        for (let i = 0; i < 200 && runningSessions.has(SID); i++) {
+          await new Promise<void>((r) => setTimeout(r, 10));
+        }
+        expect(runningSessions.has(SID)).toBe(false);
+        // The prompt is settled, not left pending for PROMPT_TTL.
+        expect(realPromptStore.getPending(SID)).toBeUndefined();
+
+        // (b) the user can send the next message — this is the reported symptom.
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const next = await jsonFetch(`/api/sessions/${SID}/run`, {
+          method: 'POST',
+          body: JSON.stringify({ task: 'never mind, do this instead', protocol: 1 }),
+        });
+        expect(next.status).not.toBe(409);
+        expect(next.status).toBe(200);
+        await next.text();
+        await res.text();
+      } finally {
+        engineRef.getPromptStore = originalGetPromptStore;
+        db.close();
+      }
+    });
     // Companion test: verify the slot remembers stream death so a later
     // /run can detect the stale state. Exercises the req.on('close') path
     // by going through the public /run endpoint and checking the internal
