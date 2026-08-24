@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Engine } from './engine.js';
@@ -136,6 +136,38 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     const engine = await boot();
     expect(engine.getGoogleClientSource()).toBeNull();
     expect(captured.calls).toHaveLength(0);
+  });
+
+  it('config→vault migration is PAIR-ATOMIC: an old vault secret blocks it, and nothing is deleted', async () => {
+    // The fix-round's own regression. The migration loop decides per FIELD: it skips
+    // a name the vault already holds. With an old secret in the vault and the
+    // operator's CURRENT pair in config.json, the secret entry was skipped, the id
+    // was moved in beside the OLD secret, and the id was then deleted from
+    // config.json — a vault pair assembled from two eras, and no way back because the
+    // correct id was gone from disk. Destructive, and it manufactured exactly the
+    // mixed pair this whole change exists to prevent.
+    const dir = freshDataDir('cp-migrate');
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    const seed = new SecretVault();
+    seed.set('GOOGLE_CLIENT_SECRET', 'PROJECT-A-secret');   // an older era, secret only
+
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      google_client_id: 'PROJECT-B-id',
+      google_client_secret: 'PROJECT-B-secret',
+    }, null, 2) + '\n');
+
+    const engine = await boot();
+
+    // Nothing may be built from a pair assembled across the two eras.
+    const built = captured.calls.at(-1);
+    expect(built?.clientSecret).not.toBe('PROJECT-A-secret');
+    if (built) expect(built).toEqual({ clientId: 'PROJECT-B-id', clientSecret: 'PROJECT-B-secret' });
+    expect(engine.getGoogleClientSource()).not.toBe('vault');
+
+    // And config.json must still hold the operator's pair — it is the only copy.
+    const after = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf-8')) as Record<string, unknown>;
+    expect(after['google_client_id']).toBe('PROJECT-B-id');
+    expect(after['google_client_secret']).toBe('PROJECT-B-secret');
   });
 
   it('no pair anywhere → nothing built, no source', async () => {

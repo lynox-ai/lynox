@@ -5079,6 +5079,24 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('secrets/status', () => {
+    it('configured.google is FALSE when no source holds a complete pair', async () => {
+      // The expression changed from `names.has(ID) || names.has(SECRET)` to the
+      // resolved source, and shipped with no coverage. The `||` reported configured
+      // on a half-filled vault while the engine built nothing; `&&` would have lied
+      // in the other direction, since env-id + vault-secret puts BOTH names in the
+      // store while no single source holds a pair.
+      const engineRef = (api as unknown as { engine: { getGoogleClientSource: ReturnType<typeof vi.fn> } }).engine;
+      const orig = engineRef.getGoogleClientSource;
+      engineRef.getGoogleClientSource = vi.fn().mockReturnValue(null);
+      try {
+        const res = await jsonFetch('/api/secrets/status');
+        const body = await res.json() as { configured: { google: boolean } };
+        expect(body.configured.google).toBe(false);
+      } finally {
+        engineRef.getGoogleClientSource = orig;
+      }
+    });
+
     it('GET /api/secrets/status returns category booleans', async () => {
       mockSecretListNames.mockReturnValue(['ANTHROPIC_API_KEY']);
       // Post-fix the handler uses resolveProviderApiKey() which consults

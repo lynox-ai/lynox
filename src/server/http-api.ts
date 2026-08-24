@@ -6255,8 +6255,10 @@ export class LynoxHTTPApi {
         available: true,
         authenticated: google.isAuthenticated(),
         // Which source supplied the client pair, and whether that pair is lynox's
-        // shared broker rather than the tenant's own. The card routes on these: a
-        // broker connection offers one button, a BYO one offers the scope toggle.
+        // shared broker rather than the tenant's own. Added FOR the card to route on
+        // — it does not yet: GoogleStatus does not declare these and GoogleSettings
+        // still branches on isManaged(). Saying "the card routes on these" would be
+        // the third false wiring claim in this change alone.
         client_source: engine.getGoogleClientSource(),
         managed_broker: engine.isGoogleManagedBroker(),
         ...google.getAccountInfo(),
