@@ -88,7 +88,12 @@ export function badExclusions(
     .filter(([rel, why]) =>
       !found.includes(rel)
       || why.trim().length <= 40
-      || !/[\w-]+\/[\w-]*[\w-]\.(ts|tsx|mts|cts|mjs|cjs|js|json|md|ya?ml|sh)\b/.test(why))
+      // `[\w.-]` on both sides of the separator, not `[\w-]`: the first path-requiring version
+      // could not cross a dot in the stem, so it rejected `tests/eval/x.test.ts`,
+      // `src/types/index.d.ts` and `./scenarios.ts` — and a reason citing a `.test.ts` is the
+      // likeliest entry anyone will write next. Fail-closed, so it was a false red rather
+      // than a hole, but a rule that rejects the common case teaches people to skip it.
+      || !/[\w.-]*\/[\w.-]*[\w-]\.(ts|tsx|mts|cts|mjs|cjs|js|json|md|ya?ml|sh)\b/.test(why))
     .map(([rel]) => rel)
     .sort();
 }
@@ -180,6 +185,9 @@ describe('probe fact freshness — every engine-facing probe is a member', () =>
     expect(badExclusions({ [real]: 'this runs under node.js and therefore never persists a row' }, [real])).toEqual([real]);
     // A reason citing a non-TypeScript file by PATH is still a reason.
     expect(badExclusions({ [real]: 'excluded because the deploy path lives in .github/workflows/release.yml only' }, [real])).toEqual([]);
+    // Dots INSIDE the stem are the common case and must not be rejected.
+    expect(badExclusions({ [real]: 'not a member, the coverage lives in tests/eval/x.test.ts instead' }, [real])).toEqual([]);
+    expect(badExclusions({ [real]: 'not a member because the shape is pinned in src/types/index.d.ts' }, [real])).toEqual([]);
   });
 
   it('FIRES on a file that only mentions the module in a comment', () => {

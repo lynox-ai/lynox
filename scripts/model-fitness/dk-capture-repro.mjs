@@ -81,8 +81,9 @@ let sentFact = false;
     // the tripwire goes quiet exactly when it matters.
     //
     // Both active-storing returns begin with "Remembered" (`knowledge.ts`); an allowlist over
-    // them is complete by construction, where a denylist is complete only until someone adds
-    // a return. Same string coupling `sawDedup` names, and the same reason it is acceptable.
+    // them beats a denylist, which is complete only until someone adds a return. It is a
+    // convention pinned by a test, not a construction — see `probe-freshness.mjs` for the one
+    // gap it cannot see. Same string coupling `sawDedup` names, for the same reason.
     const stored = results.some(storedActive);
     if (stored) sentFact = true;
     console.log(JSON.stringify({

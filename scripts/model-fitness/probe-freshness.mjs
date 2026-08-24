@@ -105,7 +105,14 @@ export function sawDedup(result) {
  * over-length, and a review-routed write answers "Recorded for review" — persisted, but as
  * `pending_review`, which the store never selects as a dedup candidate. Both active-storing
  * returns begin with "Remembered" (`src/tools/builtin/knowledge.ts`), so an allowlist over
- * them is complete by construction; a denylist is complete only until someone adds a return.
+ * them beats a denylist, which is complete only until someone adds a return.
+ *
+ * ⚠️ It is a CONVENTION pinned by a test, not a construction. `probe-freshness.test.ts` pins
+ * the handler's return count and the recognised set, so adding or rewording a return fails
+ * loudly. What it cannot see is a SEMANTIC change behind an unchanged string: flip the
+ * review-routed write from `pending_review` to `active` and no literal moves, yet this
+ * predicate would start under-reporting active stores — the same failure the denylist had.
+ * Naming the gap rather than implying it is closed.
  *
  * Same string coupling as {@link sawDedup}, and pinned by the same source-reading test.
  */
