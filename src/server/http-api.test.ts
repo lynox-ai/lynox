@@ -1582,6 +1582,215 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // ── A run parked on a pending prompt (dogfood 2026-08-24, rafael's prod) ──
+    // Reported: the stop button returned 200 while the run stayed parked, and
+    // every later message came back 409 "a run is already in progress" — the
+    // thread was unusable for 15 h until the container was restarted.
+    //
+    // Measured on the instance: the run sat on an ask_user prompt, `last_activity`
+    // was seconds fresh (the SSE keepalive was still writing, so the socket was
+    // NEVER observed closed), and the slot in `runningSessions` was therefore
+    // never reclaimed by any path:
+    //   - the wall-clock is PAUSED while parked, by design (#77, test above);
+    //   - the orphan watchdog + the stale-run takeover both require
+    //     `streamAlive === false`, which only `req.on('close')` ever sets;
+    //   - PROMPT_TTL (24 h) was the sole remaining bound.
+    // Every teardown route did `session.abort()` (or, for DELETE /threads/:id,
+    // nothing) — but a parked run is not waiting on the session, it is waiting on
+    // `waitForSettled(promptId, sessionAbortController.signal)`. Only the slot's
+    // `takeover` unwinds that, which is why the stale-run reclaim uses it.
+    //
+    // The four tests below assert the OUTCOME a user cares about — after this
+    // route, the session accepts a new message — for each way into the state.
+    async function withParkedRun(
+      sid: string,
+      body: (ctx: {
+        prompts: { getPending: (s: string) => unknown };
+        slots: Map<string, unknown>;
+        runRes: Response;
+      }) => Promise<void>,
+    ): Promise<void> {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+        question TEXT NOT NULL,
+        options_json TEXT,
+        questions_json TEXT,
+        segments_json TEXT,
+        partial_answers_json TEXT,
+        secret_name TEXT,
+        secret_key_type TEXT,
+        answer TEXT,
+        answer_saved INTEGER,
+        answer_error TEXT,
+        multi_select INTEGER,
+        payload_json TEXT,
+        origin_json TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        answered_at TEXT,
+        expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const realPromptStore = new PromptStore(db);
+
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => realPromptStore;
+      const slots = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+
+      try {
+        // The mocked agent loop parks on the handler-wired ask_user callback,
+        // exactly as the real one does.
+        mockSessionRun.mockImplementationOnce(async () => {
+          const promptUser = mockSessionInstance.promptUser as
+            (q: string, o?: string[]) => Promise<string>;
+          const answer = await promptUser('Which repo did you mean?', ['lynox', 'lynox-pro']);
+          return `settled:${answer}`;
+        });
+        const runRes = await jsonFetch(`/api/sessions/${sid}/run`, {
+          method: 'POST',
+          body: JSON.stringify({ task: 'find the repo', protocol: 1 }),
+        });
+        expect(runRes.status).toBe(200);
+
+        // Wait until the run has ACTUALLY parked — the target situation. Without
+        // this the tests would pass against a run that simply finished.
+        let pending = realPromptStore.getPending(sid);
+        for (let i = 0; i < 200 && !pending; i++) {
+          await new Promise<void>((r) => setTimeout(r, 5));
+          pending = realPromptStore.getPending(sid);
+        }
+        expect(pending).toBeDefined();
+        // Precondition: parked means the slot IS held. That is correct — the 409
+        // only becomes a defect once teardown cannot clear it.
+        expect(slots.has(sid)).toBe(true);
+
+        await body({ prompts: realPromptStore, slots, runRes });
+        await runRes.text();
+      } finally {
+        engineRef.getPromptStore = originalGetPromptStore;
+        db.close();
+      }
+    }
+
+    /** Bounded wait for the run's `finally` to drain the slot. The unwind is
+     *  asynchronous — a probe showed it completing inside the teardown request's
+     *  own round trip, but that is timing, not a guarantee, so the tests wait
+     *  rather than assert on the scheduler. */
+    async function expectSlotReclaimed(slots: Map<string, unknown>, sid: string): Promise<void> {
+      for (let i = 0; i < 200 && slots.has(sid); i++) {
+        await new Promise<void>((r) => setTimeout(r, 10));
+      }
+      expect(slots.has(sid)).toBe(false);
+    }
+
+    it('POST /abort on a parked run frees the slot — the next message is not 409', async () => {
+      await withParkedRun('abort-parked-1', async ({ prompts, slots }) => {
+        const abortRes = await jsonFetch('/api/sessions/abort-parked-1/abort', { method: 'POST' });
+        expect(abortRes.status).toBe(200);
+
+        await expectSlotReclaimed(slots, 'abort-parked-1');
+        // Settled, not left pending for the 24 h TTL.
+        expect(prompts.getPending('abort-parked-1')).toBeUndefined();
+
+        // The reported symptom: the user can send the next message.
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const next = await jsonFetch('/api/sessions/abort-parked-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'never mind, do this instead', protocol: 1 }),
+        });
+        expect(next.status).not.toBe(409);
+        expect(next.status).toBe(200);
+        await next.text();
+      });
+    });
+
+    // The reclaim must NOT sit behind the route's 404 guard. The slot does not
+    // live on the Session, and the case that needs reclaiming most is the one
+    // where the Session is already gone — a thread deleted while its run was
+    // parked. Behind the guard, the backstop would be unreachable exactly there.
+    it('POST /abort reclaims a parked run even when the Session is already gone', async () => {
+      await withParkedRun('abort-parked-2', async ({ prompts, slots }) => {
+        mockSessionGet.mockReturnValueOnce(undefined);
+        const abortRes = await jsonFetch('/api/sessions/abort-parked-2/abort', { method: 'POST' });
+        // Still 404 — there is no Session to abort, and saying so is honest. The
+        // reclaim simply is not conditional on it.
+        expect(abortRes.status).toBe(404);
+
+        await expectSlotReclaimed(slots, 'abort-parked-2');
+        expect(prompts.getPending('abort-parked-2')).toBeUndefined();
+      });
+    });
+
+    // DELETE /api/sessions/:id calls session.abort() and then drops the Session.
+    // A parked run ignores the abort, so without the reclaim the slot — and the
+    // run-executor reservation it holds — would outlive the only handle to it.
+    it('DELETE /api/sessions/:id reclaims a parked run instead of stranding its slot', async () => {
+      await withParkedRun('abort-parked-3', async ({ prompts, slots }) => {
+        const delRes = await jsonFetch('/api/sessions/abort-parked-3', { method: 'DELETE' });
+        expect(delRes.status).toBe(200);
+
+        await expectSlotReclaimed(slots, 'abort-parked-3');
+        expect(prompts.getPending('abort-parked-3')).toBeUndefined();
+      });
+    });
+
+    // DELETE /api/threads/:id is the worse of the two: it drops the Session with
+    // no abort at all. The UI offers it from the sidebar with no isStreaming
+    // check, so this is a click away while a run is parked. Five stranded
+    // reservations exhaust the run executor (capacity 5) and 429 every thread.
+    it('DELETE /api/threads/:id reclaims a parked run instead of stranding its slot', async () => {
+      await withParkedRun('abort-parked-4', async ({ prompts, slots }) => {
+        const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown } }).engine;
+        const origGetThreadStore = engineRef.getThreadStore;
+        engineRef.getThreadStore = (): unknown => ({
+          getThread: () => ({ id: 'abort-parked-4' }),
+          deleteThread: vi.fn(),
+        });
+        try {
+          const delRes = await jsonFetch('/api/threads/abort-parked-4', { method: 'DELETE' });
+          expect(delRes.status).toBe(200);
+
+          await expectSlotReclaimed(slots, 'abort-parked-4');
+          expect(prompts.getPending('abort-parked-4')).toBeUndefined();
+        } finally {
+          engineRef.getThreadStore = origGetThreadStore;
+        }
+      });
+    });
+    // Two robustness properties of the reclaim, in one target situation: the
+    // prompt store fails while the run is parked (closed db, SQLITE_BUSY).
+    //   (a) `takeover` unwinds BEFORE it does bookkeeping — `waitForSettled`
+    //       resolves on the signal alone, so a throwing store must not be able to
+    //       leave the run parked, which is the very state this fix exists to end.
+    //   (b) the reclaim is best-effort, mirroring RunExecutor.abort: a teardown
+    //       must not turn into a 500 for the caller who asked for it.
+    it('a failing prompt store neither strands the parked run nor 500s the abort', async () => {
+      await withParkedRun('abort-parked-5', async ({ prompts, slots }) => {
+        (prompts as { expirePrompt: (id: string) => boolean }).expirePrompt = (): boolean => {
+          throw new Error('SQLITE_BUSY: database is locked');
+        };
+
+        const abortRes = await jsonFetch('/api/sessions/abort-parked-5/abort', { method: 'POST' });
+        expect(abortRes.status).toBe(200);
+
+        await expectSlotReclaimed(slots, 'abort-parked-5');
+
+        // And the cost of that ordering, pinned so it cannot change silently:
+        // the expire never ran, so the row stays `pending` until its 24 h TTL and
+        // the next insertAskUser on this session hits the unique index. That is
+        // strictly better than a wedged slot — the thread stays usable for chat —
+        // but it is a trade, not a free win, and the other four tests assert the
+        // opposite (`getPending` undefined) precisely because they can.
+        expect(prompts.getPending('abort-parked-5')).toBeDefined();
+      });
+    });
     // Companion test: verify the slot remembers stream death so a later
     // /run can detect the stale state. Exercises the req.on('close') path
     // by going through the public /run endpoint and checking the internal
