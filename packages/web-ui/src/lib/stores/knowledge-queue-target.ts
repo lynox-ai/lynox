@@ -2,12 +2,16 @@
  * DEF-review-approve-target-opaque — what the review queue says about the subject an
  * approval would bind a pending entry to.
  *
- * Pure and separate from the component on purpose. The components in this package are not
- * mountable in the suite (see `chat-nav-targets.test.ts`), so a decision left inside the
- * template can only be guarded by reading the source — which pins that the branches EXIST,
- * never that they choose correctly. The branch that most needs choosing correctly is the
- * last one: an engine older than this UI sends no target at all, and rendering that as any
- * of the three real answers would be a wrong claim about what pressing approve does.
+ * Pure, and here rather than in the template on purpose. The components in this package
+ * are not mountable in the suite (`components/chat-nav-targets.test.ts` says so and works
+ * around it by reading source), so a decision left inside the markup can only be guarded
+ * by a source scan — which pins that the branches EXIST, never that they choose correctly.
+ * It lives beside `knowledge-chip.ts`, its closest sibling: same feature, same shape, a
+ * pure function returning i18n keys.
+ *
+ * The branch that most needs choosing correctly is the last one: an engine older than this
+ * UI sends no target at all, and rendering that as any of the three real answers would be
+ * a wrong claim about what pressing approve does.
  */
 
 /** The server's answer, mirrored from `KnowledgeSubjectTarget` in core's knowledge-store. */

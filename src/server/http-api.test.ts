@@ -8361,6 +8361,10 @@ describe('mail custom-server defaults are the same on both routes', () => {
           listPending: vi.fn().mockReturnValue([
             { id: 'ke_a', subjectHint: 'SVA', text: 'fact of thread one', sourceThreadId: 't-1' },
             { id: 'ke_b', subjectHint: 'X', text: 'fact of thread two', sourceThreadId: 't-2' },
+            // A hintless entry: the wire must carry an explicit `null`, because "binds
+            // nothing" and "this engine computes no targets" must not look alike to a UI
+            // that renders them differently.
+            { id: 'ke_c', subjectHint: null, text: 'a fact about nobody', sourceThreadId: 't-1' },
           ]),
           // Mirrors the real store: an EMPTY thread id is a question about no
           // thread — trim-guard answers [] (see listPendingForThread).
@@ -8389,7 +8393,7 @@ describe('mail custom-server defaults are the same on both routes', () => {
         await swapEngineQ({ getKnowledgeStore: () => store }, async () => {
           const res = await jsonFetch('/api/knowledge/queue');
           const body = await res.json() as { entries: Array<{ id: string }> };
-          expect(body.entries).toHaveLength(2);
+          expect(body.entries).toHaveLength(3);
         });
       });
 
@@ -8410,6 +8414,7 @@ describe('mail custom-server defaults are the same on both routes', () => {
           expect(body.entries.map(e => e.subjectTarget)).toEqual([
             { resolution: 'existing', id: 'sub_1', name: 'SVA', kind: 'organization' },
             { resolution: 'existing', id: 'sub_1', name: 'X', kind: 'organization' },
+            null,
           ]);
         });
       });
@@ -8418,8 +8423,11 @@ describe('mail custom-server defaults are the same on both routes', () => {
         const store = fakeQueueStore();
         await swapEngineQ({ getKnowledgeStore: () => store }, async () => {
           const res = await jsonFetch('/api/knowledge/queue?threadId=t-1');
-          const body = await res.json() as { entries: Array<{ subjectTarget?: unknown }> };
-          expect(body.entries[0]?.subjectTarget).toMatchObject({ resolution: 'existing', name: 'SVA' });
+          const body = await res.json() as { entries: Array<{ id: string; subjectTarget?: unknown }> };
+          // Ids AND length, not `entries[0]`: a mapper handed the UNFILTERED list would
+          // still put the right target first, and the assertion would not notice.
+          expect(body.entries.map(e => e.id)).toEqual(['ke_a']);
+          expect(body.entries[0]?.subjectTarget).toEqual({ resolution: 'existing', id: 'sub_1', name: 'SVA', kind: 'organization' });
         });
       });
 

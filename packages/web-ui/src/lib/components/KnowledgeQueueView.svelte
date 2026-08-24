@@ -6,7 +6,7 @@
 	// content on its actual wording.
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
-	import { approveTargetLabel, type ApproveTarget } from './knowledge-queue-target.js';
+	import { approveTargetLabel, type ApproveTarget } from '../stores/knowledge-queue-target.js';
 
 	interface QueueEntry {
 		id: string;

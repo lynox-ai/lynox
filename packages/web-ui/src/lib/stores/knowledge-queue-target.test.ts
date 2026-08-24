@@ -15,20 +15,33 @@ describe('approveTargetLabel', () => {
 		});
 	});
 
+	// The mint is the consequence a reviewer cannot see in the hint. Neutral styling would
+	// put it beside the kind chip as if it were metadata — hence `emphasis`. Asserted as a
+	// WHOLE object, not field by field: picking fields leaves the unpicked ones free, and a
+	// mutation swapping this arm's `titleKey` for the existing-arm one survived that way.
 	it('an unknown name says the approval will CREATE the subject, emphasised', () => {
-		const l = approveTargetLabel({ resolution: 'new', name: 'Nordberg AG', kind: 'organization' }, 'Nordberg AG');
-		expect(l.noteKey).toBe('knowledge.queue.target_new');
-		expect(l.kind).toBe('organization');
-		// The mint is the consequence a reviewer cannot see in the hint. Neutral styling
-		// would put it beside the kind chip as if it were metadata.
-		expect(l.emphasis).toBe(true);
+		expect(approveTargetLabel({ resolution: 'new', name: 'Nordberg AG', kind: 'organization' }, 'Nordberg AG')).toEqual({
+			name: 'Nordberg AG', kind: 'organization', noteKey: 'knowledge.queue.target_new',
+			titleKey: 'knowledge.queue.target_new_title', emphasis: true,
+		});
 	});
 
 	it('an ambiguous name says NO link is made, and offers no kind to imply one', () => {
-		const l = approveTargetLabel({ resolution: 'ambiguous', name: 'Wikipedia', candidates: 2 }, 'Wikipedia');
-		expect(l.noteKey).toBe('knowledge.queue.target_ambiguous');
-		expect(l.kind).toBeNull();
-		expect(l.titleKey).toBe('knowledge.queue.target_ambiguous_title');
+		expect(approveTargetLabel({ resolution: 'ambiguous', name: 'Wikipedia', candidates: 2 }, 'Wikipedia')).toEqual({
+			name: 'Wikipedia', kind: null, noteKey: 'knowledge.queue.target_ambiguous',
+			titleKey: 'knowledge.queue.target_ambiguous_title', emphasis: false,
+		});
+	});
+
+	/**
+	 * The hint and the resolved name are the SAME string in every other fixture here, which
+	 * makes `name: target.name` and `name: hint` indistinguishable — a mutation swapping
+	 * them survived the whole suite. The canonical name behind a non-identical hint is the
+	 * one field this component exists to show, so it gets a case where they differ.
+	 */
+	it('shows the CANONICAL subject name, not the hint that found it', () => {
+		const l = approveTargetLabel({ resolution: 'existing', id: 's1', name: 'Nordberg AG', kind: 'organization' }, 'nordberg ag');
+		expect(l.name).toBe('Nordberg AG');
 	});
 
 	/**

@@ -38,6 +38,24 @@ export type KnowledgeSubjectTarget =
   /** Several subjects carry the name; approval links to NONE of them. */
   | { resolution: 'ambiguous'; name: string; candidates: number };
 
+/**
+ * How many DISTINCT hints one {@link KnowledgeStore.withHintTargets} batch resolves.
+ *
+ * Not a performance nicety — a bound on attacker-influenced work. A pending entry's hint
+ * is authored on an UNTRUSTED turn, so the number of distinct names in the queue is not
+ * the operator's choice, and a MISS is the most expensive path through
+ * `findByNameAnyKind` (it exhausts every kind, then scans the engagement table and
+ * JSON-parses each row's aliases). At the route's 500-entry cap and a five-figure subject
+ * graph that reached seconds of blocked event loop, measured on this branch.
+ *
+ * 50 because the entries beyond it are not lost — they render as the bare hint, exactly
+ * as they do against an engine that predates the field — and a review queue holding more
+ * than 50 DIFFERENT subjects is already past what one sitting works through. Repeats are
+ * free: the cache counts distinct names, so 500 entries about three clients cost three
+ * lookups.
+ */
+export const MAX_HINT_LOOKUPS_PER_BATCH = 50;
+
 /** Max chars for a single durable knowledge entry — one concise fact. Bounds the at-rest
  *  write against a pathological / injected multi-KB `remember`. Long material belongs in a
  *  document / data_store. Enforced at the tool (friendly reject) AND the store (backstop). */
@@ -162,9 +180,15 @@ export class KnowledgeStore {
    * queue entry never leaves an empty minted subject behind"). The mint is REPORTED here
    * and performed only by an approval.
    *
-   * Both paths start at `findByNameAnyKind`, and each of its three outcomes maps to one
-   * arm here and one branch there — that shared entry point is what keeps the preview
-   * honest when the resolution changes.
+   * It mirrors {@link _resolveWriteSubject} step for step, and BOTH steps matter. The
+   * first version stopped after `findByNameAnyKind` and was wrong for a whole class of
+   * hints: the approval does not stop there either — it hands the name to
+   * `findOrCreate({kind:'organization'})`, whose read half applies a NORMALIZED fallback
+   * the any-kind lookup does not have. With `Meridian AG` in the graph, a hint of
+   * `"Meridian AG."` previewed as "will be created" while the approval folded it into the
+   * existing subject: a warning about a mint that never happens, and no mention of the
+   * subject that actually receives the fact. `resolveForCreate` is that same read half,
+   * extracted, so the two cannot drift again.
    */
   previewHintTarget(name: string): KnowledgeSubjectTarget | null {
     const hint = name.trim();
@@ -172,6 +196,9 @@ export class KnowledgeStore {
     const found = this.subjects.findByNameAnyKind(hint);
     if (found.ambiguous) return { resolution: 'ambiguous', name: hint, candidates: found.candidateIds.length };
     if (found.row) return { resolution: 'existing', id: found.row.id, name: found.row.name, kind: found.row.kind };
+    const asOrg = this.subjects.resolveForCreate({ kind: 'organization', name: hint });
+    if (asOrg.ambiguous) return { resolution: 'ambiguous', name: hint, candidates: asOrg.candidateIds.length };
+    if (asOrg.row) return { resolution: 'existing', id: asOrg.row.id, name: asOrg.row.name, kind: asOrg.row.kind };
     return { resolution: 'new', name: hint, kind: 'organization' };
   }
 
@@ -187,12 +214,19 @@ export class KnowledgeStore {
    */
   withHintTargets(
     entries: readonly KnowledgeEntry[],
-  ): Array<KnowledgeEntry & { subjectTarget: KnowledgeSubjectTarget | null }> {
+  ): Array<KnowledgeEntry & { subjectTarget?: KnowledgeSubjectTarget | null }> {
     const byName = new Map<string, KnowledgeSubjectTarget | null>();
     return entries.map(e => {
       const hint = e.subjectHint?.trim();
       if (!hint) return { ...e, subjectTarget: null };
-      if (!byName.has(hint)) byName.set(hint, this.previewHintTarget(hint));
+      if (!byName.has(hint)) {
+        // Past the cap the field is OMITTED, not nulled — `null` is this store's answer
+        // for "binds nothing", and saying that about an unresolved hint would be a
+        // different wrong promise. An absent field is the shape an older engine sends,
+        // which the review surface already renders as the bare hint.
+        if (byName.size >= MAX_HINT_LOOKUPS_PER_BATCH) return { ...e };
+        byName.set(hint, this.previewHintTarget(hint));
+      }
       return { ...e, subjectTarget: byName.get(hint) ?? null };
     });
   }

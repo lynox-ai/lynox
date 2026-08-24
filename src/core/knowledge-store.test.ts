@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
 import { SubjectStore } from './subject-store.js';
-import { KnowledgeStore, BlockOverLimitError, BlockEditError, MAX_KNOWLEDGE_ENTRY_CHARS, knowledgeEvidence } from './knowledge-store.js';
+import { KnowledgeStore, BlockOverLimitError, BlockEditError, MAX_KNOWLEDGE_ENTRY_CHARS, MAX_HINT_LOOKUPS_PER_BATCH, knowledgeEvidence } from './knowledge-store.js';
 import { deriveProvenanceTier } from './provenance.js';
 import { channels } from './observability.js';
 import { MEMORY_BLOCK_CHAR_LIMITS } from '../types/memory.js';
@@ -1250,6 +1250,26 @@ describe('previewHintTarget — the approve target, resolved without performing 
     });
   });
 
+  /**
+   * The one field this whole surface exists to show — the CANONICAL name behind the hint
+   * that found it. Every other fixture here uses a hint identical to the stored name,
+   * which makes `found.row.name` and `hint` indistinguishable: a mutation swapping them
+   * SURVIVED the suite until this case existed. Two ways the two can differ, both real:
+   * `findCanonical` matches case-insensitively, and `findByAliasResolved` matches a
+   * surface form stored as an alias.
+   */
+  it.each([
+    ['a case variant', 'nordberg ag'],
+    ['an alias', 'NBAG'],
+  ])('shows the canonical subject name, not the hint — %s', (_case, hint) => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: 'Nordberg AG', aliases: ['NBAG'] });
+
+    expect(ks.previewHintTarget(hint)).toMatchObject({
+      resolution: 'existing', name: 'Nordberg AG', kind: 'organization',
+    });
+  });
+
   it('reports the MINT for an unknown name instead of performing it', () => {
     const { ks } = make();
 
@@ -1331,6 +1351,42 @@ describe('previewHintTarget — the approve target, resolved without performing 
   });
 
   /**
+   * The lookup batch is BOUNDED because a pending hint is authored on an untrusted turn:
+   * how many distinct names sit in the queue is not the operator's choice, and a miss is
+   * the most expensive path through the resolver. Past the cap the field is OMITTED
+   * rather than nulled — `null` means "binds nothing", which would be a different wrong
+   * promise about an entry that was simply never looked up.
+   */
+  it('bounds the distinct lookups per batch, and omits the field beyond it', () => {
+    const { ks } = make();
+    for (let i = 0; i < MAX_HINT_LOOKUPS_PER_BATCH + 3; i++) {
+      ks.write({ text: `fact ${i}`, subjectName: `Client ${i}`, sourceChannel: 'agent', sourceUntrusted: true });
+    }
+
+    const served = ks.withHintTargets(ks.listPending(500));
+
+    const resolved = served.filter(e => 'subjectTarget' in e);
+    expect(resolved).toHaveLength(MAX_HINT_LOOKUPS_PER_BATCH);
+    expect(served).toHaveLength(MAX_HINT_LOOKUPS_PER_BATCH + 3);
+    // OMITTED, not null — the shape an older engine sends, which the UI already renders
+    // as the bare hint.
+    expect(served[MAX_HINT_LOOKUPS_PER_BATCH]).not.toHaveProperty('subjectTarget');
+  });
+
+  it('a repeated hint is free: 500 entries about one client stay under the cap', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: 'ACME' });
+    for (let i = 0; i < MAX_HINT_LOOKUPS_PER_BATCH + 10; i++) {
+      ks.write({ text: `ACME fact ${i}`, subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: true });
+    }
+
+    const served = ks.withHintTargets(ks.listPending(500));
+
+    expect(served.every(e => 'subjectTarget' in e)).toBe(true);
+    expect(served.at(-1)?.subjectTarget).toMatchObject({ resolution: 'existing', name: 'ACME' });
+  });
+
+  /**
    * THE test. A preview that disagrees with the approval is worse than no preview: it is a
    * wrong promise on a surface whose whole job is informed consent. Each of the three arms
    * is driven through the REAL `reviewEntry` and checked against what it actually did.
@@ -1366,9 +1422,28 @@ describe('previewHintTarget — the approve target, resolved without performing 
       },
       hint: 'Wikipedia',
       expect_: (target: unknown, subjectId: string | null, subjects: SubjectStore) => {
-        expect(target).toMatchObject({ resolution: 'ambiguous' });
+        expect(target).toMatchObject({ resolution: 'ambiguous', name: 'Wikipedia', candidates: 2 });
         expect(subjectId).toBeNull();                        // linked to none of them
         expect(countSubjects(subjects, 'Wikipedia')).toBe(2); // and no third twin
+      },
+    },
+    {
+      // The case a review found and the first version got WRONG in the expensive
+      // direction. `findByNameAnyKind` has no normalized fallback; `findOrCreate` does
+      // (`subject-store.ts`, the `normalized !== params.name` re-probe). So a punctuated
+      // hint previewed as "will be created" while approval quietly folded it into the
+      // existing subject — a warning about a mint that never happens, and silence about
+      // the subject that actually receives the fact. Every other arm here uses a hint
+      // IDENTICAL to the stored name and therefore cannot see it.
+      arm: 'existing via the normalized fallback',
+      seed: (s: SubjectStore) => { s.findOrCreate({ kind: 'organization', name: 'Meridian AG' }); },
+      hint: 'Meridian AG.',
+      expect_: (target: unknown, subjectId: string | null, subjects: SubjectStore) => {
+        // The CANONICAL name, not the punctuated hint — that is what the reviewer needs
+        // to recognise the subject.
+        expect(target).toMatchObject({ resolution: 'existing', name: 'Meridian AG', kind: 'organization' });
+        expect(subjectId).toBe((target as { id: string }).id);
+        expect(countSubjects(subjects, 'Meridian AG')).toBe(1);   // nothing minted
       },
     },
   ])('the preview matches what approval actually does — $arm', ({ seed, hint, expect_ }) => {
