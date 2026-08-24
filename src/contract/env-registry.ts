@@ -25,11 +25,11 @@
  *   (consumed inside SDK constructors — justify in `note`). `none` = not read
  *   by the engine at all; the forward test asserts ABSENCE from the read
  *   inventory. `pair-resolver` = read as one half of a credential PAIR via
- *   the `resolveClientPair` helper, taking idName then secretName. `pairArg`
- *   says WHICH argument
- *   this member is; without it a swapped call (secret passed as the id) would
- *   satisfy both rows. The direct `process.env` form is accepted only at
- *   `alsoReadAt` sites, so the primary read site stays pinned to the resolver.
+ *   the `resolveClientPair` helper. `pair` names BOTH members in call order,
+ *   so the asserted form is the whole call rather than one argument: a swapped
+ *   call, or one pairing a member with a foreign partner, matches nothing.
+ *   The direct `process.env` form is accepted only at `alsoReadAt` sites, so
+ *   the primary read site stays pinned to the resolver.
  * - `secret.redact` — `exact-name`: the env-preview masks this key's value.
  *   `whole-value`: the value embeds secrets under OTHER names (e.g. a JSON
  *   blob with api_key fields) and must be masked as a whole.
@@ -81,8 +81,8 @@ export interface EngineConsumption {
   readSite?: string;
   /** Additional read sites the forward test also asserts (e.g. web-ui next to core). */
   alsoReadAt?: string[];
-  /** For `pair-resolver` rows: which argument of the resolver this member is. */
-  pairArg?: 1 | 2;
+  /** For `pair-resolver` rows: both members of the pair, in resolver call order. */
+  pair?: { id: string; secret: string };
   /**
    * For `features` rows: the flag slug + a real consumer call-site. The forward
    * test asserts BOTH the env-name map entry in features.ts AND
@@ -155,8 +155,8 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
   { name: 'LYNOX_FEATURE_PROACTIVE_DEEP_ANTHROPIC', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'proactive-deep-anthropic', consumerSite: 'src/core/session.ts' } }, note: 'Allows proactive deep even on an Anthropic deep slot (premium).' },
 
   // ── OAuth app credentials (per provider) ──────────────────────────────────
-  { name: 'GOOGLE_CLIENT_ID', valueKind: 'opaque', emitPolicy: 'operator-only', engineConsumed: { kind: 'pair-resolver', pairArg: 1, readSite: 'src/core/engine.ts', alsoReadAt: ['src/core/engine-init.ts'] }, note: 'OAuth APP credential (public by construction — it travels in the browser redirect), not a user token, hence no secret stance. Self-host operators set it; the CP does not emit it today. A future CP emit flips this row to an emitting policy in the same change that adds the emit site, same as LYNOX_TIER_SET_JSON.' },
-  { name: 'GOOGLE_CLIENT_SECRET', valueKind: 'opaque', emitPolicy: 'operator-only', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'pair-resolver', pairArg: 2, readSite: 'src/core/engine.ts', alsoReadAt: ['src/core/engine-init.ts'] }, note: 'The secret half of the GOOGLE_CLIENT_ID pair. Also read in src/core/secret-store.ts, but through process.env[envVar] with a VARIABLE, which no literal form can assert — not listed as a read site.' },
+  { name: 'GOOGLE_CLIENT_ID', valueKind: 'opaque', emitPolicy: 'operator-only', engineConsumed: { kind: 'pair-resolver', pair: { id: 'GOOGLE_CLIENT_ID', secret: 'GOOGLE_CLIENT_SECRET' }, readSite: 'src/core/engine.ts', alsoReadAt: ['src/core/engine-init.ts'] }, note: 'OAuth APP credential (public by construction — it travels in the browser redirect), not a user token, hence no secret stance. Self-host operators set it; the CP does not emit it today. A future CP emit flips this row to an emitting policy in the same change that adds the emit site, same as LYNOX_TIER_SET_JSON.' },
+  { name: 'GOOGLE_CLIENT_SECRET', valueKind: 'opaque', emitPolicy: 'operator-only', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'pair-resolver', pair: { id: 'GOOGLE_CLIENT_ID', secret: 'GOOGLE_CLIENT_SECRET' }, readSite: 'src/core/engine.ts', alsoReadAt: ['src/core/engine-init.ts'] }, note: 'The secret half of the GOOGLE_CLIENT_ID pair. Also read in src/core/secret-store.ts, but through process.env[envVar] with a VARIABLE, which no literal form can assert — not listed as a read site.' },
 
   // ── Worker / model-profiles bridge ────────────────────────────────────────
   { name: 'LYNOX_WORKER_PROFILE', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Names a profile key inside LYNOX_MODEL_PROFILES_JSON; engine clears a dangling one.' },

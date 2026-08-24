@@ -25,10 +25,10 @@ export const INFRA_SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /^MANAGED_/,
   /^MAIL_ACCOUNT_/,
   /^GOOGLE_OAUTH_/,
-  // GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are the OAuth *app* credentials. The
-  // control plane provisions them for the managed broker, and they are resolved
-  // engine-internally — never an agent tool-input ref, which is what keeps them on
-  // this list.
+  // GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are the OAuth *app* credentials. They
+  // are resolved engine-internally — never an agent tool-input ref, which is what
+  // keeps them on this list. (Self-host operators set them; a control-plane emit
+  // for the managed broker is planned, not shipped.)
   //
   // The original note here read "OAuth hijacking if a tenant could repoint them".
   // That threat is per-INSTANCE, and each tenant runs its own container and its own

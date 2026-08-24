@@ -55,15 +55,16 @@ function readForms(row: EnvRegistryRow): RegExp[] {
       return [new RegExp(`envFloat\\(['"]${n}['"]\\)`)];
     case 'direct':
       return [new RegExp(`process\\.env(\\.${n}\\b|\\[['"]${n}['"]\\])`)];
-    case 'pair-resolver':
-      // Pinned to the member's ARGUMENT POSITION. Position-agnostic forms let a
-      // SWAPPED call — the secret passed as the client id — satisfy both rows,
-      // which is the pair-mixing defect core#1269 exists to prevent.
+    case 'pair-resolver': {
+      // The asserted form is the WHOLE call, both members in order. Pinning one
+      // argument at a time was not enough: it accepted a member paired with a
+      // FOREIGN partner. Order plus partner in one regex closes both.
       // The direct `process.env` form is NOT here: it is added per-site for
       // `alsoReadAt` only, so the primary site stays pinned to the resolver.
-      return row.engineConsumed.pairArg === 2
-        ? [new RegExp(`\\bresolveClientPair\\(\\s*['"][A-Z][A-Z0-9_]*['"]\\s*,\\s*['"]${n}['"]`)]
-        : [new RegExp(`\\bresolveClientPair\\(\\s*['"]${n}['"]\\s*,`)];
+      const pair = row.engineConsumed.pair;
+      if (!pair) return [/$^/]; // no pair declared → matches nothing; the row-level test below says why
+      return [new RegExp(`\\bresolveClientPair\\(\\s*['"]${esc(pair.id)}['"]\\s*,\\s*['"]${esc(pair.secret)}['"]`)];
+    }
     case 'web-ui':
       // SvelteKit server code reads via `$env/dynamic/private`.
       return [...webUiForms(row.name), new RegExp(`process\\.env(\\.${n}\\b|\\[['"]${n}['"]\\])`)];
@@ -84,10 +85,13 @@ describe('env-ABI forward: every registry row is read at its declared site', () 
     }
     if (kind === 'none') continue; // asserted absent by the reverse sweep below
     if (kind === 'pair-resolver') {
-      it(`${row.name} declares which resolver argument it is`, () => {
-        // Without pairArg the form set falls back to position 1 for every
-        // member, and the swap case below stops being detectable.
-        expect(row.engineConsumed.pairArg, `${row.name}: kind 'pair-resolver' requires pairArg`).toBeDefined();
+      it(`${row.name} declares its pair, and is a member of it`, () => {
+        const pair = row.engineConsumed.pair;
+        expect(pair, `${row.name}: kind 'pair-resolver' requires pair`).toBeDefined();
+        expect(
+          [pair?.id, pair?.secret],
+          `${row.name} declares a pair it is not a member of`,
+        ).toContain(row.name);
       });
     }
     it(`${row.name} declares a readSite`, () => {
@@ -111,6 +115,9 @@ describe('env-ABI forward: every registry row is read at its declared site', () 
         // A pair member is also read directly where the migration decides — but
         // only there. Accepting it at the PRIMARY site would let two independent
         // process.env reads pass as a resolved pair.
+        // A pair member is also read directly at every secondary site — the
+        // migration decision is the only one today. Never at the PRIMARY site:
+        // there, two independent process.env reads would pass as a resolved pair.
         if (kind === 'pair-resolver' && site !== readSite) {
           forms.push(new RegExp(`process\\.env(\\.${esc(row.name)}\\b|\\[['"]${esc(row.name)}['"]\\])`));
         }
@@ -141,23 +148,18 @@ describe('env-ABI forward: every registry row is read at its declared site', () 
 });
 
 describe('env-ABI forward: the pair-resolver form set rejects near-misses', () => {
-  // The form set is the only thing standing between "the consumer is pinned"
-  // and "some line in the file happens to contain the name".
-  const rowFor = (name: string, pairArg: 1 | 2): EnvRegistryRow => ({
-    name,
-    valueKind: 'opaque',
-    emitPolicy: 'operator-only',
-    engineConsumed: { kind: 'pair-resolver', pairArg, readSite: 'src/core/engine.ts' },
-  });
   const ID = 'GOOGLE_CLIENT_ID';
   const SECRET = 'GOOGLE_CLIENT_SECRET';
-  const matchesId = (src: string): boolean => readForms(rowFor(ID, 1)).some((f) => f.test(src));
-  const matchesSecret = (src: string): boolean => readForms(rowFor(SECRET, 2)).some((f) => f.test(src));
+  const row: EnvRegistryRow = {
+    name: ID,
+    valueKind: 'opaque',
+    emitPolicy: 'operator-only',
+    engineConsumed: { kind: 'pair-resolver', pair: { id: ID, secret: SECRET }, readSite: 'src/core/engine.ts' },
+  };
+  const matches = (src: string): boolean => readForms(row).some((f) => f.test(src));
 
-  it('accepts the real resolver call, each member at its own position', () => {
-    const src = `resolveClientPair('${ID}', '${SECRET}', {`;
-    expect(matchesId(src), `${ID} should match at argument 1`).toBe(true);
-    expect(matchesSecret(src), `${SECRET} should match at argument 2`).toBe(true);
+  it('accepts the real resolver call', () => {
+    expect(matches(`resolveClientPair('${ID}', '${SECRET}', {`)).toBe(true);
   });
 
   const rejected: [string, string][] = [
@@ -165,20 +167,18 @@ describe('env-ABI forward: the pair-resolver form set rejects near-misses', () =
     ['a helper whose name merely ends with the resolver', `myresolveClientPair('${ID}', '${SECRET}')`],
     ['longer names sharing the prefix', `resolveClientPair('${ID}_LEGACY', '${SECRET}_LEGACY')`],
     ['another provider pair', `resolveClientPair('MS_CLIENT_ID', 'MS_CLIENT_SECRET', {`],
-    // The one that matters most: a position-agnostic form set would accept
-    // this, and it ships the client SECRET as the client id.
-    ['a SWAPPED call — the secret passed as the client id', `resolveClientPair('${SECRET}', '${ID}', {`],
-    // Accepted only at an alsoReadAt site, added there by the site loop. If the
-    // primary form set took it, two independent env reads would pass as a
-    // resolved pair — the mixing defect core#1269 removed.
+    // Ships the client SECRET as the client id.
+    ['a SWAPPED call', `resolveClientPair('${SECRET}', '${ID}', {`],
+    // One real member, a foreign partner — the shape a one-argument form let through.
+    ['a FOREIGN partner', `resolveClientPair('MS_CLIENT_ID', '${SECRET}', {`],
+    // Accepted only at an alsoReadAt site, added there by the site loop.
     ['a bare direct env read', `!process.env['${ID}'] && !process.env['${SECRET}']`],
     ['a dotted env read of a longer name', `process.env.${ID}_LEGACY`],
     ['a bare mention in a comment', `// ${ID} / ${SECRET} env copies were removed`],
   ];
   for (const [label, src] of rejected) {
     it(`rejects ${label}`, () => {
-      expect(matchesId(src), `${ID} must not match`).toBe(false);
-      expect(matchesSecret(src), `${SECRET} must not match`).toBe(false);
+      expect(matches(src), `${label} must not match`).toBe(false);
     });
   }
 });
@@ -238,14 +238,6 @@ const READ_PATTERNS: readonly RegExp[] = [
 const BLIND_FORMS: readonly [RegExp, string][] = [
   [/\{[^}]*\}\s*=\s*process\.env\b/, 'destructuring `const { X } = process.env`'],
   [/\$env\/static\/private/, "`$env/static/private` import (compile-time env read)"],
-  // A pair resolved from hoisted consts is invisible to every literal-based
-  // form AND to PAIR_READ_PATTERNS. The lookbehind spares the resolver's own
-  // definition (checked against its single- and multi-line shapes). NOTE: this
-  // scan does NOT strip comments — prose that spells the call with an opening
-  // paren trips it. Stripping comments here was rejected: a naive `//` strip
-  // truncates any line holding a `https://` literal, which would HIDE a real
-  // read. Write about the helper without the paren instead.
-  [/(?<!function )\bresolveClientPair\(\s*[A-Za-z_$]/, 'resolveClientPair() called with a non-literal argument'],
 ];
 
 function collectReads(): { reads: Map<string, string[]>; blind: string[]; viaPair: Set<string> } {
@@ -371,21 +363,57 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
     ).toEqual([]);
   });
 
-  // The mirror of the forward test. Forward proves a declared row IS read;
-  // this proves a real read IS declared. Without it the rows can be deleted
-  // outright and every other test in this file stays green.
-  it('every name passed to resolveClientPair() in src/ has a registry row', () => {
-    const undeclared: string[] = [];
+  // The mirror of the forward test, and file-wide rather than per-row. Forward
+  // proves a declared row IS read; this proves EVERY real call resolves a
+  // declared pair, in declared order, from literal names.
+  //
+  // It has to be `every`, not `some`. The forward test asks whether the file
+  // contains a matching call — measured, a file with one correct call and one
+  // SWAPPED call passes it. And it subsumes what a BLIND_FORMS regex tried and
+  // failed to do: a call whose arguments are not literals is reported here as
+  // unverifiable, with no false positive on the resolver's own definition and
+  // nothing to evade by writing `?.(` or `.call(`.
+  it('every resolveClientPair() call in src/ resolves a declared pair, in order', () => {
+    const declared = new Set(
+      ENV_REGISTRY.filter((r) => r.engineConsumed.pair).map(
+        (r) => `${r.engineConsumed.pair?.id}\u0000${r.engineConsumed.pair?.secret}`,
+      ),
+    );
+    expect(declared.size, 'no pair is declared — this invariant has nothing to check').toBeGreaterThan(0);
+
+    const offenders: string[] = [];
+    let callSites = 0;
     for (const file of walk(resolve(repoRoot, 'src'), [])) {
-      const src = readFileSync(file, 'utf8');
-      for (const m of src.matchAll(
-        /\bresolveClientPair\(\s*['"]([A-Z][A-Z0-9_]{2,})['"]\s*,\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
-      )) {
-        for (const name of [m[1], m[2]]) {
-          if (name && !registryNames.has(name)) undeclared.push(`${name} (${relative(repoRoot, file)})`);
+      // Comment lines are dropped first. PROSE about the helper trips a naive
+      // scan, and rewording each mention as it appears is a fix applied per
+      // instance — the wrong shape. Only lines that are ENTIRELY a comment go:
+      // a trailing comment after code survives, and no line holding a `https://`
+      // literal is ever truncated (the lookbehind on `:` is what protects
+      // `https://`), which is what made a blanket `//` strip unsafe.
+      // Residual gap, stated rather than hidden: a line carrying BOTH a call
+      // and a non-URL `//` inside a string literal loses the call. That fails
+      // toward missing a call, not toward a false alarm — the trade the other
+      // way round made the guard unusable, because every prose mention of the
+      // helper tripped it.
+      const src = readFileSync(file, 'utf8')
+        .split('\n')
+        .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+        .map((l) => l.replace(/(?<!:)\/\/.*$/, ''))
+        .join('\n');
+      const rel = relative(repoRoot, file);
+      for (const m of src.matchAll(/(\w+\s+)?\bresolveClientPair\s*\(([^)]*)/g)) {
+        if (m[1]?.trim() === 'function') continue; // the declaration itself
+        callSites++;
+        const args = (m[2] ?? '').split(',').slice(0, 2).map((a) => a.trim());
+        const lit = args.map((a) => /^['"]([A-Z][A-Z0-9_]{2,})['"]$/.exec(a)?.[1]);
+        if (!lit[0] || !lit[1]) {
+          offenders.push(`${rel}: non-literal pair arguments (${args.join(', ')})`);
+        } else if (!declared.has(`${lit[0]}\u0000${lit[1]}`)) {
+          offenders.push(`${rel}: (${lit[0]}, ${lit[1]}) is not a declared pair in that order`);
         }
       }
     }
-    expect(undeclared, 'a credential pair is resolved from names that have no contract row').toEqual([]);
+    expect(callSites, 'no call site found — the scan is not looking where the calls are').toBeGreaterThan(0);
+    expect(offenders, 'a resolveClientPair() call does not resolve a declared pair').toEqual([]);
   });
 });

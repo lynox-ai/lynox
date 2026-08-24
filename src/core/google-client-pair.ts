@@ -21,9 +21,12 @@
  *   never loaded, the env value is not consented, so it arrives via the `??` tail).
  *
  * The two halves of one credential therefore take **opposite** precedence, and
- * the mixed pair reaches Google. That is not a hypothetical: the control plane
- * emits an environment pair to every managed tenant, and a customer running
- * their own Google Cloud project has a vault pair.
+ * the mixed pair reaches Google. It is reachable, but not yet reached: the
+ * control plane does NOT emit this pair today (measured 2026-08-24 — the names
+ * appear nowhere in the CP source). The mixing needs BOTH an env pair and a
+ * vault pair present, so it arms itself the day the managed broker emit ships,
+ * for the tenants running their own Google Cloud project. This function exists
+ * so that day is uneventful.
  *
  * ## The rules, and why each is written the way it is
  *
