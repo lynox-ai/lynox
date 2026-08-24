@@ -2952,7 +2952,18 @@ export class Agent implements IAgent {
     if (flat.length <= Agent.MAX_LEDGER_REASON_CHARS) return flat;
     // The marker lives INSIDE the bound \u2014 the bound is the guarantee, not the
     // target length, so a row can never exceed it to make room for saying so.
-    return `${flat.slice(0, Agent.MAX_LEDGER_REASON_CHARS - LEDGER_CUT_MARK.length)}${LEDGER_CUT_MARK}`;
+    // `Math.max(0, …)` because a negative second argument to `slice` counts
+    // from the END — so a future MAX below the marker's own length would
+    // silently return a string LONGER than the bound, which is the one thing
+    // this function guarantees.
+    //
+    // ⚠ Deleting the clamp is an EQUIVALENT mutant today and is declared as one
+    // rather than counted as killed: at MAX = 2000 the expression is 1993 either
+    // way, and MAX is a private static, so no test can drive it below 7 without
+    // editing the constant. The guard is for the edit, not for today's value —
+    // whoever lowers MAX gets the bound honoured instead of inverted.
+    const keep = Math.max(0, Agent.MAX_LEDGER_REASON_CHARS - LEDGER_CUT_MARK.length);
+    return `${flat.slice(0, keep)}${LEDGER_CUT_MARK}`;
   }
 
   /**

@@ -2554,12 +2554,13 @@ describe('Agent', () => {
       // and the same breadcrumb, and `read_file`'s ENOENT text carries the
       // model-chosen path verbatim. Counting the writers of a column is the
       // cheap step that was skipped.
-      // Every class member the regex names, in one fixture: CR, LF, NEL and
-      // LINE SEPARATOR. Without them, deleting `\u0085` or `\u2028` from the
-      // class is a surviving mutant — the guard would name characters no test
-      // ever sends. `\u0085` and `\u2028` both break `str.splitlines()` and
-      // UAX-14 readers, which is what a line-oriented ledger reader is.
-      const forged = "ENOENT: no such file or directory, open '/tmp/x\r\n2026-01\u0085-01 tool=bash\u2028 status=ok'";
+      // ALL SIX class members in one fixture: CR, LF, NEL, LINE SEPARATOR,
+      // PARAGRAPH SEPARATOR and DEL. Any of them missing here makes deleting it
+      // from the class a surviving mutant — a guard naming characters no test
+      // ever sends. The first version of this fixture carried four and its
+      // comment claimed "every class member", which is how the fourth over-broad
+      // claim of this PR got written into a comment about completeness.
+      const forged = "ENOENT: no such file or directory, open '/tmp/x\r\n2026\u0085-01-01 tool=bash\u2028 status\u2029=ok\x7f'";
       const tool = makeTool('hard_crlf', vi.fn().mockRejectedValue(new Error(forged)));
 
       mockProcess
@@ -2576,12 +2577,12 @@ describe('Agent', () => {
 
       const row = recorded.find(c => c.toolName === 'hard_crlf');
       expect(row).toBeDefined();
-      // Pinned EXACTLY, not by substring: each of the four injected characters
-      // becomes one space, so a class missing `\u0085` or `\u2028` produces a
-      // different string and dies here. A `toContain` would have let the
-      // partial-class mutants live.
+      // Pinned EXACTLY, not by substring: each injected character becomes ONE
+      // space, so a class missing any single member produces a different string
+      // and dies here. A `toContain` would have let every partial-class mutant
+      // live. The expected value was computed from the fixture, not typed.
       expect(row!.outputJson).toBe(
-        "ENOENT: no such file or directory, open '/tmp/x  2026-01 -01 tool=bash  status=ok'",
+        "ENOENT: no such file or directory, open '/tmp/x  2026 -01-01 tool=bash  status =ok '",
       );
     });
 
@@ -2628,8 +2629,13 @@ describe('Agent', () => {
       const { ToolSoftFailure } = await import('./tool-soft-failure.js');
       type RecordedCall = { toolName: string; outputJson: string };
       const recorded: RecordedCall[] = [];
+      // The head is DISTINCTIVE on purpose. With a homogeneous `'q'.repeat(3000)`
+      // a tail-slice — keep the last 1993 characters, append the marker — passes
+      // every assertion here while throwing away the one part of a reason that
+      // says what failed. Same length, same marker, opposite content.
+      const reason = `TIMEOUT connecting to api.example.com: ${'q'.repeat(3000)}`;
       const tool = makeTool('cut_mark', vi.fn().mockRejectedValue(
-        new ToolSoftFailure('payload', 'q'.repeat(3000)),
+        new ToolSoftFailure('payload', reason),
       ));
 
       mockProcess
@@ -2644,6 +2650,8 @@ describe('Agent', () => {
       await agent.send('go');
 
       const row = recorded.find(c => c.toolName === 'cut_mark');
+      expect(row!.outputJson.startsWith('TIMEOUT connecting to api.example.com:'),
+        'a cut keeps the HEAD — the cause, not the filler').toBe(true);
       expect(row!.outputJson.endsWith('\u2026[cut]'), 'the cut announces itself').toBe(true);
       // …and the marker lives INSIDE the bound: the bound is the guarantee, so
       // saying "this was cut" must never be what pushes a row over it.
