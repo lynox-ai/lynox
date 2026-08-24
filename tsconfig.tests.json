@@ -23,6 +23,20 @@
     "rootDir": ".",
     "incremental": false
   },
-  "include": ["tests/security", "tests/contract-env.test.ts"],
+  "include": ["tests/security", "tests/contract-env.test.ts",
+    // The probe-freshness pair, so `probe-freshness.d.mts` binds SOMEWHERE. Before this,
+    // `tests/eval` was in no tsc project and the declaration was checked by nothing at all.
+    //
+    // What this does and does not buy, stated because the first version of this comment
+    // claimed the stronger thing: it pins the TESTS' CALL SITES against the declaration. It
+    // does NOT verify the declaration against the module — `allowJs` is off, so tsc never
+    // loads `probe-freshness.mjs`, and a ghost export or a wrong return type there still
+    // compiles clean. The module-vs-declaration drift is caught by the runtime tests, not
+    // by tsc.
+    //
+    // Only these two files, not the whole directory — the rest of `tests/eval` was never in
+    // a project and dragging it in is a different job.
+    "tests/eval/probe-freshness.test.ts",
+    "tests/eval/probe-freshness-members.test.ts"],
   "exclude": ["src/**/*.test.ts"]
 }
