@@ -548,9 +548,22 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
   const configHasBoth = typeof gId === 'string' && !!gId && typeof gSecret === 'string' && !!gSecret;
   const envHasNeither = !process.env['GOOGLE_CLIENT_ID'] && !process.env['GOOGLE_CLIENT_SECRET'];
   if (vaultHasNeither && configHasBoth && envHasNeither) {
-    vault.set('GOOGLE_CLIENT_ID', gId, 'any');
-    vault.set('GOOGLE_CLIENT_SECRET', gSecret, 'any');
-    fieldsToRemove.push('google_client_id', 'google_client_secret');
+    // Two writes, and a half-completed pair is the thing to avoid: a lone vault
+    // half is inert today (the resolver needs both), but a later half stored
+    // through the UI would complete it ACROSS ERAS — the exact two-era pair this
+    // change exists to prevent. If the second write throws, undo the first and
+    // leave config.json untouched, so the operator's pair stays in one piece.
+    // A hard kill between the two is not reachable from here and is carried as
+    // DEF-vault-pair-write-not-atomic.
+    try {
+      vault.set('GOOGLE_CLIENT_ID', gId, 'any');
+      vault.set('GOOGLE_CLIENT_SECRET', gSecret, 'any');
+      fieldsToRemove.push('google_client_id', 'google_client_secret');
+    } catch (err) {
+      try { vault.delete('GOOGLE_CLIENT_ID'); } catch { /* nothing to undo */ }
+      try { vault.delete('GOOGLE_CLIENT_SECRET'); } catch { /* nothing to undo */ }
+      throw err;
+    }
   }
 
   if (fieldsToRemove.length === 0) return;
