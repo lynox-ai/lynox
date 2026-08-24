@@ -322,8 +322,10 @@ export function evaluate({ body, head, files, author }) {
     //      a freshly filed row is open, and putting it there corrupts the very
     //      datum that field exists to make queryable.
     //   2. it ran at the head `head:` names — or at an ancestor since which the
-    //      diff removes ONLY text that neither compiler nor runtime reads:
-    //      documentation and comments.
+    //      diff removes ONLY text that nothing in the toolchain reads.
+    //      `head:` itself ALWAYS names this PR's current head. The exception is
+    //      about where the ROUND ran; it never licenses writing an older SHA into
+    //      the field, which would still go red and should.
     //
     // The exception in (2) is what makes this terminate instead of regress: every
     // fix produces a new head, and a new head would demand another round for ever.
@@ -331,8 +333,11 @@ export function evaluate({ body, head, files, author }) {
     // cheaper, but because there is nothing added to check it AGAINST.
     //
     // Its narrowness is the whole safety, so do not widen it:
-    //   · The test is the READER, not the genre. Comments and docs qualify; test
-    //     fixtures, string literals and config all look like prose and are read.
+    //   · The test is the READER, not the genre — and it cuts BOTH ways. Plenty of
+    //     text that looks like commentary is read: `@ts-expect-error` and
+    //     `eslint-disable` are obeyed by tsc and eslint, a shebang is obeyed by the
+    //     kernel, and `drift-guard.sh` reads doc prose. Deleting one of those can
+    //     flip a required check. A `.md` file is not automatically safe either.
     //   · Code never qualifies, however small the diff. `if (a && b) { allow(); }`
     //     → `if (a) { allow(); }` deletes five characters and lets the body run in
     //     strictly more cases: a textual removal that opens a gate. Textual removal
@@ -353,8 +358,9 @@ export function evaluate({ body, head, files, author }) {
         `\`delta:\` must be \`clean\` (got \`${f.delta ?? '<missing>'}\`) — an unclean delta round is not a merge.`,
         'Clean means: nothing the round found is left unhandled — fixed here, or filed as a',
         'register row — and it ran at the head `head:` names, or at an ancestor since which the',
-        'diff removes only text no compiler or runtime reads (docs, comments — never code).',
-        'Findings are normal; carrying them silently is not.',
+        'diff removes only text nothing in the toolchain reads. Never code, and note that a',
+        'directive comment (`@ts-expect-error`, `eslint-disable`, a shebang) IS read.',
+        '`head:` always names this PR\'s current head. Findings are normal; hiding them is not.',
       );
     }
 
