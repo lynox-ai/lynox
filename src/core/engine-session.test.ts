@@ -590,6 +590,57 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(completedCall, 'an aborted run must never be stamped completed').toBeUndefined();
     });
 
+
+    // The half of DEF-hung-run-books-no-cost that core#1267 is supposed to have
+    // closed, asserted rather than reasoned about.
+    //
+    // The dogfooded run (rafael, prod 2026-08-24) sat parked on a prompt for 15 h
+    // and reached the ledger with cost_usd = 0 / tokens 0-0 while the UI chip
+    // showed $0.10 / 32k tokens for the same turn. The cause was NOT "the failure
+    // path forgets to book" — it books thoroughly, and has since 2026-06-05. It
+    // was that the run never TERMINATED, so neither try nor catch ever finished.
+    //
+    // Since the stop button actually aborts a parked run, that run now throws
+    // RunAbortedError and lands in the same catch. This pins the consequence:
+    // an aborted run books the tokens it really burned. Without it, the claim
+    // "core#1267 shrinks the cost hole" rests on reading, not on a test — and a
+    // later refactor could move the booking onto the success path with every
+    // other test still green.
+    it('an aborted run books the tokens it burned before the abort (not cost 0)', async () => {
+      const { engine, session } = await createEngineAndSession();
+      // Pin the pricing source: getPricing lazily reads ~/.lynox/pricing.json and
+      // accepts 0 as a valid rate, so a dev machine with a zeroed override entry
+      // would fail this test for a reason that has nothing to do with the product.
+      const { _resetOverridePricingForTests } = await import('./pricing.js');
+      _resetOverridePricingForTests(null);
+
+      // A run that did real work and was then interrupted — the parked-prompt
+      // shape, where the tokens are already spent with the provider.
+      mockSend.mockImplementationOnce(async () => {
+        session.usage.input_tokens += 30_000;
+        session.usage.output_tokens += 2_000;
+        throw new RunAbortedError();
+      });
+
+      await expect(session.run('find the repo')).rejects.toBeInstanceOf(RunAbortedError);
+
+      const rh = engine.getRunHistory()!;
+      const calls = (rh.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+      const aborted = calls.find(c => (c[1] as { status?: string })?.status === 'aborted');
+      expect(aborted, 'the abort must reach the booking path').toBeDefined();
+
+      const booked = aborted![1] as { costUsd: number; tokensIn: number; tokensOut: number };
+      expect(booked.tokensIn).toBe(30_000);
+      expect(booked.tokensOut).toBe(2_000);
+      // The EXACT figure, not `> 0`. `getPricing` falls back to a non-zero table
+      // for any unknown model, so `> 0` would hold for almost any mutation that
+      // still passes a positive token count — it is degenerate with the two
+      // assertions above. 30_000 x $3/M + 2_000 x $15/M = $0.12 is deterministic,
+      // and pinning it also kills a swapped in/out, a whole-session-usage
+      // (instead of the run delta), and a dropped cache term.
+      expect(booked.costUsd).toBeCloseTo(0.12, 6);
+    });
+
     it('H2: a failed run still fires onAfterRun with the partial spend (managed debit)', async () => {
       const { engine, session } = await createEngineAndSession();
       const after = vi.fn();
