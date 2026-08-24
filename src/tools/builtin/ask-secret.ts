@@ -201,7 +201,7 @@ export const askSecretTool: ToolEntry<AskSecretInput> = {
         // restricted from integrations". The template below is a SHAPE,
         // not literal copy — translate to the user's language; the rules
         // that follow are instructions the user must NEVER see.
-        return `The vault rejected "${input.name}" because this name maps to engine or channel infrastructure (mail-account / OAuth / engine-internal credentials), which is managed by the platform — not by the agent or the end-user. Reply to the user in their language (NOT this template language) — paraphrase the shape below:
+        return `The vault rejected "${input.name}" because this name maps to engine or channel infrastructure (mail-account / OAuth / engine-internal credentials), which is managed by the platform, so the agent cannot collect it. Reply to the user in their language (NOT this template language) — paraphrase the shape below:
 > "Diesen Schlüssel kannst du nicht direkt setzen — er wird automatisch verwaltet (z.B. Mail-Konten über die Mail-Einstellungen, OAuth über die jeweilige Integration). Wenn du eine bestimmte Integration aktivieren willst, sag mir welche — ich kann dir den richtigen Weg dorthin zeigen."
 
 Reply rules — these are instructions for the agent, NOT content for the user:

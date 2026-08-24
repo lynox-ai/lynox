@@ -25,10 +25,18 @@ export const INFRA_SECRET_PATTERNS: ReadonlyArray<RegExp> = [
   /^MANAGED_/,
   /^MAIL_ACCOUNT_/,
   /^GOOGLE_OAUTH_/,
-  // GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are the OAuth *app* credentials the
-  // control plane provisions (cp-managed, "OAuth hijacking" if a tenant could
-  // repoint them) — same admin-only class as the OAuth tokens above. Resolved
-  // engine-internally via secretStore.resolve(); never an agent tool-input ref.
+  // GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are the OAuth *app* credentials. The
+  // control plane provisions them for the managed broker, and they are resolved
+  // engine-internally — never an agent tool-input ref, which is what keeps them on
+  // this list.
+  //
+  // The original note here read "OAuth hijacking if a tenant could repoint them".
+  // That threat is per-INSTANCE, and each tenant runs its own container and its own
+  // vault: repointing changes which Google app THAT tenant's engine authenticates
+  // as, against THAT tenant's own data. It is what BYO means, and it is a supported
+  // state since 2026-08-23. So the customer-facing write path carves this prefix out
+  // (http-api.ts CUSTOMER_WRITABLE_INFRA_PATTERNS) while the agent-prompt path does
+  // not — the agent must never be able to raise a credential dialog for it.
   /^GOOGLE_CLIENT_/,
   /^SMTP_/,
   /^IMAP_/,
