@@ -2942,13 +2942,17 @@ export class Agent implements IAgent {
    * fragment its pattern no longer matches, leaving the tail verbatim. Flatten
    * is length-preserving, so it cannot move the cut. Replace rather than strip:
    * a reason that silently loses characters is harder to read than one that
-   * shows where they were.
+   * shows where they were \u2014 and the cut says so too, for the same reason. The
+   * hard path keeps the FULL message for the model, so without a marker an
+   * operator comparing the two cannot tell a truncated row from a complete one.
    */
   private _ledgerReason(raw: string): string {
     const masked = this.secretStore ? this.secretStore.maskSecrets(raw) : raw;
-    return masked
-      .replace(/[\x00-\x1f\x7f\u0085\u2028\u2029]/g, ' ')
-      .slice(0, Agent.MAX_LEDGER_REASON_CHARS);
+    const flat = masked.replace(/[\x00-\x1f\x7f\u0085\u2028\u2029]/g, ' ');
+    if (flat.length <= Agent.MAX_LEDGER_REASON_CHARS) return flat;
+    // The marker lives INSIDE the bound \u2014 the bound is the guarantee, not the
+    // target length, so a row can never exceed it to make room for saying so.
+    return `${flat.slice(0, Agent.MAX_LEDGER_REASON_CHARS - LEDGER_CUT_MARK.length)}${LEDGER_CUT_MARK}`;
   }
 
   /**
@@ -3362,6 +3366,9 @@ export class Agent implements IAgent {
   }
 
 }
+
+/** Appended when a ledger reason is truncated, so a cut row is visibly a cut row. */
+const LEDGER_CUT_MARK = ' …[cut]';
 
 /**
  * Patterns that indicate a tool failed in a way that retrying with a

@@ -3035,15 +3035,20 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
     // reconstructing the 2026-08-23 thread, and it is the entire difference
     // between `blockedFriendly` and `blockedVerbatim`.
     //
-    // These three assertions are the ONLY thing pinning that difference. A
-    // separate test asserting merely `reason !== agentVisibleResult` was written
-    // first and deleted: it was strictly weaker than this one — every mutant it
-    // caught died here too, and one it missed (`reason := 'Blocked: refused'`)
-    // dies here. A test that only looks like extra coverage is worse than none,
-    // because it makes this one look redundant. (Delta round, 2026-08-24.)
+    // These assertions are the ONLY thing pinning that difference. A separate
+    // test asserting merely `reason !== agentVisibleResult` was written first,
+    // deleted as strictly weaker — and the deletion was a NET LOSS until the
+    // last two lines below were added, which the commit message claiming
+    // otherwise did not notice. Its `/^Blocked:/` pair had no home here, so
+    // `agentVisibleResult := 'Blocked: ' + friendly` passed: the technical
+    // prefix leaking to the model, which is the exact distinction being
+    // asserted, and `Blocked:` is a live dispatch key at http.ts:821 and :1140.
+    // Folding a test in means folding in ALL of it. (Second delta round.)
     expect(f.reason).toContain('api.github.com');
     expect(f.reason).toContain('guarded egress policy');
     expect(f.reason).not.toBe(f.agentVisibleResult);
+    expect(f.reason, 'the ledger gets the technical string').toMatch(/^Blocked:/);
+    expect(f.agentVisibleResult, 'the model must never read the dispatch prefix').not.toMatch(/^Blocked:/);
   });
 
   it('10/14 — GET exfiltration with no interactive prompt', async () => {

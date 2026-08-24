@@ -2554,7 +2554,12 @@ describe('Agent', () => {
       // and the same breadcrumb, and `read_file`'s ENOENT text carries the
       // model-chosen path verbatim. Counting the writers of a column is the
       // cheap step that was skipped.
-      const forged = "ENOENT: no such file or directory, open '/tmp/x\r\n2026-01-01 tool=bash status=ok'";
+      // Every class member the regex names, in one fixture: CR, LF, NEL and
+      // LINE SEPARATOR. Without them, deleting `\u0085` or `\u2028` from the
+      // class is a surviving mutant — the guard would name characters no test
+      // ever sends. `\u0085` and `\u2028` both break `str.splitlines()` and
+      // UAX-14 readers, which is what a line-oriented ledger reader is.
+      const forged = "ENOENT: no such file or directory, open '/tmp/x\r\n2026-01\u0085-01 tool=bash\u2028 status=ok'";
       const tool = makeTool('hard_crlf', vi.fn().mockRejectedValue(new Error(forged)));
 
       mockProcess
@@ -2571,8 +2576,13 @@ describe('Agent', () => {
 
       const row = recorded.find(c => c.toolName === 'hard_crlf');
       expect(row).toBeDefined();
-      expect(row!.outputJson, 'no line break may survive into the row').not.toMatch(/[\r\n\u0085\u2028\u2029]/);
-      expect(row!.outputJson).toContain('tool=bash status=ok');
+      // Pinned EXACTLY, not by substring: each of the four injected characters
+      // becomes one space, so a class missing `\u0085` or `\u2028` produces a
+      // different string and dies here. A `toContain` would have let the
+      // partial-class mutants live.
+      expect(row!.outputJson).toBe(
+        "ENOENT: no such file or directory, open '/tmp/x  2026-01 -01 tool=bash  status=ok'",
+      );
     });
 
     it('does NOT flatten or bound what the MODEL reads on the hard path', async () => {
@@ -2598,12 +2608,73 @@ describe('Agent', () => {
       await agent.send('go');
 
       const toolResult = streamed.find(e => e.type === 'tool_result');
-      expect(toolResult!.result, 'the model still gets the newlines').toContain('line one\nline two');
-      expect(toolResult!.result!.length, 'and the full length').toBeGreaterThan(2500);
+      // EXACT, not `> 2500`: a bound of 3000 would satisfy "longer than the
+      // fixture" while still being a bound, so the assertion has to say the
+      // model's copy is the message ITSELF. (Second delta round, 2026-08-24.)
+      expect(toolResult!.result, 'the model gets the message verbatim').toBe(long);
       // …while the row beside it is flattened and bounded.
       const row = recorded.find(c => c.toolName === 'hard_long');
       expect(row!.outputJson).not.toMatch(/[\r\n\u0085\u2028\u2029]/);
       expect(row!.outputJson.length).toBeLessThanOrEqual(2000);
+    });
+
+    it('says so when it truncates — a cut row must not read as a complete one', async () => {
+      // The bound predates this change; the marker does not. Without it the cut
+      // is silent, and the hard path makes that actively misleading: the model's
+      // copy beside it is full-length, so an operator comparing the two sees a
+      // shorter ledger string with no way to tell truncation from a genuinely
+      // shorter message. Survived the first mutation pass — the marker was
+      // written and nothing asserted it. (Second delta round, 2026-08-24.)
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string };
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('cut_mark', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('payload', 'q'.repeat(3000)),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'cm1', name: 'cut_mark', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-cut-mark',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'cut_mark');
+      expect(row!.outputJson.endsWith('\u2026[cut]'), 'the cut announces itself').toBe(true);
+      // …and the marker lives INSIDE the bound: the bound is the guarantee, so
+      // saying "this was cut" must never be what pushes a row over it.
+      expect(row!.outputJson.length).toBe(2000);
+    });
+
+    it('leaves a reason that fits exactly at the bound unmarked', async () => {
+      // The other side of the same line. A marker appended unconditionally, or
+      // on `>=` instead of `>`, would label a complete row as truncated — which
+      // is the same defect pointing the other way: an operator distrusting a row
+      // that is whole.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string };
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('exact_fit', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('payload', 'q'.repeat(2000)),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ef1', name: 'exact_fit', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-exact-fit',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'exact_fit');
+      expect(row!.outputJson).toBe('q'.repeat(2000));
     });
 
     it('masks BEFORE truncating, so a cut cannot leave a secret tail exposed', async () => {
