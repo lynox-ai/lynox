@@ -7,6 +7,24 @@
  */
 
 import type { LynoxError } from './errors.js';
+import { maskSecretPatterns } from './secret-store.js';
+
+/**
+ * Mask credential shapes in a string bound for the error reporter.
+ *
+ * Fail-CLOSED on its own failure, and the choice matters: if the masker throws,
+ * returning the raw text would ship the very credential this exists to catch,
+ * while dropping the whole event would lose an error report to a bug in a
+ * scrubber. So the field — and only the field — is replaced with a marker. The
+ * report still arrives, minus the string that could not be cleared.
+ */
+function maskSecretText(text: string): string {
+  try {
+    return maskSecretPatterns(text);
+  } catch {
+    return '[redacted: masking failed]';
+  }
+}
 
 let _initialized = false;
 let _enabled = false;
@@ -65,6 +83,12 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
           delete breadcrumb.data['content'];
           delete breadcrumb.data['message'];
         }
+        // A breadcrumb message is free text from whoever added it. The two this
+        // module adds carry only tool and model names, but nothing stops another
+        // caller from interpolating something credential-shaped.
+        if (typeof breadcrumb.message === 'string') {
+          breadcrumb.message = maskSecretText(breadcrumb.message);
+        }
         return breadcrumb;
       },
 
@@ -72,6 +96,33 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
         // Strip request bodies (may contain user prompts)
         if (event.request) {
           delete event.request.data;
+        }
+
+        // Scrubbing here is a DENYLIST over named fields, and `captureException`
+        // ships `error.message` verbatim — so a credential interpolated into an
+        // error string left the instance untouched. `maskSecretPatterns` already
+        // existed in secret-store.ts and simply was not applied on this path;
+        // this is a wiring gap, not a new mechanism.
+        //
+        // What this covers and what it does NOT, stated rather than implied: it
+        // masks credential SHAPES (provider keys, JWTs, bearer tokens). It does
+        // not mask PII — names, addresses, mail subjects — and deliberately so.
+        // That would need a denylist over free text, whose form space is
+        // unbounded while the set of `throw new Error(`…${…}`)` sites that feed
+        // it keeps growing (208 across 40 files, measured 2026-08-24). Bugsink
+        // is first-party and self-hosted, so a stripped stack trace is a
+        // diagnostic loss we inflict on ourselves with no third party on the
+        // other side. Whether to take that trade is a risk decision, tracked in
+        // the register rather than settled here.
+        for (const value of event.exception?.values ?? []) {
+          if (typeof value.value === 'string') value.value = maskSecretText(value.value);
+        }
+        if (typeof event.message === 'string') {
+          event.message = maskSecretText(event.message);
+        } else if (event.message !== undefined) {
+          const m = event.message as { message?: string; formatted?: string };
+          if (typeof m.message === 'string') m.message = maskSecretText(m.message);
+          if (typeof m.formatted === 'string') m.formatted = maskSecretText(m.formatted);
         }
         return event;
       },
