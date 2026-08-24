@@ -2563,11 +2563,10 @@ describe('Agent', () => {
       // string and survives: the guard names 32 characters and the test was
       // sending two. NUL, TAB, VT, FF and ESC are here for that reason.
       //
-      // The comment above this fixture has been wrong twice — "every class
-      // member" while carrying four of five elements, then again while carrying
-      // two of 32 range members. It now states what the fixture CONTAINS rather
-      // than what it proves, because the other form kept being an assertion
-      // nobody had counted.
+      // The comment above this fixture has been wrong twice, both times by
+      // claiming completeness it had not counted. It now states what the
+      // fixture CONTAINS rather than what it proves, because the other form
+      // kept being an assertion nobody had checked.
       const forged = "ENOENT\x00: no\tsuch file\x0b, open\x0c '/tmp/x\r\n2026\u0085-01 tool=bash\u2028 status\u2029=ok\x1b\x7f'";
       const tool = makeTool('hard_crlf', vi.fn().mockRejectedValue(new Error(forged)));
 

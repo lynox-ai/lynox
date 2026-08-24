@@ -2943,15 +2943,23 @@ export class Agent implements IAgent {
    *
    * ⚠⚠ And there is a THIRD writer of that column which this does NOT reach, so
    * do not read the paragraph above as coverage. Pipeline steps build their
-   * Agent without `AgentConfig.recordToolCall` (`orchestrator/runtime-adapter.ts`
-   * has zero occurrences of it), so `_recordToolCall` is a no-op for them and
-   * their row is written by `createStepStreamHandler` → `runner.ts` →
-   * `insertToolCall` from the STREAM event: `boundedJson(event.result)`, a
-   * different cap, no masking order, no flatten, no cut mark. `http_request` is
-   * in `INLINE_CORE_TOOLS`, so that path is live for the very tool this change
-   * is about. It is not routed here because on that path the column carries the
-   * RESULT, not a reason — a different meaning for the same field, which is a
-   * decision about the schema and not a line of code. Filed, not fixed.
+   * Agent with no `recordToolCall` in its config, so `_recordToolCall` is a
+   * no-op for them and their row is written by `createStepStreamHandler` →
+   * `runner.ts` → `insertToolCall` from the STREAM event:
+   * `boundedJson(event.result)`, a different cap, no masking order, no flatten,
+   * no cut mark. `http_request` is in `INLINE_CORE_TOOLS`, so that path is live
+   * for the very tool this change is about.
+   *
+   * ⚠ And the forged-line threat is LIVE there, not merely a different meaning
+   * for the same field. On a soft failure the pipeline row carries the payload,
+   * which is a semantics problem. On a HARD throw the stream event carries the
+   * error text (`result: message` below), and `boundedJson` passes strings
+   * through verbatim — so `read_file`'s ENOENT with a model-chosen path writes
+   * its CRLF straight into that row. An earlier version of this comment said
+   * the column "carries the RESULT, not a reason" and made a live hole read as
+   * a schema question. It is filed rather than fixed here because the same sink
+   * needs one decision — what that column MEANS on that path — and flattening
+   * it alone would harden a field whose meaning is still wrong.
    *
    * The count in this comment was wrong twice (`two writers`, then `a third
    * would call this`) in the change whose own lesson was to count the writers.
