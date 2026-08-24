@@ -416,6 +416,40 @@ export interface SubjectExternalRefs {
   hasRecords(subjectId: string): boolean;
 }
 
+/** The one method {@link makeSubjectExternalRefs} needs from a history.db thread store. */
+export interface ThreadAnchorProbe { listBySubjectId(subjectId: string, limit?: number): readonly unknown[] }
+/** The one method {@link makeSubjectExternalRefs} needs from a datastore.db record store. */
+export interface RecordProbe { hasRecordsForSubject(subjectId: string): boolean }
+
+/**
+ * Build the cross-DB half of the reference oracle from the two live stores, or `null` when
+ * either is missing — `null` means the caller must NOT reap (fail-closed: a missing probe is
+ * not an absent reference). Structural parameter types on purpose: `SubjectStore` sits BELOW
+ * `ThreadStore`/`DataStore`, so naming those classes here would invert the layering. The engine
+ * erase path (`src/core/knowledge-layer.ts`) and the operator sweep's orphan report
+ * (`src/scripts/subject-sweep.ts --orphans`) both build their oracle HERE — the fail-closed rule
+ * below is security logic, and a second copy of it is exactly the drift this factory exists to
+ * prevent. The sweep's ARCHIVE phase deliberately does not: it asks a different question and
+ * keeps its own guardrail list, partitioned against this oracle by `SWEEP_REFERENCE_PARTITION`.
+ *
+ * A probe that THROWS answers `true` (referenced) and reports once via `onProbeFailure`: a
+ * permanently failing probe (a pre-v46 history.db without the anchor column, a locked
+ * datastore) keeps every subject forever, which is indistinguishable from a real holder unless
+ * it is said out loud. Keeping a name is today's state; erasing a live anchor is new damage.
+ */
+export function makeSubjectExternalRefs(
+  threads: ThreadAnchorProbe | null,
+  records: RecordProbe | null,
+  onProbeFailure?: (probe: string, err: unknown) => void,
+): SubjectExternalRefs | null {
+  if (!threads || !records) return null;
+  const keptOnFailure = (probe: string, err: unknown): true => { onProbeFailure?.(probe, err); return true; };
+  return {
+    isThreadAnchor: (id) => { try { return threads.listBySubjectId(id, 1).length > 0; } catch (err: unknown) { return keptOnFailure('thread-anchor', err); } },
+    hasRecords: (id) => { try { return records.hasRecordsForSubject(id); } catch (err: unknown) { return keptOnFailure('record', err); } },
+  };
+}
+
 /**
  * The complete before-image of ONE merge — enough to reverse it byte-for-byte.
  * Captured read-only by {@link SubjectStore.planMerge} BEFORE any mutation, so the
@@ -993,6 +1027,25 @@ export class SubjectStore {
   }
 
   /**
+   * For a canonical whose {@link referenceReason} is `merge-target`: the archived shell closure
+   * that would be reaped TOGETHER with it, or `null` when a shell is still held by something
+   * real (a thread anchor a failed repoint left on a dup id keeps the canonical too).
+   *
+   * Extracted so the decision has ONE home: {@link reapOrphans} executes it, and the operator
+   * report (`src/scripts/subject-sweep.ts --orphans`) shows the same unit. A report that listed
+   * the shell alone, or hid the canonical behind its own redirect, would not describe what an
+   * apply actually takes — and that report is what the operator decides on.
+   */
+  mergeTargetClosure(canonicalId: string, external: SubjectExternalRefs): string[] | null {
+    const closure = this._mergeDupClosure(canonicalId);
+    const shellHeld = closure.some(dup => {
+      const r = this.referenceReason(dup, external);
+      return r !== null && r !== 'merge-target';
+    });
+    return shellHeld ? null : closure;
+  }
+
+  /**
    * Hard-delete every candidate {@link referenceReason} finds unreferenced — the
    * orphan-subject reap an erasure owes (DEF-0015: after a GDPR erase the `subjects` row
    * survived with its plaintext name). Runs to a FIXPOINT: deleting one candidate can
@@ -1027,12 +1080,8 @@ export class SubjectStore {
           // closure holds any of them; a shell something else still holds (a thread anchor
           // a failed repoint left on the dup id) keeps the canonical too. Rolling the merge
           // back is moot once the canonical itself is erased.
-          const closure = this._mergeDupClosure(id);
-          const shellHeld = closure.some(dup => {
-            const r = this.referenceReason(dup, external);
-            return r !== null && r !== 'merge-target';
-          });
-          if (shellHeld) continue;
+          const closure = this.mergeTargetClosure(id, external);
+          if (closure === null) continue;
           for (const dup of closure) if (del.run(dup).changes > 0) reaped.push(dup);
           if (del.run(id).changes > 0) reaped.push(id);
           pending.delete(id);
