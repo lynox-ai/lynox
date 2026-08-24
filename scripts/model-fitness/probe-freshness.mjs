@@ -94,3 +94,21 @@ export function freshUid(index) {
 export function sawDedup(result) {
   return String(result ?? '').startsWith('Already recorded');
 }
+
+
+/**
+ * Did this `remember` result land an ACTIVE row — the only outcome that becomes a dedup
+ * target for a later cell?
+ *
+ * An ALLOWLIST, and that is the point. The first version listed the outcomes that do not
+ * store and was wrong by four: the handler also returns early for DK-off, empty text and
+ * over-length, and a review-routed write answers "Recorded for review" — persisted, but as
+ * `pending_review`, which the store never selects as a dedup candidate. Both active-storing
+ * returns begin with "Remembered" (`src/tools/builtin/knowledge.ts`), so an allowlist over
+ * them is complete by construction; a denylist is complete only until someone adds a return.
+ *
+ * Same string coupling as {@link sawDedup}, and pinned by the same source-reading test.
+ */
+export function storedActive(result) {
+  return String(result ?? '').startsWith('Remembered');
+}

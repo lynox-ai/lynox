@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 
-import { runToken, freshName, freshUid, sawDedup } from '../../scripts/model-fitness/probe-freshness.mjs';
+import { runToken, freshName, freshUid, sawDedup, storedActive } from '../../scripts/model-fitness/probe-freshness.mjs';
 
 /**
  * The freshness primitives.
@@ -93,9 +93,28 @@ describe('probe freshness primitives', () => {
     expect(sawDedup(m![1])).toBe(true);
   });
 
+  it('recognises ONLY the active-storing returns, read from the handler', () => {
+    // The allowlist, checked against every `return` the remember handler actually has. A
+    // denylist here was wrong by four outcomes; this asserts the complement directly, so
+    // adding a new non-storing return cannot silently start counting as a store.
+    const src = readFileSync(path.join(REPO, 'src/tools/builtin/knowledge.ts'), 'utf8');
+    const handler = src.slice(src.indexOf('const rememberTool'), src.indexOf('// ── recall'));
+    const returns = [...handler.matchAll(/return ['`]([^'`]{6,})/g)].map(m => m[1]!);
+    expect(returns.length).toBeGreaterThan(4);
+    for (const r of returns) {
+      // Every literal return either announces an active store, or must not count as one.
+      expect(storedActive(r)).toBe(r.startsWith('Remembered'));
+    }
+    // And the two that do exist are recognised.
+    expect(returns.some(r => storedActive(r))).toBe(true);
+  });
+
   it('does not fire on an ordinary success message', () => {
     expect(sawDedup('Recorded for review: this conversation read external content')).toBe(false);
     expect(sawDedup(undefined)).toBe(false);
     expect(sawDedup('')).toBe(false);
+    expect(storedActive('Recorded for review: this conversation read external content')).toBe(false);
+    expect(storedActive('Already recorded — this matches an existing durable entry.')).toBe(false);
+    expect(storedActive(undefined)).toBe(false);
   });
 });

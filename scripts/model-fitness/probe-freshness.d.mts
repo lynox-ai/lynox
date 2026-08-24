@@ -22,3 +22,6 @@ export function freshUid(index: number): string;
 
 /** True when a `remember` result reports the store's dedup path. */
 export function sawDedup(result: string | undefined | null): boolean;
+
+/** True when a `remember` result reports an ACTIVE store — the only dedup-target outcome. */
+export function storedActive(result: string | undefined | null): boolean;

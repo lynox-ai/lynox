@@ -20,7 +20,7 @@
  * Requires `durable_memory_enabled` on the target (check GET /api/tools/available
  * lists `remember`) — otherwise every probe reports 0 and proves nothing.
  */
-import { runToken, freshName, freshUid, sawDedup } from './probe-freshness.mjs';
+import { runToken, freshName, freshUid, sawDedup, storedActive } from './probe-freshness.mjs';
 const BASE = process.env.LYNOX_BASE;
 if (!BASE) { console.error('set LYNOX_BASE to the engine you want to probe (plus LYNOX_TOKEN, or LYNOX_COOKIE for a session cookie)'); process.exit(1); }
 const COOKIE = process.env.LYNOX_COOKIE;
@@ -70,13 +70,20 @@ let sentFact = false;
     // fire always — and a signal that always fires is not a signal.
     const deduped = results.some(sawDedup);
     const firstSender = sentFact === false;
-    // Flip only on a write that actually STORED. A `remember` CALL is not a stored fact: the
-    // tool refuses a secret-looking payload outright ("Cannot record content that looks like
-    // a secret"), and a dedup stores nothing either. Counting a refusal as "the fact is out
-    // there" would relabel a genuine freshness failure in B or C as the expected A→B dedup —
-    // the tripwire would then be quiet exactly when it matters.
-    // (Both strings are the tool's user-facing wording, the same coupling `sawDedup` names.)
-    const stored = results.some(r => !sawDedup(r) && !String(r ?? '').startsWith('Cannot record'));
+    // Flip only on a write that landed ACTIVE, and recognise that by an ALLOWLIST.
+    //
+    // The first attempt listed the outcomes that do NOT store — dedup and the secret refusal —
+    // and was wrong by four: `remember` also returns early for DK-off, empty text and
+    // over-length, and a review-routed write answers "Recorded for review". That last one is
+    // the trap: it IS persisted, but as `pending_review`, which the store never selects as a
+    // dedup candidate — and `C-research` is DESIGNED to land there. Treating it as "the fact
+    // is out there" would relabel a genuine freshness failure as the expected A→B dedup, so
+    // the tripwire goes quiet exactly when it matters.
+    //
+    // Both active-storing returns begin with "Remembered" (`knowledge.ts`); an allowlist over
+    // them is complete by construction, where a denylist is complete only until someone adds
+    // a return. Same string coupling `sawDedup` names, and the same reason it is acceptable.
+    const stored = results.some(storedActive);
     if (stored) sentFact = true;
     console.log(JSON.stringify({
       probe: p.key, run: runToken(), timedOut,

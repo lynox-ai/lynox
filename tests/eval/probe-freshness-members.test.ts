@@ -75,10 +75,16 @@ export function badExclusions(
   found: readonly string[],
 ): string[] {
   return Object.entries(notMembers)
-    // A reason must NAME something checkable — a file the next reader can open. Length was
-    // the first rule and it measured nothing: the test's own `'a'.repeat(41)` filler passed
-    // it, which is the definition of a check that looks thorough and is not.
-    .filter(([rel, why]) => !found.includes(rel) || !/[\w-]+\.(ts|mjs|mts|json)\b/.test(why))
+    // A reason must be substantive AND name something checkable — a file the next reader can
+    // open. Length alone measured nothing (the test's own `'a'.repeat(41)` filler passed it);
+    // a filename alone lets `"x.ts"` through. The first fix REPLACED the length floor instead
+    // of adding to it, which is the overshoot `memory/fb_review_overshoot.md` warns about:
+    // adopting a finding is not licence to run the other way. Both, and a wide extension set
+    // so a reason citing a `.yml` or `.tsx` is not called reasonless.
+    .filter(([rel, why]) =>
+      !found.includes(rel)
+      || why.trim().length <= 40
+      || !/[\w-]+\.(ts|tsx|mts|cts|mjs|cjs|js|json|md|ya?ml|sh)\b/.test(why))
     .map(([rel]) => rel)
     .sort();
 }
@@ -163,6 +169,10 @@ describe('probe fact freshness — every engine-facing probe is a member', () =>
     // Filler of any length is not a reason — it names no file anyone can open.
     expect(badExclusions({ [real]: 'a'.repeat(200) }, [real])).toEqual([real]);
     expect(badExclusions({ [real]: 'because' }, [real])).toEqual([real]);
+    // Short-but-cites and long-but-vague are both rejected — the two halves are AND, not OR.
+    expect(badExclusions({ [real]: 'see x.ts' }, [real])).toEqual([real]);
+    // A reason citing a non-TypeScript file is still a reason.
+    expect(badExclusions({ [real]: 'excluded because the deploy path lives in release.yml only' }, [real])).toEqual([]);
   });
 
   it('FIRES on a file that only mentions the module in a comment', () => {
