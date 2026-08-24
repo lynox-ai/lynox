@@ -52,7 +52,7 @@ describe('resolveClientPair', () => {
   });
 
   it('an empty env value does not SHADOW a good config pair', () => {
-    // docker-compose sets GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}, i.e. ''. Under the
+    // A deployment interpolating an unset var (`NAME=${NAME:-}`) yields ''. Under the
     // old `??` chain that empty string outranked config.json and Google was silently
     // not built. The old code did not hand '' to Google — the truthiness guard caught
     // that — it lost the working credential behind it.

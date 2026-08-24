@@ -38,9 +38,10 @@
  * - **Empty strings do not count**, and the reason is not the one it looks like.
  *   The old readers never handed `''` to Google either — the `if (id && secret)`
  *   guard below them rejected it. What `??` did was let `''` SHADOW the tiers behind
- *   it: the self-host compose file sets `GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}`, so
- *   an unset variable became an empty string that outranked a perfectly good
- *   `config.json`, and Google was silently not built at all. Skipping it is the fix.
+ *   it: any deployment that interpolates an unset variable into the environment
+ *   (`NAME=${NAME:-}`) hands the process an empty string rather than nothing, and
+ *   that empty string outranked a perfectly good `config.json`, so Google was
+ *   silently not built at all. Skipping it is the fix.
  * - **`userConfig` is last, and it is now a REAL source rather than a mirror.**
  *   It used to be neither: `config.ts` copied the environment pair into it and
  *   `engine-init.ts` copied the vault secret into it, so an env-id and a vault-secret
