@@ -56,15 +56,14 @@ function readForms(row: EnvRegistryRow): RegExp[] {
     case 'direct':
       return [new RegExp(`process\\.env(\\.${n}\\b|\\[['"]${n}['"]\\])`)];
     case 'pair-resolver':
-      // Three forms, and all three are load-bearing: a pair member is passed
-      // as the FIRST arg (the id) or the SECOND (the secret), and the same
-      // names are also read directly at the migration site. Dropping any one
-      // form kills a different row/site test — see the mutation table in the PR.
-      return [
-        new RegExp(`\\bresolveClientPair\\(\\s*['"]${n}['"]`),
-        new RegExp(`\\bresolveClientPair\\(\\s*['"][A-Z][A-Z0-9_]*['"]\\s*,\\s*['"]${n}['"]`),
-        new RegExp(`process\\.env(\\.${n}\\b|\\[['"]${n}['"]\\])`),
-      ];
+      // Pinned to the member's ARGUMENT POSITION. Position-agnostic forms let a
+      // SWAPPED call — the secret passed as the client id — satisfy both rows,
+      // which is the pair-mixing defect core#1269 exists to prevent.
+      // The direct `process.env` form is NOT here: it is added per-site for
+      // `alsoReadAt` only, so the primary site stays pinned to the resolver.
+      return row.engineConsumed.pairArg === 2
+        ? [new RegExp(`\\bresolveClientPair\\(\\s*['"][A-Z][A-Z0-9_]*['"]\\s*,\\s*['"]${n}['"]`)]
+        : [new RegExp(`\\bresolveClientPair\\(\\s*['"]${n}['"]\\s*,`)];
     case 'web-ui':
       // SvelteKit server code reads via `$env/dynamic/private`.
       return [...webUiForms(row.name), new RegExp(`process\\.env(\\.${n}\\b|\\[['"]${n}['"]\\])`)];
@@ -84,6 +83,13 @@ describe('env-ABI forward: every registry row is read at its declared site', () 
       continue;
     }
     if (kind === 'none') continue; // asserted absent by the reverse sweep below
+    if (kind === 'pair-resolver') {
+      it(`${row.name} declares which resolver argument it is`, () => {
+        // Without pairArg the form set falls back to position 1 for every
+        // member, and the swap case below stops being detectable.
+        expect(row.engineConsumed.pairArg, `${row.name}: kind 'pair-resolver' requires pairArg`).toBeDefined();
+      });
+    }
     it(`${row.name} declares a readSite`, () => {
       expect(readSite, `${row.name}: kind '${kind}' requires a readSite`).toBeTruthy();
     });
@@ -102,6 +108,12 @@ describe('env-ABI forward: every registry row is read at its declared site', () 
         // whatever the row's primary kind is (e.g. a core 'direct' row with a
         // web-ui alsoReadAt).
         if (site.startsWith('packages/web-ui/')) forms.push(...webUiForms(row.name));
+        // A pair member is also read directly where the migration decides — but
+        // only there. Accepting it at the PRIMARY site would let two independent
+        // process.env reads pass as a resolved pair.
+        if (kind === 'pair-resolver' && site !== readSite) {
+          forms.push(new RegExp(`process\\.env(\\.${esc(row.name)}\\b|\\[['"]${esc(row.name)}['"]\\])`));
+        }
         expect(
           forms.some((f) => f.test(src)),
           `${site}: expected a ${kind}-form read of ${row.name}`,
@@ -130,44 +142,43 @@ describe('env-ABI forward: every registry row is read at its declared site', () 
 
 describe('env-ABI forward: the pair-resolver form set rejects near-misses', () => {
   // The form set is the only thing standing between "the consumer is pinned"
-  // and "some line in the file happens to contain the name". Without these
-  // cases the hardening (word boundary, closing quote, argument position)
-  // would be an assertion in a commit message rather than a mechanism.
-  const rowFor = (name: string): EnvRegistryRow => ({
+  // and "some line in the file happens to contain the name".
+  const rowFor = (name: string, pairArg: 1 | 2): EnvRegistryRow => ({
     name,
     valueKind: 'opaque',
-    emitPolicy: 'when-non-default',
-    engineConsumed: { kind: 'pair-resolver', readSite: 'src/core/engine.ts' },
+    emitPolicy: 'operator-only',
+    engineConsumed: { kind: 'pair-resolver', pairArg, readSite: 'src/core/engine.ts' },
   });
-  const matches = (name: string, src: string): boolean =>
-    readForms(rowFor(name)).some((f) => f.test(src));
-
   const ID = 'GOOGLE_CLIENT_ID';
   const SECRET = 'GOOGLE_CLIENT_SECRET';
+  const matchesId = (src: string): boolean => readForms(rowFor(ID, 1)).some((f) => f.test(src));
+  const matchesSecret = (src: string): boolean => readForms(rowFor(SECRET, 2)).some((f) => f.test(src));
 
-  const accepted: [string, string][] = [
-    ['the resolver call — id in position 1, secret in position 2', `resolveClientPair('${ID}', '${SECRET}', {`],
-    ['the direct migration read', `!process.env['${ID}'] && !process.env['${SECRET}']`],
-  ];
-  for (const [label, src] of accepted) {
-    it(`accepts ${label} for BOTH pair members`, () => {
-      expect(matches(ID, src), `${ID} should match`).toBe(true);
-      expect(matches(SECRET, src), `${SECRET} should match`).toBe(true);
-    });
-  }
+  it('accepts the real resolver call, each member at its own position', () => {
+    const src = `resolveClientPair('${ID}', '${SECRET}', {`;
+    expect(matchesId(src), `${ID} should match at argument 1`).toBe(true);
+    expect(matchesSecret(src), `${SECRET} should match at argument 2`).toBe(true);
+  });
 
   const rejected: [string, string][] = [
     ['a differently-named resolver', `resolveClientPairLegacy('${ID}', '${SECRET}')`],
     ['a helper whose name merely ends with the resolver', `myresolveClientPair('${ID}', '${SECRET}')`],
     ['longer names sharing the prefix', `resolveClientPair('${ID}_LEGACY', '${SECRET}_LEGACY')`],
     ['another provider pair', `resolveClientPair('MS_CLIENT_ID', 'MS_CLIENT_SECRET', {`],
+    // The one that matters most: a position-agnostic form set would accept
+    // this, and it ships the client SECRET as the client id.
+    ['a SWAPPED call — the secret passed as the client id', `resolveClientPair('${SECRET}', '${ID}', {`],
+    // Accepted only at an alsoReadAt site, added there by the site loop. If the
+    // primary form set took it, two independent env reads would pass as a
+    // resolved pair — the mixing defect core#1269 removed.
+    ['a bare direct env read', `!process.env['${ID}'] && !process.env['${SECRET}']`],
     ['a dotted env read of a longer name', `process.env.${ID}_LEGACY`],
     ['a bare mention in a comment', `// ${ID} / ${SECRET} env copies were removed`],
   ];
   for (const [label, src] of rejected) {
     it(`rejects ${label}`, () => {
-      expect(matches(ID, src), `${ID} must not match`).toBe(false);
-      expect(matches(SECRET, src), `${SECRET} must not match`).toBe(false);
+      expect(matchesId(src), `${ID} must not match`).toBe(false);
+      expect(matchesSecret(src), `${SECRET} must not match`).toBe(false);
     });
   }
 });
@@ -190,6 +201,19 @@ function walk(dir: string, out: string[]): string[] {
 }
 
 /**
+ * Credential-pair reads (kind 'pair-resolver'), both argument positions. Kept
+ * as their OWN list rather than inlined below, so `collectReads` can record
+ * that a name was seen BY A PAIR PATTERN. Without that distinction the pair
+ * coverage control is satisfied by the generic `process.env[…]` pattern
+ * picking the same names up at the migration site, and deleting these two is
+ * a silent no-op — measured 2026-08-24, it was exactly that.
+ */
+const PAIR_READ_PATTERNS: readonly RegExp[] = [
+  /\bresolveClientPair\(\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
+  /\bresolveClientPair\(\s*['"][A-Z][A-Z0-9_]{2,}['"]\s*,\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
+];
+
+/**
  * Read forms the sweep recognizes; every pattern captures the var name as
  * group 1. Captures are NOT restricted to LYNOX_* — the coverage assertion
  * filters, so non-prefixed denylist rows (e.g. OPENAI_BASE_URL) still get a
@@ -207,22 +231,27 @@ const READ_PATTERNS: readonly RegExp[] = [
   // If the helper is renamed, its vars go stale in SELF_HOST_ONLY and the
   // allowlist-rot guard fires — update this pattern then.
   /parsePositiveIntEnv\(\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
-  // Credential-pair reads (kind 'pair-resolver'). Both positions are swept:
-  // without these the sweep would be structurally blind to a name that is
-  // ONLY read through the resolver — the very thing BLIND_FORMS exists to stop.
-  /\bresolveClientPair\(\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
-  /\bresolveClientPair\(\s*['"][A-Z][A-Z0-9_]{2,}['"]\s*,\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
+  ...PAIR_READ_PATTERNS,
 ];
 
 /** Read forms the sweep is BLIND to — banned in swept files so a new read cannot hide. */
 const BLIND_FORMS: readonly [RegExp, string][] = [
   [/\{[^}]*\}\s*=\s*process\.env\b/, 'destructuring `const { X } = process.env`'],
   [/\$env\/static\/private/, "`$env/static/private` import (compile-time env read)"],
+  // A pair resolved from hoisted consts is invisible to every literal-based
+  // form AND to PAIR_READ_PATTERNS. The lookbehind spares the resolver's own
+  // definition (checked against its single- and multi-line shapes). NOTE: this
+  // scan does NOT strip comments — prose that spells the call with an opening
+  // paren trips it. Stripping comments here was rejected: a naive `//` strip
+  // truncates any line holding a `https://` literal, which would HIDE a real
+  // read. Write about the helper without the paren instead.
+  [/(?<!function )\bresolveClientPair\(\s*[A-Za-z_$]/, 'resolveClientPair() called with a non-literal argument'],
 ];
 
-function collectReads(): { reads: Map<string, string[]>; blind: string[] } {
+function collectReads(): { reads: Map<string, string[]>; blind: string[]; viaPair: Set<string> } {
   const found = new Map<string, string[]>();
   const blind: string[] = [];
+  const viaPair = new Set<string>();
   const roots = ['src', 'packages/web-ui/src'];
   for (const root of roots) {
     for (const file of walk(resolve(repoRoot, root), [])) {
@@ -235,6 +264,7 @@ function collectReads(): { reads: Map<string, string[]>; blind: string[] } {
           const sites = found.get(name) ?? [];
           sites.push(rel);
           found.set(name, sites);
+          if (PAIR_READ_PATTERNS.includes(pattern)) viaPair.add(name);
         }
       }
       for (const [form, label] of BLIND_FORMS) {
@@ -242,7 +272,7 @@ function collectReads(): { reads: Map<string, string[]>; blind: string[] } {
       }
     }
   }
-  return { reads: found, blind };
+  return { reads: found, blind, viaPair };
 }
 
 const registryNames = new Set(ENV_REGISTRY.map((r) => r.name));
@@ -259,8 +289,11 @@ function isCovered(name: string): boolean {
   return false;
 }
 
+/** One filesystem sweep, shared by the reverse inventory and the pair control. */
+const SWEEP = collectReads();
+
 describe('env-ABI reverse: every LYNOX_* read has a contract stance', () => {
-  const { reads, blind } = collectReads();
+  const { reads, blind } = SWEEP;
 
   it('the sweep sees a plausible inventory (guard against a silently-empty scan)', () => {
     expect(reads.size).toBeGreaterThan(20);
@@ -314,20 +347,24 @@ describe('env-ABI reverse: every LYNOX_* read has a contract stance', () => {
 });
 
 describe('env-ABI: credential-pair reads are swept and declared', () => {
-  const { reads } = collectReads();
+  const { reads, viaPair } = SWEEP;
 
   // Positive control on the pair patterns themselves. Without it, deleting them
   // from READ_PATTERNS is a silent no-op TODAY — the Google pair is not LYNOX_*,
   // so the coverage loop skips it — and the blindness would only surface at the
   // first LYNOX_* pair, long after the deletion. A guard whose absence changes
   // nothing observable is not a guard.
-  it('the sweep actually sees every declared pair-resolver row', () => {
-    // Derived from the registry, not from a name pattern: a hard-coded shape
-    // like /_CLIENT_(ID|SECRET)$/ goes quietly stale the first time a pair is
-    // named differently, and a positive control that can go stale is not one.
+  it('the sweep sees every declared pair-resolver row THROUGH A PAIR PATTERN', () => {
+    // Two things this control got wrong before and now does not.
+    // (1) Derived from the registry, not from a name shape like
+    //     /_CLIENT_(ID|SECRET)$/ — a control that can go stale is not one.
+    // (2) Asserted against `viaPair`, NOT `reads`. Against `reads` it was
+    //     tautological: engine-init.ts reads both names via process.env[…],
+    //     which the generic pattern already captures, so deleting both pair
+    //     patterns left the suite green. Measured, not reasoned.
     const declared = ENV_REGISTRY.filter((r) => r.engineConsumed.kind === 'pair-resolver').map((r) => r.name);
     expect(declared, 'no pair-resolver row exists — this control has nothing to prove').not.toEqual([]);
-    const unseen = declared.filter((n) => !reads.has(n));
+    const unseen = declared.filter((n) => !viaPair.has(n));
     expect(
       unseen,
       'READ_PATTERNS no longer recognizes resolveClientPair(…) reads — the reverse inventory is blind to credential pairs',

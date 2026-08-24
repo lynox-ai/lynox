@@ -23,6 +23,6 @@
     "rootDir": ".",
     "incremental": false
   },
-  "include": ["tests/security"],
+  "include": ["tests/security", "tests/contract-env.test.ts"],
   "exclude": ["src/**/*.test.ts"]
 }
