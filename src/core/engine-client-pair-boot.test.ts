@@ -90,7 +90,7 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
 
   it('an empty env id leaves Google unbuilt — `??` would have passed it through', async () => {
     freshDataDir('cp-empty');
-    setEnv('GOOGLE_CLIENT_ID', '');           // the self-host compose default
+    setEnv('GOOGLE_CLIENT_ID', '');           // an unset var interpolated to ''
     setEnv('GOOGLE_CLIENT_SECRET', 'env-secret');
     const engine = await boot();
     expect(engine.getGoogleClientSource()).toBeNull();
@@ -124,7 +124,7 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     // MIRROR: config.ts copied the env id into it and engine-init copied the vault
     // secret into it, so this exact split re-assembled one tier down and was reported
     // as source 'config' — a source that had never held a pair. Real path: a
-    // self-hoster rotates GOOGLE_CLIENT_ID in compose while the old secret sits in the
+    // an operator rotates GOOGLE_CLIENT_ID in the environment while the old secret sits in the
     // vault, and gets PROJECT-B's id with PROJECT-A's secret, i.e. invalid_client.
     freshDataDir('cp-crossmix');
     setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');

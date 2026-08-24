@@ -461,9 +461,10 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
     expect(pairProblems([row('A_ID', 'direct', P), row('A_SECRET', 'pair-resolver', P)])).not.toEqual([]);
     expect(pairProblems([row('A_ID', 'pair-resolver', { id: 'A_ID', secret: 'A_ID' })])).not.toEqual([]);
     expect(pairProblems([row('A_ID', 'pair-resolver', P)])).not.toEqual([]);
-    // The mirror case, and it is not decoration: without it the `pair.id` half
-    // of the member loop is never driven, so narrowing the loop to the secret
-    // half alone survives — measured.
+    // The mirror case, and it is not decoration: the `pair.id` half of the member
+    // loop is exercised by the cases above, but nothing makes its REMOVAL
+    // detectable — narrowing the loop to the secret half alone survived until
+    // this line existed. Measured, both narrowings now fail.
     expect(pairProblems([row('A_SECRET', 'pair-resolver', P)])).not.toEqual([]);
     expect(pairProblems([row('A_ID', 'pair-resolver', P), row('A_SECRET', 'pair-resolver', { id: 'A_SECRET', secret: 'A_ID' })])).not.toEqual([]);
   });
