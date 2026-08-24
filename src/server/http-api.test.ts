@@ -228,6 +228,11 @@ vi.mock('../core/engine.js', () => ({
       delete: vi.fn().mockReturnValue(false),
     });
     this.getGoogleAuth = vi.fn().mockReturnValue(mockGoogleAuth);
+    // The pair resolver is the truth for "is Google configured": the secret NAMES
+    // can both be present while no single source holds a pair (env id + vault
+    // secret), and the engine then builds nothing. Routes read the resolved source.
+    this.getGoogleClientSource = vi.fn().mockReturnValue('env');
+    this.isGoogleManagedBroker = vi.fn().mockReturnValue(false);
     this.reloadGoogle = vi.fn().mockResolvedValue(true);
     this.reloadUserConfig = mockReloadUserConfig;
     this.reloadCredentials = mockReloadCredentials;

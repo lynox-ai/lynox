@@ -31,14 +31,20 @@
  *   answer "does the vault have this?" once an environment value occupies the
  *   slot — the vault value is not out-ranked there, it is absent.
  * - **A source must supply BOTH halves or it is skipped.** Never mixed.
- * - **Empty strings do not count.** `??` only catches null/undefined, and the
- *   self-host compose file sets `GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}` — an
- *   empty string that a coalesce would happily pass on.
- * - **`userConfig` is last and is not an independent source.** `config.ts` copies
- *   the environment pair into it and `engine-init.ts` copies the vault secret
- *   into it, so an env-id + vault-secret combination re-appears there as a mixed
- *   pair one tier down. It is kept for self-host configs that predate the vault,
- *   and it is only consulted when neither of the real sources supplied a pair.
+ * - **Empty strings do not count**, and the reason is not the one it looks like.
+ *   The old readers never handed `''` to Google either — the `if (id && secret)`
+ *   guard below them rejected it. What `??` did was let `''` SHADOW the tiers behind
+ *   it: the self-host compose file sets `GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}`, so
+ *   an unset variable became an empty string that outranked a perfectly good
+ *   `config.json`, and Google was silently not built at all. Skipping it is the fix.
+ * - **`userConfig` is last, and it is now a REAL source rather than a mirror.**
+ *   It used to be neither: `config.ts` copied the environment pair into it and
+ *   `engine-init.ts` copied the vault secret into it, so an env-id and a vault-secret
+ *   re-assembled there as a mixed pair one tier down — reported as `'config'`, a
+ *   source that had never held a pair. Both copies are gone, and the config→vault
+ *   migration now carries the id as well as the secret, so this tier holds only what
+ *   the operator literally wrote in `config.json`. Naming the hazard in a comment and
+ *   keeping the tier anyway, as the first version of this file did, is not a fix.
  */
 
 /** Where a resolved pair came from. `'env'` on a provisioned instance is the managed broker. */

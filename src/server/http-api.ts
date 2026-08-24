@@ -4259,7 +4259,10 @@ export class LynoxHTTPApi {
           // best-effort, not configured.
           search: !!searxngUrl,
           searxng: !!searxngUrl,
-          google: names.has('GOOGLE_CLIENT_ID') || names.has('GOOGLE_CLIENT_SECRET'),
+          // A PAIR or nothing. The `||` this replaces reported configured on a
+          // half-filled vault, while the resolver builds nothing from half a pair —
+          // the status surface said yes and the feature was absent.
+          google: engine.getGoogleClientSource() !== null,
           bugsink: names.has('LYNOX_BUGSINK_DSN'),
         },
         count: names.size,
@@ -6251,6 +6254,11 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, {
         available: true,
         authenticated: google.isAuthenticated(),
+        // Which source supplied the client pair, and whether that pair is lynox's
+        // shared broker rather than the tenant's own. The card routes on these: a
+        // broker connection offers one button, a BYO one offers the scope toggle.
+        client_source: engine.getGoogleClientSource(),
+        managed_broker: engine.isGoogleManagedBroker(),
         ...google.getAccountInfo(),
       });
     });

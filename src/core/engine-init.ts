@@ -426,10 +426,11 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
         process.stderr.write('[lynox] ANTHROPIC_API_KEY env var overrides vault value\n');
       }
 
-      const vaultGoogleSecret = vault.get('GOOGLE_CLIENT_SECRET');
-      if (vaultGoogleSecret && !process.env['GOOGLE_CLIENT_SECRET']) {
-        userConfig.google_client_secret = vaultGoogleSecret;
-      }
+      // The vault→userConfig copy for GOOGLE_CLIENT_SECRET was removed with the pair
+      // resolver: it put a vault secret next to an env id in userConfig and produced
+      // a 'config' tier holding a pair neither source ever had. The resolver reads the
+      // vault directly, and the migration below now carries the ID too, so the vault
+      // holds a COMPLETE pair rather than half of one.
 
       // Tavily backend removed 2026-05-24 — `SEARCH_API_KEY` / `TAVILY_API_KEY`
       // vault entries left behind by older installs are ignored on read. They
@@ -511,6 +512,10 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
   }> = [
     { vaultName: 'ANTHROPIC_API_KEY', configField: 'api_key', envVar: 'ANTHROPIC_API_KEY' },
     { vaultName: 'GOOGLE_CLIENT_SECRET', configField: 'google_client_secret', envVar: 'GOOGLE_CLIENT_SECRET' },
+    // The ID migrates too, so an install with the pair in config.json ends up with
+    // BOTH halves in the vault. Migrating only the secret left the id behind and the
+    // vault holding half a pair, which the resolver must then skip.
+    { vaultName: 'GOOGLE_CLIENT_ID', configField: 'google_client_id', envVar: 'GOOGLE_CLIENT_ID' },
     // SEARCH_API_KEY / TAVILY_API_KEY migration entry removed 2026-05-24
     // when the Tavily backend was retired.
   ];

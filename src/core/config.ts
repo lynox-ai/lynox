@@ -736,12 +736,13 @@ export function loadConfig(): LynoxUserConfig {
   if (process.env['CLOUD_ML_REGION']) {
     merged.gcp_region = process.env['CLOUD_ML_REGION'];
   }
-  if (process.env['GOOGLE_CLIENT_ID']) {
-    merged.google_client_id = process.env['GOOGLE_CLIENT_ID'];
-  }
-  if (process.env['GOOGLE_CLIENT_SECRET']) {
-    merged.google_client_secret = process.env['GOOGLE_CLIENT_SECRET'];
-  }
+  // The GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET env copies were removed with the
+  // pair resolver (google-client-pair.ts). Nothing reads these config fields as a
+  // credential source any more — the resolver reads env and vault directly — and
+  // mirroring env into userConfig could only ever MANUFACTURE a mixed pair: an env
+  // id landing here beside a vault secret copied in by engine-init produced a
+  // 'config' tier that had never held a pair. Copying a value into a place its only
+  // reader no longer looks is how that invariant got broken.
   // TAVILY_API_KEY env wiring removed 2026-05-24 — backend retired in favour
   // of SearXNG (full quality) + DuckDuckGo HTML-scrape fallback (no-config
   // honesty path). Setting TAVILY_API_KEY now has no effect.

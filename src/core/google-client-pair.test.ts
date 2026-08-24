@@ -51,11 +51,16 @@ describe('resolveClientPair', () => {
     expect(out).toBeNull();
   });
 
-  it('treats an empty string as absent — the self-host compose default', () => {
-    // docker-compose sets GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}, i.e. ''. `??`
-    // passes that straight through; this must not.
-    const out = resolveClientPair(ID, SECRET, { env: { [ID]: '', [SECRET]: 'env-secret' } });
-    expect(out).toBeNull();
+  it('an empty env value does not SHADOW a good config pair', () => {
+    // docker-compose sets GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}, i.e. ''. Under the
+    // old `??` chain that empty string outranked config.json and Google was silently
+    // not built. The old code did not hand '' to Google — the truthiness guard caught
+    // that — it lost the working credential behind it.
+    const out = resolveClientPair(ID, SECRET, {
+      env: { [ID]: '', [SECRET]: '' },
+      userConfig: { google_client_id: 'cfg-id', google_client_secret: 'cfg-secret' },
+    });
+    expect(out).toEqual({ clientId: 'cfg-id', clientSecret: 'cfg-secret', source: 'config' });
   });
 
   it('treats whitespace as absent', () => {
