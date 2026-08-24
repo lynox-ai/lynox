@@ -12,6 +12,7 @@ import type { LynoxHooks } from '../core/engine.js';
 import { loadConfig } from '../core/config.js';
 import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
+import { readDurableKnowledgeForDebug } from './http-api.js';
 
 // === Mock dependencies ===
 
@@ -4695,6 +4696,296 @@ describe('LynoxHTTPApi', () => {
         expect(body.sharing_notice).toContain('Share it only with recipients you trust');
         // Secrets in the memory text are still scrubbed by the whole-bundle pass.
         expect(JSON.stringify(body)).not.toContain(KEY);
+      });
+    });
+
+    /**
+     * DEF-debug-export-blind-to-dk. The export read only `memories`; durable knowledge writes to
+     * `knowledge_entries`, so on a DK tenant the snapshot showed a memory store frozen weeks in
+     * the past and looked healthy. These pin the second substrate, its labelling, and — the part
+     * that makes it a diagnostic rather than a guess — that an unreadable block SAYS so.
+     */
+    function dkEngine(store: unknown): Record<string, () => unknown> {
+      return {
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getRunHistory: () => ({ getRunsBySession: () => [], getRunToolCalls: () => [], getPromptSnapshot: () => null, getCompactionEventsBySession: () => [], getWireSnapshotsForRun: () => [] }),
+        getKnowledgeLayer: () => ({
+          stats: async () => ({ memoryCount: 1, entityCount: 0, relationCount: 0, communityCount: 0 }),
+          getDb: () => ({ listAllActiveMemories: () => [{ text: 'a legacy fact', namespace: 'knowledge', scope_type: 'context', scope_id: 'c', source_type: 'agent_inferred', source_tool_name: null, confidence: 0.75, confirmation_count: 1, created_at: '2026-07-18T08:43:54.907Z' }] }),
+        }),
+        getKnowledgeStore: () => store,
+      };
+    }
+
+    it('carries durable-knowledge entries, labelled as their own substrate', async () => {
+      const store = {
+        listActive: () => [{ id: 'k1', text: 'the durable fact', sourceType: 'user_asserted', status: 'active', subjectName: 'Meridian AG', createdAt: '2026-08-19T12:32:10Z' }],
+        listPendingForThreadMasked: () => [],
+      };
+      await swapEngine(dkEngine(store), async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { memory: {
+          active_memories_substrate: string; active_memories: Array<{ text: string }>;
+          durable_knowledge: { substrate: string; available: boolean; entries_shown: number; entries: Array<{ text: string }>; may_be_incomplete: boolean };
+        } };
+        // The fact that was invisible before this change.
+        expect(body.memory.durable_knowledge.entries_shown).toBe(1);
+        expect(body.memory.durable_knowledge.entries[0]!.text).toBe('the durable fact');
+        // Two substrates, each named — not one merged list in which the legacy rows (an order of
+        // magnitude more numerous on a real instance) would drown the live ones.
+        expect(body.memory.active_memories_substrate).toContain('legacy');
+        expect(body.memory.durable_knowledge.substrate).toContain('knowledge_entries');
+        expect(body.memory.active_memories.map(m => m.text)).toEqual(['a legacy fact']);
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(false);
+        // The legacy flag must be FALSE here too — asserting only the true case lets a
+        // hardcoded `true` (or a `>= 199` boundary) survive.
+        expect((body as unknown as { memory: { active_memories_may_be_incomplete: boolean } }).memory.active_memories_may_be_incomplete).toBe(false);
+      });
+    });
+
+    it('shows the pending-review queue — "captured but waiting" is the likeliest answer to "nothing was saved"', async () => {
+      const store = {
+        listActive: () => [],
+        listPendingForThreadMasked: () => [{ id: 'p1', text: 'a queued fact', sourceType: 'external_unverified', status: 'pending_review', createdAt: '2026-08-19T12:00:00Z' }],
+      };
+      await swapEngine(dkEngine(store), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { pending_shown: number; pending_entries: Array<{ text: string }> } } };
+        expect(body.memory.durable_knowledge.pending_shown).toBe(1);
+        expect(body.memory.durable_knowledge.pending_entries[0]!.text).toBe('a queued fact');
+      });
+    });
+
+    it('an UNREADABLE durable-knowledge block says so instead of vanishing', async () => {
+      const store = { listActive: () => { throw new Error('decrypt failed'); }, listPendingForThreadMasked: () => [] };
+      await swapEngine(dkEngine(store), async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);   // a broken section is a gap; a 500 is no answer at all
+        const body = await res.json() as { memory: { durable_knowledge: { may_be_incomplete: boolean; entries: unknown[] }; active_memories: unknown[] } };
+        // "I could not read this" must not look like "there is nothing here" to someone
+        // diagnosing a missing memory — and it must not take the legacy half down with it.
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(true);
+        expect(body.memory.durable_knowledge.entries).toEqual([]);
+        expect(body.memory.active_memories).toHaveLength(1);
+      });
+    });
+
+    it('flags a TRUNCATED legacy snapshot — a capped list that stays silent reads as the whole picture', async () => {
+      const many = Array.from({ length: 200 }, (_, i) => ({ text: `fact ${i}`, namespace: 'knowledge', scope_type: 'context', scope_id: 'c', source_type: 'agent_inferred', source_tool_name: null, confidence: 0.7, confirmation_count: 1, created_at: '2026-07-18T00:00:00Z' }));
+      const eng = dkEngine({ listActive: () => [], listPendingForThreadMasked: () => [] });
+      eng['getKnowledgeLayer'] = () => ({
+        stats: async () => ({ memoryCount: 200, entityCount: 0, relationCount: 0, communityCount: 0 }),
+        getDb: () => ({ listAllActiveMemories: () => many }),
+      });
+      await swapEngine(eng, async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { active_memories_shown: number; active_memories_may_be_incomplete: boolean } };
+        expect(body.memory.active_memories_shown).toBe(200);
+        expect(body.memory.active_memories_may_be_incomplete).toBe(true);
+      });
+    });
+
+    it('reports available:false when the instance has no durable-knowledge store at all', async () => {
+      await swapEngine(dkEngine(null), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { available: boolean; may_be_incomplete: boolean } } };
+        expect(body.memory.durable_knowledge.available).toBe(false);
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(false);  // absent ≠ unreadable
+      });
+    });
+
+    /**
+     * THE case this whole change exists for, and the one the first version got wrong: the
+     * KnowledgeLayer is null when the knowledge GRAPH is off or the embedding provider failed,
+     * while durable knowledge depends only on `durable_memory_enabled`. Gating the DK block on
+     * the layer left a DK-tenant-without-a-graph exactly as blind as before — and every test
+     * passed, because they all supplied a layer.
+     */
+    /**
+     * The whole precondition matrix, not just the one combination that was broken. The legacy
+     * half needs a KnowledgeLayer, the durable half needs a KnowledgeStore, and those are
+     * independent — so all four states are reachable in production and each must report its own
+     * availability instead of the pair collapsing to `memory: null`. Fixing only the observed
+     * case would leave the next combination to be found the same way this one was.
+     */
+    const DK_ENTRY = { id: 'k1', text: 'a durable fact', kind: 'fact', status: 'active', sourceType: 'user_asserted', sourceChannel: null, sourceUntrusted: false, pinned: false, importance: 1, subjectHint: null, subjectName: null, sourceThreadId: 't1', createdAt: '2026-08-19T00:00:00Z' };
+    it.each([
+      ['layer ✓ / DK ✓', true, true, true, true],
+      ['layer ✓ / DK ✗', true, false, true, false],
+      ['layer ✗ / DK ✓', false, true, false, true],
+      ['layer ✗ / DK ✗', false, false, false, false],
+    ])('%s — each half reports its own availability, and memory is never null', async (_name, hasLayer, hasDk, wantLegacy, wantDk) => {
+      const eng = dkEngine(hasDk ? { listActive: () => [DK_ENTRY], listPendingForThreadMasked: () => [] } : null);
+      if (!hasLayer) eng['getKnowledgeLayer'] = () => null;
+      await swapEngine(eng, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { memory: { legacy_available: boolean; durable_knowledge: { available: boolean } } | null };
+        expect(body.memory, 'memory collapsed to null — the state is unreadable, not absent').not.toBeNull();
+        expect(body.memory!.legacy_available).toBe(wantLegacy);
+        expect(body.memory!.durable_knowledge.available).toBe(wantDk);
+      });
+    });
+
+    it('carries durable knowledge even when there is NO KnowledgeLayer (DK on, graph off)', async () => {
+      const eng = dkEngine({ listActive: () => [{ id: 'k1', text: 'the durable fact', kind: 'fact', status: 'active', sourceType: 'user_asserted', sourceChannel: null, sourceUntrusted: false, pinned: false, importance: 1, subjectHint: null, subjectName: 'Meridian AG', sourceThreadId: 't1', createdAt: '2026-08-19T12:32:10Z' }], listPendingForThreadMasked: () => [] });
+      eng['getKnowledgeLayer'] = () => null;
+      await swapEngine(eng, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { memory: { legacy_available: boolean; active_memories: unknown[]; durable_knowledge: { entries_shown: number; entries: Array<{ text: string }> } } };
+        expect(body.memory.durable_knowledge.entries_shown).toBe(1);
+        expect(body.memory.durable_knowledge.entries[0]!.text).toBe('the durable fact');
+        expect(body.memory.legacy_available).toBe(false);   // named, not silently absent
+        expect(body.memory.active_memories).toEqual([]);
+      });
+    });
+
+    it('a failing LEGACY half keeps the durable block — the forbidden shape from the other side', async () => {
+      const eng = dkEngine({ listActive: () => [{ id: 'k1', text: 'still readable', kind: 'fact', status: 'active', sourceType: 'user_asserted', sourceChannel: null, sourceUntrusted: false, pinned: false, importance: 1, subjectHint: null, subjectName: null, sourceThreadId: 't1', createdAt: '2026-08-19T00:00:00Z' }], listPendingForThreadMasked: () => [] });
+      eng['getKnowledgeLayer'] = () => ({ stats: async () => { throw new Error('kg down'); }, getDb: () => ({ listAllActiveMemories: () => [] }) });
+      await swapEngine(eng, async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { legacy_error: string; durable_knowledge: { entries_shown: number } } };
+        expect(body.memory.legacy_error).toBeTruthy();
+        expect(body.memory.durable_knowledge.entries_shown, 'a readable durable block vanished with the legacy failure').toBe(1);
+      });
+    });
+
+    it('a failing ACTIVE half keeps the readable pending queue (the other direction)', async () => {
+      // The mirror of the test below. Testing only one direction let a shared try/catch survive
+      // mutation: with both calls under one guard, an active failure silently takes the queue —
+      // and the queue is the half that answers "was it captured at all?".
+      const eng = dkEngine({
+        listActive: () => { throw new Error('one bad active row'); },
+        listPendingForThreadMasked: () => [{ id: 'p1', text: 'a queued fact', kind: 'fact', status: 'pending_review', sourceType: 'external_unverified', sourceChannel: null, sourceUntrusted: true, pinned: false, importance: 1, subjectHint: null, subjectName: null, sourceThreadId: 't1', createdAt: '2026-08-19T00:00:00Z' }],
+      });
+      await swapEngine(eng, async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { entries_shown: number; pending_shown: number; may_be_incomplete: boolean; error: string } } };
+        expect(body.memory.durable_knowledge.pending_shown, 'a readable pending queue was discarded with the active failure').toBe(1);
+        expect(body.memory.durable_knowledge.entries_shown).toBe(0);
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(true);
+        expect(body.memory.durable_knowledge.error).toContain('active');
+      });
+    });
+
+    it('one unreadable HALF does not discard the other (separate try per call)', async () => {
+      const eng = dkEngine({
+        listActive: () => [{ id: 'k1', text: 'readable active', kind: 'fact', status: 'active', sourceType: 'user_asserted', sourceChannel: null, sourceUntrusted: false, pinned: false, importance: 1, subjectHint: null, subjectName: null, sourceThreadId: 't1', createdAt: '2026-08-19T00:00:00Z' }],
+        listPendingForThreadMasked: () => { throw new Error('one bad pending row'); },
+      });
+      await swapEngine(eng, async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { entries_shown: number; pending_shown: number; may_be_incomplete: boolean; error: string } } };
+        expect(body.memory.durable_knowledge.entries_shown).toBe(1);   // kept
+        expect(body.memory.durable_knowledge.pending_shown).toBe(0);
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(true);
+        expect(body.memory.durable_knowledge.error).toContain('pending');
+      });
+    });
+
+    it('flags a truncated DURABLE list, and does not flag a short one', async () => {
+      const entry = (i: number): unknown => ({ id: `k${i}`, text: `f${i}`, kind: 'fact', status: 'active', sourceType: 'agent_inferred', sourceChannel: null, sourceUntrusted: false, pinned: false, importance: 1, subjectHint: null, subjectName: null, sourceThreadId: 't1', createdAt: '2026-08-19T00:00:00Z' });
+      const many = Array.from({ length: 200 }, (_, i) => entry(i));
+      await swapEngine(dkEngine({ listActive: () => many, listPendingForThreadMasked: () => [] }), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { may_be_incomplete: boolean } } };
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(true);
+      });
+      await swapEngine(dkEngine({ listActive: () => [entry(0)], listPendingForThreadMasked: () => [] }), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { may_be_incomplete: boolean } } };
+        expect(body.memory.durable_knowledge.may_be_incomplete, 'a one-entry list must not claim truncation').toBe(false);
+      });
+    });
+
+    /**
+     * The export must call the MASKED reader. `_maskText` removes tenant vault values on top of
+     * the bundle's own secret-pattern scrub, so swapping to raw `listPending` would ship vault
+     * contents that the pattern scrub does not catch — and no assertion here would have noticed.
+     */
+    /**
+     * The queue reader must have BOTH properties, and neither sibling has both: unscoped-masked
+     * would carry other threads' queues into a single-thread export, unmasked-scoped would carry
+     * vault values into a forwardable file. This pins that the export reaches for the one that
+     * has both — and passes the thread it is exporting.
+     */
+    it('reads the pending queue through the masked, THREAD-SCOPED reader — and passes the thread', async () => {
+      const calls: string[] = [];
+      let gotThreadId: string | null = null;
+      const store = {
+        listActive: () => [],
+        listPending: () => { calls.push('listPending'); return []; },
+        listPendingMasked: () => { calls.push('listPendingMasked'); return []; },
+        listPendingForThread: () => { calls.push('listPendingForThread'); return []; },
+        listPendingForThreadMasked: (tid: string) => { calls.push('listPendingForThreadMasked'); gotThreadId = tid; return []; },
+      };
+      await swapEngine(dkEngine(store), async () => {
+        await jsonFetch('/api/threads/t1/debug-export');
+        expect(calls, 'the export used a reader that is not both masked and thread-scoped').toEqual(['listPendingForThreadMasked']);
+        expect(gotThreadId, 'the exported thread was not passed to the scoped reader').toBe('t1');
+      });
+    });
+
+    /**
+     * The trust labels must survive the projection: without them a reader cannot tell an approved
+     * fact from a queued one, or a first-party statement from external content — which is the
+     * whole reason the queue is worth exporting at all.
+     *
+     * The fixture deliberately uses the NON-default value of every label (`pending_review`,
+     * `external_unverified`, untrusted `true`). An earlier version asserted the same fields on an
+     * `active` / `user_asserted` / `false` fixture, and mutations that hardcoded exactly those
+     * values survived it — the fixture mirrored the constant, so the assertion could not fail.
+     */
+    it('keeps the trust labels through the projection, at their non-default values', async () => {
+      const store = {
+        listActive: () => [],
+        listPendingForThreadMasked: () => [{ id: 'p1', text: 'a queued fact', kind: 'fact', status: 'pending_review', sourceType: 'external_unverified', sourceChannel: 'web', sourceUntrusted: true, pinned: false, importance: 1, subjectHint: null, subjectName: null, sourceThreadId: 't1', createdAt: '2026-08-19T00:00:00Z' }],
+      };
+      await swapEngine(dkEngine(store), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { pending_entries: Array<Record<string, unknown>> } } };
+        const e = body.memory.durable_knowledge.pending_entries[0]!;
+        expect(e['status'], 'a queued entry was reported as active').toBe('pending_review');
+        expect(e['source_type']).toBe('external_unverified');
+        expect(e['source_untrusted'], 'external content lost its untrusted flag').toBe(true);
+        expect(e['source_channel']).toBe('web');
+      });
+    });
+
+    it('names the unapproved review queue in the sharing notice', async () => {
+      // The user consents on this sentence. It described "stored memories" while the export also
+      // carried entries they had explicitly NOT approved — a consent describing something other
+      // than what ships.
+      await swapEngine(dkEngine({ listActive: () => [], listPendingForThreadMasked: () => [] }), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { sharing_notice: string };
+        expect(body.sharing_notice).toMatch(/awaiting your review/i);
+      });
+    });
+
+    it('does not share array instances between exports (no cross-request state)', async () => {
+      // `{ ...EMPTY_DK }` shallow-copied a module constant, so every store-less export handed
+      // back the SAME arrays. Harmless while nothing mutates them — which is how latent shared
+      // state survives until it is not harmless.
+      // Called directly: JSON round-tripping mints fresh arrays, so the sharing is invisible
+      // through HTTP no matter whether it exists.
+      const noStore = { getKnowledgeStore: () => null } as unknown as Parameters<typeof readDurableKnowledgeForDebug>[0];
+      const a = readDurableKnowledgeForDebug(noStore, 't1');
+      const b = readDurableKnowledgeForDebug(noStore, 't1');
+      expect(a.entries).toEqual([]);
+      expect(a.entries === b.entries, 'two calls returned the SAME entries array').toBe(false);
+      expect(a.pending_entries === b.pending_entries, 'two calls returned the SAME pending array').toBe(false);
+    });
+
+    it('projects entries — internal ids and foreign thread pointers stay out of the file', async () => {
+      const store = {
+        listActive: () => [{ id: 'k-internal', text: 'a fact', kind: 'fact', status: 'active', sourceType: 'user_asserted', sourceChannel: null, sourceUntrusted: false, pinned: false, importance: 1, subjectId: 'subj-internal', subjectHint: null, subjectName: 'Meridian AG', sourceThreadId: 'ANOTHER-THREAD', sourceRunId: 'run-internal', supersededBy: null, reviewAction: null, createdAt: '2026-08-19T00:00:00Z' }],
+        listPendingForThreadMasked: () => [],
+      };
+      await swapEngine(dkEngine(store), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { entries: Array<Record<string, unknown>> } } };
+        const e = body.memory.durable_knowledge.entries[0]!;
+        expect(e['text']).toBe('a fact');
+        expect(e['subject_name']).toBe('Meridian AG');
+        // The diagnostic question survives; the foreign thread id does not.
+        expect(e['from_this_thread']).toBe(false);
+        for (const leaked of ['id', 'subjectId', 'sourceThreadId', 'sourceRunId', 'reviewAction']) {
+          expect(e[leaked], `${leaked} leaked into a forwardable file`).toBeUndefined();
+        }
+        expect(JSON.stringify(body)).not.toContain('ANOTHER-THREAD');
       });
     });
 

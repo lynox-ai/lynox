@@ -926,11 +926,19 @@ export class AgentMemoryDb {
   }
 
   /**
-   * All active memories, newest first, across every scope (capped). The debug-export
-   * snapshot: it answers "what facts does this tenant's memory hold" for diagnosing
+   * All active memories, newest first, across every scope (capped). Part of the debug-export
+   * snapshot: it answers "what facts does this tenant's LEGACY memory hold" for diagnosing
    * cross-subject bleed / poisoning, so it is deliberately scope-INDEPENDENT (unlike
-   * {@link listActiveMemories}, which the recall path scopes). Reads the legacy store —
-   * write-authoritative and complete regardless of the read-cutover flag.
+   * {@link listActiveMemories}, which the recall path scopes).
+   *
+   * ⚠ This is ONE substrate, not the whole picture. The doc here used to call the legacy store
+   * write-authoritative and exhaustive whatever the read cutover did — true in 2026-07, and
+   * false since durable knowledge went default-on: DK writes to `knowledge_entries` in engine.db
+   * and never to `memories`, so a DK tenant's recent facts are absent from every row this
+   * returns. The claim was worse than the gap, because it told the next reader not to look —
+   * a debug export built on it showed a memory store frozen weeks in the past and looked
+   * healthy. Callers diagnosing "nothing was saved" must read BOTH substrates
+   * (`readDurableKnowledgeForDebug` in `src/server/http-api.ts` is the other half).
    */
   listAllActiveMemories(limit = 200): MemoryRow[] {
     const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.floor(limit), 1), 1000) : 200;
