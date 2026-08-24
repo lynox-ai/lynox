@@ -26,9 +26,10 @@ deliberate act, because a template that pre-fills its own answers turns the whol
 thing into a ritual you satisfy by pasting a SHA.
 
 **CI cannot verify that `gates`, `delta` or `mutations` are TRUE** — it checks their
-value, not that the work happened: an unknown gate name, a `delta` that is not `clean`,
-and any surviving mutant are all rejected. They are your attestation and they are on
-the record. `head` is the **load-bearing** check: it must equal this
+value, not that the work happened: an unknown gate name is always rejected, and a
+`delta` that is not `clean` or a surviving mutant are rejected wherever a delta round
+was owed (a markdown-only legal change owes none). They are your attestation and they
+are on the record. `head` is the **load-bearing** check: it must equal this
 PR's current head, so **update it after every push**. That is the difference between
 "the gates ran" and "the gates ran on THIS code". CI also establishes on its own which
 gates the diff OWES, derived from the real file list, so leaving out a required

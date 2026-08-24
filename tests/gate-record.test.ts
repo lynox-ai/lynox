@@ -8,8 +8,7 @@
  *
  * So each test names the thing that would otherwise slip through, and the suite
  * is deliberately unbalanced towards the SHA-freshness case — the failure that
- * establish on its own, and the one that actually recurs (gates run, then more
- * commits land).
+ * actually recurs (gates run, then more commits land).
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
