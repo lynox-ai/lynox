@@ -456,3 +456,21 @@ describe('gate-record — a line nothing reads is a line that lost something', (
     expect(evaluate({ body, head: HEAD, files: CODE }).ok).toBe(true);
   });
 });
+
+describe('gate-record — a real register id may carry a capital', () => {
+  it('⭐ accepts DEF-dk-engineDb-init-partial-wire, which is a row that exists', () => {
+    // The lower-case-only shape refused it, so that row could never be named in
+    // `closes:` — a guard that cannot express a correct answer. Core cannot check
+    // existence (the register is in the private repo), which makes getting the
+    // SHAPE right the only thing standing between a typo and a green tick here.
+    expect(evaluate({ body: record({ closes: 'DEF-dk-engineDb-init-partial-wire' }), head: HEAD, files: CODE }).ok)
+      .toBe(true);
+  });
+
+  it('still refuses what is not an id at all', () => {
+    // The control: widening for capitals must not widen into accepting anything.
+    for (const value of ['#1262', 'DEF_underscore', 'Def-wrong-prefix', 'nothing']) {
+      expect(evaluate({ body: record({ closes: value }), head: HEAD, files: CODE }).ok, value).toBe(false);
+    }
+  });
+});
