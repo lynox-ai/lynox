@@ -3029,10 +3029,21 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
     mockDnsPublic();
     const f = await refusal({ url: 'https://api.github.com/repos/lynox-ai/lynox' }, makeAgent());
     expectRecorded(f, 'not reachable under the current egress policy');
-    // The friendly text names no host on purpose. The ledger reason must, or an
-    // operator reading the row still cannot see WHICH request was refused —
-    // that was the expensive half of reconstructing the 2026-08-23 thread.
+    // The friendly text names no host and no rule on purpose. The ledger reason
+    // must name both, or an operator reading the row still cannot see WHICH
+    // request was refused and WHY — that was the expensive half of
+    // reconstructing the 2026-08-23 thread, and it is the entire difference
+    // between `blockedFriendly` and `blockedVerbatim`.
+    //
+    // These three assertions are the ONLY thing pinning that difference. A
+    // separate test asserting merely `reason !== agentVisibleResult` was written
+    // first and deleted: it was strictly weaker than this one — every mutant it
+    // caught died here too, and one it missed (`reason := 'Blocked: refused'`)
+    // dies here. A test that only looks like extra coverage is worse than none,
+    // because it makes this one look redundant. (Delta round, 2026-08-24.)
     expect(f.reason).toContain('api.github.com');
+    expect(f.reason).toContain('guarded egress policy');
+    expect(f.reason).not.toBe(f.agentVisibleResult);
   });
 
   it('10/14 — GET exfiltration with no interactive prompt', async () => {
@@ -3079,22 +3090,6 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
       await refusal({ url: 'https://write2.example.com/v1/x', method: 'POST', body: '{}' }, makeAgent({ promptUser })),
       'denied by user',
     );
-  });
-
-  it('a policy refusal records the TECHNICAL reason, not the text the model read', async () => {
-    // What `blockedFriendly` is FOR, and the only thing that separates it from
-    // `blockedVerbatim`. The friendly text is deliberately vague — "That server
-    // is not reachable under the current egress policy" names no host and no
-    // rule — so an operator reading the ledger row learns nothing from it. Set
-    // the reason to the payload and 13 of the 14 tests above still pass; this
-    // is the one that does not. (Found by the review's own mutation, which is
-    // the point of running one.)
-    applyNetworkPolicy(testCtx, 'guarded', undefined);
-    mockDnsPublic();
-    const f = await refusal({ url: 'https://api.github.com/repos/lynox-ai/lynox' }, makeAgent());
-    expect(f.reason).not.toBe(f.agentVisibleResult);
-    expect(f.reason).toMatch(/^Blocked:/);
-    expect(f.agentVisibleResult).not.toMatch(/^Blocked:/);
   });
 
   it('a self-phrased refusal is NOT run through the friendly rewriter — the host is model-chosen', async () => {

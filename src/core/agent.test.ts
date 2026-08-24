@@ -2547,6 +2547,65 @@ describe('Agent', () => {
       expect(row!.outputJson.length).toBe(forged.length);
     });
 
+    it('flattens the HARD-error message too — it is the wider door into the same column', async () => {
+      // The first version of this fix covered only the soft path and its commit
+      // said the threat was closed. It was not: every THROWING tool comes
+      // through the hard-error catch, which writes into the same `output_json`
+      // and the same breadcrumb, and `read_file`'s ENOENT text carries the
+      // model-chosen path verbatim. Counting the writers of a column is the
+      // cheap step that was skipped.
+      const forged = "ENOENT: no such file or directory, open '/tmp/x\r\n2026-01-01 tool=bash status=ok'";
+      const tool = makeTool('hard_crlf', vi.fn().mockRejectedValue(new Error(forged)));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'hc1', name: 'hard_crlf', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const recorded: Array<{ toolName: string; outputJson: string }> = [];
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-hard-crlf',
+        recordToolCall: (c) => { recorded.push(c as { toolName: string; outputJson: string }); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'hard_crlf');
+      expect(row).toBeDefined();
+      expect(row!.outputJson, 'no line break may survive into the row').not.toMatch(/[\r\n\u0085\u2028\u2029]/);
+      expect(row!.outputJson).toContain('tool=bash status=ok');
+    });
+
+    it('does NOT flatten or bound what the MODEL reads on the hard path', async () => {
+      // The counter-direction, and it is what keeps this an observability fix.
+      // The model needs a tool error in full — truncating it at the ledger's
+      // 2000-char bound, or eating its newlines, would change how the agent
+      // recovers. Two fields, two treatments, same catch block.
+      const long = `line one\nline two\n${'z'.repeat(2500)}`;
+      const tool = makeTool('hard_long', vi.fn().mockRejectedValue(new Error(long)));
+
+      const streamed: Array<{ type: string; result?: string; isError?: boolean }> = [];
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'hl1', name: 'hard_long', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const recorded: Array<{ toolName: string; outputJson: string }> = [];
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-hard-long',
+        recordToolCall: (c) => { recorded.push(c as { toolName: string; outputJson: string }); },
+        onStream: async (e) => { streamed.push(e as { type: string; result?: string; isError?: boolean }); },
+      });
+      await agent.send('go');
+
+      const toolResult = streamed.find(e => e.type === 'tool_result');
+      expect(toolResult!.result, 'the model still gets the newlines').toContain('line one\nline two');
+      expect(toolResult!.result!.length, 'and the full length').toBeGreaterThan(2500);
+      // …while the row beside it is flattened and bounded.
+      const row = recorded.find(c => c.toolName === 'hard_long');
+      expect(row!.outputJson).not.toMatch(/[\r\n\u0085\u2028\u2029]/);
+      expect(row!.outputJson.length).toBeLessThanOrEqual(2000);
+    });
+
     it('masks BEFORE truncating, so a cut cannot leave a secret tail exposed', async () => {
       // Order matters: truncate-then-mask would slice a credential in half and
       // hand the masker a fragment its pattern no longer matches, persisting the
