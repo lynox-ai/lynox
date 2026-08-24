@@ -145,6 +145,17 @@ export const GATE_MEMBERSHIP_FOR_TESTS = Object.freeze({
  * resolve to one. They are kept here for the save gate, which evaluates the URL
  * without fetching it, so an on-premise profile is not made to answer a
  * third-party disclosure prompt it has no business being asked.
+ *
+ * SCOPE OF THAT REASSURANCE — it belongs to THIS function's callers, and does
+ * not travel with the patterns. `assertHostPolicy`/`fetchPinned` guard the
+ * agent tool surface (`http_request`, `api_setup`). The same
+ * {@link PRIVATE_LAN_PATTERNS} are also read by {@link isAllowlistedEndpoint},
+ * whose caller is the LLM endpoint boot gate ({@link evaluateEndpointBootGate}),
+ * and that path issues a plain `fetch` with no connect-time private-IP check.
+ * A private/link-local `api_base_url` is therefore *permitted* there, which is
+ * deliberate — a self-host operator pointing at a LAN or localhost model server
+ * is a first-class setup — but it means "private-LAN is harmless here" is a
+ * statement about the save gate, NOT a property of the pattern set.
  */
 export function isVettedEgressHost(url: string): boolean {
   return isGuardedBaselineHost(url) || isPrivateLanEndpoint(url);
@@ -197,6 +208,15 @@ export function isAllowlistedEndpoint(url: string): boolean {
  * human-accepted api_profile (`custom_endpoint_ack`), never a wildcard the
  * agent can register a match for. The RFC1918 IP patterns are moot here — the
  * caller's `isPrivateIP` early-out blocks them regardless.
+ *
+ * "Moot" is scoped to THAT caller. The `guarded` network policy runs the
+ * early-out; the LLM endpoint boot gate ({@link evaluateEndpointBootGate} via
+ * {@link isAllowlistedEndpoint}) does not, and neither does the plain `fetch`
+ * the model adapter issues afterwards. Read together with the note on
+ * {@link isVettedEgressHost}: this file carries two separate reassurances about
+ * the private-LAN breadth, and each holds only for the caller it was written
+ * for. Anything that starts consuming these patterns owes its own answer to
+ * "what stops a private address at connect time?" rather than inheriting one.
  */
 export function isGuardedBaselineHost(url: string): boolean {
   try {
