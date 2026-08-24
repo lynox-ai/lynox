@@ -65,12 +65,14 @@ export interface CapturePopulationSplit {
    * This is the numerator's share that the denominator can never account for. Counted in
    * events rather than runs because that is the quantity `fireRate` inflates by.
    *
-   * ⚠️ One event of this can be an artefact of the window's LIVE EDGE rather than a gap:
-   * a run writes its `remember_invoked` from the tool handler and its `capture_eligible`
-   * only when the turn ends, so a turn still in flight at the moment of the scan
-   * contributes the numerator without its denominator. Read a value of 1 with that in
-   * mind; the shape this split exists to expose is a numerator population with no
-   * overlapping denominator at all.
+   * ⚠️ Some of this can be an artefact of the window's LIVE EDGE rather than a gap: a run
+   * writes its `remember_invoked` from the tool handler and its `capture_eligible` only
+   * when the turn ends, so a turn still in flight at the moment of the scan contributes
+   * the numerator without its denominator. The artefact is bounded by (runs in flight) ×
+   * (their `remember` calls) — not by one: an instance can have several runs open at once
+   * (spawned children, a batch), and a single run can record several facts in one turn.
+   * The shape this split exists to expose is different in kind: a numerator population
+   * with no overlapping denominator at all.
    */
   readonly rememberOutsideEligible: number;
   /**
@@ -127,7 +129,11 @@ const BLIND_NOTE =
   'some events could not be joined to a run; the split above covers only part of the window';
 
 /**
- * Cap on DISTINCT runs held during a scan, and the axis matters: the neighbouring
+ * Cap on TRACKED ENTRIES held during a scan — not on distinct runs, and the difference is
+ * real: a run that both ends a turn and fires `remember` occupies one slot in each
+ * collection, so the distinct-run floor this guarantees is `maxRuns / 2`. The sum is the
+ * quantity that bounds memory, which is what the cap is for; the naming follows the bound
+ * rather than the concept. The axis also matters: the neighbouring
  * `MAX_MODELS_REPORTED` caps the RESPONSE, not the scan — `perModel` is already an
  * unbounded scan-time Map, so the run collections introduce no new class of growth. What
  * they introduce is roughly four orders more cardinality: a fleet runs dozens of models,

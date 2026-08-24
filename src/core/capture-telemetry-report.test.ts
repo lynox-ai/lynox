@@ -431,7 +431,7 @@ describe('populations — the two ends of fireRate, counted separately', () => {
     });
   });
 
-  it('flags the 910-to-0 shape: a numerator population over an EMPTY denominator', async () => {
+  it('flags a numerator population over an EMPTY denominator', async () => {
     // A numerator population over an EMPTY denominator: every remember run is outside, so
     // `rememberOutsideEligible` carries it and no separate clause is needed. This is NOT
     // the shape of the real 910-to-0 sink — that one predates `runId` entirely and lands
@@ -521,6 +521,26 @@ describe('populations — the two ends of fireRate, counted separately', () => {
     // NOT count as an overflow — a cap that punished repeat events would report a window
     // as truncated the moment a busy run came back.
     expect(populations).toMatchObject({ eligibleRuns: 2, rememberRuns: 0, eventsOverRunCap: 1 });
+    expect(populations.blindNote).not.toBeNull();
+  });
+
+  it('counts an ELIGIBLE run over the cap too, and bounds on tracked ENTRIES not runs', async () => {
+    // Two things at once, because they share one arithmetic. `r-1` occupies a slot in
+    // BOTH collections, so with a cap of 2 the third line overflows even though only two
+    // distinct runs exist — the cap bounds tracked entries, which is what bounds memory.
+    // And the overflowing line is a `capture_eligible`: without this case, deleting the
+    // overflow counter from the eligible branch left the suite green and produced
+    // `eventsOverRunCap: 0` with `blindNote: null` — a dropped window reported as a clean
+    // one, which is the exact silence this split exists to break.
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r-1' }),
+      entry({ event: 'remember_invoked', runId: 'r-1', outcome: 'active' }),
+      entry({ event: 'capture_eligible', runId: 'r-2' }),
+    ]);
+    const { populations } = await buildCaptureReport({ maxTrackedRuns: 2 });
+    expect(populations).toMatchObject({
+      eligibleRuns: 1, rememberRuns: 1, overlapRuns: 1, eventsOverRunCap: 1,
+    });
     expect(populations.blindNote).not.toBeNull();
   });
 });

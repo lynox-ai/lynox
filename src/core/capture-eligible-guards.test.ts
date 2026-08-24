@@ -49,12 +49,19 @@ interface Internals {
  * a bare `{}` makes that path throw a TypeError — which fails the test for a reason that
  * has nothing to do with the guard under test, and would have been read as a kill.
  */
-function makeEligibleAgent(durableMemoryEnabled = true): Agent & Internals {
+function makeEligibleAgent(
+  flag: { durableMemoryEnabled?: boolean } = { durableMemoryEnabled: true },
+): Agent & Internals {
   // Through the CONFIG, not the private field: `agent.ts` maps
   // `config.durableMemoryEnabled === true` onto the flag, and writing the field directly
   // would drive the emit while leaving that mapping untested.
+  //
+  // An OBJECT rather than a boolean parameter, so "omitted" is expressible. A default
+  // parameter cannot express it: `makeEligibleAgent(undefined)` triggers the default, so
+  // the absent-flag case silently tested the enabled one instead (it did — the test
+  // failed on the emit it was asserting away).
   const agent = new Agent({
-    name: 'test', model: 'mistral-medium-2604', systemPrompt: 'SYS', durableMemoryEnabled,
+    name: 'test', model: 'mistral-medium-2604', systemPrompt: 'SYS', ...flag,
   });
   const inner = agent as unknown as Agent & Internals;
   inner.memory = { maybeUpdate: () => Promise.resolve() } as unknown as IMemory;
@@ -106,7 +113,17 @@ describe('capture_eligible — the denominator fires only for a run the hook acc
   });
 
   it('does NOT emit when DK is off — the sink logs only where we measure', () => {
-    const inner = makeEligibleAgent(false);
+    const inner = makeEligibleAgent({ durableMemoryEnabled: false });
+    inner._captureAtTurnEnd('a business fact');
+    expect(eligibleEmits()).toEqual([]);
+  });
+
+  it('does NOT emit when the config omits the flag entirely', () => {
+    // `agent.ts` reads `config.durableMemoryEnabled === true`, and only an ABSENT flag
+    // separates that from `!== false`: with an explicit `false` both spellings agree, so
+    // the `false` case above cannot tell them apart. An instance that never sets the flag
+    // is the common one, and it must stay silent.
+    const inner = makeEligibleAgent({});
     inner._captureAtTurnEnd('a business fact');
     expect(eligibleEmits()).toEqual([]);
   });
