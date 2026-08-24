@@ -3034,7 +3034,12 @@ export class LynoxHTTPApi {
           if (!res.writableEnded && !res.destroyed) res.end();
         } else if (!aborted) {
           const msg = err instanceof Error ? err.message : String(err);
-          res.write(`event: error\ndata: ${JSON.stringify({ error: msg })}\n\n`);
+          // `fatal: true` is not decoration: this path calls res.end() right
+          // below, so the turn really is over. Without the field a consumer
+          // reading `fatal` would see `undefined` here — falsy, i.e. "keep
+          // waiting" — and the fix for the ambiguous channel would have created
+          // a worse bug than the one it closes.
+          res.write(`event: error\ndata: ${JSON.stringify({ error: msg, fatal: true })}\n\n`);
           res.end();
         }
       } finally {

@@ -174,7 +174,14 @@ export type StreamEvent =
   | { type: 'spawn_child_done'; spawnId: string; subAgent: string; subAgentId: string;
       ok: boolean; elapsedS: number; costUsd: number;              agent: string }
   | { type: 'turn_end';    stop_reason: string; usage: BetaUsage;  model?: string | undefined; contextWindow?: number | undefined; agent: string }
-  | { type: 'error';       message: string;                        agent: string }
+  // `fatal` is REQUIRED, and that is the whole point: the compiler now forces
+  // every emitter to say whether the turn is over. Before this field the channel
+  // carried both `the run is dead` (agent.ts, iteration limit) and `something
+  // went wrong and I am continuing` (stream.ts, unparsable tool input) under one
+  // name, so no receiver could tell them apart — the client marked a live,
+  // billing run as `not sent — tap to retry`. Adding an OPTIONAL flag would have
+  // left the next emitter free to skip the decision and reopen the same hole.
+  | { type: 'error';       message: string; fatal: boolean;         agent: string }
   | { type: 'warning';     code: string; detail?: string | undefined; agent: string }
   | { type: 'retry';       attempt: number; maxAttempts: number; delayMs: number; reason: string; agent: string }
   | { type: 'cost_warning';  snapshot: CostSnapshot;               agent: string }

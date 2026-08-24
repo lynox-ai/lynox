@@ -1628,7 +1628,7 @@ export class Agent implements IAgent {
     for (let i = 0; this.maxIterations === 0 || i < this.maxIterations; i++) {
       if (i >= Agent.ABSOLUTE_MAX_ITERATIONS) {
         if (this.onStream) {
-          await this.onStream({ type: 'error', message: `Absolute iteration limit (${Agent.ABSOLUTE_MAX_ITERATIONS}) reached — terminating loop`, agent: this.name });
+          await this.onStream({ type: 'error', message: `Absolute iteration limit (${Agent.ABSOLUTE_MAX_ITERATIONS}) reached — terminating loop`, fatal: true, agent: this.name });
         }
         this._lastStop = { cause: 'absolute_cap', pendingTools: [], pendingToolCount: 0, text: '' };
         return extractText([]);
