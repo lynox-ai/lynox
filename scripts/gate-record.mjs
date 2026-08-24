@@ -327,8 +327,8 @@ export function evaluate({ body, head, files, author }) {
     // re-run, attest. It terminates the ordinary way — when a round finds nothing.
     //
     // An escape hatch for "the delta since only deleted something harmless" was
-    // drafted and CUT. Five review rounds found five real defects in it, every one
-    // in the clause itself and none in the two parts above: it contradicted (2);
+    // drafted and CUT. Five review rounds found five real defects in it — spread
+    // across its drafts, never in the two parts above: it contradicted (2);
     // it waved through code deletions, which remove characters and widen behaviour;
     // it kept re-introducing a GENRE list where the test is the reader; and its own
     // worked example turned out to have a reader after all. Where prose is wrong
