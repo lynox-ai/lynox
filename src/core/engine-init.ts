@@ -18,7 +18,6 @@ import type {
   MemoryScopeRef,
   MemoryNamespace,
   MemoryScopeType,
-  DataStoreColumnDef,
 } from '../types/index.js';
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';

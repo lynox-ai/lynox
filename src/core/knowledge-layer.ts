@@ -255,13 +255,9 @@ export class KnowledgeLayer implements IKnowledgeLayer {
 
   get isReady(): boolean { return true; }
 
-  /** Access the underlying DB (for DataStore bridge and advanced queries). */
+  /** Access the underlying DB (advanced queries). */
   getDb(): AgentMemoryDb { return this.db; }
 
-  /** Access the entity resolver (for DataStore bridge). */
-  getEntityResolver(): EntityResolver { return this.entityResolver; }
-
-  /** Connect DataStore bridge to retrieval engine for data hints. */
   /**
    * DEF-0015 — hand the layer the live DataStore so the orphan reap can ask whether a
    * table row still links a subject. Called by the engine as soon as the DataStore exists;

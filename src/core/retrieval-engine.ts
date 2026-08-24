@@ -241,7 +241,6 @@ export class RetrievalEngine {
     private readonly memoryWriteTrustGate: boolean = false,
   ) {}
 
-
   /** Propagate provider switch from KnowledgeLayer.setAnthropicClient(). */
   setAnthropicClient(client: Anthropic | undefined): void {
     this.anthropicClient = client;
@@ -300,10 +299,10 @@ export class RetrievalEngine {
     // Extract query terms ONCE — both the legacy display resolver and the S5b
     // subject resolver consume them (avoids a second regex pass on the hot path).
     const queryTerms = extractEntitiesRegex(query).entities;
-    // Display / DataStore-hint entities stay on the legacy KG resolver regardless
-    // of the memory-read flag — the `<knowledge_graph>` block + DataStore bridge
-    // are keyed on legacy entity ids (a separate concern from which memories to
-    // recall). Only the MEMORY reads (vector + graph-expand) re-point in S5b.
+    // Display entities stay on the legacy KG resolver regardless of the memory-read
+    // flag — the `<knowledge_graph>` block is keyed on legacy entity ids (a separate
+    // concern from which memories to recall). Only the MEMORY reads (vector +
+    // graph-expand) re-point in S5b.
     const queryEntities = await this._resolveQueryEntities(queryTerms, scopes);
     const dim = this.embeddingProvider.dimensions;
 

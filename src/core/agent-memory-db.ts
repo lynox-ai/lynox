@@ -445,11 +445,15 @@ export class AgentMemoryDb {
    * an entity out of what reaches the model.
    *
    * ⚠️ Dormant is NOT the same as "has no active mentions", and the difference is a
-   * regression waiting to happen: entities that never had a mention at all are perfectly
-   * legitimate — an ingest can create one without ever calling `createMention`, and treating
-   * mention-less as dead would silently drop it from the context graph. Only an entity that
-   * HAD mentions and has lost them all is dormant. (The concrete producer this was written
-   * for was the DataStore→KG bridge, removed 2026-08-24; the rule stands on its own.)
+   * regression waiting to happen. Only an entity that HAD mentions and has lost them all is
+   * dormant; one that never had a mention must not be treated as dead.
+   *
+   * As of 2026-08-24 there is NO producer of mention-less entities left: the DataStore→KG
+   * bridge was the only one and was removed as never-attached, and every `createEntity` call
+   * in the layer is followed immediately by `createMention`. The distinction is kept anyway —
+   * it is a fail-safe, not a description of current traffic, and re-introducing a bulk ingest
+   * that mints without mentioning is exactly the change that would otherwise silently start
+   * dropping entities.
    *
    * Deliberately NOT applied inside `EntityResolver.resolve`: the same call also serves
    * extraction, where refusing to match a dormant entity would create a duplicate instead
@@ -1379,9 +1383,8 @@ export class AgentMemoryDb {
 
     // An orphan is an entity that HAD mentions and has lost them all — the same definition
     // {@link entityIsDormant} uses, and for the reason its docstring already gives: an entity
-    // that never had a mention is perfectly legitimate — an ingest can create one
-    // creates one per collection and `indexRecords` one per person/organization it extracts
-    // from a record, and NEITHER calls `createMention`.
+    // that never had a mention must not be treated as dead. No producer of such entities
+    // remains as of 2026-08-24 (see that docstring); the distinction is a fail-safe.
     //
     // Without the first EXISTS this deletes every one of them, together with their
     // `has_data_in` relations, on every single run — and `runStartupReap` runs it at every
