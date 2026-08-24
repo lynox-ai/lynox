@@ -2556,7 +2556,7 @@ describe('Agent', () => {
       // and the same breadcrumb, and `read_file`'s ENOENT text carries the
       // model-chosen path verbatim. Counting the writers of a column is the
       // cheap step that was skipped.
-      // All five syntactic elements of the class, and — the part two earlier
+      // All five syntactic elements of the class, and — the part earlier
       // versions of this comment got wrong — several members from INSIDE the
       // `\x00-\x1f` range, not just CR and LF. With only CR/LF present,
       // narrowing the range to `\x0a-\x0d` yields the byte-identical expected
