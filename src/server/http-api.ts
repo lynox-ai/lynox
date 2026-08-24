@@ -506,6 +506,46 @@ function enforceManagedProviderConstraints(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * The durable-knowledge half of the debug export's memory snapshot — the substrate the legacy
+ * `memories` table does NOT contain once durable knowledge is on.
+ *
+ * Its own try/catch, separate from the caller's: `listActive` decrypts every row, so one
+ * unreadable entry would otherwise take the whole memory block with it and the export would
+ * silently show only the legacy substrate — which is precisely the blindness this exists to end.
+ * A failure therefore returns a NAMED, EMPTY block with `may_be_incomplete: true` rather than
+ * disappearing: "I could not read this" and "there is nothing here" must not look the same to
+ * someone diagnosing a missing memory.
+ *
+ * PENDING entries are included, masked. Under the trust gate a captured fact can sit in
+ * `pending_review` instead of going active, and "it was captured but is waiting" is the single
+ * most likely answer to "the model never saved anything" — an export that omits the queue cannot
+ * distinguish it from "nothing was captured at all".
+ */
+function readDurableKnowledgeForDebug(engine: Engine): unknown {
+  const store = engine.getKnowledgeStore();
+  if (!store) return { substrate: 'knowledge_entries (durable knowledge)', available: false, entries: [], pending_entries: [], may_be_incomplete: false };
+  const ENTRY_CAP = 200;
+  try {
+    const active = store.listActive(ENTRY_CAP);
+    const pending = store.listPendingMasked(ENTRY_CAP);
+    return {
+      substrate: 'knowledge_entries (durable knowledge)',
+      available: true,
+      entries_shown: active.length,
+      pending_shown: pending.length,
+      // Named `may_be_incomplete` rather than `truncated`, matching the Art. 15 export: hitting
+      // exactly the cap is indistinguishable from having exactly that many, and over-reporting
+      // is the right way to be wrong about completeness.
+      may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP,
+      entries: active,
+      pending_entries: pending,
+    };
+  } catch {
+    return { substrate: 'knowledge_entries (durable knowledge)', available: true, entries: [], pending_entries: [], may_be_incomplete: true, error: 'durable knowledge unreadable' };
+  }
+}
+
 function jsonResponse(res: ServerResponse, status: number, body: unknown): void {
   const json = JSON.stringify(body);
   res.writeHead(status, {
@@ -3644,20 +3684,34 @@ export class LynoxHTTPApi {
 
       // Memory snapshot (retention-safe): the tenant's OWN stored facts + KG stats, so a
       // debugger can see cross-subject bleed / poisoning directly — the runtime <fact>
-      // injection the agent reacts to is derived from exactly this. Reads ALREADY-persisted
-      // memory (the legacy write-authoritative store, complete regardless of the read-cutover
-      // flag) — NO new always-on retention. Capped, and secret-scrubbed with the rest of the
-      // bundle below; PII is kept (the user's own data, exported by their own action — see
-      // sharing_notice). Best-effort: a KG hiccup must not fail the whole export.
+      // injection the agent reacts to is derived from exactly this. NO new always-on
+      // retention. Capped, and secret-scrubbed with the rest of the bundle below; PII is kept
+      // (the user's own data, exported by their own action — see sharing_notice).
+      //
+      // TWO SUBSTRATES, REPORTED SEPARATELY AND LABELLED. `memories` is the legacy store;
+      // durable knowledge writes to `knowledge_entries` instead, so a DK tenant's recent facts
+      // are absent from the first and present only in the second. Reading only `memories` made
+      // every memory diagnosis over this export blind — and the plausible repair (point
+      // `listAllActiveMemories` at engine.db) is green and leaves it EXACTLY as blind, because
+      // the two `memories` tables are id-identical: the split is table-level, not database-level.
+      // They stay two named blocks rather than one merged list: the legacy rows outnumber the
+      // durable ones by an order of magnitude on a real instance, so merging them would drown
+      // the live facts in dead ones and hide which substrate a row came from — trading a blind
+      // instrument for a misleading one.
       const MEMORY_SNAPSHOT_CAP = 200;
       const knowledgeLayer = engine.getKnowledgeLayer();
       let memory: unknown = null;
       if (knowledgeLayer) {
         try {
+          const legacyRows = knowledgeLayer.getDb().listAllActiveMemories(MEMORY_SNAPSHOT_CAP);
           memory = {
             kg_stats: await knowledgeLayer.stats(),
-            active_memories_shown: 0,
-            active_memories: knowledgeLayer.getDb().listAllActiveMemories(MEMORY_SNAPSHOT_CAP).map((m) => ({
+            active_memories_substrate: 'memories (legacy store)',
+            active_memories_shown: legacyRows.length,
+            // The cap was silent before. A truncated snapshot that does not say so reads as
+            // the whole picture — the same class of defect as reading one substrate of two.
+            active_memories_may_be_incomplete: legacyRows.length >= MEMORY_SNAPSHOT_CAP,
+            active_memories: legacyRows.map((m) => ({
               text: m.text,
               namespace: m.namespace,
               scope: `${m.scope_type}:${m.scope_id}`,
@@ -3667,9 +3721,8 @@ export class LynoxHTTPApi {
               confirmation_count: m.confirmation_count,
               created_at: m.created_at,
             })),
+            durable_knowledge: readDurableKnowledgeForDebug(engine),
           };
-          (memory as { active_memories_shown: number; active_memories: unknown[] }).active_memories_shown =
-            (memory as { active_memories: unknown[] }).active_memories.length;
         } catch { memory = { error: 'memory snapshot unavailable' }; }
       }
 

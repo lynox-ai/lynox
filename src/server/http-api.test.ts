@@ -4687,6 +4687,96 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    /**
+     * DEF-debug-export-blind-to-dk. The export read only `memories`; durable knowledge writes to
+     * `knowledge_entries`, so on a DK tenant the snapshot showed a memory store frozen weeks in
+     * the past and looked healthy. These pin the second substrate, its labelling, and — the part
+     * that makes it a diagnostic rather than a guess — that an unreadable block SAYS so.
+     */
+    function dkEngine(store: unknown): Record<string, () => unknown> {
+      return {
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getRunHistory: () => ({ getRunsBySession: () => [], getRunToolCalls: () => [], getPromptSnapshot: () => null, getCompactionEventsBySession: () => [], getWireSnapshotsForRun: () => [] }),
+        getKnowledgeLayer: () => ({
+          stats: async () => ({ memoryCount: 1, entityCount: 0, relationCount: 0, communityCount: 0 }),
+          getDb: () => ({ listAllActiveMemories: () => [{ text: 'a legacy fact', namespace: 'knowledge', scope_type: 'context', scope_id: 'c', source_type: 'agent_inferred', source_tool_name: null, confidence: 0.75, confirmation_count: 1, created_at: '2026-07-18T08:43:54.907Z' }] }),
+        }),
+        getKnowledgeStore: () => store,
+      };
+    }
+
+    it('carries durable-knowledge entries, labelled as their own substrate', async () => {
+      const store = {
+        listActive: () => [{ id: 'k1', text: 'the durable fact', sourceType: 'user_asserted', status: 'active', subjectName: 'Meridian AG', createdAt: '2026-08-19T12:32:10Z' }],
+        listPendingMasked: () => [],
+      };
+      await swapEngine(dkEngine(store), async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { memory: {
+          active_memories_substrate: string; active_memories: Array<{ text: string }>;
+          durable_knowledge: { substrate: string; available: boolean; entries_shown: number; entries: Array<{ text: string }>; may_be_incomplete: boolean };
+        } };
+        // The fact that was invisible before this change.
+        expect(body.memory.durable_knowledge.entries_shown).toBe(1);
+        expect(body.memory.durable_knowledge.entries[0]!.text).toBe('the durable fact');
+        // Two substrates, each named — not one merged list in which the legacy rows (an order of
+        // magnitude more numerous on a real instance) would drown the live ones.
+        expect(body.memory.active_memories_substrate).toContain('legacy');
+        expect(body.memory.durable_knowledge.substrate).toContain('knowledge_entries');
+        expect(body.memory.active_memories.map(m => m.text)).toEqual(['a legacy fact']);
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(false);
+      });
+    });
+
+    it('shows the pending-review queue — "captured but waiting" is the likeliest answer to "nothing was saved"', async () => {
+      const store = {
+        listActive: () => [],
+        listPendingMasked: () => [{ id: 'p1', text: 'a queued fact', sourceType: 'external_unverified', status: 'pending_review', createdAt: '2026-08-19T12:00:00Z' }],
+      };
+      await swapEngine(dkEngine(store), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { pending_shown: number; pending_entries: Array<{ text: string }> } } };
+        expect(body.memory.durable_knowledge.pending_shown).toBe(1);
+        expect(body.memory.durable_knowledge.pending_entries[0]!.text).toBe('a queued fact');
+      });
+    });
+
+    it('an UNREADABLE durable-knowledge block says so instead of vanishing', async () => {
+      const store = { listActive: () => { throw new Error('decrypt failed'); }, listPendingMasked: () => [] };
+      await swapEngine(dkEngine(store), async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);   // a broken section is a gap; a 500 is no answer at all
+        const body = await res.json() as { memory: { durable_knowledge: { may_be_incomplete: boolean; entries: unknown[] }; active_memories: unknown[] } };
+        // "I could not read this" must not look like "there is nothing here" to someone
+        // diagnosing a missing memory — and it must not take the legacy half down with it.
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(true);
+        expect(body.memory.durable_knowledge.entries).toEqual([]);
+        expect(body.memory.active_memories).toHaveLength(1);
+      });
+    });
+
+    it('flags a TRUNCATED legacy snapshot — a capped list that stays silent reads as the whole picture', async () => {
+      const many = Array.from({ length: 200 }, (_, i) => ({ text: `fact ${i}`, namespace: 'knowledge', scope_type: 'context', scope_id: 'c', source_type: 'agent_inferred', source_tool_name: null, confidence: 0.7, confirmation_count: 1, created_at: '2026-07-18T00:00:00Z' }));
+      const eng = dkEngine({ listActive: () => [], listPendingMasked: () => [] });
+      eng['getKnowledgeLayer'] = () => ({
+        stats: async () => ({ memoryCount: 200, entityCount: 0, relationCount: 0, communityCount: 0 }),
+        getDb: () => ({ listAllActiveMemories: () => many }),
+      });
+      await swapEngine(eng, async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { active_memories_shown: number; active_memories_may_be_incomplete: boolean } };
+        expect(body.memory.active_memories_shown).toBe(200);
+        expect(body.memory.active_memories_may_be_incomplete).toBe(true);
+      });
+    });
+
+    it('reports available:false when the instance has no durable-knowledge store at all', async () => {
+      await swapEngine(dkEngine(null), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { available: boolean; may_be_incomplete: boolean } } };
+        expect(body.memory.durable_knowledge.available).toBe(false);
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(false);  // absent ≠ unreadable
+      });
+    });
+
     it('bundles wire snapshots + the typed-vs-assembled diff + at-a-glance summary (extended debug capture)', async () => {
       const typed = 'summarise Q3 revenue';
       // What the model actually saw: a [Now:] prefix + the typed task + the injected
