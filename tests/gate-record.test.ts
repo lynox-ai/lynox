@@ -7,7 +7,7 @@
  * a green check reads as verification.
  *
  * So each test names the thing that would otherwise slip through, and the suite
- * is deliberately unbalanced towards the SHA-freshness case — the one fact CI can
+ * is deliberately unbalanced towards the SHA-freshness case — the failure that
  * establish on its own, and the one that actually recurs (gates run, then more
  * commits land).
  */

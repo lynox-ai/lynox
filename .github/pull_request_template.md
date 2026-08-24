@@ -25,12 +25,14 @@ below ships as a placeholder the check REJECTS** — filling one in has to be a
 deliberate act, because a template that pre-fills its own answers turns the whole
 thing into a ritual you satisfy by pasting a SHA.
 
-**CI cannot verify `gates`, `delta` or `mutations`.** They are your attestation
-and they are on the record. `head` is the **load-bearing** check: it must equal this
+**CI cannot verify that `gates`, `delta` or `mutations` are TRUE** — it checks their
+value, not that the work happened: an unknown gate name, a `delta` that is not `clean`,
+and any surviving mutant are all rejected. They are your attestation and they are on
+the record. `head` is the **load-bearing** check: it must equal this
 PR's current head, so **update it after every push**. That is the difference between
-"the gates ran" and "the gates ran on THIS code". CI does establish one more thing on
-its own — which gates the diff OWES, derived from the real file list — so leaving out
-a required `security` or `legal` is caught, not attested.
+"the gates ran" and "the gates ran on THIS code". CI also establishes on its own which
+gates the diff OWES, derived from the real file list, so leaving out a required
+`security` or `legal` is caught rather than attested.
 
 - `head` — this PR's **current** head, which is also the SHA the gates ran against:
   `git rev-parse --short HEAD`. Update it after every push.
