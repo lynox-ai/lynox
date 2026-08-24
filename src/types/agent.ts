@@ -1,6 +1,6 @@
 // === 4.4 IAgent Interface ===
 
-import type { ToolEntry, StreamHandler, EmittingStreamHandler } from './tools.js';
+import type { ToolEntry, EmittingStreamHandler } from './tools.js';
 import type { IMemory, MemoryScopeRef } from './memory.js';
 import type { SecretStoreLike, IsolationConfig } from './security.js';
 import type { AutonomyLevel } from './modes.js';

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
+import type { ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';

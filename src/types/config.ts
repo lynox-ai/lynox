@@ -4,7 +4,7 @@ import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
 import type { ModelTier, ThinkingMode, EffortLevel, LLMProvider, ModelProfile } from './models.js';
 import type { ProviderKey } from './provider-registry.js';
-import type { ToolEntry, StreamHandler, EmittingStreamHandler } from './tools.js';
+import type { ToolEntry, EmittingStreamHandler } from './tools.js';
 import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMailConnectFn, ToolCallRecorder } from './agent.js';
 import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';

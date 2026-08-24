@@ -185,7 +185,7 @@ export type StreamEvent =
   // break every external constructor of an error event for a flag they have no
   // stake in. The compiler force belongs where the emitters are, not where the
   // consumers are.
-  | { type: 'error';       message: string; fatal?: boolean;        agent: string }
+  | { type: 'error';       message: string; fatal?: boolean | undefined; agent: string }
   | { type: 'warning';     code: string; detail?: string | undefined; agent: string }
   | { type: 'retry';       attempt: number; maxAttempts: number; delayMs: number; reason: string; agent: string }
   | { type: 'cost_warning';  snapshot: CostSnapshot;               agent: string }
@@ -260,10 +260,16 @@ export type EmittingStreamHandler = (event: EmittedStreamEvent) => void | Promis
  * is a public entry point, so making the field required there would be a major
  * break for a flag those callers have no stake in.
  *
- * Mutation that must fail this: change `fatal?: boolean` to `fatal: boolean`
- * on the error variant above. The pair of guards is the point — that one keeps
- * the emitters honest, this one keeps the package compatible, and neither can
- * be satisfied by weakening the other.
+ * Mutation that must fail this: make `fatal` required on the error variant
+ * above.
+ *
+ * What this does NOT establish, measured 2026-08-24 rather than assumed: that
+ * the published surface is unchanged. It pins one sentence about `StreamEvent`,
+ * and the surface is wider than that sentence. Reading `agent.onStream` back as
+ * a `StreamHandler`, or forwarding a stored `StreamEvent` through it, does NOT
+ * compile any more — the emit sinks hand out the narrower type. Plugging a
+ * handler IN still works. Treat that as the known cost, not as a gap nobody
+ * noticed.
  */
 type AssertTrue<T extends true> = T;
 type _PublishedErrorEventMayOmitFatal = AssertTrue<

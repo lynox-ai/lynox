@@ -1,4 +1,4 @@
-import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, EmittingStreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier, IAgent } from '../../types/index.js';
+import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, EmittingStreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier, IAgent } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { randomUUID } from 'node:crypto';
 import { validateManifest, maxStepsFor, parallelStepCapFor } from '../../orchestrator/validate.js';

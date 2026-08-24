@@ -5,7 +5,6 @@ import type {
   IMemory,
   IWorkerPool,
   ToolEntry,
-  StreamHandler,
   EmittingStreamHandler,
   AgentConfig,
   ThinkingMode,

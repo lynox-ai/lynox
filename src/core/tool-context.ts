@@ -20,7 +20,6 @@ import type {
   IKnowledgeLayer,
   LynoxUserConfig,
   ToolEntry,
-  StreamHandler,
   EmittingStreamHandler,
   NetworkPolicy,
   StepHint,

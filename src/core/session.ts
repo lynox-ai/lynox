@@ -8,10 +8,8 @@ import type {
   ToolEntry,
   BatchRequest,
   BatchResult,
-  StreamHandler,
   EmittingStreamHandler,
   EmittedStreamEvent,
-  StreamEvent,
   ModelTier,
   ThreadModelSource,
   LLMProvider,
@@ -2218,8 +2216,10 @@ export class Session {
     const tools = pluginManager ? applyPluginToolGate(entries, pluginManager) : entries;
 
     // Emitting on BOTH sides: this wrapper receives what core produced and
-    // forwards it to the session's sink, so widening it here would be the one
-    // place the decision could get laundered back into an unknown.
+    // forwards it to the session's sink, so widening it here would launder the
+    // decision back into an unknown. It is one of three such choke points — the
+    // spawn forwarder is the second; the raw SSE writer in http-api is the third
+    // and is NOT typed at all, so only a test holds it.
     const streamHandler: EmittingStreamHandler = async (event: EmittedStreamEvent) => {
       if (event.type === 'turn_end') {
         // Inject actual model so the client can compute correct costs
