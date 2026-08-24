@@ -1,5 +1,5 @@
 {
-  "readme": "Capture fitness: does the model record a durable fact when one is present, and stay quiet when none is? Each case runs as ONE turn against a live engine. Shapes are the axis that matters — real users almost never dictate 'for the record', so a model that only fires on S1 captures nothing in practice. Entity names in the CAPTURE shapes carry a {N} nonce that the runner replaces with a per-run token: the store dedups an active write against the same SUBJECT, so a fixed name meets last run's row and the case silently stops becoming knowledge while still counting as a capture. Decision cases carry no entity and are run-scoped by the store's own candidate rule (subject_id OR source_run_id), so they need no nonce. The nonce is applied to ORGANISATION and PROJECT names, which is what these shapes give the store to resolve as a subject; person names are left readable. If a model instead resolves a PERSON as the subject, that name is not fresh and the case can dedup — the runner reports it as DEDUPED rather than absorbing it, which is the point of that line.",
+  "readme": "Capture fitness: does the model record a durable fact when one is present, and stay quiet when none is? Each case runs as ONE turn against a live engine. Shapes are the axis that matters — real users almost never dictate 'for the record', so a model that only fires on S1 captures nothing in practice. Entity names in the CAPTURE shapes carry a {N} nonce, joined WITHOUT a separator, that the runner replaces with a per-run token (a hyphen is not alphanumeric, so `Talbach-XXXX` still reads as a mention of an existing `Talbach` to KnowledgeStore._mentions and can re-attach the old subject): the store dedups an active write against the same SUBJECT, so a fixed name meets last run's row and the case silently stops becoming knowledge while still counting as a capture. Decision cases carry no entity and are run-scoped by the store's own candidate rule (subject_id OR source_run_id), so they need no nonce. The nonce is applied to ORGANISATION and PROJECT names, which is what these shapes give the store to resolve as a subject; person names are left readable. If a model instead resolves a PERSON as the subject, that name is not fresh and the case can dedup — the runner reports it as DEDUPED rather than absorbing it, which is the point of that line.",
   "sourceFile": "branchennews.txt",
   "shapes": [
     {
@@ -7,9 +7,9 @@
       "expect": "capture",
       "why": "The explicit control. If this fails the wiring is broken, not the model.",
       "cases": [
-        "Lies bitte {FILE} und fass mir in zwei Saetzen zusammen, was davon fuer uns relevant ist. Und fuers Protokoll: unser Kunde Meridian-{N} ist zum 1. September auf den Jahresvertrag umgestiegen, neue Ansprechpartnerin ist Frau Keller.",
-        "Schau kurz in {FILE}. Bitte merk dir ausserdem: die Firma Talbach-{N} zahlt ab Q4 quartalsweise statt monatlich.",
-        "Lies {FILE}. Fuer die Akten: Ansprechpartner bei Orion-{N} ist ab sofort Herr Vogt, nicht mehr Frau Reiss."
+        "Lies bitte {FILE} und fass mir in zwei Saetzen zusammen, was davon fuer uns relevant ist. Und fuers Protokoll: unser Kunde Meridian{N} ist zum 1. September auf den Jahresvertrag umgestiegen, neue Ansprechpartnerin ist Frau Keller.",
+        "Schau kurz in {FILE}. Bitte merk dir ausserdem: die Firma Talbach{N} zahlt ab Q4 quartalsweise statt monatlich.",
+        "Lies {FILE}. Fuer die Akten: Ansprechpartner bei Orion{N} ist ab sofort Herr Vogt, nicht mehr Frau Reiss."
       ]
     },
     {
@@ -17,9 +17,9 @@
       "expect": "capture",
       "why": "The fact arrives in a subordinate clause while the ASK is something else. This is how operators actually mention things.",
       "cases": [
-        "Lies {FILE} und sag mir in zwei Saetzen, ob das fuer uns relevant ist. Meridian-{N} laeuft uebrigens jetzt auf dem Jahresvertrag.",
-        "Kannst du mir {FILE} zusammenfassen? Talbach-{N} hat uebrigens den Rahmenvertrag um zwei Jahre verlaengert.",
-        "Wirf einen Blick in {FILE}. Nebenbei: bei Orion-{N} ist Herr Vogt jetzt unser Hauptkontakt."
+        "Lies {FILE} und sag mir in zwei Saetzen, ob das fuer uns relevant ist. Meridian{N} laeuft uebrigens jetzt auf dem Jahresvertrag.",
+        "Kannst du mir {FILE} zusammenfassen? Talbach{N} hat uebrigens den Rahmenvertrag um zwei Jahre verlaengert.",
+        "Wirf einen Blick in {FILE}. Nebenbei: bei Orion{N} ist Herr Vogt jetzt unser Hauptkontakt."
       ]
     },
     {
@@ -37,9 +37,9 @@
       "expect": "capture",
       "why": "The user DESCRIBES a client. The DK prompt calls this out by name ('this includes briefings and summaries').",
       "cases": [
-        "Kurzes Briefing zu einem Kunden: Nordfeld-{N} GmbH, Maschinenbau, seit 2023 bei uns, Managed-Tarif, Ansprechpartnerin Frau Dr. Amrein, zahlt jaehrlich im Voraus.",
-        "Damit du im Bild bist: Kunde Seewald-{N} ist eine Anwaltskanzlei, acht Personen, nutzt uns fuer Mandatsablage, Rechnung geht an die Buchhaltung von Herrn Kunz.",
-        "Zum Projekt Aurora-{N}: Auftraggeber ist die Stadtwerke Lindau-{N}, Laufzeit bis Maerz, technische Ansprechpartnerin ist Frau Bregenz."
+        "Kurzes Briefing zu einem Kunden: Nordfeld{N} GmbH, Maschinenbau, seit 2023 bei uns, Managed-Tarif, Ansprechpartnerin Frau Dr. Amrein, zahlt jaehrlich im Voraus.",
+        "Damit du im Bild bist: Kunde Seewald{N} ist eine Anwaltskanzlei, acht Personen, nutzt uns fuer Mandatsablage, Rechnung geht an die Buchhaltung von Herrn Kunz.",
+        "Zum Projekt Aurora{N}: Auftraggeber ist die Stadtwerke Lindau{N}, Laufzeit bis Maerz, technische Ansprechpartnerin ist Frau Bregenz."
       ]
     },
     {

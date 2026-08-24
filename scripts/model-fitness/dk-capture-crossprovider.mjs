@@ -43,9 +43,11 @@ const FIRMEN=[['Falkenstein','CHE-118.204.551','04.09.2017','Luzern','85 000'],
               ['Weidmatt','CHE-183.657.024','30.05.2018','Baden','140 000']];
 let CELL=0;
 const nextFact=()=>{const row=FIRMEN[CELL];
-  // The header promises "if you add cells, add facts" and nothing enforced it: one cell past
-  // the list destructured `undefined` and threw mid-sweep, after the config had already been
-  // swapped. Fail with the arithmetic instead.
+  // The header promises "if you add cells, add facts" and nothing enforced it. Today the fit
+  // is exact (3 models x 2 probes = 6 facts), so this path is unreachable — it is the LATENT
+  // fault the promise leaves open, not something that has happened: add a model and the next
+  // cell would destructure `undefined` and throw mid-sweep, after the config was swapped.
+  // Fail with the arithmetic instead of a TypeError.
   if(!row) throw new Error(`nextFact: cell ${CELL+1} has no fact — FIRMEN holds ${FIRMEN.length}, the sweep needs MODELS*PROBES`);
   const [n,uid,d,ort,kap]=row; CELL++;
   return `Die ${freshName(n)} Immobilien AG hat die UID ${freshUid(CELL)} und ist seit dem ${d} im Handelsregister ${ort} eingetragen, Aktienkapital CHF ${kap}.`;};

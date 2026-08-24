@@ -10,37 +10,78 @@ import path from 'node:path';
  * a store that KEEPS it, so its next run measures dedup. Three such probes existed when this
  * was written, and the first sweep for them missed one — because it was drawn over the
  * DIRECTORY `scripts/model-fitness/` while the class is defined by BEHAVIOUR. A control that
- * proves the pattern matches inside a directory does not prove the directory is the right
+ * proves a pattern matches inside a directory does not prove the directory is the right
  * place to look.
  *
- * So this test does not look for a pattern. It ENUMERATES the members from the tree and
- * requires each one to import the shared freshness module — a completeness job rather than a
- * regex, per `memory/fb_fix_per_instance.md`. A new probe joins the set by existing; nobody
- * has to remember the rule.
- *
- * What it deliberately does NOT flag: the route's own definition and its tests (they contain
- * the path because they ARE the path), and clients that expose a run helper without sending a
- * fact of their own — a member is a caller with a fact, not a transport.
+ * ⚠️ WHAT THIS SWEEP IS, stated exactly, because an earlier version of this comment claimed
+ * more than it does. It enumerates files that NAME the run route (or reach it through the
+ * known transport) and requires each to import the shared module. It is a completeness job
+ * over that population — not proof that no probe can hide. **Known gap:** a probe that
+ * assembles the path from constants the sweep cannot see would be invisible. That gap is
+ * narrow today (`RUN_PARTS` matches the path in pieces, so a split literal still trips it)
+ * and it is named here rather than papered over.
  */
 
 const REPO = path.resolve(__dirname, '../..');
 /** Where a probe could plausibly live. Kept wide on purpose — the point is not to guess. */
 const ROOTS = ['scripts', 'tests'];
-/** The route a probe drives. */
-const RUN_ROUTE = /\/api\/sessions\/[^'"`]*\/run|\/api\/sessions\/\$\{[^}]+\}\/run/;
+/**
+ * The route a probe drives, matched in PIECES. A single literal regex missed
+ * `base + '/api/sessions/' + id + '/run'`, which is how a probe written by hand tends to
+ * look; requiring both fragments in one file catches the split form too.
+ */
+const RUN_PARTS = ['/api/sessions', '/run'];
 /** The module every member must import. */
 const FRESHNESS = 'probe-freshness';
 /**
  * The module itself. Its docstring names the route it exists to protect, which makes it
- * match the sweep — a module cannot be its own member. Excluded by path rather than by
- * rewording the docstring: the documentation is right, the sweep just has to say so.
+ * match the sweep — a module cannot be its own member.
  */
 const SELF = 'scripts/model-fitness/probe-freshness.mjs';
 /**
- * Not members. `engine-client.ts` is a transport (an `EngineClient` class with a `run`
- * helper) and carries no fact of its own; its CALLERS are members if they send facts.
+ * A TRANSPORT, not a member: an `EngineClient` class with a `run` helper and no fact of its
+ * own. Its CALLERS are candidates, so importing it puts a file in the sweep — that is how a
+ * probe hiding behind the transport is caught rather than excused.
  */
-const TRANSPORTS = new Set(['scripts/agent-efficiency/engine-client.ts']);
+const TRANSPORT = 'scripts/agent-efficiency/engine-client.ts';
+
+/**
+ * Candidates that are NOT members, each with the reason someone had to write down.
+ *
+ * An allowlist, but not a silent one: a new candidate fails the suite until it is either
+ * given the module or entered here WITH a justification. The failure mode is "somebody has
+ * to think about it", not "it slipped through" — which is the difference between this and
+ * the hand-maintained exclusion the first version had.
+ */
+const NOT_MEMBERS: Readonly<Record<string, string>> = {
+  'scripts/agent-efficiency/measure.ts':
+    'drives the engine through EngineClient but sends no durable fact — every prompt in '
+    + 'scenarios.ts is a question ("Wie wird das Wetter morgen?"), so nothing persists to '
+    + 'dedup against on the next run.',
+};
+
+/**
+ * Exclusions that no longer describe a candidate, plus those with no real reason.
+ *
+ * A pure function on purpose: the previous version inlined this in the `it`, so the only way
+ * to mutate it was to edit the assertion — a circular probe that proves nothing
+ * (`memory/fb_probe_vs_survivor.md`). Extracted, it can be fed synthetic inputs and the
+ * mutation lands on logic instead of on the test.
+ */
+export function badExclusions(
+  notMembers: Readonly<Record<string, string>>,
+  found: readonly string[],
+): string[] {
+  return Object.entries(notMembers)
+    .filter(([rel, why]) => !found.includes(rel) || why.trim().length <= 40)
+    .map(([rel]) => rel)
+    .sort();
+}
+
+/** Does this source actually IMPORT the thing, or merely mention it? */
+export function importsModule(src: string, name: string): boolean {
+  return new RegExp(`(import|require)[^\\n]*${name}`).test(src);
+}
 
 function walk(dir: string, out: string[] = []): string[] {
   let entries: string[];
@@ -54,47 +95,83 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-function members(): string[] {
+function candidates(): string[] {
   const found: string[] = [];
   for (const root of ROOTS) {
     for (const file of walk(path.join(REPO, root))) {
       const rel = path.relative(REPO, file);
-      if (TRANSPORTS.has(rel)) continue;
-      if (rel === SELF || rel.endsWith('probe-freshness-members.test.ts')) continue;
+      if (rel === SELF || rel === TRANSPORT) continue;
+      if (rel.endsWith('probe-freshness-members.test.ts')) continue;
       const src = readFileSync(file, 'utf8');
-      if (RUN_ROUTE.test(src)) found.push(rel);
+      const drivesRoute = RUN_PARTS.every(part => src.includes(part));
+      // Import-anchored, not substring: `tests/contract-env.test.ts` merely NAMES
+      // `engine-client-pair-boot.test.ts` in a comment and a bare `includes` swept it in.
+      const usesTransport = importsModule(src, path.basename(TRANSPORT, '.ts'));
+      if (drivesRoute || usesTransport) found.push(rel);
     }
   }
   return found.sort();
 }
 
+/** Candidates minus the ones someone has classified out, with a reason, in NOT_MEMBERS. */
+function members(): string[] {
+  return candidates().filter(rel => !(rel in NOT_MEMBERS));
+}
+
 describe('probe fact freshness — every engine-facing probe is a member', () => {
-  it('finds the probes at all (the sweep is not looking at an empty tree)', () => {
-    // The control the first sweep lacked. Without it, a wrong root or a broken pattern
-    // reports "every member complies" by finding none — the reassuring shape of a blind
-    // query (`memory/fb_grep_ist_blind.md`).
-    const found = members();
-    expect(found.length).toBeGreaterThanOrEqual(3);
-    expect(found).toContain('scripts/model-fitness/dk-capture-repro.mjs');
-    expect(found).toContain('scripts/model-fitness/dk-capture-crossprovider.mjs');
-    expect(found).toContain('tests/eval/capture-fitness-runner.mjs');
+  it('names every CANDIDATE it found, so a shrunken sweep is visible and not silent', () => {
+    // The control the first sweep lacked. A wrong root or a broken pattern reports full
+    // compliance by finding nothing — the reassuring shape of a blind query
+    // (`memory/fb_grep_ist_blind.md`). An exact list, not a `>=` bound: an earlier version
+    // asserted `length >= 3` beside three `toContain`s, which cannot fail once they pass.
+    expect(candidates()).toEqual([
+      'scripts/agent-efficiency/measure.ts',
+      'scripts/model-fitness/dk-capture-crossprovider.mjs',
+      'scripts/model-fitness/dk-capture-repro.mjs',
+      'tests/eval/capture-fitness-runner.mjs',
+    ]);
   });
 
-  it('requires every member to import the shared freshness module', () => {
+  it('requires every member to import the shared module, and names the ones that do not', () => {
     const offenders = members().filter(
-      rel => !readFileSync(path.join(REPO, rel), 'utf8').includes(FRESHNESS),
+      rel => !importsModule(readFileSync(path.join(REPO, rel), 'utf8'), FRESHNESS),
     );
     // Named, not counted: a new probe should read WHICH file it forgot, not a number.
     expect(offenders).toEqual([]);
   });
 
-  it('rejects a would-be member that only pretends to import it', () => {
-    // The mutation this test must survive is "someone writes the module name in a comment".
-    // Membership is about the IMPORT, so the check is anchored on the statement, not the word.
-    const importing = members().filter(rel => {
-      const src = readFileSync(path.join(REPO, rel), 'utf8');
-      return new RegExp(`(import|require)[^\\n]*${FRESHNESS}`).test(src);
-    });
-    expect(importing.sort()).toEqual(members());
+  it('rejects a STALE exclusion — an entry that is no longer a candidate', () => {
+    // Without this the allowlist rots the way every hand-maintained list rots: the file is
+    // renamed or stops driving the engine, the entry stays, and the next reader believes a
+    // decision was made about something that is no longer there.
+    expect(badExclusions(NOT_MEMBERS, candidates())).toEqual([]);
+  });
+
+  it('CATCHES a stale entry and a reasonless one — the check proving it can say no', () => {
+    // Fed synthetic inputs, so the mutation lands on `badExclusions` rather than on an
+    // assertion. Without this the rule above passes for an empty rule set as readily as for
+    // a correct one.
+    const real = 'scripts/x.ts';
+    const reason = 'a'.repeat(41);
+    expect(badExclusions({ [real]: reason }, [real])).toEqual([]);
+    expect(badExclusions({ 'scripts/gone.ts': reason }, [real])).toEqual(['scripts/gone.ts']);
+    expect(badExclusions({ [real]: 'because' }, [real])).toEqual([real]);
+  });
+
+  it('FIRES on a file that only mentions the module in a comment', () => {
+    // The detector proving it can say no. Without this, an empty needle passes every
+    // assertion above — the check would be vacuous and look thorough (verified: it did).
+    expect(importsModule('// see probe-freshness.mjs for why\nconst x = 1;', FRESHNESS)).toBe(false);
+    expect(importsModule('const s = "probe-freshness";', FRESHNESS)).toBe(false);
+    expect(importsModule("import { runToken } from './probe-freshness.mjs';", FRESHNESS)).toBe(true);
+    expect(importsModule("const m = require('../probe-freshness.mjs');", FRESHNESS)).toBe(true);
+  });
+
+  it('treats a caller of the transport as a candidate, not as exempt', () => {
+    // A probe can reach the engine through `EngineClient` and never name the route. The
+    // sweep must not let that hide — this pins the rule rather than the current file list.
+    const viaTransport = 'import { EngineClient } from "../agent-efficiency/engine-client.js";';
+    expect(RUN_PARTS.every(p => viaTransport.includes(p))).toBe(false);
+    expect(importsModule(viaTransport, path.basename(TRANSPORT, '.ts'))).toBe(true);
   });
 });

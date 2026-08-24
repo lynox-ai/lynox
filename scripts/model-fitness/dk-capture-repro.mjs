@@ -41,6 +41,10 @@ async function api(path, init) {
   return fetch(`${BASE}${path}`, { ...init, headers: { ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : { Cookie: `lynox_session=${COOKIE}` }), ...(init?.body ? {'Content-Type':'application/json'} : {}), ...init?.headers } });
 }
 
+// Whether any cell has already written this run's fact. A dedup before this is true means
+// freshness failed; after it, it is the intended A->B restatement.
+let sentFact = false;
+
 (async () => {
   for (const p of PROBES) {
     const s = await (await api('/api/sessions', { method: 'POST', body: JSON.stringify({ source: 'user' }) })).json();
@@ -60,14 +64,21 @@ async function api(path, init) {
     // the search, C is a clean turn, lands active, and can dedup against A: the cell then
     // measures something else while looking like itself. Checked, not assumed.
     const webRan = tools.includes('web_research');
-    // Freshness is the guarantee; this only says when it failed (see `sawDedup`).
+    // A dedup is only a FRESHNESS failure on the first cell to send this fact. A/B/C send
+    // the same fact on purpose (that is the control), so B and C dedup against A by design
+    // on every run, in every version of this script. Flagging those would make the tripwire
+    // fire always — and a signal that always fires is not a signal.
     const deduped = results.some(sawDedup);
+    const firstSender = sentFact === false;
+    if (remembered > 0) sentFact = true;
     console.log(JSON.stringify({
       probe: p.key, run: runToken(), timedOut,
       model: (exp.runs?.[0]?.model_id || '?').split('/').pop(),
       remember: remembered, tools: [...new Set(tools)],
       ...(p.key === 'C-research' ? { webRan, cellValid: webRan && !timedOut } : {}),
-      ...(deduped ? { DEDUPED: true } : {}),
+      ...(deduped ? (firstSender
+        ? { DEDUPED: true, note: 'freshness failed — this run met an older active row' }
+        : { dedupExpected: true }) : {}),
       rememberResult: results, text,
     }, null, 1));
   }

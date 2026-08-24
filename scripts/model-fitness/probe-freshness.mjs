@@ -33,11 +33,14 @@
  * freshness, not a cell — `dk-capture-repro` deliberately sends the SAME fact through three
  * prompt conditions, and per-cell tokens would destroy that control).
  *
- * Base36 of the clock, upper-cased: short, readable in a company name, and monotonic enough
- * that two runs in the same second are the only collision — which the store would then
- * dedup, and `sawDedup()` below reports rather than hides.
+ * RANDOM, not clock-derived, and that is the whole point of the choice. The first version
+ * took the last four base36 digits of `Date.now()`, i.e. milliseconds mod 36⁴ — a period of
+ * **28 minutes**. Two runs half an hour apart drew the same token and dedup'd each other,
+ * which is precisely the failure this module exists to prevent, dressed as a fix. Six random
+ * base36 characters have no period; the residual is a ~1-in-2·10⁹ birthday collision, and
+ * `sawDedup()` below reports it rather than hiding it.
  */
-const TOKEN = Date.now().toString(36).slice(-4).toUpperCase();
+const TOKEN = Math.random().toString(36).slice(2, 8).padEnd(6, '0').toUpperCase();
 
 /** The run token, exported so a probe can print it beside its results. */
 export function runToken() {
@@ -45,11 +48,23 @@ export function runToken() {
 }
 
 /**
- * A per-run company name. `Falkenstein` → `Falkenstein-K7Q2`.
- * The suffix is part of the NAME on purpose: it is what makes the subject new.
+ * A per-run company name. `Falkenstein` → `FalkensteinK7Q2X`.
+ *
+ * NO SEPARATOR, and this is load-bearing rather than cosmetic. `KnowledgeStore._mentions`
+ * matches a subject name when it is not flanked by an ALPHANUMERIC character on either side,
+ * so `Talbach-K7Q2` still counts as a mention of a pre-existing subject `Talbach` — a hyphen
+ * is not alnum. The old subject can then be re-attached to the write and its rows are back in
+ * the dedup candidate set. Joining the token directly puts a letter on the boundary, the
+ * match fails, and the escape rests on the candidate set itself instead of on whichever
+ * heuristic happened to save it.
+ *
+ * (Measured before this was understood: a two-word base like `Nordberg Treuhand AG` survived
+ * the hyphen anyway, because the nonce lands mid-needle and breaks the full name. Single-word
+ * bases — `Talbach`, `Orion`, `Meridian` — did not. A fix that works for one shape of input
+ * and not another is not a fix.)
  */
 export function freshName(base) {
-  return `${base}-${TOKEN}`;
+  return `${base}${TOKEN}`;
 }
 
 /**
