@@ -41,7 +41,8 @@ import { pathToFileURL } from 'node:url';
 import Database from 'better-sqlite3';
 import { getLynoxDir, setDataDir } from '../core/config.js';
 import { EngineDb } from '../core/engine-db.js';
-import { SubjectStore, personNameTokens, isPersonSubsetSafe } from '../core/subject-store.js';
+import { SubjectStore, personNameTokens, isPersonSubsetSafe, makeSubjectExternalRefs } from '../core/subject-store.js';
+import type { SubjectExternalRefs } from '../core/subject-store.js';
 import { DataStore } from '../core/data-store.js';
 import { ThreadStore } from '../core/thread-store.js';
 import { SQLITE_BUSY_TIMEOUT_MS } from '../core/sqlite-constants.js';
@@ -52,12 +53,13 @@ import { isCleanupTarget, isJunkPersonShape } from '../core/kg-stopwords.js';
 // Re-exported so this script's API surface (its tests + callers) keeps one import site.
 export type { MergeLedgerFile } from '../core/subject-merge-runner.js';
 
-export interface Args { apply: boolean; json: boolean; dataDir: string | null; rollback: string | null; merge: string | null }
+export interface Args { apply: boolean; json: boolean; dataDir: string | null; rollback: string | null; merge: string | null; orphans: boolean }
 
 export function parseArgs(argv: string[]): Args {
-  const args: Args = { apply: false, json: false, dataDir: null, rollback: null, merge: null };
+  const args: Args = { apply: false, json: false, dataDir: null, rollback: null, merge: null, orphans: false };
   for (const a of argv) {
     if (a === '--apply') args.apply = true;
+    else if (a === '--orphans') args.orphans = true;
     else if (a === '--json') args.json = true;
     else if (a.startsWith('--data-dir=')) args.dataDir = a.slice('--data-dir='.length);
     else if (a.startsWith('--rollback=')) args.rollback = a.slice('--rollback='.length);
@@ -73,6 +75,7 @@ function printHelp(): void {
     'Subject garbage-sweep — archive junk (slice 1) + dedup person subsets (slice 2).\n' +
     '  (no flag)             dry-run: report junk candidates + person subset-merge pairs\n' +
     '  --apply               archive junk + write a rollback ledger\n' +
+    '  --orphans             dry-run: list subjects NOTHING references (the reap\'s own oracle)\n' +
     '  --merge=DUP:CANON     merge a confirmed subset pair (dup → canonical) + write a ledger\n' +
     '  --json                machine-readable output\n' +
     '  --rollback=PATH       restore from an archive OR merge ledger (phase-aware)\n' +
@@ -189,15 +192,79 @@ export function rollbackMergeFile(engineDb: EngineDb, dataDir: string, file: Mer
   }
 }
 
-/** Read the set of subject ids that are a thread anchor in history.db (read-only). */
-export function readThreadAnchorIds(historyDbPath: string): Set<string> {
+/**
+ * Read the set of subject ids that are a thread anchor in history.db (read-only), or `null`
+ * when the question cannot be ANSWERED — which is not the same as "no anchors".
+ *
+ * The distinction is the guard: a thread anchor is the one holder that lives OUTSIDE engine.db,
+ * so a swallowed read error here reads as "nothing is anchored" and the archive phase would
+ * archive a subject a live thread still points at. Two cases are genuine answers and stay empty:
+ * an ABSENT history.db (an instance with no threads has no anchors) and a pre-v46 schema without
+ * the column (the feature did not exist, so nothing can be anchored). Every other failure — a
+ * locked database, an I/O error, a corrupt file — is unanswerable and must fail CLOSED, matching
+ * `makeSubjectExternalRefs`, which treats a throwing probe as "referenced" on this same axis.
+ */
+export function readThreadAnchorIds(historyDbPath: string): Set<string> | null {
   if (!existsSync(historyDbPath)) return new Set();
-  const hdb = new Database(historyDbPath, { readonly: true });
+  let hdb: Database.Database | null = null;
   try {
+    hdb = new Database(historyDbPath, { readonly: true });
     const rows = hdb.prepare("SELECT DISTINCT primary_subject_id id FROM threads WHERE primary_subject_id IS NOT NULL").all() as Array<{ id: string }>;
     return new Set(rows.map(r => r.id));
-  } catch { return new Set(); }   // pre-v46 history.db lacks the column
-  finally { hdb.close(); }
+  } catch (err: unknown) {
+    // Narrow, on the message SQLite itself produces: a missing column/table is the pre-v46
+    // shape and is an answer; anything else is an outage and must not look like one.
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/no such column|no such table/i.test(msg)) return new Set();
+    process.stderr.write(`[subject-sweep] thread-anchor read failed — cannot tell whether a thread still holds a subject: ${msg}\n`);
+    return null;
+  } finally {
+    try { hdb?.close(); } catch { /* best-effort */ }
+  }
+}
+
+/** One row of the `--orphans` report: a subject the reference oracle finds unheld. */
+export interface OrphanRow { id: string; kind: string; name: string; createdAt: string; archivedAt: string | null; mergedInto: string | null }
+
+/**
+ * Plan the ORPHAN phase (side-effect-free): every subject {@link SubjectStore.referenceReason}
+ * finds unreferenced — the backlog no at-erase reap can reach (DEF-orphan-subjects-prod-backlog:
+ * after the cascade the junction is gone, so "minted by a deleted memory" and "created by a tool,
+ * not yet linked" are indistinguishable AT the delete; only a standing sweep can see them).
+ *
+ * The oracle is IMPORTED, never re-derived — the whole point of the row. Two consequences worth
+ * stating because they look like bugs otherwise:
+ *  - ARCHIVED subjects are included. `archived_at` is not a reference (the row still carries the
+ *    plaintext name), and on the measured instance 20 of 103 orphans were archived.
+ *  - A merge shell (`merged_into` set) can come back unheld: its links were repointed onto the
+ *    canonical. It is REPORTED WITH that pointer rather than filtered, because `reapOrphans`
+ *    takes a canonical and its shells as ONE closure — deciding a shell's fate on its own is a
+ *    judgement for the apply phase, not something a report should quietly make.
+ */
+export function planOrphans(engineDb: EngineDb, external: SubjectExternalRefs): OrphanRow[] {
+  const store = new SubjectStore(engineDb);
+  const rows = engineDb.getDb().prepare(
+    'SELECT id, kind, name, created_at, archived_at, merged_into FROM subjects ORDER BY created_at',
+  ).all() as Array<{ id: string; kind: string; name: string; created_at: string; archived_at: string | null; merged_into: string | null }>;
+  const out: OrphanRow[] = [];
+  for (const r of rows) {
+    if (store.referenceReason(r.id, external) !== null) continue;
+    out.push({ id: r.id, kind: r.kind, name: r.name, createdAt: r.created_at, archivedAt: r.archived_at, mergedInto: r.merged_into });
+  }
+  return out;
+}
+
+/**
+ * Build the cross-DB oracle for the sweep, or `null` when either live store is missing.
+ * `null` must ABORT the orphan report rather than degrade it: an unanswerable probe means
+ * "referenced" everywhere, so a report produced without the stores would list subjects a
+ * thread or a record still holds — the one error this phase must not make. Same fail-closed
+ * rule as the engine path, from the same factory.
+ */
+function openOrphanOracle(threadStore: ThreadStore | null, ds: DataStore | null): SubjectExternalRefs | null {
+  return makeSubjectExternalRefs(threadStore, ds, (probe, err) => {
+    process.stderr.write(`[subject-sweep] ${probe} probe failed — subjects are treated as REFERENCED while it fails: ${err instanceof Error ? err.message : String(err)}\n`);
+  });
 }
 
 /** Why (if at all) an isCleanupTarget subject must NOT be archived — human-review signal. */
@@ -214,8 +281,72 @@ function blockReason(db: Db, s: SubjectRow, threadAnchors: ReadonlySet<string>):
   if (db.prepare('SELECT 1 FROM organizations WHERE subject_id = ? AND (domain IS NOT NULL OR vat_id IS NOT NULL) LIMIT 1').get(s.id)) return 'has-org-detail';
   if (db.prepare('SELECT 1 FROM products WHERE subject_id = ? AND (sku IS NOT NULL OR price_cents IS NOT NULL) LIMIT 1').get(s.id)) return 'has-product-detail';
   if (db.prepare('SELECT 1 FROM services WHERE subject_id = ? AND hourly_rate_cents IS NOT NULL LIMIT 1').get(s.id)) return 'has-service-detail';
+  // The holders below are NOT the memory axis and were missing until DEF-subject-sweep-oracle-
+  // duplicate: a junk-NAMED subject that carries a durable-knowledge entry, a real relationship
+  // edge, or a merge redirect pointing at it is not junk — archiving it would break a live
+  // structure. A self-loop relationship is the residue of merging two related subjects and
+  // describes nothing but the subject itself, so it is not a holder (same rule as
+  // `SubjectStore.referenceReason`).
+  if (db.prepare('SELECT 1 FROM knowledge_entries WHERE subject_id = ? LIMIT 1').get(s.id)) return 'referenced-by-knowledge_entries';
+  if (db.prepare('SELECT 1 FROM relationships WHERE (from_subject_id = ? OR to_subject_id = ?) AND from_subject_id <> to_subject_id LIMIT 1').get(s.id, s.id)) return 'referenced-by-relationships';
+  if (db.prepare('SELECT 1 FROM subjects WHERE merged_into = ? LIMIT 1').get(s.id)) return 'merge-target';
   return null;
 }
+
+/**
+ * How the ARCHIVE phase treats every column the reference oracle counts
+ * ({@link subjectReferenceCoverage}) — the guard behind DEF-subject-sweep-oracle-duplicate.
+ *
+ * The two oracles answer DIFFERENT questions and must not be collapsed into one:
+ * `referenceReason` asks "does anything hold this row?", `blockReason` asks "is this junk NAME
+ * in truth a real entity?". Junk subjects are minted BY memories, so the memory axis holds
+ * nearly every archive candidate — delegating wholesale would block the entire phase (the
+ * archive step NULLs those very primaries, see `executeArchive`). What the two DO owe each
+ * other is completeness: every counted column is classified here, so the day a new table gets
+ * a `subject_id` it cannot be silently invisible to the sweep.
+ */
+export const SWEEP_REFERENCE_PARTITION: {
+  probed: Readonly<Record<string, string>>;
+  memoryAxis: Readonly<Record<string, string>>;
+  viaLiveStore: Readonly<Record<string, string>>;
+} = {
+  /** Probed by {@link blockReason} — a hit BLOCKS the archive. */
+  probed: {
+    'tasks.subject_id': 'a task about it',
+    'tasks.assignee_subject_id': 'a task assigned to it',
+    'triggers.subject_id': 'a trigger watching it',
+    'connections.subject_id': 'a connection bound to it',
+    'artifacts.subject_id': 'an artifact filed under it',
+    'engagements.provider_subject_id': 'it provides an engagement',
+    'engagements.client_subject_id': 'it is an engagement client',
+    'subjects.parent_id': 'it still has active children',
+    'knowledge_entries.subject_id': 'a durable-knowledge fact is filed against it',
+    'relationships.from_subject_id': 'a real outgoing edge (self-loops are merge residue, not holders)',
+    'relationships.to_subject_id': 'a real incoming edge (self-loops are merge residue, not holders)',
+    'subjects.merged_into': 'a merged-away duplicate redirects onto it',
+  },
+  /**
+   * NOT probed — and each entry states WHY, because an exception list without a reason per
+   * entry becomes the convenient drawer for the next column somebody does not feel like
+   * checking. Both entries share one reason: the archive phase exists to retire junk that the
+   * old extractor MINTED FROM MEMORIES, so treating a memory as a holder would block the phase
+   * against its own purpose — `executeArchive` NULLs exactly these primaries on the way out.
+   * The behavioural guard is live in both directions: a test fails if the memory axis starts
+   * blocking (`the memory axis does NOT block the archive`).
+   */
+  memoryAxis: {
+    'memories.subject_id': 'the junk subject IS the primary of the memory that minted it; the archive NULLs this pointer by design',
+    'memory_subjects.subject_id': 'the junction that links minted junk to its memories; counting it would block nearly every candidate',
+  },
+  /**
+   * Answered from the LIVE store, not from this engine.db column — and fail-CLOSED when that
+   * store cannot answer (see {@link readThreadAnchorIds}), because a swallowed read error on a
+   * holder that lives outside engine.db reads as "nothing is anchored".
+   */
+  viaLiveStore: {
+    'threads.primary_subject_id': "engine.db's threads table is an empty mirror pre-S2; the live anchors are in history.db",
+  },
+};
 
 /** Build the archive plan (side-effect-free): candidates, blocked rows, escaped slashes. */
 export function planArchive(engineDb: EngineDb, threadAnchors: ReadonlySet<string>): ArchivePlan {
@@ -350,7 +481,52 @@ export function main(): void {
         : `[subject-sweep] MERGED ${dupId} → ${canonicalId} (${r.dataStoreRows} datastore cells, ${r.threadRows} thread anchors repointed). Ledger: ${r.ledgerPath}\n`);
       return;
     }
+    if (args.orphans) {
+      // The apply half is DECIDED (hard-delete via `SubjectStore.reapOrphans`, matching the
+      // at-erase reap — archiving would leave the plaintext name behind, so the backlog would
+      // not actually reach zero) but deliberately NOT shipped in this change: a delete needs a
+      // before-image ledger whose restore is verified to put the STATE back in force, not
+      // merely to re-insert rows. That is its own change with its own review. Refusing loudly
+      // beats shipping the half someone would then run against a tenant.
+      if (args.apply) {
+        process.stderr.write('[subject-sweep] --orphans --apply is not built yet: the delete phase lands with its before-image ledger in a separate change. This flag reports only.\n');
+        process.exitCode = 2;
+        return;
+      }
+      const dsPath = join(dir, 'datastore.db');
+      let ds: DataStore | null = null;
+      let historyDb: Database.Database | null = null;
+      try {
+        ds = existsSync(dsPath) ? new DataStore(dsPath) : null;
+        const t = openThreadStore(dir);
+        historyDb = t.historyDb;
+        const external = openOrphanOracle(t.threadStore, ds);
+        if (!external) {
+          // Fail-closed, and it must reach a SCRIPT, not only a human: an empty orphan list
+          // and an unanswerable oracle look identical on stdout.
+          process.stderr.write(`[subject-sweep] ORPHANS refused: need both history.db and datastore.db in ${dir} to answer "is anything holding this subject".\n`);
+          process.exitCode = 1;
+          return;
+        }
+        const orphans = planOrphans(engineDb, external);
+        process.stdout.write(args.json ? JSON.stringify({ mode: 'orphans', count: orphans.length, orphans }) + '\n'
+          : `[subject-sweep] ORPHANS (dry-run) — ${orphans.length} subject(s) nothing references.\n` +
+            orphans.map(o => `  ${o.name} [${o.kind}] created ${o.createdAt}` +
+              (o.archivedAt ? ' (archived)' : '') + (o.mergedInto ? ` (merge shell → ${o.mergedInto})` : '') + '\n').join(''));
+      } finally {
+        try { ds?.close(); } catch { /* best-effort */ }
+        try { historyDb?.close(); } catch { /* best-effort */ }
+      }
+      return;
+    }
     const threadAnchors = readThreadAnchorIds(join(dir, 'history.db'));
+    if (!threadAnchors) {
+      // Fail-closed: without the anchor answer the archive phase could archive a subject a
+      // live thread still points at, and a dry-run would under-report the blocked set.
+      process.stderr.write('[subject-sweep] refused: history.db exists but its thread anchors could not be read.\n');
+      process.exitCode = 1;
+      return;
+    }
     const plan = planArchive(engineDb, threadAnchors);
     if (!args.apply) {
       // Slice-2 CONFIRM class: report person subset pairs (report-only, never auto-merged).

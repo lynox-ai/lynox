@@ -416,6 +416,38 @@ export interface SubjectExternalRefs {
   hasRecords(subjectId: string): boolean;
 }
 
+/** The one method {@link makeSubjectExternalRefs} needs from a history.db thread store. */
+export interface ThreadAnchorProbe { listBySubjectId(subjectId: string, limit?: number): readonly unknown[] }
+/** The one method {@link makeSubjectExternalRefs} needs from a datastore.db record store. */
+export interface RecordProbe { hasRecordsForSubject(subjectId: string): boolean }
+
+/**
+ * Build the cross-DB half of the reference oracle from the two live stores, or `null` when
+ * either is missing — `null` means the caller must NOT reap (fail-closed: a missing probe is
+ * not an absent reference). Structural parameter types on purpose: `SubjectStore` sits BELOW
+ * `ThreadStore`/`DataStore`, so naming those classes here would invert the layering. Both the
+ * engine path ({@link KnowledgeLayer}) and the operator sweep (`src/scripts/subject-sweep.ts`)
+ * build their oracle HERE — the fail-closed rule below is security logic, and a second copy of
+ * it is exactly the drift this factory exists to prevent.
+ *
+ * A probe that THROWS answers `true` (referenced) and reports once via `onProbeFailure`: a
+ * permanently failing probe (a pre-v46 history.db without the anchor column, a locked
+ * datastore) keeps every subject forever, which is indistinguishable from a real holder unless
+ * it is said out loud. Keeping a name is today's state; erasing a live anchor is new damage.
+ */
+export function makeSubjectExternalRefs(
+  threads: ThreadAnchorProbe | null,
+  records: RecordProbe | null,
+  onProbeFailure?: (probe: string, err: unknown) => void,
+): SubjectExternalRefs | null {
+  if (!threads || !records) return null;
+  const keptOnFailure = (probe: string, err: unknown): true => { onProbeFailure?.(probe, err); return true; };
+  return {
+    isThreadAnchor: (id) => { try { return threads.listBySubjectId(id, 1).length > 0; } catch (err: unknown) { return keptOnFailure('thread-anchor', err); } },
+    hasRecords: (id) => { try { return records.hasRecordsForSubject(id); } catch (err: unknown) { return keptOnFailure('record', err); } },
+  };
+}
+
 /**
  * The complete before-image of ONE merge — enough to reverse it byte-for-byte.
  * Captured read-only by {@link SubjectStore.planMerge} BEFORE any mutation, so the

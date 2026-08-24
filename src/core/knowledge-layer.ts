@@ -31,7 +31,7 @@ import type { DataStore } from './data-store.js';
 import { KpiEngine } from './kpi-engine.js';
 import type { RunHistory } from './run-history.js';
 import type { EngineDb } from './engine-db.js';
-import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS, isAmbiguousResolution } from './subject-store.js';
+import { SubjectStore, entityTypeToSubjectKind, subjectKindToEntityType, ENTITY_MAPPABLE_SUBJECT_KINDS, isAmbiguousResolution, makeSubjectExternalRefs } from './subject-store.js';
 import type { SubjectRow, SubjectExternalRefs } from './subject-store.js';
 import { RelationshipStore } from './relationship-store.js';
 import type { RelationshipRow } from './relationship-store.js';
@@ -794,25 +794,17 @@ export class KnowledgeLayer implements IKnowledgeLayer {
    * the erase or over-erase; it only keeps the subject.
    */
   private _subjectExternalRefs(): SubjectExternalRefs | null {
-    const threads = this._getAnchorThreadStore();
-    const records = this._recordStore;
-    if (!threads || !records) return null;
-    // A probe that throws answers "referenced" — and says so once per layer, because a
-    // permanently failing probe (a pre-v46 history.db, a locked datastore) keeps every
-    // subject forever and would otherwise be indistinguishable from a real holder.
-    const keptOnFailure = (probe: string, err: unknown): true => {
-      if (!this._oracleFailWarned) {
-        this._oracleFailWarned = true;
-        process.stderr.write(
-          `[lynox:subject-reap] ${probe} probe failed — subjects are KEPT while it fails: ${err instanceof Error ? err.message : String(err)}\n`,
-        );
-      }
-      return true;
-    };
-    return {
-      isThreadAnchor: (id) => { try { return threads.listBySubjectId(id, 1).length > 0; } catch (err: unknown) { return keptOnFailure('thread-anchor', err); } },
-      hasRecords: (id) => { try { return records.hasRecordsForSubject(id); } catch (err: unknown) { return keptOnFailure('record', err); } },
-    };
+    // The probes themselves live in `subject-store.ts` so the operator sweep builds its
+    // oracle from the same factory; what stays here is only WHERE the warning goes —
+    // once per layer instance, because a permanently failing probe keeps every subject
+    // forever and would otherwise be indistinguishable from a real holder.
+    return makeSubjectExternalRefs(this._getAnchorThreadStore(), this._recordStore, (probe, err) => {
+      if (this._oracleFailWarned) return;
+      this._oracleFailWarned = true;
+      process.stderr.write(
+        `[lynox:subject-reap] ${probe} probe failed — subjects are KEPT while it fails: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    });
   }
 
   /**
