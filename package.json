@@ -52,7 +52,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
     "dev": "node --env-file-if-exists=.env --watch --import tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
