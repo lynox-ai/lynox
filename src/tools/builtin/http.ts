@@ -63,7 +63,7 @@ function friendlyBlockMessage(technical: string): string {
 /**
  * A block the agent must READ — recorded in the ledger as a failure all the same.
  *
- * ## Why every block in this handler throws instead of returning
+ * ## Why a returned block became a thrown one
  *
  * The handler declines a request in fourteen places and RETURNED the refusal as
  * an ordinary string, because the model has to read it and adapt (retry another
@@ -88,16 +88,27 @@ function friendlyBlockMessage(technical: string): string {
  * NOT marked `is_error` — while the reason lands in `output_json`, where the
  * counter can see it.
  *
- * ## The rule for a fourteenth block
+ * What changes is the ledger and the diagnostics channel, not the conversation:
+ * `toolEnd` now publishes `success: false` for a refused call, which flips the
+ * Bugsink breadcrumb and the debug line. Both are operator surfaces, and both
+ * were previously as wrong as the ledger.
+ *
+ * ## The rule for a fifteenth block
  *
  * Throw, never return. The payload argument must be the string the caller would
  * otherwise have returned, so what the model reads does not change; that is what
  * keeps this an observability fix rather than a behaviour change in disguise.
  *
+ * Not every refusal goes through here, and that is deliberate: the `catch` at
+ * the bottom of the handler re-throws a network-layer block as an ordinary
+ * `Error`, which the agent loop already books as a failure and shows the model
+ * as `is_error`. Only the paths that RETURNED were silent, so only they moved.
+ *
  * The `technical` reason is what an operator needs and the friendly text
- * deliberately withholds: which rule fired, and on which host. It is safe to
- * record because `agent.ts` masks it through `maskSecrets` and bounds it before
- * persisting, and because the input row beside it already carries the same URL.
+ * deliberately withholds: which rule fired, and — where the rule is
+ * host-specific — on which host. It is safe to record because `agent.ts` masks
+ * it through `maskSecrets` and bounds it before persisting, and because the
+ * input row beside it already carries the same URL.
  */
 function blockedFriendly(technical: string): never {
   throw new ToolSoftFailure(friendlyBlockMessage(technical), technical);
@@ -1109,6 +1120,19 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const profileWarning = (input as unknown as Record<string, unknown>)['_profileWarning'];
       return profileWarning ? `${wrapped}\n\n${String(profileWarning)}` : wrapped;
     } catch (err: unknown) {
+      // A soft failure leaves untouched. `ToolSoftFailure` extends Error with
+      // the REASON as its message, and `blockedFriendly`'s reason starts with
+      // "Blocked:" — so the branch two lines down would match it, re-wrap it as
+      // an ordinary Error, and run `friendlyBlockMessage` over an already
+      // friendly string. The refusal would arrive as `is_error` with a
+      // double-mapped message, i.e. a behaviour change, silently.
+      //
+      // No refusal site is inside this try today (all fourteen are above line
+      // 900). This exists because `blockedFriendly`'s doc comment tells the next
+      // person to throw rather than return, and following that rule HERE would
+      // otherwise be the trap. A rule that is safe only outside one region of
+      // the file needs the region to enforce it, not the reader to remember.
+      if (err instanceof ToolSoftFailure) throw err;
       if (err instanceof Error && err.name === 'AbortError') {
         throw new Error(`HTTP request timed out after ${timeoutMs}ms`);
       }

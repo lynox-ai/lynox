@@ -3272,8 +3272,21 @@ export class Agent implements IAgent {
       const softMaskedFull = softRaw !== null && this.secretStore
         ? this.secretStore.maskSecrets(softRaw)
         : softRaw;
-      const softMasked = softMaskedFull !== null
-        ? softMaskedFull.slice(0, Agent.MAX_LEDGER_REASON_CHARS)
+      // …and flattened, for the same reason the bound exists: the row beside it
+      // is `JSON.stringify`d and therefore escapes control characters, while
+      // this field is written raw. A reason that interpolates tool input can
+      // carry the model's own CRLF into `tool_calls.output_json`, the debug
+      // export and the `toolEnd` breadcrumb — all line-oriented readers — which
+      // makes a forged ledger line writable from a tool argument. `http_request`
+      // reports a refused header BY NAME, and a header name is model-chosen, so
+      // this is reachable, not theoretical. Replace rather than strip: a reason
+      // that silently loses characters is harder to read than one that shows
+      // where they were. (Security round, 2026-08-24.)
+      const softFlat = softMaskedFull !== null
+        ? softMaskedFull.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ')
+        : null;
+      const softMasked = softFlat !== null
+        ? softFlat.slice(0, Agent.MAX_LEDGER_REASON_CHARS)
         : null;
       this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null);
       channels.toolEnd.publish(

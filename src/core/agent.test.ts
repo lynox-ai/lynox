@@ -2510,6 +2510,43 @@ describe('Agent', () => {
       expect(row!.isError).toBe(true);
     });
 
+    it('flattens control characters, so a tool argument cannot forge a ledger line', async () => {
+      // The row's `input_json` neighbour is `JSON.stringify`d and therefore
+      // escapes CRLF; this field is written raw. `http_request` reports a
+      // refused header BY NAME and a header name is model-chosen, so a reason
+      // built from tool input can carry the model's own newlines into
+      // `tool_calls.output_json`, the debug export and the `toolEnd`
+      // breadcrumb — all read line by line. Asserted on the WRITER, because it
+      // is the one place that covers every soft-failure tool including the ones
+      // not written yet.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string };
+      const recorded: RecordedCall[] = [];
+      const forged = "Blocked: header 'X\r\n2026-01-01 tool=bash status=ok\u2028' is invalid";
+      const tool = makeTool('crlf_tool', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('payload', forged),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'cr1', name: 'crlf_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-crlf-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'crlf_tool');
+      expect(row).toBeDefined();
+      expect(row!.outputJson, 'no line break may survive into the row').not.toMatch(/[\r\n\u2028\u2029]/);
+      // The content stays readable — flattened, not silently dropped. A reason
+      // that loses characters is harder to read than one that shows the gap.
+      expect(row!.outputJson).toContain('tool=bash status=ok');
+      expect(row!.outputJson.length).toBe(forged.length);
+    });
+
     it('masks BEFORE truncating, so a cut cannot leave a secret tail exposed', async () => {
       // Order matters: truncate-then-mask would slice a credential in half and
       // hand the masker a fragment its pattern no longer matches, persisting the

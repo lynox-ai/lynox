@@ -2882,11 +2882,19 @@ describe('http_request tool description — the session cap is stated, not disco
  * TRANSPORT — every other block assertion goes through `visible()`, which
  * unwraps it by design and would survive the revert.
  *
- * What it still cannot do: notice a FIFTEENTH refusal added as a plain
- * `return`. Nothing cheap can — `friendlyBlockMessage` is not the only funnel
- * (nine of these fourteen phrase themselves) and a source-level count would be
- * theatre. The rule is written where a new refusal is written instead: see
- * `blockedFriendly` in http.ts.
+ * What it still cannot do, stated so nobody reads more into it:
+ *
+ *  - It does not notice a FIFTEENTH refusal added as a plain `return`. Nothing
+ *    cheap can — `friendlyBlockMessage` is not the only funnel (nine of these
+ *    fourteen phrase themselves) and a source-level count would be theatre. The
+ *    rule is written where a new refusal is written instead: see
+ *    `blockedFriendly` in http.ts.
+ *  - It stops at the throw. Nothing here drives throw → `agent.ts` →
+ *    `output_json` → `error_count`; that chain holds by COMPOSITION with
+ *    `agent.test.ts`'s "ToolSoftFailure — completed but not successful", whose
+ *    fixtures are tool-agnostic and therefore cover `http_request` without
+ *    naming it. Composition is a weaker claim than an end-to-end test, and it
+ *    is the claim being made.
  */
 describe('every refusal is recorded as a failure, not a silent success', () => {
   /** Drive the handler and demand a refusal — the TRANSPORT, not just the text. */
@@ -3073,6 +3081,22 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
     );
   });
 
+  it('a policy refusal records the TECHNICAL reason, not the text the model read', async () => {
+    // What `blockedFriendly` is FOR, and the only thing that separates it from
+    // `blockedVerbatim`. The friendly text is deliberately vague — "That server
+    // is not reachable under the current egress policy" names no host and no
+    // rule — so an operator reading the ledger row learns nothing from it. Set
+    // the reason to the payload and 13 of the 14 tests above still pass; this
+    // is the one that does not. (Found by the review's own mutation, which is
+    // the point of running one.)
+    applyNetworkPolicy(testCtx, 'guarded', undefined);
+    mockDnsPublic();
+    const f = await refusal({ url: 'https://api.github.com/repos/lynox-ai/lynox' }, makeAgent());
+    expect(f.reason).not.toBe(f.agentVisibleResult);
+    expect(f.reason).toMatch(/^Blocked:/);
+    expect(f.agentVisibleResult).not.toMatch(/^Blocked:/);
+  });
+
   it('a self-phrased refusal is NOT run through the friendly rewriter — the host is model-chosen', async () => {
     // Why `blockedVerbatim` exists as a second helper, asserted rather than
     // claimed. `friendlyBlockMessage` matches on substrings, and two of these
@@ -3089,6 +3113,25 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
     );
     expect(f.agentVisibleResult).toContain('requires user consent');
     expect(f.agentVisibleResult).not.toContain('Daily request limit');
+  });
+
+  it('a soft failure raised INSIDE the request try is not re-wrapped into a hard error', async () => {
+    // The trap `blockedFriendly`'s doc comment would otherwise set. Its reason
+    // starts with "Blocked:", and `ToolSoftFailure` carries the reason as its
+    // `.message` — so the outer catch's `startsWith('Blocked:')` branch matches
+    // it, re-throws it as an ordinary Error, and maps an already-friendly
+    // string through `friendlyBlockMessage` a second time. The refusal would
+    // reach the model as `is_error` with a doubly-translated message: a
+    // behaviour change, arriving silently, in the one region of the file where
+    // the documented rule is unsafe.
+    //
+    // No refusal site is inside that try today; the rule invites the fifteenth.
+    mockDnsPublic();
+    const soft = new ToolSoftFailure('what the model reads', 'Blocked: something the guard refused');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(soft));
+    const f = await refusal({ url: 'https://inside-the-try.example.com/v1/x' }, makeAgent());
+    expect(f).toBe(soft);
+    expect(f.agentVisibleResult).toBe('what the model reads');
   });
 
   it('a request that SUCCEEDS is still a plain return — the fix must not book success as failure', async () => {
