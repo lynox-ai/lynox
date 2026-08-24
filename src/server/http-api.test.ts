@@ -1151,6 +1151,26 @@ describe('LynoxHTTPApi', () => {
       expect(text).toContain('event: done');
     });
 
+    it('marks the server-side terminal error fatal on the wire', async () => {
+      // The run stream carries `event: error` for two different things. This one
+      // is the genuinely terminal case — the catch around session.run(), with
+      // res.end() right after. A consumer reading `fatal` on a payload that
+      // omits it would see `undefined`, i.e. falsy, i.e. "keep waiting" — so the
+      // discriminator has to be present HERE, not only on the engine's events.
+      mockSessionRun.mockImplementation(async () => {
+        throw new Error('provider exploded');
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'boom' }),
+      });
+
+      const text = await res.text();
+      expect(text).toContain('event: error');
+      expect(text).toContain('"fatal":true');
+    });
+
     it('echoes the run usage in the done event', async () => {
       // The done event carries getLastRunUsage() so the per-message footer
       // survives a lost turn_end frame (PR #518).

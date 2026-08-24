@@ -145,32 +145,16 @@ describe('StreamProcessor', () => {
 
       const errors = collected.filter(e => e.type === 'error');
       expect(errors).toHaveLength(1);
-      expect(errors[0]).toMatchObject({ type: 'error', agent: 'test-agent' });
+      // `fatal: false` is the load-bearing half: this path substitutes `input:{}`
+      // and the turn continues below, while agent.ts emits the SAME event type to
+      // say the run is dead. A receiver that cannot tell them apart marks a live,
+      // billing run as failed — measured 2026-08-23 on run e2684d2e.
+      expect(errors[0]).toMatchObject({ type: 'error', fatal: false, agent: 'test-agent' });
 
       // Input should be set to empty object
       expect(result.content[0]).toMatchObject({ type: 'tool_use', input: {} });
     });
 
-    it('marks the malformed-input error NON-fatal — the turn is not over', async () => {
-      // The contrast this asserts is the whole point of the `fatal` field: this
-      // path substitutes `input:{}` and keeps going, while agent.ts's iteration
-      // cap emits the SAME event type to say the run is dead. A receiver that
-      // cannot tell them apart marks a live, billing run as failed — measured
-      // 2026-08-23 on run e2684d2e (152 s, four sub-agents, `completed`), whose
-      // bubble read "not sent — tap to retry".
-      const { proc, collected } = createProcessor();
-
-      await proc.process(mockStream([
-        { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool_1', name: 'bad', input: {} } },
-        { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{broken' } },
-        { type: 'content_block_stop', index: 0 },
-        { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 1 } },
-      ]) as AsyncIterable<never>);
-
-      const err = collected.find(e => e.type === 'error');
-      expect(err).toBeDefined();
-      expect(err).toMatchObject({ type: 'error', fatal: false });
-    });
   });
 
   describe('server-side tool blocks (tool_search / web_search)', () => {
