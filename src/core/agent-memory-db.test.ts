@@ -516,8 +516,8 @@ describe('AgentMemoryDb', () => {
     });
 
     it('keeps an entity that never had a mention — a DataStore collection is not an orphan', () => {
-      // `DataStoreBridge.registerCollection` creates one entity per collection and
-      // `indexRecords` one per person/organization it extracts from a record; neither calls
+      // A structured-data ingest creates one entity per collection and one per
+      // person/organization it extracts from a record; neither calls
       // `createMention`, because these are derived from structured rows rather than from a
       // memory. `entityIsDormant` already draws that line — "only an entity that HAD mentions
       // and has lost them all is dormant" — and gc did not, so it deleted every one of them,
@@ -758,7 +758,7 @@ describe('AgentMemoryDb', () => {
     });
 
     it('an entity that NEVER had a mention is NOT dormant — DataStore collections are exactly that', () => {
-      // The regression this guards: `DataStoreBridge.registerCollection` creates one entity
+      // The regression this guards: a structured-data ingest creates one entity
       // per collection and never calls createMention. Treating mention-less as dead would
       // silently drop every DataStore hint from the context graph.
       const collection = db.createEntity({

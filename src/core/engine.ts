@@ -33,7 +33,6 @@ import type { SecretStore } from './secret-store.js';
 import type { SecretVault } from './secret-vault.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
-import type { DataStoreBridge } from './datastore-bridge.js';
 
 import {
   bashTool,
@@ -99,7 +98,6 @@ import {
   initMemoryInstance,
   initEmbeddingProvider,
   initKnowledgeLayer,
-  initDataStoreBridge,
   setupMemoryStoreSubscription,
 } from './engine-init.js';
 import { submitBatch, pollBatch } from './batch.js';
@@ -212,7 +210,6 @@ export class Engine {
   private pluginManager: PluginManager | null = null;
   private embeddingProvider: EmbeddingProvider | null = null;
   private knowledgeLayer: KnowledgeLayer | null = null;
-  private dataStoreBridge: DataStoreBridge | null = null;
   private secretVault: SecretVault | null = null;
   private secretStore: SecretStore | null = null;
   private userId: string | null = null;
@@ -1213,11 +1210,6 @@ export class Engine {
     // onBeforeRun/onAfterRun lifecycle as chat/voice). No-op on self-host.
     this.knowledgeLayer?.setMeteredHost(this);
 
-    // Initialize DataStore ↔ Knowledge Graph Bridge
-    if (this.knowledgeLayer && this._dataStore) {
-      this.dataStoreBridge = initDataStoreBridge(this.knowledgeLayer, this._dataStore);
-    }
-
     // Inject KPI context into briefing (now that KnowledgeLayer is available)
     if (this.knowledgeLayer) {
       try {
@@ -1454,9 +1446,10 @@ export class Engine {
     // DEF-0015: the orphan-subject reap needs the record store to answer "does a table row
     // still link this subject?". Handed over HERE — after the DataStore init block succeeded
     // (a store whose init threw is null by then, so the reap stays fail-closed) and not in
-    // _initKnowledge(): that step runs before this one, which is why the `initDataStoreBridge`
-    // attach there (guarded on `this._dataStore`) has never fired in production. The reap must
-    // not ride on it.
+    // _initKnowledge(): that step runs BEFORE this one, so `this._dataStore` does not exist
+    // there yet. A guard on it in `_initKnowledge` can therefore never fire — which is exactly
+    // how the DataStore→KG bridge stayed dead from 2026-05-14 until it was removed. The reap
+    // must not sit on that side of the split.
     if (this._dataStore) this.knowledgeLayer?.setRecordStore(this._dataStore);
 
     // Initialize ArtifactStore (best-effort)

@@ -23,7 +23,6 @@ import type { EntityResolver } from './entity-resolver.js';
 import type { MemoryGraphStore } from './memory-graph-store.js';
 import { entityTypeToSubjectKind } from './subject-store.js';
 import type { SubjectStore, SubjectRow } from './subject-store.js';
-import type { DataStoreBridge } from './datastore-bridge.js';
 import type { RunHistory } from './run-history.js';
 import { escapeXml, renderProvenanceFact, detectInjectionAttempt } from './data-boundary.js';
 import { channels } from './observability.js';
@@ -196,7 +195,6 @@ class LruCache<V> {
  * Pipeline: HyDE -> Vector Search -> Graph Expansion -> Merge -> Score -> MMR -> Format
  */
 export class RetrievalEngine {
-  private dataStoreBridge: DataStoreBridge | null = null;
   private meteredHost: HookHost | null = null;
   private readonly _embeddingCache = new LruCache<number[]>(64);
   private readonly _hydeCache = new LruCache<string>(32);
@@ -242,10 +240,6 @@ export class RetrievalEngine {
      */
     private readonly memoryWriteTrustGate: boolean = false,
   ) {}
-
-  setDataStoreBridge(bridge: DataStoreBridge): void {
-    this.dataStoreBridge = bridge;
-  }
 
   /** Propagate provider switch from KnowledgeLayer.setAnthropicClient(). */
   setAnthropicClient(client: Anthropic | undefined): void {
@@ -305,10 +299,10 @@ export class RetrievalEngine {
     // Extract query terms ONCE — both the legacy display resolver and the S5b
     // subject resolver consume them (avoids a second regex pass on the hot path).
     const queryTerms = extractEntitiesRegex(query).entities;
-    // Display / DataStore-hint entities stay on the legacy KG resolver regardless
-    // of the memory-read flag — the `<knowledge_graph>` block + DataStore bridge
-    // are keyed on legacy entity ids (a separate concern from which memories to
-    // recall). Only the MEMORY reads (vector + graph-expand) re-point in S5b.
+    // Display entities stay on the legacy KG resolver regardless of the memory-read
+    // flag — the `<knowledge_graph>` block is keyed on legacy entity ids (a separate
+    // concern from which memories to recall). Only the MEMORY reads (vector +
+    // graph-expand) re-point in S5b.
     const queryEntities = await this._resolveQueryEntities(queryTerms, scopes);
     const dim = this.embeddingProvider.dimensions;
 
@@ -879,22 +873,6 @@ export class RetrievalEngine {
       return `${escapeXml(e.canonicalName)} (${e.entityType}, ${e.mentionCount} mentions, last ${seen})`;
     });
     const parts = [`Entities: ${entityLines.join(', ')}`];
-
-    if (this.dataStoreBridge && entities.length > 0) {
-      try {
-        const hints = await this.dataStoreBridge.findRelatedData(entities.map(e => e.id));
-        if (hints.length > 0) {
-          const dataLines = hints.map(h =>
-            h.preview
-              ? `${escapeXml(h.entityName)} in ${escapeXml(h.collection)} (${escapeXml(h.preview)})`
-              : `${escapeXml(h.entityName)} in ${escapeXml(h.collection)}`,
-          );
-          parts.push(`Data: ${dataLines.join('; ')}`);
-        }
-      } catch {
-        // Best-effort
-      }
-    }
 
     return `<knowledge_graph>\n${parts.join('\n')}\n</knowledge_graph>`;
   }

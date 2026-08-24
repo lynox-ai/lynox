@@ -170,8 +170,8 @@ describe('Engine boot — the two init() gates are actually wired', () => {
 // ─── Gate 3: the orphan-subject reap is wired through init() (DEF-0015) ───────────────────
 //
 // The reap needs the record store, which `_initCoreTools()` hands the KnowledgeLayer via
-// `setRecordStore` — AFTER `_initKnowledge()`. The older `initDataStoreBridge` attach in
-// `_initKnowledge()` is guarded on a DataStore that does not exist yet at that point, so it has
+// `setRecordStore` — AFTER `_initKnowledge()`. The older bridge attach in
+// `_initKnowledge()` was guarded on a DataStore that does not exist yet at that point, so it
 // never fired in production; a reap riding on it would be permanently fail-closed while every
 // unit test (which wires the store by hand) stays green. This boots the real Engine and asks
 // the only question that proves the wiring: does an erase remove the subject it minted?
