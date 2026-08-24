@@ -103,7 +103,26 @@ describe('env-ABI forward: every registry row is read at its declared site', () 
       continue;
     }
     if (kind === 'none') continue; // asserted absent by the reverse sweep below
-    if (kind === 'pair-resolver') {
+    if (kind === 'pair-resolver' && readSite) {
+      it(`every resolveClientPair call in ${readSite} resolves ${row.name}'s pair`, () => {
+        // `some()` above asks whether the file CONTAINS a matching call. It does
+        // not ask whether EVERY call matches — and engine.ts holds two (the init
+        // path and reloadGoogle), so swapping the second one passed. Scoped to
+        // the declared file, not the repo: this counts plain calls and requires
+        // all of them to be the declared pair.
+        //
+        // What it does not see, and this is the honest limit rather than a
+        // promise: `resolveClientPair?.(`, `.call(`, `.apply(`, a generic
+        // `<T>(`, or an aliased binding. Those are not caught anywhere; the
+        // fix that removes the possibility is
+        // DEF-pair-resolver-swap-detectable-not-impossible.
+        const src = read(readSite);
+        const all = [...src.matchAll(/\bresolveClientPair\s*\(/g)].length;
+        const matching = [...src.matchAll(new RegExp(readForms(row)[0]?.source ?? '$^', 'g'))].length;
+        expect(all, `${readSite}: no resolveClientPair call found at all`).toBeGreaterThan(0);
+        expect(matching, `${readSite}: ${all - matching} of ${all} calls do not resolve the declared pair in order`).toBe(all);
+      });
+
       it(`${row.name} declares its pair, and is a member of it`, () => {
         const pair = row.engineConsumed.pair;
         expect(pair, `${row.name}: kind 'pair-resolver' requires pair`).toBeDefined();
@@ -388,23 +407,37 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
   // instead of as a regex over source text: deleting one row leaves the other
   // naming a member that does not exist, and it cannot drift with syntax.
   //
-  // What this does NOT do, stated because the scan that did try it could not
-  // be made to converge (`?.(`, `.call(`, block comments, each round another
-  // shape): nothing here detects a resolveClientPair call elsewhere in src/
-  // that swaps the members or pairs one with a foreign partner. Only the
-  // DECLARED site is pinned, by the forward test above. The real fix makes
-  // the swap unrepresentable rather than detectable — see
-  // DEF-pair-resolver-swap-detectable-not-impossible.
-  it('every member named in a pair descriptor has its own registry row', () => {
-    const names = new Set(ENV_REGISTRY.map((r) => r.name));
-    const missing: string[] = [];
+  // What this does NOT do: nothing detects a resolveClientPair call in a file
+  // the registry does not name. The declared file IS fully checked — every
+  // plain call in it, not just one — by the forward test above; an earlier
+  // version of this comment claimed the declared SITE was pinned when in truth
+  // only one call in it was. The real fix removes the possibility instead of
+  // chasing it — DEF-pair-resolver-swap-detectable-not-impossible.
+  it('every pair descriptor is kind-checked, complete and symmetric', () => {
+    // One-directional and kind-blind was not enough: a `pair` on a
+    // `kind: 'direct'` row is inert but was being VALIDATED here, and dropping
+    // the partner's descriptor left the surviving row happily pointing at it.
+    const byName = new Map(ENV_REGISTRY.map((r) => [r.name, r]));
+    const problems: string[] = [];
     for (const row of ENV_REGISTRY) {
       const pair = row.engineConsumed.pair;
       if (!pair) continue;
+      if (row.engineConsumed.kind !== 'pair-resolver') {
+        problems.push(`${row.name} carries a pair descriptor but kind is '${row.engineConsumed.kind}'`);
+      }
+      if (pair.id === pair.secret) problems.push(`${row.name} pairs with itself`);
       for (const member of [pair.id, pair.secret]) {
-        if (!names.has(member)) missing.push(`${row.name} pairs with ${member}, which has no row`);
+        const partner = byName.get(member);
+        if (!partner) { problems.push(`${row.name} pairs with ${member}, which has no row`); continue; }
+        if (partner.engineConsumed.kind !== 'pair-resolver') {
+          problems.push(`${row.name} pairs with ${member}, whose kind is '${partner.engineConsumed.kind}'`);
+        }
+        const other = partner.engineConsumed.pair;
+        if (!other || other.id !== pair.id || other.secret !== pair.secret) {
+          problems.push(`${member} does not declare the same descriptor as ${row.name}`);
+        }
       }
     }
-    expect(missing, 'a pair descriptor names a member with no registry row').toEqual([]);
+    expect(problems, 'a pair descriptor is inert, incomplete or asymmetric').toEqual([]);
   });
 });
