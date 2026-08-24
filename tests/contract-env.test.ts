@@ -321,12 +321,17 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
   // so the coverage loop skips it — and the blindness would only surface at the
   // first LYNOX_* pair, long after the deletion. A guard whose absence changes
   // nothing observable is not a guard.
-  it('the sweep actually sees credential-pair reads', () => {
-    const seen = [...reads.keys()].filter((n) => /_CLIENT_(ID|SECRET)$/.test(n));
+  it('the sweep actually sees every declared pair-resolver row', () => {
+    // Derived from the registry, not from a name pattern: a hard-coded shape
+    // like /_CLIENT_(ID|SECRET)$/ goes quietly stale the first time a pair is
+    // named differently, and a positive control that can go stale is not one.
+    const declared = ENV_REGISTRY.filter((r) => r.engineConsumed.kind === 'pair-resolver').map((r) => r.name);
+    expect(declared, 'no pair-resolver row exists — this control has nothing to prove').not.toEqual([]);
+    const unseen = declared.filter((n) => !reads.has(n));
     expect(
-      seen,
+      unseen,
       'READ_PATTERNS no longer recognizes resolveClientPair(…) reads — the reverse inventory is blind to credential pairs',
-    ).not.toEqual([]);
+    ).toEqual([]);
   });
 
   // The mirror of the forward test. Forward proves a declared row IS read;
