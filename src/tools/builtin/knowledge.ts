@@ -146,6 +146,12 @@ export const rememberTool: ToolEntry<RememberInput> = {
     // Capture telemetry (DEF-dk-capture-observability): the NUMERATOR of the fire
     // -rate — the model actually recorded a durable fact, with the store outcome.
     // Gated on the DK flag so it logs only where we measure (the canary).
+    //
+    // `runId` is what makes the numerator JOINABLE to the denominator: this site fires
+    // from any run that has the tool, while `capture_eligible` fires only from the
+    // turn-end hook, which returns early for several run shapes. Without the run key the
+    // report can divide the two but cannot show they describe the same runs
+    // (DEF-firerate-mixes-two-populations).
     void appendCaptureTelemetry(agent.durableMemoryEnabled === true, {
       ts: Date.now(),
       event: 'remember_invoked',
@@ -153,6 +159,7 @@ export const rememberTool: ToolEntry<RememberInput> = {
       model: agent.model,
       untrusted: sourceUntrusted,
       outcome: result.deduped === true ? 'deduped' : result.status,
+      runId: agent.currentRunId,
     });
 
     // propose_shown (PRD-ONBOARDING §7 / AC-1.4): a NEW pending_review write becomes a

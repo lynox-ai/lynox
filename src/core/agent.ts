@@ -1352,6 +1352,11 @@ export class Agent implements IAgent {
         thread: this.currentThreadId,
         model: this.model,
         untrusted: turnUntrusted,
+        // The join key. This site sits behind the three guards above; the NUMERATOR's
+        // site (`knowledge.ts`) sits behind none of them, so the two ends of the fire
+        // -rate can describe different runs. `runId` is what lets the report SHOW that
+        // instead of dividing regardless (DEF-firerate-mixes-two-populations).
+        runId: this.currentRunId,
       });
       return;
     }

@@ -34,6 +34,63 @@ export interface CaptureModelRate {
   readonly fireRate: number | null;
 }
 
+/**
+ * The two ends of `fireRate`, counted as the SEPARATE populations they are.
+ *
+ * `fireRate` divides `remember_invoked` by `capture_eligible` as if both described the
+ * same runs. They need not: the numerator is emitted from the `remember` tool handler,
+ * which any run carrying the tool reaches, while the denominator is emitted from the
+ * turn-end hook, which returns early for a run with no `Memory`, one with
+ * `skipMemoryExtraction`, or an internal one. Measured on a real sink:
+ * **910 numerator events, 0 denominator events** — a quotient over an empty population.
+ *
+ * ⚠️ **What this split does NOT tell you: WHY.** It reports that the populations differ
+ * and by how much. The mechanism that produces a given gap is not measured here and, on
+ * the sink that motivated this, is still unknown — two candidate explanations (internal
+ * runs; ordinary spawned children) were REFUTED at the source, since internal runs carry
+ * no tools at all and an ordinary child inherits the parent's `Memory` and so passes the
+ * hook. What remains unmeasured: `isolated_memory` children, the `skipMemoryExtraction`
+ * path, and an instance with no `Memory` at all. A non-zero `rememberOutsideEligible` is
+ * a fact about the numbers, never a diagnosis.
+ */
+export interface CapturePopulationSplit {
+  /** Distinct runs that produced at least one `capture_eligible` — the denominator's population. */
+  readonly eligibleRuns: number;
+  /** Distinct runs that produced at least one `remember_invoked` — the numerator's population. */
+  readonly rememberRuns: number;
+  /** Distinct runs in BOTH — the only runs the quotient is actually about. */
+  readonly overlapRuns: number;
+  /**
+   * `remember_invoked` EVENTS (not runs) whose run never produced a `capture_eligible`.
+   * This is the numerator's share that the denominator can never account for. Counted in
+   * events rather than runs because that is the quantity `fireRate` inflates by.
+   */
+  readonly rememberOutsideEligible: number;
+  /**
+   * Events of either kind carrying no usable `runId`, so they join nothing. Non-zero for
+   * any window that predates the field — and then the other numbers here describe only
+   * the part of the window that CAN be joined, which is why this is reported beside them
+   * rather than folded into them.
+   */
+  readonly eventsWithoutRun: number;
+  /**
+   * A fixed sentence, present ONLY when the numbers above actually show a gap, saying
+   * what this report does not know about it. It ships in the RESPONSE rather than only in
+   * this file's comments because the reader of the number is an operator reading JSON at
+   * a diagnostic endpoint — a caveat that lives in the source reaches the maintainer and
+   * misses exactly the person who is about to quote the figure.
+   *
+   * Null when there is no gap. It is never a diagnosis and never varies with the data:
+   * a note that appeared to explain the gap would be worse than none, because the two
+   * explanations that seemed obvious were both refuted at the source.
+   */
+  readonly gapNote: string | null;
+}
+
+/** The one wording {@link CapturePopulationSplit.gapNote} ever carries. */
+const GAP_NOTE =
+  'numerator and denominator do not cover the same runs; this report measures THAT, not why';
+
 /** What the report could NOT see. Stated so a rate is never read as more complete than it is. */
 export interface CaptureReportBlindness {
   /** Lines present in the sink that did not parse — excluded from every count below. */
@@ -94,6 +151,13 @@ export interface CaptureReport {
   /** COUNT (not share) of capture-eligible turns that had ingested untrusted content. */
   readonly untrustedEligible: number;
 
+  /**
+   * The two ends of `fireRate` as separate populations. Read this BEFORE quoting
+   * `fireRate`: when `overlapRuns` is 0 while `rememberRuns` is not, the headline is a
+   * quotient over two disjoint sets and means nothing.
+   */
+  readonly populations: CapturePopulationSplit;
+
   readonly blindness: CaptureReportBlindness;
 }
 
@@ -140,6 +204,8 @@ interface ValidatedEntry {
   readonly hasThread: boolean;
   readonly untrusted: boolean;
   readonly outcome: CaptureOutcome | null;
+  /** A non-empty run id, or null when the line predates the field or omits it. */
+  readonly runId: string | null;
 }
 
 /**
@@ -185,6 +251,10 @@ function validateEntry(raw: unknown): ValidatedEntry | null {
     hasThread: typeof r['thread'] === 'string' && r['thread'] !== '',
     untrusted: r['untrusted'] === true,
     outcome: typeof outcome === 'string' && KNOWN_OUTCOMES.has(outcome) ? outcome as CaptureOutcome : null,
+    // Same narrowing as `model`: a non-string or empty run id is NOT a run. Keying a set
+    // on a non-string would make every such line join to one synthetic run and report an
+    // overlap that does not exist — the exact failure this field is here to expose.
+    runId: typeof r['runId'] === 'string' && r['runId'] !== '' ? r['runId'] : null,
   };
 }
 
@@ -206,6 +276,15 @@ export async function buildCaptureReport(): Promise<CaptureReport> {
   let eventsWithoutModel = 0;
   let eventsWithoutThread = 0;
   let untrustedEligible = 0;
+  // The population split. Sets, not counters: a run that ends two eligible turns is ONE
+  // run in the denominator's population, and counting events here would make the overlap
+  // look larger than the number of runs that actually exist.
+  const eligibleRuns = new Set<string>();
+  // Remember EVENTS per run, resolved after the scan: the turn-end event for a run is
+  // written AFTER the tool call in that same run, so a single forward pass cannot know
+  // yet whether a run will turn out eligible.
+  const rememberEventsByRun = new Map<string, number>();
+  let eventsWithoutRun = 0;
 
   let malformedRecords = 0;
 
@@ -227,6 +306,15 @@ export async function buildCaptureReport(): Promise<CaptureReport> {
     if (entry.model === null) eventsWithoutModel++;
     if (!entry.hasThread) eventsWithoutThread++;
 
+    // Population assignment. Only the two fire-rate events participate: a `propose_*` or
+    // `onboarding_*` line belongs to neither end of the quotient, and folding it into
+    // either would answer a question nobody asked with a number that looks like an answer.
+    if (event === 'capture_eligible' || event === 'remember_invoked') {
+      if (entry.runId === null) eventsWithoutRun++;
+      else if (event === 'capture_eligible') eligibleRuns.add(entry.runId);
+      else rememberEventsByRun.set(entry.runId, (rememberEventsByRun.get(entry.runId) ?? 0) + 1);
+    }
+
     if (event === 'capture_eligible' && entry.untrusted) untrustedEligible++;
     if (event === 'remember_invoked' && entry.outcome !== null) {
       outcomes[entry.outcome] = (outcomes[entry.outcome] ?? 0) + 1;
@@ -238,6 +326,27 @@ export async function buildCaptureReport(): Promise<CaptureReport> {
       perModel.set(entry.model, bucket);
     }
   });
+
+  // Resolve the split now that every line has been seen (see the forward-pass note above).
+  let overlapRuns = 0;
+  let rememberOutsideEligible = 0;
+  for (const [runId, count] of rememberEventsByRun) {
+    if (eligibleRuns.has(runId)) overlapRuns++;
+    else rememberOutsideEligible += count;
+  }
+  // ONE condition, and the second one this first carried is deliberately gone: "a
+  // numerator population over an empty denominator" cannot fire independently. If no
+  // remember run overlaps, every remember run is outside, and each contributes at least
+  // one event — so `rememberOutsideEligible > 0` already covers the 910-to-0 case. The
+  // extra clause was unreachable, and its comment claimed a case it could not reach.
+  const populations: CapturePopulationSplit = {
+    eligibleRuns: eligibleRuns.size,
+    rememberRuns: rememberEventsByRun.size,
+    overlapRuns,
+    rememberOutsideEligible,
+    eventsWithoutRun,
+    gapNote: rememberOutsideEligible > 0 ? GAP_NOTE : null,
+  };
 
   const ranked: CaptureModelRate[] = [...perModel.entries()]
     .map(([model, b]) => ({ model, eligible: b.eligible, remembered: b.remembered, fireRate: rate(b.remembered, b.eligible) }))
@@ -261,6 +370,7 @@ export async function buildCaptureReport(): Promise<CaptureReport> {
     outcomes,
     byModel,
     untrustedEligible,
+    populations,
     blindness: {
       unparsableLines: scan.unparsableLines,
       malformedRecords,

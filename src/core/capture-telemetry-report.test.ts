@@ -352,3 +352,115 @@ describe('buildCaptureReport', () => {
     expect(serialized).not.toContain('thread_abc');
   });
 });
+
+describe('populations — the two ends of fireRate, counted separately', () => {
+  /**
+   * One fixture, built so that every wrong ASSIGNMENT produces a different number than
+   * every other. It deliberately separates the two things a naive implementation
+   * conflates:
+   *  - run `r-both` ends TWO eligible turns, so "distinct runs" and "event count" differ
+   *    (counting events would report 3 eligible runs instead of 2);
+   *  - run `r-elig` is denominator-only, `r-rem` is numerator-only, so swapping the two
+   *    sets moves `rememberOutsideEligible` from 2 to 1;
+   *  - `r-rem` carries TWO remember events, so the outside-count is a count of EVENTS and
+   *    not of runs (a run-count would say 1);
+   *  - one remember line carries no run at all, so it must land in `eventsWithoutRun` and
+   *    in neither population.
+   */
+  async function seedPopulations(): Promise<void> {
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r-both' }),
+      entry({ event: 'remember_invoked', runId: 'r-both', outcome: 'active' }),
+      entry({ event: 'capture_eligible', runId: 'r-both' }),
+      entry({ event: 'capture_eligible', runId: 'r-elig' }),
+      entry({ event: 'remember_invoked', runId: 'r-rem', outcome: 'active' }),
+      entry({ event: 'remember_invoked', runId: 'r-rem', outcome: 'pending_review' }),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+    ]);
+  }
+
+  it('counts distinct RUNS per population, not events', async () => {
+    await seedPopulations();
+    const { populations } = await buildCaptureReport();
+    // 4 eligible events across 2 runs, 4 remember events across 2 runs + 1 unattributed.
+    expect(populations.eligibleRuns).toBe(2);
+    expect(populations.rememberRuns).toBe(2);
+  });
+
+  it('reports the overlap — the only runs the quotient is actually about', async () => {
+    await seedPopulations();
+    const { populations } = await buildCaptureReport();
+    expect(populations.overlapRuns).toBe(1);
+  });
+
+  it('counts numerator EVENTS the denominator cannot account for', async () => {
+    await seedPopulations();
+    const { populations } = await buildCaptureReport();
+    // `r-rem` fired twice and never ended an eligible turn: 2 events, not 1 run.
+    expect(populations.rememberOutsideEligible).toBe(2);
+  });
+
+  it('parks an event with no run id instead of joining it to nothing', async () => {
+    await seedPopulations();
+    const { populations } = await buildCaptureReport();
+    expect(populations.eventsWithoutRun).toBe(1);
+    // It must not have invented a run: 2 remember runs, not 3.
+    expect(populations.rememberRuns).toBe(2);
+  });
+
+  it('carries the caveat IN THE RESPONSE whenever the populations differ', async () => {
+    await seedPopulations();
+    const { populations } = await buildCaptureReport();
+    expect(populations.gapNote).toBe(
+      'numerator and denominator do not cover the same runs; this report measures THAT, not why',
+    );
+  });
+
+  it('says nothing when every remember run also ended an eligible turn', async () => {
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r-1' }),
+      entry({ event: 'remember_invoked', runId: 'r-1', outcome: 'active' }),
+    ]);
+    const { populations } = await buildCaptureReport();
+    expect(populations).toMatchObject({
+      eligibleRuns: 1, rememberRuns: 1, overlapRuns: 1, rememberOutsideEligible: 0, gapNote: null,
+    });
+  });
+
+  it('flags the 910-to-0 shape: a numerator population over an EMPTY denominator', async () => {
+    // The measured real-world case. `rememberOutsideEligible` alone would also be > 0
+    // here, but the second clause is what survives if the numerator ever lands in one
+    // single run — a fireRate of Infinity-by-another-name must still announce itself.
+    await seed([
+      entry({ event: 'remember_invoked', runId: 'r-1', outcome: 'active' }),
+      entry({ event: 'remember_invoked', runId: 'r-1', outcome: 'active' }),
+    ]);
+    const { populations, fireRate } = await buildCaptureReport();
+    expect(populations).toMatchObject({ eligibleRuns: 0, rememberRuns: 1, overlapRuns: 0 });
+    expect(populations.gapNote).not.toBeNull();
+    // The headline itself stays null (nothing to divide by) — the split is what carries
+    // the story that the numerator was nevertheless busy.
+    expect(fireRate).toBeNull();
+  });
+
+  it('ignores funnel events — they belong to neither end of the quotient', async () => {
+    await seed([
+      entry({ event: 'propose_shown', runId: 'r-x' }),
+      entry({ event: 'propose_confirmed', runId: 'r-x' }),
+      entry({ event: 'onboarding_started', runId: 'r-x' }),
+    ]);
+    const { populations } = await buildCaptureReport();
+    expect(populations).toMatchObject({
+      eligibleRuns: 0, rememberRuns: 0, overlapRuns: 0, eventsWithoutRun: 0, gapNote: null,
+    });
+  });
+
+  it('treats a non-string run id as no run at all', async () => {
+    await seed([
+      JSON.stringify({ ts: 1000, event: 'remember_invoked', outcome: 'active', runId: 42 }),
+      JSON.stringify({ ts: 1000, event: 'capture_eligible', runId: '' }),
+    ]);
+    const { populations } = await buildCaptureReport();
+    expect(populations).toMatchObject({ eligibleRuns: 0, rememberRuns: 0, eventsWithoutRun: 2 });
+  });
+});
