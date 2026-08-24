@@ -290,7 +290,14 @@ export function evaluate({ body, head, files, author }) {
       errors.push('`closes:` is empty — write `closes: none` if this PR settles no register row');
     }
     for (const id of ids) {
-      if (!/^DEF-[a-z0-9-]+$/.test(id)) {
+      // `[A-Za-z0-9-]`, not `[a-z0-9-]`. The register really does contain
+      // `DEF-dk-engineDb-init-partial-wire`, and the lower-case-only class
+      // refused a row that EXISTS — a false red on a correct answer, which this
+      // file elsewhere calls the way a guard earns a bypass. Found in pro, where
+      // the same class ALSO made the heading scan mint a phantom id; core has no
+      // heading scan (the register is not in this repo, see below), so only the
+      // shape half applies here.
+      if (!/^DEF-[A-Za-z0-9-]+$/.test(id)) {
         errors.push(`\`closes: ${id}\` is not a register id — use \`DEF-<slug>\`, a comma-separated list, or \`none\``);
       }
     }
