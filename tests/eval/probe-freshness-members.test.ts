@@ -185,6 +185,10 @@ describe('probe fact freshness — every engine-facing probe is a member', () =>
     expect(badExclusions({ [real]: 'this runs under node.js and therefore never persists a row' }, [real])).toEqual([real]);
     // A reason citing a non-TypeScript file by PATH is still a reason.
     expect(badExclusions({ [real]: 'excluded because the deploy path lives in .github/workflows/release.yml only' }, [real])).toEqual([]);
+    // A PATH but no substance — the case that makes the length half load-bearing. Without it
+    // every fixture failed the path rule first, so removing the length floor changed nothing
+    // and survived mutation (measured).
+    expect(badExclusions({ [real]: 'a/b.ts' }, [real])).toEqual([real]);
     // Dots INSIDE the stem are the common case and must not be rejected.
     expect(badExclusions({ [real]: 'not a member, the coverage lives in tests/eval/x.test.ts instead' }, [real])).toEqual([]);
     expect(badExclusions({ [real]: 'not a member because the shape is pinned in src/types/index.d.ts' }, [real])).toEqual([]);
