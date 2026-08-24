@@ -358,12 +358,14 @@ describe('populations — the two ends of fireRate, counted separately', () => {
    * One fixture, built so that every wrong ASSIGNMENT produces a different number than
    * every other. It deliberately separates the two things a naive implementation
    * conflates:
-   *  - run `r-both` ends TWO eligible turns, so "distinct runs" and "event count" differ
-   *    (counting events would report 3 eligible runs instead of 2);
+   *  - run `r-both` ends TWO eligible turns AND fires TWO remember events, so "distinct
+   *    runs" and "event count" differ on BOTH sides. The second remember is what makes
+   *    `overlapRuns` load-bearing: with only one, mutating `overlapRuns++` into
+   *    `overlapRuns += count` is equivalent and survives the whole file (measured);
    *  - run `r-elig` is denominator-only, `r-rem` is numerator-only, so swapping the two
    *    sets moves `rememberOutsideEligible` from 2 to 1;
-   *  - `r-rem` carries TWO remember events, so the outside-count is a count of EVENTS and
-   *    not of runs (a run-count would say 1);
+   *  - `r-rem` carries THREE remember events, so the outside-count is a count of EVENTS
+   *    and not of runs (a run-count would say 1);
    *  - one remember line carries no run at all, so it must land in `eventsWithoutRun` and
    *    in neither population.
    */
@@ -371,10 +373,12 @@ describe('populations — the two ends of fireRate, counted separately', () => {
     await seed([
       entry({ event: 'capture_eligible', runId: 'r-both' }),
       entry({ event: 'remember_invoked', runId: 'r-both', outcome: 'active' }),
+      entry({ event: 'remember_invoked', runId: 'r-both', outcome: 'active' }),
       entry({ event: 'capture_eligible', runId: 'r-both' }),
       entry({ event: 'capture_eligible', runId: 'r-elig' }),
       entry({ event: 'remember_invoked', runId: 'r-rem', outcome: 'active' }),
       entry({ event: 'remember_invoked', runId: 'r-rem', outcome: 'pending_review' }),
+      entry({ event: 'remember_invoked', runId: 'r-rem', outcome: 'active' }),
       entry({ event: 'remember_invoked', outcome: 'active' }),
     ]);
   }
@@ -382,7 +386,7 @@ describe('populations — the two ends of fireRate, counted separately', () => {
   it('counts distinct RUNS per population, not events', async () => {
     await seedPopulations();
     const { populations } = await buildCaptureReport();
-    // 4 eligible events across 2 runs, 4 remember events across 2 runs + 1 unattributed.
+    // 4 eligible events across 2 runs, 6 remember events across 2 runs + 1 unattributed.
     expect(populations.eligibleRuns).toBe(2);
     expect(populations.rememberRuns).toBe(2);
   });
@@ -396,8 +400,8 @@ describe('populations — the two ends of fireRate, counted separately', () => {
   it('counts numerator EVENTS the denominator cannot account for', async () => {
     await seedPopulations();
     const { populations } = await buildCaptureReport();
-    // `r-rem` fired twice and never ended an eligible turn: 2 events, not 1 run.
-    expect(populations.rememberOutsideEligible).toBe(2);
+    // `r-rem` fired three times and never ended an eligible turn: 3 events, not 1 run.
+    expect(populations.rememberOutsideEligible).toBe(3);
   });
 
   it('parks an event with no run id instead of joining it to nothing', async () => {
@@ -428,9 +432,10 @@ describe('populations — the two ends of fireRate, counted separately', () => {
   });
 
   it('flags the 910-to-0 shape: a numerator population over an EMPTY denominator', async () => {
-    // The measured real-world case. `rememberOutsideEligible` alone would also be > 0
-    // here, but the second clause is what survives if the numerator ever lands in one
-    // single run — a fireRate of Infinity-by-another-name must still announce itself.
+    // A numerator population over an EMPTY denominator: every remember run is outside, so
+    // `rememberOutsideEligible` carries it and no separate clause is needed. This is NOT
+    // the shape of the real 910-to-0 sink — that one predates `runId` entirely and lands
+    // in the blind-window case below, which is a different failure with a different note.
     await seed([
       entry({ event: 'remember_invoked', runId: 'r-1', outcome: 'active' }),
       entry({ event: 'remember_invoked', runId: 'r-1', outcome: 'active' }),
@@ -462,5 +467,60 @@ describe('populations — the two ends of fireRate, counted separately', () => {
     ]);
     const { populations } = await buildCaptureReport();
     expect(populations).toMatchObject({ eligibleRuns: 0, rememberRuns: 0, eventsWithoutRun: 2 });
+  });
+  it('says "could not look" when NO event carries a run — the 910-to-0 sink itself', async () => {
+    // The window this whole split exists for predates `runId`, so every count is zero and
+    // `gapNote` is null. Without `blindNote` that output is byte-identical to a healthy
+    // instance, and the one sink we built this for would have been the one to stay silent.
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+    ]);
+    const { populations } = await buildCaptureReport();
+    expect(populations).toMatchObject({
+      eligibleRuns: 0, rememberRuns: 0, overlapRuns: 0, rememberOutsideEligible: 0,
+      eventsWithoutRun: 3, gapNote: null,
+    });
+    expect(populations.blindNote).toBe(
+      'some events could not be joined to a run; the split above covers only part of the window',
+    );
+  });
+
+  it('stays silent on BOTH notes only when the window is fully joinable and agrees', async () => {
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r-1' }),
+      entry({ event: 'remember_invoked', runId: 'r-1', outcome: 'active' }),
+    ]);
+    const { populations } = await buildCaptureReport();
+    expect(populations.gapNote).toBeNull();
+    expect(populations.blindNote).toBeNull();
+  });
+
+  it('clamps an oversized run key instead of retaining it for the whole scan', async () => {
+    const huge = 'r'.repeat(500);
+    await seed([
+      entry({ event: 'capture_eligible', runId: huge }),
+      entry({ event: 'remember_invoked', runId: huge.slice(0, 128), outcome: 'active' }),
+    ]);
+    const { populations } = await buildCaptureReport();
+    // Both sides clamp to the same 128 chars, so they still join — the clamp bounds the
+    // key without inventing or destroying an overlap.
+    expect(populations).toMatchObject({ eligibleRuns: 1, rememberRuns: 1, overlapRuns: 1 });
+  });
+
+  it('stops tracking runs at the cap and says so instead of growing without bound', async () => {
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r-1' }),
+      entry({ event: 'capture_eligible', runId: 'r-2' }),
+      entry({ event: 'remember_invoked', runId: 'r-3', outcome: 'active' }),
+      entry({ event: 'capture_eligible', runId: 'r-1' }),
+    ]);
+    const { populations } = await buildCaptureReport({ maxTrackedRuns: 2 });
+    // r-1 and r-2 fit; r-3 is over the cap. The repeat of r-1 is already tracked and must
+    // NOT count as an overflow — a cap that punished repeat events would report a window
+    // as truncated the moment a busy run came back.
+    expect(populations).toMatchObject({ eligibleRuns: 2, rememberRuns: 0, eventsOverRunCap: 1 });
+    expect(populations.blindNote).not.toBeNull();
   });
 });

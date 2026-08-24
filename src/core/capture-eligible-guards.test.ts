@@ -13,10 +13,13 @@ import { appendCaptureTelemetry } from './capture-telemetry.js';
  * why `remember_invoked / capture_eligible` is not guaranteed to be a ratio at all — a
  * real sink carried 910 numerator events against 0 denominator events.
  *
- * Until this file existed, **removing any one of the three guards broke no test**: the
- * suite drove the numerator and the report, never the hook itself. Each `it` below is
- * therefore written to die under exactly one mutation of that line — the mutation table
- * is in the PR, and the assert that kills each one is named there.
+ * Until this file existed, removing `skipMemoryExtraction` or `isInternalRun` from that
+ * line broke **no test at all** — the suite drove the numerator and the report, never the
+ * hook. Removing `!this.memory` did break tests, but for an unrelated reason: the DK-OFF
+ * path then calls `maybeUpdate` on null, so 104 tests in `agent.test.ts` die on a
+ * TypeError rather than on the telemetry behaviour (measured on the base commit). Two
+ * guards were uncovered and the third was covered by accident; each `it` below is written
+ * to die on the behaviour itself.
  *
  * The sink itself is mocked rather than written to disk: `_captureAtTurnEnd` fires the
  * append with `void` and returns synchronously, so a disk-backed assertion would race the
@@ -32,7 +35,6 @@ const emit = vi.mocked(appendCaptureTelemetry);
 
 /** Internals the hook reads; `memory` is `readonly` on the class, so it is set through here. */
 interface Internals {
-  _durableMemoryEnabled: boolean;
   _captureAtTurnEnd(text: string): void;
   memory: IMemory | null;
 }
@@ -47,11 +49,15 @@ interface Internals {
  * a bare `{}` makes that path throw a TypeError — which fails the test for a reason that
  * has nothing to do with the guard under test, and would have been read as a kill.
  */
-function makeEligibleAgent(): Agent & Internals {
-  const agent = new Agent({ name: 'test', model: 'mistral-medium-2604', systemPrompt: 'SYS' });
+function makeEligibleAgent(durableMemoryEnabled = true): Agent & Internals {
+  // Through the CONFIG, not the private field: `agent.ts` maps
+  // `config.durableMemoryEnabled === true` onto the flag, and writing the field directly
+  // would drive the emit while leaving that mapping untested.
+  const agent = new Agent({
+    name: 'test', model: 'mistral-medium-2604', systemPrompt: 'SYS', durableMemoryEnabled,
+  });
   const inner = agent as unknown as Agent & Internals;
   inner.memory = { maybeUpdate: () => Promise.resolve() } as unknown as IMemory;
-  inner._durableMemoryEnabled = true;
   agent.currentRunId = 'run-alpha';
   agent.currentThreadId = 'thread-1';
   return inner;
@@ -100,8 +106,7 @@ describe('capture_eligible — the denominator fires only for a run the hook acc
   });
 
   it('does NOT emit when DK is off — the sink logs only where we measure', () => {
-    const inner = makeEligibleAgent();
-    inner._durableMemoryEnabled = false;
+    const inner = makeEligibleAgent(false);
     inner._captureAtTurnEnd('a business fact');
     expect(eligibleEmits()).toEqual([]);
   });
