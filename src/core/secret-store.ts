@@ -77,8 +77,19 @@ export function isInfraSecret(name: string): boolean {
 const SECRET_PATTERNS: RegExp[] = [
   // Anthropic
   /\bsk-ant-[A-Za-z0-9_-]{20,}\b/,
-  // OpenAI (sk-, sk-proj-)
+  // OpenAI. Two rules on purpose: the plain `sk-` form is alnum-only, but the
+  // prefixed forms (`sk-proj-`, `sk-svcacct-`) carry `-` and `_` INSIDE the
+  // token, so the alnum rule stops at the first dash and matches four
+  // characters. Measured 2026-08-24: a real `sk-proj-…` key passed the masker
+  // untouched while the test fixture (`sk-ant-` + 40×A) was caught — the fixture
+  // was the reason it looked covered.
+  /\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}\b/,
   /\bsk-[A-Za-z0-9]{20,}\b/,
+  // A credential embedded in a URL's userinfo (`scheme://user:pass@host`).
+  // Narrow by construction — it needs the `:`…`@` shape — so it does not touch
+  // ordinary URLs, and it catches the database and basic-auth strings that
+  // routinely end up in connection errors.
+  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s:@/]+@/i,
   // Stripe
   /\b[sr]k_(live|test)_[A-Za-z0-9]{10,}\b/,
   // GitHub (ghu_ added 2026-05-18 — user installation tokens missed previously)
@@ -136,10 +147,16 @@ export function matchesSecretPatternStrict(text: string): string | null {
  * Mask text that matches common secret patterns.
  * Replaces detected secrets with `***<last4>`.
  */
-export function maskSecretPatterns(text: string): string {
+export function maskSecretPatterns(text: string, opts?: { includeGeneric?: boolean }): string {
   let result = text;
-  // Apply specific patterns (skip generic last pattern to avoid over-masking)
-  for (const pattern of SECRET_PATTERNS.slice(0, -1)) {
+  // The generic 40+ char catcher is skipped by default to avoid over-masking
+  // ordinary prose. Callers that are scrubbing a machine-read sink rather than
+  // something a person reads (error reports) pass `includeGeneric` — there,
+  // masking a long opaque token that turns out to be a hash costs a little
+  // diagnostic detail, while missing one that is a credential costs the
+  // credential.
+  const patterns = opts?.includeGeneric === true ? SECRET_PATTERNS : SECRET_PATTERNS.slice(0, -1);
+  for (const pattern of patterns) {
     const globalPattern = new RegExp(pattern.source, 'g');
     result = result.replace(globalPattern, (match) => {
       if (match.length <= 4) return '***';
