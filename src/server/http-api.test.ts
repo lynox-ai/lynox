@@ -5874,6 +5874,86 @@ describe('LynoxHTTPApi', () => {
         },
       );
 
+      // ── The GOOGLE_CLIENT_* split ──────────────────────────────────────────
+      // Managed BYO is a supported state, so the CUSTOMER must be able to save and
+      // remove their own Google Cloud client pair. The AGENT must still not be able
+      // to raise a prompt for it: `ask_secret` takes both the name and the prompt
+      // text from the model and renders them as product-native UI, so an open
+      // prompt path is a phishing primitive inside the product.
+      //
+      // These four tests are the split. Widening the carve-out to cover the agent
+      // path — the implementation this spec is most likely to get wrong — turns the
+      // third one red, and it is the only thing that would.
+      it.each(['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'])(
+        'PUT /api/secrets/%s ACCEPTS user-scope on managed (customer writes their own pair)',
+        async (name) => {
+          vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+          vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+          try {
+            const res = await jsonFetch(`/api/secrets/${name}`, {
+              method: 'PUT',
+              body: JSON.stringify({ value: 'customer-supplied-value' }),
+            });
+            expect(res.status).toBe(200);
+            expect(mockSecretSet).toHaveBeenCalledWith(name, 'customer-supplied-value');
+          } finally {
+            vi.unstubAllEnvs();
+            vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          }
+        },
+      );
+
+      it('DELETE /api/secrets/GOOGLE_CLIENT_SECRET ACCEPTS user-scope on managed', async () => {
+        // The switch-back path (PRD D12) deletes the pair. Before the split this
+        // answered 403, which made the feature impossible on the tier it exists for.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/secrets/GOOGLE_CLIENT_SECRET', { method: 'DELETE' });
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      // Driven from the exported list, not a hand-written pair: a second entry added
+      // to CUSTOMER_WRITABLE_INFRA_PATTERNS would otherwise be carved out of the
+      // customer path with nothing checking that the agent path still refuses it.
+      it.each(['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_CLIENT_ANYTHING_FUTURE'])(
+        'the AGENT prompt path still refuses %s on managed (the split, not a loosening)',
+        async (name) => {
+          vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+          try {
+            const { predictManagedBlocked } = await import('./http-api.js');
+            expect(predictManagedBlocked(name)).toBe(true);
+          } finally {
+            vi.unstubAllEnvs();
+            vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          }
+        },
+      );
+
+      it('PUT /api/secrets/GOOGLE_OAUTH_CLIENT_ID still rejects (the carve-out is CLIENT_, not GOOGLE_)', async () => {
+        // Near-miss guard. `GOOGLE_OAUTH_*` holds the OAuth *tokens* (see
+        // INFRA_SECRET_PATTERNS) — a live grant, not a client registration, and never
+        // something the customer hand-writes. A carve-out written `/^GOOGLE_/` instead
+        // of `/^GOOGLE_CLIENT_/` would read as the same fix and expose the token names
+        // to a customer PUT. Nothing else in this file would notice.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/secrets/GOOGLE_OAUTH_CLIENT_ID', {
+            method: 'PUT',
+            body: JSON.stringify({ value: 'should-not-land' }),
+          });
+          expect(res.status).toBe(403);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
       it.each(['managed', 'managed_pro', 'eu', 'starter'])(
         'PUT /api/secrets/SMTP_PASSWORD rejects user-scope in mode=%s (admin-only infra)',
         async (mode) => {
@@ -7831,13 +7911,20 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
 
   it('blocks deleting infra/CP secrets on managed but allows a customer tool secret', async () => {
     vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
-    for (const name of ['LYNOX_VAULT_KEY', 'GOOGLE_CLIENT_SECRET', 'MANAGED_TOKEN']) {
+    // GOOGLE_CLIENT_SECRET used to sit in this list. It moved to the allowed half
+    // when managed BYO became a supported state: the pair belongs to the customer's
+    // own Google Cloud project, and the switch-back flow has to be able to remove it.
+    // GOOGLE_OAUTH_* — the control plane's own broker pair — stays blocked, which is
+    // the line the carve-out had to be drawn on.
+    for (const name of ['LYNOX_VAULT_KEY', 'GOOGLE_OAUTH_CLIENT_SECRET', 'MANAGED_TOKEN']) {
       const res = await jsonFetch(`/api/secrets/${name}`, { method: 'DELETE' });
       expect(res.status, name).toBe(403);
       expect((await res.json() as { error: string }).error).toContain('admin-managed');
     }
-    const tool = await jsonFetch('/api/secrets/SHOPIFY_TOKEN', { method: 'DELETE' });
-    expect(tool.status).not.toBe(403);
+    for (const name of ['SHOPIFY_TOKEN', 'GOOGLE_CLIENT_SECRET']) {
+      const res = await jsonFetch(`/api/secrets/${name}`, { method: 'DELETE' });
+      expect(res.status, name).not.toBe(403);
+    }
   });
 
   describe('GDPR export + erasure — engine.db coverage (Foundation Rework v2 — S2-pre0)', () => {

@@ -271,7 +271,45 @@ const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
 // calendar" with "contact support@lynox.ai" — for a value support does not have.
 const USER_OWNED_INFRA_PATTERNS: ReadonlyArray<RegExp> = [/^CALENDAR_FEED_/];
 
-function isAdminOnlySecret(name: string): boolean {
+/**
+ * Infra names the CUSTOMER may write through Settings, but the AGENT may still
+ * not be prompted for. This list is the reason the two predicates below exist
+ * separately, so read the distinction before adding to it.
+ *
+ * `GOOGLE_CLIENT_*` is a credential pair for the customer's OWN Google Cloud
+ * project. Managed BYO is a supported state, so the customer must be able to
+ * save and remove it — that is a deliberate action in their own settings.
+ *
+ * The agent must NOT be able to raise a prompt for it. `ask_secret` is an
+ * always-on tool whose `name` AND `prompt` text both come from the model, and
+ * the dialog renders as product-native UI. A prompt-injected agent asking for
+ * "your Google client secret" in lynox's own dialog is a phishing primitive
+ * inside the product, and the blocked-name check is what stops it existing.
+ * Opening the write path is a product decision; opening the prompt path is not
+ * the same decision and was never made.
+ */
+export const CUSTOMER_WRITABLE_INFRA_PATTERNS: ReadonlyArray<RegExp> = [/^GOOGLE_CLIENT_/];
+
+/**
+ * Blocked on the CUSTOMER's own write path (`PUT`/`DELETE /api/secrets/:name`),
+ * where the actor is a signed-in human acting in their own settings.
+ */
+function blockedForCustomerWrite(name: string): boolean {
+  return isInfraSecret(name)
+    && !USER_OWNED_INFRA_PATTERNS.some(p => p.test(name))
+    && !CUSTOMER_WRITABLE_INFRA_PATTERNS.some(p => p.test(name));
+}
+
+/**
+ * Blocked on the AGENT-initiated prompt path (`ask_secret` → `promptSecret`),
+ * where the actor is a model that may be acting on injected instructions.
+ *
+ * Strictly wider than {@link blockedForCustomerWrite}: everything the customer
+ * cannot write is also refused here, plus the names the customer MAY write but
+ * the agent may not ask for. If these two ever return the same answer for a
+ * `CUSTOMER_WRITABLE_INFRA_PATTERNS` name, the split has been undone.
+ */
+function blockedForAgentPrompt(name: string): boolean {
   return isInfraSecret(name) && !USER_OWNED_INFRA_PATTERNS.some(p => p.test(name));
 }
 
@@ -707,10 +745,13 @@ function requiresAdminSplitGate(value: string | undefined): boolean {
 
 /**
  * Predict whether an ask_secret call for the given name will be rejected by
- * the vault PUT (managed tier + name matches an admin-only infrastructure
- * pattern). Almost all agent-issued secrets pass — the predicate now fires
- * only for the narrow set of LYNOX_/MANAGED_/MAIL_ACCOUNT_/
- * GOOGLE_OAUTH_/SMTP_/IMAP_ infrastructure names.
+ * the AGENT-PROMPT path. It no longer predicts the vault PUT: since the predicate
+ * split, a customer may write some names the agent may not be prompted for — see
+ * CUSTOMER_WRITABLE_INFRA_PATTERNS. Almost all agent-issued secrets still pass; this
+ * fires for the infrastructure names LYNOX_/MANAGED_/MAIL_ACCOUNT_/GOOGLE_OAUTH_/
+ * GOOGLE_CLIENT_/SMTP_/IMAP_ — GOOGLE_CLIENT_ included, deliberately: `google-auth.ts`
+ * records why ("infra-walled precisely so the agent never learns to go asking for
+ * them"), and the customer-side carve-out does not change that.
  *
  * Exported so the session.promptSecret wire can short-circuit the UI prompt
  * for the rare admin-only cases AND unit tests can lock the predicate
@@ -719,7 +760,7 @@ function requiresAdminSplitGate(value: string | undefined): boolean {
  * setups can stub the env per case.
  */
 export function predictManagedBlocked(name: string): boolean {
-  return requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && isAdminOnlySecret(name);
+  return requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && blockedForAgentPrompt(name);
 }
 
 /** Provider / cost-caps / integrations are CP-managed → PUT /api/config needs the field allowlist. Pool tiers only. */
@@ -4382,7 +4423,7 @@ export class LynoxHTTPApi {
     // NAMES only, never values. The list is unfiltered (it includes infra/channel
     // key names too, not just the customer's own); that's names-only and exposes
     // no secret material, and PUT/DELETE still gate infra/channel secrets via
-    // isAdminOnlySecret. (A managed-customer-visible filter is a possible
+    // blockedForCustomerWrite. (A managed-customer-visible filter is a possible
     // follow-up; not needed for the scope fix.)
     this.addStatic('user', 'GET /api/secrets', async (_req, res) => {
       const store = engine.getSecretStore();
@@ -4478,7 +4519,7 @@ export class LynoxHTTPApi {
       // for any name EXCEPT infrastructure / channel-managed patterns (see
       // INFRA_ADMIN_ONLY_PATTERNS doc). Self-host has no admin secret, so
       // cookie users are already promoted to admin and this gate never applies.
-      if (requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && isAdminOnlySecret(name)) {
+      if (requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && blockedForCustomerWrite(name)) {
         errorResponse(res, 403, `Managed mode: secret "${name}" is admin-managed (infrastructure or channel-managed). Set this via the relevant integration UI or contact support@lynox.ai.`);
         return;
       }
@@ -4536,7 +4577,7 @@ export class LynoxHTTPApi {
       // infra / channel-managed secret (LYNOX_VAULT_KEY, MANAGED_*, MAIL_ACCOUNT_*,
       // GOOGLE_*, …) must never be deletable — only the customer's own tool
       // credentials (SHOPIFY_*, …) delete freely. Mirrors the PUT gate.
-      if (requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && isAdminOnlySecret(name)) {
+      if (requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && blockedForCustomerWrite(name)) {
         errorResponse(res, 403, `Managed mode: secret "${name}" is admin-managed (infrastructure or channel-managed). Manage this via the relevant integration UI or contact support@lynox.ai.`);
         return;
       }
