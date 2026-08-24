@@ -398,12 +398,16 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
   // every ad-hoc approximation of one shipped a SILENT FAIL-OPEN. The last
   // version was defeated by an ordinary `const g = 'src/*';` — an unpaired
   // `/*` inside a string swallowed 263 lines and a wrong call with them, and
-  // the suite stayed green. A guard that fails open is worse than none, because
-  // it reads as coverage ([[fb_gate_false_confidence]]).
+  // the suite stayed green. A guard that fails open is worse than none: a green
+  // check reads as coverage, so it removes the pressure to fix the thing it is
+  // not actually checking.
   //
-  // The fix that actually closes this removes the possibility instead of
-  // chasing it: DEF-pair-resolver-swap-detectable-not-impossible, whose
-  // verify-done is a COMPILE-level proof, so no future regex can close it. The real fix removes the possibility instead of
+  // The fix that closes this removes the possibility instead of chasing it —
+  // resolveClientPair taking the pair descriptor the contract already declares,
+  // rather than two free strings, leaves no argument order to swap. It is
+  // tracked as DEF-pair-resolver-swap-detectable-not-impossible with a
+  // compile-level acceptance test, so no future regex can be mistaken for
+  // having closed it. The real fix removes the possibility instead of
   // chasing it — DEF-pair-resolver-swap-detectable-not-impossible.
   it('every pair descriptor is kind-checked, complete and symmetric', () => {
     // One-directional and kind-blind was not enough: a `pair` on a
