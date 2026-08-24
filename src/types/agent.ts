@@ -35,10 +35,23 @@ export interface PromptOrigin {
   stepId?: string | undefined;
   stepTask?: string | undefined;
   /**
+   * ⭐ The FACT, and the only field here the model cannot touch. Set by the
+   * spawner itself, never derived from anything a spec carries.
+   *
+   * It exists because the first version had the renderer key its whole claim on
+   * `subagentName` — and a name of one zero-width space passes `validateSpawnInput`
+   * (non-empty, no C0) and cleans down to nothing, so an injected parent could
+   * DELETE the line warning about it by choosing a name. Getting the claim's
+   * WORDING out of the model's reach was not enough; its EXISTENCE had to leave
+   * too, and a boolean is the one shape that cannot be emptied.
+   */
+  subagent?: true | undefined;
+  /**
    * The spawned sub-agent that raised the prompt (`SpawnSpec.name`), and its
-   * task. Independent of the step fields rather than folded into them: a step
-   * that spawns produces BOTH, and collapsing them would drop whichever was
-   * written second. The deepest spawner wins, which is the immediate asker.
+   * task — decoration on the fact above, not the fact. Independent of the step
+   * fields rather than folded into them: a step that spawns produces BOTH, and
+   * collapsing them would drop whichever was written second. The deepest spawner
+   * wins, which is the immediate asker.
    */
   subagentName?: string | undefined;
   subagentTask?: string | undefined;

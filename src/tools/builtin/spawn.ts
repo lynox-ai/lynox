@@ -497,7 +497,10 @@ function promptCallbacksWithOrigin(
   parent: IAgent,
   spec: SpawnSpec,
 ): { promptUser?: PromptUserFn | undefined; promptSecret?: PromptSecretFn | undefined; promptTabs?: PromptTabsFn | undefined } {
-  const origin: PromptMeta = { subagentName: spec.name, subagentTask: spec.task };
+  // `subagent: true` is the claim; the two names are decoration on it. Keep them
+  // in that order in your head, because the first version had only the names and
+  // a child called "​" then rendered no origin line at all.
+  const origin: PromptMeta = { subagent: true, subagentName: spec.name, subagentTask: spec.task };
   const { promptUser, promptSecret, promptTabs } = parent;
   return {
     // Each stays undefined when the parent had none — an autonomous or headless

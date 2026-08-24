@@ -13,10 +13,21 @@ export interface PromptOrigin {
 	stepId?: string;
 	stepTask?: string;
 	/**
-	 * The spawned sub-agent that raised the prompt, and its task. BOTH are
-	 * written by the model that spawned it — by the very agent this line exists
-	 * to make the user look twice at — so neither may carry the warning. They
-	 * are rendered as values inside a frame the renderer owns.
+	 * ⭐ The FACT that a spawned sub-agent raised this prompt. The engine sets it;
+	 * nothing a model writes can produce or suppress it.
+	 *
+	 * It is separate from the name below because the first version keyed the
+	 * claim on the name — and a name of one zero-width space survives the
+	 * engine's validation and cleans down to empty here, so a parent could delete
+	 * the very line that warns about it. A boolean cannot be emptied.
+	 */
+	subagent?: true;
+	/**
+	 * The sub-agent's name and task: DECORATION on the fact above. Both are
+	 * written by the model that spawned it — by the agent this line exists to
+	 * make the user look twice at — so neither may carry the warning. They are
+	 * rendered as values inside a frame the renderer owns, and the frame renders
+	 * with or without them.
 	 */
 	subagentName?: string;
 	subagentTask?: string;
@@ -33,9 +44,16 @@ const MAX_LABEL = 80;
 /** The task is prose on its own line, so it may run longer than a label. */
 const MAX_TASK = 160;
 
-/** C0/C1 controls — a newline would turn one label into several lines. */
+/**
+ * C0/C1 controls — a newline would turn one label into several lines — plus
+ * U+2028/U+2029, which browsers break lines on exactly like `\n` and which no
+ * control-character range covers. `chat-framing.ts` strips them for the same
+ * reason and says so; this file did not, and the origin block has no height cap
+ * while the question body below it does — so it is the one part of the dialog
+ * that can push Allow/Deny off screen.
+ */
 // eslint-disable-next-line no-control-regex -- removing them is the point
-const CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F]/g;
+const CONTROL_CHARS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g;
 /**
  * Bidi marks and overrides — they render text in an order it is not written in —
  * plus the zero-width formatters, which fill a label that looks empty. This
@@ -75,11 +93,19 @@ const ORIGIN_FIELDS = {
 	workflowName: { wire: 'workflow_name', max: MAX_LABEL },
 	stepId: { wire: 'step_id', max: MAX_LABEL },
 	stepTask: { wire: 'step_task', max: MAX_TASK },
+	// A flag, not text: it carries no `max` because there is nothing to clamp,
+	// and it is read below by its own branch rather than by the cleaning loop.
+	subagent: { wire: 'subagent' },
 	subagentName: { wire: 'subagent_name', max: MAX_LABEL },
 	subagentTask: { wire: 'subagent_task', max: MAX_TASK },
-} satisfies Record<keyof PromptOrigin, { wire: string; max: number }>;
+} satisfies Record<keyof PromptOrigin, { wire: string; max?: number }>;
 
 const ORIGIN_KEYS = Object.keys(ORIGIN_FIELDS) as (keyof PromptOrigin)[];
+
+/** The text fields — everything with a length to clamp. */
+const TEXT_KEYS = ORIGIN_KEYS.filter(
+	(key): key is Exclude<keyof PromptOrigin, 'subagent'> => 'max' in ORIGIN_FIELDS[key],
+);
 
 /**
  * Build an origin from loosely-typed fields, or `undefined` when none of them
@@ -95,7 +121,7 @@ const ORIGIN_KEYS = Object.keys(ORIGIN_FIELDS) as (keyof PromptOrigin)[];
 export function toPromptOrigin(raw: Partial<Record<keyof PromptOrigin, unknown>>): PromptOrigin | undefined {
 	const o: PromptOrigin = {};
 	let present = false;
-	for (const key of ORIGIN_KEYS) {
+	for (const key of TEXT_KEYS) {
 		const value = raw[key];
 		if (typeof value !== 'string') continue;
 		const cleaned = clean(value, ORIGIN_FIELDS[key].max);
@@ -103,6 +129,9 @@ export function toPromptOrigin(raw: Partial<Record<keyof PromptOrigin, unknown>>
 		o[key] = cleaned;
 		present = true;
 	}
+	// The flag survives a name that cleans away to nothing — which is the whole
+	// reason it exists, so it is checked on its own and never through `cleaned`.
+	if (raw.subagent === true) { o.subagent = true; present = true; }
 	return present ? o : undefined;
 }
 

@@ -1662,9 +1662,15 @@ describe('spawn_agent tool', () => {
       // actually needs, so that is what is pinned — and the arguments are pinned
       // with it, because a wrapper that dropped the options would be invisible to
       // a bare "was called".
-      await ctorArg.promptUser('Proceed?', ['Yes', 'No']);
-      await ctorArg.promptSecret('STRIPE_KEY', 'Paste it', 'api_key');
-      await ctorArg.promptTabs([{ question: 'Which one?' }]);
+      promptUser.mockResolvedValue('Yes');
+      promptSecret.mockResolvedValue('saved');
+      promptTabs.mockResolvedValue(['picked']);
+      // The ANSWER has to come back, not just the call go out. A wrapper with a
+      // block body that forgets its `return` calls through perfectly and hands
+      // every consent decision back as undefined — invisible to "was called".
+      await expect(ctorArg.promptUser('Proceed?', ['Yes', 'No'])).resolves.toBe('Yes');
+      await expect(ctorArg.promptSecret('STRIPE_KEY', 'Paste it', 'api_key')).resolves.toBe('saved');
+      await expect(ctorArg.promptTabs([{ question: 'Which one?' }])).resolves.toEqual(['picked']);
       expect(promptUser).toHaveBeenCalledWith('Proceed?', ['Yes', 'No'], expect.anything());
       expect(promptSecret).toHaveBeenCalledWith('STRIPE_KEY', 'Paste it', 'api_key', expect.anything());
       expect(promptTabs).toHaveBeenCalledWith([{ question: 'Which one?' }], expect.anything());
@@ -3141,12 +3147,27 @@ describe('spawn_agent tool', () => {
       // The child's does.
       await (await childConfig()).promptUser!('Merge "Ada" into "Dr. Ada Lovelace"?', ['Merge', 'Cancel']);
       expect(promptUser.mock.calls[1]![2]).toMatchObject({
+        subagent: true,
         subagentName: 'inbox-triage',
         subagentTask: 'Fold duplicate contacts',
       });
       // Same question text both times: the dialog can only tell the two apart by
       // the origin, which is the entire point of shipping one.
       expect(promptUser.mock.calls[0]![0]).toBe(promptUser.mock.calls[1]![0]);
+    });
+
+    it('⭐ stamps the FACT even when the child is named so it cleans away', async () => {
+      // The disclosure must not be the parent's to delete. A name of one
+      // zero-width space passes `validateSpawnInput` (non-empty, no C0) and the
+      // client's `clean()` reduces it to '' — so a renderer keyed on the NAME
+      // shows nothing at all for exactly the parent it exists to warn about.
+      const promptUser = vi.fn<PromptUserFn>().mockResolvedValue('Yes');
+      await spawnAgentTool.handler(
+        { agents: [{ name: '​', task: 'Fold duplicate contacts' }] },
+        makeAgent({ promptUser }),
+      );
+      await (await childConfig()).promptUser!('Merge?', ['Merge', 'Cancel']);
+      expect(promptUser.mock.calls[0]![2]!.subagent, 'the flag is the engine\'s, not the spec\'s').toBe(true);
     });
 
     it('stamps promptSecret and promptTabs too, not only promptUser', async () => {

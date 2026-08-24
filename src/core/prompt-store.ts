@@ -95,18 +95,46 @@ function isOnboardingBasicsPayload(payloadJson: string | null): boolean {
 }
 
 /**
- * The origin fields, in ONE place, welded to the type.
+ * The origin fields, in ONE place, welded to the type: each one's wire name and
+ * whether it is text (a string to clamp) or a flag.
  *
- * `Record<keyof PromptOrigin, true>` is exhaustive, so a field added to
+ * `Record<keyof PromptOrigin, …>` is exhaustive, so a field added to
  * {@link PromptOrigin} and not here is a COMPILE error rather than a field that
  * persists and never reads back — which is what a second hand-written list
- * would eventually produce. The two functions below both derive from this, so
- * the write side and the read side cannot know different sets.
+ * would eventually produce. Everything below derives from this, so the write
+ * side, the read side and the wire cannot know different sets.
  */
-const ORIGIN_FIELD_SET: Record<keyof PromptOrigin, true> = {
-  workflowName: true, stepId: true, stepTask: true, subagentName: true, subagentTask: true,
+const ORIGIN_FIELD_SET: Record<keyof PromptOrigin, { wire: string; text: boolean }> = {
+  workflowName: { wire: 'workflow_name', text: true },
+  stepId: { wire: 'step_id', text: true },
+  stepTask: { wire: 'step_task', text: true },
+  // Not text: a boolean the spawner sets. See PromptOrigin.subagent.
+  subagent: { wire: 'subagent', text: false },
+  subagentName: { wire: 'subagent_name', text: true },
+  subagentTask: { wire: 'subagent_task', text: true },
 };
 const ORIGIN_FIELDS = Object.keys(ORIGIN_FIELD_SET) as (keyof PromptOrigin)[];
+/** The text fields — everything with a length to clamp and a string to read. */
+const ORIGIN_TEXT_FIELDS = ORIGIN_FIELDS.filter(
+  (field): field is Exclude<keyof PromptOrigin, 'subagent'> => ORIGIN_FIELD_SET[field].text,
+);
+
+/**
+ * What a single origin field may carry into a row and onto the wire.
+ *
+ * NOT the display bound — the client clamps a label at 80 and a task at 160,
+ * and that number is free to change without touching anything here. This one
+ * has a different job: `spec.task` may be 16 KB (`MAX_SPAWN_TASK_LENGTH`), and
+ * without a bound at the producer every prompt row and every SSE frame carried
+ * all of it to render 160 characters. Keeping the two numbers separate is
+ * deliberate — unifying them would tie a storage bound to a design decision.
+ */
+const ORIGIN_MAX_CHARS = 512;
+
+function boundOriginText(value: string): string {
+  const points = [...value];
+  return points.length > ORIGIN_MAX_CHARS ? points.slice(0, ORIGIN_MAX_CHARS).join('') : value;
+}
 
 /**
  * Narrow a `PromptMeta` to the origin fields worth persisting, or `undefined`
@@ -121,38 +149,29 @@ export function promptOriginOf(meta: PromptMeta | undefined): PromptOrigin | und
   // render nothing there — the row would claim an origin the dialog denies.
   const out: PromptOrigin = {};
   let present = false;
-  for (const field of ORIGIN_FIELDS) {
-    const value = meta[field] || undefined;
-    if (value !== undefined) { out[field] = value; present = true; }
+  for (const field of ORIGIN_TEXT_FIELDS) {
+    const value = meta[field];
+    if (typeof value !== 'string' || value === '') continue;
+    out[field] = boundOriginText(value);
+    present = true;
   }
+  if (meta.subagent === true) { out.subagent = true; present = true; }
   return present ? out : undefined;
 }
 
 /**
- * The wire name of each origin field, welded the same way — a field with no
- * name here does not compile. The SSE prompt events are flat and snake_case
- * (the resume path in contrast ships the nested object and needs no mapping).
- */
-const ORIGIN_WIRE_NAMES: Record<keyof PromptOrigin, string> = {
-  workflowName: 'workflow_name',
-  stepId: 'step_id',
-  stepTask: 'step_task',
-  subagentName: 'subagent_name',
-  subagentTask: 'subagent_task',
-};
-
-/**
- * The origin as an SSE prompt event carries it.
+ * The origin as an SSE prompt event carries it — flat, snake_case, derived from
+ * the same table so a field cannot be named on one side and forgotten here.
  *
  * Four events used to spread these fields by hand, which is four places to
  * forget one — and they read the meta RAW while the database row went through
  * `promptOriginOf`, so an empty string was absent in the row and present on the
  * wire. One derivation for both ends that.
  */
-export function originWireFields(meta: PromptMeta | undefined): Record<string, string | undefined> {
+export function originWireFields(meta: PromptMeta | undefined): Record<string, string | true | undefined> {
   const origin = promptOriginOf(meta);
-  const out: Record<string, string | undefined> = {};
-  for (const field of ORIGIN_FIELDS) out[ORIGIN_WIRE_NAMES[field]] = origin?.[field];
+  const out: Record<string, string | true | undefined> = {};
+  for (const field of ORIGIN_FIELDS) out[ORIGIN_FIELD_SET[field].wire] = origin?.[field];
   return out;
 }
 
@@ -171,10 +190,11 @@ export function parseOriginJson(raw: string | null): PromptOrigin | undefined {
     // branch that makes the function look more careful than it is.
     const o = JSON.parse(raw) as Record<string, unknown>;
     const meta: PromptMeta = {};
-    for (const field of ORIGIN_FIELDS) {
+    for (const field of ORIGIN_TEXT_FIELDS) {
       const value = o[field];
       if (typeof value === 'string') meta[field] = value;
     }
+    if (o['subagent'] === true) meta.subagent = true;
     return promptOriginOf(meta);
   } catch {
     return undefined;

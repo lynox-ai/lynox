@@ -483,8 +483,32 @@ describe('promptOriginOf', () => {
   });
 
   it('survives on a sub-agent alone — a spawn outside any workflow has no step', () => {
-    expect(promptOriginOf({ subagentName: 'triage', subagentTask: 'Fold dupes' }))
-      .toEqual({ subagentName: 'triage', subagentTask: 'Fold dupes' });
+    expect(promptOriginOf({ subagent: true, subagentName: 'triage', subagentTask: 'Fold dupes' }))
+      .toEqual({ subagent: true, subagentName: 'triage', subagentTask: 'Fold dupes' });
+  });
+
+  it('⭐ keeps the flag when every name is empty — the disclosure is not the spec\'s to delete', () => {
+    // `spec.name` of one zero-width space passes `validateSpawnInput` and cleans
+    // to nothing in the client. If the flag travelled only alongside a surviving
+    // name, the parent could suppress its own disclosure by choosing one.
+    expect(promptOriginOf({ subagent: true, subagentName: '', subagentTask: '' }))
+      .toEqual({ subagent: true });
+    // And it is the engine's `true`, not any truthy value off a crafted row.
+    expect(promptOriginOf({ subagent: undefined, workflowName: 'W' })).toEqual({ workflowName: 'W' });
+  });
+
+  it('⭐ bounds what a field can carry into the row and onto the wire', () => {
+    // `spec.task` may be 16 KB (MAX_SPAWN_TASK_LENGTH). Unbounded here, all of
+    // it was persisted per prompt and pushed through every SSE frame to render
+    // 160 characters. This bound is NOT the display bound — it exists so the
+    // storage and the transport are finite, and the client is free to clamp
+    // tighter for layout without touching it.
+    const long = 'x'.repeat(20_000);
+    const o = promptOriginOf({ subagent: true, subagentTask: long, stepTask: long })!;
+    expect(o.subagentTask!.length).toBe(512);
+    expect(o.stepTask!.length).toBe(512);
+    // A value inside the bound is untouched — no ellipsis, no trimming.
+    expect(promptOriginOf({ stepTask: 'Paginate contacts' })!.stepTask).toBe('Paginate contacts');
   });
 
   it('is undefined when the meta carries no origin — multiSelect alone is not one', () => {

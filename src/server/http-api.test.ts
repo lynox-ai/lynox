@@ -4235,10 +4235,16 @@ describe('LynoxHTTPApi', () => {
       },
     ] as const;
 
+    // A step that SPAWNED, so one frame carries both halves — that is the shape
+    // a real nested run produces, and it keeps the sub-agent fields under the
+    // same per-kind parametrisation rather than proving them on one arm.
     const ORIGIN_META = {
       workflowName: 'bexio Triage Phase 1-3',
       stepId: 'load_contacts',
       stepTask: 'Paginate GET /2.0/contact',
+      subagent: true,
+      subagentName: 'inbox-triage',
+      subagentTask: 'Fold duplicate contacts',
     };
 
     it.each(SSE_PROMPT_KINDS)('the live $label frame names the workflow, not just the step', async ({ raise }) => {
@@ -4270,6 +4276,11 @@ describe('LynoxHTTPApi', () => {
         const payload = JSON.parse(frame!.slice('data:'.length)) as Record<string, unknown>;
         expect(payload['workflow_name']).toBe('bexio Triage Phase 1-3');
         expect(payload['step_id']).toBe('load_contacts');
+        // The sub-agent half of the same frame. Without these, re-inlining the
+        // old three-field spread at any one of the four emit sites passes: the
+        // wire-field helper is unit-tested, but nothing proved the emits use it.
+        expect(payload['subagent']).toBe(true);
+        expect(payload['subagent_name']).toBe('inbox-triage');
 
         // Settle the parked prompt so its expiry interval is cleared before the
         // db closes. Without this the timer fires ~30s later against a closed

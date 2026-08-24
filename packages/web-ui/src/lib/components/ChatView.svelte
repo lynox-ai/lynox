@@ -2186,7 +2186,7 @@
      the main agent has its cause in the message directly above, and a redundant
      "asked by" line there would be noise. -->
 {#snippet promptOrigin(origin: PromptOrigin | undefined)}
-	{#if origin && (origin.workflowName || origin.stepId || origin.subagentName)}
+	{#if origin && (origin.workflowName || origin.stepId || origin.subagent)}
 		<!-- Workflow and step are SEPARATE elements with a real separator element
 		     between them, not one joined string. Both names come from a manifest
 		     a model may have written; a joined string lets a name containing the
@@ -2194,26 +2194,29 @@
 		     asked. Structure it cannot reach beats punctuation it can imitate.
 		     `toPromptOrigin` bounds the length and strips control/bidi chars. -->
 		<div class="text-[11px] text-text-subtle">
-			{#if origin.subagentName}
+			{#if origin.subagent}
 				<!-- The sub-agent row comes FIRST: in a step that spawned, the child
 				     is the immediate asker and the step is the context around it.
 
-				     The frame here takes NO interpolation, unlike the workflow row
+				     Keyed on `origin.subagent`, a flag the ENGINE sets — never on the
+				     name. The first version keyed it on the name, and a name of one
+				     zero-width space passes the engine's validation and cleans away
+				     to nothing here, so the parent could delete the line warning
+				     about it simply by choosing what to call its child.
+
+				     The frame also takes NO interpolation, unlike the workflow row
 				     below. A sub-agent's name is chosen by the parent model — the
 				     one an injected instruction is steering when this line matters —
 				     so a parent free to name its child names it "Main assistant".
-				     Keeping the claim and the name in separate strings means the
-				     claim stays true whatever the name says: the user reads "a
-				     sub-agent asked" and then a name, never a name pretending to be
-				     the claim. -->
+				     Claim and name in separate strings means the claim stays true
+				     whatever the name says, and renders with no name at all. -->
 				<div class="flex items-start gap-1.5">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
 						<path stroke-linecap="round" stroke-linejoin="round" d="M12 4a4 4 0 100 8 4 4 0 000-8zM4 20a8 8 0 0116 0" />
 					</svg>
 					<span class="min-w-0 [overflow-wrap:anywhere]">
 						<span>{t('chat.prompt_origin_subagent')}</span>
-						<span class="mx-1" aria-hidden="true">·</span>
-						<span>{origin.subagentName}</span>
+						{#if origin.subagentName}<span class="mx-1" aria-hidden="true">·</span><span>{origin.subagentName}</span>{/if}
 					</span>
 				</div>
 				{#if origin.subagentTask}
@@ -2221,7 +2224,7 @@
 				{/if}
 			{/if}
 			{#if origin.workflowName || origin.stepId}
-				<div class="flex items-start gap-1.5" class:mt-0.5={origin.subagentName}>
+				<div class="flex items-start gap-1.5" class:mt-0.5={origin.subagent}>
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
 						<path stroke-linecap="round" stroke-linejoin="round" d="M4 6h6a2 2 0 012 2v8a2 2 0 002 2h4m0 0l-3-3m3 3l-3 3M4 6V4m0 2v2" />
 					</svg>

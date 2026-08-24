@@ -197,27 +197,32 @@ describe('promptUser callers', () => {
   }
 
   /**
-   * A pass-through: `(q, opts, m) => promptUser(q, opts, {…})`.
+   * A pass-through: `promptUser: (q, opts, m) => promptUser(q, opts, {…})`.
    *
    * The rule this guard enforces is "say who wrote this text". A wrapper writes
-   * none — the argument is byte-identically the one its own caller passed, and
-   * that caller is already swept by the same rule. Flagging it would demand a
-   * `pv` on a value nobody here authored, which is not a declaration but a lie.
+   * none — the argument is byte-identically the one its own caller passed.
+   * Flagging it would demand a `pv` on a value nobody here authored, which is
+   * not a declaration but a lie.
    *
-   * What it does NOT do is follow the value: it moves the authorship question
-   * one frame out rather than answering it. That is sound only because the frame
-   * it moves to is inside this same sweep. A wrapper around a callback that
-   * arrived from outside `src/` would be accepted on a promise nothing checks —
-   * there is no such caller today, and if one appears it belongs in the
-   * exemption list with a reason, not here.
+   * ⚠ NARROW ON PURPOSE, and the narrowing is the whole safety argument. The
+   * first version accepted any arrow whose first parameter was passed through,
+   * which also accepts a LOCAL helper — `const ask = q => agent.promptUser(q, o)`
+   * — and there the reasoning collapses: the sweep matches `promptUser(` only,
+   * so it never inspects `ask(`Delete ${file}?`)` and the authorship question is
+   * not moved one frame out, it is dropped. So the arrow must be the value of a
+   * `promptUser` / `promptSecret` / `promptTabs` property, i.e. a callback
+   * being handed to an agent, which is a shape a caller cannot invent by
+   * accident and whose own caller is the swept tool.
    */
   function isForwarded(arg: string, before: string): boolean {
     const first = arg.split(',')[0]!.trim();
     if (!/^[A-Za-z_$][\w$]*$/.test(first)) return false;
-    // The nearest enclosing arrow, and only when nothing statement-like sits
-    // between its `=>` and this call — so a body that computes a new string and
-    // then prompts is NOT a forwarder, even if a local shares a parameter's name.
-    const params = /\(([^()]*)\)\s*(?::\s*[^=;{]+)?=>\s*[^;{}]*$/.exec(before)?.[1];
+    // The nearest enclosing arrow — required to be a prompt-callback property's
+    // value, and required to call straight through: nothing statement-like may
+    // sit between its `=>` and this call, so a body that computes a new string
+    // first is not a forwarder however it names its locals.
+    const params = /\b(?:promptUser|promptSecret|promptTabs)\s*:[^;{}]*?\(([^()]*)\)\s*(?::\s*[^=;{]+)?=>\s*[^;{}]*$/
+      .exec(before)?.[1];
     if (params === undefined) return false;
     return params.split(',').map(p => p.trim().split(/[:?=]/)[0]!.trim())[0] === first;
   }
@@ -239,13 +244,13 @@ describe('promptUser callers', () => {
   it('accepts a pass-through wrapper — and only a real one', () => {
     // The wrapper spawn.ts builds so a child's prompt names the child. It writes
     // no text; demanding a `pv` on a value it did not author would be a lie.
-    expect(classifyArg('q, opts, { ...origin, ...m })', 'promptUser ? (q, opts, m) => promptUser('))
+    expect(classifyArg('q, opts, { ...origin, ...m })', 'promptUser: promptUser ? (q, opts, m) => promptUser('))
       .toBe('declared');
 
-    // ⭐ The three ways the wrong rule would let real offenders through, each
-    // measured against the version above rather than imagined:
+    // ⭐ The four ways the wrong rule would let real offenders through, each
+    // measured against a version that actually did rather than imagined:
     expect(
-      classifyArg('agentText, opts)', 'promptUser ? (q, opts, m) => promptUser('),
+      classifyArg('agentText, opts)', 'promptUser: promptUser ? (q, opts, m) => promptUser('),
       'a bare parameter that is NOT the one forwarded',
     ).toBe('undeclared');
     expect(
@@ -253,11 +258,20 @@ describe('promptUser callers', () => {
       'a local that merely shares a parameter\'s name, with no arrow at all',
     ).toBe('undeclared');
     expect(
-      classifyArg('q, opts)', '(q, opts, m) => { const x = 1; return agent.promptUser('),
+      classifyArg('q, opts)', 'promptUser: (q, opts, m) => { const x = 1; return promptUser('),
       'a body that does work first is not a forwarder, however it names its locals',
     ).toBe('undeclared');
+    // ⭐⭐ The one the first version got wrong. A local helper looks exactly like
+    // a forwarder, but the sweep matches `promptUser(` only — it never inspects
+    // `ask(`Delete ${file}?`)`, so the authorship question is not moved one frame
+    // out, it is dropped. The exemption is therefore tied to the arrow being a
+    // prompt-CALLBACK, not merely an arrow.
+    expect(
+      classifyArg('q, o)', 'const ask = (q: string) => agent.promptUser('),
+      'a local helper is not a callback handed to an agent',
+    ).toBe('undeclared');
     // And a second parameter is not the forwarded one either.
-    expect(classifyArg('opts, q)', 'promptUser ? (q, opts, m) => promptUser(')).toBe('undeclared');
+    expect(classifyArg('opts, q)', 'promptUser: promptUser ? (q, opts, m) => promptUser(')).toBe('undeclared');
   });
 
   it('sees every call form, including the optional one', () => {
