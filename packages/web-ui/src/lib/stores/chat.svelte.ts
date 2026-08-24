@@ -1128,8 +1128,9 @@ async function _executeRun(task: string, files?: FileAttachment[], displayText?:
 	// try to re-attach to the still-live run (#83) instead of ending blind.
 	//
 	// `error` is DELIBERATELY not terminal here (it was until 2026-08-23). The
-	// engine emits `type:'error'` for two different things and the wire does not
-	// distinguish them: a dead turn (`agent.ts` absolute-iteration limit) and a
+	// engine emits `type:'error'` for two different things, and until the `fatal`
+	// flag landed the wire did not distinguish them at all: a dead turn
+	// (`agent.ts` absolute-iteration limit) and a
 	// non-fatal incident it recovers from — `stream.ts` reports an unparsable
 	// tool input, substitutes `input:{}` and CONTINUES the turn. Counting the
 	// second as terminal short-circuited this whole block, so the run kept going

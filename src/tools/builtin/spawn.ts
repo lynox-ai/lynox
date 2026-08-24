@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
+import type { ToolEntry, SpawnSpec, IAgent, ModelTier, EmittingStreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
@@ -515,7 +515,10 @@ function promptCallbacksWithOrigin(
 async function executeThinker(
   spec: SpawnSpec,
   parentAgent: IAgent,
-  parentOnStream: StreamHandler | null,
+  // Emitting: this handler is wired onto the CHILD agent, i.e. it is the sink a
+  // core producer writes into. Keeping it loose here would reintroduce at the
+  // boundary exactly what the child was forced to decide.
+  parentOnStream: EmittingStreamHandler | null,
   childDepth: number,
   /**
    * The child's actual spend, reported once it stops for ANY reason — done,
@@ -1107,7 +1110,11 @@ export const spawnAgentTool: ToolEntry<SpawnAgentInput> = {
     const spawnStart = Date.now();
 
     const parentStream = agent.onStream;
-    const makeChildStream = (sub: SpawnedSubAgent): StreamHandler | null => {
+    // Emitting, not plain: this handler IS a core producer — it is what the child
+    // agent calls — so the error it forwards must already carry `fatal`. Typing it
+    // loosely here would have let the passthrough launder a decision the child was
+    // forced to make back into an unknown.
+    const makeChildStream = (sub: SpawnedSubAgent): EmittingStreamHandler | null => {
       if (!parentStream) return null;
       return (event) => {
         // Forward only high-signal, low-frequency events. Text and thinking

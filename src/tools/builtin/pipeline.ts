@@ -1,4 +1,4 @@
-import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier, IAgent } from '../../types/index.js';
+import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, EmittingStreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier, IAgent } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { randomUUID } from 'node:crypto';
 import { validateManifest, maxStepsFor, parallelStepCapFor } from '../../orchestrator/validate.js';
@@ -209,7 +209,7 @@ export function _summarizeStepOutput(result: string): string {
   return `${collapsed.slice(0, STEP_SUMMARY_MAX - 1)}…`;
 }
 
-function buildProgressHooks(pipelineStreamHandler: StreamHandler | null, manifest?: Manifest): RunHooks {
+function buildProgressHooks(pipelineStreamHandler: EmittingStreamHandler | null, manifest?: Manifest): RunHooks {
   const handler = pipelineStreamHandler;
   if (!handler) return {};
 
@@ -452,7 +452,8 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
 export interface PipelineDeps {
   config: LynoxUserConfig;
   tools: ToolEntry[];
-  streamHandler: StreamHandler | null;
+  // Emitting: pipeline steps run core agents that write into this.
+  streamHandler: EmittingStreamHandler | null;
   runHistory: RunHistory | null;
   toolContext?: ToolContext | undefined;
   parentPrompt?: SubAgentPromptHandles | undefined;

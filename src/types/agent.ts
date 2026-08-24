@@ -1,6 +1,6 @@
 // === 4.4 IAgent Interface ===
 
-import type { ToolEntry, StreamHandler } from './tools.js';
+import type { ToolEntry, EmittingStreamHandler } from './tools.js';
 import type { IMemory, MemoryScopeRef } from './memory.js';
 import type { SecretStoreLike, IsolationConfig } from './security.js';
 import type { AutonomyLevel } from './modes.js';
@@ -271,7 +271,12 @@ export interface IAgent {
    * construction; never to telemetry, error-report, or stdout.
    */
   getProviderConfig(): ProviderConfigSnapshot;
-  onStream:        StreamHandler | null;
+  // `EmittingStreamHandler`, not `StreamHandler`: this field is what core's own
+  // producers call, so it has to reject an error event that forgot to say
+  // whether the turn is over. It does NOT narrow what callers may plug in — a
+  // plain StreamHandler accepts the wider union and is therefore still
+  // assignable here.
+  onStream:        EmittingStreamHandler | null;
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;
   promptSecret?: PromptSecretFn | undefined;

@@ -1151,6 +1151,57 @@ describe('LynoxHTTPApi', () => {
       expect(text).toContain('event: done');
     });
 
+    it('carries fatal through to the wire on an ENGINE error, not just the catch', async () => {
+      // The other test covers http-api's own catch. This covers the path every
+      // engine event takes: session.onStream -> JSON.stringify -> res.write.
+      // Typing that closure narrowly does NOT protect it — the payload goes into
+      // JSON.stringify, not into a typed sink, so an explicit field projection
+      // there drops `fatal` from every engine error and still typechecks
+      // (measured). A test on the rendered stream is the only thing that fails.
+      mockSessionRun.mockImplementationOnce(async () => {
+        const onStream = mockSessionInstance.onStream as ((e: unknown) => Promise<void>) | null;
+        if (onStream) {
+          await onStream({ type: 'error', message: 'tool input unparsable', fatal: false, agent: 'lynox' });
+        }
+        return 'partial';
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'emit an engine error' }),
+      });
+
+      const text = await res.text();
+      expect(text).toContain('event: error');
+      expect(text).toContain('"fatal":false');
+    });
+
+    it('marks the server-side terminal error fatal on the wire', async () => {
+      // The run stream carries `event: error` for two different things. This is
+      // the server-SIDE terminal case — the catch around session.run(), with
+      // res.end() right after; agent.ts's iteration cap is the other fatal one.
+      // Nothing reads `fatal` yet. The field is pinned here anyway because this
+      // payload has a different SHAPE from the engine's, so it is the one a
+      // future consumer would silently read as `undefined` — falsy, i.e. "keep
+      // waiting" — on the one path where the turn really is over.
+      // `Once`, not a standing implementation: a throwing mock that outlives its
+      // test is only caught by the blanket mockResolvedValue in the file's
+      // beforeEach, which makes that line silently load-bearing for this test
+      // alone. Scoping it here keeps the coupling from existing at all.
+      mockSessionRun.mockImplementationOnce(async () => {
+        throw new Error('provider exploded');
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'boom' }),
+      });
+
+      const text = await res.text();
+      expect(text).toContain('event: error');
+      expect(text).toContain('"fatal":true');
+    });
+
     it('echoes the run usage in the done event', async () => {
       // The done event carries getLastRunUsage() so the per-message footer
       // survives a lost turn_end frame (PR #518).
@@ -1906,6 +1957,10 @@ describe('LynoxHTTPApi', () => {
       const buf = mgr.create('stream-run');
       buf.append({ type: 'text', text: 'hello', agent: 'main' });            // seq 1
       buf.append({ type: 'tool_call', name: 'x', input: {}, agent: 'main' }); // seq 2
+      // seq 3: an error, because the re-attach path is exactly where a client
+      // decides whether its turn is dead. Replaying it without `fatal` is how a
+      // reload in mid-run learned nothing about a run that was still alive.
+      buf.append({ type: 'error', message: 'unparsable tool input', fatal: false, agent: 'main' });
 
       try {
         const res = await fetch(`${baseUrl}/api/runs/stream-run/stream?since=1`, { headers: authHeaders() });
@@ -1915,7 +1970,7 @@ describe('LynoxHTTPApi', () => {
 
         // Schedule a live append, then run completion, WHILE we read
         // continuously — avoids a read() that blocks past a fixed time budget.
-        setTimeout(() => buf.append({ type: 'text', text: 'more', agent: 'main' }), 150); // seq 3
+        setTimeout(() => buf.append({ type: 'text', text: 'more', agent: 'main' }), 150); // seq 4
         setTimeout(() => mgr.remove('stream-run'), 400); // ends buffer → terminal done
 
         let sse = '';
@@ -1932,7 +1987,14 @@ describe('LynoxHTTPApi', () => {
         expect(sse).toContain('id: 2');
         expect(sse).toContain('tool_call');
         expect(sse).not.toContain('id: 1');
+        // The replayed error must arrive with its discriminator. A projection in
+        // the replay writer drops it while typechecking clean (measured), so this
+        // assert is the only thing standing between a re-attaching client and a
+        // guess about whether its turn is dead.
+        expect(sse).toContain('event: error');
+        expect(sse).toContain('"fatal":false');
         expect(sse).toContain('id: 3');
+        expect(sse).toContain('id: 4');
         expect(sse).toContain('event: done');
       } finally {
         engineRef.getRunBufferManager = orig;

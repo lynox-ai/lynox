@@ -2873,13 +2873,14 @@ describe('Agent', () => {
   describe('ABSOLUTE_MAX_ITERATIONS', () => {
     it('terminates loop at 500 iterations with error event', async () => {
       const tool = makeTool('loop_tool');
+      const streamed: StreamEvent[] = [];
       const events: string[] = [];
       const agent = new Agent({
         name: 'test',
         model: 'claude-sonnet-4-6',
         tools: [tool],
         maxIterations: 0, // unlimited
-        onStream: async (e) => { events.push(e.type); },
+        onStream: async (e) => { streamed.push(e); events.push(e.type); },
       });
 
       // Always return tool_use to keep looping
@@ -2892,6 +2893,11 @@ describe('Agent', () => {
       // Should have called API exactly 500 times
       expect(mockProcess).toHaveBeenCalledTimes(500);
       expect(events).toContain('error');
+      // THIS end is fatal, and the event has to say so. stream.ts emits the same
+      // `type:'error'` for an incident it recovers from; without the flag the two
+      // are indistinguishable on the wire and every receiver has to guess.
+      const err = streamed.find(e => e.type === 'error');
+      expect(err).toMatchObject({ type: 'error', fatal: true });
       expect(agent.getLastStop()).toEqual({ cause: 'absolute_cap', pendingTools: [], pendingToolCount: 0, text: '' });
     });
   });

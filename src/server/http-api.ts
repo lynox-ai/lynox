@@ -51,7 +51,7 @@ import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields } from '../core/prompt-store.js';
-import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
+import type { EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
@@ -2645,7 +2645,12 @@ export class LynoxHTTPApi {
       // resume from `?since=<lastSeq>`. The buffer append happens even while
       // `aborted` (the SSE is dead but the headless run keeps producing events
       // for a reconnecting subscriber).
-      session.onStream = async (event: StreamEvent) => {
+      // `EmittedStreamEvent`, matching the slot: this closure is the path every
+      // engine event takes to the browser. Annotated with the wide union it
+      // compiled, and an explicit field projection here — the pattern already
+      // used 20 lines below — would have dropped `fatal` from every error on the
+      // wire without a single test or type failing.
+      session.onStream = async (event: EmittedStreamEvent) => {
         const seq = runBuffer?.append(event);
         if (aborted) return;
         const data = JSON.stringify(event);
@@ -3034,7 +3039,12 @@ export class LynoxHTTPApi {
           if (!res.writableEnded && !res.destroyed) res.end();
         } else if (!aborted) {
           const msg = err instanceof Error ? err.message : String(err);
-          res.write(`event: error\ndata: ${JSON.stringify({ error: msg })}\n\n`);
+          // `fatal: true` is not decoration: this path calls res.end() right
+          // below, so the turn really is over. Without the field a consumer
+          // reading `fatal` would see `undefined` here — falsy, i.e. "keep
+          // waiting" — and the fix for the ambiguous channel would have created
+          // a worse bug than the one it closes.
+          res.write(`event: error\ndata: ${JSON.stringify({ error: msg, fatal: true })}\n\n`);
           res.end();
         }
       } finally {
@@ -3137,7 +3147,11 @@ export class LynoxHTTPApi {
         'X-Accel-Buffering': 'no',
       });
 
-      const write = (seq: number, event: StreamEvent): void => {
+      // Narrow, matching what the buffer now stores. As at the live closure
+      // above, the annotation is precision only — the payload goes into
+      // JSON.stringify, so a field projection here still typechecks. What
+      // holds it is the replay test asserting an error arrives with its flag.
+      const write = (seq: number, event: EmittedStreamEvent): void => {
         if (res.writableEnded) return;
         res.write(`id: ${seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
       };

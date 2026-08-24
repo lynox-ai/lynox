@@ -145,11 +145,18 @@ describe('StreamProcessor', () => {
 
       const errors = collected.filter(e => e.type === 'error');
       expect(errors).toHaveLength(1);
-      expect(errors[0]).toMatchObject({ type: 'error', agent: 'test-agent' });
+      // `fatal: false` is the load-bearing half: this path substitutes `input:{}`
+      // and the turn continues below, while agent.ts emits the SAME event type to
+      // say the run is dead. A receiver that could not tell them apart marked a
+      // live, billing run as failed — measured 2026-08-23 on run e2684d2e. That
+      // receiver was fixed the same day; this assert keeps the wire honest so the
+      // next one does not have to guess.
+      expect(errors[0]).toMatchObject({ type: 'error', fatal: false, agent: 'test-agent' });
 
       // Input should be set to empty object
       expect(result.content[0]).toMatchObject({ type: 'tool_use', input: {} });
     });
+
   });
 
   describe('server-side tool blocks (tool_search / web_search)', () => {
