@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -314,6 +314,54 @@ describe('subject-sweep — reference-oracle coverage', () => {
     return { engine, subs: new SubjectStore(engine), mg: new MemoryGraphStore(engine) };
   }
 
+  /**
+   * A fixture per PROBED column that makes the junk subject genuinely held through THAT column.
+   * The completeness test below refuses to run without one, so a column added to `probed`
+   * without a real probe in `blockReason` cannot pass by being declared — which is exactly how
+   * the earlier list-vs-list check could be satisfied without any behaviour behind it.
+   */
+  const PROBE_FIXTURES: Record<string, (db: ReturnType<EngineDb['getDb']>, junk: string) => void> = {
+    'tasks.subject_id': (db, id) => { db.prepare("INSERT INTO tasks (id, subject_id, title) VALUES ('fx', ?, 'x')").run(id); },
+    'tasks.assignee_subject_id': (db, id) => { db.prepare("INSERT INTO tasks (id, assignee_subject_id, title) VALUES ('fx', ?, 'x')").run(id); },
+    'triggers.subject_id': (db, id) => { db.prepare("INSERT INTO triggers (id, subject_id, title) VALUES ('fx', ?, 'x')").run(id); },
+    'connections.subject_id': (db, id) => { db.prepare("INSERT INTO connections (id, subject_id, kind, name) VALUES ('fx', ?, 'k', 'n')").run(id); },
+    'artifacts.subject_id': (db, id) => { db.prepare("INSERT INTO artifacts (id, subject_id, type) VALUES ('fx', ?, 't')").run(id); },
+    'engagements.provider_subject_id': (db, id) => {
+      db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('eng', 'engagement', 'Eng')").run();
+      db.prepare("INSERT INTO engagements (subject_id, provider_subject_id) VALUES ('eng', ?)").run(id);
+    },
+    'engagements.client_subject_id': (db, id) => {
+      db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('eng', 'engagement', 'Eng')").run();
+      db.prepare("INSERT INTO engagements (subject_id, client_subject_id) VALUES ('eng', ?)").run(id);
+    },
+    'subjects.parent_id': (db, id) => { db.prepare("INSERT INTO subjects (id, kind, name, parent_id) VALUES ('kid', 'person', 'Kid', ?)").run(id); },
+    'knowledge_entries.subject_id': (db, id) => { db.prepare("INSERT INTO knowledge_entries (id, subject_id, text) VALUES ('fx', ?, 'x')").run(id); },
+    'relationships.from_subject_id': (db, id) => {
+      db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('oth', 'organization', 'Other AG')").run();
+      db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind) VALUES ('fx', ?, 'oth', 'works_for')").run(id);
+    },
+    'relationships.to_subject_id': (db, id) => {
+      db.prepare("INSERT INTO subjects (id, kind, name) VALUES ('oth', 'organization', 'Other AG')").run();
+      db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind) VALUES ('fx', 'oth', ?, 'works_for')").run(id);
+    },
+    'subjects.merged_into': (db, id) => { db.prepare("INSERT INTO subjects (id, kind, name, merged_into, archived_at) VALUES ('shl', 'person', 'Shell', ?, datetime('now'))").run(id); },
+  };
+
+  it('every PROBED column really blocks the archive — declaring it is not enough', () => {
+    const probed = Object.keys(SWEEP_REFERENCE_PARTITION.probed);
+    expect(probed.length).toBeGreaterThan(0);
+    for (const col of probed) {
+      const fixture = PROBE_FIXTURES[col];
+      expect(fixture, `no fixture for probed column ${col} — add one before declaring it probed`).toBeDefined();
+      const { engine, subs } = make();
+      const junk = subs.createSubject({ kind: 'person', name: 'data' });   // isCleanupTarget
+      fixture!(engine.getDb(), junk);
+      const plan = planArchive(engine, new Set());
+      expect(plan.archive.map(a => a.id), `${col} did not block the archive`).not.toContain(junk);
+      expect(plan.blocked.map(b => b.id), `${col} blocked for no stated reason`).toContain(junk);
+    }
+  });
+
   it('every column the reference oracle counts is classified by the sweep partition', () => {
     const counted = subjectReferenceCoverage().counted;
     const classified = new Set([
@@ -332,12 +380,12 @@ describe('subject-sweep — reference-oracle coverage', () => {
   it.each([
     ['a durable-knowledge entry', (db: ReturnType<EngineDb['getDb']>, id: string): void => {
       db.prepare("INSERT INTO knowledge_entries (id, subject_id, text) VALUES ('k1', ?, 'x')").run(id);
-    }, 'referenced-by-knowledge_entries'],
+    }, 'referenced-by-knowledge-entry'],
     ['a real relationship edge', (db: ReturnType<EngineDb['getDb']>, id: string): void => {
       const other = 'other-subject';
       db.prepare("INSERT INTO subjects (id, kind, name) VALUES (?, 'organization', 'Meridian AG')").run(other);
       db.prepare("INSERT INTO relationships (id, from_subject_id, to_subject_id, kind) VALUES ('r1', ?, ?, 'works_for')").run(id, other);
-    }, 'referenced-by-relationships'],
+    }, 'referenced-by-relationship'],
     ['a merge redirect pointing at it', (db: ReturnType<EngineDb['getDb']>, id: string): void => {
       db.prepare("INSERT INTO subjects (id, kind, name, merged_into, archived_at) VALUES ('shell', 'person', 'Shell', ?, datetime('now'))").run(id);
     }, 'merge-target'],
@@ -405,7 +453,7 @@ describe('subject-sweep — orphan phase (report)', () => {
     mg.linkSubjects('m1', [held]);
     const rows = planOrphans(engine, NONE);
     expect(rows.map(r => r.id)).toEqual([orphan]);
-    expect(rows[0]).toMatchObject({ kind: 'organization', name: 'Meridian AG', archivedAt: null, mergedInto: null });
+    expect(rows[0]).toMatchObject({ kind: 'organization', name: 'Meridian AG', archivedAt: null, mergeShells: [] });
     expect(rows[0]!.createdAt).toBeTruthy();     // the "age" the operator decides on
   });
 
@@ -428,15 +476,32 @@ describe('subject-sweep — orphan phase (report)', () => {
     expect(planOrphans(engine, mk(s))).toEqual([]);                   // …held with it
   });
 
-  it('a merge shell is reported WITH its redirect rather than silently filtered', () => {
+  /**
+   * The report must describe what an apply would TAKE. `reapOrphans` retires a canonical
+   * together with its shell closure, so the report names the canonical and counts the shells —
+   * listing the shell alone would show a row no apply takes by itself and hide the one it does.
+   */
+  it('a canonical held only by its shells is listed WITH them; the shell is not listed alone', () => {
     const { engine, subs } = make();
     const canon = subs.createSubject({ kind: 'organization', name: 'Schmidt GmbH' });
     const shell = subs.createSubject({ kind: 'organization', name: 'Schmidt' });
     engine.getDb().prepare("UPDATE subjects SET merged_into = ?, archived_at = datetime('now') WHERE id = ?").run(canon, shell);
     const rows = planOrphans(engine, NONE);
-    // The canonical is held by the shell's redirect ('merge-target'); the shell itself is unheld.
-    expect(rows.map(r => r.id)).toEqual([shell]);
-    expect(rows[0]!.mergedInto).toBe(canon);
+    expect(rows.map(r => r.id)).toEqual([canon]);
+    expect(rows[0]!.mergeShells).toEqual([shell]);
+    // …and this is exactly the set reapOrphans would delete — one decision, one home.
+    const store = new SubjectStore(engine);
+    expect(store.referenceReason(canon, NONE)).toBe('merge-target');
+    expect(store.mergeTargetClosure(canon, NONE)).toEqual([shell]);
+  });
+
+  it('a canonical whose shell something else still holds is NOT listed at all', () => {
+    const { engine, subs } = make();
+    const canon = subs.createSubject({ kind: 'organization', name: 'Schmidt GmbH' });
+    const shell = subs.createSubject({ kind: 'organization', name: 'Schmidt' });
+    engine.getDb().prepare("UPDATE subjects SET merged_into = ?, archived_at = datetime('now') WHERE id = ?").run(canon, shell);
+    const anchorOnShell: SubjectExternalRefs = { isThreadAnchor: id => id === shell, hasRecords: () => false };
+    expect(planOrphans(engine, anchorOnShell)).toEqual([]);
   });
 });
 
@@ -497,6 +562,17 @@ describe('subject-sweep — the thread-anchor probe fails closed', () => {
     expect(readThreadAnchorIds(p)).toBeNull();
   });
 
+  it('a valid SQLite file with NO threads table is an OUTAGE, not an answer', () => {
+    // "no such table" means this is not a history.db at all. Treating it as "no anchors" would
+    // archive against a store that was never read — only a missing COLUMN is the pre-v46 shape.
+    const dir = tmp();
+    const p = join(dir, 'history.db');
+    const db = new Database(p);
+    db.exec('CREATE TABLE something_else (id TEXT PRIMARY KEY)');
+    db.close();
+    expect(readThreadAnchorIds(p)).toBeNull();
+  });
+
   it('a real anchor is still read back (the probe is not merely refusing everything)', () => {
     const dir = tmp();
     const p = join(dir, 'history.db');
@@ -547,7 +623,7 @@ describe('subject-sweep — main() refuses when the anchor answer is missing', (
     const dir = mkdtempSync(join(tmpdir(), 'lynox-sweep-anchor-ok-')); dirs.push(dir);
     new EngineDb(join(dir, 'engine.db'), '').close();
     const hdb = new Database(join(dir, 'history.db'));
-    hdb.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, primary_subject_id TEXT)');
+    hdb.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, primary_subject_id TEXT, updated_at TEXT)');
     hdb.close();
 
     const argv = process.argv;
@@ -578,22 +654,161 @@ describe('subject-sweep — --orphans refuses without both live stores', () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-orph-nods-')); dirs.push(dir);
     new EngineDb(join(dir, 'engine.db'), '').close();
     const hdb = new Database(join(dir, 'history.db'));
-    hdb.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, primary_subject_id TEXT)');
+    hdb.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, primary_subject_id TEXT, updated_at TEXT)');
     hdb.close();
     // no datastore.db → the record probe cannot answer → the report must not run
     run(dir);
     expect(process.exitCode, 'an unanswerable orphan report exited 0 — indistinguishable from "nothing is orphaned"').toBe(1);
   });
 
-  it('with BOTH stores present the report runs (the branch is not refusing everything)', () => {
+  /**
+   * The report has to be driven END-TO-END here, on a NON-EMPTY graph: an earlier version of
+   * this test ran against an empty subject table, so `planOrphans` returning `[]` outright
+   * would have passed it. What must be pinned is that `main()` builds the oracle from the REAL
+   * stores and that a thread anchor in the REAL history.db keeps its subject out of the report.
+   */
+  it('reports the unheld subject and honours a real history.db anchor', () => {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-orph-ok-')); dirs.push(dir);
-    new EngineDb(join(dir, 'engine.db'), '').close();
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subs = new SubjectStore(engine);
+    const orphan = subs.createSubject({ kind: 'organization', name: 'Meridian AG' });
+    const anchored = subs.createSubject({ kind: 'organization', name: 'Nordberg GmbH' });
+    engine.close();
+
     const hdb = new Database(join(dir, 'history.db'));
-    hdb.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, primary_subject_id TEXT)');
+    hdb.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, primary_subject_id TEXT, updated_at TEXT)');
+    hdb.prepare("INSERT INTO threads (id, primary_subject_id, updated_at) VALUES ('t1', ?, datetime('now'))").run(anchored);
     hdb.close();
     new DataStore(join(dir, 'datastore.db')).close();
-    run(dir);
+
+    const out: string[] = [];
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((c: unknown) => { out.push(String(c)); return true; });
+    try {
+      const argv = process.argv;
+      process.argv = ['node', 'subject-sweep', '--orphans', '--json', `--data-dir=${dir}`];
+      try { main(); } finally { process.argv = argv; }
+    } finally { spy.mockRestore(); }
+
     expect(process.exitCode).toBeUndefined();
+    const parsed = JSON.parse(out.join('')) as { mode: string; count: number; orphans: Array<{ id: string; name: string }> };
+    expect(parsed.mode).toBe('orphans');
+    expect(parsed.orphans.map(o => o.id)).toEqual([orphan]);      // the anchored one is NOT here
+    expect(parsed.orphans[0]!.name).toBe('Meridian AG');
+    expect(parsed.count).toBe(1);
+  });
+
+  /**
+   * The silent-empty this branch exists to prevent, in its second shape: the stores are THERE
+   * but a probe throws (a pre-v46 history.db without the anchor column). The factory answers
+   * "referenced" for every subject — correct for the reap, and a lie in a report, which would
+   * print "0 subjects nothing references" on an instance full of orphans.
+   */
+  it('refuses when a probe THROWS mid-scan instead of reporting zero orphans', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-orph-throw-')); dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    new SubjectStore(engine).createSubject({ kind: 'organization', name: 'Meridian AG' });
+    engine.close();
+    const hdb = new Database(join(dir, 'history.db'));
+    hdb.exec('CREATE TABLE threads (id TEXT PRIMARY KEY)');   // pre-v46: no primary_subject_id
+    hdb.close();
+    new DataStore(join(dir, 'datastore.db')).close();
+
+    const out: string[] = [];
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((c: unknown) => { out.push(String(c)); return true; });
+    try { run(dir); } finally { spy.mockRestore(); }
+
+    expect(process.exitCode, 'a report built on a failing probe exited 0').toBe(1);
+    expect(out.join(''), 'it printed a result it could not stand behind').toBe('');
+  });
+
+  /**
+   * The listing is capped because subject names are plaintext personal data — but the COUNT is
+   * not, and the truncation is stated. A silently shortened list reads as "that is all of them",
+   * which is the wrong input for the decision this report exists to support.
+   */
+  it('caps the listing but never the count, and says it truncated', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-orph-cap-')); dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subs = new SubjectStore(engine);
+    for (const n of ['Alpha AG', 'Beta AG', 'Gamma AG']) subs.createSubject({ kind: 'organization', name: n });
+    engine.close();
+    const hdb = new Database(join(dir, 'history.db'));
+    hdb.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, primary_subject_id TEXT, updated_at TEXT)');
+    hdb.close();
+    new DataStore(join(dir, 'datastore.db')).close();
+
+    const out: string[] = [];
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((c: unknown) => { out.push(String(c)); return true; });
+    try {
+      const argv = process.argv;
+      process.argv = ['node', 'subject-sweep', '--orphans', '--json', '--limit=2', `--data-dir=${dir}`];
+      try { main(); } finally { process.argv = argv; }
+    } finally { spy.mockRestore(); }
+
+    const parsed = JSON.parse(out.join('')) as { count: number; listed: number; truncated: boolean; orphans: unknown[] };
+    expect(parsed.count).toBe(3);           // the real size, uncapped
+    expect(parsed.listed).toBe(2);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.orphans).toHaveLength(2); // only the names are withheld
+  });
+
+  it('a permanently failing probe warns ONCE, not once per subject', () => {
+    // Without the latch a locked store emits a line per subject and buries its own warning —
+    // the message that explains the refusal scrolls away behind hundreds of copies of itself.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-orph-latch-')); dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subs = new SubjectStore(engine);
+    for (const n of ['Alpha AG', 'Beta AG', 'Gamma AG', 'Delta AG']) subs.createSubject({ kind: 'organization', name: n });
+    engine.close();
+    const hdb = new Database(join(dir, 'history.db'));
+    hdb.exec('CREATE TABLE threads (id TEXT PRIMARY KEY)');   // every anchor probe throws
+    hdb.close();
+    new DataStore(join(dir, 'datastore.db')).close();
+
+    const err: string[] = [];
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation((c: unknown) => { err.push(String(c)); return true; });
+    const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try { run(dir); } finally { errSpy.mockRestore(); outSpy.mockRestore(); }
+
+    const warnings = err.filter(l => l.includes('probe failed'));
+    expect(warnings, `4 subjects produced ${warnings.length} warnings`).toHaveLength(1);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('--orphans --merge is rejected — the merge must not run behind a report flag', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-orph-merge-')); dirs.push(dir);
+    new EngineDb(join(dir, 'engine.db'), '').close();
+    const argv = process.argv;
+    process.argv = ['node', 'subject-sweep', '--orphans', '--merge=a:b', `--data-dir=${dir}`];
+    try { main(); } finally { process.argv = argv; }
+    expect(process.exitCode, 'a destructive merge ran behind --orphans').toBe(2);
+  });
+
+  /**
+   * What this pins is the OPENER: the writable one migrates a tenant's history.db to WAL as a
+   * side effect of being asked a question. The `readonly: true` flag on top is defence in depth
+   * and is NOT observable here — the report issues no write, so removing the flag changes
+   * nothing a test can see today. Stated rather than dressed up as coverage.
+   */
+  it('the report does not migrate history.db to WAL — it uses the read-only opener', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-orph-ro-')); dirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    new SubjectStore(engine).createSubject({ kind: 'organization', name: 'Meridian AG' });
+    engine.close();
+    const hp = join(dir, 'history.db');
+    const hdb = new Database(hp);
+    hdb.pragma("journal_mode = delete");   // deliberately NOT wal
+    hdb.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, primary_subject_id TEXT, updated_at TEXT)');
+    hdb.close();
+    new DataStore(join(dir, 'datastore.db')).close();
+
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try { run(dir); } finally { spy.mockRestore(); }
+
+    const after = new Database(hp, { readonly: true });
+    const mode = (after.pragma('journal_mode') as Array<{ journal_mode: string }>)[0]!.journal_mode;
+    after.close();
+    expect(mode, 'the report migrated a live tenant store to WAL just to read it').toBe('delete');
   });
 
   it('--orphans --apply refuses: the delete phase is not built', () => {
