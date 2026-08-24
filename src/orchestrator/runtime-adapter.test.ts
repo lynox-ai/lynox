@@ -1550,12 +1550,18 @@ describe('durableMemoryEnabled rides to step agents (one flag governs the whole 
 describe('wrapWithGate — the approval wrapper is transparent to a ToolSoftFailure', () => {
   // Same seam as `applyPluginToolGate` on the session side, one layer over: a
   // pipeline step's tools are re-wrapped with gate approval, and every wrapper
-  // between a tool and `agent.ts` is a place where the ledger signal can be
-  // swallowed. `bash`, `web_research` and every refusal in `http_request`
-  // report a completed-but-failed call by throwing `ToolSoftFailure`; the
-  // reason it carries is the only thing `error_count` can see. A wrapper that
-  // caught and re-threw a plain Error here would leave the ledger claiming the
-  // call succeeded — silently, and only inside pipelines.
+  // between a tool and its consumer is a place where the distinction can be
+  // swallowed. `bash`, `web_research` and every RETURNED refusal in
+  // `http_request` report a completed-but-failed call by throwing
+  // `ToolSoftFailure`, and a wrapper that caught and re-threw a plain `Error`
+  // would destroy it before anything downstream could use it.
+  //
+  // ⚠ What this does NOT assert, because an earlier version of this comment did
+  // and had it backwards: on the pipeline path the ledger row does not come
+  // from `.reason` at all. Steps build their Agent without `recordToolCall`, so
+  // the row is written from the stream event and carries the RESULT. The
+  // transparency asserted here is what a future fix to that path will need; it
+  // is not evidence that the ledger is correct there today.
   const approvingGate = {
     submit: vi.fn().mockResolvedValue('approval-1'),
     waitForDecision: vi.fn().mockResolvedValue({ status: 'approved' }),

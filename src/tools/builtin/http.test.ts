@@ -29,12 +29,13 @@ const handler = httpRequestTool.handler;
 /**
  * What the MODEL reads, whichever way the handler delivered it.
  *
- * Every refusal in this handler is a `ToolSoftFailure` — the payload takes the
- * ordinary result path (the agent still reads it and adapts) while the reason
- * goes to the ledger, so a blocked call stops being indistinguishable from a
- * successful silent one. The assertions that predate that move are about the
- * PAYLOAD and are unchanged by it; this unwraps the transport so they keep
- * saying exactly what they said.
+ * Every refusal this handler RETURNED is now a `ToolSoftFailure` — the payload
+ * takes the ordinary result path (the agent still reads it and adapts) while
+ * the reason goes to the ledger, so a blocked call stops being
+ * indistinguishable from a successful silent one. The network-layer refusals
+ * were already THROWN and did not move. The assertions that predate the change
+ * are about the PAYLOAD and are unchanged by it; this unwraps the transport so
+ * they keep saying exactly what they said.
  *
  * ⚠ It deliberately does NOT assert the transport, and no test using it can:
  * turn any block back into a plain `return` and every one of them still passes.
@@ -2879,8 +2880,10 @@ describe('http_request tool description — the session cap is stated, not disco
  * source would pass on the day someone writes the fifteenth refusal in a form
  * it does not match; a row here fails the moment its own site returns instead
  * of throwing. It is also the only place in this file that asserts the
- * TRANSPORT — every other block assertion goes through `visible()`, which
- * unwraps it by design and would survive the revert.
+ * SOFT-FAILURE transport: the `rejects.toThrow` assertions elsewhere pin the
+ * HARD-error path, which is a different exit and was never silent, and every
+ * other block assertion goes through `visible()`, which unwraps the transport
+ * by design and would survive the revert.
  *
  * What it still cannot do, stated so nobody reads more into it:
  *
@@ -2892,9 +2895,11 @@ describe('http_request tool description — the session cap is stated, not disco
  *  - It stops at the throw. Nothing here drives throw → `agent.ts` →
  *    `output_json` → `error_count`; that chain holds by COMPOSITION with
  *    `agent.test.ts`'s "ToolSoftFailure — completed but not successful", whose
- *    fixtures are tool-agnostic and therefore cover `http_request` without
- *    naming it. Composition is a weaker claim than an end-to-end test, and it
- *    is the claim being made.
+ *    fixtures are tool-agnostic. Composition is a weaker claim than an
+ *    end-to-end test, and it is the claim being made — and it covers the
+ *    SESSION sink only. `http_request` is also inline-available to pipeline
+ *    steps, whose ledger row comes from a different sink that never reads
+ *    `.reason`; there the chain does not hold.
  */
 describe('every refusal is recorded as a failure, not a silent success', () => {
   /** Drive the handler and demand a refusal — the TRANSPORT, not just the text. */
@@ -2912,9 +2917,10 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
   /** Assert the pair the ledger depends on: a reason to count, a payload unchanged. */
   function expectRecorded(f: ToolSoftFailure, visibleText: string | RegExp): void {
     // The reason IS the ledger row. `agent.ts` writes it into `output_json`,
-    // and that field alone drives `error_count` — the `isError` flag beside it
-    // is never persisted. So an empty reason is the whole defect arriving
-    // through a different door: a refusal that looks recorded and counts zero.
+    // and `error_count` is derived from it (`output_json != '' AND != '{}'`) —
+    // the `isError` flag beside it is never persisted. So an empty reason is the
+    // whole defect arriving through a different door: a refusal that looks
+    // recorded and counts zero.
     expect(f.reason.trim().length, 'an empty reason books as a success again').toBeGreaterThan(0);
     // …and the model must still read exactly what it read before.
     if (typeof visibleText === 'string') expect(f.agentVisibleResult).toContain(visibleText);
@@ -3099,8 +3105,8 @@ describe('every refusal is recorded as a failure, not a silent success', () => {
 
   it('a self-phrased refusal is NOT run through the friendly rewriter — the host is model-chosen', async () => {
     // Why `blockedVerbatim` exists as a second helper, asserted rather than
-    // claimed. `friendlyBlockMessage` matches on substrings, and two of these
-    // refusals interpolate a hostname the MODEL supplies. A request to
+    // claimed. `friendlyBlockMessage` matches on substrings, and several of
+    // these refusals interpolate a hostname the MODEL supplies. A request to
     // `daily-report.example.com` contains "daily", so routing it through the
     // rewriter answers a consent refusal with "Daily request limit reached. Try
     // again tomorrow." — a different and false statement, which teaches the

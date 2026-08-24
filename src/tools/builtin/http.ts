@@ -69,9 +69,10 @@ function friendlyBlockMessage(technical: string): string {
  * an ordinary string, because the model has to read it and adapt (retry another
  * host, ask the operator, give up on that branch). `agent.ts` books a returned
  * string as a success and writes an EMPTY `output_json`, and
- * `run-history-analytics.ts` derives `error_count` from `output_json != ''`
- * alone. So a blocked call was, in the ledger, byte-for-byte a successful call
- * that had nothing to say.
+ * `run-history-analytics.ts` derives `error_count` from that field
+ * (`output_json != '' AND != '{}'`) and from nothing else. So a blocked call
+ * was, in the ledger, byte-for-byte a successful call that had nothing to
+ * say.
  *
  * That is not a cosmetic defect. Measured on a real thread (dogfood 2026-08-23):
  * an agent asked to read a PUBLIC repository hit a guarded block on
@@ -115,7 +116,9 @@ function blockedFriendly(technical: string): never {
 }
 
 /**
- * As {@link blockedFriendly}, for the blocks this handler phrases itself.
+ * As {@link blockedFriendly}, for the refusals phrased outside
+ * `friendlyBlockMessage` — the ones this handler writes itself, plus
+ * `auth.refusal`, which `attachEngineManagedAuth` phrases.
  *
  * Deliberately NOT routed through `friendlyBlockMessage`: its rules match on
  * substrings, and these messages are not written to avoid them — a consent

@@ -82,8 +82,8 @@ describe('applyPluginToolGate — preserves ToolEntry fields through the plugin 
   });
 
   it('lets a ToolSoftFailure through UNCHANGED — the ledger signal must survive the wrapper', async () => {
-    // `bash`, `web_research` and every refusal in `http_request` report a
-    // completed-but-failed call by throwing `ToolSoftFailure`; `agent.ts`
+    // `bash`, `web_research` and every RETURNED refusal in `http_request`
+    // report a completed-but-failed call by throwing `ToolSoftFailure`; `agent.ts`
     // unwraps it, returns the payload to the model and writes the reason into
     // `tool_calls.output_json`, which is the only field `error_count` reads.
     //

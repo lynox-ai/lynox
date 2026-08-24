@@ -2919,24 +2919,42 @@ export class Agent implements IAgent {
   }
 
   /**
-   * The one way a failure reason becomes a ledger row: mask, flatten, bound.
+   * How a failure reason becomes a ledger row on the SESSION sink: mask,
+   * flatten, bound.
    *
    * `tool_calls.output_json` is written RAW, while the `input_json` beside it in
    * the same row goes through `JSON.stringify` and therefore escapes control
    * characters. Every reason here is built from tool input — `read_file`'s
    * ENOENT text embeds the model-chosen path, `http_request` names a refused
-   * header — so without this a `\r\n` in a tool argument writes a forged line
+   * header. Not all of them do — the rate-limit reasons are built from config,
+   * and the empty-reason fallback from the tool name — but enough do that the
+   * writer is where the guarantee belongs. Without this a `\r\n` in a tool
+   * argument writes a forged line
    * into the ledger, the debug export and the `toolEnd` breadcrumb, all of which
    * are read line by line. The ledger is what we later use to decide whether
    * something happened; a model-controlled path into it turns evidence into a
    * claim.
    *
-   * ⚠ It exists as a HELPER because there are TWO writers, and the first version
+   * ⚠ It exists as a HELPER because two writers reach it, and the first version
    * of this fix only covered one. The soft-failure path got mask+flatten+bound
    * while the hard-error path four dozen lines below wrote `cause.message` into
    * the same column with neither the flatten nor the bound — the narrow door
-   * shut, the wide one open, and the commit claiming the threat closed. Found in
-   * the delta round, 2026-08-24. If a third writer appears, it calls this.
+   * shut, the wide one open, and the commit claiming the threat closed.
+   *
+   * ⚠⚠ And there is a THIRD writer of that column which this does NOT reach, so
+   * do not read the paragraph above as coverage. Pipeline steps build their
+   * Agent without `AgentConfig.recordToolCall` (`orchestrator/runtime-adapter.ts`
+   * has zero occurrences of it), so `_recordToolCall` is a no-op for them and
+   * their row is written by `createStepStreamHandler` → `runner.ts` →
+   * `insertToolCall` from the STREAM event: `boundedJson(event.result)`, a
+   * different cap, no masking order, no flatten, no cut mark. `http_request` is
+   * in `INLINE_CORE_TOOLS`, so that path is live for the very tool this change
+   * is about. It is not routed here because on that path the column carries the
+   * RESULT, not a reason — a different meaning for the same field, which is a
+   * decision about the schema and not a line of code. Filed, not fixed.
+   *
+   * The count in this comment was wrong twice (`two writers`, then `a third
+   * would call this`) in the change whose own lesson was to count the writers.
    *
    * Order is load-bearing. Mask FIRST: truncating first hands the masker a
    * fragment its pattern no longer matches, leaving the tail verbatim. Flatten

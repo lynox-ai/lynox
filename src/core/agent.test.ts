@@ -2516,9 +2516,10 @@ describe('Agent', () => {
       // refused header BY NAME and a header name is model-chosen, so a reason
       // built from tool input can carry the model's own newlines into
       // `tool_calls.output_json`, the debug export and the `toolEnd`
-      // breadcrumb — all read line by line. Asserted on the WRITER, because it
-      // is the one place that covers every soft-failure tool including the ones
-      // not written yet.
+      // breadcrumb — all read line by line. Asserted on the WRITER: it covers
+      // every soft-failure tool that reaches the SESSION sink, including the
+      // ones not written yet. Pipeline steps write the same column through a
+      // different sink that never calls it — see `_ledgerReason`'s own note.
       const { ToolSoftFailure } = await import('./tool-soft-failure.js');
       type RecordedCall = { toolName: string; outputJson: string };
       const recorded: RecordedCall[] = [];
@@ -2540,7 +2541,8 @@ describe('Agent', () => {
 
       const row = recorded.find(c => c.toolName === 'crlf_tool');
       expect(row).toBeDefined();
-      expect(row!.outputJson, 'no line break may survive into the row').not.toMatch(/[\r\n\u2028\u2029]/);
+      expect(row!.outputJson, 'nothing the writer flattens may survive into the row')
+        .not.toMatch(/[\x00-\x1f\x7f\u0085\u2028\u2029]/);
       // The content stays readable — flattened, not silently dropped. A reason
       // that loses characters is harder to read than one that shows the gap.
       expect(row!.outputJson).toContain('tool=bash status=ok');
@@ -2554,13 +2556,19 @@ describe('Agent', () => {
       // and the same breadcrumb, and `read_file`'s ENOENT text carries the
       // model-chosen path verbatim. Counting the writers of a column is the
       // cheap step that was skipped.
-      // ALL SIX class members in one fixture: CR, LF, NEL, LINE SEPARATOR,
-      // PARAGRAPH SEPARATOR and DEL. Any of them missing here makes deleting it
-      // from the class a surviving mutant — a guard naming characters no test
-      // ever sends. The first version of this fixture carried four and its
-      // comment claimed "every class member", which is how the fourth over-broad
-      // claim of this PR got written into a comment about completeness.
-      const forged = "ENOENT: no such file or directory, open '/tmp/x\r\n2026\u0085-01-01 tool=bash\u2028 status\u2029=ok\x7f'";
+      // All five syntactic elements of the class, and — the part two earlier
+      // versions of this comment got wrong — several members from INSIDE the
+      // `\x00-\x1f` range, not just CR and LF. With only CR/LF present,
+      // narrowing the range to `\x0a-\x0d` yields the byte-identical expected
+      // string and survives: the guard names 32 characters and the test was
+      // sending two. NUL, TAB, VT, FF and ESC are here for that reason.
+      //
+      // The comment above this fixture has been wrong twice — "every class
+      // member" while carrying four of five elements, then again while carrying
+      // two of 32 range members. It now states what the fixture CONTAINS rather
+      // than what it proves, because the other form kept being an assertion
+      // nobody had counted.
+      const forged = "ENOENT\x00: no\tsuch file\x0b, open\x0c '/tmp/x\r\n2026\u0085-01 tool=bash\u2028 status\u2029=ok\x1b\x7f'";
       const tool = makeTool('hard_crlf', vi.fn().mockRejectedValue(new Error(forged)));
 
       mockProcess
@@ -2577,12 +2585,12 @@ describe('Agent', () => {
 
       const row = recorded.find(c => c.toolName === 'hard_crlf');
       expect(row).toBeDefined();
-      // Pinned EXACTLY, not by substring: each injected character becomes ONE
-      // space, so a class missing any single member produces a different string
-      // and dies here. A `toContain` would have let every partial-class mutant
-      // live. The expected value was computed from the fixture, not typed.
+      // Pinned EXACTLY, not by substring: every injected character becomes ONE
+      // space, so dropping any of the five elements — or narrowing the range —
+      // produces a different string and dies here. A `toContain` would have let
+      // every partial-class mutant live.
       expect(row!.outputJson).toBe(
-        "ENOENT: no such file or directory, open '/tmp/x  2026 -01-01 tool=bash  status =ok '",
+        "ENOENT : no such file , open  '/tmp/x  2026 -01 tool=bash  status =ok  '",
       );
     });
 
@@ -2615,7 +2623,7 @@ describe('Agent', () => {
       expect(toolResult!.result, 'the model gets the message verbatim').toBe(long);
       // …while the row beside it is flattened and bounded.
       const row = recorded.find(c => c.toolName === 'hard_long');
-      expect(row!.outputJson).not.toMatch(/[\r\n\u0085\u2028\u2029]/);
+      expect(row!.outputJson).not.toMatch(/[\x00-\x1f\x7f\u0085\u2028\u2029]/);
       expect(row!.outputJson.length).toBeLessThanOrEqual(2000);
     });
 
