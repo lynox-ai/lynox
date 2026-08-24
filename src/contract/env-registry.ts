@@ -24,7 +24,10 @@
  *   asserts. `sdk-internal` is the only consuming kind without a readSite
  *   (consumed inside SDK constructors — justify in `note`). `none` = not read
  *   by the engine at all; the forward test asserts ABSENCE from the read
- *   inventory.
+ *   inventory. `pair-resolver` = read as one half of a credential PAIR via
+ *   `resolveClientPair(idName, secretName, …)`; its form set accepts the name
+ *   in EITHER pair position and a direct `process.env` read, because the two
+ *   members sit at different argument positions and at different sites.
  * - `secret.redact` — `exact-name`: the env-preview masks this key's value.
  *   `whole-value`: the value embeds secrets under OTHER names (e.g. a JSON
  *   blob with api_key fields) and must be masked as a whole.
@@ -65,6 +68,7 @@ export type EngineReadKind =
   | 'env-alias' // readEnvAlias('NAME') / envTier('NAME') via src/core/env.ts
   | 'env-float' // envFloat('NAME')
   | 'direct' // process.env read at an arbitrary core site
+  | 'pair-resolver' // resolveClientPair('ID','SECRET') — one half of a credential pair
   | 'web-ui' // read inside packages/web-ui/src (runs in the engine process)
   | 'sdk-internal' // consumed inside an SDK constructor — no greppable readSite
   | 'none'; // not read by the engine (denylisted phantoms)
@@ -145,6 +149,10 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
   { name: 'LYNOX_MANAGED_FIREWORKS_ENABLED', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'direct', readSite: 'src/core/tier-presets.ts' }, note: 'Unlocks the Fireworks slot for managed; emitted only alongside FIREWORKS_API_KEY (DPA-gated sub-processor).' },
   { name: 'LYNOX_FEATURE_PROACTIVE_DEEP', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'proactive-deep', consumerSite: 'src/core/session.ts' } }, note: 'Fleet opt-in for proactive deep escalation; engine still cost-gates on the deep-slot provider.' },
   { name: 'LYNOX_FEATURE_PROACTIVE_DEEP_ANTHROPIC', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'proactive-deep-anthropic', consumerSite: 'src/core/session.ts' } }, note: 'Allows proactive deep even on an Anthropic deep slot (premium).' },
+
+  // ── OAuth app credentials (per provider; the CP emits the managed broker pair) ──
+  { name: 'GOOGLE_CLIENT_ID', valueKind: 'opaque', emitPolicy: 'when-non-default', engineConsumed: { kind: 'pair-resolver', readSite: 'src/core/engine.ts', alsoReadAt: ['src/core/engine-init.ts'] }, skewPolicy: 'An engine below the Stage-1 release renders the BYO button and lands on redirect_uri_mismatch, so the CP gates the emit on a measured engine version rather than a release-wide rule.', note: 'OAuth APP credential, not a user token. Read as one half of a PAIR — resolveClientPair() takes both names from ONE source and never mixes, so this row pins a pair member rather than an independent var. Deliberately NOT preserveAcrossSyncEnv: that list is enforced fail-closed on presence and a never-emitted name on it stops sync-env fleet-wide (DEF-preserve-list-admits-never-emitted-name); the CP-side emit gate carries the values over itself. Carries NO secret stance, and that is a decision rather than an omission: an OAuth client id is public by construction (it travels in the browser redirect), so it belongs in the env-shape diff the admin preview exists for. Note the direction of the change — an UNDECLARED key is masked fail-closed, so declaring this row makes the id VISIBLE in the preview once the contract is vendored.' },
+  { name: 'GOOGLE_CLIENT_SECRET', valueKind: 'opaque', emitPolicy: 'when-non-default', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'pair-resolver', readSite: 'src/core/engine.ts', alsoReadAt: ['src/core/engine-init.ts'] }, skewPolicy: 'An engine below the Stage-1 release renders the BYO button and lands on redirect_uri_mismatch, so the CP gates the emit on a measured engine version rather than a release-wide rule.', note: 'The secret half of the GOOGLE_CLIENT_ID pair; same source-exclusivity and the same preserve prohibition. secret-store.ts also reads it, but through process.env[envVar] with a VARIABLE, which no literal-based form can assert — it is therefore not listed as a read site.' },
 
   // ── Worker / model-profiles bridge ────────────────────────────────────────
   { name: 'LYNOX_WORKER_PROFILE', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Names a profile key inside LYNOX_MODEL_PROFILES_JSON; engine clears a dangling one.' },

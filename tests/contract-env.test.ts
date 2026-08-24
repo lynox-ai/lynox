@@ -55,6 +55,16 @@ function readForms(row: EnvRegistryRow): RegExp[] {
       return [new RegExp(`envFloat\\(['"]${n}['"]\\)`)];
     case 'direct':
       return [new RegExp(`process\\.env(\\.${n}\\b|\\[['"]${n}['"]\\])`)];
+    case 'pair-resolver':
+      // Three forms, and all three are load-bearing: a pair member is passed
+      // as the FIRST arg (the id) or the SECOND (the secret), and the same
+      // names are also read directly at the migration site. Dropping any one
+      // form kills a different row/site test — see the mutation table in the PR.
+      return [
+        new RegExp(`\\bresolveClientPair\\(\\s*['"]${n}['"]`),
+        new RegExp(`\\bresolveClientPair\\(\\s*['"][A-Z][A-Z0-9_]*['"]\\s*,\\s*['"]${n}['"]`),
+        new RegExp(`process\\.env(\\.${n}\\b|\\[['"]${n}['"]\\])`),
+      ];
     case 'web-ui':
       // SvelteKit server code reads via `$env/dynamic/private`.
       return [...webUiForms(row.name), new RegExp(`process\\.env(\\.${n}\\b|\\[['"]${n}['"]\\])`)];
@@ -118,6 +128,50 @@ describe('env-ABI forward: every registry row is read at its declared site', () 
   }
 });
 
+describe('env-ABI forward: the pair-resolver form set rejects near-misses', () => {
+  // The form set is the only thing standing between "the consumer is pinned"
+  // and "some line in the file happens to contain the name". Without these
+  // cases the hardening (word boundary, closing quote, argument position)
+  // would be an assertion in a commit message rather than a mechanism.
+  const rowFor = (name: string): EnvRegistryRow => ({
+    name,
+    valueKind: 'opaque',
+    emitPolicy: 'when-non-default',
+    engineConsumed: { kind: 'pair-resolver', readSite: 'src/core/engine.ts' },
+  });
+  const matches = (name: string, src: string): boolean =>
+    readForms(rowFor(name)).some((f) => f.test(src));
+
+  const ID = 'GOOGLE_CLIENT_ID';
+  const SECRET = 'GOOGLE_CLIENT_SECRET';
+
+  const accepted: [string, string][] = [
+    ['the resolver call — id in position 1, secret in position 2', `resolveClientPair('${ID}', '${SECRET}', {`],
+    ['the direct migration read', `!process.env['${ID}'] && !process.env['${SECRET}']`],
+  ];
+  for (const [label, src] of accepted) {
+    it(`accepts ${label} for BOTH pair members`, () => {
+      expect(matches(ID, src), `${ID} should match`).toBe(true);
+      expect(matches(SECRET, src), `${SECRET} should match`).toBe(true);
+    });
+  }
+
+  const rejected: [string, string][] = [
+    ['a differently-named resolver', `resolveClientPairLegacy('${ID}', '${SECRET}')`],
+    ['a helper whose name merely ends with the resolver', `myresolveClientPair('${ID}', '${SECRET}')`],
+    ['longer names sharing the prefix', `resolveClientPair('${ID}_LEGACY', '${SECRET}_LEGACY')`],
+    ['another provider pair', `resolveClientPair('MS_CLIENT_ID', 'MS_CLIENT_SECRET', {`],
+    ['a dotted env read of a longer name', `process.env.${ID}_LEGACY`],
+    ['a bare mention in a comment', `// ${ID} / ${SECRET} env copies were removed`],
+  ];
+  for (const [label, src] of rejected) {
+    it(`rejects ${label}`, () => {
+      expect(matches(ID, src), `${ID} must not match`).toBe(false);
+      expect(matches(SECRET, src), `${SECRET} must not match`).toBe(false);
+    });
+  }
+});
+
 // ── Reverse: read → row (mechanical inventory) ──────────────────────────────
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', '.svelte-kit']);
@@ -153,6 +207,11 @@ const READ_PATTERNS: readonly RegExp[] = [
   // If the helper is renamed, its vars go stale in SELF_HOST_ONLY and the
   // allowlist-rot guard fires — update this pattern then.
   /parsePositiveIntEnv\(\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
+  // Credential-pair reads (kind 'pair-resolver'). Both positions are swept:
+  // without these the sweep would be structurally blind to a name that is
+  // ONLY read through the resolver — the very thing BLIND_FORMS exists to stop.
+  /\bresolveClientPair\(\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
+  /\bresolveClientPair\(\s*['"][A-Z][A-Z0-9_]{2,}['"]\s*,\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
 ];
 
 /** Read forms the sweep is BLIND to — banned in swept files so a new read cannot hide. */
@@ -251,5 +310,40 @@ describe('env-ABI reverse: every LYNOX_* read has a contract stance', () => {
       if (!row.name.startsWith('LYNOX_')) continue; // non-prefixed rows escape the sweep patterns
       expect(reads.has(row.name), `${row.name}: registry claims kind '${kind}' but the sweep finds no read`).toBe(true);
     }
+  });
+});
+
+describe('env-ABI: credential-pair reads are swept and declared', () => {
+  const { reads } = collectReads();
+
+  // Positive control on the pair patterns themselves. Without it, deleting them
+  // from READ_PATTERNS is a silent no-op TODAY — the Google pair is not LYNOX_*,
+  // so the coverage loop skips it — and the blindness would only surface at the
+  // first LYNOX_* pair, long after the deletion. A guard whose absence changes
+  // nothing observable is not a guard.
+  it('the sweep actually sees credential-pair reads', () => {
+    const seen = [...reads.keys()].filter((n) => /_CLIENT_(ID|SECRET)$/.test(n));
+    expect(
+      seen,
+      'READ_PATTERNS no longer recognizes resolveClientPair(…) reads — the reverse inventory is blind to credential pairs',
+    ).not.toEqual([]);
+  });
+
+  // The mirror of the forward test. Forward proves a declared row IS read;
+  // this proves a real read IS declared. Without it the rows can be deleted
+  // outright and every other test in this file stays green.
+  it('every name passed to resolveClientPair() in src/ has a registry row', () => {
+    const undeclared: string[] = [];
+    for (const file of walk(resolve(repoRoot, 'src'), [])) {
+      const src = readFileSync(file, 'utf8');
+      for (const m of src.matchAll(
+        /\bresolveClientPair\(\s*['"]([A-Z][A-Z0-9_]{2,})['"]\s*,\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
+      )) {
+        for (const name of [m[1], m[2]]) {
+          if (name && !registryNames.has(name)) undeclared.push(`${name} (${relative(repoRoot, file)})`);
+        }
+      }
+    }
+    expect(undeclared, 'a credential pair is resolved from names that have no contract row').toEqual([]);
   });
 });
