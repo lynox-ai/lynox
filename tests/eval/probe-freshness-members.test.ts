@@ -55,9 +55,11 @@ const TRANSPORT = 'scripts/agent-efficiency/engine-client.ts';
  */
 const NOT_MEMBERS: Readonly<Record<string, string>> = {
   'scripts/agent-efficiency/measure.ts':
-    'drives the engine through EngineClient but sends no durable fact — every prompt in '
-    + 'scenarios.ts is a question ("Wie wird das Wetter morgen?"), so nothing persists to '
-    + 'dedup against on the next run.',
+    'drives the engine through EngineClient but writes no KNOWLEDGE row. Its prompts in '
+    + 'scenarios.ts do persist things — the promote-attempt scenario orders capture_process '
+    + 'and promote_process — but a process/pipeline is not a knowledge_entries row and never '
+    + 'enters this dedup candidate set. (An earlier version of this reason claimed every '
+    + 'prompt is a question, which is false; the exclusion was right for the wrong reason.)',
 };
 
 /**
@@ -73,7 +75,10 @@ export function badExclusions(
   found: readonly string[],
 ): string[] {
   return Object.entries(notMembers)
-    .filter(([rel, why]) => !found.includes(rel) || why.trim().length <= 40)
+    // A reason must NAME something checkable — a file the next reader can open. Length was
+    // the first rule and it measured nothing: the test's own `'a'.repeat(41)` filler passed
+    // it, which is the definition of a check that looks thorough and is not.
+    .filter(([rel, why]) => !found.includes(rel) || !/[\w-]+\.(ts|mjs|mts|json)\b/.test(why))
     .map(([rel]) => rel)
     .sort();
 }
@@ -152,9 +157,11 @@ describe('probe fact freshness — every engine-facing probe is a member', () =>
     // assertion. Without this the rule above passes for an empty rule set as readily as for
     // a correct one.
     const real = 'scripts/x.ts';
-    const reason = 'a'.repeat(41);
+    const reason = 'not a member: scenarios.ts sends no knowledge row';
     expect(badExclusions({ [real]: reason }, [real])).toEqual([]);
     expect(badExclusions({ 'scripts/gone.ts': reason }, [real])).toEqual(['scripts/gone.ts']);
+    // Filler of any length is not a reason — it names no file anyone can open.
+    expect(badExclusions({ [real]: 'a'.repeat(200) }, [real])).toEqual([real]);
     expect(badExclusions({ [real]: 'because' }, [real])).toEqual([real]);
   });
 

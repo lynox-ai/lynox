@@ -70,7 +70,14 @@ let sentFact = false;
     // fire always — and a signal that always fires is not a signal.
     const deduped = results.some(sawDedup);
     const firstSender = sentFact === false;
-    if (remembered > 0) sentFact = true;
+    // Flip only on a write that actually STORED. A `remember` CALL is not a stored fact: the
+    // tool refuses a secret-looking payload outright ("Cannot record content that looks like
+    // a secret"), and a dedup stores nothing either. Counting a refusal as "the fact is out
+    // there" would relabel a genuine freshness failure in B or C as the expected A→B dedup —
+    // the tripwire would then be quiet exactly when it matters.
+    // (Both strings are the tool's user-facing wording, the same coupling `sawDedup` names.)
+    const stored = results.some(r => !sawDedup(r) && !String(r ?? '').startsWith('Cannot record'));
+    if (stored) sentFact = true;
     console.log(JSON.stringify({
       probe: p.key, run: runToken(), timedOut,
       model: (exp.runs?.[0]?.model_id || '?').split('/').pop(),

@@ -23,6 +23,13 @@
     "rootDir": ".",
     "incremental": false
   },
-  "include": ["tests/security", "tests/contract-env.test.ts"],
+  "include": ["tests/security", "tests/contract-env.test.ts",
+    // The probe-freshness pair, so `probe-freshness.d.mts` is actually CHECKED. It was
+    // added to pin the module's signatures and sat inert: `tests/eval` is in no tsc
+    // project, so a hand-written declaration could drift from the module forever. Only
+    // these two files, not the whole directory — the rest of `tests/eval` was never in a
+    // project and dragging it in is a different job.
+    "tests/eval/probe-freshness.test.ts",
+    "tests/eval/probe-freshness-members.test.ts"],
   "exclude": ["src/**/*.test.ts"]
 }
