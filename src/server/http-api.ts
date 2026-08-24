@@ -4040,7 +4040,13 @@ export class LynoxHTTPApi {
       const entries = threadId === null
         ? store.listPending(limit)
         : store.listPendingForThread(threadId, limit);
-      jsonResponse(res, 200, { entries, pendingCount: store.pendingCount() });
+      // Each entry carries the subject its hint WOULD bind to on approval
+      // (DEF-review-approve-target-opaque). `reviewEntry` resolves the hint AFTER the
+      // human decision, so without this the reviewer approves a link nobody showed them
+      // — including the case where approving MINTS a new organization. Resolved here,
+      // on the response that already feeds the review surface, so a second surface
+      // cannot serve the queue without the target.
+      jsonResponse(res, 200, { entries: store.withHintTargets(entries), pendingCount: store.pendingCount() });
     });
 
     // Cheap badge poll (the Intelligence-Hub tab pill). `?thread=` narrows it to one

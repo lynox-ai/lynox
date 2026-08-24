@@ -19,6 +19,25 @@ import {
   FOCUS_BLOCK_CHAR_LIMIT,
 } from '../types/memory.js';
 
+/**
+ * What approving a queued entry WOULD bind its `subject_hint` to, resolved WITHOUT
+ * performing it (DEF-review-approve-target-opaque). The reviewer decides first and
+ * {@link KnowledgeStore.reviewEntry} resolves after, so until this shape existed the
+ * approval bound a subject nobody had been shown.
+ *
+ * Three arms because {@link SubjectStore.findByNameAnyKind} has three outcomes, and the
+ * approval path branches on the same three. `new` is the one worth naming out loud: an
+ * unknown name is not a dead end, it MINTS an organization — a consequence of pressing
+ * approve that the hint alone does not reveal.
+ */
+export type KnowledgeSubjectTarget =
+  /** The name identifies exactly one subject; approval links the entry to it. */
+  | { resolution: 'existing'; id: string; name: string; kind: string }
+  /** The graph does not know the name; approval creates an `organization` under it. */
+  | { resolution: 'new'; name: string; kind: SubjectKind }
+  /** Several subjects carry the name; approval links to NONE of them. */
+  | { resolution: 'ambiguous'; name: string; candidates: number };
+
 /** Max chars for a single durable knowledge entry — one concise fact. Bounds the at-rest
  *  write against a pathological / injected multi-KB `remember`. Long material belongs in a
  *  document / data_store. Enforced at the tool (friendly reject) AND the store (backstop). */
@@ -130,6 +149,52 @@ export class KnowledgeStore {
     if (existing.row) return { ambiguous: false, id: existing.row.id };
     const minted = this.subjects.findOrCreate({ kind: 'organization', name });
     return minted.ambiguous ? { ambiguous: true } : { ambiguous: false, id: minted.id };
+  }
+
+  /**
+   * The SAME resolution {@link reviewEntry} performs on approval, run as a pure lookup so
+   * the reviewer sees the target BEFORE deciding (DEF-review-approve-target-opaque).
+   *
+   * It deliberately does NOT call {@link _resolveWriteSubject}, and that is the whole
+   * point rather than a style preference: that method MINTS an organization for a name
+   * the graph does not know, so previewing THROUGH it would create the subject as a side
+   * effect of LOOKING — precisely the leftover the queue exists to avoid ("a rejected
+   * queue entry never leaves an empty minted subject behind"). The mint is REPORTED here
+   * and performed only by an approval.
+   *
+   * Both paths start at `findByNameAnyKind`, and each of its three outcomes maps to one
+   * arm here and one branch there — that shared entry point is what keeps the preview
+   * honest when the resolution changes.
+   */
+  previewHintTarget(name: string): KnowledgeSubjectTarget | null {
+    const hint = name.trim();
+    if (!hint) return null;
+    const found = this.subjects.findByNameAnyKind(hint);
+    if (found.ambiguous) return { resolution: 'ambiguous', name: hint, candidates: found.candidateIds.length };
+    if (found.row) return { resolution: 'existing', id: found.row.id, name: found.row.name, kind: found.row.kind };
+    return { resolution: 'new', name: hint, kind: 'organization' };
+  }
+
+  /**
+   * Pair queued entries with the subject each hint would resolve to — the shape the review
+   * surface is served. One lookup per DISTINCT name rather than per entry: a queue is
+   * usually several facts about the same client, and `findByNameAnyKind` scans the
+   * engagement table on every call.
+   *
+   * A hintless entry gets `null`, not an omitted key: "this entry binds nothing" and "this
+   * engine does not compute targets" are different answers, and a UI that has to tell them
+   * apart cannot do it from an absent field.
+   */
+  withHintTargets(
+    entries: readonly KnowledgeEntry[],
+  ): Array<KnowledgeEntry & { subjectTarget: KnowledgeSubjectTarget | null }> {
+    const byName = new Map<string, KnowledgeSubjectTarget | null>();
+    return entries.map(e => {
+      const hint = e.subjectHint?.trim();
+      if (!hint) return { ...e, subjectTarget: null };
+      if (!byName.has(hint)) byName.set(hint, this.previewHintTarget(hint));
+      return { ...e, subjectTarget: byName.get(hint) ?? null };
+    });
   }
 
   /**

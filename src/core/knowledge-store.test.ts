@@ -1202,3 +1202,186 @@ describe('kind-agnostic subject resolution on the durable surface', () => {
     expect(hits).toHaveLength(0);
   });
 });
+
+/**
+ * DEF-review-approve-target-opaque — the review surface must name the subject an approval
+ * WOULD bind to, before the human decides. `reviewEntry` resolves the hint AFTER the
+ * decision, so the reviewer used to approve a link nobody had shown them.
+ *
+ * The whole risk of a preview here is that the resolution it previews MUTATES:
+ * `_resolveWriteSubject` mints an organization for an unknown name, so a preview routed
+ * through it would create the subject as a side effect of LOOKING. Two of the tests below
+ * exist for that alone, and the last one is the one that matters most: the preview and the
+ * approval must agree, or the preview is a well-formatted guess.
+ */
+describe('previewHintTarget — the approve target, resolved without performing it', () => {
+  const tmpDirs: string[] = [];
+
+  function make(): { ks: KnowledgeStore; subjects: SubjectStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-ks-preview-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const subjects = new SubjectStore(engine);
+    return { ks: new KnowledgeStore(engine, subjects), subjects };
+  }
+
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** Rows carrying `name` across every resolvable kind — the mint detector. */
+  function countSubjects(subjects: SubjectStore, name: string): number {
+    let n = 0;
+    for (const kind of ['person', 'organization', 'product', 'service', 'engagement'] as const) {
+      const r = subjects.findByNameAnyKind(name, { kinds: [kind] });
+      if (r.ambiguous) n += r.candidateIds.length;
+      else if (r.row) n += 1;
+    }
+    return n;
+  }
+
+  it('names the existing subject AND its kind — the kind is what tells a product from an org', () => {
+    const { ks, subjects } = make();
+    const vireo = subjects.findOrCreate({ kind: 'product', name: 'Vireo' });
+    if (vireo.ambiguous) throw new Error('fixture: a freshly created subject cannot be ambiguous');
+
+    expect(ks.previewHintTarget('Vireo')).toEqual({
+      resolution: 'existing', id: vireo.id, name: 'Vireo', kind: 'product',
+    });
+  });
+
+  it('reports the MINT for an unknown name instead of performing it', () => {
+    const { ks } = make();
+
+    expect(ks.previewHintTarget('Nordberg AG')).toEqual({
+      resolution: 'new', name: 'Nordberg AG', kind: 'organization',
+    });
+  });
+
+  /**
+   * The gegen-Richtung the preview's whole design rests on, and the one a later
+   * convenience would break first: looking must leave the graph untouched. Without this
+   * test "pure lookup" is a claim about code that was just written — and swapping the body
+   * for `_resolveWriteSubject` (the tempting one-liner) passes every other test here.
+   */
+  it('LOOKING does not create: a name absent before the preview is absent after it', () => {
+    const { ks, subjects } = make();
+    expect(countSubjects(subjects, 'Nordberg AG')).toBe(0);
+
+    ks.previewHintTarget('Nordberg AG');
+    ks.previewHintTarget('Nordberg AG');
+
+    expect(countSubjects(subjects, 'Nordberg AG')).toBe(0);
+  });
+
+  it('an ambiguous name is reported as ambiguous, with how many candidates carry it', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'product', name: 'Wikipedia' });
+    subjects.findOrCreate({ kind: 'organization', name: 'Wikipedia' });
+
+    expect(ks.previewHintTarget('Wikipedia')).toEqual({
+      resolution: 'ambiguous', name: 'Wikipedia', candidates: 2,
+    });
+  });
+
+  it('an empty or whitespace hint has no target at all', () => {
+    const { ks } = make();
+    expect(ks.previewHintTarget('   ')).toBeNull();
+  });
+
+  /**
+   * The predicate of the register row: the resolution must appear in the shape the review
+   * surface is served. A hintless entry carries an explicit `null` — "binds nothing" and
+   * "this engine does not compute targets" must not look alike to the UI.
+   */
+  it('withHintTargets pairs every queued entry with its target, null included', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: 'ACME' });
+    ks.write({ text: 'ACME renews in March', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: true });
+    ks.write({ text: 'a fact about nobody', sourceChannel: 'agent', sourceUntrusted: true });
+
+    const served = ks.withHintTargets(ks.listPending());
+
+    expect(served).toHaveLength(2);
+    const acme = served.find(e => e.subjectHint === 'ACME');
+    expect(acme?.subjectTarget).toMatchObject({ resolution: 'existing', name: 'ACME', kind: 'organization' });
+    const hintless = served.find(e => e.subjectHint === null);
+    expect(hintless).toHaveProperty('subjectTarget', null);
+  });
+
+  /**
+   * The dedup cache is the one line in `withHintTargets` that can be wrong QUIETLY. It
+   * exists because a queue is usually several facts about the same client and
+   * `findByNameAnyKind` scans a table per call — but a cache keyed on anything other than
+   * the name shows every entry the FIRST entry's subject, which on a consent surface is a
+   * wrong promise rather than a slow one. Two hints, two targets, one call: found as a
+   * surviving mutant, not by reading the code.
+   */
+  it('two different hints in one call get their OWN targets (the dedup cache is name-keyed)', () => {
+    const { ks, subjects } = make();
+    subjects.findOrCreate({ kind: 'organization', name: 'ACME' });
+    subjects.findOrCreate({ kind: 'product', name: 'Vireo' });
+    ks.write({ text: 'ACME renews in March', subjectName: 'ACME', sourceChannel: 'agent', sourceUntrusted: true });
+    ks.write({ text: 'Vireo pricing changes', subjectName: 'Vireo', sourceChannel: 'agent', sourceUntrusted: true });
+
+    const byHint = new Map(ks.withHintTargets(ks.listPending()).map(e => [e.subjectHint, e.subjectTarget]));
+
+    expect(byHint.get('ACME')).toMatchObject({ resolution: 'existing', name: 'ACME', kind: 'organization' });
+    expect(byHint.get('Vireo')).toMatchObject({ resolution: 'existing', name: 'Vireo', kind: 'product' });
+  });
+
+  /**
+   * THE test. A preview that disagrees with the approval is worse than no preview: it is a
+   * wrong promise on a surface whose whole job is informed consent. Each of the three arms
+   * is driven through the REAL `reviewEntry` and checked against what it actually did.
+   */
+  it.each([
+    {
+      arm: 'existing',
+      seed: (s: SubjectStore) => { s.findOrCreate({ kind: 'product', name: 'Vireo' }); },
+      hint: 'Vireo',
+      expect_: (target: unknown, subjectId: string | null, subjects: SubjectStore) => {
+        const t = target as { resolution: string; id: string };
+        expect(t.resolution).toBe('existing');
+        expect(subjectId).toBe(t.id);
+        expect(countSubjects(subjects, 'Vireo')).toBe(1);   // nothing minted alongside
+      },
+    },
+    {
+      arm: 'new',
+      seed: () => { /* the graph does not know this name */ },
+      hint: 'Nordberg AG',
+      expect_: (target: unknown, subjectId: string | null, subjects: SubjectStore) => {
+        expect(target).toMatchObject({ resolution: 'new', kind: 'organization' });
+        expect(subjectId).not.toBeNull();                    // the approval DID mint
+        const org = subjects.findByNameAnyKind('Nordberg AG', { kinds: ['organization'] });
+        expect(!org.ambiguous && org.row?.id).toBe(subjectId);
+      },
+    },
+    {
+      arm: 'ambiguous',
+      seed: (s: SubjectStore) => {
+        s.findOrCreate({ kind: 'product', name: 'Wikipedia' });
+        s.findOrCreate({ kind: 'organization', name: 'Wikipedia' });
+      },
+      hint: 'Wikipedia',
+      expect_: (target: unknown, subjectId: string | null, subjects: SubjectStore) => {
+        expect(target).toMatchObject({ resolution: 'ambiguous' });
+        expect(subjectId).toBeNull();                        // linked to none of them
+        expect(countSubjects(subjects, 'Wikipedia')).toBe(2); // and no third twin
+      },
+    },
+  ])('the preview matches what approval actually does — $arm', ({ seed, hint, expect_ }) => {
+    const { ks, subjects } = make();
+    seed(subjects);
+
+    const queued = ks.write({ text: `${hint} pricing changes`, subjectName: hint, sourceChannel: 'agent', sourceUntrusted: true });
+    expect(queued.status).toBe('pending_review');
+
+    const previewed = ks.withHintTargets(ks.listPending())[0]?.subjectTarget;
+    const approved = ks.reviewEntry(queued.id, 'approve');
+
+    expect(approved?.status).toBe('active');
+    expect_(previewed, approved?.subjectId ?? null, subjects);
+  });
+});

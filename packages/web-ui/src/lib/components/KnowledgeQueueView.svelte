@@ -6,11 +6,19 @@
 	// content on its actual wording.
 	import { getApiBase } from '../config.svelte.js';
 	import { t } from '../i18n.svelte.js';
+	import { approveTargetLabel, type ApproveTarget } from './knowledge-queue-target.js';
 
 	interface QueueEntry {
 		id: string;
 		text: string;
 		subjectHint: string | null;
+		/**
+		 * What approving this entry would bind its hint to (DEF-review-approve-target-opaque).
+		 * OPTIONAL on purpose: an engine older than this UI sends no target, and that has to
+		 * render as the plain hint rather than as a wrong claim about what approve will do.
+		 * `null` is the engine's answer for a hintless entry — different from absent.
+		 */
+		subjectTarget?: ApproveTarget | null;
 		kind: string;
 		sourceChannel: string | null;
 		sourceType: string;
@@ -107,7 +115,17 @@
 			<div class="border border-border rounded-[var(--radius-sm)] p-3 space-y-2">
 				<div class="flex items-center gap-2 text-[10px] text-text-muted font-mono">
 					<span class="rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 px-1.5">{t('knowledge.queue.pending_tag')}</span>
-					{#if entry.subjectHint}<span>→ {entry.subjectHint}</span>{/if}
+					{#if entry.subjectHint}
+						{@const label = approveTargetLabel(entry.subjectTarget, entry.subjectHint)}
+						<span title={label.titleKey ? t(label.titleKey) : undefined}>→ {label.name}</span>
+						{#if label.kind}<span class="rounded-full bg-bg-muted px-1.5">{label.kind}</span>{/if}
+						{#if label.noteKey}
+							<span
+								class="rounded-full px-1.5 {label.emphasis
+									? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+									: 'bg-bg-muted'}">{t(label.noteKey)}</span>
+						{/if}
+					{/if}
 					<span>{entry.kind}</span>
 					<span class="ml-auto">{fmtDate(entry.createdAt)}</span>
 				</div>

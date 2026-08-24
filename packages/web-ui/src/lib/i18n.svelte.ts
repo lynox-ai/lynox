@@ -114,6 +114,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.knowledge.review_edit_aria': { de: 'Zur Prüfung bearbeiten', en: 'Edit for review' },
 	'knowledge.queue.empty': { de: 'Nichts zu prüfen — die Warteschlange ist leer.', en: 'Nothing to review — the queue is empty.' },
 	'knowledge.queue.pending_tag': { de: 'ungeprüft', en: 'pending' },
+	// The subject a queued entry would bind to on approval. `target_new` is the one that
+	// changes a decision: approving does not just file the fact, it CREATES the subject.
+	'knowledge.queue.target_new': { de: 'wird neu angelegt', en: 'will be created' },
+	'knowledge.queue.target_ambiguous': { de: 'mehrdeutig · keine Verknüpfung', en: 'ambiguous · no link' },
+	'knowledge.queue.target_existing_title': { de: 'Bei Freigabe wird der Fakt mit diesem vorhandenen Subjekt verknüpft.', en: 'On approval the fact is linked to this existing subject.' },
+	'knowledge.queue.target_new_title': { de: 'Dieser Name ist im Graph unbekannt — die Freigabe legt dafür eine Organisation an.', en: 'The graph does not know this name — approving creates an organization for it.' },
+	'knowledge.queue.target_ambiguous_title': { de: 'Mehrere Subjekte tragen diesen Namen. Die Freigabe verknüpft mit keinem davon.', en: 'Several subjects carry this name. Approving links to none of them.' },
 	'knowledge.queue.approve': { de: 'Freigeben', en: 'Approve' },
 	'knowledge.queue.edit': { de: 'Bearbeiten…', en: 'Edit…' },
 	'knowledge.queue.save_approve': { de: 'Speichern + freigeben', en: 'Save + approve' },
