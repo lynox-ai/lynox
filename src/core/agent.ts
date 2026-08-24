@@ -2924,6 +2924,80 @@ export class Agent implements IAgent {
   }
 
   /**
+   * How a failure reason becomes a ledger row on the SESSION sink: mask,
+   * flatten, bound.
+   *
+   * `tool_calls.output_json` is written RAW, while the `input_json` beside it in
+   * the same row goes through `JSON.stringify` and therefore escapes control
+   * characters. Every reason here is built from tool input — `read_file`'s
+   * ENOENT text embeds the model-chosen path, `http_request` names a refused
+   * header. Not all of them do — the rate-limit reasons are built from config,
+   * and the empty-reason fallback from the tool name — but enough do that the
+   * writer is where the guarantee belongs. Without this a `\r\n` in a tool
+   * argument writes a forged line
+   * into the ledger, the debug export and the `toolEnd` breadcrumb, all of which
+   * are read line by line. The ledger is what we later use to decide whether
+   * something happened; a model-controlled path into it turns evidence into a
+   * claim.
+   *
+   * ⚠ It exists as a HELPER because two writers reach it, and the first version
+   * of this fix only covered one. The soft-failure path got mask+flatten+bound
+   * while the hard-error path four dozen lines below wrote `cause.message` into
+   * the same column with neither the flatten nor the bound — the narrow door
+   * shut, the wide one open, and the commit claiming the threat closed.
+   *
+   * ⚠⚠ And there is a THIRD writer of that column which this does NOT reach, so
+   * do not read the paragraph above as coverage. Pipeline steps build their
+   * Agent with no `recordToolCall` in its config, so `_recordToolCall` is a
+   * no-op for them and their row is written by `createStepStreamHandler` →
+   * `runner.ts` → `insertToolCall` from the STREAM event:
+   * `boundedJson(event.result)`, a different cap, no masking order, no flatten,
+   * no cut mark. `http_request` is in `INLINE_CORE_TOOLS`, so that path is live
+   * for the very tool this change is about.
+   *
+   * ⚠ And the forged-line threat is LIVE there, not merely a different meaning
+   * for the same field. On a soft failure the pipeline row carries the payload,
+   * which is a semantics problem. On a HARD throw the stream event carries the
+   * error text (`result: message` below), and `boundedJson` passes strings
+   * through verbatim — so `read_file`'s ENOENT with a model-chosen path writes
+   * its CRLF straight into that row. An earlier version of this comment said
+   * the column "carries the RESULT, not a reason" and made a live hole read as
+   * a schema question. It is filed rather than fixed here because the same sink
+   * needs one decision — what that column MEANS on that path — and flattening
+   * it alone would harden a field whose meaning is still wrong.
+   *
+   * The count in this comment was wrong twice (`two writers`, then `a third
+   * would call this`) in the change whose own lesson was to count the writers.
+   *
+   * Order is load-bearing. Mask FIRST: truncating first hands the masker a
+   * fragment its pattern no longer matches, leaving the tail verbatim. Flatten
+   * is length-preserving, so it cannot move the cut. Replace rather than strip:
+   * a reason that silently loses characters is harder to read than one that
+   * shows where they were \u2014 and the cut says so too, for the same reason. The
+   * hard path keeps the FULL message for the model, so without a marker an
+   * operator comparing the two cannot tell a truncated row from a complete one.
+   */
+  private _ledgerReason(raw: string): string {
+    const masked = this.secretStore ? this.secretStore.maskSecrets(raw) : raw;
+    const flat = masked.replace(/[\x00-\x1f\x7f\u0085\u2028\u2029]/g, ' ');
+    if (flat.length <= Agent.MAX_LEDGER_REASON_CHARS) return flat;
+    // The marker lives INSIDE the bound \u2014 the bound is the guarantee, not the
+    // target length, so a row can never exceed it to make room for saying so.
+    // `Math.max(0, …)` because a negative second argument to `slice` counts
+    // from the END — so a future MAX below the marker's own length would
+    // silently return a string LONGER than the bound, which is the one thing
+    // this function guarantees.
+    //
+    // ⚠ Deleting the clamp is an EQUIVALENT mutant today and is declared as one
+    // rather than counted as killed: at MAX = 2000 the expression is 1993 either
+    // way, and MAX is a private static, so no test can drive it below 7 without
+    // editing the constant. The guard is for the edit, not for today's value —
+    // whoever lowers MAX gets the bound honoured instead of inverted.
+    const keep = Math.max(0, Agent.MAX_LEDGER_REASON_CHARS - LEDGER_CUT_MARK.length);
+    return `${flat.slice(0, keep)}${LEDGER_CUT_MARK}`;
+  }
+
+  /**
    * How many tool calls this agent has handed to the sink — i.e. how many rows
    * it caused. Read by `spawn_agent` to stamp `runs.tool_call_count` on the
    * child's own row, so that column agrees with `COUNT(run_tool_calls)` for the
@@ -3265,21 +3339,7 @@ export class Agent implements IAgent {
       const softRaw = softFailureReason === null
         ? null
         : (softFailureReason.trim() === '' ? `${tc.name} reported a failure without a reason` : softFailureReason);
-      // Bounded before it is persisted, like the input beside it (`slice(0,2000)`)
-      // and the result above it (`toolResultLimit`). The reason had no bound at
-      // all, and the export in this same change is what makes that reachable: a
-      // plugin or a pro-side integration can now construct a `ToolSoftFailure`
-      // and put an unbounded string into `tool_calls.output_json`. The in-tree
-      // tools happen to be short — `web_research` slices to 200 itself — but
-      // that is caller courtesy, not a guarantee, and the writer is where a
-      // guarantee belongs. Masking runs FIRST so truncation cannot cut a secret
-      // in half and leave the tail unmatched. (Security round, 2026-08-23.)
-      const softMaskedFull = softRaw !== null && this.secretStore
-        ? this.secretStore.maskSecrets(softRaw)
-        : softRaw;
-      const softMasked = softMaskedFull !== null
-        ? softMaskedFull.slice(0, Agent.MAX_LEDGER_REASON_CHARS)
-        : null;
+      const softMasked = softRaw !== null ? this._ledgerReason(softRaw) : null;
       this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null);
       channels.toolEnd.publish(
         softMasked === null
@@ -3300,13 +3360,28 @@ export class Agent implements IAgent {
       const cause = err instanceof Error ? err : new Error(String(err));
       const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : cause.message;
       const message = annotateNonRetryable(rawMessage);
+      // The LEDGER copy is a different string from the MODEL copy, deliberately.
+      //
+      // `message` above is what the model reads and what the UI renders red; it
+      // stays exactly as it was — flattening or bounding it would truncate an
+      // error the model needs in full, which is a behaviour change, not an
+      // observability fix.
+      //
+      // `output_json` and the breadcrumb are line-oriented readers and get the
+      // same mask+flatten+bound the soft path gets. This is in fact the WIDER
+      // door: every throwing tool comes through here, and `read_file`'s ENOENT
+      // text carries the model-chosen path verbatim, so a `\r\n` in a tool
+      // argument could write a forged ledger line. The first version of this fix
+      // covered only the soft path and claimed the threat closed — found in the
+      // delta round, 2026-08-24.
+      const ledgerMessage = this._ledgerReason(message);
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawErrInput = JSON.stringify(errAuditInput).slice(0, 2000);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
       // A failed call is recorded like a successful one — it consumed the same
       // budget and counts against the same rate limits.
-      this._recordToolCall(tc.name, safeErrInput, message, duration, true);
-      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: message, input: safeErrInput, threadId: this.currentThreadId });
+      this._recordToolCall(tc.name, safeErrInput, ledgerMessage, duration, true);
+      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: ledgerMessage, input: safeErrInput, threadId: this.currentThreadId });
 
       if (this.onStream) {
         // Tool-level error: surface inline via tool_result (UI renders it red on
@@ -3333,6 +3408,9 @@ export class Agent implements IAgent {
   }
 
 }
+
+/** Appended when a ledger reason is truncated, so a cut row is visibly a cut row. */
+const LEDGER_CUT_MARK = ' …[cut]';
 
 /**
  * Patterns that indicate a tool failed in a way that retrying with a
