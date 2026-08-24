@@ -26,9 +26,11 @@ deliberate act, because a template that pre-fills its own answers turns the whol
 thing into a ritual you satisfy by pasting a SHA.
 
 **CI cannot verify `gates`, `delta` or `mutations`.** They are your attestation
-and they are on the record. The one thing CI does establish by itself is `head`:
-it must equal this PR's current head, so **update it after every push**. That is
-the difference between "the gates ran" and "the gates ran on THIS code".
+and they are on the record. `head` is the **load-bearing** check: it must equal this
+PR's current head, so **update it after every push**. That is the difference between
+"the gates ran" and "the gates ran on THIS code". CI does establish one more thing on
+its own — which gates the diff OWES, derived from the real file list — so leaving out
+a required `security` or `legal` is caught, not attested.
 
 - `head` — this PR's **current** head, which is also the SHA the gates ran against:
   `git rev-parse --short HEAD`. Update it after every push.
