@@ -1152,12 +1152,18 @@ describe('LynoxHTTPApi', () => {
     });
 
     it('marks the server-side terminal error fatal on the wire', async () => {
-      // The run stream carries `event: error` for two different things. This one
-      // is the genuinely terminal case — the catch around session.run(), with
-      // res.end() right after. A consumer reading `fatal` on a payload that
-      // omits it would see `undefined`, i.e. falsy, i.e. "keep waiting" — so the
-      // discriminator has to be present HERE, not only on the engine's events.
-      mockSessionRun.mockImplementation(async () => {
+      // The run stream carries `event: error` for two different things. This is
+      // the server-SIDE terminal case — the catch around session.run(), with
+      // res.end() right after; agent.ts's iteration cap is the other fatal one.
+      // Nothing reads `fatal` yet. The field is pinned here anyway because this
+      // payload has a different SHAPE from the engine's, so it is the one a
+      // future consumer would silently read as `undefined` — falsy, i.e. "keep
+      // waiting" — on the one path where the turn really is over.
+      // `Once`, not a standing implementation: a throwing mock that outlives its
+      // test is only caught by the blanket mockResolvedValue in the file's
+      // beforeEach, which makes that line silently load-bearing for this test
+      // alone. Scoping it here keeps the coupling from existing at all.
+      mockSessionRun.mockImplementationOnce(async () => {
         throw new Error('provider exploded');
       });
 

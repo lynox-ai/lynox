@@ -92,10 +92,13 @@ export type ReattachOutcome = 'took-over' | 'no-run' | 'unreachable';
  * a store, a browser or a network.
  *
  * The rule, and the one that changed on 2026-08-23: `done` is the ONLY event
- * that establishes an end. `error` does not, because the wire uses one channel
- * for two meanings — a dead turn (`agent.ts` iteration limit) and a non-fatal
- * incident the engine recovers from (`stream.ts` unparsable tool input, which
- * substitutes `input:{}` and continues). Treating `error` as terminal skipped
+ * that establishes an end. `error` does not, because one channel carried two
+ * meanings — a dead turn (`agent.ts` iteration limit) and a non-fatal incident
+ * the engine recovers from (`stream.ts` unparsable tool input, which substitutes
+ * `input:{}` and continues). The wire now carries a `fatal` flag that separates
+ * them, and this rule deliberately does NOT depend on it: asking the server is
+ * correct for both, so the probe stays the wider net and the flag can be adopted
+ * without this predicate changing meaning. Treating `error` as terminal skipped
  * the probe entirely, so a run that was still executing — measured at 152 s
  * with four spawned sub-agents — rendered as "not sent, tap to retry", offering
  * the user a second purchase of a turn already being billed.

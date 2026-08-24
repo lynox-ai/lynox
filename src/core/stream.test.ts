@@ -147,8 +147,10 @@ describe('StreamProcessor', () => {
       expect(errors).toHaveLength(1);
       // `fatal: false` is the load-bearing half: this path substitutes `input:{}`
       // and the turn continues below, while agent.ts emits the SAME event type to
-      // say the run is dead. A receiver that cannot tell them apart marks a live,
-      // billing run as failed — measured 2026-08-23 on run e2684d2e.
+      // say the run is dead. A receiver that could not tell them apart marked a
+      // live, billing run as failed — measured 2026-08-23 on run e2684d2e. That
+      // receiver was fixed the same day; this assert keeps the wire honest so the
+      // next one does not have to guess.
       expect(errors[0]).toMatchObject({ type: 'error', fatal: false, agent: 'test-agent' });
 
       // Input should be set to empty object
