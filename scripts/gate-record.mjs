@@ -12,7 +12,10 @@
  * CI cannot judge whether a review was any good. It can enforce that a record
  * EXISTS and PINS THE EXACT HEAD SHA, which converts the second failure into a
  * hard stop and makes the first one a deliberate lie rather than an oversight.
- * Everything past SHA-freshness is an attestation and is documented as one.
+ * Most of what follows is an attestation and is documented as one — but not all:
+ * the gates a diff OWES are derived from the real file list, which is a fact this
+ * check establishes on its own. (The line used to read "everything past
+ * SHA-freshness is an attestation", which was never quite true.)
  *
  * NOT A SECURITY BOUNDARY. Anyone who can open a PR can write the block. The
  * point is friction in the right place and a durable record on the PR, not
