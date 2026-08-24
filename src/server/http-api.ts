@@ -51,7 +51,7 @@ import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields } from '../core/prompt-store.js';
-import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
+import type { StreamEvent, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
@@ -2645,7 +2645,12 @@ export class LynoxHTTPApi {
       // resume from `?since=<lastSeq>`. The buffer append happens even while
       // `aborted` (the SSE is dead but the headless run keeps producing events
       // for a reconnecting subscriber).
-      session.onStream = async (event: StreamEvent) => {
+      // `EmittedStreamEvent`, matching the slot: this closure is the path every
+      // engine event takes to the browser. Annotated with the wide union it
+      // compiled, and an explicit field projection here — the pattern already
+      // used 20 lines below — would have dropped `fatal` from every error on the
+      // wire without a single test or type failing.
+      session.onStream = async (event: EmittedStreamEvent) => {
         const seq = runBuffer?.append(event);
         if (aborted) return;
         const data = JSON.stringify(event);

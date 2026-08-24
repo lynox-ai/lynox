@@ -2218,8 +2218,11 @@ export class Session {
     // Emitting on BOTH sides: this wrapper receives what core produced and
     // forwards it to the session's sink, so widening it here would launder the
     // decision back into an unknown. It is one of three such choke points — the
-    // spawn forwarder is the second; the raw SSE writer in http-api is the third
-    // and is NOT typed at all, so only a test holds it.
+    // spawn forwarder is the second; http-api's SSE closure the third; the raw
+    // SSE writer in http-api's catch is the fourth and is not typed at all, so
+    // only a test holds that one. The count was three until a delta round found
+    // the closure annotated with the wide union — which is why it is written out
+    // here rather than left as "several".
     const streamHandler: EmittingStreamHandler = async (event: EmittedStreamEvent) => {
       if (event.type === 'turn_end') {
         // Inject actual model so the client can compute correct costs

@@ -1151,6 +1151,31 @@ describe('LynoxHTTPApi', () => {
       expect(text).toContain('event: done');
     });
 
+    it('carries fatal through to the wire on an ENGINE error, not just the catch', async () => {
+      // The other test covers http-api's own catch. This covers the path every
+      // engine event takes: session.onStream -> JSON.stringify -> res.write.
+      // Typing that closure narrowly does NOT protect it — the payload goes into
+      // JSON.stringify, not into a typed sink, so an explicit field projection
+      // there drops `fatal` from every engine error and still typechecks
+      // (measured). A test on the rendered stream is the only thing that fails.
+      mockSessionRun.mockImplementationOnce(async () => {
+        const onStream = mockSessionInstance.onStream as ((e: unknown) => Promise<void>) | null;
+        if (onStream) {
+          await onStream({ type: 'error', message: 'tool input unparsable', fatal: false, agent: 'lynox' });
+        }
+        return 'partial';
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'emit an engine error' }),
+      });
+
+      const text = await res.text();
+      expect(text).toContain('event: error');
+      expect(text).toContain('"fatal":false');
+    });
+
     it('marks the server-side terminal error fatal on the wire', async () => {
       // The run stream carries `event: error` for two different things. This is
       // the server-SIDE terminal case — the catch around session.run(), with

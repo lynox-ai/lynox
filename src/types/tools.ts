@@ -160,7 +160,7 @@ export type StreamEvent =
   | { type: 'tool_progress'; tool: string; phase: string;          agent: string; subAgent?: string | undefined }
   | { type: 'api_cost'; tool: string; profileId: string; profileName: string;
       endpoint: string; costUsd: number;                           agent: string; subAgent?: string | undefined }
-  | { type: 'tool_result'; name: string; result: string;           agent: string; isError?: boolean; subAgent?: string | undefined; subAgentId?: string | undefined }
+  | { type: 'tool_result'; name: string; result: string;           agent: string; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined }
   | { type: 'spawn';       spawnId: string; subAgents: SpawnedSubAgent[];
       estimatedCostUSD?: number | undefined;                       agent: string }
   // 5s heartbeat for a running batch. `running` and the keys of `lastToolBySub`
@@ -197,7 +197,7 @@ export type StreamEvent =
       detail?: string | undefined; durationMs?: number | undefined; elapsed?: number | undefined;
       summary?: string | undefined; agent: string }
   | { type: 'context_pressure'; droppedMessages: number; usagePercent: number; agent: string }
-  | { type: 'context_budget'; systemTokens?: number; toolTokens?: number; messageTokens?: number;
+  | { type: 'context_budget'; systemTokens?: number | undefined; toolTokens?: number | undefined; messageTokens?: number | undefined;
       totalTokens: number; maxTokens: number; usagePercent: number;
       // Cost-aware budget occupancy (Session._compactionUsagePercent — the SAME
       // figure that drives `_autoCompactIfNeeded`'s offer/auto-compact triggers),
