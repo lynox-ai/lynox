@@ -25,6 +25,7 @@ import {
   SELF_HOST_ONLY,
   PREFIX_FAMILIES,
   type EnvRegistryRow,
+  type EngineReadKind,
 } from '../src/contract/env-registry.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -82,7 +83,7 @@ function readForms(row: EnvRegistryRow): RegExp[] {
       // `alsoReadAt` only, so the primary site stays pinned to the resolver.
       const pair = row.engineConsumed.pair;
       if (!pair) return [/$^/]; // no pair declared → matches nothing; the row-level test below says why
-      return [new RegExp(`\\bresolveClientPair\\s*!?\\s*\\(\\s*['"]${esc(pair.id)}['"]\\s*,\\s*['"]${esc(pair.secret)}['"]`)];
+      return [new RegExp(`\\bresolveClientPair\\(\\s*['"]${esc(pair.id)}['"]\\s*,\\s*['"]${esc(pair.secret)}['"]`)];
     }
     case 'web-ui':
       // SvelteKit server code reads via `$env/dynamic/private`.
@@ -358,6 +359,40 @@ describe('env-ABI reverse: every LYNOX_* read has a contract stance', () => {
   });
 });
 
+/**
+ * Every problem with the pair descriptors in `rows`. A function rather than an
+ * inline loop so its branches can be driven by synthetic rows — against the
+ * real registry they are unreachable, and an unreachable branch reads green
+ * whatever it does.
+ *
+ * There is deliberately NO separate "the partner has the wrong kind" check: it
+ * is implied. Symmetry requires the partner to declare the same descriptor, so
+ * the partner has a pair, so the kind check above fires when the loop reaches
+ * it. Both were present once and neither could be killed alone — a redundant
+ * pair reads as two guards and is one.
+ */
+function pairProblems(rows: readonly EnvRegistryRow[]): string[] {
+  const byName = new Map(rows.map((r) => [r.name, r]));
+  const problems: string[] = [];
+  for (const row of rows) {
+    const pair = row.engineConsumed.pair;
+    if (!pair) continue;
+    if (row.engineConsumed.kind !== 'pair-resolver') {
+      problems.push(`${row.name} carries a pair descriptor but kind is '${row.engineConsumed.kind}'`);
+    }
+    if (pair.id === pair.secret) problems.push(`${row.name} pairs with itself`);
+    for (const member of [pair.id, pair.secret]) {
+      const partner = byName.get(member);
+      if (!partner) { problems.push(`${row.name} pairs with ${member}, which has no row`); continue; }
+      const other = partner.engineConsumed.pair;
+      if (!other || other.id !== pair.id || other.secret !== pair.secret) {
+        problems.push(`${member} does not declare the same descriptor as ${row.name}`);
+      }
+    }
+  }
+  return problems;
+}
+
 describe('env-ABI: credential-pair reads are swept and declared', () => {
   const { reads, viaPair } = SWEEP;
 
@@ -388,52 +423,48 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
   // instead of as a regex over source text: deleting one row leaves the other
   // naming a member that does not exist, and it cannot drift with syntax.
   //
-  // What this does NOT do, and it is deliberately less than three earlier
-  // versions of this file attempted: nothing verifies that EVERY
-  // resolveClientPair call resolves a declared pair. The forward test asks
-  // only whether the declared readSite CONTAINS one correct call.
+  // What this asserts is weaker than it reads, and this is the fourth attempt
+  // at saying so accurately. The forward test matches source TEXT at the
+  // declared readSite — it does not verify that a CALL happens. Measured:
+  // rename both real calls to `resolveClientPairX(` and leave one commented-out
+  // correct call behind, and this file stays green. What pins the real
+  // behaviour is the boot test (`src/core/engine-client-pair-boot.test.ts`),
+  // not this file; this file pins the DECLARATION against the text.
   //
-  // A counting check was built twice and removed twice, and the reason is the
-  // same both times: enforcing this by scanning source text needs a lexer, and
-  // every ad-hoc approximation of one shipped a SILENT FAIL-OPEN. The last
-  // version was defeated by an ordinary `const g = 'src/*';` — an unpaired
-  // `/*` inside a string swallowed 263 lines and a wrong call with them, and
-  // the suite stayed green. A guard that fails open is worse than none: a green
-  // check reads as coverage, so it removes the pressure to fix the thing it is
-  // not actually checking.
+  // Nor does anything here check that EVERY call resolves a declared pair: a
+  // second call in the same file can swap the members. A counting check was
+  // built twice and removed twice, and the reason belongs here so there is no
+  // third attempt — enforcing this over source text needs a lexer, and every
+  // approximation of one shipped a SILENT FAIL-OPEN. The last was defeated by
+  // an ordinary `const g = 'src/*';`: the unpaired `/*` opened a pseudo-comment
+  // that swallowed 263 lines and a wrong call with them, and the suite stayed
+  // green. A guard that fails open is worse than none — a green check reads as
+  // coverage, so it removes the pressure to fix what it is not checking.
   //
-  // The fix that closes this removes the possibility instead of chasing it —
-  // resolveClientPair taking the pair descriptor the contract already declares,
-  // rather than two free strings, leaves no argument order to swap. It is
-  // tracked as DEF-pair-resolver-swap-detectable-not-impossible with a
-  // compile-level acceptance test, so no future regex can be mistaken for
-  // having closed it. The real fix removes the possibility instead of
-  // chasing it — DEF-pair-resolver-swap-detectable-not-impossible.
+  // The fix that closes this removes the possibility rather than chasing it:
+  // resolveClientPair taking the pair descriptor the contract already declares
+  // leaves no argument order to swap. Tracked as
+  // DEF-pair-resolver-swap-detectable-not-impossible with a compile-level
+  // acceptance test, so no future regex can be mistaken for having closed it.
+
+  it('the pair check rejects each broken shape (synthetic rows)', () => {
+    // The four branches below are only reachable through a registry mutation,
+    // so on the real registry they read green whatever they do. Synthetic rows
+    // make each one killable on its own.
+    const row = (name: string, kind: EngineReadKind, pair?: { id: string; secret: string }): EnvRegistryRow => ({
+      name, valueKind: 'opaque', emitPolicy: 'operator-only',
+      engineConsumed: { kind, ...(pair ? { pair } : {}), readSite: 'src/core/engine.ts' },
+    });
+    const P = { id: 'A_ID', secret: 'A_SECRET' };
+    const ok = [row('A_ID', 'pair-resolver', P), row('A_SECRET', 'pair-resolver', P)];
+    expect(pairProblems(ok), 'a well-formed pair must produce no problem').toEqual([]);
+    expect(pairProblems([row('A_ID', 'direct', P), row('A_SECRET', 'pair-resolver', P)])).not.toEqual([]);
+    expect(pairProblems([row('A_ID', 'pair-resolver', { id: 'A_ID', secret: 'A_ID' })])).not.toEqual([]);
+    expect(pairProblems([row('A_ID', 'pair-resolver', P)])).not.toEqual([]);
+    expect(pairProblems([row('A_ID', 'pair-resolver', P), row('A_SECRET', 'pair-resolver', { id: 'A_SECRET', secret: 'A_ID' })])).not.toEqual([]);
+  });
+
   it('every pair descriptor is kind-checked, complete and symmetric', () => {
-    // One-directional and kind-blind was not enough: a `pair` on a
-    // `kind: 'direct'` row is inert but was being VALIDATED here, and dropping
-    // the partner's descriptor left the surviving row happily pointing at it.
-    const byName = new Map(ENV_REGISTRY.map((r) => [r.name, r]));
-    const problems: string[] = [];
-    for (const row of ENV_REGISTRY) {
-      const pair = row.engineConsumed.pair;
-      if (!pair) continue;
-      if (row.engineConsumed.kind !== 'pair-resolver') {
-        problems.push(`${row.name} carries a pair descriptor but kind is '${row.engineConsumed.kind}'`);
-      }
-      if (pair.id === pair.secret) problems.push(`${row.name} pairs with itself`);
-      for (const member of [pair.id, pair.secret]) {
-        const partner = byName.get(member);
-        if (!partner) { problems.push(`${row.name} pairs with ${member}, which has no row`); continue; }
-        if (partner.engineConsumed.kind !== 'pair-resolver') {
-          problems.push(`${row.name} pairs with ${member}, whose kind is '${partner.engineConsumed.kind}'`);
-        }
-        const other = partner.engineConsumed.pair;
-        if (!other || other.id !== pair.id || other.secret !== pair.secret) {
-          problems.push(`${member} does not declare the same descriptor as ${row.name}`);
-        }
-      }
-    }
-    expect(problems, 'a pair descriptor is inert, incomplete or asymmetric').toEqual([]);
+    expect(pairProblems([...ENV_REGISTRY]), 'a pair descriptor is inert, incomplete or asymmetric').toEqual([]);
   });
 });
