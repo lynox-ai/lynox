@@ -215,6 +215,7 @@ export function evaluate({ body, head, files, author }) {
         'the delta-round verdict, and the mutation count. See .github/pull_request_template.md.',
         'A round is CLEAN when nothing it found is left unhandled — fixed here, or filed as a',
         'register row. Findings do not make a round unclean; carrying them silently does.',
+        'A filed row does NOT belong in `closes:` — that field names rows this PR settles.',
       ],
     };
   }
@@ -305,43 +306,55 @@ export function evaluate({ body, head, files, author }) {
     }
   }
 
-  // A delta round that did not come back clean is a reason not to merge, so
-  // there is exactly one accepted value.
-  //
-  // WHAT `clean` MEANS, because the one-line version was read as "no round ever
-  // found anything" and that reading makes the gate UNSATISFIABLE for exactly the
-  // PRs that were reviewed hardest — a PR whose review found something could never
-  // attest, and the `head:` field below would be pointless. Three parts:
-  //   1. nothing the round found is left unhandled — fixed in this diff, or filed
-  //      as a register row (that is what `closes:` is for; filing is the norm here);
-  //   2. it ran at the head `head:` names — the load-bearing half, checked below;
-  //   3. the delta since that round only REMOVES.
-  // Part 3 is what makes this terminate rather than regress. Every fix produces a
-  // new head, and a new head would demand a new round for ever. A deletion can be
-  // taken by inspection — not because inspection is cheaper, but because there is
-  // nothing added to check it AGAINST. Anything ADDED needs a fresh round, and
-  // "added" includes code: a one-line guard change asserts no prose and still
-  // changes behaviour. A rewording is an addition and a deletion at once, so it
-  // falls on the round side — which is the incentive we want. Deleting is the way
-  // out; rewording is not. (An earlier draft of this rule said "adds no new CLAIM",
-  // which was reasoned from a prose case and would have waved every code fix
-  // through on the grounds that it claims nothing.)
-  //
-  // NOT a second accepted value: someone merging while attesting an unclean round
-  // is the failure this field exists for. The restriction was never the problem —
-  // its description was.
-  //
   // `delta` and `mutations` describe a CODE round, so they are demanded only when one
   // was owed. A markdown-only legal change has neither, and forcing those fields would
   // buy a fabricated line — a record filled in to get past CI is worth less than none.
   if (required.has('delta')) {
+    // A delta round that did not come back clean is a reason not to merge, so
+    // there is exactly one accepted value.
+    //
+    // WHAT `clean` MEANS, because the one-line version got read as "no round ever
+    // found anything" — and that reading makes the gate UNSATISFIABLE for exactly
+    // the PRs reviewed hardest: a PR whose review found something could never
+    // attest, and the `head:` check above would be pointless. Two parts:
+    //   1. nothing the round found is left unhandled — fixed in this diff, or filed
+    //      as a register row. NOT via `closes:`, which names rows this PR SETTLES;
+    //      a freshly filed row is open, and putting it there corrupts the very
+    //      datum that field exists to make queryable.
+    //   2. it ran at the head `head:` names — or at an ancestor since which the
+    //      diff removes ONLY text that neither compiler nor runtime reads:
+    //      documentation and comments.
+    //
+    // The exception in (2) is what makes this terminate instead of regress: every
+    // fix produces a new head, and a new head would demand another round for ever.
+    // Such a deletion can be taken by inspection — not because inspection is
+    // cheaper, but because there is nothing added to check it AGAINST.
+    //
+    // Its narrowness is the whole safety, so do not widen it:
+    //   · The test is the READER, not the genre. Comments and docs qualify; test
+    //     fixtures, string literals and config all look like prose and are read.
+    //   · Code never qualifies, however small the diff. `if (a && b) { allow(); }`
+    //     → `if (a) { allow(); }` deletes five characters and lets the body run in
+    //     strictly more cases: a textual removal that opens a gate. Textual removal
+    //     is not behavioural removal.
+    //   · A rewording is an addition and a deletion at once, so it needs the round.
+    //     Deleting is the way out; rewording is not.
+    // (Two earlier drafts were worse and are recorded so they are not re-proposed:
+    // "adds no new CLAIM" was reasoned from a prose case and would have waved every
+    // code fix through on the grounds that it claims nothing; and stating the
+    // exception as a THIRD part contradicted the second — if a delta exists, the
+    // round did not run at `head:`, so both could never hold at once.)
+    //
+    // NOT a second accepted value: someone merging while attesting an unclean round
+    // is the failure this field exists for. The restriction was never the problem —
+    // its description was.
     if (f.delta !== 'clean') {
       errors.push(
         `\`delta:\` must be \`clean\` (got \`${f.delta ?? '<missing>'}\`) — an unclean delta round is not a merge.`,
-        'A round is clean when nothing it found is left unhandled — fixed in this diff or filed',
-        'as a register row — and when it ran at the head `head:` names.',
-        'A round that found things is normal. What decides it is the delta since: if that only',
-        'REMOVED, `clean` still holds; anything ADDED — text or code — needs a fresh round.',
+        'Clean means: nothing the round found is left unhandled — fixed here, or filed as a',
+        'register row — and it ran at the head `head:` names, or at an ancestor since which the',
+        'diff removes only text no compiler or runtime reads (docs, comments — never code).',
+        'Findings are normal; carrying them silently is not.',
       );
     }
 
