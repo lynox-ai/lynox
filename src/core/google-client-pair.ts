@@ -23,10 +23,10 @@
  * The two halves of one credential therefore take **opposite** precedence, and
  * the mixed pair reaches Google. The mixing needs BOTH an env pair and a vault
  * pair, and both are reachable TODAY: a deployment can supply the pair in the
- * environment, and a customer can write the vault pair
- * through Settings since core#1272. Any deployment that hands a tenant the env
- * pair while that tenant also holds a vault pair reaches this — which is why
- * the function exists, rather than a note claiming it cannot happen yet.
+ * environment, and a customer can write the vault pair through Settings since
+ * core#1272. Any deployment that hands a tenant the env pair while that tenant
+ * also holds a vault pair reaches this — which is why the function exists,
+ * rather than a note claiming it cannot happen yet.
  *
  * ## The rules, and why each is written the way it is
  *

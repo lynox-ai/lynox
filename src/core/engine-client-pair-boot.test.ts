@@ -123,9 +123,10 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     // The hole the first version of this change left open. userConfig used to be a
     // MIRROR: config.ts copied the env id into it and engine-init copied the vault
     // secret into it, so this exact split re-assembled one tier down and was reported
-    // as source 'config' — a source that had never held a pair. Real path: a
-    // an operator rotates GOOGLE_CLIENT_ID in the environment while the old secret sits in the
-    // vault, and gets PROJECT-B's id with PROJECT-A's secret, i.e. invalid_client.
+    // as source 'config' — a source that had never held a pair. Real path: an
+    // operator rotates GOOGLE_CLIENT_ID in the environment while the old secret
+    // sits in the vault, and gets PROJECT-B's id with PROJECT-A's secret, i.e.
+    // invalid_client.
     freshDataDir('cp-crossmix');
     setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
     const seed = new SecretVault();
