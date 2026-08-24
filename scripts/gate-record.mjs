@@ -322,10 +322,13 @@ export function evaluate({ body, head, files, author }) {
     //      a freshly filed row is open, and putting it there corrupts the very
     //      datum that field exists to make queryable.
     //   2. it ran at the head `head:` names — or at an ancestor since which the
-    //      diff removes ONLY text that nothing in the toolchain reads.
-    //      `head:` itself ALWAYS names this PR's current head. The exception is
-    //      about where the ROUND ran; it never licenses writing an older SHA into
-    //      the field, which would still go red and should.
+    //      diff removes ONLY text that nothing in the toolchain reads AND that
+    //      binds nobody outside it. `head:` itself ALWAYS names this PR's current
+    //      head. The exception is about where the ROUND ran; it never licenses
+    //      writing an older SHA into the field, which would still go red and
+    //      should. It also covers the DELTA round only — `code-review` and
+    //      `security` are claims about the code, and code is never what this
+    //      exception moves.
     //
     // The exception in (2) is what makes this terminate instead of regress: every
     // fix produces a new head, and a new head would demand another round for ever.
@@ -338,6 +341,12 @@ export function evaluate({ body, head, files, author }) {
     //     `eslint-disable` are obeyed by tsc and eslint, a shebang is obeyed by the
     //     kernel, and `drift-guard.sh` reads doc prose. Deleting one of those can
     //     flip a required check. A `.md` file is not automatically safe either.
+    //   · And "no reader" is not enough on its own, which is why the clause has a
+    //     second half. `SUBPROCESSORS.md` is read by no build step at all — and it
+    //     is the list the managed DPA contractually points customers at. Deleting a
+    //     paragraph there is invisible to every tool and changes what we owe. Text
+    //     that binds someone outside the toolchain never qualifies, whoever reads
+    //     it; that is also why it carries its own `legal` gate.
     //   · Code never qualifies, however small the diff. `if (a && b) { allow(); }`
     //     → `if (a) { allow(); }` deletes five characters and lets the body run in
     //     strictly more cases: a textual removal that opens a gate. Textual removal
@@ -358,8 +367,9 @@ export function evaluate({ body, head, files, author }) {
         `\`delta:\` must be \`clean\` (got \`${f.delta ?? '<missing>'}\`) — an unclean delta round is not a merge.`,
         'Clean means: nothing the round found is left unhandled — fixed here, or filed as a',
         'register row — and it ran at the head `head:` names, or at an ancestor since which the',
-        'diff removes only text nothing in the toolchain reads. Never code, and note that a',
-        'directive comment (`@ts-expect-error`, `eslint-disable`, a shebang) IS read.',
+        'diff removes only text nothing in the toolchain reads AND that binds nobody outside',
+        'it. Never code; a directive comment (`@ts-expect-error`, a shebang) IS read; and a',
+        'binding text like SUBPROCESSORS.md has no reader yet still never qualifies.',
         '`head:` always names this PR\'s current head. Findings are normal; hiding them is not.',
       );
     }
