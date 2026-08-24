@@ -547,6 +547,17 @@ export class KnowledgeStore {
     return this.listPending(limit).map(e => ({ ...e, text: this._maskText(e.text) }));
   }
 
+  /**
+   * The thread-scoped queue read, MASKED — {@link listPendingForThread} for a consumer that
+   * writes to a file rather than to a reviewer's screen. Exists because the two properties are
+   * needed together and neither sibling has both: the unscoped `listPendingMasked` would carry
+   * every other thread's queue into a single-thread export, and the unmasked
+   * `listPendingForThread` would carry vault values into a file that gets forwarded.
+   */
+  listPendingForThreadMasked(threadId: string, limit = 100): KnowledgeEntry[] {
+    return this.listPendingForThread(threadId, limit).map(e => ({ ...e, text: this._maskText(e.text) }));
+  }
+
   listActive(limit = 200): Array<KnowledgeEntry & { subjectName: string | null }> {
     const capped = Math.max(1, Math.min(limit, 500));
     const rows = this.db.prepare(

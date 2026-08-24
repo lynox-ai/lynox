@@ -16,6 +16,7 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash, createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
 import { Engine } from '../core/engine.js';
+import type { KnowledgeEntry } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
 import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
@@ -506,44 +507,113 @@ function enforceManagedProviderConstraints(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/** One projected durable-knowledge entry — the diagnostic surface, without internal ids. */
+interface DebugKnowledgeEntry {
+  text: string; kind: string; status: string; source_type: string; source_channel: string | null;
+  source_untrusted: boolean; pinned: boolean; importance: number;
+  subject_name: string | null; subject_hint: string | null; created_at: string;
+  /** Whether the entry was captured in THIS thread — replaces the raw foreign thread id. */
+  from_this_thread: boolean;
+}
+
+/** Every return path of {@link readDurableKnowledgeForDebug} has this exact shape. */
+interface DebugKnowledgeBlock {
+  substrate: string; available: boolean; entries_shown: number; pending_shown: number;
+  may_be_incomplete: boolean; entries: DebugKnowledgeEntry[]; pending_entries: DebugKnowledgeEntry[];
+  error?: string;
+}
+
+const DK_SUBSTRATE = 'knowledge_entries (durable knowledge)';
+/** Shared so every non-happy path is shape-IDENTICAL: a missing `entries_shown` reads as
+ *  `undefined`, which is indistinguishable from `0` — the exact confusion this block exists to
+ *  prevent. Same device as the Art. 15 export's `EMPTY_KNOWLEDGE`. */
+const EMPTY_DK: Omit<DebugKnowledgeBlock, 'entries' | 'pending_entries'> = {
+  substrate: DK_SUBSTRATE, available: false, entries_shown: 0, pending_shown: 0,
+  may_be_incomplete: false,
+};
+
+/**
+ * Why an allowlist and not the row object, stated as what it actually REMOVES — an earlier
+ * version of this comment justified the list with a field the very next line kept, which is
+ * worse than no rationale because it invites the next reader to trust it.
+ *
+ * Removed: internal ids (`id`, `subjectId`, `sourceRunId`, `supersededBy`) — no diagnostic value
+ * outside the instance — and `sourceThreadId`, which in a SINGLE-thread export a user forwards
+ * would name a DIFFERENT thread the recipient was never given. Its diagnostic question survives
+ * as `from_this_thread`.
+ *
+ * Kept, deliberately: `subject_name` / `subject_hint`. They are names, but no more revealing
+ * than the entry `text` printed beside them, which is what the name was extracted from — and the
+ * snapshot exists to diagnose cross-subject bleed, which cannot be read without the subject.
+ * Note they do NOT pass `_maskText` (that covers `.text` only); the whole-bundle secret scrub is
+ * what covers them, which is sufficient for a name and would not be for a credential.
+ *
+ * The reason lives HERE, next to the list, so the next field added has to argue with it.
+ */
+function projectKnowledgeEntry(e: KnowledgeEntry & { subjectName?: string | null }, threadId: string): DebugKnowledgeEntry {
+  return {
+    text: e.text, kind: e.kind, status: e.status, source_type: e.sourceType,
+    source_channel: e.sourceChannel, source_untrusted: e.sourceUntrusted,
+    pinned: e.pinned, importance: e.importance,
+    subject_name: e.subjectName ?? null, subject_hint: e.subjectHint,
+    created_at: e.createdAt,
+    // The raw `sourceThreadId` would name a DIFFERENT thread in a single-thread export a user
+    // forwards — a pointer at data the recipient was never given. The diagnostic question it
+    // answers ("did this fact come from the thread I am looking at?") survives as a boolean.
+    from_this_thread: e.sourceThreadId === threadId,
+  };
+}
+
 /**
  * The durable-knowledge half of the debug export's memory snapshot — the substrate the legacy
  * `memories` table does NOT contain once durable knowledge is on.
  *
- * Its own try/catch, separate from the caller's: `listActive` decrypts every row, so one
- * unreadable entry would otherwise take the whole memory block with it and the export would
- * silently show only the legacy substrate — which is precisely the blindness this exists to end.
- * A failure therefore returns a NAMED, EMPTY block with `may_be_incomplete: true` rather than
- * disappearing: "I could not read this" and "there is nothing here" must not look the same to
- * someone diagnosing a missing memory.
+ * Independent of the KnowledgeLayer ON PURPOSE. The layer is null when the knowledge GRAPH is
+ * off or the embedding provider failed (`engine-init.ts`), while durable knowledge is gated
+ * solely on `durable_memory_enabled` (`engine.ts`). Those are separate conditions, so a DK
+ * tenant without a graph — the very case this block exists for — must still get its entries.
  *
- * PENDING entries are included, masked. Under the trust gate a captured fact can sit in
- * `pending_review` instead of going active, and "it was captured but is waiting" is the single
- * most likely answer to "the model never saved anything" — an export that omits the queue cannot
- * distinguish it from "nothing was captured at all".
+ * Each half gets its OWN try/catch: `listActive` and `listPending` both decrypt every row, and
+ * one unreadable pending row must not discard readable active entries. A failure yields a
+ * NAMED, EMPTY half with `may_be_incomplete: true` rather than vanishing — "I could not read
+ * this" and "there is nothing here" must not look the same to someone diagnosing a missing
+ * memory. Entries are projected (see {@link projectKnowledgeEntry}), mirroring the field
+ * allowlist the legacy block applies rather than shipping the row object whole.
  */
-function readDurableKnowledgeForDebug(engine: Engine): unknown {
+/** Exported for the array-identity test: shared state between calls is invisible through HTTP,
+ *  because JSON round-tripping mints fresh arrays either way. */
+export function readDurableKnowledgeForDebug(engine: Engine, threadId: string): DebugKnowledgeBlock {
   const store = engine.getKnowledgeStore();
-  if (!store) return { substrate: 'knowledge_entries (durable knowledge)', available: false, entries: [], pending_entries: [], may_be_incomplete: false };
+  if (!store) return { ...EMPTY_DK, entries: [], pending_entries: [] };
   const ENTRY_CAP = 200;
+  let entries: DebugKnowledgeEntry[] = [];
+  let pending: DebugKnowledgeEntry[] = [];
+  let incomplete = false;
+  let failed: string | null = null;
   try {
     const active = store.listActive(ENTRY_CAP);
-    const pending = store.listPendingMasked(ENTRY_CAP);
-    return {
-      substrate: 'knowledge_entries (durable knowledge)',
-      available: true,
-      entries_shown: active.length,
-      pending_shown: pending.length,
-      // Named `may_be_incomplete` rather than `truncated`, matching the Art. 15 export: hitting
-      // exactly the cap is indistinguishable from having exactly that many, and over-reporting
-      // is the right way to be wrong about completeness.
-      may_be_incomplete: active.length >= ENTRY_CAP || pending.length >= ENTRY_CAP,
-      entries: active,
-      pending_entries: pending,
-    };
-  } catch {
-    return { substrate: 'knowledge_entries (durable knowledge)', available: true, entries: [], pending_entries: [], may_be_incomplete: true, error: 'durable knowledge unreadable' };
-  }
+    entries = active.map(e => projectKnowledgeEntry(e, threadId));
+    if (active.length >= ENTRY_CAP) incomplete = true;
+  } catch { failed = 'active entries unreadable'; incomplete = true; }
+  try {
+    // THREAD-SCOPED and masked. Scoped because `listPending` orders `created_at ASC` and caps:
+    // with a full queue of OLDER entries from other threads, this thread's freshly captured one
+    // falls outside the window — i.e. the export added to answer "was anything captured here?"
+    // would be missing exactly that entry. `listPendingForThread` filters in SQL BEFORE the
+    // limit and its docstring records that same trap from an earlier review. Masked because this
+    // is a file that gets stored and forwarded.
+    const raw = store.listPendingForThreadMasked(threadId, ENTRY_CAP);
+    pending = raw.map(e => projectKnowledgeEntry(e, threadId));
+    if (raw.length >= ENTRY_CAP) incomplete = true;
+  } catch { failed = failed ? 'durable knowledge unreadable' : 'pending queue unreadable'; incomplete = true; }
+  const block: DebugKnowledgeBlock = {
+    substrate: DK_SUBSTRATE, available: true,
+    entries_shown: entries.length, pending_shown: pending.length,
+    // `may_be_incomplete` rather than `truncated`, for the reason spelled out at the Art. 15
+    // export below: hitting exactly the cap cannot be told from having exactly that many.
+    may_be_incomplete: incomplete, entries, pending_entries: pending,
+  };
+  return failed ? { ...block, error: failed } : block;
 }
 
 function jsonResponse(res: ServerResponse, status: number, body: unknown): void {
@@ -3694,23 +3764,40 @@ export class LynoxHTTPApi {
       // every memory diagnosis over this export blind — and the plausible repair (point
       // `listAllActiveMemories` at engine.db) is green and leaves it EXACTLY as blind, because
       // the two `memories` tables are id-identical: the split is table-level, not database-level.
-      // They stay two named blocks rather than one merged list: the legacy rows outnumber the
-      // durable ones by an order of magnitude on a real instance, so merging them would drown
-      // the live facts in dead ones and hide which substrate a row came from — trading a blind
-      // instrument for a misleading one.
+      // They stay two named blocks rather than one merged list: on the instance where this was
+      // measured (2026-08-23) the legacy table held far more rows than the durable one and none
+      // newer than the cutover, so merging them would bury the live facts among dead ones and
+      // hide which substrate a row came from — trading a blind instrument for a misleading one.
       const MEMORY_SNAPSHOT_CAP = 200;
       const knowledgeLayer = engine.getKnowledgeLayer();
-      let memory: unknown = null;
-      if (knowledgeLayer) {
+      // Read OUTSIDE the layer check. The two substrates have INDEPENDENT preconditions, and
+      // conflating them is what made the first version of this fix miss its own target case:
+      //   - the legacy half needs a KnowledgeLayer — null when `knowledge_graph_enabled` is
+      //     false OR the embedding provider failed (`engine-init.ts`)
+      //   - the durable half needs a KnowledgeStore — gated solely on `durable_memory_enabled`
+      //     (`engine.ts`)
+      // So all four combinations are real, and the export serves every one of them; each half
+      // reports its own availability rather than the pair collapsing to `memory: null`:
+      //   layer ✓ / DK ✓ → both blocks    · layer ✓ / DK ✗ → durable `available: false`
+      //   layer ✗ / DK ✓ → `legacy_available: false`, durable populated  ← the DK-only tenant
+      //   layer ✗ / DK ✗ → both named and empty; still an object, never null
+      // The boundary is held by tests rather than by this comment: `it.each` over the four
+      // states asserts each half's availability flag.
+      const durableKnowledge = readDurableKnowledgeForDebug(engine, id);
+      let legacyHalf: Record<string, unknown>;
+      if (!knowledgeLayer) {
+        legacyHalf = { kg_stats: null, active_memories_substrate: 'memories (legacy store)', active_memories_shown: 0, active_memories_may_be_incomplete: false, active_memories: [], legacy_available: false };
+      } else {
         try {
           const legacyRows = knowledgeLayer.getDb().listAllActiveMemories(MEMORY_SNAPSHOT_CAP);
-          memory = {
+          legacyHalf = {
             kg_stats: await knowledgeLayer.stats(),
             active_memories_substrate: 'memories (legacy store)',
             active_memories_shown: legacyRows.length,
             // The cap was silent before. A truncated snapshot that does not say so reads as
             // the whole picture — the same class of defect as reading one substrate of two.
             active_memories_may_be_incomplete: legacyRows.length >= MEMORY_SNAPSHOT_CAP,
+            legacy_available: true,
             active_memories: legacyRows.map((m) => ({
               text: m.text,
               namespace: m.namespace,
@@ -3721,10 +3808,15 @@ export class LynoxHTTPApi {
               confirmation_count: m.confirmation_count,
               created_at: m.created_at,
             })),
-            durable_knowledge: readDurableKnowledgeForDebug(engine),
           };
-        } catch { memory = { error: 'memory snapshot unavailable' }; }
+        } catch {
+          // Only the legacy half is lost. Replacing the WHOLE object here (as this did) made a
+          // readable durable block disappear unnamed — the same forbidden shape as a silent
+          // empty, just from the other side.
+          legacyHalf = { kg_stats: null, active_memories_substrate: 'memories (legacy store)', active_memories_shown: 0, active_memories_may_be_incomplete: true, active_memories: [], legacy_available: true, legacy_error: 'memory snapshot unavailable' };
+        }
       }
+      const memory: unknown = { ...legacyHalf, durable_knowledge: durableKnowledge };
 
       // Assembled from the strongly-typed `wireSummaryRows` collected during the per-run
       // snapshot build above — no re-parse of the emitted bundle.
@@ -3740,7 +3832,7 @@ export class LynoxHTTPApi {
         engine: { version: PKG_VERSION, build_sha: buildSha.length > 0 ? buildSha : null },
         // The export is the user's own data, exported by their own action; it contains PII
         // (kept — scrubbing it would destroy the diagnostic value) with SECRETS masked below.
-        sharing_notice: 'This export contains your own conversation data — including personal information and stored memories — with secrets masked. Share it only with recipients you trust.',
+        sharing_notice: 'This export contains your own conversation data — including personal information, stored memories, and knowledge entries still awaiting your review — with secrets masked. Share it only with recipients you trust.',
         thread,
         debug_summary: debugSummary,
         wire_capture_summary: wireCaptureSummary,

@@ -678,8 +678,9 @@ describe('AgentMemoryDb', () => {
    *
    * This guard is deliberately WEAK and named as such: it pins a sentence, and a sentence can
    * be reworded around it. It exists only to stop the specific retired claim from returning.
-   * The strong guard is behavioural and lives in `http-api.test.ts` — the export must carry
-   * BOTH substrates; that one cannot be talked around.
+   * The behavioural guards in `http-api.test.ts` cover what the export actually DOES — they are
+   * stronger, but not beyond wording either, so the honest claim is "different failure modes",
+   * not "cannot be talked around".
    */
   it('the doc no longer claims the legacy store is complete (weak guard; the behavioural one is in http-api.test.ts)', () => {
     const src = readFileSync(fileURLToPath(new URL('./agent-memory-db.ts', import.meta.url)), 'utf-8');
