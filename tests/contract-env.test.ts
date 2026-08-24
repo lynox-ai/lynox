@@ -103,26 +103,7 @@ describe('env-ABI forward: every registry row is read at its declared site', () 
       continue;
     }
     if (kind === 'none') continue; // asserted absent by the reverse sweep below
-    if (kind === 'pair-resolver' && readSite) {
-      it(`every resolveClientPair call in ${readSite} resolves ${row.name}'s pair`, () => {
-        // `some()` above asks whether the file CONTAINS a matching call. It does
-        // not ask whether EVERY call matches — and engine.ts holds two (the init
-        // path and reloadGoogle), so swapping the second one passed. Scoped to
-        // the declared file, not the repo: this counts plain calls and requires
-        // all of them to be the declared pair.
-        //
-        // What it does not see, and this is the honest limit rather than a
-        // promise: `resolveClientPair?.(`, `.call(`, `.apply(`, a generic
-        // `<T>(`, or an aliased binding. Those are not caught anywhere; the
-        // fix that removes the possibility is
-        // DEF-pair-resolver-swap-detectable-not-impossible.
-        const src = read(readSite);
-        const all = [...src.matchAll(/\bresolveClientPair\s*\(/g)].length;
-        const matching = [...src.matchAll(new RegExp(readForms(row)[0]?.source ?? '$^', 'g'))].length;
-        expect(all, `${readSite}: no resolveClientPair call found at all`).toBeGreaterThan(0);
-        expect(matching, `${readSite}: ${all - matching} of ${all} calls do not resolve the declared pair in order`).toBe(all);
-      });
-
+    if (kind === 'pair-resolver') {
       it(`${row.name} declares its pair, and is a member of it`, () => {
         const pair = row.engineConsumed.pair;
         expect(pair, `${row.name}: kind 'pair-resolver' requires pair`).toBeDefined();
@@ -172,6 +153,74 @@ describe('env-ABI forward: every registry row is read at its declared site', () 
         }
       });
     }
+  }
+});
+
+/** Source with comments removed, so a commented-out call is not counted as one. */
+function withoutComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .split('\n')
+    .map((l) => l.replace(/(?<!:)\/\/.*$/, ''))
+    .join('\n');
+}
+
+describe('env-ABI forward: every pair-resolver call site resolves a declared pair', () => {
+  const pairRows = ENV_REGISTRY.filter((r) => r.engineConsumed.kind === 'pair-resolver');
+  const sites = [...new Set(pairRows.map((r) => r.engineConsumed.readSite).filter((s): s is string => !!s))];
+
+  it('withoutComments hides a commented-out call but keeps a URL intact', () => {
+    // Pins the helper directly. Removing its CALL SITE below is an equivalent
+    // mutation on today's tree — no declared readSite currently holds a
+    // commented-out call — so this is what says the behaviour is intended
+    // rather than incidental. The URL case is here because an earlier version
+    // of this strip truncated any line containing `https://`.
+    const live = `resolveClientPair('A_ID', 'A_SECRET', {`;
+    expect(withoutComments(`// ${live}`)).not.toContain('resolveClientPair');
+    expect(withoutComments(`/* ${live} */`)).not.toContain('resolveClientPair');
+    expect(withoutComments(live)).toContain('resolveClientPair');
+    expect(withoutComments(`const u = 'https://a.com/x';`)).toContain('https://a.com/x');
+  });
+
+  it('there is at least one pair-resolver read site to check', () => {
+    expect(sites, 'no pair-resolver readSite — this check has nothing to look at').not.toEqual([]);
+  });
+
+  for (const site of sites) {
+    it(`every resolveClientPair call in ${site} resolves SOME declared pair`, () => {
+      // `some()` in the per-row test above asks whether the file CONTAINS a
+      // matching call; it does not ask whether EVERY call matches. engine.ts
+      // holds two, so a swap in the second one passed until this existed.
+      //
+      // "some declared pair", not "this row's pair": a second provider's own
+      // correct call must not fail the Google rows.
+      //
+      // Comments are stripped first — otherwise a commented-out call counts in
+      // both totals, they stay equal, and a real read site can disappear behind
+      // one. The `!?` catches a TS non-null assertion, which would otherwise be
+      // invisible to both counters rather than caught by one.
+      //
+      // Still invisible, written down instead of promised: `resolveClientPair?.(`,
+      // `.call(`, `.apply(`, a generic `<T>(`, and an aliased binding. Removing
+      // the possibility rather than chasing it is
+      // DEF-pair-resolver-swap-detectable-not-impossible.
+      const src = withoutComments(read(site));
+      const all = [...src.matchAll(/\bresolveClientPair\s*!?\s*\(/g)].length;
+      // Deduplicated: both members of a pair declare the SAME descriptor, so
+      // without this every call matches twice and the totals never line up.
+      const descriptors = new Map(
+        pairRows
+          .map((r) => r.engineConsumed.pair)
+          .filter((x): x is { id: string; secret: string } => !!x)
+          .map((pr) => [`${pr.id}\u0000${pr.secret}`, pr] as const),
+      );
+      const forms = [...descriptors.values()].map(
+        (pr) => new RegExp(`\\bresolveClientPair\\s*!?\\s*\\(\\s*['"]${esc(pr.id)}['"]\\s*,\\s*['"]${esc(pr.secret)}['"]`, 'g'),
+      );
+      const matching = forms.reduce((n, f) => n + [...src.matchAll(f)].length, 0);
+      expect(all, `${site}: no resolveClientPair call found at all`).toBeGreaterThan(0);
+      expect(matching, `${site}: ${all - matching} of ${all} calls do not resolve a declared pair in order`).toBe(all);
+    });
   }
 });
 
@@ -407,11 +456,13 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
   // instead of as a regex over source text: deleting one row leaves the other
   // naming a member that does not exist, and it cannot drift with syntax.
   //
-  // What this does NOT do: nothing detects a resolveClientPair call in a file
-  // the registry does not name. The declared file IS fully checked — every
-  // plain call in it, not just one — by the forward test above; an earlier
-  // version of this comment claimed the declared SITE was pinned when in truth
-  // only one call in it was. The real fix removes the possibility instead of
+  // What this does NOT do: nothing checks a resolveClientPair call in any file
+  // OTHER than a declared `readSite` — `alsoReadAt` included, which today holds
+  // no such call but is not excluded by anything. The declared readSite IS
+  // fully checked, every plain call in it. Two earlier versions of this comment
+  // were each too generous: the first claimed the site was pinned when only one
+  // call in it was, the second drew the boundary at "a file the registry does
+  // not name", which quietly counted alsoReadAt as covered. The real fix removes the possibility instead of
   // chasing it — DEF-pair-resolver-swap-detectable-not-impossible.
   it('every pair descriptor is kind-checked, complete and symmetric', () => {
     // One-directional and kind-blind was not enough: a `pair` on a
