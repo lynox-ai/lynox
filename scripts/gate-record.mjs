@@ -327,14 +327,10 @@ export function evaluate({ body, head, files, author }) {
     // re-run, attest. It terminates the ordinary way — when a round finds nothing.
     //
     // An escape hatch for "the delta since only deleted something harmless" was
-    // drafted and CUT. Five review rounds found five real defects in it, each
-    // draft introducing the next: it contradicted (2); it waved code deletions
-    // through; it kept re-introducing a GENRE list where the test is the reader;
-    // and its own worked example for "unread text" turned out to be read. Where
-    // prose is wrong that often, the answer is not another draft — it is a
-    // computation. See
-    // `DEF-gate-record-round-sha-not-pinned`: a `round: <sha>` field plus a CI diff
-    // makes this exact exception a measurement instead of a description.
+    // drafted and CUT: review found a defect in every draft of it. Do not re-draft
+    // it here — `DEF-gate-record-round-sha-not-pinned` carries what each draft got
+    // wrong, and names what replaces it: a `round: <sha>` field plus a CI diff,
+    // which turns this exception into a measurement instead of a description.
     //
     // NOT a second accepted value either: someone merging while attesting an unclean
     // round is the failure this field exists for. The restriction was never the
