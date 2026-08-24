@@ -694,6 +694,27 @@ export class LynoxHTTPApi {
   // closes; if a pending prompt is then blocking the previous run, a fresh
   // /run can take it over instead of 409-looping forever (Bug 3).
   private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>();
+
+  /**
+   * Unwind whatever run holds this session's slot, so the slot's `finally` can
+   * run and the next request is not refused with a 409.
+   *
+   * Needed because a run PARKED on a pending prompt does not observe
+   * `session.abort()`: it is suspended in `waitForSettled(promptId,
+   * sessionAbortController.signal)`, and neither the prompt row nor that
+   * controller belongs to the Session. Only the slot's `takeover` unwinds all
+   * three. Deliberately keyed on `runningSessions` and NOT on the Session — a
+   * deleted thread drops the Session while the slot (and its run-executor
+   * reservation) lives on, and that is precisely when reclaiming matters.
+   *
+   * Best-effort by design, mirroring RunExecutor.abort: a teardown must not turn
+   * into a 500 for the caller who asked for it.
+   */
+  private reclaimRunSlot(sessionId: string): void {
+    try {
+      this.runningSessions.get(sessionId)?.takeover();
+    } catch { /* best-effort — the caller's teardown continues regardless */ }
+  }
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
   private readonly staticRoutes = new Map<string, RouteHandler>();
   /**
@@ -2035,6 +2056,10 @@ export class LynoxHTTPApi {
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
+      // A parked run ignores abort() and would keep both the slot and its
+      // run-executor reservation after the Session is dropped below — with no
+      // handle left to reach it.
+      this.reclaimRunSlot(params['id']!);
       this.sessionStore.reset(params['id']!);
       jsonResponse(res, 200, { ok: true });
     }));
@@ -2803,10 +2828,14 @@ export class LynoxHTTPApi {
       // Takeover hook: a future /run for this session can call this to free
       // the slot when our SSE stream is dead and we're stuck on a prompt.
       const takeover = (): void => {
-        const pending = promptStore?.getPending(sessionId);
-        if (pending) promptStore?.expirePrompt(pending.id);
+        // Unwind BEFORE the bookkeeping. `waitForSettled` resolves on the signal
+        // alone, so aborting first means a throw from the prompt store (closed
+        // db, SQLITE_BUSY) can no longer leave the run parked — which is the
+        // exact failure this handle exists to prevent.
         sessionAbortController.abort();
         session.abort();
+        const pending = promptStore?.getPending(sessionId);
+        if (pending) promptStore?.expirePrompt(pending.id);
       };
       this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now() });
       try {
@@ -3235,20 +3264,18 @@ export class LynoxHTTPApi {
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/abort', async (_req, res, params) => {
       const sessionId = params['id']!;
+      // BEFORE the 404: the slot does not live on the Session, and the case that
+      // needs reclaiming most is the one where the Session is already gone
+      // (a thread deleted while its run was parked). Guarding this on
+      // `sessionStore.get` would make the backstop unreachable exactly there.
+      // Stop means stop: if a secret/mail prompt is open, this settles it, so a
+      // save that had not yet POSTed /secret-saved finds the prompt gone. That is
+      // the intended reading of the button — before this, stop left the flow
+      // running (dogfood 2026-08-24: a parked run held its thread for 15 h).
+      this.reclaimRunSlot(sessionId);
       const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
-      // A run PARKED on a pending prompt does not observe session.abort(): it is
-      // suspended in `waitForSettled(promptId, sessionAbortController.signal)`,
-      // and neither the prompt row nor that controller belongs to the session.
-      // Without this the route answered 200 while the run stayed parked, its
-      // `finally` never ran, and the slot below pinned the session — every later
-      // message got a 409 until the process restarted (dogfood 2026-08-24: 15 h).
-      // `takeover` is the one path that unwinds all three (expire prompt → abort
-      // controller → abort session); it is the same handle the stale-run reclaim
-      // and DELETE /api/runs/:runId already use. Idempotent: no slot, or a prompt
-      // that already settled, makes it a no-op.
-      this.runningSessions.get(sessionId)?.takeover();
       jsonResponse(res, 200, { ok: true });
     }));
 
@@ -3453,7 +3480,11 @@ export class LynoxHTTPApi {
       if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
-      // Also clean up in-memory session
+      // Also clean up in-memory session. Reclaim first: this route drops the
+      // Session outright, so a run still holding the slot (parked on a prompt,
+      // which abort() does not reach) would be stranded with no route left to
+      // free it — and five stranded reservations 429 every other thread.
+      this.reclaimRunSlot(params['id']!);
       this.sessionStore.reset(params['id']!);
       threadStore.deleteThread(params['id']!);
       // Extended debug capture: drop the thread's captured wire_snapshots too (the
