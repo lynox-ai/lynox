@@ -93,20 +93,25 @@ describe('probe freshness primitives', () => {
     expect(sawDedup(m![1])).toBe(true);
   });
 
-  it('recognises ONLY the active-storing returns, read from the handler', () => {
-    // The allowlist, checked against every `return` the remember handler actually has. A
-    // denylist here was wrong by four outcomes; this asserts the complement directly, so
-    // adding a new non-storing return cannot silently start counting as a store.
+  it('recognises ONLY the two active-storing returns the handler actually has', () => {
+    // PINNED, not derived. The first version of this test looped over the returns and
+    // asserted `storedActive(r) === r.startsWith('Remembered')` — the predicate compared
+    // against its own literal, which holds for ANY return set. It passed just as happily
+    // with a new active-storing return that says something else (the denylist's original
+    // failure mode) as without one. A tautology is worse than a missing test, because it
+    // looks like coverage (`memory/fb_test_must_fail.md`).
+    //
+    // So: the COUNT is pinned and the recognised set is pinned. Adding, removing or
+    // rewording a return in the handler fails here and forces a human to decide whether the
+    // allowlist still covers it — which is the whole job this check exists to do.
     const src = readFileSync(path.join(REPO, 'src/tools/builtin/knowledge.ts'), 'utf8');
     const handler = src.slice(src.indexOf('const rememberTool'), src.indexOf('// ── recall'));
     const returns = [...handler.matchAll(/return ['`]([^'`]{6,})/g)].map(m => m[1]!);
-    expect(returns.length).toBeGreaterThan(4);
-    for (const r of returns) {
-      // Every literal return either announces an active store, or must not count as one.
-      expect(storedActive(r)).toBe(r.startsWith('Remembered'));
-    }
-    // And the two that do exist are recognised.
-    expect(returns.some(r => storedActive(r))).toBe(true);
+    expect(returns, 'a return was added, removed or reworded in the remember handler').toHaveLength(8);
+    expect(returns.filter(storedActive)).toEqual([
+      'Remembered${pinned}, but \"${input.subject}\" matches more than one subject, so it is ',
+      'Remembered${linked}${pinned}.',
+    ]);
   });
 
   it('does not fire on an ordinary success message', () => {

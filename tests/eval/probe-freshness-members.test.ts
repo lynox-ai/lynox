@@ -56,7 +56,8 @@ const TRANSPORT = 'scripts/agent-efficiency/engine-client.ts';
 const NOT_MEMBERS: Readonly<Record<string, string>> = {
   'scripts/agent-efficiency/measure.ts':
     'drives the engine through EngineClient but writes no KNOWLEDGE row. Its prompts in '
-    + 'scenarios.ts do persist things — the promote-attempt scenario orders capture_process '
+    + 'scripts/agent-efficiency/scenarios.ts do persist things — the promote-attempt scenario '
+    + 'orders capture_process '
     + 'and promote_process — but a process/pipeline is not a knowledge_entries row and never '
     + 'enters this dedup candidate set. (An earlier version of this reason claimed every '
     + 'prompt is a question, which is false; the exclusion was right for the wrong reason.)',
@@ -75,16 +76,19 @@ export function badExclusions(
   found: readonly string[],
 ): string[] {
   return Object.entries(notMembers)
-    // A reason must be substantive AND name something checkable — a file the next reader can
-    // open. Length alone measured nothing (the test's own `'a'.repeat(41)` filler passed it);
-    // a filename alone lets `"x.ts"` through. The first fix REPLACED the length floor instead
-    // of adding to it, which is the overshoot `memory/fb_review_overshoot.md` warns about:
-    // adopting a finding is not licence to run the other way. Both, and a wide extension set
-    // so a reason citing a `.yml` or `.tsx` is not called reasonless.
+    // A reason must be substantive AND cite a PATH the next reader can open. Three rules
+    // were tried and the first two measured nothing: length alone let the test's own
+    // `'a'.repeat(41)` filler through, and a bare filename let `"x.ts"` through — and worse,
+    // any prose mentioning `node.js` satisfied it. Requiring a directory separator is what
+    // distinguishes a citation from a word that happens to contain a dot.
+    //
+    // Both halves are AND. The first fix REPLACED the length floor instead of adding to it,
+    // which is the overshoot `memory/fb_review_overshoot.md` warns about: adopting a finding
+    // is not licence to run the other way.
     .filter(([rel, why]) =>
       !found.includes(rel)
       || why.trim().length <= 40
-      || !/[\w-]+\.(ts|tsx|mts|cts|mjs|cjs|js|json|md|ya?ml|sh)\b/.test(why))
+      || !/[\w-]+\/[\w-]*[\w-]\.(ts|tsx|mts|cts|mjs|cjs|js|json|md|ya?ml|sh)\b/.test(why))
     .map(([rel]) => rel)
     .sort();
 }
@@ -163,7 +167,7 @@ describe('probe fact freshness — every engine-facing probe is a member', () =>
     // assertion. Without this the rule above passes for an empty rule set as readily as for
     // a correct one.
     const real = 'scripts/x.ts';
-    const reason = 'not a member: scenarios.ts sends no knowledge row';
+    const reason = 'not a member: scripts/agent-efficiency/scenarios.ts sends no knowledge row';
     expect(badExclusions({ [real]: reason }, [real])).toEqual([]);
     expect(badExclusions({ 'scripts/gone.ts': reason }, [real])).toEqual(['scripts/gone.ts']);
     // Filler of any length is not a reason — it names no file anyone can open.
@@ -171,8 +175,11 @@ describe('probe fact freshness — every engine-facing probe is a member', () =>
     expect(badExclusions({ [real]: 'because' }, [real])).toEqual([real]);
     // Short-but-cites and long-but-vague are both rejected — the two halves are AND, not OR.
     expect(badExclusions({ [real]: 'see x.ts' }, [real])).toEqual([real]);
-    // A reason citing a non-TypeScript file is still a reason.
-    expect(badExclusions({ [real]: 'excluded because the deploy path lives in release.yml only' }, [real])).toEqual([]);
+    // Prose that merely contains a dotted word is not a citation — `node.js` passed the
+    // bare-filename rule and named nothing anyone can open.
+    expect(badExclusions({ [real]: 'this runs under node.js and therefore never persists a row' }, [real])).toEqual([real]);
+    // A reason citing a non-TypeScript file by PATH is still a reason.
+    expect(badExclusions({ [real]: 'excluded because the deploy path lives in .github/workflows/release.yml only' }, [real])).toEqual([]);
   });
 
   it('FIRES on a file that only mentions the module in a comment', () => {
