@@ -226,7 +226,7 @@ export function evaluate({ body, head, files, author }) {
 
   const f = rec.fields;
 
-  // The load-bearing check. Everything else here is an attestation; this one is
+  // The load-bearing check. Nearly everything else here is an attestation; this one is
   // a fact CI can establish on its own, and it is the failure that actually
   // recurs — gates run, then more commits land.
   // Compared case-insensitively: a SHA pasted from a tool that upper-cases it is
@@ -360,7 +360,7 @@ export function evaluate({ body, head, files, author }) {
   // flags, never advice, and its counsel-half is explicitly not self-authorable — so the
   // wording needs a human yes on the record before it reaches a customer.
   //
-  // An attestation, like every line here except `head:`. It cannot prove the sign-off
+  // An attestation, like most lines here. It cannot prove the sign-off
   // happened; it makes FORGETTING impossible — the failure that actually recurs — and
   // turns the alternative into a deliberate lie rather than an oversight.
   if (required.has('legal')) {
