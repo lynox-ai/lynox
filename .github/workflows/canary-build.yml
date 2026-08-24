@@ -20,6 +20,12 @@ on:
     branches:
       - 'feat/**'
       - 'fix/**'
+      # `harden/**` is one of the eight prefixes CLAUDE.md names, and it is the
+      # one most likely to need a staging walk — a hardening change is usually a
+      # change to what a user is SHOWN, which no unit test can render. It was
+      # missing here, so such a branch could only be walked via a manual
+      # dispatch: the tooling covered three of the documented prefixes.
+      - 'harden/**'
       - 'canary/**'
     paths-ignore: ['docs/**']
   workflow_dispatch:
