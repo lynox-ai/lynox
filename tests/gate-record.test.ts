@@ -26,6 +26,7 @@ function record(over: Record<string, string> = {}): string {
     gates: 'code-review, delta',
     delta: 'clean',
     mutations: '12 killed, 0 survived',
+    closes: 'none',
     ...over,
   };
   const body = Object.entries(f)
@@ -340,5 +341,57 @@ describe('gate-record — the block is found where it is written', () => {
 
   it('returns null rather than throwing on an empty body', () => {
     expect(extractRecord('')).toBeNull();
+  });
+});
+
+describe('gate-record — `closes:`, required with `none` allowed', () => {
+  it('⭐ refuses a record that omits it, so absence cannot mean two things', () => {
+    // The whole design in one test. An OPTIONAL field is missing both when a PR
+    // closes nothing and when its author was in a hurry — and a query over a
+    // field like that cannot tell those apart, which is exactly why the detector
+    // built on `git log --grep "<DEF-id>"` measured recall 0/2.
+    const v = evaluate({ body: record({ closes: '' }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('`closes:` is missing');
+  });
+
+  it('accepts `none` — declining is an answer, not a silence', () => {
+    expect(evaluate({ body: record({ closes: 'none' }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('accepts one id and a list, in either separator this register uses', () => {
+    for (const value of ['DEF-merge-consent-inherited-mode',
+                         'DEF-a-row, DEF-b-row',
+                         'DEF-a-row · DEF-b-row']) {
+      const v = evaluate({ body: record({ closes: value }), head: HEAD, files: CODE });
+      expect(v.ok, `rejected ${value}`).toBe(true);
+    }
+  });
+
+  it('refuses something that is not a register id', () => {
+    // Including the two near-misses a person actually types: a PR number, and
+    // prose that reads like an answer.
+    for (const value of ['#1262', 'nothing', 'DEF_underscore', 'def-lowercase-prefix']) {
+      const v = evaluate({ body: record({ closes: value }), head: HEAD, files: CODE });
+      expect(v.ok, `accepted ${value}`).toBe(false);
+    }
+  });
+
+  it('does not demand it where no record is demanded at all', () => {
+    // The two standing exemptions must keep working: a docs-only diff and a bot.
+    // Without this, every dependabot PR goes permanently red and the field's
+    // first effect is to break the auto-merge path.
+    expect(evaluate({ body: '', head: HEAD, files: ['docs/getting-started.md'] }).ok).toBe(true);
+    expect(evaluate({ body: '', head: HEAD, files: CODE, author: 'dependabot[bot]' }).ok).toBe(true);
+  });
+
+  it('⭐ reports the missing field ALONGSIDE other problems, not instead of them', () => {
+    // A check that returns on the first error teaches people to fix one thing
+    // per CI round. The record here is wrong in two independent ways and both
+    // must be named in one run.
+    const v = evaluate({ body: record({ closes: '', gates: 'code-review' }), head: HEAD, files: CODE });
+    const joined = v.errors?.join(' ') ?? '';
+    expect(joined).toContain('`closes:` is missing');
+    expect(joined).toContain('requires the `delta` gate');
   });
 });

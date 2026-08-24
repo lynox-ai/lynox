@@ -223,6 +223,46 @@ export function evaluate({ body, head, files, author }) {
     if (!claimed.has(g)) errors.push(`this diff requires the \`${g}\` gate; the record does not list it`);
   }
 
+  // ── closes: which register rows this PR settles ─────────────────────────────
+  //
+  // MANDATORY, with `none` as a valid answer. That combination is the whole
+  // point and it is not pedantry: an OPTIONAL field is absent both when a PR
+  // closes nothing and when its author was in a hurry, so absence says nothing
+  // and a query over it cannot be trusted. Required-with-`none` turns "this
+  // closes no row" into a statement someone made, and costs that author four
+  // characters.
+  //
+  // Measured reason it exists: on 2026-08-24 two register rows still read
+  // `open` four days after their fix merged, and the week's cut ranked finished
+  // work above unfinished. The detector our own notes recommend for that —
+  // `git log --grep "<DEF-id>"` — was measured at recall 0/2, because neither
+  // fix commit named its row. Nothing required it to. This is that requirement;
+  // the query is exact once the datum exists.
+  //
+  // SHAPE only, never existence. The register lives in the pro repo, so a core
+  // PR cannot check an id against it, and a check that passes in one repo and
+  // fails in the other would teach people to leave the field out. Validating
+  // the shape is what this job can honestly do; `deferred-id-guard` owns
+  // whether an id is real.
+  const closes = f.closes;
+  if (closes === undefined) {
+    errors.push(
+      '`closes:` is missing — name the register rows this PR settles, or `closes: none`. ' +
+      'It is required WITH `none` allowed on purpose: an optional field is absent both when ' +
+      'nothing is closed and when someone forgot, and then nobody can tell those apart.',
+    );
+  } else if (closes !== 'none') {
+    const ids = closes.split(/[,·]/).map((s) => s.trim()).filter(Boolean);
+    if (ids.length === 0) {
+      errors.push('`closes:` is empty — write `closes: none` if this PR settles no register row');
+    }
+    for (const id of ids) {
+      if (!/^DEF-[a-z0-9-]+$/.test(id)) {
+        errors.push(`\`closes: ${id}\` is not a register id — use \`DEF-<slug>\`, a comma-separated list, or \`none\``);
+      }
+    }
+  }
+
   // A delta round that did not come back clean is a reason not to merge, so
   // there is exactly one accepted value.
   // `delta` and `mutations` describe a CODE round, so they are demanded only when one

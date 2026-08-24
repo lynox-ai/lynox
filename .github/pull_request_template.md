@@ -49,7 +49,15 @@ head: <short SHA>
 gates: <which gates ran>
 delta: <clean?>
 mutations: <n> killed, <n> survived
+closes: <DEF-… ids this PR settles, or none>
 ```
+
+**`closes:` is required, and `none` is a valid answer.** That is deliberate: an
+optional field is missing both when a PR settles no register row and when its
+author was in a hurry, so nobody can tell those apart afterwards — which is how
+two rows sat at `open` for four days after their fix merged, and how a query for
+"which merged PR closed this row" comes back empty. Writing `none` costs four
+characters and makes the silence a statement.
 
 ## Notes
 
