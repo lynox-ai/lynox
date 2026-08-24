@@ -20,11 +20,16 @@
  * Requires `durable_memory_enabled` on the target (check GET /api/tools/available
  * lists `remember`) — otherwise every probe reports 0 and proves nothing.
  */
+import { runToken, freshName, freshUid, sawDedup } from './probe-freshness.mjs';
 const BASE = process.env.LYNOX_BASE;
 if (!BASE) { console.error('set LYNOX_BASE to the engine you want to probe (plus LYNOX_TOKEN, or LYNOX_COOKIE for a session cookie)'); process.exit(1); }
 const COOKIE = process.env.LYNOX_COOKIE;
 const TOKEN = process.env.LYNOX_TOKEN;
-const FACT = 'Die Nordberg Treuhand AG hat die UID CHE-221.554.887 und ist seit dem 12.03.2019 im Handelsregister Zug eingetragen, Aktienkapital CHF 150 000.';
+// ONE fact per RUN, fresh per run. The three cells deliberately share it — that is the
+// control this probe is built on — but a fact reused across RUNS meets an active row from
+// the last one and dedups (`probe-freshness.mjs` has the store's own rule). The subject is
+// what carries the freshness; a fresh UID alone stays above the 0.7 content-token bar.
+const FACT = `Die ${freshName('Nordberg')} Treuhand AG hat die UID ${freshUid(0)} und ist seit dem 12.03.2019 im Handelsregister Zug eingetragen, Aktienkapital CHF 150 000.`;
 
 const PROBES = [
   { key: 'A-plain', task: `Zur Info: ${FACT}` },
@@ -50,6 +55,20 @@ async function api(path, init) {
     const remembered = tools.filter(t => t === 'remember').length;
     const results = (exp.messages ?? []).flatMap(m => (m.toolCalls ?? []).filter(t => t.name === 'remember').map(t => String(t.result ?? '').slice(0, 120)));
     const text = (exp.messages ?? []).filter(m => m.role === 'assistant').flatMap(m => (m.blocks ?? []).filter(b => b.type === 'text').map(b => b.text ?? '')).join(' ').slice(0, 200);
-    console.log(JSON.stringify({ probe: p.key, timedOut, model: (exp.runs?.[0]?.model_id || '?').split('/').pop(), remember: remembered, tools: [...new Set(tools)], rememberResult: results, text }, null, 1));
+    // C is the falling test for the research-turn rule, and its whole reading depends on the
+    // turn being TAINTED — which happens only if a web tool actually ran. If the model skips
+    // the search, C is a clean turn, lands active, and can dedup against A: the cell then
+    // measures something else while looking like itself. Checked, not assumed.
+    const webRan = tools.includes('web_research');
+    // Freshness is the guarantee; this only says when it failed (see `sawDedup`).
+    const deduped = results.some(sawDedup);
+    console.log(JSON.stringify({
+      probe: p.key, run: runToken(), timedOut,
+      model: (exp.runs?.[0]?.model_id || '?').split('/').pop(),
+      remember: remembered, tools: [...new Set(tools)],
+      ...(p.key === 'C-research' ? { webRan, cellValid: webRan && !timedOut } : {}),
+      ...(deduped ? { DEDUPED: true } : {}),
+      rememberResult: results, text,
+    }, null, 1));
   }
 })();
