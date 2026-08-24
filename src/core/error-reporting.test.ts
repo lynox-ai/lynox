@@ -362,6 +362,79 @@ describe('error-reporting scrubbing', () => {
     expect(out).toEqual({ level: 'info' });
   });
 
+  it('masks the credential prefixes the first fixture happened to miss', async () => {
+    // The original fixture was `sk-ant-` + 40 A's, which the alnum rule catches.
+    // Real OpenAI project keys carry `-` and `_` INSIDE the token, so that rule
+    // stopped after four characters and the key shipped verbatim. The fixture
+    // was the reason it looked covered — measured 2026-08-24.
+    const { beforeSend } = await hooks();
+    const cases = [
+      'sk-proj-Ab1Cd2Ef3Gh4Ij5_Kl6Mn7-Op8Qr9St0Uv1Wx2Yz3',
+      'sk-svcacct-Ab1Cd2Ef3_Gh4Ij5-Kl6Mn7Op8Qr9St0',
+      'postgres://lynox:Hunter2Pw@db.internal:5432/lynox',
+      'https://admin:s3cretpw@ops.example.com/admin',
+      'a'.repeat(64),
+    ];
+    for (const secret of cases) {
+      const out = beforeSend(eventWith(`connect failed: ${secret}`));
+      expect(firstValue(out as Record<string, unknown>), `still leaks: ${secret}`).not.toContain(secret);
+    }
+  });
+
+  it('does not mask an ordinary URL or a stack frame path', async () => {
+    // The counter-direction. Turning the generic catcher on for this path buys
+    // the 64-hex case above; it must not cost every path and query in a trace.
+    const { beforeSend } = await hooks();
+    const msg = 'GET https://api.example.com/v1/users?id=3 failed at /app/dist/core/session.js:1237:14';
+    const out = beforeSend(eventWith(msg));
+    expect(firstValue(out as Record<string, unknown>)).toBe(msg);
+  });
+
+  it('drops request headers and cookies outright', async () => {
+    // The @sentry/node http integration is default-on and attaches these. A
+    // session cookie or a bearer in the error store is an account takeover for
+    // anyone who can read it, and a MASKED session cookie has no diagnostic
+    // value — so they go entirely rather than being scrubbed.
+    const { beforeSend } = await hooks();
+    const out = beforeSend({
+      request: {
+        headers: { cookie: 'lynox_session=abcdef', authorization: 'Bearer xyz', 'user-agent': 'curl' },
+        cookies: { lynox_session: 'abcdef' },
+        query_string: `key=sk-ant-${'F'.repeat(40)}`,
+        url: 'https://x/y',
+      },
+    });
+    const req = (out as { request: Record<string, unknown> }).request;
+    expect(req['headers'], 'headers carry cookie and authorization').toBeUndefined();
+    expect(req['cookies']).toBeUndefined();
+    expect(req['query_string'], 'the query string is masked, not dropped — it is diagnostic').not.toContain('F'.repeat(40));
+    expect(req['url'], 'the URL stays').toBe('https://x/y');
+  });
+
+  it('masks breadcrumb data, which the four named deletes never covered', async () => {
+    // The http integration writes the raw query string under `http.query`, a key
+    // the existing denylist does not name. Walking beats growing the list.
+    const { beforeBreadcrumb } = await hooks();
+    const key = `sk-ant-${'G'.repeat(40)}`;
+    const out = beforeBreadcrumb({ data: { 'http.query': `token=${key}`, nested: { deep: [`${key}`] } } });
+    expect(JSON.stringify(out), 'no credential anywhere in the breadcrumb').not.toContain(key);
+  });
+
+  it('masks extra, tags and contexts', async () => {
+    const { beforeSend } = await hooks();
+    const key = `sk-ant-${'H'.repeat(40)}`;
+    const out = beforeSend({ extra: { conf: { dsn: key } }, tags: { k: key }, contexts: { app: { note: key } } });
+    expect(JSON.stringify(out)).not.toContain(key);
+  });
+
+  it('survives a cyclic structure rather than hanging', async () => {
+    // Event payloads are attacker-influenced in SHAPE as well as content.
+    const { beforeSend } = await hooks();
+    const cyclic: Record<string, unknown> = { a: 1 };
+    cyclic['self'] = cyclic;
+    expect(() => beforeSend({ extra: cyclic })).not.toThrow();
+  });
+
   it('does NOT mask PII — the boundary, pinned so nobody infers otherwise', async () => {
     // Deliberate scope, not an oversight. A PII denylist over free text has an
     // unbounded form space while the set of `throw new Error(`…${…}`)` sites

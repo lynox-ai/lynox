@@ -20,10 +20,40 @@ import { maskSecretPatterns } from './secret-store.js';
  */
 function maskSecretText(text: string): string {
   try {
-    return maskSecretPatterns(text);
+    // `includeGeneric` on purpose: an error report is machine-read, not prose,
+    // so a long opaque token that turns out to be a hash costs a little
+    // diagnostic detail while one that turns out to be a credential costs the
+    // credential. Measured 2026-08-24 — without it a 64-hex instance secret
+    // passed through untouched.
+    return maskSecretPatterns(text, { includeGeneric: true });
   } catch {
     return '[redacted: masking failed]';
   }
+}
+
+/**
+ * Mask every string inside an arbitrary structure, in place where possible.
+ *
+ * Sentry events carry credential-shaped values in more places than the message:
+ * breadcrumb `data` (the http integration writes the raw query string there),
+ * `extra`, `tags`, `contexts`. Walking them is cheaper than enumerating which
+ * key names are safe — an allowlist of key names is the per-instance shape, and
+ * the set of keys grows with every integration.
+ *
+ * Depth-capped because event payloads are attacker-influenced in shape as well
+ * as content, and a cyclic or absurdly nested object must not turn the reporting
+ * path into a hang.
+ */
+function maskDeep(value: unknown, depth = 0): unknown {
+  if (depth > 6) return value;
+  if (typeof value === 'string') return maskSecretText(value);
+  if (Array.isArray(value)) return value.map((v) => maskDeep(v, depth + 1));
+  if (value !== null && typeof value === 'object') {
+    const out = value as Record<string, unknown>;
+    for (const [k, v] of Object.entries(out)) out[k] = maskDeep(v, depth + 1);
+    return out;
+  }
+  return value;
 }
 
 let _initialized = false;
@@ -89,13 +119,32 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
         if (typeof breadcrumb.message === 'string') {
           breadcrumb.message = maskSecretText(breadcrumb.message);
         }
+        // The four deletes above are a key-name denylist and the http
+        // integration does not use those names — it writes `http.query`. Walk
+        // whatever is left rather than growing the list.
+        if (breadcrumb.data !== undefined) {
+          breadcrumb.data = maskDeep(breadcrumb.data, 0) as typeof breadcrumb.data;
+        }
         return breadcrumb;
       },
 
       beforeSend(event) {
-        // Strip request bodies (may contain user prompts)
+        // Strip request bodies (may contain user prompts) AND the three fields
+        // that carry credentials outright. The @sentry/node http integration is
+        // on by default and attaches headers, cookies and the query string; the
+        // SDK's own source notes that gating them on `sendDefaultPii` is a
+        // future change, so today they ship regardless. `cookie` carries the
+        // live session token and `authorization` carries a bearer — either is
+        // enough to act as the user, so a read of the error store would be an
+        // account takeover. They go entirely rather than masked: a masked
+        // session cookie has no diagnostic value anyway.
         if (event.request) {
           delete event.request.data;
+          delete event.request.cookies;
+          delete event.request.headers;
+          if (typeof event.request.query_string === 'string') {
+            event.request.query_string = maskSecretText(event.request.query_string);
+          }
         }
 
         // Scrubbing here is a DENYLIST over named fields, and `captureException`
@@ -117,6 +166,17 @@ export async function initErrorReporting(dsn?: string | undefined): Promise<bool
         for (const value of event.exception?.values ?? []) {
           if (typeof value.value === 'string') value.value = maskSecretText(value.value);
         }
+        // The structured carriers. `breadcrumbs[].data` is where the http
+        // integration puts the raw query string, and `extra`/`tags`/`contexts`
+        // are free-form by design.
+        for (const crumb of event.breadcrumbs ?? []) {
+          if (crumb.data !== undefined) crumb.data = maskDeep(crumb.data, 0) as typeof crumb.data;
+          if (typeof crumb.message === 'string') crumb.message = maskSecretText(crumb.message);
+        }
+        if (event.extra !== undefined) event.extra = maskDeep(event.extra, 0) as typeof event.extra;
+        if (event.tags !== undefined) event.tags = maskDeep(event.tags, 0) as typeof event.tags;
+        if (event.contexts !== undefined) event.contexts = maskDeep(event.contexts, 0) as typeof event.contexts;
+
         if (typeof event.message === 'string') {
           event.message = maskSecretText(event.message);
         } else if (event.message !== undefined) {
