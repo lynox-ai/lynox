@@ -229,6 +229,11 @@ vi.mock('../core/engine.js', () => ({
       delete: vi.fn().mockReturnValue(false),
     });
     this.getGoogleAuth = vi.fn().mockReturnValue(mockGoogleAuth);
+    // The pair resolver is the truth for "is Google configured": the secret NAMES
+    // can both be present while no single source holds a pair (env id + vault
+    // secret), and the engine then builds nothing. Routes read the resolved source.
+    this.getGoogleClientSource = vi.fn().mockReturnValue('env');
+    this.isGoogleManagedBroker = vi.fn().mockReturnValue(false);
     this.reloadGoogle = vi.fn().mockResolvedValue(true);
     this.reloadUserConfig = mockReloadUserConfig;
     this.reloadCredentials = mockReloadCredentials;
@@ -5574,6 +5579,24 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('secrets/status', () => {
+    it('configured.google is FALSE when no source holds a complete pair', async () => {
+      // The expression changed from `names.has(ID) || names.has(SECRET)` to the
+      // resolved source, and shipped with no coverage. The `||` reported configured
+      // on a half-filled vault while the engine built nothing; `&&` would have lied
+      // in the other direction, since env-id + vault-secret puts BOTH names in the
+      // store while no single source holds a pair.
+      const engineRef = (api as unknown as { engine: { getGoogleClientSource: ReturnType<typeof vi.fn> } }).engine;
+      const orig = engineRef.getGoogleClientSource;
+      engineRef.getGoogleClientSource = vi.fn().mockReturnValue(null);
+      try {
+        const res = await jsonFetch('/api/secrets/status');
+        const body = await res.json() as { configured: { google: boolean } };
+        expect(body.configured.google).toBe(false);
+      } finally {
+        engineRef.getGoogleClientSource = orig;
+      }
+    });
+
     it('GET /api/secrets/status returns category booleans', async () => {
       mockSecretListNames.mockReturnValue(['ANTHROPIC_API_KEY']);
       // Post-fix the handler uses resolveProviderApiKey() which consults

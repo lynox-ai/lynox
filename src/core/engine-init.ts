@@ -424,10 +424,11 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
         process.stderr.write('[lynox] ANTHROPIC_API_KEY env var overrides vault value\n');
       }
 
-      const vaultGoogleSecret = vault.get('GOOGLE_CLIENT_SECRET');
-      if (vaultGoogleSecret && !process.env['GOOGLE_CLIENT_SECRET']) {
-        userConfig.google_client_secret = vaultGoogleSecret;
-      }
+      // The vault→userConfig copy for GOOGLE_CLIENT_SECRET was removed with the pair
+      // resolver: it put a vault secret next to an env id in userConfig and produced
+      // a 'config' tier holding a pair neither source ever had. The resolver reads the
+      // vault directly, and the migration below now carries the ID too, so the vault
+      // holds a COMPLETE pair rather than half of one.
 
       // Tavily backend removed 2026-05-24 — `SEARCH_API_KEY` / `TAVILY_API_KEY`
       // vault entries left behind by older installs are ignored on read. They
@@ -508,7 +509,9 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
     envVar: string;
   }> = [
     { vaultName: 'ANTHROPIC_API_KEY', configField: 'api_key', envVar: 'ANTHROPIC_API_KEY' },
-    { vaultName: 'GOOGLE_CLIENT_SECRET', configField: 'google_client_secret', envVar: 'GOOGLE_CLIENT_SECRET' },
+    // The Google pair is NOT in this list — see the paired migration below. The loop
+    // is per-field and this value is a pair, and mixing those two shapes is exactly
+    // the defect google-client-pair.ts exists to prevent.
     // SEARCH_API_KEY / TAVILY_API_KEY migration entry removed 2026-05-24
     // when the Tavily backend was retired.
   ];
@@ -522,6 +525,43 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
     if (process.env[m.envVar]) continue; // Don't store env-sourced keys
     vault.set(m.vaultName, value, 'any');
     fieldsToRemove.push(m.configField);
+  }
+
+  // ── The Google client pair migrates atomically or not at all ────────────────
+  //
+  // The loop above decides per FIELD: it skips a name the vault already holds and
+  // migrates the rest. For a pair that is wrong in a way that destroys data. With
+  // an old secret in the vault and the operator's current pair in config.json, the
+  // secret entry is skipped, the id is moved in beside the OLD secret, and the id
+  // is then deleted from config.json — leaving a vault pair assembled from two
+  // eras (PROJECT-B id with PROJECT-A secret, i.e. invalid_client) and no way back,
+  // because the correct id is gone from disk.
+  //
+  // So: migrate both only when the vault holds NEITHER and config.json holds BOTH.
+  // In every other shape, migrate neither and delete neither — a half-migrated pair
+  // is worse than an unmigrated one, and config.json is the only remaining copy.
+  const gId = userConfig.google_client_id;
+  const gSecret = userConfig.google_client_secret;
+  const vaultHasNeither = !vault.has('GOOGLE_CLIENT_ID') && !vault.has('GOOGLE_CLIENT_SECRET');
+  const configHasBoth = typeof gId === 'string' && !!gId && typeof gSecret === 'string' && !!gSecret;
+  const envHasNeither = !process.env['GOOGLE_CLIENT_ID'] && !process.env['GOOGLE_CLIENT_SECRET'];
+  if (vaultHasNeither && configHasBoth && envHasNeither) {
+    // Two writes, and a half-completed pair is the thing to avoid: a lone vault
+    // half is inert today (the resolver needs both), but a later half stored
+    // through the UI would complete it ACROSS ERAS — the exact two-era pair this
+    // change exists to prevent. If the second write throws, undo the first and
+    // leave config.json untouched, so the operator's pair stays in one piece.
+    // A hard kill between the two is not reachable from here and is carried as
+    // DEF-vault-pair-write-not-atomic.
+    try {
+      vault.set('GOOGLE_CLIENT_ID', gId, 'any');
+      vault.set('GOOGLE_CLIENT_SECRET', gSecret, 'any');
+      fieldsToRemove.push('google_client_id', 'google_client_secret');
+    } catch (err) {
+      try { vault.delete('GOOGLE_CLIENT_ID'); } catch { /* nothing to undo */ }
+      try { vault.delete('GOOGLE_CLIENT_SECRET'); } catch { /* nothing to undo */ }
+      throw err;
+    }
   }
 
   if (fieldsToRemove.length === 0) return;

@@ -111,6 +111,7 @@ import { escalateToUser as runEscalation, type EscalateOpts } from './escalation
 import { WorkerLoop } from './worker-loop.js';
 import { Session } from './session.js';
 import type { SessionOptions } from './session.js';
+import { resolveClientPair, isManagedBrokerPair, type ClientPairSource } from './google-client-pair.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -243,6 +244,18 @@ export class Engine {
   private _hooks: LynoxHooks[] = [];
   private _toolContext: ToolContext;
   private _googleAuth: import('../integrations/google/google-auth.js').GoogleAuth | null = null;
+  /** Which source supplied the Google client pair — the UI routes the card on it. */
+  private _googleClientSource: ClientPairSource | null = null;
+
+  /** Which source supplied the Google client pair, for `GET /api/google/status`. */
+  getGoogleClientSource(): ClientPairSource | null {
+    return this._googleClientSource;
+  }
+
+  /** True when the resolved pair is lynox's shared broker client, not the tenant's own. */
+  isGoogleManagedBroker(): boolean {
+    return isManagedBrokerPair(this._googleClientSource);
+  }
   private _mailContext: import('../integrations/mail/context.js').MailContext | null = null;
   private _scheduledSendPoller: import('../integrations/mail/mail-scheduled-poller.js').ScheduledSendPoller | null = null;
   private _inboxRuntime: import('../integrations/inbox/bootstrap.js').InboxRuntime | null = null;
@@ -1530,13 +1543,17 @@ export class Engine {
     }
 
     // Google Workspace tools (conditional — requires client ID + secret)
-    const googleClientId = this.secretStore?.resolve('GOOGLE_CLIENT_ID')
-      ?? process.env['GOOGLE_CLIENT_ID']
-      ?? this.userConfig.google_client_id;
-    const googleClientSecret = this.secretStore?.resolve('GOOGLE_CLIENT_SECRET')
-      ?? process.env['GOOGLE_CLIENT_SECRET']
-      ?? this.userConfig.google_client_secret;
-    if (googleClientId && googleClientSecret) {
+    // Resolved as a PAIR, from ONE source — see google-client-pair.ts for why
+    // resolving the halves independently produced a mixed credential.
+    const googlePair = resolveClientPair('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', {
+      vault: this.secretVault,
+      env: process.env,
+      userConfig: this.userConfig,
+    });
+    this._googleClientSource = googlePair?.source ?? null;
+    if (googlePair) {
+      const googleClientId = googlePair.clientId;
+      const googleClientSecret = googlePair.clientSecret;
       try {
         const { createGoogleTools } = await import('../integrations/google/index.js');
         const { tools: googleTools, auth: googleAuth } = createGoogleTools({
@@ -2099,12 +2116,14 @@ export class Engine {
 
   /** Re-initialize Google Workspace integration after credentials change. */
   async reloadGoogle(): Promise<boolean> {
-    const clientId = this.secretStore?.resolve('GOOGLE_CLIENT_ID')
-      ?? process.env['GOOGLE_CLIENT_ID']
-      ?? this.userConfig.google_client_id;
-    const clientSecret = this.secretStore?.resolve('GOOGLE_CLIENT_SECRET')
-      ?? process.env['GOOGLE_CLIENT_SECRET']
-      ?? this.userConfig.google_client_secret;
+    const pair = resolveClientPair('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', {
+      vault: this.secretVault,
+      env: process.env,
+      userConfig: this.userConfig,
+    });
+    this._googleClientSource = pair?.source ?? null;
+    const clientId = pair?.clientId;
+    const clientSecret = pair?.clientSecret;
     if (!clientId || !clientSecret) {
       this._googleAuth = null;
       return false;

@@ -4461,7 +4461,10 @@ export class LynoxHTTPApi {
           // best-effort, not configured.
           search: !!searxngUrl,
           searxng: !!searxngUrl,
-          google: names.has('GOOGLE_CLIENT_ID') || names.has('GOOGLE_CLIENT_SECRET'),
+          // A PAIR or nothing. The `||` this replaces reported configured on a
+          // half-filled vault, while the resolver builds nothing from half a pair —
+          // the status surface said yes and the feature was absent.
+          google: engine.getGoogleClientSource() !== null,
           bugsink: names.has('LYNOX_BUGSINK_DSN'),
         },
         count: names.size,
@@ -6453,6 +6456,13 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, {
         available: true,
         authenticated: google.isAuthenticated(),
+        // Which source supplied the client pair, and whether that pair is lynox's
+        // shared broker rather than the tenant's own. Added FOR the card to route on
+        // — it does not yet: GoogleStatus does not declare these and GoogleSettings
+        // still branches on isManaged(). Saying "the card routes on these" would be
+        // the third false wiring claim in this change alone.
+        client_source: engine.getGoogleClientSource(),
+        managed_broker: engine.isGoogleManagedBroker(),
         ...google.getAccountInfo(),
       });
     });
