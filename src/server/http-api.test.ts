@@ -1714,7 +1714,7 @@ describe('LynoxHTTPApi', () => {
     // live on the Session, and the case that needs reclaiming most is the one
     // where the Session is already gone — a thread deleted while its run was
     // parked. Behind the guard, the backstop would be unreachable exactly there.
-    it('POST /abort reclaims the slot even when the Session is already gone', async () => {
+    it('POST /abort reclaims a parked run even when the Session is already gone', async () => {
       await withParkedRun('abort-parked-2', async ({ prompts, slots }) => {
         mockSessionGet.mockReturnValueOnce(undefined);
         const abortRes = await jsonFetch('/api/sessions/abort-parked-2/abort', { method: 'POST' });
@@ -1780,6 +1780,14 @@ describe('LynoxHTTPApi', () => {
         expect(abortRes.status).toBe(200);
 
         await expectSlotReclaimed(slots, 'abort-parked-5');
+
+        // And the cost of that ordering, pinned so it cannot change silently:
+        // the expire never ran, so the row stays `pending` until its 24 h TTL and
+        // the next insertAskUser on this session hits the unique index. That is
+        // strictly better than a wedged slot — the thread stays usable for chat —
+        // but it is a trade, not a free win, and the other four tests assert the
+        // opposite (`getPending` undefined) precisely because they can.
+        expect(prompts.getPending('abort-parked-5')).toBeDefined();
       });
     });
     // Companion test: verify the slot remembers stream death so a later

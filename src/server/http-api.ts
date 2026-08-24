@@ -708,7 +708,17 @@ export class LynoxHTTPApi {
    * reservation) lives on, and that is precisely when reclaiming matters.
    *
    * Best-effort by design, mirroring RunExecutor.abort: a teardown must not turn
-   * into a 500 for the caller who asked for it.
+   * into a 500 for the caller who asked for it. Two consequences that are real
+   * and are NOT closed here:
+   *   - `takeover` ends with `session.abort()`, and `Session.abort` still calls
+   *     the PROCESS-WIDE `abortSpawnedAgents()`/`abortPipelineAgents()`
+   *     (`spawn.ts`, `runtime-adapter.ts` keep module-level Sets). So this also
+   *     aborts sub-agents belonging to OTHER threads. That is pre-existing — the
+   *     stop button has always done it — but every caller added here inherits it.
+   *   - if the swallowed throw came from `expirePrompt`, the run is unwound but
+   *     the prompt row stays `pending` until its 24 h TTL, and the next
+   *     `insertAskUser` on this session hits the unique index. Strictly better
+   *     than a wedged slot, not free.
    */
   private reclaimRunSlot(sessionId: string): void {
     try {
@@ -2842,7 +2852,7 @@ export class LynoxHTTPApi {
         // Reserve a concurrency slot + register the abort handle so the run can
         // be aborted by id from any connection (DELETE /api/runs/:runId) —
         // including a headless run whose original SSE is already gone. `takeover`
-        // is the same expire-prompt + abort path the stale-run reclaim uses (for
+        // is the same abort-then-expire path the stale-run reclaim uses (for
         // a headless run `aborted` is already true, so no terminal is owed).
         // INSIDE the try so a throw from runRegistry.start (SQLite busy/disk-full)
         // still hits the finally's release() — otherwise the slot would leak and
@@ -3482,8 +3492,12 @@ export class LynoxHTTPApi {
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
       // Also clean up in-memory session. Reclaim first: this route drops the
       // Session outright, so a run still holding the slot (parked on a prompt,
-      // which abort() does not reach) would be stranded with no route left to
-      // free it — and five stranded reservations 429 every other thread.
+      // which abort() does not reach) would keep both the slot and its
+      // run-executor reservation with no route the UI offers to free them.
+      // `DELETE /api/runs/:runId` still reaches it by runId — that is the escape
+      // hatch, not a path any client walks. sessionId IS the threadId here
+      // (POST /api/sessions returns `threadId: sessionId`), so this can only
+      // ever reclaim this thread's own run.
       this.reclaimRunSlot(params['id']!);
       this.sessionStore.reset(params['id']!);
       threadStore.deleteThread(params['id']!);
