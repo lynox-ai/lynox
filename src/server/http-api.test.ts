@@ -8341,12 +8341,30 @@ describe('mail custom-server defaults are the same on both routes', () => {
       // conversation's queue. The filter branch is the whole point — without a
       // test a mutation on it survives silently and every thread re-hydrates
       // every other thread's pending wording into its chips.
-      function fakeQueueStore(): { pendingCount: ReturnType<typeof vi.fn>; listPending: ReturnType<typeof vi.fn>; listPendingForThread: ReturnType<typeof vi.fn> } {
+      function fakeQueueStore(): {
+        pendingCount: ReturnType<typeof vi.fn>;
+        listPending: ReturnType<typeof vi.fn>;
+        listPendingForThread: ReturnType<typeof vi.fn>;
+        withHintTargets: ReturnType<typeof vi.fn>;
+      } {
         return {
+          // DEF-review-approve-target-opaque: the real store resolves each hint here.
+          // Stamped rather than re-implemented — the CORRECTNESS of the resolution is
+          // pinned against the real `reviewEntry` in knowledge-store.test.ts; what this
+          // double is for is whether the ROUTE can serve the queue without going
+          // through the mapper at all.
+          withHintTargets: vi.fn().mockImplementation((entries: Array<Record<string, unknown>>) =>
+            entries.map(e => ({ ...e, subjectTarget: e['subjectHint'] === null || e['subjectHint'] === undefined
+              ? null
+              : { resolution: 'existing', id: 'sub_1', name: String(e['subjectHint']), kind: 'organization' } }))),
           pendingCount: vi.fn().mockReturnValue(2),
           listPending: vi.fn().mockReturnValue([
             { id: 'ke_a', subjectHint: 'SVA', text: 'fact of thread one', sourceThreadId: 't-1' },
             { id: 'ke_b', subjectHint: 'X', text: 'fact of thread two', sourceThreadId: 't-2' },
+            // A hintless entry: the wire must carry an explicit `null`, because "binds
+            // nothing" and "this engine computes no targets" must not look alike to a UI
+            // that renders them differently.
+            { id: 'ke_c', subjectHint: null, text: 'a fact about nobody', sourceThreadId: 't-1' },
           ]),
           // Mirrors the real store: an EMPTY thread id is a question about no
           // thread — trim-guard answers [] (see listPendingForThread).
@@ -8375,7 +8393,41 @@ describe('mail custom-server defaults are the same on both routes', () => {
         await swapEngineQ({ getKnowledgeStore: () => store }, async () => {
           const res = await jsonFetch('/api/knowledge/queue');
           const body = await res.json() as { entries: Array<{ id: string }> };
-          expect(body.entries).toHaveLength(2);
+          expect(body.entries).toHaveLength(3);
+        });
+      });
+
+      /**
+       * DEF-review-approve-target-opaque. `reviewEntry` resolves a pending entry's hint
+       * AFTER the human decides, so the approve surface used to show a NAME and hide the
+       * subject it binds to — including the case where approving MINTS a new one. The
+       * predicate is served-shape, not store-shape: drop `withHintTargets` from the route
+       * and the resolution still happens on approval, invisibly. This is the test that
+       * fails then.
+       */
+      it('every served entry carries the subject its hint would bind to on approval', async () => {
+        const store = fakeQueueStore();
+        await swapEngineQ({ getKnowledgeStore: () => store }, async () => {
+          const res = await jsonFetch('/api/knowledge/queue');
+          const body = await res.json() as { entries: Array<{ id: string; subjectTarget?: unknown }> };
+          expect(store.withHintTargets).toHaveBeenCalledTimes(1);
+          expect(body.entries.map(e => e.subjectTarget)).toEqual([
+            { resolution: 'existing', id: 'sub_1', name: 'SVA', kind: 'organization' },
+            { resolution: 'existing', id: 'sub_1', name: 'X', kind: 'organization' },
+            null,
+          ]);
+        });
+      });
+
+      it('the thread-scoped read is served through the same mapper', async () => {
+        const store = fakeQueueStore();
+        await swapEngineQ({ getKnowledgeStore: () => store }, async () => {
+          const res = await jsonFetch('/api/knowledge/queue?threadId=t-1');
+          const body = await res.json() as { entries: Array<{ id: string; subjectTarget?: unknown }> };
+          // Ids AND length, not `entries[0]`: a mapper handed the UNFILTERED list would
+          // still put the right target first, and the assertion would not notice.
+          expect(body.entries.map(e => e.id)).toEqual(['ke_a']);
+          expect(body.entries[0]?.subjectTarget).toEqual({ resolution: 'existing', id: 'sub_1', name: 'SVA', kind: 'organization' });
         });
       });
 

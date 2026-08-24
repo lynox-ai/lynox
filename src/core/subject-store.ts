@@ -554,37 +554,60 @@ export class SubjectStore {
     status?: string | undefined;
     embedding?: Buffer | undefined;
   }): SubjectResolution {
-    const owner = params.ownerUserId ?? DEFAULT_OWNER;
-    if (NAME_DEDUP_KINDS.has(params.kind)) {
-      // Exact canonical/alias hit first; then a normalized fallback so a punctuated /
-      // doubled-whitespace variant converges onto an already-stored CLEAN name (e.g.
-      // "Meridian AG." finds a prior "Meridian AG"). One-directional: it matches the
-      // normalized query against stored raw names, so the clean form must have been
-      // stored first — full symmetry would need a stored normalized-name column.
-      const normalized = normalizeSubjectName(params.kind, params.name);
-      const canonical = this.findCanonical(params.name, params.kind, owner);
-      const aliasHit = canonical ? null : this.findByAliasResolved(params.name, params.kind, owner);
-      // AMBIGUOUS → hand the question back, and stop looking. Two subjects already carry
-      // this name, so there is no right answer to fold into, and every step below is a
-      // wider matcher than the one that just declined. This store does NOT invent an
-      // identity here: it once returned whichever row SQLite yielded first (a silent
-      // wrong bind), and a later attempt collected such mentions on a row named after the
-      // name itself — which then won `findCanonical` and could only ever be un-done by a
-      // BULK repoint that reassigns every collected fact to ONE of the candidates,
-      // reproducing the original defect later and in bulk. Both invented an answer to a
-      // question the store cannot answer. The caller gets the candidates instead.
-      if (aliasHit?.ambiguous) return { ambiguous: true, candidateIds: aliasHit.ids };
-      const existing = canonical
-        ?? aliasHit?.row
-        ?? (normalized !== params.name ? this.findCanonical(normalized, params.kind, owner) : null);
-      if (existing) {
-        // Fold the caller's surface forms into the existing subject's aliases
-        // (case-insensitive — case-variants of an existing alias are no-ops).
-        this._mergeAliases(existing, [params.name, ...(params.aliases ?? [])]);
-        return { ambiguous: false, id: existing.id, created: false };
-      }
+    const found = this.resolveForCreate(params);
+    if (found.ambiguous) return { ambiguous: true, candidateIds: found.candidateIds };
+    if (found.row) {
+      // Fold the caller's surface forms into the existing subject's aliases
+      // (case-insensitive — case-variants of an existing alias are no-ops).
+      this._mergeAliases(found.row, [params.name, ...(params.aliases ?? [])]);
+      return { ambiguous: false, id: found.row.id, created: false };
     }
     return { ambiguous: false, id: this.createSubject(params), created: true };
+  }
+
+  /**
+   * The READ half of {@link findOrCreate}: WHICH existing subject a create-call would
+   * fold into, or `null` when it would insert. Side-effect free — no alias merge, no
+   * insert.
+   *
+   * Extracted so a caller that needs to know the OUTCOME without causing it resolves
+   * through the same code instead of a second, slightly-different copy of the rule. That
+   * second copy is not hypothetical: the review queue's approve preview first reproduced
+   * the lookup with `findByNameAnyKind`, which has no normalized fallback, so a hint of
+   * `"Meridian AG."` previewed as "will be created" while the approval quietly folded it
+   * into the existing `Meridian AG`. The preview was a wrong promise on a consent
+   * surface, and nothing could catch it while the rule lived in two places.
+   *
+   * Non-deduped kinds (`engagement`, `other`) resolve to `null` — a create-call there
+   * always inserts, which is the correct answer to "what would this fold into".
+   */
+  resolveForCreate(params: { kind: SubjectKind; name: string; ownerUserId?: string | undefined }):
+    | { ambiguous: false; row: SubjectRow | null }
+    | { ambiguous: true; candidateIds: readonly string[] } {
+    const owner = params.ownerUserId ?? DEFAULT_OWNER;
+    if (!NAME_DEDUP_KINDS.has(params.kind)) return { ambiguous: false, row: null };
+    // Exact canonical/alias hit first; then a normalized fallback so a punctuated /
+    // doubled-whitespace variant converges onto an already-stored CLEAN name (e.g.
+    // "Meridian AG." finds a prior "Meridian AG"). One-directional: it matches the
+    // normalized query against stored raw names, so the clean form must have been
+    // stored first — full symmetry would need a stored normalized-name column.
+    const normalized = normalizeSubjectName(params.kind, params.name);
+    const canonical = this.findCanonical(params.name, params.kind, owner);
+    const aliasHit = canonical ? null : this.findByAliasResolved(params.name, params.kind, owner);
+    // AMBIGUOUS → hand the question back, and stop looking. Two subjects already carry
+    // this name, so there is no right answer to fold into, and every step below is a
+    // wider matcher than the one that just declined. This store does NOT invent an
+    // identity here: it once returned whichever row SQLite yielded first (a silent
+    // wrong bind), and a later attempt collected such mentions on a row named after the
+    // name itself — which then won `findCanonical` and could only ever be un-done by a
+    // BULK repoint that reassigns every collected fact to ONE of the candidates,
+    // reproducing the original defect later and in bulk. Both invented an answer to a
+    // question the store cannot answer. The caller gets the candidates instead.
+    if (aliasHit?.ambiguous) return { ambiguous: true, candidateIds: aliasHit.ids };
+    const existing = canonical
+      ?? aliasHit?.row
+      ?? (normalized !== params.name ? this.findCanonical(normalized, params.kind, owner) : null);
+    return { ambiguous: false, row: existing ?? null };
   }
 
   /**
