@@ -22,14 +22,12 @@
  *
  * The two halves of one credential therefore take **opposite** precedence, and
  * the mixed pair reaches Google. The mixing needs BOTH an env pair and a vault
- * pair, and both are reachable TODAY: the deploy compose files EXPOSE the env
- * pair for an operator to fill (`${GOOGLE_CLIENT_ID:-}` — empty by default,
- * which is the same empty-string hazard this file guards against below), and a
- * customer can write the vault pair through Settings since core#1272. What is NOT shipped is
- * the managed-broker emit — the control plane does not emit these names at all
- * (measured 2026-08-24, zero occurrences in the CP source). So this is armed
- * for an operator-configured deployment now, and for every managed tenant on
- * the day that emit lands.
+ * pair, and both are reachable TODAY: a deployment can supply the pair in the
+ * environment (commonly empty by default, which is the same empty-string hazard
+ * this file guards against below), and a customer can write the vault pair
+ * through Settings since core#1272. Any deployment that hands a tenant the env
+ * pair while that tenant also holds a vault pair reaches this — which is why
+ * the function exists, rather than a note claiming it cannot happen yet.
  *
  * ## The rules, and why each is written the way it is
  *
