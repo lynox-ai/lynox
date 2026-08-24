@@ -213,6 +213,8 @@ export function evaluate({ body, head, files, author }) {
         'no gate record in the PR body.',
         `Add a \`\`\`${MARK} block naming the head SHA it was taken at, the gates that ran,`,
         'the delta-round verdict, and the mutation count. See .github/pull_request_template.md.',
+        'A round is CLEAN when nothing it found is left unhandled — fixed here, or filed as a',
+        'register row. Findings do not make a round unclean; carrying them silently does.',
       ],
     };
   }
@@ -305,12 +307,42 @@ export function evaluate({ body, head, files, author }) {
 
   // A delta round that did not come back clean is a reason not to merge, so
   // there is exactly one accepted value.
+  //
+  // WHAT `clean` MEANS, because the one-line version was read as "no round ever
+  // found anything" and that reading makes the gate UNSATISFIABLE for exactly the
+  // PRs that were reviewed hardest — a PR whose review found something could never
+  // attest, and the `head:` field below would be pointless. Three parts:
+  //   1. nothing the round found is left unhandled — fixed in this diff, or filed
+  //      as a register row (that is what `closes:` is for; filing is the norm here);
+  //   2. it ran at the head `head:` names — the load-bearing half, checked below;
+  //   3. the delta since that round only REMOVES.
+  // Part 3 is what makes this terminate rather than regress. Every fix produces a
+  // new head, and a new head would demand a new round for ever. A deletion can be
+  // taken by inspection — not because inspection is cheaper, but because there is
+  // nothing added to check it AGAINST. Anything ADDED needs a fresh round, and
+  // "added" includes code: a one-line guard change asserts no prose and still
+  // changes behaviour. A rewording is an addition and a deletion at once, so it
+  // falls on the round side — which is the incentive we want. Deleting is the way
+  // out; rewording is not. (An earlier draft of this rule said "adds no new CLAIM",
+  // which was reasoned from a prose case and would have waved every code fix
+  // through on the grounds that it claims nothing.)
+  //
+  // NOT a second accepted value: someone merging while attesting an unclean round
+  // is the failure this field exists for. The restriction was never the problem —
+  // its description was.
+  //
   // `delta` and `mutations` describe a CODE round, so they are demanded only when one
   // was owed. A markdown-only legal change has neither, and forcing those fields would
   // buy a fabricated line — a record filled in to get past CI is worth less than none.
   if (required.has('delta')) {
     if (f.delta !== 'clean') {
-      errors.push(`\`delta:\` must be \`clean\` (got \`${f.delta ?? '<missing>'}\`) — an unclean delta round is not a merge`);
+      errors.push(
+        `\`delta:\` must be \`clean\` (got \`${f.delta ?? '<missing>'}\`) — an unclean delta round is not a merge.`,
+        'A round is clean when nothing it found is left unhandled — fixed in this diff or filed',
+        'as a register row — and when it ran at the head `head:` names.',
+        'A round that found things is normal. What decides it is the delta since: if that only',
+        'REMOVED, `clean` still holds; anything ADDED — text or code — needs a fresh round.',
+      );
     }
 
     const mut = /^\s*(\d+)\s+killed\s*[,/]\s*(\d+)\s+survived\s*$/.exec(f.mutations ?? '');
