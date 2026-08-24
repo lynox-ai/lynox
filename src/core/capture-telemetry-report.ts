@@ -34,6 +34,120 @@ export interface CaptureModelRate {
   readonly fireRate: number | null;
 }
 
+/**
+ * The two ends of `fireRate`, counted as the SEPARATE populations they are.
+ *
+ * `fireRate` divides `remember_invoked` by `capture_eligible` as if both described the
+ * same runs. They need not: the numerator is emitted from the `remember` tool handler,
+ * which any run carrying the tool reaches, while the denominator is emitted from the
+ * turn-end hook, which returns early for a run with no `Memory`, one with
+ * `skipMemoryExtraction`, or an internal one. Measured on a real sink:
+ * **910 numerator events, 0 denominator events** — a quotient over an empty population.
+ *
+ * ⚠️ **What this split does NOT tell you: WHY.** It reports that the populations differ
+ * and by how much. The mechanism that produces a given gap is not measured here and, on
+ * the sink that motivated this, is still unknown — two candidate explanations (internal
+ * runs; ordinary spawned children) were REFUTED at the source, since internal runs carry
+ * no tools at all and an ordinary child inherits the parent's `Memory` and so passes the
+ * hook. What remains unmeasured: `isolated_memory` children, the `skipMemoryExtraction`
+ * path, and an instance with no `Memory` at all. A non-zero `rememberOutsideEligible` is
+ * a fact about the numbers, never a diagnosis.
+ */
+export interface CapturePopulationSplit {
+  /** Distinct runs that produced at least one `capture_eligible` — the denominator's population. */
+  readonly eligibleRuns: number;
+  /** Distinct runs that produced at least one `remember_invoked` — the numerator's population. */
+  readonly rememberRuns: number;
+  /** Distinct runs in BOTH — the only runs the quotient is actually about. */
+  readonly overlapRuns: number;
+  /**
+   * `remember_invoked` EVENTS (not runs) whose run never produced a `capture_eligible`.
+   * This is the numerator's share that the denominator can never account for. Counted in
+   * events rather than runs because that is the quantity `fireRate` inflates by.
+   *
+   * ⚠️ Some of this can be an artefact of the window's LIVE EDGE rather than a gap: a run
+   * writes its `remember_invoked` from the tool handler and its `capture_eligible` only
+   * when the turn ends, so a turn still in flight at the moment of the scan contributes
+   * the numerator without its denominator. The artefact is bounded by (runs in flight) ×
+   * (their `remember` calls) — not by one: an instance can have several runs open at once
+   * (spawned children, a batch), and a single run can record several facts in one turn.
+   * The shape this split exists to expose is different in kind: a numerator population
+   * with no overlapping denominator at all.
+   */
+  readonly rememberOutsideEligible: number;
+  /**
+   * Events of either kind carrying no usable `runId`, so they join nothing.
+   *
+   * Two causes, and the second is NOT transitional. (1) The window predates the field.
+   * (2) The run genuinely has no id: `currentRunId` is optional, an ad-hoc `Agent` built
+   * outside a Session never gets one, and `Session` sets it to `null` when `insertRun`
+   * throws — so an instance with a broken run history is PERMANENTLY unjoinable, not
+   * temporarily. Either way the other numbers here describe only the part of the window
+   * that CAN be joined, which is why this is reported beside them rather than folded in.
+   */
+  readonly eventsWithoutRun: number;
+  /**
+   * Events whose run could not be tracked because the tracked-entry cap was reached.
+   * Counted in EVENTS and named so: counting distinct dropped runs would need exactly the
+   * unbounded set the cap exists to prevent. Non-zero means the numbers above cover a
+   * PREFIX of the window's runs, so a gap may be under- or over-stated — `blindNote`
+   * fires with it.
+   */
+  readonly eventsOverRunCap: number;
+  /**
+   * A fixed sentence, present ONLY when the numbers above actually show a gap. It ships
+   * in the RESPONSE rather than only in this file's comments because the reader of the
+   * number is an operator reading JSON at a diagnostic endpoint — a caveat that lives in
+   * the source reaches the maintainer and misses exactly the person about to quote the
+   * figure.
+   *
+   * Null when there is no gap. It is never a diagnosis and never varies with the data: a
+   * note that appeared to explain the gap would be worse than none, because the two
+   * explanations that seemed obvious were both refuted at the source.
+   */
+  readonly gapNote: string | null;
+  /**
+   * The OTHER thing a null `gapNote` can mean, and the reason this field exists: **"no
+   * gap" and "could not look" are different states that produced identical output.**
+   *
+   * A window whose events carry no `runId` yields all-zero counts and `gapNote: null` —
+   * which reads as "the populations agree". That is exactly the sink this whole split was
+   * built for: the measured 910-to-0 instance PREDATES the field, so it reports zeros and
+   * would have been the one window to say nothing at all. This note is non-null whenever
+   * the split is partial or impossible (`eventsWithoutRun` or `eventsOverRunCap` above zero),
+   * so silence from `gapNote` can be read as an answer only when this one is also null.
+   */
+  readonly blindNote: string | null;
+}
+
+/** The one wording {@link CapturePopulationSplit.gapNote} ever carries. */
+const GAP_NOTE =
+  'numerator and denominator do not cover the same runs; this report measures THAT, not why';
+
+/** The one wording {@link CapturePopulationSplit.blindNote} ever carries. */
+const BLIND_NOTE =
+  'some events could not be joined to a run; the split above covers only part of the window';
+
+/**
+ * Cap on TRACKED ENTRIES held during a scan — not on distinct runs, and the difference is
+ * real: a run that both ends a turn and fires `remember` occupies one slot in each
+ * collection, so the distinct-run floor this guarantees is `maxRuns / 2`. The sum is the
+ * quantity that bounds memory, which is what the cap is for, so the symbol is named for it.
+ * The axis also matters: the neighbouring
+ * `MAX_MODELS_REPORTED` caps the RESPONSE, not the scan — `perModel` is already an
+ * unbounded scan-time Map, so the run collections introduce no new class of growth. What
+ * they introduce is roughly four orders more cardinality: a fleet runs dozens of models,
+ * while runs approach one per line.
+ *
+ * The number is chosen against the sink's own bound rather than picked round. At the
+ * default 32 MiB × 2 generations and a measured ~210 B per line, a full window holds
+ * ~320k lines, so this cap never engages in normal operation. It engages only under the
+ * documented `LYNOX_TELEMETRY_LOG_MAX_BYTES` override, where a 2 GiB setting would put
+ * ~20M lines through these collections — measured at ~1.9 GiB of Set/Map overhead, which
+ * OOMs the container from a read-only diagnostic request.
+ */
+const MAX_TRACKED_ENTRIES = 400_000;
+
 /** What the report could NOT see. Stated so a rate is never read as more complete than it is. */
 export interface CaptureReportBlindness {
   /** Lines present in the sink that did not parse — excluded from every count below. */
@@ -94,6 +208,13 @@ export interface CaptureReport {
   /** COUNT (not share) of capture-eligible turns that had ingested untrusted content. */
   readonly untrustedEligible: number;
 
+  /**
+   * The two ends of `fireRate` as separate populations. Read this BEFORE quoting
+   * `fireRate`: when `overlapRuns` is 0 while `rememberRuns` is not, the headline is a
+   * quotient over two disjoint sets and means nothing.
+   */
+  readonly populations: CapturePopulationSplit;
+
   readonly blindness: CaptureReportBlindness;
 }
 
@@ -104,6 +225,8 @@ export interface CaptureReport {
 const MAX_MODELS_REPORTED = 50;
 /** Cap on a model key's length — same reason, applied to the key rather than the count. */
 const MAX_MODEL_KEY_CHARS = 128;
+/** Cap on a run key's length. Same reason and same number as the model key above. */
+const MAX_RUN_KEY_CHARS = 128;
 
 /** Outcome values this build knows. Guards `outcomes` against an out-of-enum sink value. */
 const KNOWN_OUTCOMES: ReadonlySet<string> = new Set<CaptureOutcome>(['active', 'pending_review', 'rejected', 'superseded', 'deduped']);
@@ -140,6 +263,8 @@ interface ValidatedEntry {
   readonly hasThread: boolean;
   readonly untrusted: boolean;
   readonly outcome: CaptureOutcome | null;
+  /** A non-empty run id, or null when the line predates the field or omits it. */
+  readonly runId: string | null;
 }
 
 /**
@@ -185,6 +310,15 @@ function validateEntry(raw: unknown): ValidatedEntry | null {
     hasThread: typeof r['thread'] === 'string' && r['thread'] !== '',
     untrusted: r['untrusted'] === true,
     outcome: typeof outcome === 'string' && KNOWN_OUTCOMES.has(outcome) ? outcome as CaptureOutcome : null,
+    // Same narrowing AND the same clamp as `model`, for the same reason: a non-string or
+    // empty run id is NOT a run (keying a set on one would join every such line to a
+    // single synthetic run and invent an overlap), and an unbounded key is retained for
+    // the whole scan. The sink is not on the permission-guard's protected-path list, so a
+    // tool can write a line whose run id is megabytes long; the byte cap in
+    // `bounded-jsonl-log` applies at append time, never on read.
+    runId: typeof r['runId'] === 'string' && r['runId'] !== ''
+      ? (r['runId'].length > MAX_RUN_KEY_CHARS ? r['runId'].slice(0, MAX_RUN_KEY_CHARS) : r['runId'])
+      : null,
   };
 }
 
@@ -196,7 +330,10 @@ function validateEntry(raw: unknown): ValidatedEntry | null {
  * a rejection: a diagnostic endpoint that 500s when there is nothing to diagnose is worse
  * than one that says "nothing recorded, and here is what I could not open".
  */
-export async function buildCaptureReport(): Promise<CaptureReport> {
+export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: number }): Promise<CaptureReport> {
+  // Injectable so the cap's behaviour is testable without seeding a cap-sized sink; the
+  // endpoint calls this with no argument and gets the real bound.
+  const maxEntries = opts?.maxTrackedEntries ?? MAX_TRACKED_ENTRIES;
   const events = Object.fromEntries(ALL_EVENTS.map(e => [e, 0])) as Record<CaptureEvent, number>;
   const outcomes: Partial<Record<CaptureOutcome, number>> = {};
   const perModel = new Map<string, { eligible: number; remembered: number }>();
@@ -206,6 +343,16 @@ export async function buildCaptureReport(): Promise<CaptureReport> {
   let eventsWithoutModel = 0;
   let eventsWithoutThread = 0;
   let untrustedEligible = 0;
+  // The population split. Sets, not counters: a run that ends two eligible turns is ONE
+  // run in the denominator's population, and counting events here would make the overlap
+  // look larger than the number of runs that actually exist.
+  const eligibleRuns = new Set<string>();
+  // Remember EVENTS per run, resolved after the scan: the turn-end event for a run is
+  // written AFTER the tool call in that same run, so a single forward pass cannot know
+  // yet whether a run will turn out eligible.
+  const rememberEventsByRun = new Map<string, number>();
+  let eventsWithoutRun = 0;
+  let eventsOverRunCap = 0;
 
   let malformedRecords = 0;
 
@@ -227,6 +374,24 @@ export async function buildCaptureReport(): Promise<CaptureReport> {
     if (entry.model === null) eventsWithoutModel++;
     if (!entry.hasThread) eventsWithoutThread++;
 
+    // Population assignment. Only the two fire-rate events participate: a `propose_*` or
+    // `onboarding_*` line belongs to neither end of the quotient, and folding it into
+    // either would answer a question nobody asked with a number that looks like an answer.
+    if (event === 'capture_eligible' || event === 'remember_invoked') {
+      if (entry.runId === null) eventsWithoutRun++;
+      else if (event === 'capture_eligible') {
+        if (!eligibleRuns.has(entry.runId)) {
+          if (eligibleRuns.size + rememberEventsByRun.size < maxEntries) eligibleRuns.add(entry.runId);
+          else eventsOverRunCap++;
+        }
+      }
+      else if (rememberEventsByRun.has(entry.runId)) {
+        rememberEventsByRun.set(entry.runId, rememberEventsByRun.get(entry.runId)! + 1);
+      } else if (eligibleRuns.size + rememberEventsByRun.size < maxEntries) {
+        rememberEventsByRun.set(entry.runId, 1);
+      } else eventsOverRunCap++;
+    }
+
     if (event === 'capture_eligible' && entry.untrusted) untrustedEligible++;
     if (event === 'remember_invoked' && entry.outcome !== null) {
       outcomes[entry.outcome] = (outcomes[entry.outcome] ?? 0) + 1;
@@ -238,6 +403,29 @@ export async function buildCaptureReport(): Promise<CaptureReport> {
       perModel.set(entry.model, bucket);
     }
   });
+
+  // Resolve the split now that every line has been seen (see the forward-pass note above).
+  let overlapRuns = 0;
+  let rememberOutsideEligible = 0;
+  for (const [runId, count] of rememberEventsByRun) {
+    if (eligibleRuns.has(runId)) overlapRuns++;
+    else rememberOutsideEligible += count;
+  }
+  // `rememberOutsideEligible > 0` is the whole gap test: if no remember run overlaps,
+  // every remember run is outside and each contributes at least one event, so the
+  // "numerator over an empty denominator" shape needs no separate clause.
+  const populations: CapturePopulationSplit = {
+    eligibleRuns: eligibleRuns.size,
+    rememberRuns: rememberEventsByRun.size,
+    overlapRuns,
+    rememberOutsideEligible,
+    eventsWithoutRun,
+    eventsOverRunCap,
+    gapNote: rememberOutsideEligible > 0 ? GAP_NOTE : null,
+    // Independent of `gapNote`, and both can be non-null at once: a partial window can
+    // still show a gap in the part that WAS joinable.
+    blindNote: eventsWithoutRun > 0 || eventsOverRunCap > 0 ? BLIND_NOTE : null,
+  };
 
   const ranked: CaptureModelRate[] = [...perModel.entries()]
     .map(([model, b]) => ({ model, eligible: b.eligible, remembered: b.remembered, fireRate: rate(b.remembered, b.eligible) }))
@@ -261,6 +449,7 @@ export async function buildCaptureReport(): Promise<CaptureReport> {
     outcomes,
     byModel,
     untrustedEligible,
+    populations,
     blindness: {
       unparsableLines: scan.unparsableLines,
       malformedRecords,

@@ -67,6 +67,24 @@ export interface CaptureTelemetryEntry {
   readonly untrusted: boolean;
   /** Store outcome — only set for `remember_invoked`. */
   readonly outcome?: CaptureOutcome | undefined;
+  /**
+   * The run this event belongs to — the JOIN KEY between the two ends of the fire-rate.
+   *
+   * Without it the ratio `remember_invoked / capture_eligible` cannot be shown to be a
+   * ratio at all: the numerator is emitted from the TOOL HANDLER (any run that has the
+   * tool), the denominator only from the turn-end hook, which returns early for a run
+   * with no `Memory`, with `skipMemoryExtraction`, or an internal one. Measured on a real
+   * sink: **910 numerator events against 0 denominator events** — two populations, one
+   * quotient. `runId` is what lets the report say so instead of dividing anyway.
+   *
+   * An opaque handle, never text — the same class as `thread`/`entryId`, which this sink
+   * already carries, and covered by the same S5 rule.
+   *
+   * Optional because the sink PREDATES it: every line written before this field shipped
+   * carries none. Those events are counted in `populations.eventsWithoutRun` rather than
+   * joined to nothing, so an old window reads as "cannot tell", not as "disjoint".
+   */
+  readonly runId?: string | undefined;
 
   // ── Onboarding Wave 1 additions (PRD-ONBOARDING §7, content rule S5) ──
   // The S5 rule is "entry-IDs + signals only, NEVER the fact text". No field here is

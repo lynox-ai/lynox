@@ -211,6 +211,21 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     for (const v of Object.values(proposeShown[0]!)) expect(v).not.toBe(secret);
   });
 
+  // The NUMERATOR's join key. `remember_invoked` fires from this handler, which any run
+  // carrying the tool reaches; `capture_eligible` fires only from the turn-end hook, which
+  // returns early for several run shapes. Without `runId` on BOTH the report can divide
+  // the two but cannot show they describe the same runs — a real sink carried 910
+  // numerator events against 0 denominator events (DEF-firerate-mixes-two-populations).
+  // Dropping the field from this emit is a live mutation and dies here.
+  it('remember_invoked carries the run id, so the numerator can be joined to the denominator', async () => {
+    mockSink.mockClear();
+    const { agent } = make({ durableMemoryEnabled: true });
+    await rememberTool.handler({ text: 'ACME renews in March', subject: 'ACME' }, agent);
+    const invoked = captureEvents().filter((e) => e['event'] === 'remember_invoked');
+    expect(invoked).toHaveLength(1);
+    expect(invoked[0]!['runId']).toBe('r1');
+  });
+
   it('remember does NOT emit propose_shown for a TRUSTED active write (not a reviewable proposal)', async () => {
     mockSink.mockClear();
     const { agent } = make({ durableMemoryEnabled: true }); // trusted turn → active, not pending_review
