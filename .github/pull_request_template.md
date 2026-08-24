@@ -30,10 +30,10 @@ and they are on the record. The one thing CI does establish by itself is `head`:
 it must equal this PR's current head, so **update it after every push**. That is
 the difference between "the gates ran" and "the gates ran on THIS code".
 
-- `head` — this PR's **current** head: `git rev-parse --short HEAD`. Usually that is also
-  the SHA the gates ran against; where it is not, see what `delta: clean` means below.
+- `head` — this PR's **current** head, which is also the SHA the gates ran against:
+  `git rev-parse --short HEAD`. Update it after every push.
 - `gates` — which ran, from: `code-review`, `delta`, `security`, `prd`, `staging-walk`, `legal`.
-  `legal` is required for `SUBPROCESSORS.md` — the one binding text in this repo — and
+  `legal` is required for `SUBPROCESSORS.md`, the one binding text `LEGAL_PATHS` covers, and
   then the record also needs `approved: <who> <YYYY-MM-DD>`, naming who signed off on the
   WORDING. A binding customer text does not ship on an assistant's judgement, and a name
   without a date cannot be told apart from a sign-off carried over from an earlier revision.
@@ -47,19 +47,17 @@ the difference between "the gates ran" and "the gates ran on THIS code".
   `clean` does **not** mean the round found nothing — a round that found things and
   handled them is clean. It means: nothing it found is left unhandled (fixed here, or
   filed as a register row — **not** listed in `closes:`, which names rows this PR
-  *settles*), and it ran at the head above, or at an ancestor since which the diff only
-  removes text nothing in the toolchain reads AND that binds nobody outside it.
-  Removing a directive comment (`@ts-expect-error`, a shebang) does not qualify —
-  those are read; nor does a binding text like `SUBPROCESSORS.md`, which has no
-  reader at all. The exception covers the DELTA round only: `code-review` and
-  `security` are claims about code, and code is never what it moves.
+  *settles*), and it ran at the head above. No exception: every fix makes a new head,
+  so it is fix, re-run, attest, and it ends when a round finds nothing.
 - `mutations` — mutations of the CHANGED LINES, killed vs survived. A survivor
   means no test covers that line and fails the check.
 
 A documentation-only diff needs none of this — delete the block. (A binding text is
 NOT documentation for this purpose: `SUBPROCESSORS.md` is markdown, and it is the
 document the managed DPA points customers at, so it needs the `legal` gate and an
-`approved:` line naming who signed off on the wording and when.)
+`approved:` line naming who signed off on the wording and when. `delta` and `mutations`
+are dropped for a markdown-only legal change: there is no delta round to report, and a
+fabricated line is worse than none.)
 
 ```gate-record
 head: <short SHA>

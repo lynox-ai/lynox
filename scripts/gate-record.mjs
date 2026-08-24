@@ -321,56 +321,31 @@ export function evaluate({ body, head, files, author }) {
     //      as a register row. NOT via `closes:`, which names rows this PR SETTLES;
     //      a freshly filed row is open, and putting it there corrupts the very
     //      datum that field exists to make queryable.
-    //   2. it ran at the head `head:` names — or at an ancestor since which the
-    //      diff removes ONLY text that nothing in the toolchain reads AND that
-    //      binds nobody outside it. `head:` itself ALWAYS names this PR's current
-    //      head. The exception is about where the ROUND ran; it never licenses
-    //      writing an older SHA into the field, which would still go red and
-    //      should. It also covers the DELTA round only — `code-review` and
-    //      `security` are claims about the code, and code is never what this
-    //      exception moves.
+    //   2. it ran at the head `head:` names. No exception, and that is deliberate.
     //
-    // The exception in (2) is what makes this terminate instead of regress: every
-    // fix produces a new head, and a new head would demand another round for ever.
-    // Such a deletion can be taken by inspection — not because inspection is
-    // cheaper, but because there is nothing added to check it AGAINST.
+    // Deliberate because every fix produces a new head, so this is strict: fix,
+    // re-run, attest. It terminates the ordinary way — when a round finds nothing.
     //
-    // Its narrowness is the whole safety, so do not widen it:
-    //   · The test is the READER, not the genre — and it cuts BOTH ways. Plenty of
-    //     text that looks like commentary is read: `@ts-expect-error` and
-    //     `eslint-disable` are obeyed by tsc and eslint, a shebang is obeyed by the
-    //     kernel, and `drift-guard.sh` reads doc prose. Deleting one of those can
-    //     flip a required check. A `.md` file is not automatically safe either.
-    //   · And "no reader" is not enough on its own, which is why the clause has a
-    //     second half. `SUBPROCESSORS.md` is read by no build step at all — and it
-    //     is the list the managed DPA contractually points customers at. Deleting a
-    //     paragraph there is invisible to every tool and changes what we owe. Text
-    //     that binds someone outside the toolchain never qualifies, whoever reads
-    //     it; that is also why it carries its own `legal` gate.
-    //   · Code never qualifies, however small the diff. `if (a && b) { allow(); }`
-    //     → `if (a) { allow(); }` deletes five characters and lets the body run in
-    //     strictly more cases: a textual removal that opens a gate. Textual removal
-    //     is not behavioural removal.
-    //   · A rewording is an addition and a deletion at once, so it needs the round.
-    //     Deleting is the way out; rewording is not.
-    // (Two earlier drafts were worse and are recorded so they are not re-proposed:
-    // "adds no new CLAIM" was reasoned from a prose case and would have waved every
-    // code fix through on the grounds that it claims nothing; and stating the
-    // exception as a THIRD part contradicted the second — if a delta exists, the
-    // round did not run at `head:`, so both could never hold at once.)
+    // An escape hatch for "the delta since only deleted something harmless" was
+    // drafted and CUT. Five review rounds found five real defects in it, every one
+    // in the clause itself and none in the two parts above: it contradicted (2);
+    // it waved through code deletions, which remove characters and widen behaviour;
+    // it kept re-introducing a GENRE list where the test is the reader; and its own
+    // worked example turned out to have a reader after all. Where prose is wrong
+    // five times, the answer is not a sixth draft — it is a computation. See
+    // `DEF-gate-record-round-sha-not-pinned`: a `round: <sha>` field plus a CI diff
+    // makes this exact exception a measurement instead of a description.
     //
-    // NOT a second accepted value: someone merging while attesting an unclean round
-    // is the failure this field exists for. The restriction was never the problem —
-    // its description was.
+    // NOT a second accepted value either: someone merging while attesting an unclean
+    // round is the failure this field exists for. The restriction was never the
+    // problem — its description was.
     if (f.delta !== 'clean') {
       errors.push(
         `\`delta:\` must be \`clean\` (got \`${f.delta ?? '<missing>'}\`) — an unclean delta round is not a merge.`,
-        'Clean means: nothing the round found is left unhandled — fixed here, or filed as a',
-        'register row — and it ran at the head `head:` names, or at an ancestor since which the',
-        'diff removes only text nothing in the toolchain reads AND that binds nobody outside',
-        'it. Never code; a directive comment (`@ts-expect-error`, a shebang) IS read; and a',
-        'binding text like SUBPROCESSORS.md has no reader yet still never qualifies.',
-        '`head:` always names this PR\'s current head. Findings are normal; hiding them is not.',
+        'Clean does NOT mean the round found nothing. It means nothing it found is left',
+        'unhandled — fixed here, or filed as a register row (not listed in `closes:`, which',
+        'names rows this PR settles) — and that it ran at the head `head:` names.',
+        'Findings are normal; carrying them silently is not.',
       );
     }
 
