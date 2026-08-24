@@ -4,7 +4,7 @@ import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
 import type { ModelTier, ThinkingMode, EffortLevel, LLMProvider, ModelProfile } from './models.js';
 import type { ProviderKey } from './provider-registry.js';
-import type { ToolEntry, StreamHandler } from './tools.js';
+import type { ToolEntry, StreamHandler, EmittingStreamHandler } from './tools.js';
 import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMailConnectFn, ToolCallRecorder } from './agent.js';
 import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';
@@ -21,7 +21,9 @@ export interface AgentConfig {
   effort?:          EffortLevel | undefined;
   maxTokens?:       number | undefined;
   memory?:          IMemory | undefined;
-  onStream?:        StreamHandler | undefined;
+  // Emitting: the agent built from this config writes INTO this handler, so it
+  // is an emit sink. A plain StreamHandler is still assignable here.
+  onStream?:        EmittingStreamHandler | undefined;
   workerPool?:      IWorkerPool | undefined;
   promptUser?:      PromptUserFn | undefined;
   promptTabs?:      PromptTabsFn | undefined;

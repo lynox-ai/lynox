@@ -9,6 +9,8 @@ import type {
   BatchRequest,
   BatchResult,
   StreamHandler,
+  EmittingStreamHandler,
+  EmittedStreamEvent,
   StreamEvent,
   ModelTier,
   ThreadModelSource,
@@ -171,7 +173,7 @@ export interface SessionOptions {
   thinking?: ThinkingMode | undefined;
   autonomy?: import('../types/index.js').AutonomyLevel | undefined;
   briefing?: string | undefined;
-  onStream?: StreamHandler | undefined;
+  onStream?: EmittingStreamHandler | undefined;
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;
   promptSecret?: PromptSecretFn | undefined;
@@ -291,7 +293,10 @@ export class Session {
    *  reset when usage drops back below COMPACT_PREPARE_PERCENT or after a
    *  compaction, so it can re-offer on the next fill but doesn't nag every turn. */
   private _compactionOffered = false;
-  onStream: StreamHandler | null = null;
+  // Emitting: everything the session forwards here comes from core's own
+  // producers. Callers may still assign a plain StreamHandler — a handler that
+  // accepts the published (wider) union accepts this one.
+  onStream: EmittingStreamHandler | null = null;
   private _promptUser: PromptUserFn | null = null;
   private _promptTabs: PromptTabsFn | null = null;
   private _promptSecret: PromptSecretFn | null = null;
@@ -2212,7 +2217,10 @@ export class Session {
     // is load-bearing (a dropped endsTurn made suggest_follow_ups loop).
     const tools = pluginManager ? applyPluginToolGate(entries, pluginManager) : entries;
 
-    const streamHandler: StreamHandler = async (event: StreamEvent) => {
+    // Emitting on BOTH sides: this wrapper receives what core produced and
+    // forwards it to the session's sink, so widening it here would be the one
+    // place the decision could get laundered back into an unknown.
+    const streamHandler: EmittingStreamHandler = async (event: EmittedStreamEvent) => {
       if (event.type === 'turn_end') {
         // Inject actual model so the client can compute correct costs
         (event as { model?: string }).model = model;

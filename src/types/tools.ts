@@ -174,14 +174,18 @@ export type StreamEvent =
   | { type: 'spawn_child_done'; spawnId: string; subAgent: string; subAgentId: string;
       ok: boolean; elapsedS: number; costUsd: number;              agent: string }
   | { type: 'turn_end';    stop_reason: string; usage: BetaUsage;  model?: string | undefined; contextWindow?: number | undefined; agent: string }
-  // `fatal` is REQUIRED, and that is the whole point: the compiler now forces
-  // every emitter to say whether the turn is over. Before this field the channel
-  // carried both `the run is dead` (agent.ts, iteration limit) and `something
-  // went wrong and I am continuing` (stream.ts, unparsable tool input) under one
-  // name, so no receiver could tell them apart — the client marked a live,
-  // billing run as `not sent — tap to retry`. Adding an OPTIONAL flag would have
-  // left the next emitter free to skip the decision and reopen the same hole.
-  | { type: 'error';       message: string; fatal: boolean;         agent: string }
+  // `fatal` separates two meanings this channel used to carry under one name:
+  // `the run is dead` (agent.ts, iteration limit) and `something went wrong and
+  // I am continuing` (stream.ts, unparsable tool input, which substitutes
+  // `input:{}`). No receiver could tell them apart, so the client marked a live,
+  // billing run as `not sent — tap to retry`.
+  //
+  // OPTIONAL here, REQUIRED at the emit boundary — see `EmittedStreamEvent`.
+  // This type is published (`@lynox-ai/core/types`), so a required field would
+  // break every external constructor of an error event for a flag they have no
+  // stake in. The compiler force belongs where the emitters are, not where the
+  // consumers are.
+  | { type: 'error';       message: string; fatal?: boolean;        agent: string }
   | { type: 'warning';     code: string; detail?: string | undefined; agent: string }
   | { type: 'retry';       attempt: number; maxAttempts: number; delayMs: number; reason: string; agent: string }
   | { type: 'cost_warning';  snapshot: CostSnapshot;               agent: string }
@@ -222,6 +226,49 @@ export type StreamEvent =
       cause?: UntrustedCause | undefined };
 
 export type StreamHandler = (event: StreamEvent) => void | Promise<void>;
+
+/**
+ * What core's OWN emitters must produce — identical to {@link StreamEvent}
+ * except that `fatal` is REQUIRED on the error variant.
+ *
+ * The split exists because the two audiences need opposite things. A consumer
+ * reading events wants an optional flag (it may not be there on an event from
+ * an older producer). An emitter inside core must not be allowed to skip the
+ * decision, because "is this turn over?" has no safe default: absent reads as
+ * falsy, i.e. "keep waiting", on a stream that may already be finished.
+ *
+ * Assigning a plain {@link StreamHandler} here still works — a function that
+ * accepts the wider event type accepts the narrower one — so this constrains
+ * core's emit sites without narrowing what anyone may plug in.
+ */
+export type EmittedStreamEvent =
+  | Exclude<StreamEvent, { type: 'error' }>
+  | { type: 'error'; message: string; fatal: boolean; agent: string };
+
+/** A {@link StreamHandler} as core's own producers must call it. */
+export type EmittingStreamHandler = (event: EmittedStreamEvent) => void | Promise<void>;
+
+/**
+ * Compile guard for the OTHER half of the split, and it has to live in `src/`:
+ * `tsconfig` excludes `*.test.ts`, so a type assertion written in a test file is
+ * compiled by nothing and asserts nothing. `contract/fixtures/mirrors.ts` exists
+ * for the same reason and says so in its own header.
+ *
+ * What it pins: an error event built WITHOUT `fatal` is still a valid
+ * {@link StreamEvent}. That is the published promise — external code (test
+ * doubles, hook implementations) constructs these, and `@lynox-ai/core/types`
+ * is a public entry point, so making the field required there would be a major
+ * break for a flag those callers have no stake in.
+ *
+ * Mutation that must fail this: change `fatal?: boolean` to `fatal: boolean`
+ * on the error variant above. The pair of guards is the point — that one keeps
+ * the emitters honest, this one keeps the package compatible, and neither can
+ * be satisfied by weakening the other.
+ */
+type AssertTrue<T extends true> = T;
+type _PublishedErrorEventMayOmitFatal = AssertTrue<
+  { type: 'error'; message: string; agent: string } extends StreamEvent ? true : false
+>;
 
 /**
  * One end-of-turn follow-up chip, as the `suggest_follow_ups` tool takes it and

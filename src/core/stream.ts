@@ -1,4 +1,4 @@
-import type { StreamHandler } from '../types/index.js';
+import type { EmittingStreamHandler } from '../types/index.js';
 import type {
   BetaRawMessageStreamEvent,
   BetaContentBlock,
@@ -16,7 +16,7 @@ import type {
 
 export class StreamProcessor {
   constructor(
-    private onEvent: StreamHandler,
+    private onEvent: EmittingStreamHandler,
     private agentName: string,
   ) {}
 

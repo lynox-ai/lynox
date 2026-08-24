@@ -21,6 +21,7 @@ import type {
   LynoxUserConfig,
   ToolEntry,
   StreamHandler,
+  EmittingStreamHandler,
   NetworkPolicy,
   StepHint,
 } from '../types/index.js';
@@ -53,7 +54,10 @@ export interface ToolContext {
 
   // ── Pipeline / process ──
   tools: ToolEntry[];
-  streamHandler: StreamHandler | null;
+  // Emitting: tools write their progress events into this, so it is an emit
+  // sink like every other handler core producers call. Assigning a plain
+  // StreamHandler still works — it accepts the wider published union.
+  streamHandler: EmittingStreamHandler | null;
 
   // ── Network policy (http tool) ──
   networkPolicy: NetworkPolicy | undefined;

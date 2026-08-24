@@ -6,6 +6,7 @@ import type {
   IWorkerPool,
   ToolEntry,
   StreamHandler,
+  EmittingStreamHandler,
   AgentConfig,
   ThinkingMode,
   AgentWarning,
@@ -271,7 +272,7 @@ export class Agent implements IAgent {
   readonly model: string;
   readonly memory: IMemory | null;
   readonly tools: ToolEntry[];
-  onStream: StreamHandler | null;
+  onStream: EmittingStreamHandler | null;
   /** See `AgentConfig.onMessageCheckpoint` for contract + rationale. */
   private readonly onMessageCheckpoint?: (() => void | Promise<void>) | undefined;
 
