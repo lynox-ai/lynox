@@ -55,25 +55,29 @@ const ALLOWLISTED_HOSTS: ReadonlySet<string> = new Set<string>([
  * suffix-spoof attacks like `evil.local.attacker.com`.
  *
  * WHAT MEMBERSHIP HERE DOES AND DOES NOT MEAN. "Exposes nothing to a third
- * party" above is a statement about sub-processor exposure — the question this
- * file was built to answer. It is NOT a statement that the address is
- * unreachable, and it does not carry a connect-time guarantee to whoever reads
- * the set. Each consumer answers "what stops a private address at connect
- * time?" for itself, and today they answer differently:
- *   · `isVettedEgressHost` → `http_request` / `api_setup`, which go through
- *     `assertHostPolicy` + `fetchPinned`. Guarded at connect time.
- *   · `isAllowlistedEndpoint` → the LLM endpoint gate, at engine boot AND on
- *     `PUT /api/config`. The model adapter then issues a plain `fetch`, so
- *     there is NO connect-time private-IP check on that path.
- *   · a hand-synced copy of this set lives in
- *     `packages/web-ui/src/lib/utils/endpoint-disclosure.ts` and drives the
- *     client-side disclosure modal only.
+ * party" above answers sub-processor exposure — the question this file was
+ * built for. It says nothing about whether the address is REACHABLE, and it
+ * carries no connect-time guarantee to whoever reads the set.
  *
- * Note also what the set does NOT match, because "private" here is narrower
- * than `isPrivateIP` (`network-guard.ts`): no link-local (`169.254/16`), no
- * CGNAT (`100.64/10`), no IPv6, no `198.18/15`. Those are not vetted by these
- * patterns and fall through to the non-allowlisted branch of whatever gate is
- * asking. `localhost` / `127.0.0.1` / `0.0.0.0` are vetted, but by
+ * That distinction is easy to lose because the consumers genuinely differ: some
+ * reach the network through `assertHostPolicy` + `fetchPinned` and are guarded
+ * at connect time, some only evaluate a URL and never fetch it, and the LLM
+ * endpoint path performs no connect-time private-IP check at all (its
+ * openai-compatible branch calls global `fetch` directly; its Anthropic branch
+ * hands `baseURL` to the SDK without a fetch override). Deliberately not
+ * enumerated further here: a list of who-guards-what goes stale silently, and
+ * the point survives without it — **derive your path's behaviour from your own
+ * call chain, never from membership in this set.** Note also that these
+ * patterns are not unique to this file: a hand-synced copy lives in
+ * `packages/web-ui/src/lib/utils/endpoint-disclosure.ts`, whose function of the
+ * same name differs on empty input, so a copy is not automatically a mirror.
+ *
+ * One property worth stating because it is checkable: "private" here is
+ * NARROWER than `isPrivateIP` (`network-guard.ts`). These patterns match
+ * RFC1918 in dotted-quad form plus the three name suffixes below — nothing
+ * else. Addresses `isPrivateIP` rejects but these do not vet (link-local,
+ * CGNAT, IPv6, and others) fall through to the non-allowlisted branch of
+ * whatever gate is asking. `localhost` / `127.0.0.1` / `0.0.0.0` are vetted by
  * `ALLOWLISTED_HOSTS` above, not by this set.
  */
 const PRIVATE_LAN_PATTERNS: readonly RegExp[] = [
@@ -168,10 +172,11 @@ export const GATE_MEMBERSHIP_FOR_TESTS = Object.freeze({
  * without fetching it, so an on-premise profile is not made to answer a
  * third-party disclosure prompt it has no business being asked.
  *
- * That last point is scoped to THIS function's callers — `http_request` and
- * `api_setup`, both of which reach the network through `assertHostPolicy` and
- * `fetchPinned`. It is not a property of the pattern set; see the note on
- * `PRIVATE_LAN_PATTERNS` for which consumers do and do not have such a guard.
+ * That last point is scoped to the tool-surface callers this function was
+ * written for, whose fetching paths go through `assertHostPolicy` and
+ * `fetchPinned` — and note that one caller here is the save gate itself, which
+ * never fetches at all. None of it is a property of the pattern set; see the
+ * note on `PRIVATE_LAN_PATTERNS`.
  */
 export function isVettedEgressHost(url: string): boolean {
   return isGuardedBaselineHost(url) || isPrivateLanEndpoint(url);
@@ -225,12 +230,11 @@ export function isAllowlistedEndpoint(url: string): boolean {
  * agent can register a match for. The RFC1918 IP patterns are moot here — the
  * caller's `isPrivateIP` early-out blocks them regardless.
  *
- * "Moot" is scoped to that caller. The early-out belongs to `assertHostPolicy`
- * (`network-guard.ts`) and runs for every policy — it is not something
- * `guarded` adds. The other production caller, `mayFallBackToStoredKey`
- * (`provider-keys.ts`), is not an egress path at all: it decides whether a
- * stored credential may be used, so no connect-time check applies there and
- * none is implied. See the note on `PRIVATE_LAN_PATTERNS`.
+ * "Moot" is scoped to that caller, and the early-out is `assertHostPolicy`'s
+ * (`network-guard.ts`), which runs for every policy — it is not something
+ * `guarded` adds. This function has other callers, including ones that decide
+ * about credentials rather than about egress, so the sentence above does not
+ * generalise. See the note on `PRIVATE_LAN_PATTERNS`.
  */
 export function isGuardedBaselineHost(url: string): boolean {
   try {
