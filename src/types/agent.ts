@@ -17,14 +17,50 @@ export interface TabQuestion {
  * visible cause in the thread — the step's tool calls carry an empty
  * `context_id` and never enter `thread_messages` — so the dialog has to carry
  * its own provenance or the user sees a bare "Allow / Deny" for a command
- * nothing on screen asked for. Populated by the pipeline spawners; the
- * main-agent path leaves every field undefined (there the cause IS on screen).
+ * nothing on screen asked for. Populated by the pipeline spawners and by
+ * `spawn_agent`; the main-agent path leaves every field undefined (there the
+ * cause IS on screen).
+ *
+ * ⚠ EVERY field here is authored by a model, and the sub-agent fields by the
+ * very agent the line exists to make the user suspicious of: an injected parent
+ * chooses its child's name and task freely and would name it "Main assistant"
+ * given the chance. So none of these fields may carry the WARNING — they are
+ * values, bounded and stripped by `toPromptOrigin`. The claim "a sub-agent
+ * asked" is frame, written by the renderer, and stays true whatever the name
+ * says.
  */
 export interface PromptOrigin {
   /** The workflow that owns `stepId`, as the user named it. */
   workflowName?: string | undefined;
   stepId?: string | undefined;
   stepTask?: string | undefined;
+  /**
+   * ⭐ The FACT that a `spawn_agent` child raised this prompt — and the only
+   * field here the model cannot touch. Set by the spawn path itself, never
+   * derived from anything a spec carries.
+   *
+   * A pipeline step does NOT set it, deliberately: that path already names its
+   * own cause (`workflowName` + `stepId` + `stepTask`), so the user is told who
+   * asked either way. This flag exists for the case where there was nothing
+   * else to say.
+   *
+   * It exists because the first version had the renderer key its whole claim on
+   * `subagentName` — and a name of one zero-width space passes `validateSpawnInput`
+   * (non-empty, no C0) and cleans down to nothing, so an injected parent could
+   * DELETE the line warning about it by choosing a name. Getting the claim's
+   * WORDING out of the model's reach was not enough; its EXISTENCE had to leave
+   * too, and a boolean is the one shape that cannot be emptied.
+   */
+  subagent?: true | undefined;
+  /**
+   * The spawned sub-agent that raised the prompt (`SpawnSpec.name`), and its
+   * task — decoration on the fact above, not the fact. Independent of the step
+   * fields rather than folded into them: a step that spawns produces BOTH, and
+   * collapsing them would drop whichever was written second. The deepest spawner
+   * wins, which is the immediate asker.
+   */
+  subagentName?: string | undefined;
+  subagentTask?: string | undefined;
 }
 
 /**

@@ -185,14 +185,60 @@ describe('promptUser callers', () => {
    * logic nothing exercises is the same defect it exists to prevent, one level
    * up. The cases below are the shapes that were measured slipping through.
    */
-  function classifyArg(arg: string): 'declared' | 'declaration' | 'undeclared' {
+  function classifyArg(arg: string, before = ''): 'declared' | 'declaration' | 'undeclared' {
     const a = arg.trimStart();
     if (a.startsWith('pv`') || a.startsWith('promptValue(')) return 'declared';
     if ((a.startsWith('`') || a.startsWith("'") || a.startsWith('"')) && !a.slice(0, 200).includes('${')) return 'declared';
     // A declaration always has the COLON; a ternary never does.
     if (/^[A-Za-z_$][\w$]*\??\s*:/.test(a)) return 'declaration';
     if (a.startsWith(')')) return 'declaration';
+    if (isForwarded(a, before)) return 'declared';
     return 'undeclared';
+  }
+
+  /**
+   * A pass-through: `promptUser: (q, opts, m) => promptUser(q, opts, {…})`.
+   *
+   * The rule this guard enforces is "say who wrote this text". A wrapper writes
+   * none — the argument is byte-identically the one its own caller passed.
+   * Flagging it would demand a `pv` on a value nobody here authored, which is
+   * not a declaration but a lie.
+   *
+   * ⚠ NARROW ON PURPOSE, and the narrowing is the whole safety argument. The
+   * first version accepted any arrow whose first parameter was passed through,
+   * which also accepts a LOCAL helper — `const ask = q => agent.promptUser(q, o)`
+   * — and there the reasoning collapses: the sweep matches `promptUser(` only,
+   * so it never inspects `ask(`Delete ${file}?`)` and the authorship question is
+   * not moved one frame out, it is dropped. So the arrow must be the value of a
+   * `promptUser` / `promptSecret` / `promptTabs` property, i.e. a callback
+   * being handed to an agent, whose own caller is the swept tool.
+   *
+   * ⚠⚠ "The value of that property" has to mean IMMEDIATELY, and the second
+   * version did not: it allowed any run of non-brace characters between the
+   * property name and the arrow, so one sibling property re-opened the exact
+   * hole — `{ promptUser: base, ask: (q) => agent.promptUser(q, o) }` passed.
+   * The test written to prove the narrowing passed too, because its fixture had
+   * no sibling. Hence the explicit prefix below: optional ternary test, optional
+   * `async`, then the parameter list. Two shapes in the tree need it
+   * (`spawn.ts`, `runtime-adapter.ts`) and both are `name ? (…) =>`.
+   *
+   * Anything else — an assignment `session.promptUser = (q) => …`, a typed
+   * `const cb: PromptUserFn = …` — is NOT accepted, deliberately: no such
+   * caller exists today, and if one appears it belongs in the exemption list
+   * with a reason, not in a widened pattern here.
+   */
+  function isForwarded(arg: string, before: string): boolean {
+    const first = arg.split(',')[0]!.trim();
+    if (!/^[A-Za-z_$][\w$]*$/.test(first)) return false;
+    // The nearest enclosing arrow — required to be a prompt-callback property's
+    // IMMEDIATE value, and required to call straight through: nothing
+    // statement-like may sit between its `=>` and this call, so a body that
+    // computes a new string first is not a forwarder however it names its locals.
+    const params =
+      /\b(?:promptUser|promptSecret|promptTabs)\s*:\s*(?:[\w$.!]+\s*\?\s*)?(?:async\s+)?\(([^()]*)\)\s*(?::\s*[^=;{]+)?=>\s*[^;{}]*$/
+        .exec(before)?.[1];
+    if (params === undefined) return false;
+    return params.split(',').map(p => p.trim().split(/[:?=]/)[0]!.trim())[0] === first;
   }
 
   it('classifies the argument shapes that were measured slipping through', () => {
@@ -207,6 +253,52 @@ describe('promptUser callers', () => {
     expect(classifyArg('`Ask about ${topic}?`, opts'), 'an untagged template').toBe('undeclared');
     // The accessor in session.ts, which is not a call at all:
     expect(classifyArg('fn: PromptUserFn | null) {')).toBe('declaration');
+  });
+
+  it('accepts a pass-through wrapper — and only a real one', () => {
+    // The wrapper spawn.ts builds so a child's prompt names the child. It writes
+    // no text; demanding a `pv` on a value it did not author would be a lie.
+    expect(classifyArg('q, opts, { ...origin, ...m })', 'promptUser: promptUser ? (q, opts, m) => promptUser('))
+      .toBe('declared');
+
+    // ⭐ The four ways the wrong rule would let real offenders through, each
+    // measured against a version that actually did rather than imagined:
+    expect(
+      classifyArg('agentText, opts)', 'promptUser: promptUser ? (q, opts, m) => promptUser('),
+      'a bare parameter that is NOT the one forwarded',
+    ).toBe('undeclared');
+    expect(
+      classifyArg('q, opts)', 'const q = `Ask about ${topic}?`;\n  await agent.promptUser('),
+      'a local that merely shares a parameter\'s name, with no arrow at all',
+    ).toBe('undeclared');
+    expect(
+      classifyArg('q, opts)', 'promptUser: (q, opts, m) => { const x = 1; return promptUser('),
+      'a body that does work first is not a forwarder, however it names its locals',
+    ).toBe('undeclared');
+    // ⭐⭐ The one the first version got wrong. A local helper looks exactly like
+    // a forwarder, but the sweep matches `promptUser(` only — it never inspects
+    // `ask(`Delete ${file}?`)`, so the authorship question is not moved one frame
+    // out, it is dropped. The exemption is therefore tied to the arrow being a
+    // prompt-CALLBACK, not merely an arrow.
+    expect(
+      classifyArg('q, o)', 'const ask = (q: string) => agent.promptUser('),
+      'a local helper is not a callback handed to an agent',
+    ).toBe('undeclared');
+    // ⭐⭐⭐ …and the one the SECOND version got wrong, which the case above could
+    // not see: with a sibling property in scope the local helper came back as a
+    // forwarder again, because "the value of a promptUser property" was matched
+    // loosely enough to skip over `base, ask:`. A fixture without the sibling
+    // passes either way — that is why it is here, next to the one it fooled.
+    expect(
+      classifyArg('q, o)', '{ promptUser: base, ask: (q) => agent.promptUser('),
+      'a sibling prompt-callback property must not launder the helper next to it',
+    ).toBe('undeclared');
+    // The two real shapes in the tree, so the narrowing cannot be tightened until
+    // it rejects the callers it exists to accept.
+    expect(classifyArg('q, opts, m)', 'promptUser: parent.parentPromptUser ? async (q, opts, m) => parent.parentPromptUser!('))
+      .toBe('declared');
+    // And a second parameter is not the forwarded one either.
+    expect(classifyArg('opts, q)', 'promptUser: promptUser ? (q, opts, m) => promptUser(')).toBe('undeclared');
   });
 
   it('sees every call form, including the optional one', () => {
@@ -269,7 +361,7 @@ describe('promptUser callers', () => {
       const code = stripCommentsAndStrings(source);
       for (const call of code.matchAll(promptUserCalls())) {
         const arg = code.slice(call.index + call[0].length);
-        if (classifyArg(arg) !== 'undeclared') continue;
+        if (classifyArg(arg, code.slice(0, call.index)) !== 'undeclared') continue;
         found.push(`${rel}:${source.slice(0, call.index).split(LF).length}`);
       }
     }

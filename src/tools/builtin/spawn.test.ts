@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { IAgent, ToolEntry, StreamHandler } from '../../types/index.js';
+import type { IAgent, ToolEntry, StreamHandler, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import type { RoleConfig } from '../../core/roles.js';
 
 // === Mocks ===
@@ -1648,15 +1648,32 @@ describe('spawn_agent tool', () => {
       );
 
       const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as {
-        promptUser: unknown;
-        promptSecret: unknown;
-        promptTabs: unknown;
+        promptUser: PromptUserFn;
+        promptSecret: PromptSecretFn;
+        promptTabs: PromptTabsFn;
       };
-      // All three callbacks must reach the child by reference so ask_user /
-      // ask_secret / ask_tabs invoked by the sub-agent surface to the same UI.
-      expect(ctorArg.promptUser).toBe(promptUser);
-      expect(ctorArg.promptSecret).toBe(promptSecret);
-      expect(ctorArg.promptTabs).toBe(promptTabs);
+      // All three must REACH the parent's channel so ask_user / ask_secret /
+      // ask_tabs invoked by the sub-agent surface to the same UI.
+      //
+      // This asserted reference identity until the callbacks started being
+      // wrapped to carry the child's name (`promptCallbacksWithOrigin`). Identity
+      // was always the weaker claim: it passes for a wrapper that never calls
+      // through, and fails for one that does. Reachability is what the child
+      // actually needs, so that is what is pinned — and the arguments are pinned
+      // with it, because a wrapper that dropped the options would be invisible to
+      // a bare "was called".
+      promptUser.mockResolvedValue('Yes');
+      promptSecret.mockResolvedValue('saved');
+      promptTabs.mockResolvedValue(['picked']);
+      // The ANSWER has to come back, not just the call go out. A wrapper with a
+      // block body that forgets its `return` calls through perfectly and hands
+      // every consent decision back as undefined — invisible to "was called".
+      await expect(ctorArg.promptUser('Proceed?', ['Yes', 'No'])).resolves.toBe('Yes');
+      await expect(ctorArg.promptSecret('STRIPE_KEY', 'Paste it', 'api_key')).resolves.toBe('saved');
+      await expect(ctorArg.promptTabs([{ question: 'Which one?' }])).resolves.toEqual(['picked']);
+      expect(promptUser).toHaveBeenCalledWith('Proceed?', ['Yes', 'No'], expect.anything());
+      expect(promptSecret).toHaveBeenCalledWith('STRIPE_KEY', 'Paste it', 'api_key', expect.anything());
+      expect(promptTabs).toHaveBeenCalledWith([{ question: 'Which one?' }], expect.anything());
     });
 
     it('a spawned child can raise a credential prompt of its own', async () => {
@@ -1667,8 +1684,8 @@ describe('spawn_agent tool', () => {
       // What this asserts is the child's TOOL LIST, because that is the only
       // half a parent-side test cannot already prove. An earlier version ran
       // `askSecretTool.handler` against a stub holding `ctorArg.promptSecret`
-      // and called that "the child path" — but `:1658` already pins that the
-      // callback IS the parent's, so that stub was `makeAgent({ promptSecret })`
+      // and called that "the child path" — but the callback's reachability is
+      // pinned by the test above, so that stub was `makeAgent({ promptSecret })`
       // by definition and the whole thing re-ran the parent test through a
       // longer route. It could not have failed for a child-specific reason.
       // This one fails if `ask_secret` ever lands in SPAWN_EXCLUDED or is
@@ -1690,10 +1707,11 @@ describe('spawn_agent tool', () => {
       );
 
       const ctorArg = vi.mocked(MockAgent).mock.calls[0]![0] as {
-        promptSecret: unknown;
+        promptSecret: PromptSecretFn;
         tools: ToolEntry<unknown>[];
       };
-      expect(ctorArg.promptSecret, 'the child must get the parent callback').toBe(promptSecret);
+      await ctorArg.promptSecret('STRIPE_KEY', 'Paste it');
+      expect(promptSecret, 'the child must reach the parent channel').toHaveBeenCalled();
       const names = ctorArg.tools.map((t) => t.definition.name);
       expect(names, 'a child that cannot ask is a trigger this row does not cover').toContain(
         'ask_secret',
@@ -3085,6 +3103,119 @@ describe('spawn_agent tool', () => {
       const bash = isDangerousDetailed('bash', { command: 'rm -rf /tmp/lynox-probe' }, 'guided', undefined, undefined, undefined);
       expect(bash).not.toBeNull();
       expect(bash!.payload).toBeUndefined();
+    });
+  });
+
+  /**
+   * A confirmation dialog is answered on what it shows, and from a child what it
+   * shows is a question with no visible asker. The pipeline path has stamped its
+   * origin since the workflow spawners started wrapping the callbacks; these
+   * cover the OTHER way a sub-agent comes into being.
+   *
+   * They drive the real `spawn_agent` handler and take the callback the real
+   * wiring built, rather than calling the wrapper directly — the mocked class is
+   * `Agent` itself, exactly as every other test in this file mocks it.
+   */
+  describe('prompt origin — a child names itself to the dialog', () => {
+    /** The child's AgentConfig as spawn.ts actually built it. */
+    async function childConfig(index = 0): Promise<{
+      promptUser?: PromptUserFn | undefined;
+      promptSecret?: PromptSecretFn | undefined;
+      promptTabs?: PromptTabsFn | undefined;
+    }> {
+      const { Agent: MockAgent } = await import('../../core/agent.js');
+      return vi.mocked(MockAgent).mock.calls[index]![0] as {
+        promptUser?: PromptUserFn | undefined;
+        promptSecret?: PromptSecretFn | undefined;
+        promptTabs?: PromptTabsFn | undefined;
+      };
+    }
+
+    it('stamps the child name and task onto a prompt the child raises', async () => {
+      const promptUser = vi.fn<PromptUserFn>().mockResolvedValue('Merge');
+      const agent = makeAgent({ promptUser });
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'inbox-triage', task: 'Fold duplicate contacts' }] },
+        agent,
+      );
+
+      // The parent's OWN prompt carries nothing — the cause of that one is the
+      // message directly above it, and an "asked by" line there is noise.
+      await agent.promptUser!('Merge "Ada" into "Dr. Ada Lovelace"?', ['Merge', 'Cancel']);
+      expect(promptUser.mock.calls[0]![2]).toBeUndefined();
+
+      // The child's does.
+      await (await childConfig()).promptUser!('Merge "Ada" into "Dr. Ada Lovelace"?', ['Merge', 'Cancel']);
+      expect(promptUser.mock.calls[1]![2]).toMatchObject({
+        subagent: true,
+        subagentName: 'inbox-triage',
+        subagentTask: 'Fold duplicate contacts',
+      });
+      // Same question text both times: the dialog can only tell the two apart by
+      // the origin, which is the entire point of shipping one.
+      expect(promptUser.mock.calls[0]![0]).toBe(promptUser.mock.calls[1]![0]);
+    });
+
+    it('⭐ stamps the FACT even when the child is named so it cleans away', async () => {
+      // The disclosure must not be the parent's to delete. A name of one
+      // zero-width space passes `validateSpawnInput` (non-empty, no C0) and the
+      // client's `clean()` reduces it to '' — so a renderer keyed on the NAME
+      // shows nothing at all for exactly the parent it exists to warn about.
+      const promptUser = vi.fn<PromptUserFn>().mockResolvedValue('Yes');
+      await spawnAgentTool.handler(
+        { agents: [{ name: '​', task: 'Fold duplicate contacts' }] },
+        makeAgent({ promptUser }),
+      );
+      await (await childConfig()).promptUser!('Merge?', ['Merge', 'Cancel']);
+      expect(promptUser.mock.calls[0]![2]!.subagent, 'the flag is the engine\'s, not the spec\'s').toBe(true);
+    });
+
+    it('stamps promptSecret and promptTabs too, not only promptUser', async () => {
+      const promptSecret = vi.fn().mockResolvedValue('saved');
+      const promptTabs = vi.fn().mockResolvedValue([]);
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'connector', task: 'Wire the Stripe key' }] },
+        makeAgent({ promptSecret, promptTabs }),
+      );
+
+      const child = await childConfig();
+      await child.promptSecret!('STRIPE_KEY', 'Paste the key');
+      await child.promptTabs!([{ question: 'Which account?' }]);
+      expect(promptSecret.mock.calls[0]![3]).toMatchObject({ subagentName: 'connector' });
+      expect(promptTabs.mock.calls[0]![1]).toMatchObject({ subagentName: 'connector' });
+    });
+
+    it('leaves each callback UNDEFINED when the parent has none', async () => {
+      // The load-bearing half. Tools refuse when `agent.promptUser` is absent —
+      // `subjects_merge` fails closed on `autonomy === 'autonomous' || !agent.promptUser`
+      // — so a wrapper built unconditionally would hand an autonomous child a
+      // truthy callback, turn every such refusal into a call on `undefined`, and
+      // convert "cannot run unattended" into a crash or a silent wait.
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'headless', task: 'Summarise' }] },
+        makeAgent(),                      // no prompt callbacks at all
+      );
+
+      const child = await childConfig();
+      expect(child.promptUser).toBeUndefined();
+      expect(child.promptSecret).toBeUndefined();
+      expect(child.promptTabs).toBeUndefined();
+    });
+
+    it('lets a caller-supplied meta win, so a step inside a child keeps its own', async () => {
+      const promptUser = vi.fn<PromptUserFn>().mockResolvedValue('Yes');
+      await spawnAgentTool.handler(
+        { agents: [{ name: 'outer', task: 'Run the pipeline' }] },
+        makeAgent({ promptUser }),
+      );
+      await (await childConfig()).promptUser!('Proceed?', ['Yes'], { subagentName: 'inner', stepId: 'load' });
+
+      const meta = promptUser.mock.calls[0]![2]!;
+      expect(meta.subagentName, 'the nearer wrapper must not overwrite the nearer caller').toBe('inner');
+      // And the outer wrapper's other field survives rather than being replaced
+      // wholesale — a child inside a workflow step has to show both.
+      expect(meta.subagentTask).toBe('Run the pipeline');
+      expect(meta.stepId).toBe('load');
     });
   });
 });

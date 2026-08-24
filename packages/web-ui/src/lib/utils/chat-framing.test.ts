@@ -85,11 +85,11 @@ describe('what a framing field may not carry', () => {
 		// expressed what is true here: the two agree on everything that forges,
 		// and differ on LRM/RLM alone, on purpose.
 		for (const cp of MARKS) {
-			const origin = toPromptOrigin(`before${String.fromCodePoint(cp)}after`, undefined, undefined);
+			const origin = toPromptOrigin({ workflowName: `before${String.fromCodePoint(cp)}after` });
 			expect(origin?.workflowName, `prompt-origin kept U+${cp.toString(16)}`).toBe('beforeafter');
 		}
 		for (const cp of FORGING) {
-			const origin = toPromptOrigin(`before${String.fromCodePoint(cp)}after`, undefined, undefined);
+			const origin = toPromptOrigin({ workflowName: `before${String.fromCodePoint(cp)}after` });
 			expect(origin?.workflowName, `prompt-origin kept U+${cp.toString(16)}`).toBe('beforeafter');
 		}
 	});
