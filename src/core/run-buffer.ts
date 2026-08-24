@@ -8,13 +8,13 @@
  * it, the run is marked `interrupted`, and the client shows a Retry — there is
  * no SQLite event tail.
  *
- * Per-run, the buffer is a seq-numbered ring of `StreamEvent`s (the rendered
- * event stream — `text`/`tool_call`/`tool_result`/`spawn*`/…), fanned out to N
- * ephemeral subscribers. The `GET /api/runs/:runId/stream?since=<seq>` endpoint
- * replays events newer than `since`, then live-tails new appends.
+ * Per-run, the buffer is a seq-numbered ring of `EmittedStreamEvent`s (the
+ * rendered event stream — `text`/`tool_call`/`tool_result`/`spawn*`/…), fanned
+ * out to N ephemeral subscribers. The `GET /api/runs/:runId/stream?since=<seq>`
+ * endpoint replays events newer than `since`, then live-tails new appends.
  *
- * Secret safety (S1, D-S1): `append` is typed to `StreamEvent`, and
- * `secret_prompt`/`ask_secret` prompts are NOT `StreamEvent`s — they travel a
+ * Secret safety (S1, D-S1): `append` is typed to the event union, and
+ * `secret_prompt`/`ask_secret` prompts are NOT part of it — they travel a
  * separate value-free handler path and can never enter this buffer. The
  * type system is the guard; a unit test asserts the invariant holds.
  */
