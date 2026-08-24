@@ -12,6 +12,14 @@ export interface PromptOrigin {
 	workflowName?: string;
 	stepId?: string;
 	stepTask?: string;
+	/**
+	 * The spawned sub-agent that raised the prompt, and its task. BOTH are
+	 * written by the model that spawned it — by the very agent this line exists
+	 * to make the user look twice at — so neither may carry the warning. They
+	 * are rendered as values inside a frame the renderer owns.
+	 */
+	subagentName?: string;
+	subagentTask?: string;
 }
 
 /**
@@ -55,32 +63,63 @@ function clean(value: string, max: number): string {
 }
 
 /**
- * Build an origin from three loosely-typed fields, or `undefined` when none of
- * them carries anything. Empty counts as absent: a prompt with no origin must
- * render NO origin line, and an empty frame is worse than none — it claims a
- * workflow asked and then fails to name it. A value that is nothing BUT control
- * characters cleans down to empty and is therefore absent too.
+ * Every origin field in ONE table: its wire name and how far it may run.
+ *
+ * `satisfies Record<keyof PromptOrigin, …>` is exhaustive, so a field added to
+ * the interface and not here does not compile — and both readers below derive
+ * from it, so the live-event path and the resume path cannot come to know
+ * different sets of fields. They did not before; they would have the first time
+ * someone added a field to one of two hand-written argument lists.
  */
-export function toPromptOrigin(workflowName: unknown, stepId: unknown, stepTask: unknown): PromptOrigin | undefined {
-	const name = typeof workflowName === 'string' ? clean(workflowName, MAX_LABEL) : '';
-	const step = typeof stepId === 'string' ? clean(stepId, MAX_LABEL) : '';
-	const task = typeof stepTask === 'string' ? clean(stepTask, MAX_TASK) : '';
-	if (!name && !step && !task) return undefined;
+const ORIGIN_FIELDS = {
+	workflowName: { wire: 'workflow_name', max: MAX_LABEL },
+	stepId: { wire: 'step_id', max: MAX_LABEL },
+	stepTask: { wire: 'step_task', max: MAX_TASK },
+	subagentName: { wire: 'subagent_name', max: MAX_LABEL },
+	subagentTask: { wire: 'subagent_task', max: MAX_TASK },
+} satisfies Record<keyof PromptOrigin, { wire: string; max: number }>;
+
+const ORIGIN_KEYS = Object.keys(ORIGIN_FIELDS) as (keyof PromptOrigin)[];
+
+/**
+ * Build an origin from loosely-typed fields, or `undefined` when none of them
+ * carries anything. Empty counts as absent: a prompt with no origin must render
+ * NO origin line, and an empty frame is worse than none — it claims someone
+ * asked and then fails to name them. A value that is nothing BUT control
+ * characters cleans down to empty and is therefore absent too.
+ *
+ * Takes a record rather than one argument per field so a caller cannot pass
+ * some of them and silently drop the rest — the failure a positional list
+ * invites the moment a sixth field arrives.
+ */
+export function toPromptOrigin(raw: Partial<Record<keyof PromptOrigin, unknown>>): PromptOrigin | undefined {
 	const o: PromptOrigin = {};
-	if (name) o.workflowName = name;
-	if (step) o.stepId = step;
-	if (task) o.stepTask = task;
-	return o;
+	let present = false;
+	for (const key of ORIGIN_KEYS) {
+		const value = raw[key];
+		if (typeof value !== 'string') continue;
+		const cleaned = clean(value, ORIGIN_FIELDS[key].max);
+		if (!cleaned) continue;
+		o[key] = cleaned;
+		present = true;
+	}
+	return present ? o : undefined;
+}
+
+/** Read one shape into the other, by a key function over the same table. */
+function pick(data: Record<string, unknown>, keyOf: (key: keyof PromptOrigin) => string): PromptOrigin | undefined {
+	const raw: Partial<Record<keyof PromptOrigin, unknown>> = {};
+	for (const key of ORIGIN_KEYS) raw[key] = data[keyOf(key)];
+	return toPromptOrigin(raw);
 }
 
 /** Origin off a live SSE prompt event — flat, snake_case wire fields. */
 export function originFromEvent(data: Record<string, unknown>): PromptOrigin | undefined {
-	return toPromptOrigin(data['workflow_name'], data['step_id'], data['step_task']);
+	return pick(data, key => ORIGIN_FIELDS[key].wire);
 }
 
 /** Origin off `GET /pending-prompt` — the nested object persisted in v52. */
 export function originFromPending(raw: unknown): PromptOrigin | undefined {
 	if (typeof raw !== 'object' || raw === null) return undefined;
-	const o = raw as Record<string, unknown>;
-	return toPromptOrigin(o['workflowName'], o['stepId'], o['stepTask']);
+	return pick(raw as Record<string, unknown>, key => key);
 }

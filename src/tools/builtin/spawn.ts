@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent } from '../../types/index.js';
+import type { ToolEntry, SpawnSpec, IAgent, ModelTier, StreamHandler, IsolationConfig, IsolationLevel, CostGuardConfig, ModelProfile, ProviderConfigSnapshot, LynoxUserConfig, LLMProvider, SpawnedSubAgent, PromptMeta, PromptUserFn, PromptSecretFn, PromptTabsFn } from '../../types/index.js';
 import { getDefaultMaxTokens, modelCapability, modelIdExceedsMaxTier, isBlockedModelId } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { getActiveProvider } from '../../core/llm-client.js';
@@ -470,6 +470,45 @@ function assertSpawnRoutingPermitted(spec: SpawnSpec, userConfig: LynoxUserConfi
   }
 }
 
+/**
+ * The parent's prompt callbacks, wrapped so every prompt a child raises names
+ * the child as its cause.
+ *
+ * WHY A WRAPPER AND NOT A SENTENCE IN THE TOOL. A consent dialog is answered on
+ * what it shows, and what it shows is "Allow / Deny" over a question whose
+ * asker the user cannot see. From a child the asker is not the person's own
+ * turn, and that single circumstance is what would make an otherwise ordinary
+ * request suspicious. Fourteen call sites raise such dialogs; this is the one
+ * place all fourteen pass through.
+ *
+ * WHY THE ORIGIN CANNOT CARRY THE WARNING. `spec.name` and `spec.task` are
+ * written by the parent model — the same model an injected instruction is
+ * steering when this matters. A parent free to name its child names it
+ * "Main assistant". So these two travel as VALUES: the renderer frames them
+ * ("A sub-agent asked"), and that frame is true whatever the name claims.
+ *
+ * Merge order is `{...ours, ...m}`, matching `buildSubAgentPromptCallbacks`:
+ * a caller-supplied meta wins, and in a nested spawn the DEEPEST wrapper is the
+ * innermost caller, so the immediate asker ends up named rather than the
+ * outermost one. A child inside a pipeline step keeps both sets — the step
+ * fields come from the parent's own wrapper, one frame further out.
+ */
+function promptCallbacksWithOrigin(
+  parent: IAgent,
+  spec: SpawnSpec,
+): { promptUser?: PromptUserFn | undefined; promptSecret?: PromptSecretFn | undefined; promptTabs?: PromptTabsFn | undefined } {
+  const origin: PromptMeta = { subagentName: spec.name, subagentTask: spec.task };
+  const { promptUser, promptSecret, promptTabs } = parent;
+  return {
+    // Each stays undefined when the parent had none — an autonomous or headless
+    // parent has no channel, and manufacturing a callback here would turn every
+    // tool's "no interactive channel" refusal into a hang.
+    promptUser: promptUser ? (q, opts, m) => promptUser(q, opts, { ...origin, ...m }) : undefined,
+    promptSecret: promptSecret ? (n, p, k, m) => promptSecret(n, p, k, { ...origin, ...m }) : undefined,
+    promptTabs: promptTabs ? (qs, m) => promptTabs(qs, { ...origin, ...m }) : undefined,
+  };
+}
+
 async function executeThinker(
   spec: SpawnSpec,
   parentAgent: IAgent,
@@ -678,9 +717,16 @@ async function executeThinker(
     // `ask_secret`/`ask_tabs` invoked by the child surfaces to the same UI
     // the parent uses. Without these, child tool invocations that need user
     // input silently fail (the prompt callback is undefined).
-    promptUser: parentAgent.promptUser,
-    promptSecret: parentAgent.promptSecret,
-    promptTabs: parentAgent.promptTabs,
+    //
+    // WRAPPED, not passed through: a prompt raised inside a child otherwise
+    // arrives at the dialog indistinguishable from one the user's own turn
+    // raised. The pipeline path has stamped its origin since the workflow
+    // spawners started wrapping (`buildSubAgentPromptCallbacks`); this is the
+    // same treatment for the OTHER way a sub-agent comes into being. It covers
+    // every consent surface at once — there are fourteen `promptUser` call
+    // sites across thirteen modules, and putting the sentence in any one tool
+    // would leave the other thirteen exactly as they are.
+    ...promptCallbacksWithOrigin(parentAgent, spec),
     // T2-X1 part 4: pass the pre-minted runId so the constructor stamps it
     // onto the child and the child's downstream code (memory writes, tool-call
     // recording) can attribute work to this run.

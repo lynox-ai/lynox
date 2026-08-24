@@ -863,6 +863,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	// reads worse than the half that is true.
 	'chat.prompt_origin_workflow': { de: 'Workflow „{name}“', en: 'Workflow "{name}"' },
 	'chat.prompt_origin_step': { de: 'Schritt „{id}“', en: 'Step "{id}"' },
+	// Deliberately WITHOUT a {name} placeholder, unlike the two above. The
+	// sub-agent's name is written by the model that spawned it, so the claim and
+	// the name must not share a string: the claim is the only part of this line
+	// the user can rely on, and it has to stay true even when the name says
+	// something else entirely.
+	'chat.prompt_origin_subagent': { de: 'Ein Unter-Agent fragt', en: 'A sub-agent is asking' },
 	'chat.batch_mode': { de: 'Fragen beantworten', en: 'Answer questions' },
 
 	// Pipeline status v2 — prompt anchor (sticky bar above the chat input)

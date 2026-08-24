@@ -185,14 +185,41 @@ describe('promptUser callers', () => {
    * logic nothing exercises is the same defect it exists to prevent, one level
    * up. The cases below are the shapes that were measured slipping through.
    */
-  function classifyArg(arg: string): 'declared' | 'declaration' | 'undeclared' {
+  function classifyArg(arg: string, before = ''): 'declared' | 'declaration' | 'undeclared' {
     const a = arg.trimStart();
     if (a.startsWith('pv`') || a.startsWith('promptValue(')) return 'declared';
     if ((a.startsWith('`') || a.startsWith("'") || a.startsWith('"')) && !a.slice(0, 200).includes('${')) return 'declared';
     // A declaration always has the COLON; a ternary never does.
     if (/^[A-Za-z_$][\w$]*\??\s*:/.test(a)) return 'declaration';
     if (a.startsWith(')')) return 'declaration';
+    if (isForwarded(a, before)) return 'declared';
     return 'undeclared';
+  }
+
+  /**
+   * A pass-through: `(q, opts, m) => promptUser(q, opts, {…})`.
+   *
+   * The rule this guard enforces is "say who wrote this text". A wrapper writes
+   * none — the argument is byte-identically the one its own caller passed, and
+   * that caller is already swept by the same rule. Flagging it would demand a
+   * `pv` on a value nobody here authored, which is not a declaration but a lie.
+   *
+   * What it does NOT do is follow the value: it moves the authorship question
+   * one frame out rather than answering it. That is sound only because the frame
+   * it moves to is inside this same sweep. A wrapper around a callback that
+   * arrived from outside `src/` would be accepted on a promise nothing checks —
+   * there is no such caller today, and if one appears it belongs in the
+   * exemption list with a reason, not here.
+   */
+  function isForwarded(arg: string, before: string): boolean {
+    const first = arg.split(',')[0]!.trim();
+    if (!/^[A-Za-z_$][\w$]*$/.test(first)) return false;
+    // The nearest enclosing arrow, and only when nothing statement-like sits
+    // between its `=>` and this call — so a body that computes a new string and
+    // then prompts is NOT a forwarder, even if a local shares a parameter's name.
+    const params = /\(([^()]*)\)\s*(?::\s*[^=;{]+)?=>\s*[^;{}]*$/.exec(before)?.[1];
+    if (params === undefined) return false;
+    return params.split(',').map(p => p.trim().split(/[:?=]/)[0]!.trim())[0] === first;
   }
 
   it('classifies the argument shapes that were measured slipping through', () => {
@@ -207,6 +234,30 @@ describe('promptUser callers', () => {
     expect(classifyArg('`Ask about ${topic}?`, opts'), 'an untagged template').toBe('undeclared');
     // The accessor in session.ts, which is not a call at all:
     expect(classifyArg('fn: PromptUserFn | null) {')).toBe('declaration');
+  });
+
+  it('accepts a pass-through wrapper — and only a real one', () => {
+    // The wrapper spawn.ts builds so a child's prompt names the child. It writes
+    // no text; demanding a `pv` on a value it did not author would be a lie.
+    expect(classifyArg('q, opts, { ...origin, ...m })', 'promptUser ? (q, opts, m) => promptUser('))
+      .toBe('declared');
+
+    // ⭐ The three ways the wrong rule would let real offenders through, each
+    // measured against the version above rather than imagined:
+    expect(
+      classifyArg('agentText, opts)', 'promptUser ? (q, opts, m) => promptUser('),
+      'a bare parameter that is NOT the one forwarded',
+    ).toBe('undeclared');
+    expect(
+      classifyArg('q, opts)', 'const q = `Ask about ${topic}?`;\n  await agent.promptUser('),
+      'a local that merely shares a parameter\'s name, with no arrow at all',
+    ).toBe('undeclared');
+    expect(
+      classifyArg('q, opts)', '(q, opts, m) => { const x = 1; return agent.promptUser('),
+      'a body that does work first is not a forwarder, however it names its locals',
+    ).toBe('undeclared');
+    // And a second parameter is not the forwarded one either.
+    expect(classifyArg('opts, q)', 'promptUser ? (q, opts, m) => promptUser(')).toBe('undeclared');
   });
 
   it('sees every call form, including the optional one', () => {
@@ -269,7 +320,7 @@ describe('promptUser callers', () => {
       const code = stripCommentsAndStrings(source);
       for (const call of code.matchAll(promptUserCalls())) {
         const arg = code.slice(call.index + call[0].length);
-        if (classifyArg(arg) !== 'undeclared') continue;
+        if (classifyArg(arg, code.slice(0, call.index)) !== 'undeclared') continue;
         found.push(`${rel}:${source.slice(0, call.index).split(LF).length}`);
       }
     }

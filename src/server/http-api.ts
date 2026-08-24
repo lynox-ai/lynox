@@ -49,7 +49,7 @@ import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
-import { promptOriginOf, parseOriginJson } from '../core/prompt-store.js';
+import { promptOriginOf, parseOriginJson, originWireFields } from '../core/prompt-store.js';
 import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
@@ -2529,7 +2529,7 @@ export class LynoxHTTPApi {
             // Omitted when there is nothing to distinguish (an all-frame
             // prompt), so the payload does not grow for un-migrated callers.
             segments: segments.some((s: PromptSegment) => s.kind === 'value') ? segments : undefined,
-            step_id: meta?.stepId, step_task: meta?.stepTask, workflow_name: meta?.workflowName,
+            ...originWireFields(meta),
             // Multi-select pills (toggle several + Send). The client posts the
             // chosen labels back as a JSON array string via the normal /reply;
             // the ask_user tool parses it. A reconnect mid-prompt (which loads
@@ -2562,7 +2562,7 @@ export class LynoxHTTPApi {
           if (!aborted && !res.writableEnded) {
             const data = JSON.stringify({
               promptId, questions, timeoutMs: PROMPT_TIMEOUT_MS,
-              step_id: meta?.stepId, step_task: meta?.stepTask, workflow_name: meta?.workflowName,
+              ...originWireFields(meta),
             });
             res.write(`event: prompt_tabs\ndata: ${data}\n\n`);
           }
@@ -2630,7 +2630,7 @@ export class LynoxHTTPApi {
         if (!aborted && !res.writableEnded) {
           const data = JSON.stringify({
             promptId, name, prompt, key_type: keyType,
-            step_id: meta?.stepId, step_task: meta?.stepTask, workflow_name: meta?.workflowName,
+            ...originWireFields(meta),
           });
           res.write(`event: secret_prompt\ndata: ${data}\n\n`);
         }
@@ -2670,7 +2670,7 @@ export class LynoxHTTPApi {
         if (!aborted && !res.writableEnded) {
           const payload = JSON.stringify({
             promptId, ...data,
-            step_id: meta?.stepId, step_task: meta?.stepTask, workflow_name: meta?.workflowName,
+            ...originWireFields(meta),
           });
           res.write(`event: mail_connect_prompt\ndata: ${payload}\n\n`);
         }

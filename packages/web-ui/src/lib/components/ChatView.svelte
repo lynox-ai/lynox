@@ -2186,7 +2186,7 @@
      the main agent has its cause in the message directly above, and a redundant
      "asked by" line there would be noise. -->
 {#snippet promptOrigin(origin: PromptOrigin | undefined)}
-	{#if origin && (origin.workflowName || origin.stepId)}
+	{#if origin && (origin.workflowName || origin.stepId || origin.subagentName)}
 		<!-- Workflow and step are SEPARATE elements with a real separator element
 		     between them, not one joined string. Both names come from a manifest
 		     a model may have written; a joined string lets a name containing the
@@ -2194,20 +2194,48 @@
 		     asked. Structure it cannot reach beats punctuation it can imitate.
 		     `toPromptOrigin` bounds the length and strips control/bidi chars. -->
 		<div class="text-[11px] text-text-subtle">
-			<div class="flex items-start gap-1.5">
-				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
-					<path stroke-linecap="round" stroke-linejoin="round" d="M4 6h6a2 2 0 012 2v8a2 2 0 002 2h4m0 0l-3-3m3 3l-3 3M4 6V4m0 2v2" />
-				</svg>
-				<span class="min-w-0 [overflow-wrap:anywhere]">
-					{#if origin.workflowName}<span>{tf('chat.prompt_origin_workflow', { name: origin.workflowName })}</span>{/if}
-					{#if origin.workflowName && origin.stepId}<span class="mx-1" aria-hidden="true">·</span>{/if}
-					{#if origin.stepId}<span>{tf('chat.prompt_origin_step', { id: origin.stepId })}</span>{/if}
-				</span>
-			</div>
-			{#if origin.stepTask}
-				<!-- The readable half. It was hover-only `title` first, which is
-				     invisible on touch — where most of these prompts are answered. -->
-				<p class="mt-0.5 ml-5 text-text-subtle/80 [overflow-wrap:anywhere]">{origin.stepTask}</p>
+			{#if origin.subagentName}
+				<!-- The sub-agent row comes FIRST: in a step that spawned, the child
+				     is the immediate asker and the step is the context around it.
+
+				     The frame here takes NO interpolation, unlike the workflow row
+				     below. A sub-agent's name is chosen by the parent model — the
+				     one an injected instruction is steering when this line matters —
+				     so a parent free to name its child names it "Main assistant".
+				     Keeping the claim and the name in separate strings means the
+				     claim stays true whatever the name says: the user reads "a
+				     sub-agent asked" and then a name, never a name pretending to be
+				     the claim. -->
+				<div class="flex items-start gap-1.5">
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 4a4 4 0 100 8 4 4 0 000-8zM4 20a8 8 0 0116 0" />
+					</svg>
+					<span class="min-w-0 [overflow-wrap:anywhere]">
+						<span>{t('chat.prompt_origin_subagent')}</span>
+						<span class="mx-1" aria-hidden="true">·</span>
+						<span>{origin.subagentName}</span>
+					</span>
+				</div>
+				{#if origin.subagentTask}
+					<p class="mt-0.5 ml-5 text-text-subtle/80 [overflow-wrap:anywhere]">{origin.subagentTask}</p>
+				{/if}
+			{/if}
+			{#if origin.workflowName || origin.stepId}
+				<div class="flex items-start gap-1.5" class:mt-0.5={origin.subagentName}>
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M4 6h6a2 2 0 012 2v8a2 2 0 002 2h4m0 0l-3-3m3 3l-3 3M4 6V4m0 2v2" />
+					</svg>
+					<span class="min-w-0 [overflow-wrap:anywhere]">
+						{#if origin.workflowName}<span>{tf('chat.prompt_origin_workflow', { name: origin.workflowName })}</span>{/if}
+						{#if origin.workflowName && origin.stepId}<span class="mx-1" aria-hidden="true">·</span>{/if}
+						{#if origin.stepId}<span>{tf('chat.prompt_origin_step', { id: origin.stepId })}</span>{/if}
+					</span>
+				</div>
+				{#if origin.stepTask}
+					<!-- The readable half. It was hover-only `title` first, which is
+					     invisible on touch — where most of these prompts are answered. -->
+					<p class="mt-0.5 ml-5 text-text-subtle/80 [overflow-wrap:anywhere]">{origin.stepTask}</p>
+				{/if}
 			{/if}
 		</div>
 	{/if}

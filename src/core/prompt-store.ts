@@ -95,21 +95,65 @@ function isOnboardingBasicsPayload(payloadJson: string | null): boolean {
 }
 
 /**
+ * The origin fields, in ONE place, welded to the type.
+ *
+ * `Record<keyof PromptOrigin, true>` is exhaustive, so a field added to
+ * {@link PromptOrigin} and not here is a COMPILE error rather than a field that
+ * persists and never reads back — which is what a second hand-written list
+ * would eventually produce. The two functions below both derive from this, so
+ * the write side and the read side cannot know different sets.
+ */
+const ORIGIN_FIELD_SET: Record<keyof PromptOrigin, true> = {
+  workflowName: true, stepId: true, stepTask: true, subagentName: true, subagentTask: true,
+};
+const ORIGIN_FIELDS = Object.keys(ORIGIN_FIELD_SET) as (keyof PromptOrigin)[];
+
+/**
  * Narrow a `PromptMeta` to the origin fields worth persisting, or `undefined`
- * when the prompt has no origin. Takes the whole meta rather than three
- * arguments on purpose: a call site cannot pass two of the three fields and
- * silently drop the workflow name.
+ * when the prompt has no origin. Takes the whole meta rather than one argument
+ * per field on purpose: a call site cannot pass some of them and silently drop
+ * the workflow name.
  */
 export function promptOriginOf(meta: PromptMeta | undefined): PromptOrigin | undefined {
   if (!meta) return undefined;
   // Empty counts as absent, matching the client-side parser. An `undefined`-vs-
   // `''` split between the two would persist `{"workflowName":""}` here and then
   // render nothing there — the row would claim an origin the dialog denies.
-  const workflowName = meta.workflowName || undefined;
-  const stepId = meta.stepId || undefined;
-  const stepTask = meta.stepTask || undefined;
-  if (workflowName === undefined && stepId === undefined && stepTask === undefined) return undefined;
-  return { workflowName, stepId, stepTask };
+  const out: PromptOrigin = {};
+  let present = false;
+  for (const field of ORIGIN_FIELDS) {
+    const value = meta[field] || undefined;
+    if (value !== undefined) { out[field] = value; present = true; }
+  }
+  return present ? out : undefined;
+}
+
+/**
+ * The wire name of each origin field, welded the same way — a field with no
+ * name here does not compile. The SSE prompt events are flat and snake_case
+ * (the resume path in contrast ships the nested object and needs no mapping).
+ */
+const ORIGIN_WIRE_NAMES: Record<keyof PromptOrigin, string> = {
+  workflowName: 'workflow_name',
+  stepId: 'step_id',
+  stepTask: 'step_task',
+  subagentName: 'subagent_name',
+  subagentTask: 'subagent_task',
+};
+
+/**
+ * The origin as an SSE prompt event carries it.
+ *
+ * Four events used to spread these fields by hand, which is four places to
+ * forget one — and they read the meta RAW while the database row went through
+ * `promptOriginOf`, so an empty string was absent in the row and present on the
+ * wire. One derivation for both ends that.
+ */
+export function originWireFields(meta: PromptMeta | undefined): Record<string, string | undefined> {
+  const origin = promptOriginOf(meta);
+  const out: Record<string, string | undefined> = {};
+  for (const field of ORIGIN_FIELDS) out[ORIGIN_WIRE_NAMES[field]] = origin?.[field];
+  return out;
 }
 
 /**
@@ -126,11 +170,12 @@ export function parseOriginJson(raw: string | null): PromptOrigin | undefined {
     // whose removal changes no output is not a guard — it is an untestable
     // branch that makes the function look more careful than it is.
     const o = JSON.parse(raw) as Record<string, unknown>;
-    return promptOriginOf({
-      workflowName: typeof o['workflowName'] === 'string' ? o['workflowName'] : undefined,
-      stepId: typeof o['stepId'] === 'string' ? o['stepId'] : undefined,
-      stepTask: typeof o['stepTask'] === 'string' ? o['stepTask'] : undefined,
-    });
+    const meta: PromptMeta = {};
+    for (const field of ORIGIN_FIELDS) {
+      const value = o[field];
+      if (typeof value === 'string') meta[field] = value;
+    }
+    return promptOriginOf(meta);
   } catch {
     return undefined;
   }

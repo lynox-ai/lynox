@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
-import { PromptStore, PromptConflictError, promptOriginOf, parseOriginJson } from './prompt-store.js';
+import { PromptStore, PromptConflictError, promptOriginOf, parseOriginJson, originWireFields } from './prompt-store.js';
 import { RunHistory } from './run-history.js';
 
 /** Build a fresh SQLite instance with just the pending_prompts schema the
@@ -471,9 +471,20 @@ describe('PromptStore against the real migrated schema', () => {
 });
 
 describe('promptOriginOf', () => {
-  it('narrows a full meta to exactly the three origin fields', () => {
-    expect(promptOriginOf({ workflowName: 'W', stepId: 's', stepTask: 't', multiSelect: true }))
-      .toEqual({ workflowName: 'W', stepId: 's', stepTask: 't' });
+  it('narrows a full meta to the origin fields and nothing else', () => {
+    expect(promptOriginOf({
+      workflowName: 'W', stepId: 's', stepTask: 't',
+      subagentName: 'triage', subagentTask: 'Fold dupes',
+      multiSelect: true,
+    })).toEqual({
+      workflowName: 'W', stepId: 's', stepTask: 't',
+      subagentName: 'triage', subagentTask: 'Fold dupes',
+    });
+  });
+
+  it('survives on a sub-agent alone — a spawn outside any workflow has no step', () => {
+    expect(promptOriginOf({ subagentName: 'triage', subagentTask: 'Fold dupes' }))
+      .toEqual({ subagentName: 'triage', subagentTask: 'Fold dupes' });
   });
 
   it('is undefined when the meta carries no origin — multiSelect alone is not one', () => {
@@ -527,5 +538,46 @@ describe('parseOriginJson', () => {
   it('drops non-string fields rather than rendering them', () => {
     expect(parseOriginJson('{"workflowName":42,"stepId":"load_contacts"}'))
       .toEqual({ workflowName: undefined, stepId: 'load_contacts', stepTask: undefined });
+  });
+
+  it('⭐ reads back every field the writer can write — no half-known set', () => {
+    // The failure this replaces: the write side and the read side were two
+    // hand-written field lists, so a field added to one and forgotten in the
+    // other persists on the row and comes back as nothing. It looks like a
+    // rendering bug and is a parsing one. Both derive from ORIGIN_FIELDS now,
+    // and the point of asserting it here is that the DERIVATION is what holds —
+    // the exhaustive `Record<keyof PromptOrigin, true>` makes forgetting a field
+    // a compile error, and this proves the two agree at runtime as well.
+    const full = {
+      workflowName: 'W', stepId: 's', stepTask: 't',
+      subagentName: 'triage', subagentTask: 'Fold dupes',
+    };
+    const written = promptOriginOf(full)!;
+    expect(parseOriginJson(JSON.stringify(written))).toEqual(full);
+  });
+});
+
+describe('originWireFields', () => {
+  it('names every field on the wire, in the snake_case the client reads', () => {
+    expect(originWireFields({
+      workflowName: 'W', stepId: 's', stepTask: 't',
+      subagentName: 'triage', subagentTask: 'Fold dupes',
+    })).toEqual({
+      workflow_name: 'W', step_id: 's', step_task: 't',
+      subagent_name: 'triage', subagent_task: 'Fold dupes',
+    });
+  });
+
+  it('agrees with the persisted row about an empty field', () => {
+    // The four SSE emits used to read the meta RAW while the row went through
+    // `promptOriginOf`, so `''` was absent in the database and present on the
+    // wire — the live dialog and the one restored after a refresh could disagree
+    // about whether a prompt had an origin at all.
+    expect(originWireFields({ workflowName: '', stepId: 'load' }).workflow_name).toBeUndefined();
+    expect(promptOriginOf({ workflowName: '', stepId: 'load' })?.workflowName).toBeUndefined();
+  });
+
+  it('is all-undefined when there is no origin, so the event grows no fields', () => {
+    expect(Object.values(originWireFields(undefined)).every(v => v === undefined)).toBe(true);
   });
 });
