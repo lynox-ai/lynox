@@ -43,6 +43,8 @@ import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentP
 import type { AgentDef } from '../types/orchestration.js';
 import type { StreamEvent } from '../types/index.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
+import { wrapWithGate } from './runtime-adapter.js';
+import { ToolSoftFailure } from '../core/tool-soft-failure.js';
 import type { ManifestStep } from '../types/orchestration.js';
 
 const mockConfig = { api_key: 'test-key' } as unknown as LynoxUserConfig;
@@ -1543,5 +1545,31 @@ describe('durableMemoryEnabled rides to step agents (one flag governs the whole 
     const dkOn = { ...mockConfig, durable_memory_enabled: true } as LynoxUserConfig;
     await spawnViaAgent(namedStep, agentDef, {}, dkOn, undefined, 'run-1');
     expect(lastCfg()['durableMemoryEnabled']).toBe(true);
+  });
+});
+
+describe('wrapWithGate — the approval wrapper is transparent to a ToolSoftFailure', () => {
+  // Same seam as `applyPluginToolGate` on the session side, one layer over: a
+  // pipeline step's tools are re-wrapped with gate approval, and every wrapper
+  // between a tool and `agent.ts` is a place where the ledger signal can be
+  // swallowed. `bash`, `web_research` and every refusal in `http_request`
+  // report a completed-but-failed call by throwing `ToolSoftFailure`; the
+  // reason it carries is the only thing `error_count` can see. A wrapper that
+  // caught and re-threw a plain Error here would leave the ledger claiming the
+  // call succeeded — silently, and only inside pipelines.
+  const approvingGate = {
+    submit: vi.fn().mockResolvedValue('approval-1'),
+    waitForDecision: vi.fn().mockResolvedValue({ status: 'approved' }),
+  } as never;
+  const meta = { runId: 'r1', stepId: 's1' } as never;
+
+  it('lets it through UNCHANGED once the gate approves', async () => {
+    const soft = new ToolSoftFailure('what the model reads', 'what the ledger counts');
+    const tool: ToolEntry = {
+      definition: { name: 'http_request', description: '', input_schema: { type: 'object', properties: {} } },
+      handler: vi.fn().mockRejectedValue(soft),
+    };
+    const wrapped = wrapWithGate(tool, approvingGate, meta);
+    await expect(wrapped.handler({}, {} as never)).rejects.toBe(soft);
   });
 });

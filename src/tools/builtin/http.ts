@@ -10,6 +10,7 @@ import type { EgressSurface } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite } from '../../core/secret-store.js';
+import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 import {
   extractHtmlText,
   isHtmlContentType,
@@ -57,6 +58,63 @@ function friendlyBlockMessage(technical: string): string {
   if (technical.includes('daily')) return 'Daily request limit reached. Try again tomorrow.';
   if (technical.includes('session')) return 'Request limit reached for this session.';
   return technical;
+}
+
+/**
+ * A block the agent must READ — recorded in the ledger as a failure all the same.
+ *
+ * ## Why every block in this handler throws instead of returning
+ *
+ * The handler declines a request in fourteen places and RETURNED the refusal as
+ * an ordinary string, because the model has to read it and adapt (retry another
+ * host, ask the operator, give up on that branch). `agent.ts` books a returned
+ * string as a success and writes an EMPTY `output_json`, and
+ * `run-history-analytics.ts` derives `error_count` from `output_json != ''`
+ * alone. So a blocked call was, in the ledger, byte-for-byte a successful call
+ * that had nothing to say.
+ *
+ * That is not a cosmetic defect. Measured on a real thread (dogfood 2026-08-23):
+ * an agent asked to read a PUBLIC repository hit a guarded block on
+ * `api.github.com`, saw no failure anywhere, and reported the repository as
+ * non-existent — a fact-claim built on a refusal it could not perceive. It then
+ * proposed spawning six to eight sub-agents onto an analysis with no codebase.
+ * The same defect had already been observed ten days earlier, on the same
+ * instance, in the same shape: eight egress blocks at 0–2 ms, every one with an
+ * empty output field, none counted. It was written down and not fixed, and it
+ * cost the same user a second time.
+ *
+ * `ToolSoftFailure` is the existing mechanism for exactly this (core#1259): the
+ * payload takes the ordinary result path — masked, injection-scanned, truncated,
+ * NOT marked `is_error` — while the reason lands in `output_json`, where the
+ * counter can see it.
+ *
+ * ## The rule for a fourteenth block
+ *
+ * Throw, never return. The payload argument must be the string the caller would
+ * otherwise have returned, so what the model reads does not change; that is what
+ * keeps this an observability fix rather than a behaviour change in disguise.
+ *
+ * The `technical` reason is what an operator needs and the friendly text
+ * deliberately withholds: which rule fired, and on which host. It is safe to
+ * record because `agent.ts` masks it through `maskSecrets` and bounds it before
+ * persisting, and because the input row beside it already carries the same URL.
+ */
+function blockedFriendly(technical: string): never {
+  throw new ToolSoftFailure(friendlyBlockMessage(technical), technical);
+}
+
+/**
+ * As {@link blockedFriendly}, for the blocks this handler phrases itself.
+ *
+ * Deliberately NOT routed through `friendlyBlockMessage`: its rules match on
+ * substrings, and these messages are not written to avoid them — a consent
+ * refusal mentioning "this session" would be rewritten into "Request limit
+ * reached for this session", which is a different and false statement. Passing
+ * the message through unchanged keeps the model-visible bytes identical to what
+ * the `return` produced.
+ */
+function blockedVerbatim(message: string): never {
+  throw new ToolSoftFailure(message, message);
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -618,20 +676,20 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (hourlyLimit < Infinity) {
         const hourlyCount = rateLimitProvider.getToolCallCountSince('http_request', 1);
         if (hourlyCount >= hourlyLimit) {
-          return friendlyBlockMessage(`Blocked: hourly HTTP request limit (${hourlyLimit}) exceeded. Count: ${hourlyCount}.`);
+          blockedFriendly(`Blocked: hourly HTTP request limit (${hourlyLimit}) exceeded. Count: ${hourlyCount}.`);
         }
       }
       if (dailyLimit < Infinity) {
         const dailyCount = rateLimitProvider.getToolCallCountSince('http_request', 24);
         if (dailyCount >= dailyLimit) {
-          return friendlyBlockMessage(`Blocked: daily HTTP request limit (${dailyLimit}) exceeded. Count: ${dailyCount}.`);
+          blockedFriendly(`Blocked: daily HTTP request limit (${dailyLimit}) exceeded. Count: ${dailyCount}.`);
         }
       }
     }
 
     // Check session rate limit before any validation — only increment on actual request attempt
     if (agent.sessionCounters.httpRequests >= MAX_REQUESTS_PER_SESSION) {
-      return friendlyBlockMessage(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
+      blockedFriendly(`Blocked: session HTTP request limit (${MAX_REQUESTS_PER_SESSION}) exceeded.`);
     }
 
     // Per-API rate limiting + profile enforcement (from API Store)
@@ -641,7 +699,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         // Check per-API rate limit
         const apiBlock = toolContext.apiStore.checkRateLimit(reqHostname);
         if (apiBlock) {
-          return friendlyBlockMessage(apiBlock);
+          blockedFriendly(apiBlock);
         }
         // Soft-warning: note missing profile but let the request through
         // The agent sees the warning in the response and can create a profile for next time
@@ -653,7 +711,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             (input as unknown as Record<string, unknown>)['_profileWarning'] = `Note: No API profile for "${reqHostname}". After this task, create one via api_setup to ensure correct usage next time.`;
           }
         }
-      } catch {
+      } catch (err) {
+        // A block raised INSIDE this try must not be swallowed by it. The catch
+        // exists for one thing — a malformed URL, which `assertHostPolicy`
+        // reports properly further down — and a bare `catch {}` around a
+        // `throw` turns a refusal into a request that proceeds. The per-API
+        // rate limit used to `return` from here, so the hazard arrived with
+        // this change; the guard covers any future throw in this block too.
+        if (err instanceof ToolSoftFailure) throw err;
         // Invalid URL — will be caught below
       }
     }
@@ -662,7 +727,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const headers: Record<string, string> = {};
     for (const [key, value] of Object.entries(input.headers ?? {})) {
       if (/[\r\n\0]/.test(key) || /[\r\n\0]/.test(value)) {
-        return `Blocked: header '${key}' contains invalid characters (CRLF/null).`;
+        blockedVerbatim(`Blocked: header '${key}' contains invalid characters (CRLF/null).`);
       }
       headers[key] = value;
     }
@@ -683,7 +748,10 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     // exists since 2026-07-02 and the self→managed migration strips it on purpose,
     // so anything else would break live integrations on upgrade.
     const auth = await attachEngineManagedAuth(input.url, headers, toolContext, agent);
-    if (auth.refusal) return auth.refusal;
+    // A refusal means nothing was sent — a failed call, not a quiet one. It is
+    // phrased for the model (`Error: api_profile "x" is oauth2 but the vault has
+    // no access_token …`), so it goes to the ledger verbatim.
+    if (auth.refusal) blockedVerbatim(auth.refusal);
     const attachedAuthSlot = auth.slot;
 
     // Egress secret scan over AGENT-SUPPLIED header values (all methods).
@@ -698,7 +766,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       if (attachedAuthSlot !== undefined && headerName.toLowerCase() === attachedAuthSlot) continue;
       const headerMatch = detectSecretInContent(headerValue);
       if (headerMatch) {
-        return `Blocked: request header '${headerName}' appears to contain a ${headerMatch}. Sending secrets to external servers is not allowed.`;
+        blockedVerbatim(`Blocked: request header '${headerName}' appears to contain a ${headerMatch}. Sending secrets to external servers is not allowed.`);
       }
     }
 
@@ -722,7 +790,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (urlAuthType !== 'query') {
       const urlSecretMatch = detectSecretInContent(input.url);
       if (urlSecretMatch) {
-        return `Blocked: request URL appears to contain a ${urlSecretMatch}. Sending secrets to external servers is not allowed.`;
+        blockedVerbatim(`Blocked: request URL appears to contain a ${urlSecretMatch}. Sending secrets to external servers is not allowed.`);
       }
     }
 
@@ -740,7 +808,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         assertHostPolicy(input.url, 'full-control', toolContext, guardedAckHosts);
       } catch (err) {
         if (err instanceof Error && err.message.startsWith('Blocked:')) {
-          return friendlyBlockMessage(err.message);
+          blockedFriendly(err.message);
         }
         // Non-Blocked (e.g. malformed URL) — defer to existing downstream handling.
       }
@@ -751,14 +819,14 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const exfilWarning = detectGetExfiltration(input.url);
       if (exfilWarning) {
         if (!agent.promptUser) {
-          return `Blocked: ${exfilWarning}`;
+          blockedVerbatim(`Blocked: ${exfilWarning}`);
         }
         const answer = await agent.promptUser(
           pv`⚠ http_request: ${exfilWarning} — Allow?`,
           ['Allow', 'Deny', '\x00'],
         );
         if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
-          return `Blocked: ${exfilWarning} — denied by user.`;
+          blockedVerbatim(`Blocked: ${exfilWarning} — denied by user.`);
         }
       }
     }
@@ -767,7 +835,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     if (input.body && WRITE_METHODS.has(method)) {
       const secretMatch = detectSecretInContent(input.body);
       if (secretMatch) {
-        return `Blocked: request body appears to contain a ${secretMatch}. Sending secrets to external servers is not allowed.`;
+        blockedVerbatim(`Blocked: request body appears to contain a ${secretMatch}. Sending secrets to external servers is not allowed.`);
       }
     }
 
@@ -792,7 +860,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       const pendingMap = agent.sessionCounters.pendingOutboundPrompts;
       if (!approved.has(hostname)) {
         if (!agent.promptUser) {
-          return `Blocked: outbound ${method} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).`;
+          blockedVerbatim(`Blocked: outbound ${method} to ${hostname} requires user consent but no interactive prompt is available (autonomous/background mode).`);
         }
         const promptUser = agent.promptUser;
         let pending = pendingMap.get(hostname);
@@ -814,7 +882,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
         }
         const allowed = await pending;
         if (!allowed) {
-          return `Blocked: outbound ${method} to ${hostname} denied by user.`;
+          blockedVerbatim(`Blocked: outbound ${method} to ${hostname} denied by user.`);
         }
       }
     }
