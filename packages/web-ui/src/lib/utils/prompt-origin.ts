@@ -13,8 +13,9 @@ export interface PromptOrigin {
 	stepId?: string;
 	stepTask?: string;
 	/**
-	 * ⭐ The FACT that a spawned sub-agent raised this prompt. The engine sets it;
-	 * nothing a model writes can produce or suppress it.
+	 * ⭐ The FACT that a `spawn_agent` child raised this prompt. The engine sets
+	 * it; nothing a model writes can produce or suppress it. A workflow step does
+	 * not — that path names its own cause in the two fields above.
 	 *
 	 * It is separate from the name below because the first version keyed the
 	 * claim on the name — and a name of one zero-width space survives the

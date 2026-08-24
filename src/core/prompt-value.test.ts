@@ -211,18 +211,32 @@ describe('promptUser callers', () => {
    * so it never inspects `ask(`Delete ${file}?`)` and the authorship question is
    * not moved one frame out, it is dropped. So the arrow must be the value of a
    * `promptUser` / `promptSecret` / `promptTabs` property, i.e. a callback
-   * being handed to an agent, which is a shape a caller cannot invent by
-   * accident and whose own caller is the swept tool.
+   * being handed to an agent, whose own caller is the swept tool.
+   *
+   * ⚠⚠ "The value of that property" has to mean IMMEDIATELY, and the second
+   * version did not: it allowed any run of non-brace characters between the
+   * property name and the arrow, so one sibling property re-opened the exact
+   * hole — `{ promptUser: base, ask: (q) => agent.promptUser(q, o) }` passed.
+   * The test written to prove the narrowing passed too, because its fixture had
+   * no sibling. Hence the explicit prefix below: optional ternary test, optional
+   * `async`, then the parameter list. Two shapes in the tree need it
+   * (`spawn.ts`, `runtime-adapter.ts`) and both are `name ? (…) =>`.
+   *
+   * Anything else — an assignment `session.promptUser = (q) => …`, a typed
+   * `const cb: PromptUserFn = …` — is NOT accepted, deliberately: no such
+   * caller exists today, and if one appears it belongs in the exemption list
+   * with a reason, not in a widened pattern here.
    */
   function isForwarded(arg: string, before: string): boolean {
     const first = arg.split(',')[0]!.trim();
     if (!/^[A-Za-z_$][\w$]*$/.test(first)) return false;
     // The nearest enclosing arrow — required to be a prompt-callback property's
-    // value, and required to call straight through: nothing statement-like may
-    // sit between its `=>` and this call, so a body that computes a new string
-    // first is not a forwarder however it names its locals.
-    const params = /\b(?:promptUser|promptSecret|promptTabs)\s*:[^;{}]*?\(([^()]*)\)\s*(?::\s*[^=;{]+)?=>\s*[^;{}]*$/
-      .exec(before)?.[1];
+    // IMMEDIATE value, and required to call straight through: nothing
+    // statement-like may sit between its `=>` and this call, so a body that
+    // computes a new string first is not a forwarder however it names its locals.
+    const params =
+      /\b(?:promptUser|promptSecret|promptTabs)\s*:\s*(?:[\w$.!]+\s*\?\s*)?(?:async\s+)?\(([^()]*)\)\s*(?::\s*[^=;{]+)?=>\s*[^;{}]*$/
+        .exec(before)?.[1];
     if (params === undefined) return false;
     return params.split(',').map(p => p.trim().split(/[:?=]/)[0]!.trim())[0] === first;
   }
@@ -270,6 +284,19 @@ describe('promptUser callers', () => {
       classifyArg('q, o)', 'const ask = (q: string) => agent.promptUser('),
       'a local helper is not a callback handed to an agent',
     ).toBe('undeclared');
+    // ⭐⭐⭐ …and the one the SECOND version got wrong, which the case above could
+    // not see: with a sibling property in scope the local helper came back as a
+    // forwarder again, because "the value of a promptUser property" was matched
+    // loosely enough to skip over `base, ask:`. A fixture without the sibling
+    // passes either way — that is why it is here, next to the one it fooled.
+    expect(
+      classifyArg('q, o)', '{ promptUser: base, ask: (q) => agent.promptUser('),
+      'a sibling prompt-callback property must not launder the helper next to it',
+    ).toBe('undeclared');
+    // The two real shapes in the tree, so the narrowing cannot be tightened until
+    // it rejects the callers it exists to accept.
+    expect(classifyArg('q, opts, m)', 'promptUser: parent.parentPromptUser ? async (q, opts, m) => parent.parentPromptUser!('))
+      .toBe('declared');
     // And a second parameter is not the forwarded one either.
     expect(classifyArg('opts, q)', 'promptUser: promptUser ? (q, opts, m) => promptUser(')).toBe('undeclared');
   });

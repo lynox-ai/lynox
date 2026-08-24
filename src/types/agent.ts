@@ -35,8 +35,14 @@ export interface PromptOrigin {
   stepId?: string | undefined;
   stepTask?: string | undefined;
   /**
-   * ⭐ The FACT, and the only field here the model cannot touch. Set by the
-   * spawner itself, never derived from anything a spec carries.
+   * ⭐ The FACT that a `spawn_agent` child raised this prompt — and the only
+   * field here the model cannot touch. Set by the spawn path itself, never
+   * derived from anything a spec carries.
+   *
+   * A pipeline step does NOT set it, deliberately: that path already names its
+   * own cause (`workflowName` + `stepId` + `stepTask`), so the user is told who
+   * asked either way. This flag exists for the case where there was nothing
+   * else to say.
    *
    * It exists because the first version had the renderer key its whole claim on
    * `subagentName` — and a name of one zero-width space passes `validateSpawnInput`

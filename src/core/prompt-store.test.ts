@@ -493,8 +493,16 @@ describe('promptOriginOf', () => {
     // name, the parent could suppress its own disclosure by choosing one.
     expect(promptOriginOf({ subagent: true, subagentName: '', subagentTask: '' }))
       .toEqual({ subagent: true });
-    // And it is the engine's `true`, not any truthy value off a crafted row.
-    expect(promptOriginOf({ subagent: undefined, workflowName: 'W' })).toEqual({ workflowName: 'W' });
+  });
+
+  it('⭐ only the engine\'s own `true` counts, not any truthy value off a crafted row', () => {
+    // Asserted through `parseOriginJson`, because that is the path a crafted row
+    // actually takes — and with values a TRUTHY check would accept. A fixture of
+    // `undefined` proves nothing here: it is falsy, so `=== true` and a plain
+    // truthy test agree on it, and mutating the comparison survives.
+    expect(parseOriginJson('{"subagent":1,"workflowName":"W"}')).toEqual({ workflowName: 'W' });
+    expect(parseOriginJson('{"subagent":"false","workflowName":"W"}')).toEqual({ workflowName: 'W' });
+    expect(parseOriginJson('{"subagent":true}')).toEqual({ subagent: true });
   });
 
   it('⭐ bounds what a field can carry into the row and onto the wire', () => {
@@ -503,10 +511,15 @@ describe('promptOriginOf', () => {
     // 160 characters. This bound is NOT the display bound — it exists so the
     // storage and the transport are finite, and the client is free to clamp
     // tighter for layout without touching it.
-    const long = 'x'.repeat(20_000);
+    //
+    // The fixture is ASTRAL on purpose. With `'x'.repeat()` a UTF-16 `slice`
+    // and a code-point slice are indistinguishable, so the bound could be
+    // rewritten to cut surrogate pairs in half and every assertion would hold.
+    const long = '😀'.repeat(20_000);
     const o = promptOriginOf({ subagent: true, subagentTask: long, stepTask: long })!;
-    expect(o.subagentTask!.length).toBe(512);
-    expect(o.stepTask!.length).toBe(512);
+    expect([...o.subagentTask!]).toHaveLength(512);
+    expect([...o.stepTask!]).toHaveLength(512);
+    expect(o.subagentTask!.isWellFormed(), 'the cut split a surrogate pair').toBe(true);
     // A value inside the bound is untouched — no ellipsis, no trimming.
     expect(promptOriginOf({ stepTask: 'Paginate contacts' })!.stepTask).toBe('Paginate contacts');
   });
