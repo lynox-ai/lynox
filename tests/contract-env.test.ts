@@ -448,7 +448,7 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
   // acceptance test, so no future regex can be mistaken for having closed it.
 
   it('the pair check rejects each broken shape (synthetic rows)', () => {
-    // The four branches below are only reachable through a registry mutation,
+    // The branches of pairProblems are only reachable through a registry mutation,
     // so on the real registry they read green whatever they do. Synthetic rows
     // make each one killable on its own.
     const row = (name: string, kind: EngineReadKind, pair?: { id: string; secret: string }): EnvRegistryRow => ({
@@ -461,6 +461,10 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
     expect(pairProblems([row('A_ID', 'direct', P), row('A_SECRET', 'pair-resolver', P)])).not.toEqual([]);
     expect(pairProblems([row('A_ID', 'pair-resolver', { id: 'A_ID', secret: 'A_ID' })])).not.toEqual([]);
     expect(pairProblems([row('A_ID', 'pair-resolver', P)])).not.toEqual([]);
+    // The mirror case, and it is not decoration: without it the `pair.id` half
+    // of the member loop is never driven, so narrowing the loop to the secret
+    // half alone survives — measured.
+    expect(pairProblems([row('A_SECRET', 'pair-resolver', P)])).not.toEqual([]);
     expect(pairProblems([row('A_ID', 'pair-resolver', P), row('A_SECRET', 'pair-resolver', { id: 'A_SECRET', secret: 'A_ID' })])).not.toEqual([]);
   });
 
