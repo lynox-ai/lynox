@@ -87,7 +87,7 @@ export interface CapturePopulationSplit {
    */
   readonly eventsWithoutRun: number;
   /**
-   * Events whose run could not be tracked because the distinct-run cap was reached.
+   * Events whose run could not be tracked because the tracked-entry cap was reached.
    * Counted in EVENTS and named so: counting distinct dropped runs would need exactly the
    * unbounded set the cap exists to prevent. Non-zero means the numbers above cover a
    * PREFIX of the window's runs, so a gap may be under- or over-stated — `blindNote`
@@ -132,8 +132,8 @@ const BLIND_NOTE =
  * Cap on TRACKED ENTRIES held during a scan — not on distinct runs, and the difference is
  * real: a run that both ends a turn and fires `remember` occupies one slot in each
  * collection, so the distinct-run floor this guarantees is `maxRuns / 2`. The sum is the
- * quantity that bounds memory, which is what the cap is for; the naming follows the bound
- * rather than the concept. The axis also matters: the neighbouring
+ * quantity that bounds memory, which is what the cap is for, so the symbol is named for it.
+ * The axis also matters: the neighbouring
  * `MAX_MODELS_REPORTED` caps the RESPONSE, not the scan — `perModel` is already an
  * unbounded scan-time Map, so the run collections introduce no new class of growth. What
  * they introduce is roughly four orders more cardinality: a fleet runs dozens of models,
@@ -146,7 +146,7 @@ const BLIND_NOTE =
  * ~20M lines through these collections — measured at ~1.9 GiB of Set/Map overhead, which
  * OOMs the container from a read-only diagnostic request.
  */
-const MAX_TRACKED_RUNS = 400_000;
+const MAX_TRACKED_ENTRIES = 400_000;
 
 /** What the report could NOT see. Stated so a rate is never read as more complete than it is. */
 export interface CaptureReportBlindness {
@@ -330,10 +330,10 @@ function validateEntry(raw: unknown): ValidatedEntry | null {
  * a rejection: a diagnostic endpoint that 500s when there is nothing to diagnose is worse
  * than one that says "nothing recorded, and here is what I could not open".
  */
-export async function buildCaptureReport(opts?: { readonly maxTrackedRuns?: number }): Promise<CaptureReport> {
+export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: number }): Promise<CaptureReport> {
   // Injectable so the cap's behaviour is testable without seeding a cap-sized sink; the
   // endpoint calls this with no argument and gets the real bound.
-  const maxRuns = opts?.maxTrackedRuns ?? MAX_TRACKED_RUNS;
+  const maxEntries = opts?.maxTrackedEntries ?? MAX_TRACKED_ENTRIES;
   const events = Object.fromEntries(ALL_EVENTS.map(e => [e, 0])) as Record<CaptureEvent, number>;
   const outcomes: Partial<Record<CaptureOutcome, number>> = {};
   const perModel = new Map<string, { eligible: number; remembered: number }>();
@@ -381,13 +381,13 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedRuns?: numb
       if (entry.runId === null) eventsWithoutRun++;
       else if (event === 'capture_eligible') {
         if (!eligibleRuns.has(entry.runId)) {
-          if (eligibleRuns.size + rememberEventsByRun.size < maxRuns) eligibleRuns.add(entry.runId);
+          if (eligibleRuns.size + rememberEventsByRun.size < maxEntries) eligibleRuns.add(entry.runId);
           else eventsOverRunCap++;
         }
       }
       else if (rememberEventsByRun.has(entry.runId)) {
         rememberEventsByRun.set(entry.runId, rememberEventsByRun.get(entry.runId)! + 1);
-      } else if (eligibleRuns.size + rememberEventsByRun.size < maxRuns) {
+      } else if (eligibleRuns.size + rememberEventsByRun.size < maxEntries) {
         rememberEventsByRun.set(entry.runId, 1);
       } else eventsOverRunCap++;
     }

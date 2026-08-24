@@ -363,7 +363,7 @@ describe('populations — the two ends of fireRate, counted separately', () => {
    *    `overlapRuns` load-bearing: with only one, mutating `overlapRuns++` into
    *    `overlapRuns += count` is equivalent and survives the whole file (measured);
    *  - run `r-elig` is denominator-only, `r-rem` is numerator-only, so swapping the two
-   *    sets moves `rememberOutsideEligible` from 2 to 1;
+   *    sets moves `rememberOutsideEligible` from 3 to 1;
    *  - `r-rem` carries THREE remember events, so the outside-count is a count of EVENTS
    *    and not of runs (a run-count would say 1);
    *  - one remember line carries no run at all, so it must land in `eventsWithoutRun` and
@@ -516,7 +516,7 @@ describe('populations — the two ends of fireRate, counted separately', () => {
       entry({ event: 'remember_invoked', runId: 'r-3', outcome: 'active' }),
       entry({ event: 'capture_eligible', runId: 'r-1' }),
     ]);
-    const { populations } = await buildCaptureReport({ maxTrackedRuns: 2 });
+    const { populations } = await buildCaptureReport({ maxTrackedEntries: 2 });
     // r-1 and r-2 fit; r-3 is over the cap. The repeat of r-1 is already tracked and must
     // NOT count as an overflow — a cap that punished repeat events would report a window
     // as truncated the moment a busy run came back.
@@ -537,7 +537,7 @@ describe('populations — the two ends of fireRate, counted separately', () => {
       entry({ event: 'remember_invoked', runId: 'r-1', outcome: 'active' }),
       entry({ event: 'capture_eligible', runId: 'r-2' }),
     ]);
-    const { populations } = await buildCaptureReport({ maxTrackedRuns: 2 });
+    const { populations } = await buildCaptureReport({ maxTrackedEntries: 2 });
     expect(populations).toMatchObject({
       eligibleRuns: 1, rememberRuns: 1, overlapRuns: 1, eventsOverRunCap: 1,
     });
