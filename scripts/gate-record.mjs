@@ -124,10 +124,36 @@ export function extractRecord(body, mark = MARK) {
   if (found.length === 0) return null;
   if (found.length > 1) return { error: `found ${found.length} record blocks; a body may carry one` };
 
+  // Every non-blank line in the block must parse, and no key may appear twice.
+  //
+  // The loop used to skip whatever it did not recognise, which turned the record
+  // into a place where writing something and having nothing read it looked
+  // identical to writing nothing. Two measured shapes, both green before this:
+  //   · `closes: DEF-a,` with the second id on a continuation line — the id was
+  //     dropped, silently, by the guard whose entire purpose is to stop a datum
+  //     from going missing;
+  //   · a second `closes:` line below the first — the last one won, so a
+  //     leftover `closes: none` could quietly overwrite a real answer.
+  // That is the same reasoning the two-blocks rule above already states, one
+  // level down: picking silently is how a stale claim survives.
   const fields = {};
+  const junk = [];
+  const dupes = [];
   for (const line of found[0][1].split('\n')) {
+    if (!line.trim()) continue;
     const m = /^\s*([a-z-]+)\s*:\s*(.*?)\s*$/.exec(line);
-    if (m) fields[m[1]] = m[2];
+    if (!m) { junk.push(line.trim()); continue; }
+    if (Object.prototype.hasOwnProperty.call(fields, m[1])) dupes.push(m[1]);
+    fields[m[1]] = m[2];
+  }
+  if (dupes.length > 0) {
+    return { error: `record repeats \`${dupes[0]}:\` — two values for one field, and the later one wins silently` };
+  }
+  if (junk.length > 0) {
+    return {
+      error: `record line \`${junk[0].slice(0, 60)}\` is not \`field: value\` — nothing reads it, ` +
+        'so anything written there is lost. Keep the block to one field per line and put prose below it.',
+    };
   }
   return { fields };
 }
@@ -239,11 +265,16 @@ export function evaluate({ body, head, files, author }) {
   // fix commit named its row. Nothing required it to. This is that requirement;
   // the query is exact once the datum exists.
   //
-  // SHAPE only, never existence. The register lives in the pro repo, so a core
-  // PR cannot check an id against it, and a check that passes in one repo and
-  // fails in the other would teach people to leave the field out. Validating
-  // the shape is what this job can honestly do; `deferred-id-guard` owns
-  // whether an id is real.
+  // SHAPE only, never existence — and NOTHING else checks existence either, in
+  // either repo. `deferred-id-guard` reads REGISTER.md for duplicate ids; it
+  // never sees a PR body, and core has no such script at all. So a `closes:`
+  // naming a row that does not exist passes, and that is a stated gap rather
+  // than a division of labour (an earlier version of this comment claimed the
+  // latter, which was a control that did not exist).
+  //
+  // Existence is not checkable HERE for a real reason: the register lives in the
+  // pro repo, so a core PR cannot reach it, and a rule that passes in one repo
+  // and fails in the other teaches people to leave the field out.
   const closes = f.closes;
   if (closes === undefined) {
     errors.push(
@@ -251,7 +282,9 @@ export function evaluate({ body, head, files, author }) {
       'It is required WITH `none` allowed on purpose: an optional field is absent both when ' +
       'nothing is closed and when someone forgot, and then nobody can tell those apart.',
     );
-  } else if (closes !== 'none') {
+  } else if (closes.toLowerCase() !== 'none') {
+    // Case-insensitive, for the same reason `head:` is: `None` is what a person
+    // types, and a false red on a legitimate PR is how a guard earns a bypass.
     const ids = closes.split(/[,·]/).map((s) => s.trim()).filter(Boolean);
     if (ids.length === 0) {
       errors.push('`closes:` is empty — write `closes: none` if this PR settles no register row');
