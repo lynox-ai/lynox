@@ -52,7 +52,7 @@ describe('resolveClientPair', () => {
   });
 
   it('an empty env value does not SHADOW a good config pair', () => {
-    // docker-compose sets GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}, i.e. ''. Under the
+    // A deployment interpolating an unset var (`NAME=${NAME:-}`) yields ''. Under the
     // old `??` chain that empty string outranked config.json and Google was silently
     // not built. The old code did not hand '' to Google — the truthiness guard caught
     // that — it lost the working credential behind it.
@@ -76,10 +76,11 @@ describe('resolveClientPair', () => {
     expect(out).toEqual({ clientId: 'cfg-id', clientSecret: 'cfg-secret', source: 'config' });
   });
 
-  it('prefers the env pair over userConfig, since config mirrors env and vault', () => {
-    // config.ts copies env into userConfig and engine-init.ts copies the vault
-    // secret into it, so userConfig can itself hold a mixed pair. It must never
-    // win over a source that supplied both halves.
+  it('prefers the env pair over userConfig, which used to mirror env and vault', () => {
+    // config.ts USED TO copy env into userConfig and engine-init.ts the vault
+    // secret, so a userConfig written by an older engine can itself hold a mixed
+    // pair. Both copies are gone now; the stored value outlives them, so it must
+    // still never win over a source that supplied both halves.
     const out = resolveClientPair(ID, SECRET, {
       env: { [ID]: 'env-id', [SECRET]: 'env-secret' },
       userConfig: { google_client_id: 'cfg-id', google_client_secret: 'cfg-secret' },

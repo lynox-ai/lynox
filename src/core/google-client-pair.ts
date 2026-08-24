@@ -21,9 +21,12 @@
  *   never loaded, the env value is not consented, so it arrives via the `??` tail).
  *
  * The two halves of one credential therefore take **opposite** precedence, and
- * the mixed pair reaches Google. That is not a hypothetical: the control plane
- * emits an environment pair to every managed tenant, and a customer running
- * their own Google Cloud project has a vault pair.
+ * the mixed pair reaches Google. The mixing needs BOTH an env pair and a vault
+ * pair, and both are reachable TODAY: a deployment can supply the pair in the
+ * environment, and a customer can write the vault pair through Settings since
+ * core#1272. Any deployment that hands a tenant the env pair while that tenant
+ * also holds a vault pair reaches this — which is why the function exists,
+ * rather than a note claiming it cannot happen yet.
  *
  * ## The rules, and why each is written the way it is
  *
@@ -34,9 +37,10 @@
  * - **Empty strings do not count**, and the reason is not the one it looks like.
  *   The old readers never handed `''` to Google either — the `if (id && secret)`
  *   guard below them rejected it. What `??` did was let `''` SHADOW the tiers behind
- *   it: the self-host compose file sets `GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}`, so
- *   an unset variable became an empty string that outranked a perfectly good
- *   `config.json`, and Google was silently not built at all. Skipping it is the fix.
+ *   it: any deployment that interpolates an unset variable into the environment
+ *   (`NAME=${NAME:-}`) hands the process an empty string rather than nothing, and
+ *   that empty string outranked a perfectly good `config.json`, so Google was
+ *   silently not built at all. Skipping it is the fix.
  * - **`userConfig` is last, and it is now a REAL source rather than a mirror.**
  *   It used to be neither: `config.ts` copied the environment pair into it and
  *   `engine-init.ts` copied the vault secret into it, so an env-id and a vault-secret
