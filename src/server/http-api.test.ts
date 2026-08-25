@@ -1176,6 +1176,30 @@ describe('LynoxHTTPApi', () => {
       expect(text).toContain('"fatal":false');
     });
 
+    it('masks BEFORE it caps — a secret straddling the cut must not survive in pieces', async () => {
+      // The order is the whole control, and nothing pinned it: a delta round put
+      // the wrong order back at two sites and 550 tests stayed green.
+      //
+      // Cutting first can slice a secret below a rule's minimum length — or, for
+      // the URL rule, before the `@` it needs — so the rule stops matching and
+      // the REMAINDER ships in cleartext. Measured across 15 shapes and 700
+      // offsets: masking first leaks nothing; cutting first leaked up to 38 of
+      // 39 characters of a Google key. The padding here puts the password across
+      // the cut on purpose (offset found by sweep, not guessed).
+      const pw = 'Xk4vQ9wTz2mLp7bNr5dHs8g';
+      mockSessionRun.mockImplementationOnce(async () => {
+        throw new Error(`${'x'.repeat(555)} postgres://lynox_app:${pw}@db-primary.internal:5432/lynox`);
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'boom' }),
+      });
+
+      const text = await res.text();
+      expect(text).not.toContain(pw);
+    });
+
     it('masks a credential shape out of the error it streams, and caps the length', async () => {
       // The message on this path is whatever the runtime or the provider said.
       // It renders into the tenant's error banner, an 8s toast and a one-click
@@ -6101,9 +6125,12 @@ describe('LynoxHTTPApi', () => {
       });
 
       it('PUT /api/secrets/:name masks a credential shape out of the thrown message', async () => {
-        // The JSON half: every API error goes through `errorResponse`, and seven
-        // call sites hand it an uncontrolled err.message. Masking there covers
-        // all 265 callers plus the next one, instead of the seven known today.
+        // The JSON half: every API error goes through `errorResponse`, and
+        // roughly two dozen call sites hand it an uncontrolled err.message.
+        // Masking there covers them and the next one written, instead of the
+        // set known today. (Exact counts are deliberately not restated — two
+        // independent counts disagreed on whether a template literal counts as
+        // deliberate, and a number that does not reproduce is not a measurement.)
         const key = `sk-ant-${'c'.repeat(60)}`;
         mockSecretSet.mockImplementationOnce(() => {
           throw new Error(`store refused ${key}`);

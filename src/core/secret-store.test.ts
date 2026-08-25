@@ -528,9 +528,13 @@ describe('URL-userinfo rule stays linear', () => {
     const started = performance.now();
     maskSecretPatterns(input, { includeGeneric: true });
     const elapsed = performance.now() - started;
-    // Two orders of magnitude of headroom over the bounded cost (~3 ms) and two
-    // below the unbounded one (~500 ms), so it fails on a real regression and
-    // not on a loaded machine.
+    // Headroom, measured inside vitest rather than estimated: bounded runs
+    // 3–5 ms idle and 14 ms worst case under load (16 hogs on 8 cores), so the
+    // bar sits ~10x above the bad case. Unbounded measures ~960 ms here, so the
+    // bar sits ~6x below it. Both gaps are smaller than the "two orders of
+    // magnitude" this comment first claimed — a bare wall-clock assertion with
+    // no scaling comparison, kept because it demonstrably fails on the real
+    // regression and holds under load, not because the margin is generous.
     expect(elapsed).toBeLessThan(150);
   });
 

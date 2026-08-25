@@ -664,17 +664,21 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
 }
 
 /**
- * Cap a client-bound error string BEFORE it is masked.
+ * Cap a client-bound error string AFTER it has been masked. Never before.
  *
- * Order matters for cost, not just for the wire. `maskSecretPatterns` is
- * superlinear on one of its rules — the URL-userinfo pattern degrades
- * quadratically on a long dotted run (measured: 40 KB → ~500 ms of blocked
- * event loop, and Node cannot interrupt a regex). Masking first and cutting
- * afterwards bounds what leaves the process while leaving the cost unbounded,
- * which is the wrong half. Cutting first bounds both.
+ * This docblock argued the opposite for two commits and was the reason a
+ * disclosure oracle got built. The reasoning was: the masker is superlinear on
+ * one rule, so cut first and the cost is bounded. What that misses is that every
+ * rule has a minimum length and some need a terminator — cut inside a secret and
+ * the rule no longer matches, so the REMAINDER ships in cleartext. Measured
+ * across 15 credential shapes and 700 offsets: masking first leaks nothing
+ * beyond the sanctioned `***<last4>`; cutting first leaks up to 38 of 39
+ * characters of a Google key. And the offset is caller-controllable wherever a
+ * message interpolates user input ahead of the secret.
  *
- * Applied at `errorResponse` too: the argument that an unbounded field is how
- * an uninspected payload leaves the process does not stop at the stream.
+ * The cost belongs to the regex, not to the call order — see the bounded
+ * quantifier in `secret-store.ts`. Bounding it there costs nothing and leaves
+ * this order free to be the safe one.
  */
 function capForClient(text: string): string {
   return text.length > SSE_ERROR_MAX_CHARS ? `${text.slice(0, SSE_ERROR_MAX_CHARS)}…` : text;
@@ -4711,7 +4715,7 @@ export class LynoxHTTPApi {
         // 200, so this never reaches `errorResponse` — and this route is handed a
         // real provider key in the request body, so a probe failure echoing it back
         // is the shortest path from our own secret to the browser.
-        jsonResponse(res, 200, { state: 'network-error', error: maskSecretPatterns(capForClient(msg)) });
+        jsonResponse(res, 200, { state: 'network-error', error: capForClient(maskSecretPatterns(msg)) });
       }
     });
 
@@ -5618,7 +5622,7 @@ export class LynoxHTTPApi {
         // Workflow step errors come from tools, i.e. from whatever a remote
         // service said. Array-valued, so each entry is treated like any other
         // client-bound error string.
-        error: result.error === undefined ? undefined : maskSecretPatterns(capForClient(result.error)),
+        error: result.error === undefined ? undefined : capForClient(maskSecretPatterns(result.error)),
         costUsd: result.costUsd ?? 0,
         // By FIELD, not by `typeof`. The first attempt tested `typeof e === 'string'`
         // and was a bit-identical no-op — these are objects, always — while both the
@@ -6708,12 +6712,15 @@ export class LynoxHTTPApi {
         // safe to reveal. This page is the OAuth failure a user actually sees,
         // and the message is whatever the token endpoint said.
         //
-        // Order note, corrected: a delta round DID separate the two orders. The
-        // URL-userinfo class `[^\s:@/]+` admits `& < > " '`, which is exactly what
-        // escaping rewrites — `postgres://svc:pa&ss@host` masks under one order and
-        // not the other. Neither order changes WHETHER the secret is masked here,
-        // but the earlier claim that no fixture could separate them was wrong, and
-        // "no test can see it" is the sentence that talks someone out of writing one.
+        // Order note, corrected twice. The first version claimed no fixture could
+        // separate mask-then-escape from escape-then-mask; a delta round built one
+        // (`postgres://svc:pa&ss@host` — the URL-userinfo class admits the very
+        // characters escaping rewrites). The second version then overshot and said
+        // the two orders differ in WHETHER the secret is masked. Measured for all
+        // five escape characters: both orders mask it; only the rendering of the
+        // masked remainder differs. So the order is not load-bearing here — it is
+        // load-bearing for a pattern added later, and that is why it is written
+        // down instead of left to chance.
         const msg = maskSecretPatterns(err instanceof Error ? err.message : String(err))
           .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
         res.writeHead(500, { 'Content-Type': 'text/html' });
@@ -6938,7 +6945,7 @@ export class LynoxHTTPApi {
             // the test button next to it gave real advice.
             jsonResponse(res, 400, {
               // Mail-server text: the surface most likely to echo a login line back.
-              error: maskSecretPatterns(capForClient(`Connection test failed: ${probe.error ?? 'unknown error'} (${probe.code ?? 'unknown'})`)),
+              error: capForClient(maskSecretPatterns(`Connection test failed: ${probe.error ?? 'unknown error'} (${probe.code ?? 'unknown'})`)),
               code: probe.code ?? 'unknown',
               stage: probe.stage,
             });
@@ -8294,7 +8301,7 @@ export class LynoxHTTPApi {
         // This one carries the whole raw HTTP body of a remote engine (see the
         // `Restore failed: ${await rRes.text()}` throw above) — unmasked and
         // uncapped it is the largest uninspected payload on any client surface here.
-        sendEvent('error', { message: maskSecretPatterns(capForClient(err instanceof Error ? err.message : 'Migration failed'), { includeGeneric: true }) });
+        sendEvent('error', { message: capForClient(maskSecretPatterns(err instanceof Error ? err.message : 'Migration failed', { includeGeneric: true })) });
       } finally {
         res.end();
       }
