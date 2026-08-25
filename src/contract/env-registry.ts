@@ -25,19 +25,20 @@
  *   (consumed inside SDK constructors — justify in `note`). `none` = not read
  *   by the engine at all; the forward test asserts ABSENCE from the read
  *   inventory. `pair-resolver` = read as one half of a credential PAIR via
- *   the `resolveClientPair` helper. `pair` names BOTH members, as DATA for a
- *   weld rather than as a text form to match: the resolver takes one branded
- *   descriptor, so a swapped pair — or one pairing a member with a foreign
- *   partner — cannot be written by accident, and the member names no longer
- *   appear at the call site at all. The asserted form is therefore only that
- *   the declared site calls the resolver; it does NOT say which pair that site
- *   reads, and core's welds do not close that either. They constrain what the
- *   argument's TYPE must be — a minted descriptor, never a loose name — but the
- *   pair brand is per role and shared by every minted pair, so no weld names a
- *   provider. What binds the two declared sites today is a boot test written by
- *   hand for one. Carried as DEF-pair-forward-form-provider-blind. The direct `process.env` form is
- *   accepted only at `alsoReadAt` sites, so the primary read site stays pinned
- *   to the resolver.
+ *   the `resolveClientPair` helper. `pair` names BOTH members of one credential,
+ *   as DATA: each member's row declares the same descriptor, so which two names
+ *   belong together is readable here without parsing code.
+ *
+ *   This file deliberately does NOT describe what the forward test asserts from
+ *   that, nor what core's compile welds do. Three attempts to summarise it here
+ *   each shipped a false sentence — the mechanisms live in other files and move
+ *   independently of this one, so a summary written here is stale the moment
+ *   either changes. `core/tests/contract-env.test.ts` documents its own form,
+ *   `core/src/core/google-client-pair-welds.ts` documents what it welds, and
+ *   `DEF-pair-forward-form-provider-blind` records the gap between them.
+ *
+ *   The direct `process.env` form is accepted only at `alsoReadAt` sites, so the
+ *   primary read site stays pinned to the resolver.
  * - `secret.redact` — `exact-name`: the env-preview masks this key's value.
  *   `whole-value`: the value embeds secrets under OTHER names (e.g. a JSON
  *   blob with api_key fields) and must be masked as a whole.
