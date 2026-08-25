@@ -174,13 +174,28 @@ describe('env-ABI forward: the pair-resolver form rejects near-misses', () => {
   const row: EnvRegistryRow = {
     name: 'GOOGLE_CLIENT_ID',
     valueKind: 'opaque',
-    emitPolicy: 'when-non-default',
+    emitPolicy: 'operator-only',
     engineConsumed: { kind: 'pair-resolver', pair: { id: 'GOOGLE_CLIENT_ID', secret: 'GOOGLE_CLIENT_SECRET' }, readSite: 'src/core/engine.ts' },
   };
   const matches = (src: string): boolean => readForms(row).some((f) => f.test(src));
 
   it('accepts a real resolver call', () => {
     expect(matches('const p = resolveClientPair(GOOGLE_CLIENT_PAIR, { vault });')).toBe(true);
+  });
+
+  it('accepts a bare env read at a SECONDARY site but not at the primary one', () => {
+    // The asymmetry survived the move to a descriptor and is the one thing the
+    // loosened form still has to carry alone: at the declared site the resolver
+    // call is the ONLY accepted form, so replacing it with two independent
+    // process.env reads — which is precisely how the halves came to disagree
+    // before core#1269 — fails. At a migration site the direct read IS the real
+    // form. Nothing else drives the `site !== readSite` condition in
+    // formsForSite, so without this the condition could be deleted and every
+    // suite would stay green.
+    const envRead = `!process.env['GOOGLE_CLIENT_ID'] && !process.env['GOOGLE_CLIENT_SECRET']`;
+    const at = (site: string): boolean => formsForSite(row, site).some((f) => f.test(envRead));
+    expect(at('src/core/engine.ts'), 'the primary site must reject a bare env read').toBe(false);
+    expect(at('src/core/engine-init.ts'), 'a secondary site must accept it').toBe(true);
   });
 
   const rejected: [string, string][] = [

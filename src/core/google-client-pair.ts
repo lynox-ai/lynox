@@ -81,28 +81,55 @@ export interface ClientPairSources {
  * could only ever DETECT that at sites it knew about; this makes it
  * unrepresentable instead.
  *
- * The brands are minted HERE and nowhere else. They deliberately do NOT live in
- * `src/contract/`: the registry already declares the same pair as data, and a
- * contract change obliges every vendored copy to re-sync. `pairMatchesRegistry`
- * in the contract test welds this constant to that declaration, so the two
- * cannot drift without a red test.
+ * The brands deliberately do NOT live in `src/contract/`: the registry already
+ * declares the same pair as data, and a contract change obliges every vendored
+ * copy to re-sync. The drift test in `tests/contract-env.test.ts` welds this
+ * constant to that declaration, so the two cannot diverge without a red test.
+ *
+ * What the brands do and do not buy, stated exactly, because the difference is
+ * the whole point: a descriptor cannot be built ACCIDENTALLY — not from loose
+ * strings, not by swapping two members, not by pairing one provider's id with
+ * another's secret. A deliberate `as ClientPairNames` still mints one anywhere,
+ * and no type can stop that. The claim is "unrepresentable by accident", never
+ * "unforgeable".
  */
 declare const CLIENT_ID_BRAND: unique symbol;
 declare const CLIENT_SECRET_BRAND: unique symbol;
+declare const CLIENT_PAIR_BRAND: unique symbol;
 export type ClientIdName = string & { readonly [CLIENT_ID_BRAND]: true };
 export type ClientSecretName = string & { readonly [CLIENT_SECRET_BRAND]: true };
 
-/** A credential pair's member names, in the only order they may be read. */
+/**
+ * A credential pair's member names, in the only order they may be read.
+ *
+ * The brand on the PAIR is separate from the brands on its members, and it
+ * carries the half the member brands cannot. The member brands make `id` and
+ * `secret` non-interchangeable — that is the swap. They say nothing about
+ * whether the two halves belong to the SAME credential: once a second provider
+ * exists, `{ id: googlePair.id, secret: msPair.secret }` has a correctly
+ * branded member in each slot and satisfies a member-branded interface. That is
+ * the "foreign partner" mix core#1269 was built against, re-assembled by the
+ * caller. Branding the pair itself makes the re-assembly unrepresentable:
+ * a fresh object literal cannot carry the brand, so the only descriptors that
+ * exist are the ones minted whole.
+ */
 export interface ClientPairNames {
   readonly id: ClientIdName;
   readonly secret: ClientSecretName;
+  readonly [CLIENT_PAIR_BRAND]: true;
 }
 
-/** The Google OAuth app credential pair. The only construction site of the brands. */
-export const GOOGLE_CLIENT_PAIR: ClientPairNames = {
+/**
+ * The Google OAuth app credential pair.
+ *
+ * The `as` is the mint. It is deliberate and it is the only kind of statement
+ * that can produce a `ClientPairNames`; a second provider's pair is added the
+ * same way, next to this one.
+ */
+export const GOOGLE_CLIENT_PAIR = {
   id: 'GOOGLE_CLIENT_ID' as ClientIdName,
   secret: 'GOOGLE_CLIENT_SECRET' as ClientSecretName,
-};
+} as ClientPairNames;
 
 /** Non-empty after trimming. An all-whitespace secret is a misconfiguration, not a credential. */
 function usable(v: string | null | undefined): v is string {

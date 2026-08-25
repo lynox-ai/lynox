@@ -33,7 +33,55 @@ import {
   type ClientSecretName,
 } from './google-client-pair.js';
 
+/**
+ * A second provider's pair, minted exactly as a real one would be.
+ *
+ * It exists so the FOREIGN-PARTNER case is expressible at all. With one pair in
+ * the tree there is no second `ClientSecretName` to mis-pair with, so the guard
+ * against mixing two credentials could not be exercised — an untestable guard
+ * and an absent one read the same from here. This fixture is the second pair,
+ * ahead of the real one.
+ */
+const OTHER_PROVIDER_PAIR = {
+  id: 'MS_CLIENT_ID' as ClientIdName,
+  secret: 'MS_CLIENT_SECRET' as ClientSecretName,
+} as ClientPairNames;
+
 export function pairBrandWelds(): void {
+  // ── Independently killable: each of the three below dies to exactly one
+  // removal, which is what makes them guards rather than commentary.
+
+  /**
+   * The PAIR brand. Two correctly branded members from DIFFERENT credentials —
+   * the mix core#1269 exists against, re-assembled by the caller instead of by
+   * the precedence chain. Killed by removing `[CLIENT_PAIR_BRAND]` from the
+   * interface: the literal then satisfies it and the suppression goes unused.
+   */
+  // @ts-expect-error — members of two different pairs cannot form a pair
+  const foreignPartner: ClientPairNames = { id: GOOGLE_CLIENT_PAIR.id, secret: OTHER_PROVIDER_PAIR.secret };
+  void foreignPartner;
+
+  /**
+   * The ID brand alone. MEASURED before this split existed: with both member
+   * brands in place, dropping EITHER one left every whole-descriptor check
+   * still failing, because the surviving brand caught the swap by itself — a
+   * redundant pair that reads as two guards and is one.
+   */
+  // @ts-expect-error — the ID brand cannot be minted from a loose string
+  const idFromLooseString: ClientIdName = 'GOOGLE_CLIENT_ID';
+  void idFromLooseString;
+
+  /** The SECRET brand alone, for the same reason and killed by the same cut. */
+  // @ts-expect-error — the SECRET brand cannot be minted from a loose string
+  const secretFromLooseString: ClientSecretName = 'GOOGLE_CLIENT_SECRET';
+  void secretFromLooseString;
+
+  // ── NOT independently killable, and kept anyway — as the record of the
+  // defect, not as coverage. Each of the three below stays a type error under
+  // the removal of ANY SINGLE brand, because the remaining brands still reject
+  // it. Saying so here is the point: a weld nobody can kill looks exactly like
+  // a weld that works, and the mutation table must not count these as kills.
+
   /** The defect this module exists for: the client SECRET passed as the client id. */
   // @ts-expect-error — a swapped pair must never satisfy ClientPairNames
   const swapped: ClientPairNames = { id: GOOGLE_CLIENT_PAIR.secret, secret: GOOGLE_CLIENT_PAIR.id };
@@ -43,23 +91,8 @@ export function pairBrandWelds(): void {
   // @ts-expect-error — resolveClientPair must not accept two loose name strings
   void resolveClientPair('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', {});
 
-  /** The brands may be minted in google-client-pair.ts and nowhere else. */
+  /** A descriptor assembled by hand, from loose strings, at a call site. */
   // @ts-expect-error — a hand-built descriptor cannot mint the brands
   const handBuilt: ClientPairNames = { id: 'GOOGLE_CLIENT_ID', secret: 'GOOGLE_CLIENT_SECRET' };
   void handBuilt;
-
-  // The two welds below look redundant against the ones above and are not.
-  // MEASURED: with both brands in place, dropping EITHER one alone left every
-  // check above still failing — the surviving brand caught the swap by itself.
-  // A redundant pair reads as two guards and is one. These separate them: each
-  // depends on exactly ONE brand, so removing that brand turns exactly one of
-  // them green and fails the build on the unused @ts-expect-error.
-
-  // @ts-expect-error — the ID brand may only be minted in google-client-pair.ts
-  const idFromLooseString: ClientIdName = 'GOOGLE_CLIENT_ID';
-  void idFromLooseString;
-
-  // @ts-expect-error — the SECRET brand may only be minted in google-client-pair.ts
-  const secretFromLooseString: ClientSecretName = 'GOOGLE_CLIENT_SECRET';
-  void secretFromLooseString;
 }
