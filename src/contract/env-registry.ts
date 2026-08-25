@@ -31,10 +31,11 @@
  *   partner — cannot be written by accident, and the member names no longer
  *   appear at the call site at all. The asserted form is therefore only that
  *   the declared site calls the resolver; it does NOT say which pair that site
- *   reads, and nothing in core's welds does either — they constrain the
- *   descriptors, not the argument. What binds the call site today is a boot
- *   test written by hand for one provider. Carried as
- *   DEF-pair-forward-form-provider-blind. The direct `process.env` form is
+ *   reads, and core's welds do not close that either. They constrain what the
+ *   argument's TYPE must be — a minted descriptor, never a loose name — but the
+ *   pair brand is per role and shared by every minted pair, so no weld names a
+ *   provider. What binds the two declared sites today is a boot test written by
+ *   hand for one. Carried as DEF-pair-forward-form-provider-blind. The direct `process.env` form is
  *   accepted only at `alsoReadAt` sites, so the primary read site stays pinned
  *   to the resolver.
  * - `secret.redact` — `exact-name`: the env-preview masks this key's value.
