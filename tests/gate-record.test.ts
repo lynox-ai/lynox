@@ -6,10 +6,7 @@
  * passes everything is indistinguishable from no guard, and it is WORSE, because
  * a green check reads as verification.
  *
- * So each test names the thing that would otherwise slip through, and the suite
- * is deliberately unbalanced towards the SHA-freshness case — the one fact CI can
- * establish on its own, and the one that actually recurs (gates run, then more
- * commits land).
+ * So each test names the thing that would otherwise slip through.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';

@@ -25,13 +25,23 @@ below ships as a placeholder the check REJECTS** — filling one in has to be a
 deliberate act, because a template that pre-fills its own answers turns the whole
 thing into a ritual you satisfy by pasting a SHA.
 
-**CI cannot verify `gates`, `delta` or `mutations`.** They are your attestation
-and they are on the record. The one thing CI does establish by itself is `head`:
-it must equal this PR's current head, so **update it after every push**. That is
-the difference between "the gates ran" and "the gates ran on THIS code".
+**CI cannot verify that `gates`, `delta` or `mutations` are TRUE** — it checks their
+value, not that the work happened: an unknown gate name is always rejected, and a
+`delta` that is not `clean` or a surviving mutant are rejected wherever a delta round
+was owed (a markdown-only legal change owes none). They are your attestation and they
+are on the record. `head` is the **load-bearing** check: it must equal this
+PR's current head, so **update it after every push**. That is the difference between
+"the gates ran" and "the gates ran on THIS code". CI also establishes on its own which
+gates the diff OWES, derived from the real file list, so leaving out a required
+`security` or `legal` is caught rather than attested.
 
-- `head` — the SHA the gates ran against: `git rev-parse --short HEAD`
-- `gates` — which ran, from: `code-review`, `delta`, `security`, `prd`, `staging-walk`.
+- `head` — this PR's **current** head, which is also the SHA the gates ran against:
+  `git rev-parse --short HEAD`. Update it after every push.
+- `gates` — which ran, from: `code-review`, `delta`, `security`, `prd`, `staging-walk`, `legal`.
+  `legal` is required for `SUBPROCESSORS.md`, the one binding text `LEGAL_PATHS` covers, and
+  then the record also needs `approved: <who> <YYYY-MM-DD>`, naming who signed off on the
+  WORDING. A binding customer text does not ship on an assistant's judgement, and a name
+  without a date cannot be told apart from a sign-off carried over from an earlier revision.
   `code-review` and `delta` are required for any code change. `security` is
   required when the diff touches one of the paths the check lists — every module
   under `src/tools/builtin/`, `src/server/`, `data-boundary`, `output-guard`,
@@ -39,10 +49,20 @@ the difference between "the gates ran" and "the gates ran on THIS code".
   integration's auth/oauth. That list is a **floor**: a change can open a trust
   boundary somewhere it does not name, and then the gate is still yours to run.
 - `delta` — the verdict of the delta round ON THE FIXES. `clean` or don't merge.
+  `clean` does **not** mean the round found nothing — a round that found things and
+  handled them is clean. It means: nothing it found is left unhandled (fixed here, or
+  filed as a register row — **not** listed in `closes:`, which names rows this PR
+  *settles*), and it ran at the head above. No exception: every fix makes a new head,
+  so it is fix, re-run, attest, and it ends when a round finds nothing.
 - `mutations` — mutations of the CHANGED LINES, killed vs survived. A survivor
   means no test covers that line and fails the check.
 
-A documentation-only diff needs none of this — delete the block.
+A documentation-only diff needs none of this — delete the block. (A binding text is
+NOT documentation for this purpose: `SUBPROCESSORS.md` is markdown, and it is the
+document the managed DPA points customers at, so it needs the `legal` gate and an
+`approved:` line naming who signed off on the wording and when. `delta` and `mutations`
+are dropped for a markdown-only legal change: there is no delta round to report, and a
+fabricated line is worse than none.)
 
 ```gate-record
 head: <short SHA>

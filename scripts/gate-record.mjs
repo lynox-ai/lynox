@@ -12,7 +12,10 @@
  * CI cannot judge whether a review was any good. It can enforce that a record
  * EXISTS and PINS THE EXACT HEAD SHA, which converts the second failure into a
  * hard stop and makes the first one a deliberate lie rather than an oversight.
- * Everything past SHA-freshness is an attestation and is documented as one.
+ * Most of what follows is an attestation and is documented as one — but not all:
+ * the gates a diff OWES are derived from the real file list, which is a fact this
+ * check establishes on its own. (The line used to read "everything past
+ * SHA-freshness is an attestation", which was never quite true.)
  *
  * NOT A SECURITY BOUNDARY. Anyone who can open a PR can write the block. The
  * point is friction in the right place and a durable record on the PR, not
@@ -213,6 +216,9 @@ export function evaluate({ body, head, files, author }) {
         'no gate record in the PR body.',
         `Add a \`\`\`${MARK} block naming the head SHA it was taken at, the gates that ran,`,
         'the delta-round verdict, and the mutation count. See .github/pull_request_template.md.',
+        'A round is CLEAN when nothing it found is left unhandled — fixed here, or filed as a',
+        'register row. Findings do not make a round unclean; carrying them silently does.',
+        'A filed row does NOT belong in `closes:` — that field names rows this PR settles.',
       ],
     };
   }
@@ -220,7 +226,7 @@ export function evaluate({ body, head, files, author }) {
 
   const f = rec.fields;
 
-  // The load-bearing check. Everything else here is an attestation; this one is
+  // The load-bearing check. Nearly everything else here is an attestation; this one is
   // a fact CI can establish on its own, and it is the failure that actually
   // recurs — gates run, then more commits land.
   // Compared case-insensitively: a SHA pasted from a tool that upper-cases it is
@@ -303,14 +309,43 @@ export function evaluate({ body, head, files, author }) {
     }
   }
 
-  // A delta round that did not come back clean is a reason not to merge, so
-  // there is exactly one accepted value.
   // `delta` and `mutations` describe a CODE round, so they are demanded only when one
   // was owed. A markdown-only legal change has neither, and forcing those fields would
   // buy a fabricated line — a record filled in to get past CI is worth less than none.
   if (required.has('delta')) {
+    // A delta round that did not come back clean is a reason not to merge, so
+    // there is exactly one accepted value.
+    //
+    // WHAT `clean` MEANS, because the one-line version got read as "no round ever
+    // found anything" — and that reading makes the gate UNSATISFIABLE for exactly
+    // the PRs reviewed hardest: a PR whose review found something could never
+    // attest, and the `head:` check above would be pointless. Two parts:
+    //   1. nothing the round found is left unhandled — fixed in this diff, or filed
+    //      as a register row. NOT via `closes:`, which names rows this PR SETTLES;
+    //      a freshly filed row is open, and putting it there corrupts the very
+    //      datum that field exists to make queryable.
+    //   2. it ran at the head `head:` names. No exception, and that is deliberate.
+    //
+    // Deliberate because every fix produces a new head, so this is strict: fix,
+    // re-run, attest. It terminates the ordinary way — when a round finds nothing.
+    //
+    // An escape hatch for "the delta since only deleted something harmless" was
+    // drafted and CUT: review found a defect in every draft of it. Do not re-draft
+    // it here — `DEF-gate-record-round-sha-not-pinned` carries what each draft got
+    // wrong, and names what replaces it: a `round: <sha>` field plus a CI diff,
+    // which turns this exception into a measurement instead of a description.
+    //
+    // NOT a second accepted value either: someone merging while attesting an unclean
+    // round is the failure this field exists for. The restriction was never the
+    // problem — its description was.
     if (f.delta !== 'clean') {
-      errors.push(`\`delta:\` must be \`clean\` (got \`${f.delta ?? '<missing>'}\`) — an unclean delta round is not a merge`);
+      errors.push(
+        `\`delta:\` must be \`clean\` (got \`${f.delta ?? '<missing>'}\`) — an unclean delta round is not a merge.`,
+        'Clean does NOT mean the round found nothing. It means nothing it found is left',
+        'unhandled — fixed here, or filed as a register row (not listed in `closes:`, which',
+        'names rows this PR settles) — and that it ran at the head `head:` names.',
+        'Findings are normal; carrying them silently is not.',
+      );
     }
 
     const mut = /^\s*(\d+)\s+killed\s*[,/]\s*(\d+)\s+survived\s*$/.exec(f.mutations ?? '');
@@ -325,7 +360,7 @@ export function evaluate({ body, head, files, author }) {
   // flags, never advice, and its counsel-half is explicitly not self-authorable — so the
   // wording needs a human yes on the record before it reaches a customer.
   //
-  // An attestation, like every line here except `head:`. It cannot prove the sign-off
+  // An attestation, like most lines here. It cannot prove the sign-off
   // happened; it makes FORGETTING impossible — the failure that actually recurs — and
   // turns the alternative into a deliberate lie rather than an oversight.
   if (required.has('legal')) {
