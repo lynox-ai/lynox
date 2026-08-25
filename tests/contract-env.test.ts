@@ -17,10 +17,12 @@
  * via the membership review line instead).
  */
 import { describe, it, expect } from 'vitest';
-import { GOOGLE_CLIENT_PAIR } from '../src/core/google-client-pair.js';
+import { GOOGLE_CLIENT_PAIR, MINTED_CLIENT_PAIRS } from '../src/core/google-client-pair.js';
 // Imported so DELETING the weld file is a failure rather than a silent loss.
-// Nothing else references it — the same device mirrors.ts relies on.
-import { pairBrandWelds } from '../src/core/google-client-pair.welds.js';
+// Nothing else references it, which is the whole reason the import is here —
+// unlike src/contract/fixtures/mirrors.ts, whose TYPED_MIRRORS is genuinely
+// consumed by tests/contract-http.test.ts and needs no such device.
+import { pairBrandWelds } from '../src/core/google-client-pair-welds.js';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, relative, join } from 'node:path';
@@ -83,14 +85,18 @@ function readForms(row: EnvRegistryRow): RegExp[] {
       // The member NAMES are deliberately absent from the call site now: the
       // resolver takes one branded descriptor, so there is no argument order to
       // get wrong. This form therefore asserts only that the declared site calls
-      // the resolver at all — the naming is welded elsewhere, and more strongly:
-      //   · the descriptor ≡ its registry row (the drift test below);
-      //   · nothing but the branded descriptor is accepted (the compile welds in
-      //     src/core/google-client-pair.welds.ts).
-      // Earlier revisions matched the two literals in order, which was text
-      // matching standing in for a type. It caught a swap only where it already
-      // knew to look; the compiler catches it everywhere, including call sites
-      // that do not exist yet.
+      // the resolver AT ALL — it does not say WHICH pair. Stated plainly because
+      // the first version of this comment claimed the compile welds covered that,
+      // and they do not: the brands are per ROLE, not per provider, so with a
+      // second pair in the tree `resolveClientPair(MS_CLIENT_PAIR, …)` satisfies
+      // this form for the Google rows too.
+      //
+      // What actually binds this call site to THIS pair is
+      // src/core/engine-client-pair-boot.test.ts — it boots a real Engine and
+      // asserts the values handed to createGoogleTools. Measured 2026-08-25:
+      // pointing engine.ts at a foreign descriptor keeps tsc and this file green
+      // and fails that test three times. Nothing forces a second provider to
+      // bring its own boot test — DEF-pair-forward-form-provider-blind.
       return [/\bresolveClientPair\s*\(/];
     case 'web-ui':
       // SvelteKit server code reads via `$env/dynamic/private`.
@@ -168,9 +174,17 @@ describe('env-ABI forward: the pair-resolver form rejects near-misses', () => {
   // What is left to check at the TEXT level is narrow, and that is the point.
   // A swapped or foreign-partnered pair used to be a regex question; since the
   // resolver takes a branded descriptor it is a COMPILE question, pinned in
-  // src/core/google-client-pair.welds.ts. Those cases are gone from here rather
+  // src/core/google-client-pair-welds.ts. Those cases are gone from here rather
   // than duplicated: a text check that mirrors a compile check adds no coverage
   // and rots independently.
+  //
+  // The form does NOT distinguish code from prose — a commented-out call at the
+  // declared site satisfies it. That looseness is known and left in place: the
+  // only way to close it is to strip comments before matching, and that strip
+  // was built twice and removed twice, the second time because an ordinary
+  // `const g = 'src/*';` opened a pseudo-comment that swallowed 263 lines and
+  // left the suite green. A fixture that pretends otherwise would be picked to
+  // pass, so there is none.
   const row: EnvRegistryRow = {
     name: 'GOOGLE_CLIENT_ID',
     valueKind: 'opaque',
@@ -201,7 +215,6 @@ describe('env-ABI forward: the pair-resolver form rejects near-misses', () => {
   const rejected: [string, string][] = [
     ['a differently-named resolver', 'resolveClientPairLegacy(GOOGLE_CLIENT_PAIR, {})'],
     ['a helper whose name merely ends with the resolver', 'myresolveClientPair(GOOGLE_CLIENT_PAIR, {})'],
-    ['a bare mention in prose', '// resolveClientPair is described here without being called'],
   ];
   for (const [label, src] of rejected) {
     it(`rejects ${label}`, () => {
@@ -228,19 +241,6 @@ function walk(dir: string, out: string[]): string[] {
 }
 
 /**
- * Credential-pair reads (kind 'pair-resolver'), both argument positions. Kept
- * as their OWN list rather than inlined below, so `collectReads` can record
- * that a name was seen BY A PAIR PATTERN. Without that distinction the pair
- * coverage control is satisfied by the generic `process.env[…]` pattern
- * picking the same names up at the migration site, and deleting these two is
- * a silent no-op — measured 2026-08-24, it was exactly that.
- */
-const PAIR_READ_PATTERNS: readonly RegExp[] = [
-  /\bresolveClientPair\(\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
-  /\bresolveClientPair\(\s*['"][A-Z][A-Z0-9_]{2,}['"]\s*,\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
-];
-
-/**
  * Read forms the sweep recognizes; every pattern captures the var name as
  * group 1. Captures are NOT restricted to LYNOX_* — the coverage assertion
  * filters, so non-prefixed denylist rows (e.g. OPENAI_BASE_URL) still get a
@@ -258,7 +258,6 @@ const READ_PATTERNS: readonly RegExp[] = [
   // If the helper is renamed, its vars go stale in SELF_HOST_ONLY and the
   // allowlist-rot guard fires — update this pattern then.
   /parsePositiveIntEnv\(\s*['"]([A-Z][A-Z0-9_]{2,})['"]/g,
-  ...PAIR_READ_PATTERNS,
 ];
 
 /** Read forms the sweep is BLIND to — banned in swept files so a new read cannot hide. */
@@ -267,10 +266,9 @@ const BLIND_FORMS: readonly [RegExp, string][] = [
   [/\$env\/static\/private/, "`$env/static/private` import (compile-time env read)"],
 ];
 
-function collectReads(): { reads: Map<string, string[]>; blind: string[]; viaPair: Set<string> } {
+function collectReads(): { reads: Map<string, string[]>; blind: string[] } {
   const found = new Map<string, string[]>();
   const blind: string[] = [];
-  const viaPair = new Set<string>();
   const roots = ['src', 'packages/web-ui/src'];
   for (const root of roots) {
     for (const file of walk(resolve(repoRoot, root), [])) {
@@ -283,7 +281,6 @@ function collectReads(): { reads: Map<string, string[]>; blind: string[]; viaPai
           const sites = found.get(name) ?? [];
           sites.push(rel);
           found.set(name, sites);
-          if (PAIR_READ_PATTERNS.includes(pattern)) viaPair.add(name);
         }
       }
       for (const [form, label] of BLIND_FORMS) {
@@ -291,7 +288,7 @@ function collectReads(): { reads: Map<string, string[]>; blind: string[]; viaPai
       }
     }
   }
-  return { reads: found, blind, viaPair };
+  return { reads: found, blind };
 }
 
 const registryNames = new Set(ENV_REGISTRY.map((r) => r.name));
@@ -400,29 +397,29 @@ function pairProblems(rows: readonly EnvRegistryRow[]): string[] {
 }
 
 describe('env-ABI: credential-pair reads are swept and declared', () => {
-  const { reads, viaPair } = SWEEP;
+  const { reads } = SWEEP;
 
-  // Positive control on the pair patterns themselves. Without it, deleting them
-  // from READ_PATTERNS is a silent no-op TODAY — the Google pair is not LYNOX_*,
-  // so the coverage loop skips it — and the blindness would only surface at the
-  // first LYNOX_* pair, long after the deletion. A guard whose absence changes
-  // nothing observable is not a guard.
-  it('the sweep sees every declared pair-resolver row THROUGH A PAIR PATTERN', () => {
-    // Two things this control got wrong before and now does not.
-    // (1) Derived from the registry, not from a name shape like
-    //     /_CLIENT_(ID|SECRET)$/ — a control that can go stale is not one.
-    // (2) Asserted against `viaPair`, NOT `reads`. Against `reads` it was
-    //     tautological: engine-init.ts reads both names via process.env[…],
-    //     which the generic pattern already captures, so deleting both pair
-    //     patterns left the suite green. Measured, not reasoned.
-    const declared = ENV_REGISTRY.filter((r) => r.engineConsumed.kind === 'pair-resolver').map((r) => r.name);
-    expect(declared, 'no pair-resolver row exists — this control has nothing to prove').not.toEqual([]);
-    const unseen = declared.filter((n) => !viaPair.has(n));
-    expect(
-      unseen,
-      'READ_PATTERNS no longer recognizes resolveClientPair(…) reads — the reverse inventory is blind to credential pairs',
-    ).toEqual([]);
-  });
+  // THE SOURCE SWEEP IS STRUCTURALLY BLIND TO PAIR MEMBERS, and saying so is
+  // the honest replacement for the control that used to stand here.
+  //
+  // `resolveClientPair` indexes `env[idName]` with a VARIABLE taken from the
+  // descriptor. No regex over source text reaches that, and the descriptor no
+  // longer carries the names at the call site either. The control that claimed
+  // otherwise was measured on 2026-08-25 to match exactly ONE line in the whole
+  // tree — a deliberately-illegal fixture in the weld file. It asserted a
+  // fixture and reported the reverse inventory healthy while it was blind: the
+  // third source-text approximation of a semantic property in this arc to be
+  // removed rather than patched.
+  //
+  // What carries the property instead, both as DATA rather than as text:
+  //   · the two tests below — every pair-resolver row's members are rows, and
+  //     every minted descriptor matches its registry rows in BOTH directions;
+  //   · src/core/engine-client-pair-boot.test.ts — boots a real Engine and
+  //     asserts the VALUES handed to createGoogleTools, which is what actually
+  //     fails if engine.ts stops reading this pair.
+  //
+  // The names still appear in `reads` via the direct `process.env[…]` at the
+  // engine-init migration site, so the reverse inventory keeps its row for them.
 
   // Both members of a declared pair must themselves be rows. This is the
   // coupling the file-wide source scan was reaching for, expressed as DATA
@@ -481,19 +478,42 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
     expect(typeof pairBrandWelds).toBe('function');
   });
 
-  it('the branded constant in src/core matches its registry descriptor', () => {
-    // The brands are minted in google-client-pair.ts, deliberately NOT in the
-    // contract: a contract change obliges every vendored copy to re-sync, and
-    // the registry already declares the same pair as data. That leaves two
-    // declarations of one fact, so this is the weld that stops them drifting.
-    // Without it, renaming a member in the registry would leave the resolver
-    // reading the old name with a perfectly green contract test.
-    const row = ENV_REGISTRY.find((r) => r.name === GOOGLE_CLIENT_PAIR.id);
-    expect(row?.engineConsumed.pair, 'the id member has no pair descriptor').toBeDefined();
-    expect({ id: row?.engineConsumed.pair?.id, secret: row?.engineConsumed.pair?.secret }).toEqual({
-      id: String(GOOGLE_CLIENT_PAIR.id),
-      secret: String(GOOGLE_CLIENT_PAIR.secret),
-    });
+  // The brands are minted in google-client-pair.ts, deliberately NOT in the
+  // contract: a contract change obliges every vendored copy to re-sync, and the
+  // registry already declares the same pair as data. That leaves two
+  // declarations of one fact, so these two tests are the weld that stops them
+  // drifting. Without them, renaming a member in the registry would leave the
+  // resolver reading the old name with a perfectly green contract test.
+  //
+  // BOTH directions, and the second is the one that matters. Checking only that
+  // GOOGLE_CLIENT_PAIR matches its rows is a per-provider weld, and a
+  // per-provider weld is exactly the shape that skips the provider nobody
+  // remembered to add.
+  it('every minted descriptor matches its registry rows', () => {
+    expect(MINTED_CLIENT_PAIRS.length, 'no descriptor is minted — this weld has nothing to hold').toBeGreaterThan(0);
+    for (const pair of MINTED_CLIENT_PAIRS) {
+      const declared = { id: String(pair.id), secret: String(pair.secret) };
+      for (const member of [declared.id, declared.secret]) {
+        const row = ENV_REGISTRY.find((r) => r.name === member);
+        expect(row, `${member} is minted but has no registry row`).toBeDefined();
+        expect(row?.engineConsumed.kind, `${member} is minted but its row is not a pair-resolver`).toBe('pair-resolver');
+        expect(
+          { id: row?.engineConsumed.pair?.id, secret: row?.engineConsumed.pair?.secret },
+          `${member}'s row declares a different pair than the minted descriptor`,
+        ).toEqual(declared);
+      }
+    }
+  });
+
+  it('every declared pair-resolver row is covered by a minted descriptor', () => {
+    const minted = new Set(MINTED_CLIENT_PAIRS.flatMap((p) => [String(p.id), String(p.secret)]));
+    const orphans = ENV_REGISTRY.filter((r) => r.engineConsumed.kind === 'pair-resolver')
+      .map((r) => r.name)
+      .filter((n) => !minted.has(n));
+    expect(
+      orphans,
+      'a pair-resolver row exists whose descriptor is not in MINTED_CLIENT_PAIRS — nothing welds it to the resolver',
+    ).toEqual([]);
   });
 
   it('every pair descriptor is kind-checked, complete and symmetric', () => {

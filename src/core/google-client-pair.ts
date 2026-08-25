@@ -68,7 +68,16 @@ export interface ClientPairVault {
 export interface ClientPairSources {
   vault?: ClientPairVault | null | undefined;
   env?: NodeJS.ProcessEnv | undefined;
-  userConfig?: { google_client_id?: string | undefined; google_client_secret?: string | undefined } | undefined;
+  /**
+   * The operator's `config.json` values for THIS pair, already selected by the
+   * caller. Deliberately NOT the whole config object: the config keys are
+   * provider-specific (`google_client_id`, …) while the rest of this function
+   * is not. Reading them here would mean a second provider's descriptor
+   * silently resolves GOOGLE's config credentials — the cross-provider mix the
+   * brands exist against, assembled inside the very function built to prevent
+   * one, and reachable by no type.
+   */
+  config?: { id?: string | undefined; secret?: string | undefined } | undefined;
 }
 
 /**
@@ -122,14 +131,24 @@ export interface ClientPairNames {
 /**
  * The Google OAuth app credential pair.
  *
- * The `as` is the mint. It is deliberate and it is the only kind of statement
- * that can produce a `ClientPairNames`; a second provider's pair is added the
- * same way, next to this one.
+ * The assertion is the mint — one cast, not three: asserting the members
+ * individually as well changes nothing, because the outer assertion is what
+ * produces the branded type. A second provider's pair is added the same way,
+ * next to this one, and registered in `MINTED_CLIENT_PAIRS` below.
  */
 export const GOOGLE_CLIENT_PAIR = {
-  id: 'GOOGLE_CLIENT_ID' as ClientIdName,
-  secret: 'GOOGLE_CLIENT_SECRET' as ClientSecretName,
+  id: 'GOOGLE_CLIENT_ID',
+  secret: 'GOOGLE_CLIENT_SECRET',
 } as ClientPairNames;
+
+/**
+ * Every minted pair. The contract test asserts this list against the registry
+ * in BOTH directions, which is the direction that matters: a second pair whose
+ * rows exist but whose descriptor is missing here turns the suite red. Without
+ * it the weld would be per-provider, and a per-provider weld is the shape that
+ * silently skips the provider nobody remembered.
+ */
+export const MINTED_CLIENT_PAIRS: readonly ClientPairNames[] = [GOOGLE_CLIENT_PAIR];
 
 /** Non-empty after trimming. An all-whitespace secret is a misconfiguration, not a credential. */
 function usable(v: string | null | undefined): v is string {
@@ -142,7 +161,7 @@ export function resolveClientPair(
 ): ResolvedClientPair | null {
   const idName: string = pair.id;
   const secretName: string = pair.secret;
-  const { vault, env = process.env, userConfig } = sources;
+  const { vault, env = process.env, config } = sources;
 
   const vaultId = vault?.get(idName);
   const vaultSecret = vault?.get(secretName);
@@ -156,8 +175,8 @@ export function resolveClientPair(
     return { clientId: envId, clientSecret: envSecret, source: 'env' };
   }
 
-  const cfgId = userConfig?.google_client_id;
-  const cfgSecret = userConfig?.google_client_secret;
+  const cfgId = config?.id;
+  const cfgSecret = config?.secret;
   if (usable(cfgId) && usable(cfgSecret)) {
     return { clientId: cfgId, clientSecret: cfgSecret, source: 'config' };
   }

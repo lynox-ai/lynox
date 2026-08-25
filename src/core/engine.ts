@@ -1548,7 +1548,9 @@ export class Engine {
     const googlePair = resolveClientPair(GOOGLE_CLIENT_PAIR, {
       vault: this.secretVault,
       env: process.env,
-      userConfig: this.userConfig,
+      // The config KEYS are Google's; the resolver is not. Selecting them here
+      // keeps a future provider's descriptor from resolving this pair's values.
+      config: { id: this.userConfig?.google_client_id, secret: this.userConfig?.google_client_secret },
     });
     this._googleClientSource = googlePair?.source ?? null;
     if (googlePair) {
@@ -2119,7 +2121,9 @@ export class Engine {
     const pair = resolveClientPair(GOOGLE_CLIENT_PAIR, {
       vault: this.secretVault,
       env: process.env,
-      userConfig: this.userConfig,
+      // The config KEYS are Google's; the resolver is not. Selecting them here
+      // keeps a future provider's descriptor from resolving this pair's values.
+      config: { id: this.userConfig?.google_client_id, secret: this.userConfig?.google_client_secret },
     });
     this._googleClientSource = pair?.source ?? null;
     const clientId = pair?.clientId;

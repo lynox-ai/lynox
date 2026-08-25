@@ -58,7 +58,7 @@ describe('resolveClientPair', () => {
     // that — it lost the working credential behind it.
     const out = resolveClientPair(GOOGLE_CLIENT_PAIR, {
       env: { [ID]: '', [SECRET]: '' },
-      userConfig: { google_client_id: 'cfg-id', google_client_secret: 'cfg-secret' },
+      config: { id: 'cfg-id', secret: 'cfg-secret' },
     });
     expect(out).toEqual({ clientId: 'cfg-id', clientSecret: 'cfg-secret', source: 'config' });
   });
@@ -68,22 +68,22 @@ describe('resolveClientPair', () => {
     expect(out).toBeNull();
   });
 
-  it('falls back to userConfig only when neither real source has a pair', () => {
+  it('falls back to the config tier only when neither real source has a pair', () => {
     const out = resolveClientPair(GOOGLE_CLIENT_PAIR, {
       env: {},
-      userConfig: { google_client_id: 'cfg-id', google_client_secret: 'cfg-secret' },
+      config: { id: 'cfg-id', secret: 'cfg-secret' },
     });
     expect(out).toEqual({ clientId: 'cfg-id', clientSecret: 'cfg-secret', source: 'config' });
   });
 
-  it('prefers the env pair over userConfig, which used to mirror env and vault', () => {
+  it('prefers the env pair over the config tier, which used to mirror env and vault', () => {
     // config.ts USED TO copy env into userConfig and engine-init.ts the vault
     // secret, so a userConfig written by an older engine can itself hold a mixed
     // pair. Both copies are gone now; the stored value outlives them, so it must
     // still never win over a source that supplied both halves.
     const out = resolveClientPair(GOOGLE_CLIENT_PAIR, {
       env: { [ID]: 'env-id', [SECRET]: 'env-secret' },
-      userConfig: { google_client_id: 'cfg-id', google_client_secret: 'cfg-secret' },
+      config: { id: 'cfg-id', secret: 'cfg-secret' },
     });
     expect(out?.source).toBe('env');
   });
