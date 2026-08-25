@@ -514,3 +514,29 @@ describe('maskSecretPatterns — prefixed key forms', () => {
     expect(maskSecretPatterns(`sha=${hash}`, { includeGeneric: true })).not.toContain(hash);
   });
 });
+
+
+describe('URL-userinfo rule stays linear', () => {
+  it('does not degrade quadratically on a long dotted run', () => {
+    // The trigger is specific and the obvious fixture MISSES it: a solid hex or
+    // base64 blob is linear (one `\b` start), and a space-broken stack trace is
+    // linear (short runs). What degrades is ONE unbroken `[a-z0-9+.-]` run with
+    // many internal word boundaries — `a.a.a.…` — because the scheme quantifier
+    // restarts at each of them. Unbounded this measured 40 KB -> ~500 ms of
+    // blocked event loop, and a regex cannot be interrupted.
+    const input = 'a.'.repeat(20_000); // 40 KB
+    const started = performance.now();
+    maskSecretPatterns(input, { includeGeneric: true });
+    const elapsed = performance.now() - started;
+    // Two orders of magnitude of headroom over the bounded cost (~3 ms) and two
+    // below the unbounded one (~500 ms), so it fails on a real regression and
+    // not on a loaded machine.
+    expect(elapsed).toBeLessThan(150);
+  });
+
+  it('still matches the schemes the bound has to keep', () => {
+    for (const scheme of ['postgres', 'amqp', 'mongodb+srv', 'https']) {
+      expect(maskSecretPatterns(`${scheme}://user:hunter2@host/db`)).not.toContain('hunter2');
+    }
+  });
+});

@@ -692,11 +692,13 @@ const SSE_ERROR_MAX_CHARS = 600;
 
 /**
  * Every error the API hands a client goes through here, which is why the mask
- * lives here and not at the call sites. COUNTED, not estimated: of 265 callers,
- * 193 pass a deliberate literal and 72 pass something dynamic — 28 of those a
- * caught `err.message` straight through, and four a string the far side
- * controls. Fixing those 32 by hand would leave the next one to be written
- * tomorrow.
+ * lives here and not at the call sites. There are 264 call sites (265 textual
+ * occurrences, one of which is this definition). The exact literal/dynamic split
+ * is NOT restated here: two independent counts disagreed depending on whether a
+ * `${}` template counts as deliberate, and a number that does not reproduce is
+ * not a measurement. What holds either way: roughly two dozen hand a caught
+ * `err.message` straight through, and fixing those by hand leaves the next one
+ * to be written tomorrow.
  *
  * Known credential shapes only (no `includeGeneric`): most callers pass a
  * deliberate sentence, and the generic 40+ char catcher would redact ordinary
@@ -704,7 +706,7 @@ const SSE_ERROR_MAX_CHARS = 600;
  * see the SSE error path, which also caps the length.
  */
 function errorResponse(res: ServerResponse, status: number, message: string): void {
-  jsonResponse(res, status, { error: maskSecretPatterns(capForClient(message)) });
+  jsonResponse(res, status, { error: capForClient(maskSecretPatterns(message)) });
 }
 
 /**
@@ -3087,7 +3089,7 @@ export class LynoxHTTPApi {
           // a little detail, missing one that is a credential costs the
           // credential. The cap matters on its own — this path was unbounded.
           const rawMsg = err instanceof Error ? err.message : String(err);
-          const msg = maskSecretPatterns(capForClient(rawMsg), { includeGeneric: true });
+          const msg = capForClient(maskSecretPatterns(rawMsg, { includeGeneric: true }));
           // `fatal: true` is not decoration: this path calls res.end() right
           // below, so the turn really is over. Without the field a consumer
           // reading `fatal` would see `undefined` here — falsy, i.e. "keep
@@ -5618,8 +5620,14 @@ export class LynoxHTTPApi {
         // client-bound error string.
         error: result.error === undefined ? undefined : maskSecretPatterns(capForClient(result.error)),
         costUsd: result.costUsd ?? 0,
-        stepErrors: (result.stepErrors ?? []).map(e =>
-          typeof e === 'string' ? maskSecretPatterns(capForClient(e)) : e),
+        // By FIELD, not by `typeof`. The first attempt tested `typeof e === 'string'`
+        // and was a bit-identical no-op — these are objects, always — while both the
+        // comment and the commit message claimed the surface was covered. tsc could
+        // not see it either: `e` narrows to `never`, and `never` is assignable to
+        // `string`, so the dead branch typechecks.
+        stepErrors: (result.stepErrors ?? []).map(e => (
+          e.error === undefined ? e : { ...e, error: capForClient(maskSecretPatterns(e.error)) }
+        )),
       });
     }));
 
@@ -6700,10 +6708,12 @@ export class LynoxHTTPApi {
         // safe to reveal. This page is the OAuth failure a user actually sees,
         // and the message is whatever the token endpoint said.
         //
-        // Order note, stated honestly: for the current pattern set mask-then-
-        // escape and escape-then-mask produce identical output, and a review
-        // could not build a fixture that separates them. This order is the
-        // defensive one for a pattern added later; no test can see it today.
+        // Order note, corrected: a delta round DID separate the two orders. The
+        // URL-userinfo class `[^\s:@/]+` admits `& < > " '`, which is exactly what
+        // escaping rewrites — `postgres://svc:pa&ss@host` masks under one order and
+        // not the other. Neither order changes WHETHER the secret is masked here,
+        // but the earlier claim that no fixture could separate them was wrong, and
+        // "no test can see it" is the sentence that talks someone out of writing one.
         const msg = maskSecretPatterns(err instanceof Error ? err.message : String(err))
           .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
         res.writeHead(500, { 'Content-Type': 'text/html' });

@@ -96,7 +96,12 @@ const SECRET_PATTERNS: RegExp[] = [
   // Narrow by construction — it needs the `:`…`@` shape — so it does not touch
   // ordinary URLs, and it catches the database and basic-auth strings that
   // routinely end up in connection errors.
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s:@/]+@/i,
+  // `{0,32}` on the scheme, not `*`: unbounded it makes this rule quadratic in a
+  // long dotted run (measured 40 KB -> 469 ms of blocked event loop; bounded,
+  // 2.1 ms — 220x, and a regex cannot be interrupted). No fidelity lost: the
+  // longest real scheme here is `mongodb+srv`, and a 33-character URI scheme
+  // does not exist.
+  /\b[a-z][a-z0-9+.-]{0,32}:\/\/[^\s:@/]+:[^\s:@/]+@/i,
   // Stripe
   /\b[sr]k_(live|test)_[A-Za-z0-9]{10,}\b/,
   // GitHub (ghu_ added 2026-05-18 — user installation tokens missed previously)
