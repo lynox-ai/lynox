@@ -4712,10 +4712,7 @@ export class LynoxHTTPApi {
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Validation failed';
-        // 200, so this never reaches `errorResponse` — and this route is handed a
-        // real provider key in the request body, so a probe failure echoing it back
-        // is the shortest path from our own secret to the browser.
-        jsonResponse(res, 200, { state: 'network-error', error: capForClient(maskSecretPatterns(msg)) });
+        jsonResponse(res, 200, { state: 'network-error', error: msg });
       }
     });
 
@@ -6944,8 +6941,7 @@ export class LynoxHTTPApi {
             // actually blocks — could only print the raw engine string, while
             // the test button next to it gave real advice.
             jsonResponse(res, 400, {
-              // Mail-server text: the surface most likely to echo a login line back.
-              error: capForClient(maskSecretPatterns(`Connection test failed: ${probe.error ?? 'unknown error'} (${probe.code ?? 'unknown'})`)),
+              error: `Connection test failed: ${probe.error ?? 'unknown error'} (${probe.code ?? 'unknown'})`,
               code: probe.code ?? 'unknown',
               stage: probe.stage,
             });
@@ -8298,10 +8294,7 @@ export class LynoxHTTPApi {
         const result = await rRes.json() as { success: boolean; verification: unknown };
         sendEvent('done', { success: true, verification: result.verification });
       } catch (err: unknown) {
-        // This one carries the whole raw HTTP body of a remote engine (see the
-        // `Restore failed: ${await rRes.text()}` throw above) — unmasked and
-        // uncapped it is the largest uninspected payload on any client surface here.
-        sendEvent('error', { message: capForClient(maskSecretPatterns(err instanceof Error ? err.message : 'Migration failed', { includeGeneric: true })) });
+        sendEvent('error', { message: err instanceof Error ? err.message : 'Migration failed' });
       } finally {
         res.end();
       }

@@ -5592,6 +5592,33 @@ describe('LynoxHTTPApi', () => {
       expect(body.workflows).toEqual([]);
     });
 
+    it('POST /api/workflows/:id/run masks credentials out of the run error AND the step errors', async () => {
+      // Two sites, one test, because they are the same claim on the same object.
+      // The stepErrors half was a bit-identical no-op in its first version — it
+      // tested `typeof e === 'string'` on elements that are always objects, and
+      // tsc could not see the dead branch because `never` is assignable to
+      // `string`. Nothing caught that but a mutation, so this is the test that
+      // would have.
+      const key = `sk-ant-${'d'.repeat(60)}`;
+      mockRunSavedWorkflow.mockResolvedValue({
+        ok: true,
+        runId: 'run-e',
+        status: 'failed',
+        error: `workflow aborted: ${key}`,
+        stepErrors: [{ stepId: 'step-2', error: `step refused ${key}`, costUsd: 0 }],
+      });
+
+      const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+      const raw = await res.text();
+      expect(raw).not.toContain(key);
+      const body = JSON.parse(raw) as { error: string; stepErrors: Array<{ stepId: string; error: string }> };
+      // masking, not blanket redaction — both diagnoses survive
+      expect(body.error).toContain('workflow aborted');
+      expect(body.stepErrors[0]!.error).toContain('step refused');
+      // and the object shape is untouched
+      expect(body.stepErrors[0]!.stepId).toBe('step-2');
+    });
+
     it('POST /api/workflows/:id/run executes a saved workflow', async () => {
       mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-xyz', status: 'completed' });
       const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
