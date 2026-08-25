@@ -598,6 +598,29 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
     });
   });
 
+  it('both members of a pair carry the SAME emit policy', () => {
+    // The value itself has no reader in core — nothing here behaves differently
+    // for 'operator-only' than for 'when-non-default', which is exactly why a
+    // flip is inert in this repo and lands its risk downstream. What IS a core
+    // invariant is that the two halves move TOGETHER: a control plane emitting
+    // one member and withholding the other hands the engine half a credential,
+    // the mixed-pair state this whole area exists to prevent, one tier up.
+    // Nothing else asserts this, so flipping a single member's policy is
+    // otherwise a silent, green change.
+    const byName = new Map(ENV_REGISTRY.map((r) => [r.name, r]));
+    const mismatched: string[] = [];
+    for (const row of ENV_REGISTRY) {
+      const pair = row.engineConsumed.pair;
+      if (!pair || row.engineConsumed.kind !== 'pair-resolver') continue;
+      const partnerName = row.name === pair.id ? pair.secret : pair.id;
+      const partner = byName.get(partnerName);
+      if (partner && partner.emitPolicy !== row.emitPolicy) {
+        mismatched.push(`${row.name} is '${row.emitPolicy}' but ${partnerName} is '${partner.emitPolicy}'`);
+      }
+    }
+    expect(mismatched, 'a credential pair must be emitted as a pair or not at all').toEqual([]);
+  });
+
   it('every pair descriptor is kind-checked, complete and symmetric', () => {
     expect(pairProblems([...ENV_REGISTRY]), 'a pair descriptor is inert, incomplete or asymmetric').toEqual([]);
   });
