@@ -49,7 +49,11 @@ vi.mock('../integrations/google/index.js', () => ({
 describe('Engine boot — the Google client pair is resolved from ONE source', () => {
   const dirs: string[] = [];
   const engines: Engine[] = [];
+  // GOOGLE_SERVICE_ACCOUNT_KEY belongs here since one case sets it: freshDataDir
+  // is what stops a marker leaking from one case into the next, and a key it does
+  // not know about leaks silently.
   const ENV_KEYS = ['LYNOX_DATA_DIR', 'LYNOX_VAULT_KEY', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET',
+    'GOOGLE_SERVICE_ACCOUNT_KEY',
     'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'] as const;
   const saved = new Map<string, string | undefined>();
 
@@ -103,10 +107,12 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
 
     const engine = await boot();
     expect(engine.getGoogleClientSource()).toBe('env');
-    // toEqual, not toMatchObject: the whole options object, so an EXTRA argument
-    // is caught too. A subset match cannot see one, and passing the secret twice
-    // under a second name is exactly the shape this module exists against.
-    expect(captured.calls.at(-1)).toEqual({
+    // toStrictEqual, and the reason is narrower than "the whole object": a subset
+    // match cannot see an EXTRA argument at all, and plain toEqual sees one only
+    // if its value is defined — `extra: process.env['UNSET']` slips through both.
+    // Passing the secret a second time under another name is exactly the shape
+    // this module exists against, so the strict form is the one that holds.
+    expect(captured.calls.at(-1)).toStrictEqual({
       clientId: 'env-id',
       clientSecret: 'env-secret',
       serviceAccountKeyPath: '/tmp/sa-key.json',
@@ -343,8 +349,11 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     captured.explode = true;
     expect(await engine.reloadGoogle(), 'a reload that throws must report failure').toBe(false);
 
-    // What the throw leaves behind, asserted rather than left to chance — three
-    // mutants lived in here. Two of these are deliberate and one is a question:
+    // What the throw leaves behind, asserted rather than left to chance — two
+    // killable mutants lived in here (dropping the handle, and setting the source
+    // only on success). The registry line below is NOT one of them and is kept as
+    // documentation: ToolRegistry has no unregister method, so no mutation can
+    // make that assertion fail. Counting it as coverage was the error. Two of these are deliberate and one is a question:
     //  · the handle stays the OLD one. Deliberate: the previous integration is
     //    still working, and tearing it down because a rebuild failed would turn
     //    a failed reload into an outage.
@@ -354,7 +363,7 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     //    one. Harmless while both resolve to the same tier and not obviously
     //    right otherwise — carried as DEF-reload-throw-leaves-source-ahead.
     expect(engine.getGoogleAuth(), 'a failed rebuild must not drop a working handle').toBe(handleBefore);
-    expect(engine.registry.find(PROBE_TOOL), 'nor unregister its tools').toBeDefined();
+    expect(engine.registry.find(PROBE_TOOL), 'the tools stay — there is no unregister path at all').toBeDefined();
     expect(engine.getGoogleClientSource(), 'the source reflects the attempted pair').toBe('env');
   });
 

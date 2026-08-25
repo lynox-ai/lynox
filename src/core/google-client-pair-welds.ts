@@ -15,6 +15,14 @@
  * with every brand deleted. Keep each fixture narrow enough that only one error
  * is possible.
  *
+ * WHAT THIS FILE DOES NOT GUARANTEE, measured rather than assumed: deleting the
+ * WHOLE file is caught — tests/contract-env.test.ts imports it and stops
+ * resolving — but deleting ONE weld passes both vitest and tsc, because the
+ * statement and its suppression go together and nothing is left unused. The
+ * obvious guard, counting `@ts-expect-error` occurrences in the source, is
+ * theater: it pins a number, not a property. Carried as
+ * DEF-single-weld-deletion-undetected.
+ *
  * The checks live in an exported, never-called function. The first version used
  * `declare const`, which type-checks and does not exist at runtime, so importing
  * the module threw — and nothing imported it, so the file was broken and green at

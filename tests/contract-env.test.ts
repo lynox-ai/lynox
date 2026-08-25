@@ -95,8 +95,10 @@ function readForms(row: EnvRegistryRow): RegExp[] {
       // src/core/engine-client-pair-boot.test.ts — it boots a real Engine and
       // asserts the values handed to createGoogleTools. Measured 2026-08-25:
       // pointing engine.ts at a foreign descriptor keeps tsc and this file green
-      // and fails that test three times. Nothing forces a second provider to
-      // bring its own boot test — DEF-pair-forward-form-provider-blind.
+      // and fails that one. (An earlier version of this comment said "three
+      // times"; the count depends on which call site is repointed, so it was a
+      // number nothing verified.) Nothing forces a second provider to bring its
+      // own boot test — DEF-pair-forward-form-provider-blind.
       return [/\bresolveClientPair\s*\(/];
     case 'web-ui':
       // SvelteKit server code reads via `$env/dynamic/private`.
