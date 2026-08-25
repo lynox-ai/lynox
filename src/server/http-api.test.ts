@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { maskSecretPatterns } from '../core/secret-store.js';
 import type { Server } from 'node:http';
 import { createHmac, randomBytes } from 'node:crypto';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
@@ -49,6 +50,10 @@ const mockSecretDelete = vi.fn().mockReturnValue(true);
 // Memory routes reject content containing a secret (parity with the memory_store
 // tool). Default: no secret detected; a case can flip it to assert the 400 guard.
 const mockSecretContains = vi.fn().mockReturnValue(false);
+// Value-based masking. Default is a pass-through so no existing case changes;
+// the wiring test swaps it for a real redaction and asserts it reached the
+// client-error path.
+const mockSecretMask = vi.fn((t: string) => t);
 // Hoisted so /api/secrets/status regression tests can swap userConfig per-case
 // (the bug = "userConfig.api_key empty for non-Anthropic providers" needs the
 // returned config to vary without re-instantiating the Engine mock).
@@ -160,6 +165,7 @@ vi.mock('../core/engine.js', () => ({
       deleteSecret: mockSecretDelete,
       resolve: mockSecretResolve,
       containsSecret: mockSecretContains,
+      maskSecrets: mockSecretMask,
     });
     this.getRunHistory = vi.fn().mockReturnValue({
       getRecentRuns: mockHistoryGetRecentRuns,
@@ -1174,6 +1180,38 @@ describe('LynoxHTTPApi', () => {
       const text = await res.text();
       expect(text).toContain('event: error');
       expect(text).toContain('"fatal":false');
+    });
+
+    it('masks a store VALUE that no pattern can match — and this is the boot wiring', async () => {
+      // Two claims in one test, on purpose.
+      //
+      // The product claim: a credential with no distinguishing shape is masked.
+      // 11 of the 13 patterns are prefix-bound and the other two need either a
+      // `user:pass@` shape or 40+ characters, so a Mistral key — 32 bare
+      // alphanumerics — cannot be caught by any of them. Only the store knows it.
+      //
+      // The wiring claim, which is the one that decays silently: the store is a
+      // module-scoped reference set ONCE after engine.init(). Delete that line
+      // and every unit test that hands a store in itself still passes, while
+      // production masks nothing. So this test asserts through the real boot
+      // path and NEVER calls setClientErrorSecretStore itself — deleting the
+      // wiring line has to be what makes it fail.
+      const mistralKey = 'a'.repeat(32);
+      mockSecretMask.mockImplementationOnce((t: string) => t.split(mistralKey).join('***'));
+      mockSessionRun.mockImplementationOnce(async () => {
+        throw new Error(`provider rejected ${mistralKey}`);
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'boom' }),
+      });
+
+      const text = await res.text();
+      expect(text).not.toContain(mistralKey);
+      // and the pattern masker demonstrably could NOT have done it
+      expect(maskSecretPatterns(`provider rejected ${mistralKey}`, { includeGeneric: true }))
+        .toContain(mistralKey);
     });
 
     it('masks BEFORE it caps — a secret straddling the cut must not survive in pieces', async () => {
