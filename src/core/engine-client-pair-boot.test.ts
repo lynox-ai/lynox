@@ -174,20 +174,54 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     const after = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf-8')) as Record<string, unknown>;
     expect(after['google_client_id']).toBe('PROJECT-B-id');
     expect(after['google_client_secret']).toBe('PROJECT-B-secret');
+  });
 
-    // The RELOAD path, driven here and nowhere else, because this is the one
-    // shape where the config tier survives a boot: the migration is conditional
-    // (engine-init.ts — vault holds neither, config holds both, env holds
-    // neither), and the old vault secret above blocks it. Everywhere else the
-    // pair has moved to the vault by the time reload runs, and the vault tier
-    // wins. `POST /api/google/reload` is a live route; before this, no test drove
-    // it at all.
+  it('reloadGoogle resolves the CONFIG tier when the migration was blocked', async () => {
+    // Its own test rather than an appendix to the one above: a reload defect
+    // reporting under "migration is PAIR-ATOMIC" sends the reader to the wrong
+    // code. The setup is repeated on purpose — sharing it would couple a
+    // destructive-migration regression to a reload regression.
+    //
+    // The config tier only reaches a reload where the config→vault migration did
+    // NOT run, and it is conditional (engine-init.ts: vault holds neither,
+    // config holds both, env holds neither). An old vault secret is one way to
+    // block it; a single env half is another. Everywhere else the pair has moved
+    // into the vault by the time reload runs, and the vault tier wins.
+    const dir = freshDataDir('cp-reload-config');
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    const seed = new SecretVault();
+    seed.set('GOOGLE_CLIENT_SECRET', 'PROJECT-A-secret');
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      google_client_id: 'PROJECT-B-id',
+      google_client_secret: 'PROJECT-B-secret',
+    }, null, 2) + '\n');
+
+    const engine = await boot();
     captured.calls.length = 0;
     await engine.reloadGoogle();
+
     const reloaded = captured.calls.at(-1);
     expect(reloaded, 'reloadGoogle must rebuild from the config tier').toBeDefined();
     expect(reloaded).toEqual({ clientId: 'PROJECT-B-id', clientSecret: 'PROJECT-B-secret' });
     expect(engine.getGoogleClientSource()).toBe('config');
+  });
+
+  it('reloadGoogle UPDATES the reported source, it does not merely re-report it', async () => {
+    // Both other reload cases boot into the source they then assert, so neither
+    // can tell a reload that recomputes the source from one that leaves the old
+    // value standing — measured: deleting the assignment in reloadGoogle left
+    // all of them green. Here the source has to CHANGE.
+    freshDataDir('cp-reload-source');
+    const engine = await boot();
+    expect(engine.getGoogleClientSource()).toBeNull();
+    expect(captured.calls).toHaveLength(0);
+
+    setEnv('GOOGLE_CLIENT_ID', 'late-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'late-secret');
+    await engine.reloadGoogle();
+
+    expect(engine.getGoogleClientSource()).toBe('env');
+    expect(captured.calls.at(-1)).toEqual({ clientId: 'late-id', clientSecret: 'late-secret' });
   });
 
   it('reloadGoogle re-resolves after the pair has migrated into the vault', async () => {
@@ -197,9 +231,7 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     //
     // This case is the ordinary shape: config.json supplies the pair, init
     // migrates it into the vault, and the reload therefore resolves 'vault'
-    // even though config.json is where the operator wrote it. The config tier
-    // at reload is driven by the pair-atomic migration test above, which is the
-    // one boot shape where the migration does not run.
+    // even though config.json is where the operator wrote it.
     const dir = freshDataDir('cp-reload');
     writeFileSync(join(dir, 'config.json'), JSON.stringify({
       google_client_id: 'cfg-id',

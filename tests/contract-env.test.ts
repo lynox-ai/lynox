@@ -562,6 +562,18 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
     // row also counts as an orphan — so two branches co-fired and neither could
     // be killed alone. Separating them is the whole point of driving a pure
     // function with synthetic input rather than asserting against the registry.
+    it('rejects a minted member whose row is a pair-resolver with no descriptor', () => {
+      // `pair` is optional on EVERY kind, so this row is type-legal — and it is
+      // the only shape that reaches the `!declared` disjunct alone. Round 3
+      // deleted the fixture that used to cover it while separating two branches
+      // that co-fired, which moved this one from co-fired to never-reached: a
+      // fix for an unkillable pair that produced an unreached branch.
+      const noPair: EnvRegistryRow = {
+        name: 'A_SECRET', valueKind: 'opaque', emitPolicy: 'operator-only',
+        engineConsumed: { kind: 'pair-resolver', readSite: 'src/core/engine.ts' },
+      };
+      expect(mintedWeldProblems([pairRow('A_ID', P), noPair], [P])).not.toEqual([]);
+    });
     it('rejects a minted member whose row carries the pair but the wrong kind', () => {
       // Same descriptor, so the pair-comparison branch stays silent.
       const wrongKind: EnvRegistryRow = {
