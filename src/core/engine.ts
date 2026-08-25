@@ -111,7 +111,7 @@ import { escalateToUser as runEscalation, type EscalateOpts } from './escalation
 import { WorkerLoop } from './worker-loop.js';
 import { Session } from './session.js';
 import type { SessionOptions } from './session.js';
-import { resolveClientPair, isManagedBrokerPair, type ClientPairSource } from './google-client-pair.js';
+import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource } from './google-client-pair.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -1545,7 +1545,7 @@ export class Engine {
     // Google Workspace tools (conditional — requires client ID + secret)
     // Resolved as a PAIR, from ONE source — see google-client-pair.ts for why
     // resolving the halves independently produced a mixed credential.
-    const googlePair = resolveClientPair('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', {
+    const googlePair = resolveClientPair(GOOGLE_CLIENT_PAIR, {
       vault: this.secretVault,
       env: process.env,
       userConfig: this.userConfig,
@@ -2116,7 +2116,7 @@ export class Engine {
 
   /** Re-initialize Google Workspace integration after credentials change. */
   async reloadGoogle(): Promise<boolean> {
-    const pair = resolveClientPair('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', {
+    const pair = resolveClientPair(GOOGLE_CLIENT_PAIR, {
       vault: this.secretVault,
       env: process.env,
       userConfig: this.userConfig,

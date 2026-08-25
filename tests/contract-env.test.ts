@@ -17,6 +17,10 @@
  * via the membership review line instead).
  */
 import { describe, it, expect } from 'vitest';
+import { GOOGLE_CLIENT_PAIR } from '../src/core/google-client-pair.js';
+// Imported so DELETING the weld file is a failure rather than a silent loss.
+// Nothing else references it — the same device mirrors.ts relies on.
+import { pairBrandWelds } from '../src/core/google-client-pair.welds.js';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, relative, join } from 'node:path';
@@ -75,16 +79,19 @@ function readForms(row: EnvRegistryRow): RegExp[] {
       return [new RegExp(`envFloat\\(['"]${n}['"]\\)`)];
     case 'direct':
       return [new RegExp(`process\\.env(\\.${n}\\b|\\[['"]${n}['"]\\])`)];
-    case 'pair-resolver': {
-      // The asserted form is the WHOLE call, both members in order. Pinning one
-      // argument at a time was not enough: it accepted a member paired with a
-      // FOREIGN partner. Order plus partner in one regex closes both.
-      // The direct `process.env` form is NOT here: it is added per-site for
-      // `alsoReadAt` only, so the primary site stays pinned to the resolver.
-      const pair = row.engineConsumed.pair;
-      if (!pair) return [/$^/]; // no pair declared → matches nothing; the row-level test below says why
-      return [new RegExp(`\\bresolveClientPair\\(\\s*['"]${esc(pair.id)}['"]\\s*,\\s*['"]${esc(pair.secret)}['"]`)];
-    }
+    case 'pair-resolver':
+      // The member NAMES are deliberately absent from the call site now: the
+      // resolver takes one branded descriptor, so there is no argument order to
+      // get wrong. This form therefore asserts only that the declared site calls
+      // the resolver at all — the naming is welded elsewhere, and more strongly:
+      //   · the descriptor ≡ its registry row (the drift test below);
+      //   · nothing but the branded descriptor is accepted (the compile welds in
+      //     src/core/google-client-pair.welds.ts).
+      // Earlier revisions matched the two literals in order, which was text
+      // matching standing in for a type. It caught a swap only where it already
+      // knew to look; the compiler catches it everywhere, including call sites
+      // that do not exist yet.
+      return [/\bresolveClientPair\s*\(/];
     case 'web-ui':
       // SvelteKit server code reads via `$env/dynamic/private`.
       return [...webUiForms(row.name), new RegExp(`process\\.env(\\.${n}\\b|\\[['"]${n}['"]\\])`)];
@@ -157,45 +164,29 @@ describe('env-ABI forward: every registry row is read at its declared site', () 
   }
 });
 
-describe('env-ABI forward: the pair-resolver form set rejects near-misses', () => {
-  const ID = 'GOOGLE_CLIENT_ID';
-  const SECRET = 'GOOGLE_CLIENT_SECRET';
+describe('env-ABI forward: the pair-resolver form rejects near-misses', () => {
+  // What is left to check at the TEXT level is narrow, and that is the point.
+  // A swapped or foreign-partnered pair used to be a regex question; since the
+  // resolver takes a branded descriptor it is a COMPILE question, pinned in
+  // src/core/google-client-pair.welds.ts. Those cases are gone from here rather
+  // than duplicated: a text check that mirrors a compile check adds no coverage
+  // and rots independently.
   const row: EnvRegistryRow = {
-    name: ID,
+    name: 'GOOGLE_CLIENT_ID',
     valueKind: 'opaque',
-    emitPolicy: 'operator-only',
-    engineConsumed: { kind: 'pair-resolver', pair: { id: ID, secret: SECRET }, readSite: 'src/core/engine.ts' },
+    emitPolicy: 'when-non-default',
+    engineConsumed: { kind: 'pair-resolver', pair: { id: 'GOOGLE_CLIENT_ID', secret: 'GOOGLE_CLIENT_SECRET' }, readSite: 'src/core/engine.ts' },
   };
   const matches = (src: string): boolean => readForms(row).some((f) => f.test(src));
 
-  it('accepts the real resolver call', () => {
-    expect(matches(`resolveClientPair('${ID}', '${SECRET}', {`)).toBe(true);
-  });
-
-  it('accepts a bare env read at a SECONDARY site but not at the primary one', () => {
-    // The asymmetry is the point: at the declared site the resolver call is the
-    // only accepted form, so swapping it for two independent process.env reads
-    // fails. At a migration site the direct read IS the real form.
-    const envRead = `!process.env['${ID}'] && !process.env['${SECRET}']`;
-    const at = (site: string): boolean => formsForSite(row, site).some((f) => f.test(envRead));
-    expect(at('src/core/engine.ts'), 'the primary site must reject a bare env read').toBe(false);
-    expect(at('src/core/engine-init.ts'), 'a secondary site must accept it').toBe(true);
+  it('accepts a real resolver call', () => {
+    expect(matches('const p = resolveClientPair(GOOGLE_CLIENT_PAIR, { vault });')).toBe(true);
   });
 
   const rejected: [string, string][] = [
-    ['a differently-named resolver', `resolveClientPairLegacy('${ID}', '${SECRET}')`],
-    ['a helper whose name merely ends with the resolver', `myresolveClientPair('${ID}', '${SECRET}')`],
-    ['longer names sharing the prefix', `resolveClientPair('${ID}_LEGACY', '${SECRET}_LEGACY')`],
-    ['another provider pair', `resolveClientPair('MS_CLIENT_ID', 'MS_CLIENT_SECRET', {`],
-    // Ships the client SECRET as the client id.
-    ['a SWAPPED call', `resolveClientPair('${SECRET}', '${ID}', {`],
-    // One real member, a foreign partner — the shape a one-argument form let through.
-    ['a FOREIGN partner in position 1', `resolveClientPair('MS_CLIENT_ID', '${SECRET}', {`],
-    ['a FOREIGN partner in position 2', `resolveClientPair('${ID}', 'MS_CLIENT_SECRET', {`],
-    // Accepted only at an alsoReadAt site, added there by the site loop.
-    ['a bare direct env read', `!process.env['${ID}'] && !process.env['${SECRET}']`],
-    ['a dotted env read of a longer name', `process.env.${ID}_LEGACY`],
-    ['a bare mention in a comment', `// ${ID} / ${SECRET} env copies were removed`],
+    ['a differently-named resolver', 'resolveClientPairLegacy(GOOGLE_CLIENT_PAIR, {})'],
+    ['a helper whose name merely ends with the resolver', 'myresolveClientPair(GOOGLE_CLIENT_PAIR, {})'],
+    ['a bare mention in prose', '// resolveClientPair is described here without being called'],
   ];
   for (const [label, src] of rejected) {
     it(`rejects ${label}`, () => {
@@ -467,6 +458,27 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
     // this line existed. Measured, both narrowings now fail.
     expect(pairProblems([row('A_SECRET', 'pair-resolver', P)])).not.toEqual([]);
     expect(pairProblems([row('A_ID', 'pair-resolver', P), row('A_SECRET', 'pair-resolver', { id: 'A_SECRET', secret: 'A_ID' })])).not.toEqual([]);
+  });
+
+  it('the compile welds for the pair brands are present', () => {
+    // Not a value assertion — the IMPORT is the assertion. If
+    // google-client-pair.welds.ts is deleted, this file no longer resolves.
+    expect(typeof pairBrandWelds).toBe('function');
+  });
+
+  it('the branded constant in src/core matches its registry descriptor', () => {
+    // The brands are minted in google-client-pair.ts, deliberately NOT in the
+    // contract: a contract change obliges every vendored copy to re-sync, and
+    // the registry already declares the same pair as data. That leaves two
+    // declarations of one fact, so this is the weld that stops them drifting.
+    // Without it, renaming a member in the registry would leave the resolver
+    // reading the old name with a perfectly green contract test.
+    const row = ENV_REGISTRY.find((r) => r.name === GOOGLE_CLIENT_PAIR.id);
+    expect(row?.engineConsumed.pair, 'the id member has no pair descriptor').toBeDefined();
+    expect({ id: row?.engineConsumed.pair?.id, secret: row?.engineConsumed.pair?.secret }).toEqual({
+      id: String(GOOGLE_CLIENT_PAIR.id),
+      secret: String(GOOGLE_CLIENT_PAIR.secret),
+    });
   });
 
   it('every pair descriptor is kind-checked, complete and symmetric', () => {

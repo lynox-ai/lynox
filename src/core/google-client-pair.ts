@@ -71,16 +71,50 @@ export interface ClientPairSources {
   userConfig?: { google_client_id?: string | undefined; google_client_secret?: string | undefined } | undefined;
 }
 
+/**
+ * The two member names, BRANDED so they cannot be exchanged for one another.
+ *
+ * The previous signature took `(idName: string, secretName: string)`. Two
+ * arguments of the same type are swappable, and a swapped call ships the client
+ * SECRET as the client id — the mixed pair this whole module exists to prevent,
+ * assembled by the caller instead of by the precedence chain. A contract test
+ * could only ever DETECT that at sites it knew about; this makes it
+ * unrepresentable instead.
+ *
+ * The brands are minted HERE and nowhere else. They deliberately do NOT live in
+ * `src/contract/`: the registry already declares the same pair as data, and a
+ * contract change obliges every vendored copy to re-sync. `pairMatchesRegistry`
+ * in the contract test welds this constant to that declaration, so the two
+ * cannot drift without a red test.
+ */
+declare const CLIENT_ID_BRAND: unique symbol;
+declare const CLIENT_SECRET_BRAND: unique symbol;
+export type ClientIdName = string & { readonly [CLIENT_ID_BRAND]: true };
+export type ClientSecretName = string & { readonly [CLIENT_SECRET_BRAND]: true };
+
+/** A credential pair's member names, in the only order they may be read. */
+export interface ClientPairNames {
+  readonly id: ClientIdName;
+  readonly secret: ClientSecretName;
+}
+
+/** The Google OAuth app credential pair. The only construction site of the brands. */
+export const GOOGLE_CLIENT_PAIR: ClientPairNames = {
+  id: 'GOOGLE_CLIENT_ID' as ClientIdName,
+  secret: 'GOOGLE_CLIENT_SECRET' as ClientSecretName,
+};
+
 /** Non-empty after trimming. An all-whitespace secret is a misconfiguration, not a credential. */
 function usable(v: string | null | undefined): v is string {
   return typeof v === 'string' && v.trim().length > 0;
 }
 
 export function resolveClientPair(
-  idName: string,
-  secretName: string,
+  pair: ClientPairNames,
   sources: ClientPairSources,
 ): ResolvedClientPair | null {
+  const idName: string = pair.id;
+  const secretName: string = pair.secret;
   const { vault, env = process.env, userConfig } = sources;
 
   const vaultId = vault?.get(idName);
