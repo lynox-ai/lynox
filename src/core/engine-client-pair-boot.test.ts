@@ -21,18 +21,39 @@ import type { LynoxConfig } from '../types/index.js';
  * matters, the secret VALUE. A resolver that returns the vault id with the env
  * secret still reports `source: 'vault'` — the value is the assertion.
  */
-const captured = vi.hoisted(() => ({ calls: [] as { clientId: string; clientSecret: string }[] }));
+const PROBE_TOOL = 'google_probe_tool';
+/**
+ * The fixture is a suspect, and here it was the defect. It used to return
+ * `tools: []` and capture only `clientId`/`clientSecret`, which made two things
+ * UNOBSERVABLE BY CONSTRUCTION rather than by omission: whether the registration
+ * loop runs at all, and whether the vault, scopes and key path reach
+ * createGoogleTools. Deleting any of those lines from the engine left every test
+ * green. It returns one real tool now and captures the whole options object.
+ */
+const captured = vi.hoisted(() => ({
+  calls: [] as Record<string, unknown>[],
+  /** Set by the one test that needs createGoogleTools to blow up. */
+  explode: false,
+}));
 vi.mock('../integrations/google/index.js', () => ({
-  createGoogleTools: (opts: { clientId: string; clientSecret: string }) => {
-    captured.calls.push({ clientId: opts.clientId, clientSecret: opts.clientSecret });
-    return { tools: [], auth: { isAuthenticated: () => false } };
+  createGoogleTools: (opts: Record<string, unknown>) => {
+    captured.calls.push({ ...opts });
+    if (captured.explode) throw new Error('createGoogleTools failed');
+    return {
+      tools: [{ definition: { name: 'google_probe_tool', description: 'probe', parameters: {} }, execute: async () => '' }],
+      auth: { isAuthenticated: () => false },
+    };
   },
 }));
 
 describe('Engine boot — the Google client pair is resolved from ONE source', () => {
   const dirs: string[] = [];
   const engines: Engine[] = [];
+  // GOOGLE_SERVICE_ACCOUNT_KEY belongs here since one case sets it: freshDataDir
+  // is what stops a marker leaking from one case into the next, and a key it does
+  // not know about leaks silently.
   const ENV_KEYS = ['LYNOX_DATA_DIR', 'LYNOX_VAULT_KEY', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET',
+    'GOOGLE_SERVICE_ACCOUNT_KEY',
     'LYNOX_MANAGED_INSTANCE_ID', 'LYNOX_BILLING_TIER', 'LYNOX_MANAGED_MODE'] as const;
   const saved = new Map<string, string | undefined>();
 
@@ -49,6 +70,7 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     for (const d of dirs) rmSync(d, { recursive: true, force: true });
     dirs.length = 0;
     captured.calls.length = 0;
+    captured.explode = false;
     reloadConfig();
   });
 
@@ -71,12 +93,35 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
   }
 
   it('env pair only → source is env, and the env values are what got built', async () => {
-    freshDataDir('cp-env');
+    const dir = freshDataDir('cp-env');
     setEnv('GOOGLE_CLIENT_ID', 'env-id');
     setEnv('GOOGLE_CLIENT_SECRET', 'env-secret');
+    // The two arguments no test anywhere set a value for, so their VALUES were
+    // never exercised: presence alone survives `scopes: undefined` and a renamed
+    // env key, which is exactly what a config-field rename produces.
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    setEnv('GOOGLE_SERVICE_ACCOUNT_KEY', '/tmp/sa-key.json');
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      google_oauth_scopes: ['https://www.googleapis.com/auth/calendar.events'],
+    }, null, 2) + '\n');
+
     const engine = await boot();
     expect(engine.getGoogleClientSource()).toBe('env');
-    expect(captured.calls.at(-1)).toEqual({ clientId: 'env-id', clientSecret: 'env-secret' });
+    // toStrictEqual, and the reason is narrower than "the whole object": a subset
+    // match cannot see an EXTRA argument at all, and plain toEqual sees one only
+    // if its value is defined — `extra: process.env['UNSET']` slips through both.
+    // Passing the secret a second time under another name is exactly the shape
+    // this module exists against, so the strict form is the one that holds.
+    expect(captured.calls.at(-1)).toStrictEqual({
+      clientId: 'env-id',
+      clientSecret: 'env-secret',
+      serviceAccountKeyPath: '/tmp/sa-key.json',
+      vault: expect.anything(),
+      scopes: ['https://www.googleapis.com/auth/calendar.events'],
+    });
+    // The BOOT path has its own registration loop, and deleting it survived
+    // every suite until this line — the reload fix closed only the other copy.
+    expect(engine.registry.find(PROBE_TOOL), 'the boot must register the built tools').toBeDefined();
   });
 
   it('an env pair on a provisioned instance is the managed broker', async () => {
@@ -114,9 +159,14 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
 
     const engine = await boot();
     expect(engine.getGoogleClientSource()).toBe('vault');
-    expect(captured.calls.at(-1)).toEqual({ clientId: 'vault-id', clientSecret: 'vault-secret' });
-    // And a managed tenant running their own client is NOT the broker.
-    expect(engine.isGoogleManagedBroker()).toBe(false);
+    expect(captured.calls.at(-1)).toMatchObject({ clientId: 'vault-id', clientSecret: 'vault-secret' });
+    // A tenant running their OWN client is not the broker — and the marker is
+    // set here on purpose, because without it this assertion reads false for the
+    // wrong reason: freshDataDir clears the marker, so it would pass with the
+    // source term deleted. The point is that a provisioned instance resolving
+    // from the VAULT is still not the broker.
+    setEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst_vault_byo');
+    expect(engine.isGoogleManagedBroker(), 'a vault pair is the tenant\'s own, marker or not').toBe(false);
   });
 
   it('env id + vault secret builds NOTHING — the config tier must not re-assemble it', async () => {
@@ -160,15 +210,185 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     const engine = await boot();
 
     // Nothing may be built from a pair assembled across the two eras.
+    // No `if (built)` here, and that is the point: guarding the equality made it
+    // stop firing in exactly the case where the config tier stops producing a
+    // pair at all — the assert above still passes against `undefined`, so the
+    // whole test went green with NOTHING built.
     const built = captured.calls.at(-1);
+    expect(built, 'the config pair must reach createGoogleTools').toBeDefined();
     expect(built?.clientSecret).not.toBe('PROJECT-A-secret');
-    if (built) expect(built).toEqual({ clientId: 'PROJECT-B-id', clientSecret: 'PROJECT-B-secret' });
+    expect(built).toMatchObject({ clientId: 'PROJECT-B-id', clientSecret: 'PROJECT-B-secret' });
     expect(engine.getGoogleClientSource()).not.toBe('vault');
 
     // And config.json must still hold the operator's pair — it is the only copy.
     const after = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf-8')) as Record<string, unknown>;
     expect(after['google_client_id']).toBe('PROJECT-B-id');
     expect(after['google_client_secret']).toBe('PROJECT-B-secret');
+  });
+
+  it('reloadGoogle resolves the CONFIG tier when the migration was blocked', async () => {
+    // Its own test rather than an appendix to the one above: a reload defect
+    // reporting under "migration is PAIR-ATOMIC" sends the reader to the wrong
+    // code. The setup is repeated on purpose — sharing it would couple a
+    // destructive-migration regression to a reload regression.
+    //
+    // The config tier only reaches a reload where the config→vault migration did
+    // NOT run, and it is conditional (engine-init.ts: vault holds neither,
+    // config holds both, env holds neither). An old vault secret is one way to
+    // block it; a single env half is another. Everywhere else the pair has moved
+    // into the vault by the time reload runs, and the vault tier wins.
+    const dir = freshDataDir('cp-reload-config');
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    const seed = new SecretVault();
+    seed.set('GOOGLE_CLIENT_SECRET', 'PROJECT-A-secret');
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      google_client_id: 'PROJECT-B-id',
+      google_client_secret: 'PROJECT-B-secret',
+    }, null, 2) + '\n');
+
+    const engine = await boot();
+    captured.calls.length = 0;
+    await engine.reloadGoogle();
+
+    const reloaded = captured.calls.at(-1);
+    expect(reloaded, 'reloadGoogle must rebuild from the config tier').toBeDefined();
+    expect(reloaded).toMatchObject({ clientId: 'PROJECT-B-id', clientSecret: 'PROJECT-B-secret' });
+    expect(engine.getGoogleClientSource()).toBe('config');
+    // The vault handle itself, asserted where one actually exists: nulling this
+    // argument would leave the tools unable to read a stored token, and until
+    // now nothing looked at it.
+    expect(reloaded?.['vault'], 'the vault must reach createGoogleTools').toBeDefined();
+  });
+
+  it('reloadGoogle drives the whole reported state, in both directions', async () => {
+    // Five things hang off a reload and each was killed by nothing before this:
+    // the resolved source, the managed-broker verdict, the GoogleAuth handle,
+    // the registered tools, and the return value. They are asserted in one test
+    // because they are one state machine — a reload that half-updates is the
+    // failure mode.
+    //
+    // The consequence that makes this more than tidiness: `GET /api/secrets/status`
+    // reports `configured.google` from `getGoogleClientSource() !== null`
+    // (src/server/http-api.ts). A source left standing after the credentials are
+    // removed therefore tells the settings surface that Google is configured on
+    // an engine that resolves nothing. (`GET /api/google/status` does NOT show
+    // this — it returns early on a null GoogleAuth and never reaches
+    // client_source. An earlier version of this comment named it, and it was
+    // wrong: that endpoint cannot display the symptom.)
+    freshDataDir('cp-reload-source');
+    const engine = await boot();
+    expect(engine.getGoogleClientSource()).toBeNull();
+    expect(captured.calls).toHaveLength(0);
+
+    // ── nothing → an env pair, on a SELF-HOST engine.
+    setEnv('GOOGLE_CLIENT_ID', 'late-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'late-secret');
+    expect(await engine.reloadGoogle(), 'a reload that builds must report success').toBe(true);
+    expect(engine.getGoogleClientSource()).toBe('env');
+    expect(captured.calls.at(-1)).toMatchObject({ clientId: 'late-id', clientSecret: 'late-secret' });
+    // The POSITIVE half, and it is what makes the null assertion in phase 4 mean
+    // anything: without it, `getGoogleAuth()` reads null there because the boot
+    // never set a handle, not because the reload cleared one — and deleting the
+    // assignment in reloadGoogle stays green. The vacuous-negative trap, one
+    // round after fixing the same trap on isGoogleManagedBroker.
+    expect(engine.getGoogleAuth(), 'a reload that builds must install the auth handle').not.toBeNull();
+    // The literal reading of "every Google tool was dead": deleting the
+    // registration loop used to survive every suite, because the fixture
+    // returned no tools. It returns one now, so the loop is observable.
+    expect(engine.registry.find(PROBE_TOOL), 'the built tools must reach the registry').toBeDefined();
+    // The other three arguments createGoogleTools is handed. Deleting any of them
+    // used to survive every suite, because the fixture captured only id and
+    // secret. Presence, not value — in THIS phase there is no vault key and no
+    // configured scope list, so the values are legitimately undefined; the
+    // vault's VALUE is asserted in the migration case below, where one exists.
+    const opts = Object.keys(captured.calls.at(-1) ?? {});
+    for (const key of ['vault', 'scopes', 'serviceAccountKeyPath']) {
+      expect(opts, `createGoogleTools must still be handed ${key}`).toContain(key);
+    }
+    // An env pair alone is NOT the managed broker — the provisioning marker is
+    // the other half of that verdict.
+    expect(engine.isGoogleManagedBroker(), 'env alone is a self-host pair').toBe(false);
+
+    // ── the same pair, now on a provisioned instance. No reload: the verdict
+    // reads process.env live, so it flips without one. Calling reloadGoogle here
+    // would look like the cause and be decoration — measured, deleting it left
+    // the suite green.
+    setEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst_reload');
+    expect(engine.isGoogleManagedBroker(), 'env + a provisioning marker IS the broker').toBe(true);
+
+    // An EMPTY marker is not a marker. The shape is the one this module's own
+    // header calls out: a deployment interpolating an unset variable
+    // (`NAME=${NAME:-}`) hands the process an empty string rather than nothing.
+    // Weakening the check to `!== undefined` would make a self-host engine
+    // report as the managed broker, and only this case catches that.
+    setEnv('LYNOX_MANAGED_INSTANCE_ID', '');
+    expect(engine.isGoogleManagedBroker(), 'an empty marker is not a provisioned instance').toBe(false);
+    setEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst_reload');
+
+    // ── and back to nothing.
+    setEnv('GOOGLE_CLIENT_ID', undefined);
+    setEnv('GOOGLE_CLIENT_SECRET', undefined);
+    expect(await engine.reloadGoogle(), 'a reload that builds nothing must report failure').toBe(false);
+    expect(engine.getGoogleClientSource(), 'the source must clear').toBeNull();
+    expect(engine.isGoogleManagedBroker(), 'and the broker verdict with it').toBe(false);
+    expect(engine.getGoogleAuth(), 'the auth handle must go with the credentials').toBeNull();
+  });
+
+  it('reloadGoogle reports failure when building the tools throws', async () => {
+    // The try/catch has two ways to answer false and only one was asserted.
+    // A throwing createGoogleTools with `catch { return true }` would have
+    // POST /api/google/reload answer ok while the engine kept whatever handle it
+    // had — the same lie as the early-return branch, through the other door.
+    freshDataDir('cp-reload-throw');
+    setEnv('GOOGLE_CLIENT_ID', 'boom-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'boom-secret');
+    const engine = await boot();
+    expect(engine.getGoogleAuth(), 'the boot must have built something to lose').not.toBeNull();
+
+    const handleBefore = engine.getGoogleAuth();
+    captured.explode = true;
+    expect(await engine.reloadGoogle(), 'a reload that throws must report failure').toBe(false);
+
+    // What the throw leaves behind, asserted rather than left to chance — two
+    // killable mutants lived in here (dropping the handle, and setting the source
+    // only on success). The registry line below is NOT one of them and is kept as
+    // documentation: ToolRegistry has no unregister method, so no mutation can
+    // make that assertion fail. Counting it as coverage was the error. Two of these are deliberate and one is a question:
+    //  · the handle stays the OLD one. Deliberate: the previous integration is
+    //    still working, and tearing it down because a rebuild failed would turn
+    //    a failed reload into an outage.
+    //  · the registry keeps the old tools, for the same reason.
+    //  · the SOURCE was already updated before the throw, so it now describes
+    //    the pair the failed build was for while the handle is from the previous
+    //    one. Harmless while both resolve to the same tier and not obviously
+    //    right otherwise — carried as DEF-reload-throw-leaves-source-ahead.
+    expect(engine.getGoogleAuth(), 'a failed rebuild must not drop a working handle').toBe(handleBefore);
+    expect(engine.registry.find(PROBE_TOOL), 'the tools stay — there is no unregister path at all').toBeDefined();
+    expect(engine.getGoogleClientSource(), 'the source reflects the attempted pair').toBe('env');
+  });
+
+  it('reloadGoogle re-resolves after the pair has migrated into the vault', async () => {
+    // reloadGoogle has a live production caller — `POST /api/google/reload`
+    // (src/server/http-api.ts). What it did NOT have was a test: the HTTP API
+    // suite replaces it with a vi.fn(), so the real method ran nowhere.
+    //
+    // This case is the ordinary shape: config.json supplies the pair, init
+    // migrates it into the vault, and the reload therefore resolves 'vault'
+    // even though config.json is where the operator wrote it.
+    const dir = freshDataDir('cp-reload');
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      google_client_id: 'cfg-id',
+      google_client_secret: 'cfg-secret',
+    }, null, 2) + '\n');
+    const engine = await boot();
+    captured.calls.length = 0;
+
+    await engine.reloadGoogle();
+
+    const rebuilt = captured.calls.at(-1);
+    expect(rebuilt, 'reloadGoogle must rebuild the pair').toBeDefined();
+    expect(rebuilt).toMatchObject({ clientId: 'cfg-id', clientSecret: 'cfg-secret' });
+    expect(engine.getGoogleClientSource()).toBe('vault');
   });
 
   it('no pair anywhere → nothing built, no source', async () => {

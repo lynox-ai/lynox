@@ -111,7 +111,7 @@ import { escalateToUser as runEscalation, type EscalateOpts } from './escalation
 import { WorkerLoop } from './worker-loop.js';
 import { Session } from './session.js';
 import type { SessionOptions } from './session.js';
-import { resolveClientPair, isManagedBrokerPair, type ClientPairSource } from './google-client-pair.js';
+import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -193,6 +193,30 @@ export function resolveInboxLlmRegion(opts: {
 export class Engine {
   readonly config: LynoxConfig;
   private userConfig: LynoxUserConfig;
+
+  /**
+   * The three tiers `resolveClientPair` reads, in ONE place.
+   *
+   * The config KEYS are Google's and the resolver is not, so the caller has to
+   * name them — but naming them at each call site meant two hand-written copies
+   * of the same two-key mapping, and only the first was covered: swapping or
+   * deleting the copy in `reloadGoogle` left the pair suites green. One copy,
+   * so one mutation reaches both call sites.
+   *
+   * The reload copy was reachable, contrary to the first version of this
+   * comment: the config→vault migration is conditional, and the pair-atomic
+   * case in engine-client-pair-boot.test.ts is a boot where it does not run.
+   * That case now drives the reload. Deduplicating is still the right call —
+   * two hand-written copies of a credential mapping is the shape this module
+   * exists to prevent — but "untestable" was not the reason, and it was wrong.
+   */
+  private googleClientSources(): ClientPairSources {
+    return {
+      vault: this.secretVault,
+      env: process.env,
+      config: { id: this.userConfig?.google_client_id, secret: this.userConfig?.google_client_secret },
+    };
+  }
   readonly registry = new ToolRegistry();
   client: Anthropic;
   private readonly batchIndex = new BatchIndex();
@@ -247,7 +271,15 @@ export class Engine {
   /** Which source supplied the Google client pair — the UI routes the card on it. */
   private _googleClientSource: ClientPairSource | null = null;
 
-  /** Which source supplied the Google client pair, for `GET /api/google/status`. */
+  /**
+   * Which source supplied the Google client pair.
+   *
+   * Read by `GET /api/google/status` — but only AFTER that route returns early
+   * on a null GoogleAuth, so it is not the surface where a stale value shows.
+   * That is `GET /api/secrets/status`, whose `configured.google` is this value
+   * being non-null: a source left standing after the credentials are gone
+   * reports Google as configured on an engine that resolves nothing.
+   */
   getGoogleClientSource(): ClientPairSource | null {
     return this._googleClientSource;
   }
@@ -1545,11 +1577,7 @@ export class Engine {
     // Google Workspace tools (conditional — requires client ID + secret)
     // Resolved as a PAIR, from ONE source — see google-client-pair.ts for why
     // resolving the halves independently produced a mixed credential.
-    const googlePair = resolveClientPair('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', {
-      vault: this.secretVault,
-      env: process.env,
-      userConfig: this.userConfig,
-    });
+    const googlePair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
     this._googleClientSource = googlePair?.source ?? null;
     if (googlePair) {
       const googleClientId = googlePair.clientId;
@@ -2116,11 +2144,7 @@ export class Engine {
 
   /** Re-initialize Google Workspace integration after credentials change. */
   async reloadGoogle(): Promise<boolean> {
-    const pair = resolveClientPair('GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', {
-      vault: this.secretVault,
-      env: process.env,
-      userConfig: this.userConfig,
-    });
+    const pair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
     this._googleClientSource = pair?.source ?? null;
     const clientId = pair?.clientId;
     const clientSecret = pair?.clientSecret;

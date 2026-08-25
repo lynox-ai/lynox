@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveClientPair, isManagedBrokerPair } from './google-client-pair.js';
+import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR } from './google-client-pair.js';
 
 const ID = 'GOOGLE_CLIENT_ID';
 const SECRET = 'GOOGLE_CLIENT_SECRET';
@@ -11,12 +11,12 @@ function vaultOf(entries: Record<string, string>) {
 
 describe('resolveClientPair', () => {
   it('takes the env pair when only the env has both', () => {
-    const out = resolveClientPair(ID, SECRET, { env: { [ID]: 'env-id', [SECRET]: 'env-secret' } });
+    const out = resolveClientPair(GOOGLE_CLIENT_PAIR, { env: { [ID]: 'env-id', [SECRET]: 'env-secret' } });
     expect(out).toEqual({ clientId: 'env-id', clientSecret: 'env-secret', source: 'env' });
   });
 
   it('takes the vault pair when only the vault has both', () => {
-    const out = resolveClientPair(ID, SECRET, { vault: vaultOf({ [ID]: 'v-id', [SECRET]: 'v-secret' }), env: {} });
+    const out = resolveClientPair(GOOGLE_CLIENT_PAIR, { vault: vaultOf({ [ID]: 'v-id', [SECRET]: 'v-secret' }), env: {} });
     expect(out).toEqual({ clientId: 'v-id', clientSecret: 'v-secret', source: 'vault' });
   });
 
@@ -26,7 +26,7 @@ describe('resolveClientPair', () => {
     // the store preloads only the secret and never consents it. The assertion
     // that matters is the secret: a resolver that returns the vault id with the
     // env secret satisfies `source === 'vault'` and is still the defect.
-    const out = resolveClientPair(ID, SECRET, {
+    const out = resolveClientPair(GOOGLE_CLIENT_PAIR, {
       vault: vaultOf({ [ID]: 'v-id', [SECRET]: 'v-secret' }),
       env: { [ID]: 'env-id', [SECRET]: 'env-secret' },
     });
@@ -36,7 +36,7 @@ describe('resolveClientPair', () => {
   });
 
   it('never mixes: a half-filled vault falls through to the env pair entirely', () => {
-    const out = resolveClientPair(ID, SECRET, {
+    const out = resolveClientPair(GOOGLE_CLIENT_PAIR, {
       vault: vaultOf({ [ID]: 'v-id-only' }),
       env: { [ID]: 'env-id', [SECRET]: 'env-secret' },
     });
@@ -44,7 +44,7 @@ describe('resolveClientPair', () => {
   });
 
   it('never mixes: a half-filled env does not borrow the other half from the vault', () => {
-    const out = resolveClientPair(ID, SECRET, {
+    const out = resolveClientPair(GOOGLE_CLIENT_PAIR, {
       vault: vaultOf({ [SECRET]: 'v-secret-only' }),
       env: { [ID]: 'env-id' },
     });
@@ -56,40 +56,40 @@ describe('resolveClientPair', () => {
     // old `??` chain that empty string outranked config.json and Google was silently
     // not built. The old code did not hand '' to Google — the truthiness guard caught
     // that — it lost the working credential behind it.
-    const out = resolveClientPair(ID, SECRET, {
+    const out = resolveClientPair(GOOGLE_CLIENT_PAIR, {
       env: { [ID]: '', [SECRET]: '' },
-      userConfig: { google_client_id: 'cfg-id', google_client_secret: 'cfg-secret' },
+      config: { id: 'cfg-id', secret: 'cfg-secret' },
     });
     expect(out).toEqual({ clientId: 'cfg-id', clientSecret: 'cfg-secret', source: 'config' });
   });
 
   it('treats whitespace as absent', () => {
-    const out = resolveClientPair(ID, SECRET, { env: { [ID]: '   ', [SECRET]: 'env-secret' } });
+    const out = resolveClientPair(GOOGLE_CLIENT_PAIR, { env: { [ID]: '   ', [SECRET]: 'env-secret' } });
     expect(out).toBeNull();
   });
 
-  it('falls back to userConfig only when neither real source has a pair', () => {
-    const out = resolveClientPair(ID, SECRET, {
+  it('falls back to the config tier only when neither real source has a pair', () => {
+    const out = resolveClientPair(GOOGLE_CLIENT_PAIR, {
       env: {},
-      userConfig: { google_client_id: 'cfg-id', google_client_secret: 'cfg-secret' },
+      config: { id: 'cfg-id', secret: 'cfg-secret' },
     });
     expect(out).toEqual({ clientId: 'cfg-id', clientSecret: 'cfg-secret', source: 'config' });
   });
 
-  it('prefers the env pair over userConfig, which used to mirror env and vault', () => {
+  it('prefers the env pair over the config tier, which used to mirror env and vault', () => {
     // config.ts USED TO copy env into userConfig and engine-init.ts the vault
     // secret, so a userConfig written by an older engine can itself hold a mixed
     // pair. Both copies are gone now; the stored value outlives them, so it must
     // still never win over a source that supplied both halves.
-    const out = resolveClientPair(ID, SECRET, {
+    const out = resolveClientPair(GOOGLE_CLIENT_PAIR, {
       env: { [ID]: 'env-id', [SECRET]: 'env-secret' },
-      userConfig: { google_client_id: 'cfg-id', google_client_secret: 'cfg-secret' },
+      config: { id: 'cfg-id', secret: 'cfg-secret' },
     });
     expect(out?.source).toBe('env');
   });
 
   it('returns null when nothing has a pair', () => {
-    expect(resolveClientPair(ID, SECRET, { env: {} })).toBeNull();
+    expect(resolveClientPair(GOOGLE_CLIENT_PAIR, { env: {} })).toBeNull();
   });
 });
 
