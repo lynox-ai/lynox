@@ -6,8 +6,7 @@ name: gate-record
 #
 # What it can and cannot do, stated plainly because the difference matters: CI
 # cannot judge whether a review was any good, so most of the record is an
-# ATTESTATION. The exceptions CI establishes on its own are the head SHA and which
-# gates the diff's path map makes mandatory —
+# ATTESTATION. It does pin the head SHA itself,
 # and that is the failure that actually recurs: the gates ran, then three more
 # commits landed and nobody re-ran them. `synchronize` re-runs this job on every
 # push, so the record goes red the moment it stops describing the code.
