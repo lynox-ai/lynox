@@ -206,36 +206,48 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     expect(engine.getGoogleClientSource()).toBe('config');
   });
 
-  it('reloadGoogle updates the reported source in BOTH directions', async () => {
-    // Both other reload cases boot into the source they then assert, so neither
-    // can tell a reload that recomputes the source from one that leaves the old
-    // value standing — measured: deleting the assignment in reloadGoogle left
-    // all of them green. Here the source has to CHANGE.
+  it('reloadGoogle drives the whole reported state, in both directions', async () => {
+    // Four things hang off a reload and each was killed by nothing before this:
+    // the resolved source, the managed-broker verdict, the GoogleAuth handle,
+    // and the return value. They are asserted in one test because they are one
+    // state machine — a reload that half-updates is the failure mode.
+    //
+    // The consequence that makes this more than tidiness: `GET /api/secrets/status`
+    // reports `configured.google` from `getGoogleClientSource() !== null`
+    // (src/server/http-api.ts). A source left standing after the credentials are
+    // removed therefore tells the settings surface that Google is configured on
+    // an engine that resolves nothing. (`GET /api/google/status` does NOT show
+    // this — it returns early on a null GoogleAuth and never reaches
+    // client_source. An earlier version of this comment named it, and it was
+    // wrong: that endpoint cannot display the symptom.)
     freshDataDir('cp-reload-source');
     const engine = await boot();
     expect(engine.getGoogleClientSource()).toBeNull();
     expect(captured.calls).toHaveLength(0);
 
+    // ── nothing → an env pair, on a SELF-HOST engine.
     setEnv('GOOGLE_CLIENT_ID', 'late-id');
     setEnv('GOOGLE_CLIENT_SECRET', 'late-secret');
-    await engine.reloadGoogle();
-
+    expect(await engine.reloadGoogle(), 'a reload that builds must report success').toBe(true);
     expect(engine.getGoogleClientSource()).toBe('env');
     expect(captured.calls.at(-1)).toEqual({ clientId: 'late-id', clientSecret: 'late-secret' });
+    // An env pair alone is NOT the managed broker — the provisioning marker is
+    // the other half of that verdict, and without this the marker term is
+    // untested and could be dropped.
+    expect(engine.isGoogleManagedBroker(), 'env alone is a self-host pair').toBe(false);
 
-    // And BACK to nothing. Asserting only the null→set direction left two
-    // plausible mutations alive — moving the assignment below the
-    // `if (!clientId || !clientSecret)` early return, or guarding it with
-    // `=== null` — and both are live defects rather than test noise:
-    // /api/google/status derives `configured` from `source !== null`, plus
-    // `client_source` and `managed_broker`. A stale 'env' therefore reports an
-    // unconfigured engine as configured, and as running on the managed broker.
+    // ── the same pair, now on a provisioned instance.
+    setEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst_reload');
+    expect(await engine.reloadGoogle()).toBe(true);
+    expect(engine.isGoogleManagedBroker(), 'env + a provisioning marker IS the broker').toBe(true);
+
+    // ── and back to nothing.
     setEnv('GOOGLE_CLIENT_ID', undefined);
     setEnv('GOOGLE_CLIENT_SECRET', undefined);
-    await engine.reloadGoogle();
-
-    expect(engine.getGoogleClientSource(), 'a reload that finds no pair must clear the source').toBeNull();
-    expect(engine.isGoogleManagedBroker(), 'and must stop reporting the managed broker').toBe(false);
+    expect(await engine.reloadGoogle(), 'a reload that builds nothing must report failure').toBe(false);
+    expect(engine.getGoogleClientSource(), 'the source must clear').toBeNull();
+    expect(engine.isGoogleManagedBroker(), 'and the broker verdict with it').toBe(false);
+    expect(engine.getGoogleAuth(), 'the auth handle must go with the credentials').toBeNull();
   });
 
   it('reloadGoogle re-resolves after the pair has migrated into the vault', async () => {
