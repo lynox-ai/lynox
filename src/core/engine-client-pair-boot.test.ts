@@ -160,15 +160,47 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     const engine = await boot();
 
     // Nothing may be built from a pair assembled across the two eras.
+    // No `if (built)` here, and that is the point: guarding the equality made it
+    // stop firing in exactly the case where the config tier stops producing a
+    // pair at all — the assert above still passes against `undefined`, so the
+    // whole test went green with NOTHING built.
     const built = captured.calls.at(-1);
+    expect(built, 'the config pair must reach createGoogleTools').toBeDefined();
     expect(built?.clientSecret).not.toBe('PROJECT-A-secret');
-    if (built) expect(built).toEqual({ clientId: 'PROJECT-B-id', clientSecret: 'PROJECT-B-secret' });
+    expect(built).toEqual({ clientId: 'PROJECT-B-id', clientSecret: 'PROJECT-B-secret' });
     expect(engine.getGoogleClientSource()).not.toBe('vault');
 
     // And config.json must still hold the operator's pair — it is the only copy.
     const after = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf-8')) as Record<string, unknown>;
     expect(after['google_client_id']).toBe('PROJECT-B-id');
     expect(after['google_client_secret']).toBe('PROJECT-B-secret');
+  });
+
+  it('reloadGoogle re-resolves and rebuilds — nothing else drove that path', async () => {
+    // The only other caller of reloadGoogle is a vi.fn() in the HTTP API test,
+    // so this method was reachable by no test at all. It matters here because
+    // it repeats the resolver call, and a second call site is where a pair gets
+    // assembled differently from the first.
+    //
+    // What it asserts is deliberately what is REACHABLE: after init runs the
+    // config→vault migration the pair lives in the vault, so the source on
+    // reload is 'vault' even though config.json supplied it. That is why the
+    // tier mapping now has exactly ONE owner (Engine#googleClientSources) —
+    // a second copy of it could not be reached by any boot test.
+    const dir = freshDataDir('cp-reload');
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      google_client_id: 'cfg-id',
+      google_client_secret: 'cfg-secret',
+    }, null, 2) + '\n');
+    const engine = await boot();
+    captured.calls.length = 0;
+
+    await engine.reloadGoogle();
+
+    const rebuilt = captured.calls.at(-1);
+    expect(rebuilt, 'reloadGoogle must rebuild the pair').toBeDefined();
+    expect(rebuilt).toEqual({ clientId: 'cfg-id', clientSecret: 'cfg-secret' });
+    expect(engine.getGoogleClientSource()).toBe('vault');
   });
 
   it('no pair anywhere → nothing built, no source', async () => {

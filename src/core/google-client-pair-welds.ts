@@ -21,12 +21,14 @@
  * the same time. `tests/contract-env.test.ts` imports the function; that is what
  * makes deleting this file a failure rather than a silent loss.
  */
-import {
+import { GOOGLE_CLIENT_PAIR } from './google-client-pair.js';
+// Type-only: the resolver is referenced solely through `typeof` below, so a
+// value import would be flagged by consistent-type-imports.
+import type {
   resolveClientPair,
-  GOOGLE_CLIENT_PAIR,
-  type ClientPairNames,
-  type ClientIdName,
-  type ClientSecretName,
+  ClientPairNames,
+  ClientIdName,
+  ClientSecretName,
 } from './google-client-pair.js';
 
 /**
@@ -38,7 +40,12 @@ import {
 const OTHER_PROVIDER_PAIR = { id: 'MS_CLIENT_ID', secret: 'MS_CLIENT_SECRET' } as ClientPairNames;
 
 export function pairBrandWelds(): void {
-  // ── Independently killable. Each dies to exactly one removal.
+  // ── Independently killable: each dies to exactly one mutation, and the
+  // mutation differs. The two member fixtures and the pair fixture each die to
+  // the removal of THEIR brand. `legacyFirstArg` dies to none of the three —
+  // it survives every brand removal, exactly like the group below — and is
+  // here because it dies to the mutation that matters more than any of them:
+  // putting a bare name string back into the first parameter.
 
   /** The PAIR brand: two correctly branded members from DIFFERENT credentials. */
   // @ts-expect-error — members of two different pairs cannot form a pair

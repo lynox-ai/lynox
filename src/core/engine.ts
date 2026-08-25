@@ -111,7 +111,7 @@ import { escalateToUser as runEscalation, type EscalateOpts } from './escalation
 import { WorkerLoop } from './worker-loop.js';
 import { Session } from './session.js';
 import type { SessionOptions } from './session.js';
-import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource } from './google-client-pair.js';
+import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -193,6 +193,25 @@ export function resolveInboxLlmRegion(opts: {
 export class Engine {
   readonly config: LynoxConfig;
   private userConfig: LynoxUserConfig;
+
+  /**
+   * The three tiers `resolveClientPair` reads, in ONE place.
+   *
+   * The config KEYS are Google's and the resolver is not, so the caller has to
+   * name them — but naming them at each call site meant two hand-written copies
+   * of the same two-key mapping, and the second one is untestable: after the
+   * config→vault migration runs during init, the vault tier always wins, so no
+   * boot test can reach `reloadGoogle`'s copy of the config tier. An untestable
+   * duplicate of a two-key mapping is the exact shape this module exists to
+   * prevent, so there is one copy, and the boot tests reach it.
+   */
+  private googleClientSources(): ClientPairSources {
+    return {
+      vault: this.secretVault,
+      env: process.env,
+      config: { id: this.userConfig?.google_client_id, secret: this.userConfig?.google_client_secret },
+    };
+  }
   readonly registry = new ToolRegistry();
   client: Anthropic;
   private readonly batchIndex = new BatchIndex();
@@ -1545,13 +1564,7 @@ export class Engine {
     // Google Workspace tools (conditional — requires client ID + secret)
     // Resolved as a PAIR, from ONE source — see google-client-pair.ts for why
     // resolving the halves independently produced a mixed credential.
-    const googlePair = resolveClientPair(GOOGLE_CLIENT_PAIR, {
-      vault: this.secretVault,
-      env: process.env,
-      // The config KEYS are Google's; the resolver is not. Selecting them here
-      // keeps a future provider's descriptor from resolving this pair's values.
-      config: { id: this.userConfig?.google_client_id, secret: this.userConfig?.google_client_secret },
-    });
+    const googlePair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
     this._googleClientSource = googlePair?.source ?? null;
     if (googlePair) {
       const googleClientId = googlePair.clientId;
@@ -2118,13 +2131,7 @@ export class Engine {
 
   /** Re-initialize Google Workspace integration after credentials change. */
   async reloadGoogle(): Promise<boolean> {
-    const pair = resolveClientPair(GOOGLE_CLIENT_PAIR, {
-      vault: this.secretVault,
-      env: process.env,
-      // The config KEYS are Google's; the resolver is not. Selecting them here
-      // keeps a future provider's descriptor from resolving this pair's values.
-      config: { id: this.userConfig?.google_client_id, secret: this.userConfig?.google_client_secret },
-    });
+    const pair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
     this._googleClientSource = pair?.source ?? null;
     const clientId = pair?.clientId;
     const clientSecret = pair?.clientSecret;

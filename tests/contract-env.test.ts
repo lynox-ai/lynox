@@ -215,6 +215,12 @@ describe('env-ABI forward: the pair-resolver form rejects near-misses', () => {
   const rejected: [string, string][] = [
     ['a differently-named resolver', 'resolveClientPairLegacy(GOOGLE_CLIENT_PAIR, {})'],
     ['a helper whose name merely ends with the resolver', 'myresolveClientPair(GOOGLE_CLIENT_PAIR, {})'],
+    // The CALL parenthesis, and nothing else, is what this one holds. An earlier
+    // revision dropped a paren-less fixture as "picked to pass" — it was not:
+    // measured, weakening the form to /\bresolveClientPair\b/ survives without
+    // it. The prose-vs-code looseness noted above is real AND this kill is real;
+    // they are different properties and only one of them is unenforceable.
+    ['the bare identifier without a call', 'export { resolveClientPair } from \'./google-client-pair.js\';'],
   ];
   for (const [label, src] of rejected) {
     it(`rejects ${label}`, () => {
@@ -374,6 +380,45 @@ describe('env-ABI reverse: every LYNOX_* read has a contract stance', () => {
  * it. Both were present once and neither could be killed alone — a redundant
  * pair reads as two guards and is one.
  */
+/**
+ * The weld between the minted descriptors in `src/core/google-client-pair.ts`
+ * and the registry rows that declare the same pair as data. Takes both sides as
+ * arguments so the branches can be driven by SYNTHETIC input: with one real
+ * pair in the tree, running it only against ENV_REGISTRY leaves half of it a
+ * survivor — stubbing the orphan list to `[]` stays green.
+ *
+ * Both directions, and they fail differently: a minted member with no row (or
+ * the wrong row) is a resolver reading a name the ABI does not declare; a
+ * pair-resolver row with no minted descriptor is a declared pair that nothing
+ * in core is welded to.
+ */
+function mintedWeldProblems(
+  rows: readonly EnvRegistryRow[],
+  minted: readonly { id: string; secret: string }[],
+): string[] {
+  const problems: string[] = [];
+  for (const pair of minted) {
+    for (const member of [pair.id, pair.secret]) {
+      const row = rows.find((r) => r.name === member);
+      if (!row) { problems.push(`${member} is minted but has no registry row`); continue; }
+      if (row.engineConsumed.kind !== 'pair-resolver') {
+        problems.push(`${member} is minted but its row is kind '${row.engineConsumed.kind}'`);
+      }
+      const declared = row.engineConsumed.pair;
+      if (!declared || declared.id !== pair.id || declared.secret !== pair.secret) {
+        problems.push(`${member}'s row declares a different pair than the minted descriptor`);
+      }
+    }
+  }
+  const mintedNames = new Set(minted.flatMap((p) => [p.id, p.secret]));
+  for (const row of rows) {
+    if (row.engineConsumed.kind === 'pair-resolver' && !mintedNames.has(row.name)) {
+      problems.push(`${row.name} is a declared pair-resolver row with no minted descriptor`);
+    }
+  }
+  return problems;
+}
+
 function pairProblems(rows: readonly EnvRegistryRow[]): string[] {
   const byName = new Map(rows.map((r) => [r.name, r]));
   const problems: string[] = [];
@@ -397,10 +442,9 @@ function pairProblems(rows: readonly EnvRegistryRow[]): string[] {
 }
 
 describe('env-ABI: credential-pair reads are swept and declared', () => {
-  const { reads } = SWEEP;
-
-  // THE SOURCE SWEEP IS STRUCTURALLY BLIND TO PAIR MEMBERS, and saying so is
-  // the honest replacement for the control that used to stand here.
+  // THE SOURCE SWEEP IS STRUCTURALLY BLIND TO THE PAIR-RESOLVER READ — not to
+  // the member NAMES, which it still sees at the migration site below. Saying it
+  // that way round is the honest replacement for the control that stood here.
   //
   // `resolveClientPair` indexes `env[idName]` with a VARIABLE taken from the
   // descriptor. No regex over source text reaches that, and the descriptor no
@@ -489,31 +533,39 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
   // GOOGLE_CLIENT_PAIR matches its rows is a per-provider weld, and a
   // per-provider weld is exactly the shape that skips the provider nobody
   // remembered to add.
-  it('every minted descriptor matches its registry rows', () => {
+  it('the minted descriptors and the registry agree, in both directions', () => {
     expect(MINTED_CLIENT_PAIRS.length, 'no descriptor is minted — this weld has nothing to hold').toBeGreaterThan(0);
-    for (const pair of MINTED_CLIENT_PAIRS) {
-      const declared = { id: String(pair.id), secret: String(pair.secret) };
-      for (const member of [declared.id, declared.secret]) {
-        const row = ENV_REGISTRY.find((r) => r.name === member);
-        expect(row, `${member} is minted but has no registry row`).toBeDefined();
-        expect(row?.engineConsumed.kind, `${member} is minted but its row is not a pair-resolver`).toBe('pair-resolver');
-        expect(
-          { id: row?.engineConsumed.pair?.id, secret: row?.engineConsumed.pair?.secret },
-          `${member}'s row declares a different pair than the minted descriptor`,
-        ).toEqual(declared);
-      }
-    }
+    const minted = MINTED_CLIENT_PAIRS.map((p) => ({ id: String(p.id), secret: String(p.secret) }));
+    expect(mintedWeldProblems([...ENV_REGISTRY], minted), 'a minted pair and its rows disagree').toEqual([]);
   });
 
-  it('every declared pair-resolver row is covered by a minted descriptor', () => {
-    const minted = new Set(MINTED_CLIENT_PAIRS.flatMap((p) => [String(p.id), String(p.secret)]));
-    const orphans = ENV_REGISTRY.filter((r) => r.engineConsumed.kind === 'pair-resolver')
-      .map((r) => r.name)
-      .filter((n) => !minted.has(n));
-    expect(
-      orphans,
-      'a pair-resolver row exists whose descriptor is not in MINTED_CLIENT_PAIRS — nothing welds it to the resolver',
-    ).toEqual([]);
+  // The branches, on synthetic input — because against the real registry the
+  // second direction cannot fail today and would ship as a survivor.
+  describe('the minted weld catches each direction', () => {
+    const P = { id: 'A_ID', secret: 'A_SECRET' };
+    const pairRow = (name: string, pair: { id: string; secret: string } | undefined): EnvRegistryRow => ({
+      name, valueKind: 'opaque', emitPolicy: 'operator-only',
+      engineConsumed: pair
+        ? { kind: 'pair-resolver', pair, readSite: 'src/core/engine.ts' }
+        : { kind: 'direct', readSite: 'src/core/engine.ts' },
+    });
+    const both = [pairRow('A_ID', P), pairRow('A_SECRET', P)];
+
+    it('accepts a consistent pair', () => {
+      expect(mintedWeldProblems(both, [P])).toEqual([]);
+    });
+    it('rejects a minted member with no row', () => {
+      expect(mintedWeldProblems([pairRow('A_ID', P)], [P])).not.toEqual([]);
+    });
+    it('rejects a minted member whose row is not a pair-resolver', () => {
+      expect(mintedWeldProblems([pairRow('A_ID', P), pairRow('A_SECRET', undefined)], [P])).not.toEqual([]);
+    });
+    it('rejects a row declaring a different pair than the descriptor', () => {
+      expect(mintedWeldProblems(both, [{ id: 'A_ID', secret: 'B_SECRET' }])).not.toEqual([]);
+    });
+    it('rejects a declared pair-resolver row that nothing mints', () => {
+      expect(mintedWeldProblems(both, []), 'an unminted pair row must be reported').not.toEqual([]);
+    });
   });
 
   it('every pair descriptor is kind-checked, complete and symmetric', () => {
