@@ -25,11 +25,14 @@
  *   (consumed inside SDK constructors — justify in `note`). `none` = not read
  *   by the engine at all; the forward test asserts ABSENCE from the read
  *   inventory. `pair-resolver` = read as one half of a credential PAIR via
- *   the `resolveClientPair` helper. `pair` names BOTH members in call order,
- *   so the asserted form is the whole call rather than one argument: a swapped
- *   call, or one pairing a member with a foreign partner, matches nothing.
- *   The direct `process.env` form is accepted only at `alsoReadAt` sites, so
- *   the primary read site stays pinned to the resolver.
+ *   the `resolveClientPair` helper. `pair` names BOTH members, as DATA for a
+ *   weld rather than as a text form to match: the resolver takes one branded
+ *   descriptor, so a swapped pair — or one pairing a member with a foreign
+ *   partner — does not compile, and the member names no longer appear at the
+ *   call site at all. The asserted form is therefore only that the declared
+ *   site calls the resolver; WHICH pair it reads is welded in core, against
+ *   the minted descriptors. The direct `process.env` form is accepted only at
+ *   `alsoReadAt` sites, so the primary read site stays pinned to the resolver.
  * - `secret.redact` — `exact-name`: the env-preview masks this key's value.
  *   `whole-value`: the value embeds secrets under OTHER names (e.g. a JSON
  *   blob with api_key fields) and must be masked as a whole.
@@ -70,7 +73,7 @@ export type EngineReadKind =
   | 'env-alias' // readEnvAlias('NAME') / envTier('NAME') via src/core/env.ts
   | 'env-float' // envFloat('NAME')
   | 'direct' // process.env read at an arbitrary core site
-  | 'pair-resolver' // resolveClientPair('ID','SECRET') — one half of a credential pair
+  | 'pair-resolver' // resolveClientPair(<branded pair descriptor>) — one half of a credential pair
   | 'web-ui' // read inside packages/web-ui/src (runs in the engine process)
   | 'sdk-internal' // consumed inside an SDK constructor — no greppable readSite
   | 'none'; // not read by the engine (denylisted phantoms)
@@ -81,7 +84,7 @@ export interface EngineConsumption {
   readSite?: string;
   /** Additional read sites the forward test also asserts (e.g. web-ui next to core). */
   alsoReadAt?: string[];
-  /** For `pair-resolver` rows: both members of the pair, in resolver call order. */
+  /** For `pair-resolver` rows: both members of the pair. */
   pair?: { id: string; secret: string };
   /**
    * For `features` rows: the flag slug + a real consumer call-site. The forward
