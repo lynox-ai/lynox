@@ -663,8 +663,54 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
   res.end(json);
 }
 
+/**
+ * Cap a client-bound error string AFTER it has been masked. Never before.
+ *
+ * This docblock argued the opposite for two commits and was the reason a
+ * disclosure oracle got built. The reasoning was: the masker is superlinear on
+ * one rule, so cut first and the cost is bounded. What that misses is that every
+ * rule has a minimum length and some need a terminator — cut inside a secret and
+ * the rule no longer matches, so the REMAINDER ships in cleartext. Measured
+ * across 15 credential shapes and 700 offsets: masking first leaks nothing
+ * beyond the sanctioned `***<last4>`; cutting first leaks up to 38 of 39
+ * characters of a Google key. And the offset is caller-controllable wherever a
+ * message interpolates user input ahead of the secret.
+ *
+ * The cost belongs to the regex, not to the call order — see the bounded
+ * quantifier in `secret-store.ts`. Bounding it there costs nothing and leaves
+ * this order free to be the safe one.
+ */
+function capForClient(text: string): string {
+  return text.length > SSE_ERROR_MAX_CHARS ? `${text.slice(0, SSE_ERROR_MAX_CHARS)}…` : text;
+}
+
+/**
+ * Upper bound on the error text the run stream hands the browser. The toast
+ * that renders it already truncates at 140 chars for layout; this is the
+ * transport-level bound, generous enough to keep a real stack frame readable
+ * and small enough that a provider returning a paragraph cannot ship the whole
+ * thing. Not a security control on its own — the mask is — but an unbounded
+ * field is how a payload nobody inspected leaves the process.
+ */
+const SSE_ERROR_MAX_CHARS = 600;
+
+/**
+ * Every error the API hands a client goes through here, which is why the mask
+ * lives here and not at the call sites. There are 264 call sites (265 textual
+ * occurrences, one of which is this definition). The exact literal/dynamic split
+ * is NOT restated here: two independent counts disagreed depending on whether a
+ * `${}` template counts as deliberate, and a number that does not reproduce is
+ * not a measurement. What holds either way: roughly two dozen hand a caught
+ * `err.message` straight through, and fixing those by hand leaves the next one
+ * to be written tomorrow.
+ *
+ * Known credential shapes only (no `includeGeneric`): most callers pass a
+ * deliberate sentence, and the generic 40+ char catcher would redact ordinary
+ * prose. For a message that is entirely uncontrolled the caller asks for more —
+ * see the SSE error path, which also caps the length.
+ */
 function errorResponse(res: ServerResponse, status: number, message: string): void {
-  jsonResponse(res, status, { error: message });
+  jsonResponse(res, status, { error: capForClient(maskSecretPatterns(message)) });
 }
 
 /**
@@ -3038,7 +3084,16 @@ export class LynoxHTTPApi {
         if (err instanceof RunAbortedError) {
           if (!res.writableEnded && !res.destroyed) res.end();
         } else if (!aborted) {
-          const msg = err instanceof Error ? err.message : String(err);
+          // Masked AND capped: this string is a runtime/provider error rendered
+          // into the tenant's error banner, an 8s toast, and a one-click copy
+          // button — and in the managed tiers the LLM key it might quote is
+          // OURS, not the tenant's, so whoever induces a provider error is the
+          // one reading it. `includeGeneric` for the reason error-reporting.ts
+          // gives: masking a long opaque token that turns out to be a hash costs
+          // a little detail, missing one that is a credential costs the
+          // credential. The cap matters on its own — this path was unbounded.
+          const rawMsg = err instanceof Error ? err.message : String(err);
+          const msg = capForClient(maskSecretPatterns(rawMsg, { includeGeneric: true }));
           // `fatal: true` is not decoration: this path calls res.end() right
           // below, so the turn really is over. Without the field a consumer
           // reading `fatal` would see `undefined` here — falsy, i.e. "keep
@@ -5561,9 +5616,19 @@ export class LynoxHTTPApi {
         ran: true,
         runId: result.runId,
         status: result.status,
-        error: result.error,
+        // Workflow step errors come from tools, i.e. from whatever a remote
+        // service said. Array-valued, so each entry is treated like any other
+        // client-bound error string.
+        error: result.error === undefined ? undefined : capForClient(maskSecretPatterns(result.error)),
         costUsd: result.costUsd ?? 0,
-        stepErrors: result.stepErrors ?? [],
+        // By FIELD, not by `typeof`. The first attempt tested `typeof e === 'string'`
+        // and was a bit-identical no-op — these are objects, always — while both the
+        // comment and the commit message claimed the surface was covered. tsc could
+        // not see it either: `e` narrows to `never`, and `never` is assignable to
+        // `string`, so the dead branch typechecks.
+        stepErrors: (result.stepErrors ?? []).map(e => (
+          e.error === undefined ? e : { ...e, error: capForClient(maskSecretPatterns(e.error)) }
+        )),
       });
     }));
 
@@ -6640,7 +6705,20 @@ export class LynoxHTTPApi {
         LynoxHTTPApi._appendSetCookie(res, this._clearOAuthStateCookie());
         sendSuccessRedirect();
       } catch (err: unknown) {
-        const msg = (err instanceof Error ? err.message : String(err))
+        // Masked BEFORE escaping: escaping makes the string safe to render, not
+        // safe to reveal. This page is the OAuth failure a user actually sees,
+        // and the message is whatever the token endpoint said.
+        //
+        // Order note, corrected twice. The first version claimed no fixture could
+        // separate mask-then-escape from escape-then-mask; a delta round built one
+        // (`postgres://svc:pa&ss@host` — the URL-userinfo class admits the very
+        // characters escaping rewrites). The second version then overshot and said
+        // the two orders differ in WHETHER the secret is masked. Measured for all
+        // five escape characters: both orders mask it; only the rendering of the
+        // masked remainder differs. So the order is not load-bearing here — it is
+        // load-bearing for a pattern added later, and that is why it is written
+        // down instead of left to chance.
+        const msg = maskSecretPatterns(err instanceof Error ? err.message : String(err))
           .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
         res.writeHead(500, { 'Content-Type': 'text/html' });
         res.end(`<html><body><h1>Error</h1><p>${msg}</p></body></html>`);

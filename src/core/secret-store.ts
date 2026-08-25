@@ -96,7 +96,21 @@ const SECRET_PATTERNS: RegExp[] = [
   // Narrow by construction — it needs the `:`…`@` shape — so it does not touch
   // ordinary URLs, and it catches the database and basic-auth strings that
   // routinely end up in connection errors.
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s:@/]+@/i,
+  // Two deliberate departures from the obvious form, both measured.
+  //
+  // `{0,32}` instead of `*`: unbounded, this rule is quadratic in a long dotted
+  // run — 40 KB cost ~500 ms of blocked event loop, and a regex cannot be
+  // interrupted.
+  //
+  // NO leading `\b[a-z]` anchor: the quantifier does not govern the SCHEME, it
+  // governs everything since the last word boundary. Anchored, a bound of 32
+  // silently stops matching as soon as 34+ alphanumerics are glued in front of
+  // the URL — and text immediately before an error's URL is exactly what a
+  // caller can control. Without the anchor the same bound keeps the match
+  // (verified: 40 and 200 characters of glued prefix both match) while ordinary
+  // URLs still do not (`https://api.example.com/…`, `host:8443/…`,
+  // `redis://cache:6379/0` — none has the `user:pass@` shape this needs).
+  /[a-z0-9+.-]{0,32}:\/\/[^\s:@/]+:[^\s:@/]+@/i,
   // Stripe
   /\b[sr]k_(live|test)_[A-Za-z0-9]{10,}\b/,
   // GitHub (ghu_ added 2026-05-18 — user installation tokens missed previously)

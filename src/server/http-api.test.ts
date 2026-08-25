@@ -1176,6 +1176,60 @@ describe('LynoxHTTPApi', () => {
       expect(text).toContain('"fatal":false');
     });
 
+    it('masks BEFORE it caps — a secret straddling the cut must not survive in pieces', async () => {
+      // The order is the whole control, and nothing pinned it: a delta round put
+      // the wrong order back at two sites and 550 tests stayed green.
+      //
+      // Cutting first can slice a secret below a rule's minimum length — or, for
+      // the URL rule, before the `@` it needs — so the rule stops matching and
+      // the REMAINDER ships in cleartext. Measured across 15 shapes and 700
+      // offsets: masking first leaks nothing; cutting first leaked up to 38 of
+      // 39 characters of a Google key. The padding here puts the password across
+      // the cut on purpose (offset found by sweep, not guessed).
+      const pw = 'Xk4vQ9wTz2mLp7bNr5dHs8g';
+      mockSessionRun.mockImplementationOnce(async () => {
+        throw new Error(`${'x'.repeat(555)} postgres://lynox_app:${pw}@db-primary.internal:5432/lynox`);
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'boom' }),
+      });
+
+      const text = await res.text();
+      expect(text).not.toContain(pw);
+    });
+
+    it('masks a credential shape out of the error it streams, and caps the length', async () => {
+      // The message on this path is whatever the runtime or the provider said.
+      // It renders into the tenant's error banner, an 8s toast and a one-click
+      // copy button — and in the managed tiers the LLM key it may quote is ours,
+      // not theirs. Two asserts on purpose: the register row for this warned
+      // that a test which only checks the LENGTH measures the wrong half, since
+      // truncation hides a key by accident rather than removing it.
+      const key = `sk-ant-${'a'.repeat(60)}`;
+      mockSessionRun.mockImplementationOnce(async () => {
+        // Filler with SPACES on purpose: an unbroken 900-char run is itself a
+        // generic-secret shape, so the masker would collapse it and satisfy the
+        // length assert without the cap ever running. Measured — that survivor
+        // is how this line got written.
+        throw new Error(`provider rejected request with ${key} while calling ${'lorem ipsum dolor '.repeat(60)}`);
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'boom' }),
+      });
+
+      const text = await res.text();
+      const frame = text.split('\n').find(l => l.startsWith('data: ') && l.includes('"error"')) ?? '';
+      // 1) the credential shape is gone — not merely pushed past the cut
+      expect(frame).not.toContain(key);
+      // 2) and the payload is bounded, independently of the masking
+      const payload = JSON.parse(frame.slice(6)) as { error: string };
+      expect(payload.error.length).toBeLessThanOrEqual(601);
+    });
+
     it('marks the server-side terminal error fatal on the wire', async () => {
       // The run stream carries `event: error` for two different things. This is
       // the server-SIDE terminal case — the catch around session.run(), with
@@ -5538,6 +5592,33 @@ describe('LynoxHTTPApi', () => {
       expect(body.workflows).toEqual([]);
     });
 
+    it('POST /api/workflows/:id/run masks credentials out of the run error AND the step errors', async () => {
+      // Two sites, one test, because they are the same claim on the same object.
+      // The stepErrors half was a bit-identical no-op in its first version — it
+      // tested `typeof e === 'string'` on elements that are always objects, and
+      // tsc could not see the dead branch because `never` is assignable to
+      // `string`. Nothing caught that but a mutation, so this is the test that
+      // would have.
+      const key = `sk-ant-${'d'.repeat(60)}`;
+      mockRunSavedWorkflow.mockResolvedValue({
+        ok: true,
+        runId: 'run-e',
+        status: 'failed',
+        error: `workflow aborted: ${key}`,
+        stepErrors: [{ stepId: 'step-2', error: `step refused ${key}`, costUsd: 0 }],
+      });
+
+      const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+      const raw = await res.text();
+      expect(raw).not.toContain(key);
+      const body = JSON.parse(raw) as { error: string; stepErrors: Array<{ stepId: string; error: string }> };
+      // masking, not blanket redaction — both diagnoses survive
+      expect(body.error).toContain('workflow aborted');
+      expect(body.stepErrors[0]!.error).toContain('step refused');
+      // and the object shape is untouched
+      expect(body.stepErrors[0]!.stepId).toBe('step-2');
+    });
+
     it('POST /api/workflows/:id/run executes a saved workflow', async () => {
       mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-xyz', status: 'completed' });
       const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
@@ -6068,6 +6149,27 @@ describe('LynoxHTTPApi', () => {
         expect(res.status).toBe(400);
         const body = await res.json() as { error: string };
         expect(body.error).toContain('Missing value');
+      });
+
+      it('PUT /api/secrets/:name masks a credential shape out of the thrown message', async () => {
+        // The JSON half: every API error goes through `errorResponse`, and
+        // roughly two dozen call sites hand it an uncontrolled err.message.
+        // Masking there covers them and the next one written, instead of the
+        // set known today. (Exact counts are deliberately not restated — two
+        // independent counts disagreed on whether a template literal counts as
+        // deliberate, and a number that does not reproduce is not a measurement.)
+        const key = `sk-ant-${'c'.repeat(60)}`;
+        mockSecretSet.mockImplementationOnce(() => {
+          throw new Error(`store refused ${key}`);
+        });
+        const res = await jsonFetch('/api/secrets/ANTHROPIC_API_KEY', {
+          method: 'PUT',
+          body: JSON.stringify({ value: 'sk-ant-x' }),
+        });
+        const body = await res.json() as { error: string };
+        expect(body.error).not.toContain(key);
+        // masking, not blanket redaction — the diagnosis survives
+        expect(body.error).toContain('store refused');
       });
 
       it('PUT /api/secrets/:name returns 503 when the secret store throws', async () => {
@@ -7130,6 +7232,30 @@ describe('LynoxHTTPApi', () => {
       const body = await cbRes.text();
       expect(body).toContain('token endpoint unreachable');
       expect(mockGoogleExchangeRedirectCode).toHaveBeenCalledTimes(1);
+    });
+
+    it('masks a credential shape out of the OAuth failure PAGE', async () => {
+      // This surface renders HTML directly and never touches `errorResponse` —
+      // found by writing this test against the choke point and watching it fail
+      // on a raw key. Escaping made the string safe to RENDER, which reads like
+      // safety and is not: the credential was intact inside the escaped page.
+      const startRes = await jsonFetch('/api/google/auth', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      const oauthCookie = extractFirstCookiePair(startRes, 'lynox_oauth_state');
+
+      const key = `sk-ant-${'b'.repeat(60)}`;
+      mockGoogleExchangeRedirectCode.mockRejectedValueOnce(new Error(`refused: ${key}`));
+
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid&state=test-state`, {
+        headers: { cookie: oauthCookie! },
+      });
+      expect(cbRes.status).toBe(500);
+      const body = await cbRes.text();
+      expect(body).not.toContain(key);
+      // and the surrounding message survives — masking, not blanket redaction
+      expect(body).toContain('refused');
     });
   });
 
