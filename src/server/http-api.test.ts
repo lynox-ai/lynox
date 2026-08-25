@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
-import { maskSecretPatterns } from '../core/secret-store.js';
+import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import type { Server } from 'node:http';
 import { createHmac, randomBytes } from 'node:crypto';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
@@ -50,10 +50,14 @@ const mockSecretDelete = vi.fn().mockReturnValue(true);
 // Memory routes reject content containing a secret (parity with the memory_store
 // tool). Default: no secret detected; a case can flip it to assert the 400 guard.
 const mockSecretContains = vi.fn().mockReturnValue(false);
-// Value-based masking. Default is a pass-through so no existing case changes;
-// the wiring test swaps it for a real redaction and asserts it reached the
-// client-error path.
-const mockSecretMask = vi.fn((t: string) => t);
+// Value-based masking. The mock delegates to the REAL combined masker with a
+// mutable value list, rather than passing through: a mock that is less capable
+// than the thing it stands for silently removes the pattern half, and five
+// unrelated tests measured exactly that. Tests that care add a value.
+const mockStoreValues: string[] = [];
+const mockSecretMask = vi.fn(
+  (t: string, opts?: { includeGeneric?: boolean }) => maskSecretsAndPatterns(t, mockStoreValues, opts),
+);
 // Hoisted so /api/secrets/status regression tests can swap userConfig per-case
 // (the bug = "userConfig.api_key empty for non-Anthropic providers" needs the
 // returned config to vary without re-instantiating the Engine mock).
@@ -166,6 +170,7 @@ vi.mock('../core/engine.js', () => ({
       resolve: mockSecretResolve,
       containsSecret: mockSecretContains,
       maskSecrets: mockSecretMask,
+      maskAll: mockSecretMask,
     });
     this.getRunHistory = vi.fn().mockReturnValue({
       getRecentRuns: mockHistoryGetRecentRuns,
@@ -1197,7 +1202,8 @@ describe('LynoxHTTPApi', () => {
       // path and NEVER calls setClientErrorSecretStore itself — deleting the
       // wiring line has to be what makes it fail.
       const mistralKey = 'a'.repeat(32);
-      mockSecretMask.mockImplementationOnce((t: string) => t.split(mistralKey).join('***'));
+      mockStoreValues.push(mistralKey);
+      try {
       mockSessionRun.mockImplementationOnce(async () => {
         throw new Error(`provider rejected ${mistralKey}`);
       });
@@ -1212,6 +1218,7 @@ describe('LynoxHTTPApi', () => {
       // and the pattern masker demonstrably could NOT have done it
       expect(maskSecretPatterns(`provider rejected ${mistralKey}`, { includeGeneric: true }))
         .toContain(mistralKey);
+      } finally { mockStoreValues.length = 0; }
     });
 
     it('masks BEFORE it caps — a secret straddling the cut must not survive in pieces', async () => {

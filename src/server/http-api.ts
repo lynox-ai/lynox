@@ -709,11 +709,36 @@ const SSE_ERROR_MAX_CHARS = 600;
  * which is the half no pattern can reach: 11 of 13 rules are prefix-bound, and
  * a Mistral key is 32 bare alphanumerics with no shape to match.
  */
-let clientErrorSecretStore: SecretStoreLike | null = null;
+// A SET of resolvers, and both halves of that are corrections.
+//
+// RESOLVER, not the store: caching the store meant the wiring had to run after
+// `engine.init()`, and moving the line one statement earlier wired `null`
+// permanently with a fully green suite — a mutation that survived, because a
+// test cannot see an ordering it does not execute. Lazy resolution removes the
+// ordering requirement instead of guarding it.
+//
+// SET, not a single slot: a single slot is last-writer-wins. A second instance
+// in the same process (tests do this) overwrites the first, and then ITS
+// shutdown leaves the still-serving first instance unwired. Measured — that is
+// what broke the boot test. A set is also safe in the direction that matters:
+// resolving through another instance's store can only redact MORE, never less.
+const clientErrorStoreResolvers = new Set<() => SecretStoreLike | null>();
 
-/** Wire the store into the client-error path. Called once, after engine init. */
-export function setClientErrorSecretStore(store: SecretStoreLike | null): void {
-  clientErrorSecretStore = store;
+/** Wire the client-error path to a store LOOKUP. Order-independent by design. */
+export function setClientErrorSecretStore(resolve: (() => SecretStoreLike | null) | null): void {
+  if (resolve) clientErrorStoreResolvers.add(resolve);
+}
+
+/**
+ * Release a lookup, but ONLY if it is still the one installed.
+ *
+ * An unconditional clear on shutdown is wrong in the same way last-writer-wins
+ * is wrong, just pointing the other way: a second instance shutting down would
+ * unwire the first one, which is still serving. Measured — an unconditional
+ * version broke eight unrelated tests.
+ */
+export function releaseClientErrorSecretStore(resolve: (() => SecretStoreLike | null) | null): void {
+  if (resolve) clientErrorStoreResolvers.delete(resolve);
 }
 
 /**
@@ -724,8 +749,11 @@ export function setClientErrorSecretStore(store: SecretStoreLike | null): void {
  * exact pass first cannot hide a shape from the second pass.
  */
 function maskForClient(text: string, opts?: { includeGeneric?: boolean }): string {
-  const byValue = clientErrorSecretStore ? clientErrorSecretStore.maskSecrets(text) : text;
-  return maskSecretPatterns(byValue, opts);
+  for (const resolve of clientErrorStoreResolvers) {
+    const store = resolve();
+    if (store) return store.maskAll(text, opts);
+  }
+  return maskSecretPatterns(text, opts);
 }
 
 /**
@@ -917,6 +945,7 @@ function parseDynamicRoute(scope: AuthScope, method: string, path: string, handl
 
 export class LynoxHTTPApi {
   private engine: Engine | null = null;
+  private clientErrorResolver: (() => SecretStoreLike | null) | null = null;
   private server: Server | null = null;
   private webUiHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | null = null;
   private readonly sessionStore = new SessionStore();
@@ -1120,10 +1149,11 @@ export class LynoxHTTPApi {
       context: { id: 'http-api', name: 'lynox', source: 'pwa', workspaceDir: '' },
     });
     await this.engine.init();
-    // Wire the store into the client-error path. AFTER init(), because the
-    // store does not exist before it. Deleting this line is the mutation the
-    // boot test has to fail on.
-    setClientErrorSecretStore(this.engine.getSecretStore());
+    // Order-independent on purpose: this hands over a LOOKUP, so it no longer
+    // matters whether it runs before or after init(). Deleting the line is
+    // still the mutation the boot test fails on.
+    this.clientErrorResolver = (): SecretStoreLike | null => this.engine?.getSecretStore() ?? null;
+    setClientErrorSecretStore(this.clientErrorResolver);
     this.engine.startWorkerLoop();
     this._registerRoutes();
     await this._initPushChannel();
@@ -1676,6 +1706,12 @@ export class LynoxHTTPApi {
     // Expire all pending prompts in SQLite on shutdown
     this.engine?.getPromptStore()?.expireAll();
     this.server?.close();
+    // Release the client-error lookup. Module state is last-writer-wins, so a
+    // second instance in the same process (tests do this) would otherwise leave
+    // the reference pointing into a shut-down instance. Not a live leak today —
+    // production constructs exactly one — but the reason it is safe is an
+    // accident of arity, and that is a poor thing to rely on.
+    releaseClientErrorSecretStore(this.clientErrorResolver);
     await this.engine?.shutdown();
   }
 
