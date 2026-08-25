@@ -33,8 +33,8 @@
  *   that, nor what core's compile welds do. Three attempts to summarise it here
  *   each shipped a false sentence — the mechanisms live in other files and move
  *   independently of this one, so a summary written here is stale the moment
- *   either changes. `core/tests/contract-env.test.ts` documents its own form,
- *   `core/src/core/google-client-pair-welds.ts` documents what it welds, and
+ *   either changes. `tests/contract-env.test.ts` documents its own form,
+ *   `src/core/google-client-pair-welds.ts` documents what it welds, and
  *   `DEF-pair-forward-form-provider-blind` records the gap between them.
  *
  *   The direct `process.env` form is accepted only at `alsoReadAt` sites, so the
