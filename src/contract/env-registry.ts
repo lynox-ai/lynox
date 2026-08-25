@@ -28,11 +28,15 @@
  *   the `resolveClientPair` helper. `pair` names BOTH members, as DATA for a
  *   weld rather than as a text form to match: the resolver takes one branded
  *   descriptor, so a swapped pair — or one pairing a member with a foreign
- *   partner — does not compile, and the member names no longer appear at the
- *   call site at all. The asserted form is therefore only that the declared
- *   site calls the resolver; WHICH pair it reads is welded in core, against
- *   the minted descriptors. The direct `process.env` form is accepted only at
- *   `alsoReadAt` sites, so the primary read site stays pinned to the resolver.
+ *   partner — cannot be written by accident, and the member names no longer
+ *   appear at the call site at all. The asserted form is therefore only that
+ *   the declared site calls the resolver; it does NOT say which pair that site
+ *   reads, and nothing in core's welds does either — they constrain the
+ *   descriptors, not the argument. What binds the call site today is a boot
+ *   test written by hand for one provider. Carried as
+ *   DEF-pair-forward-form-provider-blind. The direct `process.env` form is
+ *   accepted only at `alsoReadAt` sites, so the primary read site stays pinned
+ *   to the resolver.
  * - `secret.redact` — `exact-name`: the env-preview masks this key's value.
  *   `whole-value`: the value embeds secrets under OTHER names (e.g. a JSON
  *   blob with api_key fields) and must be masked as a whole.
