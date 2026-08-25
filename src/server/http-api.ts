@@ -664,6 +664,23 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
 }
 
 /**
+ * Cap a client-bound error string BEFORE it is masked.
+ *
+ * Order matters for cost, not just for the wire. `maskSecretPatterns` is
+ * superlinear on one of its rules — the URL-userinfo pattern degrades
+ * quadratically on a long dotted run (measured: 40 KB → ~500 ms of blocked
+ * event loop, and Node cannot interrupt a regex). Masking first and cutting
+ * afterwards bounds what leaves the process while leaving the cost unbounded,
+ * which is the wrong half. Cutting first bounds both.
+ *
+ * Applied at `errorResponse` too: the argument that an unbounded field is how
+ * an uninspected payload leaves the process does not stop at the stream.
+ */
+function capForClient(text: string): string {
+  return text.length > SSE_ERROR_MAX_CHARS ? `${text.slice(0, SSE_ERROR_MAX_CHARS)}…` : text;
+}
+
+/**
  * Upper bound on the error text the run stream hands the browser. The toast
  * that renders it already truncates at 140 chars for layout; this is the
  * transport-level bound, generous enough to keep a real stack frame readable
@@ -675,10 +692,11 @@ const SSE_ERROR_MAX_CHARS = 600;
 
 /**
  * Every error the API hands a client goes through here, which is why the mask
- * lives here and not at the call sites. Seven of them pass an uncontrolled
- * `err.message` straight through — a provider payload, a filesystem path, a DB
- * error quoting a value — and fixing those seven would leave the eighth to be
- * written tomorrow.
+ * lives here and not at the call sites. COUNTED, not estimated: of 265 callers,
+ * 193 pass a deliberate literal and 72 pass something dynamic — 28 of those a
+ * caught `err.message` straight through, and four a string the far side
+ * controls. Fixing those 32 by hand would leave the next one to be written
+ * tomorrow.
  *
  * Known credential shapes only (no `includeGeneric`): most callers pass a
  * deliberate sentence, and the generic 40+ char catcher would redact ordinary
@@ -686,7 +704,7 @@ const SSE_ERROR_MAX_CHARS = 600;
  * see the SSE error path, which also caps the length.
  */
 function errorResponse(res: ServerResponse, status: number, message: string): void {
-  jsonResponse(res, status, { error: maskSecretPatterns(message) });
+  jsonResponse(res, status, { error: maskSecretPatterns(capForClient(message)) });
 }
 
 /**
@@ -3069,10 +3087,7 @@ export class LynoxHTTPApi {
           // a little detail, missing one that is a credential costs the
           // credential. The cap matters on its own — this path was unbounded.
           const rawMsg = err instanceof Error ? err.message : String(err);
-          const maskedMsg = maskSecretPatterns(rawMsg, { includeGeneric: true });
-          const msg = maskedMsg.length > SSE_ERROR_MAX_CHARS
-            ? `${maskedMsg.slice(0, SSE_ERROR_MAX_CHARS)}…`
-            : maskedMsg;
+          const msg = maskSecretPatterns(capForClient(rawMsg), { includeGeneric: true });
           // `fatal: true` is not decoration: this path calls res.end() right
           // below, so the turn really is over. Without the field a consumer
           // reading `fatal` would see `undefined` here — falsy, i.e. "keep
@@ -4691,7 +4706,10 @@ export class LynoxHTTPApi {
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Validation failed';
-        jsonResponse(res, 200, { state: 'network-error', error: msg });
+        // 200, so this never reaches `errorResponse` — and this route is handed a
+        // real provider key in the request body, so a probe failure echoing it back
+        // is the shortest path from our own secret to the browser.
+        jsonResponse(res, 200, { state: 'network-error', error: maskSecretPatterns(capForClient(msg)) });
       }
     });
 
@@ -5595,9 +5613,13 @@ export class LynoxHTTPApi {
         ran: true,
         runId: result.runId,
         status: result.status,
-        error: result.error,
+        // Workflow step errors come from tools, i.e. from whatever a remote
+        // service said. Array-valued, so each entry is treated like any other
+        // client-bound error string.
+        error: result.error === undefined ? undefined : maskSecretPatterns(capForClient(result.error)),
         costUsd: result.costUsd ?? 0,
-        stepErrors: result.stepErrors ?? [],
+        stepErrors: (result.stepErrors ?? []).map(e =>
+          typeof e === 'string' ? maskSecretPatterns(capForClient(e)) : e),
       });
     }));
 
@@ -6676,8 +6698,12 @@ export class LynoxHTTPApi {
       } catch (err: unknown) {
         // Masked BEFORE escaping: escaping makes the string safe to render, not
         // safe to reveal. This page is the OAuth failure a user actually sees,
-        // and the message is whatever the token endpoint said — the one error
-        // surface in this file that does not go through `errorResponse`.
+        // and the message is whatever the token endpoint said.
+        //
+        // Order note, stated honestly: for the current pattern set mask-then-
+        // escape and escape-then-mask produce identical output, and a review
+        // could not build a fixture that separates them. This order is the
+        // defensive one for a pattern added later; no test can see it today.
         const msg = maskSecretPatterns(err instanceof Error ? err.message : String(err))
           .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
         res.writeHead(500, { 'Content-Type': 'text/html' });
@@ -6901,7 +6927,8 @@ export class LynoxHTTPApi {
             // actually blocks — could only print the raw engine string, while
             // the test button next to it gave real advice.
             jsonResponse(res, 400, {
-              error: `Connection test failed: ${probe.error ?? 'unknown error'} (${probe.code ?? 'unknown'})`,
+              // Mail-server text: the surface most likely to echo a login line back.
+              error: maskSecretPatterns(capForClient(`Connection test failed: ${probe.error ?? 'unknown error'} (${probe.code ?? 'unknown'})`)),
               code: probe.code ?? 'unknown',
               stage: probe.stage,
             });
@@ -8254,7 +8281,10 @@ export class LynoxHTTPApi {
         const result = await rRes.json() as { success: boolean; verification: unknown };
         sendEvent('done', { success: true, verification: result.verification });
       } catch (err: unknown) {
-        sendEvent('error', { message: err instanceof Error ? err.message : 'Migration failed' });
+        // This one carries the whole raw HTTP body of a remote engine (see the
+        // `Restore failed: ${await rRes.text()}` throw above) — unmasked and
+        // uncapped it is the largest uninspected payload on any client surface here.
+        sendEvent('error', { message: maskSecretPatterns(capForClient(err instanceof Error ? err.message : 'Migration failed'), { includeGeneric: true }) });
       } finally {
         res.end();
       }
