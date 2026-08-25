@@ -369,18 +369,6 @@ describe('env-ABI reverse: every LYNOX_* read has a contract stance', () => {
 });
 
 /**
- * Every problem with the pair descriptors in `rows`. A function rather than an
- * inline loop so its branches can be driven by synthetic rows — against the
- * real registry they are unreachable, and an unreachable branch reads green
- * whatever it does.
- *
- * There is deliberately NO separate "the partner has the wrong kind" check: it
- * is implied. Symmetry requires the partner to declare the same descriptor, so
- * the partner has a pair, so the kind check above fires when the loop reaches
- * it. Both were present once and neither could be killed alone — a redundant
- * pair reads as two guards and is one.
- */
-/**
  * The weld between the minted descriptors in `src/core/google-client-pair.ts`
  * and the registry rows that declare the same pair as data. Takes both sides as
  * arguments so the branches can be driven by SYNTHETIC input: with one real
@@ -419,6 +407,18 @@ function mintedWeldProblems(
   return problems;
 }
 
+/**
+ * Every problem with the pair descriptors in `rows`. A function rather than an
+ * inline loop so its branches can be driven by synthetic rows — against the
+ * real registry they are unreachable, and an unreachable branch reads green
+ * whatever it does.
+ *
+ * There is deliberately NO separate "the partner has the wrong kind" check: it
+ * is implied. Symmetry requires the partner to declare the same descriptor, so
+ * the partner has a pair, so the kind check above fires when the loop reaches
+ * it. Both were present once and neither could be killed alone — a redundant
+ * pair reads as two guards and is one.
+ */
 function pairProblems(rows: readonly EnvRegistryRow[]): string[] {
   const byName = new Map(rows.map((r) => [r.name, r]));
   const problems: string[] = [];
@@ -557,11 +557,27 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
     it('rejects a minted member with no row', () => {
       expect(mintedWeldProblems([pairRow('A_ID', P)], [P])).not.toEqual([]);
     });
-    it('rejects a minted member whose row is not a pair-resolver', () => {
-      expect(mintedWeldProblems([pairRow('A_ID', P), pairRow('A_SECRET', undefined)], [P])).not.toEqual([]);
+    // Each fixture below must fire exactly ONE branch. The first versions did
+    // not: a row with no pair also has the wrong kind, and a minted name with no
+    // row also counts as an orphan — so two branches co-fired and neither could
+    // be killed alone. Separating them is the whole point of driving a pure
+    // function with synthetic input rather than asserting against the registry.
+    it('rejects a minted member whose row carries the pair but the wrong kind', () => {
+      // Same descriptor, so the pair-comparison branch stays silent.
+      const wrongKind: EnvRegistryRow = {
+        name: 'A_SECRET', valueKind: 'opaque', emitPolicy: 'operator-only',
+        engineConsumed: { kind: 'direct', pair: P, readSite: 'src/core/engine.ts' },
+      };
+      expect(mintedWeldProblems([pairRow('A_ID', P), wrongKind], [P])).not.toEqual([]);
     });
-    it('rejects a row declaring a different pair than the descriptor', () => {
-      expect(mintedWeldProblems(both, [{ id: 'A_ID', secret: 'B_SECRET' }])).not.toEqual([]);
+    it('rejects rows whose SECRET half declares a different partner', () => {
+      // Both rows exist and are pair-resolvers, so only the comparison fires.
+      const skewed = { id: 'A_ID', secret: 'OTHER_SECRET' };
+      expect(mintedWeldProblems([pairRow('A_ID', skewed), pairRow('A_SECRET', skewed)], [P])).not.toEqual([]);
+    });
+    it('rejects rows whose ID half declares a different partner', () => {
+      const skewed = { id: 'OTHER_ID', secret: 'A_SECRET' };
+      expect(mintedWeldProblems([pairRow('A_ID', skewed), pairRow('A_SECRET', skewed)], [P])).not.toEqual([]);
     });
     it('rejects a declared pair-resolver row that nothing mints', () => {
       expect(mintedWeldProblems(both, []), 'an unminted pair row must be reported').not.toEqual([]);

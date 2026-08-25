@@ -199,11 +199,16 @@ export class Engine {
    *
    * The config KEYS are Google's and the resolver is not, so the caller has to
    * name them — but naming them at each call site meant two hand-written copies
-   * of the same two-key mapping, and the second one is untestable: after the
-   * config→vault migration runs during init, the vault tier always wins, so no
-   * boot test can reach `reloadGoogle`'s copy of the config tier. An untestable
-   * duplicate of a two-key mapping is the exact shape this module exists to
-   * prevent, so there is one copy, and the boot tests reach it.
+   * of the same two-key mapping, and only the first was covered: swapping or
+   * deleting the copy in `reloadGoogle` left the pair suites green. One copy,
+   * so one mutation reaches both call sites.
+   *
+   * The reload copy was reachable, contrary to the first version of this
+   * comment: the config→vault migration is conditional, and the pair-atomic
+   * case in engine-client-pair-boot.test.ts is a boot where it does not run.
+   * That case now drives the reload. Deduplicating is still the right call —
+   * two hand-written copies of a credential mapping is the shape this module
+   * exists to prevent — but "untestable" was not the reason, and it was wrong.
    */
   private googleClientSources(): ClientPairSources {
     return {

@@ -43,7 +43,8 @@ export function pairBrandWelds(): void {
   // ── Independently killable: each dies to exactly one mutation, and the
   // mutation differs. The two member fixtures and the pair fixture each die to
   // the removal of THEIR brand. `legacyFirstArg` dies to none of the three —
-  // it survives every brand removal, exactly like the group below — and is
+  // it survives any SINGLE brand removal, and unlike the group below it
+  // survives removing all three, because it depends on no brand at all. It is
   // here because it dies to the mutation that matters more than any of them:
   // putting a bare name string back into the first parameter.
 

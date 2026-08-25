@@ -174,19 +174,32 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     const after = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf-8')) as Record<string, unknown>;
     expect(after['google_client_id']).toBe('PROJECT-B-id');
     expect(after['google_client_secret']).toBe('PROJECT-B-secret');
+
+    // The RELOAD path, driven here and nowhere else, because this is the one
+    // shape where the config tier survives a boot: the migration is conditional
+    // (engine-init.ts — vault holds neither, config holds both, env holds
+    // neither), and the old vault secret above blocks it. Everywhere else the
+    // pair has moved to the vault by the time reload runs, and the vault tier
+    // wins. `POST /api/google/reload` is a live route; before this, no test drove
+    // it at all.
+    captured.calls.length = 0;
+    await engine.reloadGoogle();
+    const reloaded = captured.calls.at(-1);
+    expect(reloaded, 'reloadGoogle must rebuild from the config tier').toBeDefined();
+    expect(reloaded).toEqual({ clientId: 'PROJECT-B-id', clientSecret: 'PROJECT-B-secret' });
+    expect(engine.getGoogleClientSource()).toBe('config');
   });
 
-  it('reloadGoogle re-resolves and rebuilds — nothing else drove that path', async () => {
-    // The only other caller of reloadGoogle is a vi.fn() in the HTTP API test,
-    // so this method was reachable by no test at all. It matters here because
-    // it repeats the resolver call, and a second call site is where a pair gets
-    // assembled differently from the first.
+  it('reloadGoogle re-resolves after the pair has migrated into the vault', async () => {
+    // reloadGoogle has a live production caller — `POST /api/google/reload`
+    // (src/server/http-api.ts). What it did NOT have was a test: the HTTP API
+    // suite replaces it with a vi.fn(), so the real method ran nowhere.
     //
-    // What it asserts is deliberately what is REACHABLE: after init runs the
-    // config→vault migration the pair lives in the vault, so the source on
-    // reload is 'vault' even though config.json supplied it. That is why the
-    // tier mapping now has exactly ONE owner (Engine#googleClientSources) —
-    // a second copy of it could not be reached by any boot test.
+    // This case is the ordinary shape: config.json supplies the pair, init
+    // migrates it into the vault, and the reload therefore resolves 'vault'
+    // even though config.json is where the operator wrote it. The config tier
+    // at reload is driven by the pair-atomic migration test above, which is the
+    // one boot shape where the migration does not run.
     const dir = freshDataDir('cp-reload');
     writeFileSync(join(dir, 'config.json'), JSON.stringify({
       google_client_id: 'cfg-id',
