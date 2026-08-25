@@ -89,12 +89,33 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
   }
 
   it('env pair only → source is env, and the env values are what got built', async () => {
-    freshDataDir('cp-env');
+    const dir = freshDataDir('cp-env');
     setEnv('GOOGLE_CLIENT_ID', 'env-id');
     setEnv('GOOGLE_CLIENT_SECRET', 'env-secret');
+    // The two arguments no test anywhere set a value for, so their VALUES were
+    // never exercised: presence alone survives `scopes: undefined` and a renamed
+    // env key, which is exactly what a config-field rename produces.
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    setEnv('GOOGLE_SERVICE_ACCOUNT_KEY', '/tmp/sa-key.json');
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({
+      google_oauth_scopes: ['https://www.googleapis.com/auth/calendar.events'],
+    }, null, 2) + '\n');
+
     const engine = await boot();
     expect(engine.getGoogleClientSource()).toBe('env');
-    expect(captured.calls.at(-1)).toMatchObject({ clientId: 'env-id', clientSecret: 'env-secret' });
+    // toEqual, not toMatchObject: the whole options object, so an EXTRA argument
+    // is caught too. A subset match cannot see one, and passing the secret twice
+    // under a second name is exactly the shape this module exists against.
+    expect(captured.calls.at(-1)).toEqual({
+      clientId: 'env-id',
+      clientSecret: 'env-secret',
+      serviceAccountKeyPath: '/tmp/sa-key.json',
+      vault: expect.anything(),
+      scopes: ['https://www.googleapis.com/auth/calendar.events'],
+    });
+    // The BOOT path has its own registration loop, and deleting it survived
+    // every suite until this line — the reload fix closed only the other copy.
+    expect(engine.registry.find(PROBE_TOOL), 'the boot must register the built tools').toBeDefined();
   });
 
   it('an env pair on a provisioned instance is the managed broker', async () => {
@@ -318,8 +339,23 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     const engine = await boot();
     expect(engine.getGoogleAuth(), 'the boot must have built something to lose').not.toBeNull();
 
+    const handleBefore = engine.getGoogleAuth();
     captured.explode = true;
     expect(await engine.reloadGoogle(), 'a reload that throws must report failure').toBe(false);
+
+    // What the throw leaves behind, asserted rather than left to chance — three
+    // mutants lived in here. Two of these are deliberate and one is a question:
+    //  · the handle stays the OLD one. Deliberate: the previous integration is
+    //    still working, and tearing it down because a rebuild failed would turn
+    //    a failed reload into an outage.
+    //  · the registry keeps the old tools, for the same reason.
+    //  · the SOURCE was already updated before the throw, so it now describes
+    //    the pair the failed build was for while the handle is from the previous
+    //    one. Harmless while both resolve to the same tier and not obviously
+    //    right otherwise — carried as DEF-reload-throw-leaves-source-ahead.
+    expect(engine.getGoogleAuth(), 'a failed rebuild must not drop a working handle').toBe(handleBefore);
+    expect(engine.registry.find(PROBE_TOOL), 'nor unregister its tools').toBeDefined();
+    expect(engine.getGoogleClientSource(), 'the source reflects the attempted pair').toBe('env');
   });
 
   it('reloadGoogle re-resolves after the pair has migrated into the vault', async () => {
