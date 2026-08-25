@@ -206,7 +206,7 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     expect(engine.getGoogleClientSource()).toBe('config');
   });
 
-  it('reloadGoogle UPDATES the reported source, it does not merely re-report it', async () => {
+  it('reloadGoogle updates the reported source in BOTH directions', async () => {
     // Both other reload cases boot into the source they then assert, so neither
     // can tell a reload that recomputes the source from one that leaves the old
     // value standing — measured: deleting the assignment in reloadGoogle left
@@ -222,6 +222,20 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
 
     expect(engine.getGoogleClientSource()).toBe('env');
     expect(captured.calls.at(-1)).toEqual({ clientId: 'late-id', clientSecret: 'late-secret' });
+
+    // And BACK to nothing. Asserting only the null→set direction left two
+    // plausible mutations alive — moving the assignment below the
+    // `if (!clientId || !clientSecret)` early return, or guarding it with
+    // `=== null` — and both are live defects rather than test noise:
+    // /api/google/status derives `configured` from `source !== null`, plus
+    // `client_source` and `managed_broker`. A stale 'env' therefore reports an
+    // unconfigured engine as configured, and as running on the managed broker.
+    setEnv('GOOGLE_CLIENT_ID', undefined);
+    setEnv('GOOGLE_CLIENT_SECRET', undefined);
+    await engine.reloadGoogle();
+
+    expect(engine.getGoogleClientSource(), 'a reload that finds no pair must clear the source').toBeNull();
+    expect(engine.isGoogleManagedBroker(), 'and must stop reporting the managed broker').toBe(false);
   });
 
   it('reloadGoogle re-resolves after the pair has migrated into the vault', async () => {
