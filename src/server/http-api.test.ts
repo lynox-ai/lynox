@@ -1176,6 +1176,36 @@ describe('LynoxHTTPApi', () => {
       expect(text).toContain('"fatal":false');
     });
 
+    it('masks a credential shape out of the error it streams, and caps the length', async () => {
+      // The message on this path is whatever the runtime or the provider said.
+      // It renders into the tenant's error banner, an 8s toast and a one-click
+      // copy button — and in the managed tiers the LLM key it may quote is ours,
+      // not theirs. Two asserts on purpose: the register row for this warned
+      // that a test which only checks the LENGTH measures the wrong half, since
+      // truncation hides a key by accident rather than removing it.
+      const key = `sk-ant-${'a'.repeat(60)}`;
+      mockSessionRun.mockImplementationOnce(async () => {
+        // Filler with SPACES on purpose: an unbroken 900-char run is itself a
+        // generic-secret shape, so the masker would collapse it and satisfy the
+        // length assert without the cap ever running. Measured — that survivor
+        // is how this line got written.
+        throw new Error(`provider rejected request with ${key} while calling ${'lorem ipsum dolor '.repeat(60)}`);
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'boom' }),
+      });
+
+      const text = await res.text();
+      const frame = text.split('\n').find(l => l.startsWith('data: ') && l.includes('"error"')) ?? '';
+      // 1) the credential shape is gone — not merely pushed past the cut
+      expect(frame).not.toContain(key);
+      // 2) and the payload is bounded, independently of the masking
+      const payload = JSON.parse(frame.slice(6)) as { error: string };
+      expect(payload.error.length).toBeLessThanOrEqual(601);
+    });
+
     it('marks the server-side terminal error fatal on the wire', async () => {
       // The run stream carries `event: error` for two different things. This is
       // the server-SIDE terminal case — the catch around session.run(), with
@@ -6070,6 +6100,24 @@ describe('LynoxHTTPApi', () => {
         expect(body.error).toContain('Missing value');
       });
 
+      it('PUT /api/secrets/:name masks a credential shape out of the thrown message', async () => {
+        // The JSON half: every API error goes through `errorResponse`, and seven
+        // call sites hand it an uncontrolled err.message. Masking there covers
+        // all 265 callers plus the next one, instead of the seven known today.
+        const key = `sk-ant-${'c'.repeat(60)}`;
+        mockSecretSet.mockImplementationOnce(() => {
+          throw new Error(`store refused ${key}`);
+        });
+        const res = await jsonFetch('/api/secrets/ANTHROPIC_API_KEY', {
+          method: 'PUT',
+          body: JSON.stringify({ value: 'sk-ant-x' }),
+        });
+        const body = await res.json() as { error: string };
+        expect(body.error).not.toContain(key);
+        // masking, not blanket redaction — the diagnosis survives
+        expect(body.error).toContain('store refused');
+      });
+
       it('PUT /api/secrets/:name returns 503 when the secret store throws', async () => {
         mockSecretSet.mockImplementationOnce(() => {
           throw new Error('disk full');
@@ -7130,6 +7178,30 @@ describe('LynoxHTTPApi', () => {
       const body = await cbRes.text();
       expect(body).toContain('token endpoint unreachable');
       expect(mockGoogleExchangeRedirectCode).toHaveBeenCalledTimes(1);
+    });
+
+    it('masks a credential shape out of the OAuth failure PAGE', async () => {
+      // This surface renders HTML directly and never touches `errorResponse` —
+      // found by writing this test against the choke point and watching it fail
+      // on a raw key. Escaping made the string safe to RENDER, which reads like
+      // safety and is not: the credential was intact inside the escaped page.
+      const startRes = await jsonFetch('/api/google/auth', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      const oauthCookie = extractFirstCookiePair(startRes, 'lynox_oauth_state');
+
+      const key = `sk-ant-${'b'.repeat(60)}`;
+      mockGoogleExchangeRedirectCode.mockRejectedValueOnce(new Error(`refused: ${key}`));
+
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid&state=test-state`, {
+        headers: { cookie: oauthCookie! },
+      });
+      expect(cbRes.status).toBe(500);
+      const body = await cbRes.text();
+      expect(body).not.toContain(key);
+      // and the surrounding message survives — masking, not blanket redaction
+      expect(body).toContain('refused');
     });
   });
 

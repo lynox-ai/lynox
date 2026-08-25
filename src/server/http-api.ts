@@ -663,8 +663,30 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
   res.end(json);
 }
 
+/**
+ * Upper bound on the error text the run stream hands the browser. The toast
+ * that renders it already truncates at 140 chars for layout; this is the
+ * transport-level bound, generous enough to keep a real stack frame readable
+ * and small enough that a provider returning a paragraph cannot ship the whole
+ * thing. Not a security control on its own — the mask is — but an unbounded
+ * field is how a payload nobody inspected leaves the process.
+ */
+const SSE_ERROR_MAX_CHARS = 600;
+
+/**
+ * Every error the API hands a client goes through here, which is why the mask
+ * lives here and not at the call sites. Seven of them pass an uncontrolled
+ * `err.message` straight through — a provider payload, a filesystem path, a DB
+ * error quoting a value — and fixing those seven would leave the eighth to be
+ * written tomorrow.
+ *
+ * Known credential shapes only (no `includeGeneric`): most callers pass a
+ * deliberate sentence, and the generic 40+ char catcher would redact ordinary
+ * prose. For a message that is entirely uncontrolled the caller asks for more —
+ * see the SSE error path, which also caps the length.
+ */
 function errorResponse(res: ServerResponse, status: number, message: string): void {
-  jsonResponse(res, status, { error: message });
+  jsonResponse(res, status, { error: maskSecretPatterns(message) });
 }
 
 /**
@@ -3038,7 +3060,19 @@ export class LynoxHTTPApi {
         if (err instanceof RunAbortedError) {
           if (!res.writableEnded && !res.destroyed) res.end();
         } else if (!aborted) {
-          const msg = err instanceof Error ? err.message : String(err);
+          // Masked AND capped: this string is a runtime/provider error rendered
+          // into the tenant's error banner, an 8s toast, and a one-click copy
+          // button — and in the managed tiers the LLM key it might quote is
+          // OURS, not the tenant's, so whoever induces a provider error is the
+          // one reading it. `includeGeneric` for the reason error-reporting.ts
+          // gives: masking a long opaque token that turns out to be a hash costs
+          // a little detail, missing one that is a credential costs the
+          // credential. The cap matters on its own — this path was unbounded.
+          const rawMsg = err instanceof Error ? err.message : String(err);
+          const maskedMsg = maskSecretPatterns(rawMsg, { includeGeneric: true });
+          const msg = maskedMsg.length > SSE_ERROR_MAX_CHARS
+            ? `${maskedMsg.slice(0, SSE_ERROR_MAX_CHARS)}…`
+            : maskedMsg;
           // `fatal: true` is not decoration: this path calls res.end() right
           // below, so the turn really is over. Without the field a consumer
           // reading `fatal` would see `undefined` here — falsy, i.e. "keep
@@ -6640,7 +6674,11 @@ export class LynoxHTTPApi {
         LynoxHTTPApi._appendSetCookie(res, this._clearOAuthStateCookie());
         sendSuccessRedirect();
       } catch (err: unknown) {
-        const msg = (err instanceof Error ? err.message : String(err))
+        // Masked BEFORE escaping: escaping makes the string safe to render, not
+        // safe to reveal. This page is the OAuth failure a user actually sees,
+        // and the message is whatever the token endpoint said — the one error
+        // surface in this file that does not go through `errorResponse`.
+        const msg = maskSecretPatterns(err instanceof Error ? err.message : String(err))
           .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
         res.writeHead(500, { 'Content-Type': 'text/html' });
         res.end(`<html><body><h1>Error</h1><p>${msg}</p></body></html>`);
