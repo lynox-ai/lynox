@@ -271,7 +271,15 @@ export class Engine {
   /** Which source supplied the Google client pair — the UI routes the card on it. */
   private _googleClientSource: ClientPairSource | null = null;
 
-  /** Which source supplied the Google client pair, for `GET /api/google/status`. */
+  /**
+   * Which source supplied the Google client pair.
+   *
+   * Read by `GET /api/google/status` — but only AFTER that route returns early
+   * on a null GoogleAuth, so it is not the surface where a stale value shows.
+   * That is `GET /api/secrets/status`, whose `configured.google` is this value
+   * being non-null: a source left standing after the credentials are gone
+   * reports Google as configured on an engine that resolves nothing.
+   */
   getGoogleClientSource(): ClientPairSource | null {
     return this._googleClientSource;
   }

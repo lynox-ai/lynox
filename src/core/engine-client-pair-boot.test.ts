@@ -231,15 +231,31 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     expect(await engine.reloadGoogle(), 'a reload that builds must report success').toBe(true);
     expect(engine.getGoogleClientSource()).toBe('env');
     expect(captured.calls.at(-1)).toEqual({ clientId: 'late-id', clientSecret: 'late-secret' });
+    // The POSITIVE half, and it is what makes the null assertion in phase 4 mean
+    // anything: without it, `getGoogleAuth()` reads null there because the boot
+    // never set a handle, not because the reload cleared one — and deleting the
+    // assignment in reloadGoogle stays green. The vacuous-negative trap, one
+    // round after fixing the same trap on isGoogleManagedBroker.
+    expect(engine.getGoogleAuth(), 'a reload that builds must install the auth handle').not.toBeNull();
     // An env pair alone is NOT the managed broker — the provisioning marker is
-    // the other half of that verdict, and without this the marker term is
-    // untested and could be dropped.
+    // the other half of that verdict.
     expect(engine.isGoogleManagedBroker(), 'env alone is a self-host pair').toBe(false);
 
-    // ── the same pair, now on a provisioned instance.
+    // ── the same pair, now on a provisioned instance. No reload: the verdict
+    // reads process.env live, so it flips without one. Calling reloadGoogle here
+    // would look like the cause and be decoration — measured, deleting it left
+    // the suite green.
     setEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst_reload');
-    expect(await engine.reloadGoogle()).toBe(true);
     expect(engine.isGoogleManagedBroker(), 'env + a provisioning marker IS the broker').toBe(true);
+
+    // An EMPTY marker is not a marker. The shape is the one this module's own
+    // header calls out: a deployment interpolating an unset variable
+    // (`NAME=${NAME:-}`) hands the process an empty string rather than nothing.
+    // Weakening the check to `!== undefined` would make a self-host engine
+    // report as the managed broker, and only this case catches that.
+    setEnv('LYNOX_MANAGED_INSTANCE_ID', '');
+    expect(engine.isGoogleManagedBroker(), 'an empty marker is not a provisioned instance').toBe(false);
+    setEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst_reload');
 
     // ── and back to nothing.
     setEnv('GOOGLE_CLIENT_ID', undefined);
