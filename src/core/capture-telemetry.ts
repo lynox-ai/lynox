@@ -44,8 +44,13 @@ export type CaptureEvent =
   // and `remember_invoked` only when something was written, so the most common outcome
   // (ran, found nothing) had no event at all: on a live staging run it was impossible to
   // tell a working classifier that judged a turn correctly from a pass that never
-  // executed. Carries `facts` = how many it proposed, so all three states separate:
-  // no event = did not run · facts 0 = ran, found nothing · facts n = ran, found n.
+  // executed. Carries `facts` = how many it proposed, so FOUR states separate:
+  //   no event          = the pass did not run (guarded off, or never reached)
+  //   facts ABSENT      = it ran and its provider call failed (timeout/abort/error)
+  //   facts 0           = it ran, completed, and judged the turn to hold nothing
+  //   facts n           = it ran and proposed n
+  // The third and fourth are the ones a rate needs; the second is the one that used to
+  // masquerade as the first, because the failure path wrote only to stderr.
   | 'capture_ran'
   | 'remember_invoked'   // the model recorded a durable fact (numerator)
   // propose→confirm→apply — ACTIVATED by Onboarding Wave 1 (Layer-1 Faden chips):

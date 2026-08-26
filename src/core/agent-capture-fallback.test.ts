@@ -488,6 +488,16 @@ describe('turn-end capture — what an adversarial round found missing', () => {
       await expect(inner._captureFallback(ANSWER, false)).resolves.toBeUndefined();
       expect(stderr.mock.calls.map((c) => String(c[0])).join('')).toContain('upstream exploded');
     } finally { stderr.mockRestore(); }
+    // …and the SINK hears it as well. stderr is not something the report can read, so a
+    // failure that only reaches stderr is a failure the rate cannot see: it looked
+    // identical to a mechanism that never ran. `facts` ABSENT is what distinguishes a
+    // failed pass from one that completed and found nothing.
+    const ran = vi.mocked(appendCaptureTelemetry).mock.calls
+      .map(c => c[1] as unknown as Record<string, unknown>)
+      .filter(e => e['event'] === 'capture_ran');
+    expect(ran, 'a failed pass is invisible to the report').toHaveLength(1);
+    expect(ran[0]!['facts'], 'a failed pass must not read as "completed, found nothing"').toBeUndefined();
+    expect(ran[0]).toMatchObject({ source: 'capture' });
   });
 
   it('the TURN TRACKS the pass — it is not fired and forgotten', async () => {

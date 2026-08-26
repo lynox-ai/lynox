@@ -1524,6 +1524,22 @@ export class Agent implements IAgent {
       // (fast-model id sent to a client that does not know it) is a 404 that would
       // otherwise be invisible.
       process.stderr.write(`[lynox:capture-fallback] ${getErrorMessage(err)}\n`);
+      // …and the SINK has to hear it too, not only stderr. The emit above sits after
+      // `finalMessage()`, so a timeout, an abort or a provider error produced no line at
+      // all — and "the pass ran and its provider call failed" collapsed onto "the pass
+      // never ran", which is the exact confusion this event was added to end. An expired
+      // fast-tier key would have read as a disabled mechanism. `facts` is left UNSET
+      // here: absent means the pass did not complete, `0` means it completed and found
+      // nothing. The report reads what it is given; stderr is not a sink it can read.
+      void appendCaptureTelemetry(this._durableMemoryEnabled, {
+        ts: Date.now(),
+        event: 'capture_ran',
+        thread: this.currentThreadId,
+        model: this.model,
+        untrusted: turnUntrusted,
+        runId: this.currentRunId,
+        source: 'capture',
+      });
     } finally {
       clearTimeout(timer);
     }
