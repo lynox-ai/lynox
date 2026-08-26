@@ -1099,7 +1099,12 @@ describe('refresh through the control plane (the client secret stays there)', ()
     // The negative half, and the one that matters: Google must not be reached at
     // all. Asserting only the CP URL would pass an implementation that called
     // both, which is the shape that leaks the secret while looking correct.
-    expect(url).not.toContain('googleapis.com');
+    // `not.toContain` on `url` cannot express that — the line above already
+    // pins `url` by equality, so it could never fail on its own. Counting the
+    // calls can.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // The secret must not be replayed to a redirect target either.
+    expect(init.redirect, 'the CP request must not follow redirects').toBe('manual');
     expect((init.headers as Record<string, string>)['x-instance-secret']).toBe('instance-secret-value');
     const body = JSON.parse(String(init.body)) as Record<string, unknown>;
     expect(body).toEqual({ instance_id: 'inst-1', refresh_handle: 'sealed-handle-1' });
@@ -1121,12 +1126,37 @@ describe('refresh through the control plane (the client secret stays there)', ()
     expect(url).toContain('oauth2.googleapis.com');
   });
 
-  it('falls back to Google when the control-plane identity is incomplete', async () => {
-    // All three env values or none. A half-configured instance must not build a
-    // request it cannot authenticate — it would fail at the CP with a 403 that
-    // reads like a revoked grant.
+  // All three env values or none. A half-configured instance must not build a
+  // request it cannot authenticate — it would fail at the CP with a 403 that
+  // reads like a revoked grant.
+  //
+  // Parameterised over all three deliberately: with only one of them driven,
+  // deleting either of the other two conjuncts from the guard left the whole
+  // file green. A three-way `||` needs three tests, not one.
+  it.each(ENV)('falls back to Google when %s is missing', async (missing) => {
     setEnv(true);
-    delete process.env['LYNOX_HTTP_SECRET'];
+    delete process.env[missing];
+    const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: 'google-token', expires_in: 3600, scope: '', token_type: 'Bearer' }),
+    });
+
+    await authWith(vault).getAccessToken();
+
+    expect((mockFetch.mock.calls[0] as [string])[0]).toContain('oauth2.googleapis.com');
+  });
+
+  // A base URL that carries a query or a fragment does not get a path appended —
+  // it gets its query extended, and the request leaves with the instance secret.
+  it.each([
+    ['a query', 'https://cp.invalid/?to=elsewhere'],
+    ['a fragment', 'https://cp.invalid/#x'],
+    ['a non-http scheme', 'file:///etc/passwd'],
+    ['an unparseable value', 'not a url'],
+  ])('falls back to Google when the control-plane URL carries %s', async (_why, raw) => {
+    setEnv(true);
+    process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = raw;
     const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
     mockFetch.mockResolvedValueOnce({
       ok: true,
@@ -1232,5 +1262,125 @@ describe('refresh through the control plane (the client secret stays there)', ()
     mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true }) });
 
     await expect(authWith(vault).getAccessToken()).rejects.toThrow(/no usable token/);
+  });
+
+  // `typeof` alone is not the bar the direct path uses. Each of these passes a
+  // typeof check and breaks something downstream: an empty token is served as
+  // if it worked, a NaN expiry makes the staleness comparison false FOREVER so
+  // the engine never refreshes again, and an out-of-range expiry turns the CP
+  // into a dependency of every Google call instead of the hourly refresh.
+  it.each([
+    ['an empty access token', { access_token: '', expires_at: Date.now() + 3_600_000 }, /no usable token/],
+    ['a NaN expiry', { access_token: 'cp-token', expires_at: Number.NaN }, /no usable expiry/],
+    ['an infinite expiry', { access_token: 'cp-token', expires_at: Number.POSITIVE_INFINITY }, /no usable expiry/],
+    ['an already-past expiry', { access_token: 'cp-token', expires_at: Date.now() - 1 }, /plausible range/],
+    ['an absurdly distant expiry', { access_token: 'cp-token', expires_at: Date.now() + 400 * 24 * 3_600_000 }, /plausible range/],
+    ['a non-string handle', { access_token: 'cp-token', expires_at: Date.now() + 3_600_000, refresh_handle: 42 }, /unusable refresh handle/],
+  ])('refuses a control-plane response with %s', async (_why, body, pattern) => {
+    setEnv(true);
+    const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => body });
+
+    await expect(authWith(vault).getAccessToken()).rejects.toThrow(pattern);
+    // And nothing was written: a refused response must not half-update the vault.
+    expect(vault.stored()['access_token']).toBe('old-token-aaaaaaaa');
+  });
+
+  // Nothing drove a non-ok CP response at all, so the entire error branch was
+  // uncovered on this path: `if (!response.ok && !cp)` survived, i.e. skipping
+  // error handling on the CP path was invisible. These three pin the split that
+  // decides whether a living grant is deleted.
+  it('deletes the token when the control plane reports a revoked grant', async () => {
+    setEnv(true);
+    const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 400, text: async () => JSON.stringify({ error: 'invalid_grant' }),
+    });
+
+    await expect(authWith(vault).getAccessToken()).rejects.toThrow(/400/);
+    expect(vault.delete).toHaveBeenCalledWith('GOOGLE_OAUTH_TOKENS');
+  });
+
+  it('KEEPS the token when the control plane reports a bad client', async () => {
+    setEnv(true);
+    const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 401, text: async () => JSON.stringify({ error: 'invalid_client' }),
+    });
+
+    // The invalid client is lynox's own here, so the remedy must not send the
+    // user after this instance's credentials.
+    await expect(authWith(vault).getAccessToken()).rejects.toThrow(/lynox could not complete the refresh/);
+    expect(vault.delete).not.toHaveBeenCalled();
+  });
+
+  it('keeps the token and stays transient when the control plane is down', async () => {
+    setEnv(true);
+    const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 503, text: async () => 'upstream unavailable' });
+
+    await expect(authWith(vault).getAccessToken()).rejects.toThrow(/503/);
+    expect(vault.delete).not.toHaveBeenCalled();
+  });
+
+  // A 3xx arrives as !ok because the request does not follow redirects. It must
+  // be transient — a redirecting CP is an outage, not a revoked grant.
+  it('treats a redirect from the control plane as transient, not as a revocation', async () => {
+    setEnv(true);
+    const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 302, text: async () => '' });
+
+    await expect(authWith(vault).getAccessToken()).rejects.toThrow(/302/);
+    expect(vault.delete).not.toHaveBeenCalled();
+  });
+
+  // The end state this arc moves toward: the CP holds the refresh token and the
+  // engine holds only a handle. A precondition requiring the raw token would
+  // make that token unrefreshable, and the failure would read as a lost grant.
+  it('refreshes a token that has ONLY a handle and no raw refresh token', async () => {
+    setEnv(true);
+    const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: 'cp-issued-token', expires_at: Date.now() + 3_600_000 }),
+    });
+
+    await expect(authWith(vault).getAccessToken()).resolves.toBe('cp-issued-token');
+  });
+
+  // The direct path and the handle can coexist on a misconfigured instance. If
+  // Google rotates the refresh token there, the control plane's sealed copy is
+  // stale — presenting it later returns `invalid_grant`, which this code cannot
+  // tell from a real revocation, so it would delete a living grant.
+  it('drops a stale handle when a DIRECT refresh rotated the refresh token', async () => {
+    setEnv(false);
+    const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        access_token: 'google-token', refresh_token: 'rotated-cccccccc',
+        expires_in: 3600, scope: '', token_type: 'Bearer',
+      }),
+    });
+
+    await authWith(vault).getAccessToken();
+
+    expect(vault.stored()['refresh_handle'], 'a rotated token invalidates the sealed handle').toBeUndefined();
+  });
+
+  // The counter-direction, without which the line above is a one-way swap: when
+  // Google returns no new refresh token, the handle still stands for the token
+  // the CP sealed, and dropping it would throw away a working credential.
+  it('KEEPS the handle when a direct refresh did not rotate the refresh token', async () => {
+    setEnv(false);
+    const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: 'google-token', expires_in: 3600, scope: '', token_type: 'Bearer' }),
+    });
+
+    await authWith(vault).getAccessToken();
+
+    expect(vault.stored()['refresh_handle']).toBe('sealed-handle-1');
   });
 });
