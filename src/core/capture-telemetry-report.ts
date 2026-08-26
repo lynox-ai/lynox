@@ -245,6 +245,7 @@ const KNOWN_OUTCOMES: ReadonlySet<string> = new Set<CaptureOutcome>(['active', '
 /** Every event key, so the report always carries a full record rather than a sparse one. */
 const ALL_EVENTS: readonly CaptureEvent[] = [
   'capture_eligible',
+  'capture_ran',
   'remember_invoked',
   'propose_shown',
   'propose_confirmed',

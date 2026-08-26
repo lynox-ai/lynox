@@ -1441,8 +1441,22 @@ export class Agent implements IAgent {
       const call = response.content.find(
         (b): b is BetaToolUseBlock => b.type === 'tool_use' && b.name === CAPTURE_TOOL_NAME,
       );
-      if (!call) return;
-      const facts = parseExtractedFacts(call.input);
+      const facts = call ? parseExtractedFacts(call.input) : [];
+      // The pass RAN. Emitted before the empty-return below, and unconditionally, because
+      // the silent return was the whole defect: on a live staging run a turn where the
+      // model skipped `remember` produced no chip and no event, and nothing in the
+      // telemetry could say whether the classifier had judged the turn or never executed.
+      // `capture_eligible` fires before this method's own guards, so it cannot answer it.
+      void appendCaptureTelemetry(this._durableMemoryEnabled, {
+        ts: Date.now(),
+        event: 'capture_ran',
+        thread: this.currentThreadId,
+        model: this.model,
+        untrusted: turnUntrusted,
+        runId: this.currentRunId,
+        facts: facts.length,
+        source: 'capture',
+      });
       if (facts.length === 0) return;
 
       for (const fact of facts) {

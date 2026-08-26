@@ -224,6 +224,11 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     const invoked = captureEvents().filter((e) => e['event'] === 'remember_invoked');
     expect(invoked).toHaveLength(1);
     expect(invoked[0]!['runId']).toBe('r1');
+    // Tagged POSITIVELY as the model's own choice. Leaving it untagged made "the model
+    // complied" indistinguishable from a line written before the field existed, so the
+    // split that is supposed to separate mechanism from compliance quietly counted all
+    // history as compliance.
+    expect(invoked[0]!['source']).toBe('model');
   });
 
   it('remember does NOT emit propose_shown for a TRUSTED active write (not a reviewable proposal)', async () => {

@@ -39,6 +39,14 @@ export const CAPTURE_TELEMETRY_LOG_FILE = 'capture-telemetry.jsonl';
 
 export type CaptureEvent =
   | 'capture_eligible'   // a capture-eligible turn ended (denominator)
+  // The turn-end recovery pass RAN and returned. Emitted whatever it found, including
+  // nothing — which is the point. `capture_eligible` fires BEFORE the pass's own guards,
+  // and `remember_invoked` only when something was written, so the most common outcome
+  // (ran, found nothing) had no event at all: on a live staging run it was impossible to
+  // tell a working classifier that judged a turn correctly from a pass that never
+  // executed. Carries `facts` = how many it proposed, so all three states separate:
+  // no event = did not run · facts 0 = ran, found nothing · facts n = ran, found n.
+  | 'capture_ran'
   | 'remember_invoked'   // the model recorded a durable fact (numerator)
   // propose→confirm→apply — ACTIVATED by Onboarding Wave 1 (Layer-1 Faden chips):
   | 'propose_shown'
@@ -67,6 +75,10 @@ export interface CaptureTelemetryEntry {
   readonly untrusted: boolean;
   /** Store outcome — only set for `remember_invoked`. */
   readonly outcome?: CaptureOutcome | undefined;
+  /** How many facts the recovery pass proposed — only set for `capture_ran`. Zero is a
+   *  RESULT, not an absence, and is the reason this field exists as a number rather than
+   *  the event being emitted only on a hit. */
+  readonly facts?: number | undefined;
   /**
    * WHO recorded it: the model choosing to call `remember` ('model', the default
    * when absent) or the turn-end recovery pass ('capture').

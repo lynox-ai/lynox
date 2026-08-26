@@ -580,3 +580,30 @@ describe('rememberBySource — mechanism vs. model compliance', () => {
     expect(report.rememberBySource).toEqual({ capture: 0, model: 0, unknown: 1 });
   });
 });
+
+describe('capture_ran — the pass announcing that it executed', () => {
+  it('is COUNTED, so an empty run is visible in the report and not just in the sink', async () => {
+    // Dropping `capture_ran` from ALL_EVENTS left every other test green: the line lands
+    // in the file, the validator accepts it, and the report silently omits it. A sink
+    // entry nobody aggregates answers no question — which is the same defect the event
+    // was added to fix, one layer up.
+    await seed([
+      entry({ event: 'capture_ran' }),
+      entry({ event: 'capture_ran' }),
+      entry({ event: 'capture_eligible' }),
+    ]);
+    const report = await buildCaptureReport();
+    expect(report.events['capture_ran']).toBe(2);
+    // And it must be a FULL record: a report that omits an event key entirely reads as
+    // "this never happened" rather than "this build does not know the key".
+    expect(Object.keys(report.events)).toContain('capture_ran');
+  });
+
+  it('separates a dead pass from one that ran and found nothing', async () => {
+    // The whole point, stated as the two windows it must tell apart.
+    await seed([entry({ event: 'capture_eligible' }), entry({ event: 'capture_eligible' })]);
+    const dead = await buildCaptureReport();
+    expect(dead.events['capture_ran']).toBe(0);
+    expect(dead.events['remember_invoked']).toBe(0);
+  });
+});
