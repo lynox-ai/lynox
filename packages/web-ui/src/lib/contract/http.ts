@@ -255,8 +255,71 @@ export interface OAuthClaimRequest {
  */
 export interface OAuthClaimResponse {
   access_token: string;
+  /**
+   * The raw Google refresh token.
+   *
+   * ⚠ BEING RETIRED. It is here for engines that predate `refresh_handle` and
+   * still refresh against Google themselves. Once the fleet is past the release
+   * that uses the handle, this field goes — DEF-retire-raw-refresh-token.
+   *
+   * Handing it down is what the CP-exchange decision (2026-08-26) removes: an
+   * engine holding it needs lynox's client secret to use it, which is why the
+   * secret was going to be emitted to every tenant in the first place.
+   */
   refresh_token: string;
+  /**
+   * The same refresh token, sealed to THIS instance by the control plane.
+   *
+   * Optional so an older engine is unaffected — it simply keeps using
+   * `refresh_token`. A newer engine prefers this and never learns the raw
+   * value: it presents the handle to `POST /internal/oauth/google/refresh`,
+   * which unseals it with the instance's own key and does the Google call
+   * control-plane-side. A handle lifted from one tenant is inert at another,
+   * because unsealing uses the key of the instance that authenticated.
+   *
+   * Opaque by contract. Its format is the control plane's business and may
+   * change without a wire change; nothing outside the CP may parse it.
+   */
+  refresh_handle?: string;
   /** Absolute expiry, epoch milliseconds (not a TTL, not seconds). */
   expires_at: number;
   scopes: string[];
+}
+
+// === OAuth refresh — POST /internal/oauth/google/refresh (engine → CP) ===
+
+/**
+ * Refresh on behalf of an instance, so lynox's client secret never leaves the
+ * control plane.
+ *
+ * Authenticated exactly like the claim: `x-instance-secret`, matched against
+ * `instances.instanceSecret` in constant time. The handle is bound on top of
+ * that — presenting someone else's handle fails at the unseal, not at a lookup,
+ * so this endpoint cannot be used as an oracle that redeems arbitrary refresh
+ * tokens.
+ */
+export interface OAuthRefreshRequest {
+  instance_id: string;
+  /** The `refresh_handle` from the claim, or from a previous refresh. */
+  refresh_handle: string;
+}
+
+/**
+ * A fresh access token, and nothing the caller did not already have.
+ *
+ * ⚠ The engine MUST cache `access_token` until `expires_at`. That is not an
+ * optimisation: with the refresh path routed through the control plane, an
+ * uncached engine reaches for the CP on every expiry and the CP becomes a
+ * runtime dependency of every Google call rather than of the refresh.
+ */
+export interface OAuthRefreshResponse {
+  access_token: string;
+  /** Absolute expiry, epoch milliseconds (not a TTL, not seconds). */
+  expires_at: number;
+  /**
+   * Present only when Google rotated the refresh token, which it may do on any
+   * refresh. The engine must replace its stored handle when this appears, or
+   * the next refresh presents a handle Google has already invalidated.
+   */
+  refresh_handle?: string;
 }
