@@ -1151,7 +1151,13 @@ describe('refresh through the control plane (the client secret stays there)', ()
   // it gets its query extended, and the request leaves with the instance secret.
   it.each([
     ['a query', 'https://cp.invalid/?to=elsewhere'],
+    // An EMPTY query is the case the first version of this guard let through:
+    // `new URL('https://cp.invalid/?').search` is '', but `href` keeps the '?',
+    // so the endpoint would have been appended into the query string.
+    ['an empty query', 'https://cp.invalid/?'],
+    ['an empty fragment', 'https://cp.invalid/#'],
     ['a fragment', 'https://cp.invalid/#x'],
+    ['embedded credentials', 'https://user:pw@cp.invalid/'],
     ['a non-http scheme', 'file:///etc/passwd'],
     ['an unparseable value', 'not a url'],
   ])('falls back to Google when the control-plane URL carries %s', async (_why, raw) => {
@@ -1276,6 +1282,7 @@ describe('refresh through the control plane (the client secret stays there)', ()
     ['an already-past expiry', { access_token: 'cp-token', expires_at: Date.now() - 1 }, /plausible range/],
     ['an absurdly distant expiry', { access_token: 'cp-token', expires_at: Date.now() + 400 * 24 * 3_600_000 }, /plausible range/],
     ['a non-string handle', { access_token: 'cp-token', expires_at: Date.now() + 3_600_000, refresh_handle: 42 }, /unusable refresh handle/],
+    ['an empty handle', { access_token: 'cp-token', expires_at: Date.now() + 3_600_000, refresh_handle: '' }, /unusable refresh handle/],
   ])('refuses a control-plane response with %s', async (_why, body, pattern) => {
     setEnv(true);
     const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
@@ -1310,8 +1317,14 @@ describe('refresh through the control plane (the client secret stays there)', ()
 
     // The invalid client is lynox's own here, so the remedy must not send the
     // user after this instance's credentials.
-    await expect(authWith(vault).getAccessToken()).rejects.toThrow(/lynox could not complete the refresh/);
+    const auth = authWith(vault);
+    await expect(auth.getAccessToken()).rejects.toThrow(/lynox could not complete the refresh/);
     expect(vault.delete).not.toHaveBeenCalled();
+    // And the cool-down armed: the second attempt must not reach the network at
+    // all. Without this the breaker that keeps a fleet-wide bad secret from
+    // hammering the CP forever was asserted nowhere.
+    await expect(auth.getAccessToken()).rejects.toThrow(/suppressed/);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the token and stays transient when the control plane is down', async () => {
@@ -1323,8 +1336,11 @@ describe('refresh through the control plane (the client secret stays there)', ()
     expect(vault.delete).not.toHaveBeenCalled();
   });
 
-  // A 3xx arrives as !ok because the request does not follow redirects. It must
-  // be transient — a redirecting CP is an outage, not a revoked grant.
+  // What this pins is the CLASSIFICATION of a 3xx, not that redirects are
+  // unfollowed — a mock returns `ok:false` regardless, so it cannot show that;
+  // the `init.redirect` assertion above is what pins the request itself. The
+  // classification still matters: a redirecting CP is an outage, and reading it
+  // as a revoked grant would delete the token.
   it('treats a redirect from the control plane as transient, not as a revocation', async () => {
     setEnv(true);
     const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
@@ -1346,6 +1362,24 @@ describe('refresh through the control plane (the client secret stays there)', ()
     });
 
     await expect(authWith(vault).getAccessToken()).resolves.toBe('cp-issued-token');
+  });
+
+  // The precondition that lets a handle-only token refresh opened a way to
+  // destroy one: with the control plane unreachable, the direct branch reads an
+  // EMPTY refresh_token, Google answers `invalid_grant`, and this code cannot
+  // tell that from a revocation — so it would delete the grant because we could
+  // not reach our own control plane. Both ways of losing the CP are driven.
+  it.each([
+    ['the identity is incomplete', () => { delete process.env['LYNOX_HTTP_SECRET']; }],
+    ['the URL is refused', () => { process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] = 'https://cp.invalid/?'; }],
+  ])('fails transient, without deleting, when a handle-only token cannot reach the CP because %s', async (_why, breakIt) => {
+    setEnv(true);
+    breakIt();
+    const vault = vaultWith({ refresh_token: '', refresh_handle: 'sealed-handle-1' });
+
+    await expect(authWith(vault).getAccessToken()).rejects.toThrow(/cannot reach its control plane/);
+    expect(vault.delete, 'an unreachable control plane must never look like a revoked grant').not.toHaveBeenCalled();
+    expect(mockFetch, 'and nothing may be sent to Google with an empty refresh token').not.toHaveBeenCalled();
   });
 
   // The direct path and the handle can coexist on a misconfigured instance. If

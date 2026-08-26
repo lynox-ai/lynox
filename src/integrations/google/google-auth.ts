@@ -61,8 +61,20 @@ function controlPlaneBase(raw: string): string | null {
     return null;
   }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
-  if (parsed.search !== '' || parsed.hash !== '') return null;
-  return parsed.href.replace(/\/+$/, '');
+  // Refuse on the RAW string, not on `parsed.search`/`parsed.hash`: an empty
+  // query parses to `search === ''` while `href` keeps the `?`, so reading the
+  // parsed fields let exactly the value through that this guard exists for.
+  // Refusing beats silently dropping — an operator's mistake should be loud.
+  if (raw.includes('?') || raw.includes('#')) return null;
+  // Credentials in the base would authenticate the request somewhere the
+  // operator did not mean; `origin` drops them silently, so refuse instead.
+  if (parsed.username !== '' || parsed.password !== '') return null;
+  // `origin + pathname` cannot carry a query, a fragment or credentials by
+  // construction. With all three refused above it is byte-equal to `href`
+  // for every value that reaches here — the two are belt and braces, and
+  // that is deliberate: the string check states the intent, this makes it
+  // structural.
+  return (parsed.origin + parsed.pathname).replace(/\/+$/, '');
 }
 
 interface ServiceAccountKey {
@@ -168,9 +180,11 @@ function parseTokenData(raw: string): TokenData | null {
 /**
  * Validate a refresh response from the control plane.
  *
- * The direct path runs every Google response through `validateTokenResponse`;
- * this is the same bar for the other one. A `typeof` check alone is not that
- * bar — `NaN` is a number, and an `expires_at` of `NaN` makes the staleness
+ * The direct path runs every Google response through `validateTokenResponse`.
+ * This is the equivalent for the other one, and deliberately stricter: the
+ * direct path derives `expires_at` from a `expires_in` it has already bounded
+ * to be positive, while this value arrives absolute and unchecked. A `typeof`
+ * check alone is not enough — `NaN` is a number, and an `expires_at` of `NaN` makes the staleness
  * comparison in `getAccessToken` false forever, so the engine would serve a
  * dead access token and never refresh again. An out-of-range value fails the
  * other way: an always-past expiry turns the CP into a dependency of every
@@ -858,13 +872,26 @@ export class GoogleAuth {
     // it. Either missing takes the direct call below, which is unchanged for
     // self-host and for any claim that predates handles.
     //
-    // The CP is expected to proxy Google's status and body, which is what lets
-    // `classifyRefreshFailure` serve both paths instead of growing a second
-    // copy of the grant-revoked / client-misconfigured / transient split. That
-    // expectation lives in the wire contract, not in this file — see
-    // `OAuthRefreshResponse` in `src/contract/http.ts`.
+    // Reusing `classifyRefreshFailure` for both paths assumes the CP passes
+    // Google's status and error body through rather than rewriting them. The
+    // wire contract does NOT state that today — it describes the success shape
+    // only — so this is an expectation on the endpoint being built, written
+    // here so it is not discovered by a misclassification later.
     const handle = this.tokenData.refresh_handle;
     const cp = handle ? readControlPlaneIdentity() : null;
+
+    // The direct call below reads `refresh_token`. A handle-only token whose
+    // control plane is unreachable — env incomplete, or a URL this build
+    // refuses — would reach it with an EMPTY one, and Google answers 400
+    // `invalid_grant`: indistinguishable here from a revoked grant, so the
+    // grant would be deleted because we could not reach our own control plane.
+    // Fail transient instead. The token survives; the next attempt can work.
+    if (!(cp && handle) && this.tokenData.refresh_token === '') {
+      throw new Error(
+        'Token refresh failed: this instance cannot reach its control plane.'
+        + REFRESH_FAILURE_REMEDY.transient,
+      );
+    }
 
     const response = cp && handle
       ? await fetch(`${cp.url}/internal/oauth/google/refresh`, {
