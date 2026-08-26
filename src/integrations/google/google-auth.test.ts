@@ -1202,8 +1202,15 @@ describe('refresh through the control plane (the client secret stays there)', ()
       json: async () => ({ access_token: 'cp-issued-token', expires_at: Date.now() + 3_600_000 }),
     });
 
-    await authWith(vault).getAccessToken();
+    const token = await authWith(vault).getAccessToken();
 
+    // Asserting the handle UNCHANGED is asserting the pre-state, so an
+    // implementation that refreshes nothing at all satisfies it. Measured: with
+    // the staleness check disabled so no refresh can fire, this test still
+    // passed. Something that DID change has to be asserted alongside, or
+    // "preserved" is indistinguishable from "never ran".
+    expect(token).toBe('cp-issued-token');
+    expect(vault.stored()['access_token']).toBe('cp-issued-token');
     expect(vault.stored()['refresh_handle']).toBe('sealed-handle-1');
   });
 
@@ -1382,6 +1389,88 @@ describe('refresh through the control plane (the client secret stays there)', ()
     expect(mockFetch, 'and nothing may be sent to Google with an empty refresh token').not.toHaveBeenCalled();
   });
 
+  // The suppression exists so a fleet-wide bad client secret cannot make every
+  // instance hammer Google forever. It must not outlive the reconnect that
+  // resolves it — and on the CP path, reconnecting IS the user's remedy, so the
+  // window would have blocked exactly the action that fixes it.
+  it('a reconnect ENDS the suppression', async () => {
+    setEnv(true);
+    const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
+    const auth = authWith(vault);
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 401, text: async () => JSON.stringify({ error: 'invalid_client' }),
+    });
+    await expect(auth.getAccessToken()).rejects.toThrow(/lynox could not complete/);
+    await expect(auth.getAccessToken()).rejects.toThrow(/suppressed/);
+
+    // The reconnected token is written ALREADY EXPIRED, deliberately. The
+    // suppression lives in `_doRefresh`, and `getAccessToken` only goes there
+    // past expiry — so a fresh, valid token returns from cache and never
+    // reaches the check. Measured: with a future expiry this test passed even
+    // when the clear was deleted, which is a test that drives nothing.
+    await auth.setTokens({
+      access_token: 'reconnected-access-token',
+      refresh_token: 'reconnected-refresh-token',
+      expires_at: Date.now() - 1_000,
+      scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+      refresh_handle: 'sealed-handle-2',
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ access_token: 'post-reconnect-token', expires_at: Date.now() + 3_600_000 }),
+    });
+
+    await expect(auth.getAccessToken()).resolves.toBe('post-reconnect-token');
+    expect(mockFetch, 'the refresh after a reconnect must actually go out').toHaveBeenCalledTimes(2);
+  });
+
+  it('but WITHOUT a reconnect it stays suppressed inside the window', async () => {
+    // The counter-direction. Without it, clearing on every call would pass the
+    // test above and quietly remove the brake the cool-down exists to be.
+    setEnv(true);
+    const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
+    const auth = authWith(vault);
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 401, text: async () => JSON.stringify({ error: 'invalid_client' }),
+    });
+    await expect(auth.getAccessToken()).rejects.toThrow(/lynox could not complete/);
+
+    await expect(auth.getAccessToken()).rejects.toThrow(/suppressed/);
+    await expect(auth.getAccessToken()).rejects.toThrow(/suppressed/);
+    expect(mockFetch, 'a suppressed attempt must not reach the network').toHaveBeenCalledTimes(1);
+  });
+
+  // Two texts about one situation that contradict each other is worse than
+  // either: the first attempt told a managed user lynox could not complete the
+  // refresh, and every suppressed attempt after it blamed credentials that user
+  // does not have and cannot reach.
+  it('repeats the CONTROL-PLANE remedy while suppressed, not the instance one', async () => {
+    setEnv(true);
+    const vault = vaultWith({ refresh_handle: 'sealed-handle-1' });
+    const auth = authWith(vault);
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 401, text: async () => JSON.stringify({ error: 'invalid_client' }),
+    });
+    await expect(auth.getAccessToken()).rejects.toThrow(/lynox could not complete/);
+
+    await expect(auth.getAccessToken()).rejects.toThrow(/lynox could not complete/);
+    await expect(auth.getAccessToken()).rejects.not.toThrow(/an operator corrects them/);
+  });
+
+  it('and the INSTANCE remedy on the direct path, which is where it is true', async () => {
+    // The counter-direction: a self-host operator genuinely can fix this
+    // instance's credentials, and must be told so.
+    setEnv(false);
+    const vault = vaultWith({});
+    const auth = authWith(vault);
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 401, text: async () => JSON.stringify({ error: 'invalid_client' }),
+    });
+    await expect(auth.getAccessToken()).rejects.toThrow(/an operator corrects them/);
+
+    await expect(auth.getAccessToken()).rejects.toThrow(/an operator corrects them/);
+  });
+
   // The direct path and the handle can coexist on a misconfigured instance. If
   // Google rotates the refresh token there, the control plane's sealed copy is
   // stale — presenting it later returns `invalid_grant`, which this code cannot
@@ -1413,8 +1502,11 @@ describe('refresh through the control plane (the client secret stays there)', ()
       json: async () => ({ access_token: 'google-token', expires_in: 3600, scope: '', token_type: 'Bearer' }),
     });
 
-    await authWith(vault).getAccessToken();
+    const token = await authWith(vault).getAccessToken();
 
+    // Same shape, same guard: pin something the refresh CHANGED next to the
+    // thing it left alone.
+    expect(token).toBe('google-token');
     expect(vault.stored()['refresh_handle']).toBe('sealed-handle-1');
   });
 });

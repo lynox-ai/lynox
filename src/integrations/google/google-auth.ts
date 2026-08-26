@@ -293,6 +293,23 @@ const REFRESH_FAILURE_REMEDY: Record<RefreshFailureKind, string> = {
 };
 
 /**
+ * The same verdict, for the control-plane path.
+ *
+ * Not an entry in the table above, because it is not a new failure KIND — it is
+ * the same one with a different audience. On the direct path the invalid client
+ * belongs to this instance and an operator here can fix it; on the control-plane
+ * path it is lynox's own, and naming this instance would send the user after
+ * something they do not control. It promises no reporting, because nothing in
+ * this file reports anything anywhere.
+ *
+ * A named constant rather than a literal at the throw site: the suppression
+ * window replays this text for every attempt it refuses, so it now has two
+ * readers, and two copies of a user-facing sentence is how they drift apart.
+ */
+const CP_CLIENT_MISCONFIGURED_REMEDY =
+  ' Your Google connection is intact — lynox could not complete the refresh.';
+
+/**
  * How long a `client-misconfigured` verdict suppresses further token POSTs.
  *
  * Longer than the 120 s mail-watch tick (`providers/oauth-gmail.ts`), on
@@ -489,6 +506,12 @@ export class GoogleAuth {
       scopes: data.scopes,
       ...(data.refresh_handle ? { refresh_handle: data.refresh_handle } : {}),
     };
+    // A fresh grant ends the suppression. The cool-down exists so a fleet-wide
+    // bad client secret cannot make every instance hammer Google forever; it is
+    // not there to outlive the reconnect that resolves it. Without this line the
+    // window kept refusing for up to five minutes after the user had already
+    // done the one thing that fixes it.
+    this._clientMisconfigured = null;
     saveTokenData(this.tokenData, this.vault);
   }
 
@@ -840,8 +863,16 @@ export class GoogleAuth {
     return this.refreshInFlight;
   }
 
-  /** Set when Google rejected OUR client credentials; see `_doRefresh`. */
-  private _clientMisconfiguredUntil: number | null = null;
+  /**
+   * Set when Google rejected OUR client credentials; see `_doRefresh`.
+   *
+   * The remedy travels WITH the deadline rather than being looked up when the
+   * suppression fires. The two paths blame different parties — this instance's
+   * operator on the direct one, lynox on the control-plane one — and the choice
+   * is made where the failure happens, with `cp` in scope. Re-deriving it later
+   * would mean a second copy of that rule, and the copy is where they drift.
+   */
+  private _clientMisconfigured: { until: number; remedy: string } | null = null;
 
   private async _doRefresh(): Promise<void> {
     // Either credential can drive a refresh: the raw token on the direct path,
@@ -860,16 +891,22 @@ export class GoogleAuth {
     // into every instance POSTing Google's token endpoint forever. The cool-down
     // restores the brake WITHOUT the data loss.
     //
-    // It dies with the instance — `clientId`/`clientSecret` are readonly, so
-    // corrected credentials arrive as a new GoogleAuth. That is NOT the same as
-    // "a fix always clears it": `reloadGoogle()` swaps the engine's own
-    // `_googleAuth`, but `MailContext.googleAuth` is readonly and bound at
-    // construction (`mail/context.ts:258`), so the Gmail path keeps this
-    // instance — and this window — until the process restarts. That is the
-    // already-known `restart_required` limitation of `reloadGoogle`, not
-    // something the cool-down adds; it just inherits it.
-    if (this._clientMisconfiguredUntil !== null && Date.now() < this._clientMisconfiguredUntil) {
-      throw new Error(`Token refresh suppressed.${REFRESH_FAILURE_REMEDY['client-misconfigured']}`);
+    // A RECONNECT clears it — see `setTokens`. That is not a courtesy: when the
+    // control plane refuses a handle minted under a different OAuth client, it
+    // answers as a client problem so the token survives, and the user's remedy
+    // for that is precisely to reconnect. Without the clear, the suppression
+    // would outlast the very action that fixes it, for up to five minutes,
+    // while telling the user the connection is still broken.
+    //
+    // Corrected CREDENTIALS are a different case and still need a restart:
+    // `clientId`/`clientSecret` are readonly, so they arrive as a new
+    // GoogleAuth — and `reloadGoogle()` swaps the engine's own `_googleAuth`
+    // while `MailContext.googleAuth` stays bound at construction
+    // (`mail/context.ts:258`), so the Gmail path keeps this instance until the
+    // process restarts. That is the already-known `restart_required` limit of
+    // `reloadGoogle`, inherited here rather than added.
+    if (this._clientMisconfigured !== null && Date.now() < this._clientMisconfigured.until) {
+      throw new Error(`Token refresh suppressed.${this._clientMisconfigured.remedy}`);
     }
 
     // Two ways to refresh. The control-plane one needs BOTH a sealed handle and
@@ -931,25 +968,24 @@ export class GoogleAuth {
       // secret (`invalid_client`) and a network blip both leave the user's
       // grant intact, so both keep the token — see `classifyRefreshFailure`.
       const failure = classifyRefreshFailure(response.status, text);
-      if (failure === 'grant-revoked') {
-        this.tokenData = null;
-        deleteTokenData(this.vault);
-      } else if (failure === 'client-misconfigured') {
-        this._clientMisconfiguredUntil = Date.now() + CLIENT_MISCONFIGURED_COOLDOWN_MS;
-      }
-      // The remedy text is written for the direct path, where the invalid client
-      // is this instance's own. On the CP path it is lynox's shared client, so
-      // telling the user an operator must fix THIS instance would send them
-      // after the wrong thing — the cool-down still applies either way.
+      // Chosen ONCE, here, where `cp` says which client is actually invalid.
       // Not a new failure KIND, so not a new `REFRESH_FAILURE_REMEDY` entry:
       // the same classification with a different audience. On the direct path
       // the invalid client is this instance's own and an operator can fix it;
       // on the CP path it is lynox's, and naming the instance would send the
-      // user after something they do not control. It says only that, because
-      // nothing here reports the failure anywhere.
+      // user after something they do not control.
       const remedy = cp && failure === 'client-misconfigured'
-        ? ' Your Google connection is intact — lynox could not complete the refresh.'
+        ? CP_CLIENT_MISCONFIGURED_REMEDY
         : REFRESH_FAILURE_REMEDY[failure];
+      if (failure === 'grant-revoked') {
+        this.tokenData = null;
+        deleteTokenData(this.vault);
+      } else if (failure === 'client-misconfigured') {
+        // The remedy is stored with the deadline so every suppressed attempt in
+        // the window repeats THIS answer, not the generic one. Two texts about
+        // one situation, contradicting each other, is worse than either.
+        this._clientMisconfigured = { until: Date.now() + CLIENT_MISCONFIGURED_COOLDOWN_MS, remedy };
+      }
       throw new Error(`Token refresh failed: ${response.status} ${text}.${remedy}`);
     }
 
