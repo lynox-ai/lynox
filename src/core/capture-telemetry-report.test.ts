@@ -544,3 +544,39 @@ describe('populations — the two ends of fireRate, counted separately', () => {
     expect(populations.blindNote).not.toBeNull();
   });
 });
+
+describe('rememberBySource — mechanism vs. model compliance', () => {
+  /**
+   * The field exists so a lifted `fireRate` can be attributed. Carrying it through the
+   * validator is NOT enough: a field nothing reports is inert, and the mutation that
+   * drops it at the boundary survived every test in the capture suite until this block
+   * existed. The three counts are deliberately DISTINCT so a swapped assignment shows.
+   */
+  it('splits remember_invoked three ways and folds nothing', async () => {
+    await seed([
+      entry({ event: 'remember_invoked', outcome: 'active', source: 'capture' }),
+      entry({ event: 'remember_invoked', outcome: 'active', source: 'capture' }),
+      entry({ event: 'remember_invoked', outcome: 'active', source: 'capture' }),
+      entry({ event: 'remember_invoked', outcome: 'active', source: 'model' }),
+      entry({ event: 'remember_invoked', outcome: 'active', source: 'model' }),
+      // No `source` — a line from before the field existed.
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+      // Not a remember event: must not be counted at all.
+      entry({ event: 'propose_shown', source: 'capture' }),
+    ]);
+    const report = await buildCaptureReport();
+    expect(report.rememberBySource).toEqual({ capture: 3, model: 2, unknown: 1 });
+    // The sum is the headline numerator — if the split drifts from it, one of the two
+    // is wrong and the report would show a rate it cannot attribute.
+    const s = report.rememberBySource;
+    expect(s.capture + s.model + s.unknown).toBe(report.events.remember_invoked);
+  });
+
+  it('an out-of-enum source counts as unknown rather than being invented', async () => {
+    await seed([
+      entry({ event: 'remember_invoked', outcome: 'active', source: 'telepathy' as unknown as 'model' }),
+    ]);
+    const report = await buildCaptureReport();
+    expect(report.rememberBySource).toEqual({ capture: 0, model: 0, unknown: 1 });
+  });
+});

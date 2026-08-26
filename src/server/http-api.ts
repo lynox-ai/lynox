@@ -2298,6 +2298,7 @@ export class LynoxHTTPApi {
         // do not deliver them. Set together so a surface can never request the
         // chips without the recovery, or pay for recovery where nothing asked.
         followUpFallback: true,
+        captureFallback: true,
       });
       const tier = session.getModelTier();
       const threadStore = engine.getThreadStore();

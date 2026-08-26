@@ -184,6 +184,9 @@ export interface SessionOptions {
    *  the suffix asks for the chips, this catches the models that do not deliver.
    *  See `Agent.followUpFallback`. */
   followUpFallback?: boolean | undefined;
+  /** See `Agent.captureFallback` — the turn-end fact recovery. Opt-in for the
+   *  same reason: only a surface that can SHOW a proposal should make one. */
+  captureFallback?: boolean | undefined;
   costGuard?: import('../types/index.js').CostGuardConfig | undefined;
 }
 
@@ -254,6 +257,7 @@ export class Session {
     excludeTools?: string[] | undefined;
     systemPromptSuffix?: string | undefined;
     followUpFallback?: boolean | undefined;
+    captureFallback?: boolean | undefined;
     autonomy?: import('../types/index.js').AutonomyLevel | undefined;
     costGuard?: import('../types/index.js').CostGuardConfig | undefined;
   } = {};
@@ -421,6 +425,9 @@ export class Session {
     }
     if (opts?.followUpFallback) {
       this.agentOverrides.followUpFallback = true;
+    }
+    if (opts?.captureFallback) {
+      this.agentOverrides.captureFallback = true;
     }
     if (opts?.autonomy) {
       this.agentOverrides.autonomy = opts.autonomy;
@@ -2084,6 +2091,7 @@ export class Session {
       // Travels WITH the suffix: the suffix asks for the chips, this recovers
       // them. A rebuild that dropped it would silently stop recovering mid-thread.
       followUpFallback: this.agentOverrides.followUpFallback,
+      captureFallback: this.agentOverrides.captureFallback,
       autonomy: supplied.autonomy ?? this.agentOverrides.autonomy,
       costGuard: this.agentOverrides.costGuard, // never a caller's to set here
       // per-rebuild — reset unless this call supplies one
@@ -2443,6 +2451,9 @@ export class Session {
     // Web-UI surfaces only: catch a turn that ended without the chips.
     if (this.agentOverrides.followUpFallback === true) {
       this.agent.followUpFallback = true;
+    }
+    if (this.agentOverrides.captureFallback === true) {
+      this.agent.captureFallback = true;
     }
   }
 

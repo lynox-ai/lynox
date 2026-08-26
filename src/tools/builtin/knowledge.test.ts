@@ -407,6 +407,29 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     expect(out).toMatch(/too long/i);
     expect(ks.pendingCount()).toBe(0);
   });
+
+  it('remember rejects a credential in the SUBJECT, not only in the text', async () => {
+    // The gate read `text` while the write also stored `subject`, and `subject_hint`
+    // is the column that is NOT encrypted at rest — it renders into the review panel
+    // and into every later focus block. An innocuous sentence with a key as its
+    // subject passed a check that was looking at the wrong field. Found by an
+    // adversarial round on the capture path; the same hole was here.
+    const { agent, ks } = make();
+    const out = await rememberTool.handler(
+      { text: 'Der Kunde hat eine Projekt-Kennung hinterlegt.', subject: `sk_live_${'a'.repeat(40)}` },
+      agent,
+    );
+    expect(out).toMatch(/secret|credential/i);
+    expect(ks.pendingCount()).toBe(0);
+    expect(ks.recall({ query: 'Projekt-Kennung' }).length).toBe(0);
+  });
+
+  it('remember rejects an over-long SUBJECT too', async () => {
+    const { agent, ks } = make();
+    const out = await rememberTool.handler({ text: 'Kurzer Fakt.', subject: 'x'.repeat(8001) }, agent);
+    expect(out).toMatch(/too long/i);
+    expect(ks.pendingCount()).toBe(0);
+  });
 });
 
 describe('DK.2 tools (memory_retire / memory_focus / archive_search)', () => {

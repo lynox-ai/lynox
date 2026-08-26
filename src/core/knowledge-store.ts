@@ -109,6 +109,70 @@ const DEDUP_FUNCTION_WORDS: ReadonlySet<string> = new Set([
  *    `getAncestors` walk-up), then ranked WITHIN by Unicode-aware token overlap — no cosine,
  *    no embedding index (`text` is enc()'d at rest; the measured 0.83 band adds noise).
  */
+/**
+ * The three checks a durable write must pass, in ONE place.
+ *
+ * They lived only in the `remember` tool handler. When the turn-end capture pass
+ * started writing through the same store, it inherited the store's own size
+ * backstop and NOTHING else — so a user typing an API key in a clean turn would
+ * have had it stored active and agent-readable, which `remember` rejects
+ * outright. An adversarial round measured that gap; this function is why it
+ * cannot open a third time.
+ *
+ * `write()` itself deliberately does not scan — it is the low-level insert.
+ *
+ * WHAT THIS DOES NOT COVER, counted rather than assumed. There are three `write()`
+ * callers; this gate holds two of them:
+ *   - `tools/builtin/knowledge.ts` (`remember`)            — through here
+ *   - `core/agent.ts` (turn-end capture)                   — through here
+ *   - `core/onboarding-promotion.ts` — NOT through here. It runs `looksLikeSecret`,
+ *     which is `matchesSecretPatternStrict`, plus its own length bound. That is a
+ *     DIFFERENT and tighter predicate, deliberately so; folding it in here would
+ *     loosen onboarding, not tighten it. Left alone on purpose, named so the next
+ *     reader counts three and not two.
+ * `memory_block_edit` in the same tool file keeps a hand-copied secret check because
+ * blocks carry their own `char_limit` and their own refusal text; only the length
+ * half differs, so the two cannot share this function as written.
+ */
+export function checkKnowledgeText(
+  text: string,
+  secretStore: { containsSecret(text: string): boolean } | null | undefined,
+  subject?: string | undefined,
+): { ok: true } | { ok: false; reason: string } {
+  // The SUBJECT is checked too, and it is the more dangerous of the two: `text` is
+  // enc()'d at rest, `subject_hint` is stored PLAINTEXT next to it (see the INSERT)
+  // and a minted subject name renders into the always-loaded focus block. A gate that
+  // read only `text` let a credential through in the column beside it.
+  for (const field of subject === undefined ? [text] : [text, subject]) {
+    const bad = checkOneField(field, secretStore);
+    if (bad) return bad;
+  }
+  return { ok: true };
+}
+
+function checkOneField(
+  text: string,
+  secretStore: { containsSecret(text: string): boolean } | null | undefined,
+): { ok: false; reason: string } | null {
+  if (text.length > MAX_KNOWLEDGE_ENTRY_CHARS) {
+    return {
+      ok: false as const,
+      reason: `That is too long for a single memory (${text.length} chars, max ${MAX_KNOWLEDGE_ENTRY_CHARS}). `
+        + 'Record one concise fact, or put the full material in a document / data_store.',
+    };
+  }
+  // H7: secret-SHAPED, not only tenant-known. REJECT, never queue — a decrypted
+  // credential must not sit in a review panel waiting to be approved.
+  if (matchesSecretPattern(text) || secretStore?.containsSecret(text) === true) {
+    return {
+      ok: false as const,
+      reason: 'Cannot record content that looks like a secret or credential. '
+        + 'Store secrets via ask_secret / the vault, not in memory.',
+    };
+  }
+  return null;
+}
+
 export class KnowledgeStore {
   private readonly db: Database.Database;
 
