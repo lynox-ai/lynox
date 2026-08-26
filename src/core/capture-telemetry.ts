@@ -80,10 +80,18 @@ export interface CaptureTelemetryEntry {
   readonly untrusted: boolean;
   /** Store outcome — only set for `remember_invoked`. */
   readonly outcome?: CaptureOutcome | undefined;
-  /** How many facts the recovery pass proposed — only set for `capture_ran`. Zero is a
-   *  RESULT, not an absence, and is the reason this field exists as a number rather than
-   *  the event being emitted only on a hit. */
+  /** How many facts the recovery pass WROTE THROUGH the per-turn ceiling — only set for
+   *  `capture_ran`. Zero is a RESULT, not an absence, and is the reason this field exists
+   *  as a number rather than the event being emitted only on a hit.
+   *  ⚠ ABSENCE is load-bearing since the failure path emits too: no `facts` means the pass
+   *  did not COMPLETE. A third emit site must keep that: writing `0` on a failure disguises
+   *  an outage as an empty result. */
   readonly facts?: number | undefined;
+  /** Well-formed facts the model OFFERED, before the per-turn ceiling — only set for
+   *  `capture_ran`. `proposed - facts` is what the ceiling costs, and it is the only way to
+   *  see that from production: `facts` alone is capped, so a turn offering nine and a turn
+   *  offering four read identically. */
+  readonly proposed?: number | undefined;
   /**
    * WHO recorded it: the model choosing to call `remember` ('model') or the turn-end
    * recovery pass ('capture').

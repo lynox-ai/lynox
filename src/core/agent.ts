@@ -1447,7 +1447,8 @@ export class Agent implements IAgent {
       const call = response.content.find(
         (b): b is BetaToolUseBlock => b.type === 'tool_use' && b.name === CAPTURE_TOOL_NAME,
       );
-      const facts = call ? parseExtractedFacts(call.input) : [];
+      const parsed = call ? parseExtractedFacts(call.input) : { facts: [], proposed: 0 };
+      const facts = parsed.facts;
       // The pass RAN. Emitted before the empty-return below, and unconditionally, because
       // the silent return was the whole defect: on a live staging run a turn where the
       // model skipped `remember` produced no chip and no event, and nothing in the
@@ -1462,6 +1463,7 @@ export class Agent implements IAgent {
         untrusted: turnUntrusted,
         runId: this.currentRunId,
         facts: facts.length,
+        proposed: parsed.proposed,
         source: 'capture',
       });
       if (facts.length === 0) return;

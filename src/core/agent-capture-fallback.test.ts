@@ -358,6 +358,26 @@ describe('turn-end capture — what an adversarial round found missing', () => {
     expect(ran[0]!['facts']).toBe(0);
   });
 
+  it('counts what the model OFFERED, not what survived the ceiling', async () => {
+    // The producer half. The report tests seed `proposed` by hand and therefore cannot see
+    // whether anything ever produces it — the same consumer-tested-in-isolation split that
+    // let `facts` reach the sink and never be read. Nine offered, four written.
+    const many = Array.from({ length: 9 }, (_, i) => ({ text: `Dauerhafter Fakt Nummer ${i} über den Kunden.` }));
+    const reply = vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c1', name: CAPTURE_TOOL_NAME, input: { facts: many } }],
+      usage: USAGE,
+    });
+    const { inner, write } = makeAgent({ reply });
+    await inner._captureFallback(ANSWER, false);
+    expect(write, 'the ceiling must still bound what is WRITTEN').toHaveBeenCalledTimes(4);
+    const ran = vi.mocked(appendCaptureTelemetry).mock.calls
+      .map(c => c[1] as unknown as Record<string, unknown>)
+      .filter(e => e['event'] === 'capture_ran');
+    expect(ran).toHaveLength(1);
+    expect(ran[0]!['facts'], 'written through the ceiling').toBe(4);
+    expect(ran[0]!['proposed'], 'offered before it — this is what makes the ceiling measurable').toBe(9);
+  });
+
   it('reports the fact COUNT it proposed, not merely that it ran', async () => {
     // A boolean "it ran" cannot separate a classifier proposing three facts from one
     // proposing one and dropping two. The count is what makes the per-turn ceiling

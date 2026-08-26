@@ -140,11 +140,28 @@ export interface ExtractedFact {
  * Validate what came back. Anything unusable is dropped rather than repaired —
  * a helper that guesses at a malformed fact writes a fact nobody said.
  */
-export function parseExtractedFacts(input: unknown): ExtractedFact[] {
-  if (typeof input !== 'object' || input === null) return [];
+/**
+ * The parse result, carrying BOTH counts on purpose.
+ *
+ * `facts` is what survives the per-turn ceiling; `proposed` is how many well-formed facts
+ * the model actually offered. Keeping only the first made the ceiling unmeasurable from
+ * production — every telemetry line reported the CAPPED number, so a turn where the model
+ * offered nine facts and a turn where it offered four were the same observation. That is
+ * the same shape as the legacy extractor's schema, which capped at four by construction
+ * and left the corpus censored at its own edge with nobody able to see it.
+ */
+export interface ParsedFacts {
+  readonly facts: ExtractedFact[];
+  /** Well-formed facts offered BEFORE the ceiling. Always >= `facts.length`. */
+  readonly proposed: number;
+}
+
+export function parseExtractedFacts(input: unknown): ParsedFacts {
+  if (typeof input !== 'object' || input === null) return { facts: [], proposed: 0 };
   const raw = (input as { facts?: unknown }).facts;
-  if (!Array.isArray(raw)) return [];
+  if (!Array.isArray(raw)) return { facts: [], proposed: 0 };
   const out: ExtractedFact[] = [];
+  let proposed = 0;
   for (const item of raw) {
     if (typeof item !== 'object' || item === null) continue;
     const text = (item as { text?: unknown }).text;
@@ -154,11 +171,16 @@ export function parseExtractedFacts(input: unknown): ExtractedFact[] {
     // should not hand it garbage to reject.
     if (trimmed.length < 8) continue;
     const subject = (item as { subject?: unknown }).subject;
-    out.push({
-      text: trimmed,
-      ...(typeof subject === 'string' && subject.trim() ? { subject: subject.trim() } : {}),
-    });
-    if (out.length >= CAPTURE_MAX_FACTS) break;
+    // Counted before the ceiling, PUSHED under it: the array stays bounded (the caller
+    // writes from it) while the count stays true. A `break` here would have kept the array
+    // bounded and thrown the measurement away with it.
+    proposed++;
+    if (out.length < CAPTURE_MAX_FACTS) {
+      out.push({
+        text: trimmed,
+        ...(typeof subject === 'string' && subject.trim() ? { subject: subject.trim() } : {}),
+      });
+    }
   }
-  return out;
+  return { facts: out, proposed };
 }
