@@ -68,6 +68,16 @@ export interface CaptureTelemetryEntry {
   /** Store outcome — only set for `remember_invoked`. */
   readonly outcome?: CaptureOutcome | undefined;
   /**
+   * WHO recorded it: the model choosing to call `remember` ('model', the default
+   * when absent) or the turn-end recovery pass ('capture').
+   *
+   * Without this the two are one number, and the question the report exists to
+   * answer — does the mechanism lift the rate, or did the model start complying —
+   * cannot be asked. The field is optional so every line written before it stays
+   * readable as what it was: a model-chosen write.
+   */
+  readonly source?: 'model' | 'capture' | undefined;
+  /**
    * The run this event belongs to — the JOIN KEY between the two ends of the fire-rate.
    *
    * Without it the ratio `remember_invoked / capture_eligible` cannot be shown to be a

@@ -50,6 +50,10 @@ import {
   normalizeFollowUpSuggestions,
   lastUserText,
 } from './follow-up-fallback.js';
+import {
+  CAPTURE_FALLBACK_MAX_TOKENS, CAPTURE_SYSTEM, CAPTURE_TIMEOUT_MS, CAPTURE_TOOL,
+  CAPTURE_TOOL_NAME, buildCaptureExcerpt, parseExtractedFacts,
+} from './capture-fallback.js';
 import { randomBytes } from 'node:crypto';
 import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
 import { scanToolResult, RepeatCallGuard } from './output-guard.js';
@@ -86,6 +90,8 @@ import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-ke
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
+import { checkKnowledgeText } from './knowledge-store.js';
+import { getErrorMessage } from './utils.js';
 
 /**
  * Per-image token estimate for occupancy accounting. Anthropic bills vision by
@@ -667,9 +673,32 @@ export class Agent implements IAgent {
    * measurement in `follow-up-fallback.ts`.
    */
   followUpFallback = false;
+  /**
+   * Whether the turn-end capture pass runs. Opt-in, and for the same two reasons
+   * its sibling is: it must only run where the proposal can actually be SHOWN
+   * (a chip nobody sees is a silent write), and it must be switchable off without
+   * a redeploy. Off by default also excludes spawned children, which inherit the
+   * parent's memory and store but not this override — otherwise a fan-out of three
+   * researchers would run four passes and propose up to sixteen facts for one turn.
+   */
+  captureFallback = false;
   /** Set when this turn produced a `suggest_follow_ups` call — the recovery's
    *  whole point is to stay silent (and free) then. Reset per run. */
   private _sawFollowUpCall = false;
+  /**
+   * Whether the model recorded a fact itself this turn.
+   *
+   * Same role as `_sawFollowUpCall`: the capture pass RECOVERS, it never
+   * duplicates. A model that already did the work is not second-guessed by a
+   * helper that saw a shorter excerpt than it did.
+   *
+   * DERIVED from `_turnToolNames` rather than latched at the two places that
+   * notice a tool call. Two setters is two places to forget: an adversarial round
+   * deleted one of them and every test stayed green, because the tool-loop path
+   * and the end-turn path each set it separately. `_turnToolNames` is the single
+   * point every dispatched call passes through, and it is already cleared per turn.
+   */
+  private get _sawRememberCall(): boolean { return this._turnToolNames.has('remember'); }
   /**
    * Wave 1.2: did any tool result on this run carry the untrusted-data boundary marker?
    * Set in the tool-result dispatcher (content signal, not a tool-name list), reset at
@@ -1335,6 +1364,157 @@ export class Agent implements IAgent {
     }
   }
 
+  /**
+   * Post-turn fact extraction — the mechanism the durable-knowledge flip removed.
+   *
+   * Shaped after `_recoverFollowUps`, for the reason that method exists: an
+   * end-of-turn duty carried by the prompt alone is measured at ~2-4% compliance,
+   * on every model tried, and more prompt pressure does not move it. A cheap
+   * forced call does.
+   *
+   * Three deliberate bounds, each protecting something measured:
+   *  - **fast tier**, so the recovered facts never cost more than the turn.
+   *  - **capped excerpt**, so a long research turn cannot turn this into a large call.
+   *  - **at most four facts**, because the precision worth keeping is 7 of 10
+   *    proposals confirmed by the user, and a pass that returns fifteen turns an
+   *    approval into a wall. That ceiling is SET, not measured — see the row.
+   *
+   * Silent by design when it finds nothing: most turns hold no durable fact, and
+   * the classifier is told that an empty list is the expected answer.
+   */
+  private async _captureFallback(text: string, turnUntrusted: boolean): Promise<void> {
+    // `_sawRememberCall` — do not second-guess a model that already did the work.
+    // Same shape as the follow-up guard: the fallback recovers, it never duplicates.
+    if (!this.captureFallback || this._sawRememberCall) return;
+    if (this.isInternalRun || this._suppressTools) return;
+    if (!text.trim()) return;
+    const ks = this.toolContext?.knowledgeStore;
+    if (!ks) return;
+    const question = lastUserText(this.messages);
+    if (!question) return;
+
+    // Masked BEFORE it leaves the process. The legacy extractor eight lines below does
+    // the same (`safeText`), and it matters more here: `resolveTierModel('fast', …)` can
+    // resolve to a DIFFERENT VENDOR than the conversation's model on a hybrid tenant, so
+    // an unmasked excerpt ships a typed-in credential to a provider the user never chose
+    // for this chat.
+    const safeQuestion = this.secretStore ? this.secretStore.maskSecrets(question) : question;
+    const safeAnswer = this.secretStore ? this.secretStore.maskSecrets(text) : text;
+
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), CAPTURE_TIMEOUT_MS);
+    try {
+      const provider = getActiveProvider();
+      const fastSnap = resolveTierModel('fast', provider);
+      const client = clientForTierSnapshot(fastSnap, this.client, provider);
+      const stream = client.beta.messages.stream({
+        model: fastSnap.modelId,
+        max_tokens: CAPTURE_FALLBACK_MAX_TOKENS,
+        system: CAPTURE_SYSTEM,
+        messages: [{ role: 'user', content: buildCaptureExcerpt(safeQuestion, safeAnswer) }],
+        tools: [CAPTURE_TOOL],
+        tool_choice: { type: 'tool', name: CAPTURE_TOOL_NAME },
+        ...(fastSnap.betas ? { betas: fastSnap.betas } : {}),
+      }, {
+        signal: AbortSignal.any(
+          [this.abortController?.signal, timeout.signal].filter((s): s is AbortSignal => s !== undefined),
+        ),
+      });
+      const response = await stream.finalMessage();
+
+      // Booked BEFORE the early returns: the tokens were spent whether or not the
+      // extraction turns out usable. Priced on the fast model and charged as a
+      // dollar amount, so an expensive run does not book helper tokens at its own rate.
+      const u = response.usage;
+      if (u) {
+        const usd = calculateCost(fastSnap.modelId, {
+          input_tokens: u.input_tokens,
+          output_tokens: u.output_tokens,
+          cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+          cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+        });
+        this.costGuard?.recordExternalCost(usd);
+        debitInRunHelperCost(this.toolContext.meteredHost, this.sessionCounters, usd, 'fast');
+        this._helperCostUsd += usd;
+      }
+
+      const call = response.content.find(
+        (b): b is BetaToolUseBlock => b.type === 'tool_use' && b.name === CAPTURE_TOOL_NAME,
+      );
+      if (!call) return;
+      const facts = parseExtractedFacts(call.input);
+      if (facts.length === 0) return;
+
+      for (const fact of facts) {
+        // The SAME gate the `remember` tool passes, not just the same write. The
+        // store's own backstop is a size limit; the secret rejection lives one
+        // level up, and inheriting only the store left a clean turn able to record
+        // a typed-in API key as trusted. Measured by an adversarial round.
+        if (!checkKnowledgeText(fact.text, this.secretStore, fact.subject).ok) continue;
+        // The SAME write the `remember` tool uses, with the same untrusted flag —
+        // so a tainted turn routes to review here exactly as it does there. Putting
+        // a second routing decision next to it is how the two drift apart.
+        const result = ks.write({
+          text: fact.text,
+          ...(fact.subject !== undefined ? { subjectName: fact.subject } : {}),
+          sourceChannel: 'agent',
+          sourceUntrusted: turnUntrusted,
+          sourceThreadId: this.currentThreadId,
+          sourceRunId: this.currentRunId,
+        });
+        // The SAME two emits the `remember` tool makes. Without them the fire-rate
+        // report keeps dividing a numerator that only the tool writes by a
+        // denominator this hook writes — so the feature would land and the measured
+        // rate would not move, whether or not it works. `source: 'capture'` is what
+        // lets the report separate a recovered fact from one the model chose.
+        void appendCaptureTelemetry(this._durableMemoryEnabled, {
+          ts: Date.now(),
+          event: 'remember_invoked',
+          thread: this.currentThreadId,
+          model: this.model,
+          untrusted: turnUntrusted,
+          outcome: result.deduped === true ? 'deduped' : result.status,
+          runId: this.currentRunId,
+          source: 'capture',
+        });
+        if (result.deduped === true) continue;
+        if (result.status === 'pending_review') {
+          void appendCaptureTelemetry(this._durableMemoryEnabled, {
+            ts: Date.now(),
+            event: 'propose_shown',
+            thread: this.currentThreadId,
+            model: this.model,
+            untrusted: turnUntrusted,
+            entryId: result.id,
+            source: 'capture',
+          });
+        }
+        // Surface it where it happened. A fact the user cannot see is not a
+        // proposal, and a queue elsewhere is what made the old flow feel broken.
+        if (this.onStream) {
+          await this.onStream({
+            type: 'knowledge_write',
+            id: result.id,
+            ...(fact.subject !== undefined ? { subject: fact.subject } : {}),
+            status: result.status === 'pending_review' ? 'pending_review' : 'active',
+            text: fact.text,
+            agent: this.name,
+          });
+        }
+      }
+    } catch (err) {
+      // Never fail a turn over a recovered fact — but never swallow it silently
+      // either. The sibling recovery carries the same line and states why: without
+      // it, "the model found nothing" and "every run in production is throwing"
+      // are the same observation. A wire-client mismatch on a hybrid tenant
+      // (fast-model id sent to a client that does not know it) is a 404 that would
+      // otherwise be invisible.
+      process.stderr.write(`[lynox:capture-fallback] ${getErrorMessage(err)}\n`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private _captureAtTurnEnd(text: string): void {
     if (!this.memory || this.skipMemoryExtraction || this.isInternalRun) return;
     // The FULL untrusted union (deriveTurnUntrusted) — marker OR an external-content tool ran
@@ -1358,6 +1538,30 @@ export class Agent implements IAgent {
         // instead of dividing regardless (DEF-firerate-mixes-two-populations).
         runId: this.currentRunId,
       });
+      // The mechanism, restored. Until this line the DK branch logged the
+      // opportunity and returned — the legacy path's mechanical extractor was
+      // switched off by the flip and replaced with a prose duty in the prompt.
+      //
+      // Measured on a real instance: the legacy store took 1020 facts in three
+      // months and stopped on 2026-07-18; the five weeks after the flip produced
+      // 59. A factor of 28. The prose is not weak — the sibling end-of-turn
+      // instruction is phrased UNCONDITIONALLY and reached 2.0% until it got a
+      // mechanism of its own, then 41.6%. Prose does not produce this behaviour,
+      // and three attempts at more prompt pressure measured 0/5, 0/5 and 1/5.
+      //
+      // Deliberately NOT the legacy behaviour: that one minted straight into
+      // memory, including from web and mail, which is the poison the union gate
+      // closed on 2026-07-20. This routes through the same `knowledgeStore.write`
+      // the `remember` tool uses, so an untrusted turn still lands in review.
+      // Tracked, not fired-and-forgotten. `void` here measured as three separate
+      // defects: the `knowledge_write` chip landed on an already-ended SSE response
+      // (so a TRUSTED fact — the one with no review panel to recover it — was
+      // written silently and the user never learned of it); `_helperCostUsd` was
+      // read by the session immediately after `send()` resolved, so the cost
+      // appeared on the NEXT turn's line or nowhere; and `costGuard` never saw the
+      // spend for its own run. The turn already drains this list in its `finally`,
+      // for exactly the reason it exists — an orphaned stream.
+      this._pendingMemory.push(this._captureFallback(text, turnUntrusted));
       return;
     }
     // Recorded on BOTH branches, because a numerator without a denominator answers

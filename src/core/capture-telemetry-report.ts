@@ -215,6 +215,17 @@ export interface CaptureReport {
    */
   readonly populations: CapturePopulationSplit;
 
+  /**
+   * `remember_invoked` split by WHO produced it. Without this, a lifted `fireRate` and a
+   * model that started calling the tool on its own are the same number — and those two
+   * call for opposite next steps.
+   *
+   * `unknown` is every line written before the field existed; it is reported rather than
+   * folded into either side, because folding it would make the mechanism's share look
+   * larger or smaller depending purely on how old the retained window is.
+   */
+  readonly rememberBySource: Readonly<{ model: number; capture: number; unknown: number }>;
+
   readonly blindness: CaptureReportBlindness;
 }
 
@@ -265,6 +276,12 @@ interface ValidatedEntry {
   readonly outcome: CaptureOutcome | null;
   /** A non-empty run id, or null when the line predates the field or omits it. */
   readonly runId: string | null;
+  /**
+   * Who produced the write: the model choosing the tool, or the turn-end recovery pass.
+   * `null` on every line written before the field existed — which is why the split below
+   * reports an UNKNOWN bucket instead of folding those into either side.
+   */
+  readonly source: 'model' | 'capture' | null;
 }
 
 /**
@@ -293,6 +310,10 @@ interface ValidatedEntry {
  */
 function validateEntry(raw: unknown): ValidatedEntry | null {
   if (typeof raw !== 'object' || raw === null) return null;
+  // `source` is read by name below. A field the writer emits and the validator drops is
+  // not a half-built feature, it is an INERT one that reads as built — the whole reason
+  // it exists is to separate "the mechanism lifted the rate" from "the model started
+  // complying", and a dropped field answers neither.
   const r = raw as Record<string, unknown>;
   const event = r['event'];
   // `Object.hasOwn`, not `in`: `in` walks the prototype chain, so `event:"toString"`
@@ -319,6 +340,7 @@ function validateEntry(raw: unknown): ValidatedEntry | null {
     runId: typeof r['runId'] === 'string' && r['runId'] !== ''
       ? (r['runId'].length > MAX_RUN_KEY_CHARS ? r['runId'].slice(0, MAX_RUN_KEY_CHARS) : r['runId'])
       : null,
+    source: r['source'] === 'model' || r['source'] === 'capture' ? r['source'] : null,
   };
 }
 
@@ -343,6 +365,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   let eventsWithoutModel = 0;
   let eventsWithoutThread = 0;
   let untrustedEligible = 0;
+  const rememberBySource = { model: 0, capture: 0, unknown: 0 };
   // The population split. Sets, not counters: a run that ends two eligible turns is ONE
   // run in the denominator's population, and counting events here would make the overlap
   // look larger than the number of runs that actually exist.
@@ -393,6 +416,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     }
 
     if (event === 'capture_eligible' && entry.untrusted) untrustedEligible++;
+    if (event === 'remember_invoked') rememberBySource[entry.source ?? 'unknown']++;
     if (event === 'remember_invoked' && entry.outcome !== null) {
       outcomes[entry.outcome] = (outcomes[entry.outcome] ?? 0) + 1;
     }
@@ -450,6 +474,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     byModel,
     untrustedEligible,
     populations,
+    rememberBySource,
     blindness: {
       unparsableLines: scan.unparsableLines,
       malformedRecords,

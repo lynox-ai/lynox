@@ -1,7 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { KnowledgeKind, MemoryBlockEditMode } from '../../types/memory.js';
 import { matchesSecretPattern, maskSecretPatterns } from '../../core/secret-store.js';
-import { BlockEditError, BlockOverLimitError, MAX_KNOWLEDGE_ENTRY_CHARS } from '../../core/knowledge-store.js';
+import { BlockEditError, BlockOverLimitError, checkKnowledgeText } from '../../core/knowledge-store.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { appendCaptureTelemetry } from '../../core/capture-telemetry.js';
 import type { UntrustedCause } from '../../core/untrusted-signals.js';
@@ -97,20 +97,12 @@ export const rememberTool: ToolEntry<RememberInput> = {
 
     const text = input.text?.trim();
     if (!text) return 'Pass a non-empty `text` to remember.';
-    // S8/S6: bound the durable write. A knowledge entry is ONE concise fact — an unbounded
-    // `remember` (or an injected loop of them) would bloat engine.db at rest. Loud reject, not
-    // a silent trim; long material belongs in a document / data_store, not a memory entry.
-    if (text.length > MAX_KNOWLEDGE_ENTRY_CHARS) {
-      return `That is too long for a single memory (${text.length} chars, max ${MAX_KNOWLEDGE_ENTRY_CHARS}). Record one concise fact, or put the full material in a document / data_store.`;
-    }
-
-    // H7: a secret-SHAPED scan on the write path (not only tenant-known secrets). Reject
-    // clear credentials (API keys, tokens, Bearer/JWT) — reject, never queue: a decrypted
-    // credential must not sit in the review panel. Legitimate business facts (incl. IBANs,
-    // which are not credentials) are unaffected.
-    if (matchesSecretPattern(text) || agent.secretStore?.containsSecret(text) === true) {
-      return 'Cannot record content that looks like a secret or credential. Store secrets via ask_secret / the vault, not in memory.';
-    }
+    // S8/S6 (length) + H7 (secret-SHAPED reject, never queue) both live in
+    // `checkKnowledgeText`, shared with the turn-end capture path so the two write paths
+    // cannot drift apart — they already had, once. Its reasons are user-visible returns of
+    // this tool and are pinned in `tests/eval/probe-freshness.test.ts` on that surface.
+    const check = checkKnowledgeText(text, agent.secretStore, input.subject);
+    if (!check.ok) return check.reason;
 
     // H4: the source is untrusted if the run saw the content boundary marker OR any
     // external-content tool ran this turn (the capability denylist — the marker alone is

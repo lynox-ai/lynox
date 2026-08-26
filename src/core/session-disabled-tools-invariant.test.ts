@@ -28,6 +28,8 @@
  * `disabled_tools` per-test.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 
 // === Mocks ===
 
@@ -557,5 +559,70 @@ describe('followUpFallback wiring: SessionOptions → agentOverrides → Agent',
     const session = engine.createSession();
     session._recreateAgent({});
     expect(agentFlag(session)).toBeFalsy();
+  });
+});
+
+/**
+ * The SAME chain for the turn-end capture pass, and it is here for the same reason
+ * twice over: the sibling above was written after a severed wiring shipped green, and
+ * the capture pass then repeated the failure in a WORSE form — the surface opt-in was
+ * never written at all, so `http-api.ts` had `followUpFallback: true` and no
+ * `captureFallback` line beside it. Seventeen green behaviour tests, a flag that was
+ * false in every production process, and nothing to say so.
+ *
+ * The last test is the one that would have caught it: it asserts the Web-UI surface
+ * actually asks. A wiring test that only proves `createSession({captureFallback:true})`
+ * works proves nothing about whether anyone passes it.
+ */
+describe('captureFallback wiring: SessionOptions → agentOverrides → Agent', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRegister.mockReturnThis();
+    currentUserConfig = {};
+  });
+
+  function captureFlag(session: import('./session.js').Session): boolean | undefined {
+    const inner = session as unknown as { agent: { captureFallback?: boolean } | null };
+    return inner.agent?.captureFallback;
+  }
+
+  it('a Web-UI session (captureFallback: true) reaches the Agent', async () => {
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession({ captureFallback: true });
+    expect(captureFlag(session)).toBe(true);
+  });
+
+  it('a session that did NOT ask for it leaves the Agent default-off', async () => {
+    // Also the spawned-child case: a fan-out of three researchers must not each run
+    // a paid extraction pass on top of the parent's.
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession();
+    expect(captureFlag(session)).toBeFalsy();
+  });
+
+  it('SURVIVES a rebuild — a tier change mid-thread must not stop the capture', async () => {
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession({ captureFallback: true });
+    session._recreateAgent({});
+    expect(captureFlag(session)).toBe(true);
+  });
+
+  it('a rebuild does not INVENT it for a session that never asked', async () => {
+    const engine = await createEngineWithDisabledTools(undefined);
+    const session = engine.createSession();
+    session._recreateAgent({});
+    expect(captureFlag(session)).toBeFalsy();
+  });
+
+  it('the Web-UI SURFACE asks for it — the half that was actually missing', () => {
+    // Source-read, not a session drive: this asserts that the HTTP surface passes the
+    // option at all. Every test above can be green while no caller ever opts in, which
+    // is exactly the state this branch was in until an adversarial round counted the
+    // callers. Pinned next to its sibling so the two cannot drift apart again.
+    const src = readFileSync(path.join(__dirname, '../server/http-api.ts'), 'utf8');
+    expect(src, 'http-api no longer opts the Web-UI session into follow-up recovery')
+      .toMatch(/followUpFallback:\s*true/);
+    expect(src, 'http-api does not opt the Web-UI session into turn-end capture — the pass is DEAD in production')
+      .toMatch(/captureFallback:\s*true/);
   });
 });

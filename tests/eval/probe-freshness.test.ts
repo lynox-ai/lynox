@@ -104,11 +104,39 @@ describe('probe freshness primitives', () => {
     // So: the COUNT is pinned and the recognised set is pinned. Adding, removing or
     // rewording a return in the handler fails here and forces a human to decide whether the
     // allowlist still covers it — which is the whole job this check exists to do.
+    //
+    // The two REJECTION outcomes (too long, secret-shaped) moved into `checkKnowledgeText`
+    // in knowledge-store.ts when the turn-end capture path started sharing that gate. They
+    // are still user-visible returns of `remember` — the handler returns `check.reason`
+    // verbatim — so they are counted HERE, on their new surface. Lowering the count to 6
+    // instead would have shrunk this guard silently while it still reported green, which is
+    // the exact failure mode it exists to catch.
     const src = readFileSync(path.join(REPO, 'src/tools/builtin/knowledge.ts'), 'utf8');
     const handler = src.slice(src.indexOf('const rememberTool'), src.indexOf('// ── recall'));
     const returns = [...handler.matchAll(/return ['`]([^'`]{6,})/g)].map(m => m[1]!);
-    expect(returns, 'a return was added, removed or reworded in the remember handler').toHaveLength(8);
-    expect(returns.filter(storedActive)).toEqual([
+
+    const gateSrc = readFileSync(path.join(REPO, 'src/core/knowledge-store.ts'), 'utf8');
+    // From the entry point to the end of its helper. The first cut of this slice stopped
+    // at the FIRST `\n}` and went green the moment the gate was split into an entry point
+    // plus `checkOneField` — the reasons moved one function down and the count silently
+    // read 0 against an expected 2. A source-reading guard has to be anchored to the last
+    // thing it means to cover, not to the first brace it meets.
+    const gateStart = gateSrc.indexOf('export function checkKnowledgeText');
+    const helperStart = gateSrc.indexOf('function checkOneField', gateStart);
+    expect(helperStart, 'the shared gate no longer has the shape this guard reads').toBeGreaterThan(gateStart);
+    const gateBody = gateSrc.slice(gateStart, gateSrc.indexOf('\n}', helperStart));
+    const reasons = [...gateBody.matchAll(/reason: ['`]([^'`]{6,})/g)].map(m => m[1]!);
+    expect(reasons, 'a rejection reason was added to or removed from checkKnowledgeText')
+      .toHaveLength(2);
+    // A rejection must never READ like a successful active store, or the probe counts a
+    // refusal as a hit. The count pin above cannot see a reword; this can.
+    expect(reasons.filter(storedActive), 'a checkKnowledgeText rejection now reads as a store')
+      .toEqual([]);
+
+    const outcomes = [...returns, ...reasons];
+    expect(outcomes, 'a user-visible outcome of remember was added or removed')
+      .toHaveLength(8);
+    expect(outcomes.filter(storedActive)).toEqual([
       'Remembered${pinned}, but \"${input.subject}\" matches more than one subject, so it is ',
       'Remembered${linked}${pinned}.',
     ]);
