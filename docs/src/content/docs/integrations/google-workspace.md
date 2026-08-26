@@ -73,12 +73,20 @@ complete verification first. The trade-off is that an app requesting sensitive o
 an unverified-app warning screen until verification is granted, and Google's OAuth quota table caps such an
 app at *"100 new users in total, after the app presents the unverified app screen"*.
 
-**Verification and CASA are two different bars.** Verification (free, and Google states it can take up to
-10 days) applies to *sensitive* scopes. The annual CASA security assessment applies only to *restricted*
+**Verification and CASA are two different bars.** Verification is free — Google says sensitive-scope
+verification *"typically takes 3-5 business days"* (read 2026-08-27) — and applies to *sensitive* scopes. The annual CASA security assessment applies only to *restricted*
 scopes — for Google Workspace that means full-mailbox and full-Drive access such as `gmail.readonly`,
-`gmail.modify`, `drive` and `drive.readonly`. Narrower scopes cost far less: `calendar.events` and
+`gmail.modify`, `drive` and `drive.readonly`. Narrower scopes often cost less — `calendar.events` and
 `documents.readonly` are sensitive (verification, no CASA), and `drive.file` — files the app creates or the
-user explicitly picks — is not even sensitive. Google publishes no per-scope list; the authoritative
+user explicitly picks — is not even sensitive.
+
+**But "narrower" does not help for Gmail, and that is the case most people look up.** Every OAuth path to
+mailbox content is restricted, including the narrow-looking ones: `gmail.readonly`, `gmail.modify`,
+`gmail.compose`, `gmail.metadata` (headers only) and the IMAP scope `https://mail.google.com/` are all on
+Google's restricted list. The axis is *how much data the scope exposes*, not read-versus-write — which is
+why full calendar access including deletion is only sensitive, while a metadata-only mailbox scope is not.
+If you want mailbox access without a CASA assessment, an OAuth scope is not the route; lynox also supports
+plain IMAP/SMTP with an app password. Google publishes no per-scope list; the authoritative
 classification is shown in the Cloud Console under **Google Auth Platform → Data access**.
 :::
 
