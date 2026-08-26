@@ -1202,8 +1202,15 @@ describe('refresh through the control plane (the client secret stays there)', ()
       json: async () => ({ access_token: 'cp-issued-token', expires_at: Date.now() + 3_600_000 }),
     });
 
-    await authWith(vault).getAccessToken();
+    const token = await authWith(vault).getAccessToken();
 
+    // Asserting the handle UNCHANGED is asserting the pre-state, so an
+    // implementation that refreshes nothing at all satisfies it. Measured: with
+    // the staleness check disabled so no refresh can fire, this test still
+    // passed. Something that DID change has to be asserted alongside, or
+    // "preserved" is indistinguishable from "never ran".
+    expect(token).toBe('cp-issued-token');
+    expect(vault.stored()['access_token']).toBe('cp-issued-token');
     expect(vault.stored()['refresh_handle']).toBe('sealed-handle-1');
   });
 
@@ -1495,8 +1502,11 @@ describe('refresh through the control plane (the client secret stays there)', ()
       json: async () => ({ access_token: 'google-token', expires_in: 3600, scope: '', token_type: 'Bearer' }),
     });
 
-    await authWith(vault).getAccessToken();
+    const token = await authWith(vault).getAccessToken();
 
+    // Same shape, same guard: pin something the refresh CHANGED next to the
+    // thing it left alone.
+    expect(token).toBe('google-token');
     expect(vault.stored()['refresh_handle']).toBe('sealed-handle-1');
   });
 });
