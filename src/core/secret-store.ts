@@ -187,6 +187,78 @@ export function maskSecretPatterns(text: string, opts?: { includeGeneric?: boole
   return result;
 }
 
+/**
+ * Mask known SHAPES and known VALUES in one pass, over the ORIGINAL text.
+ *
+ * Running the two maskers in sequence is unsafe in BOTH orders, and that is
+ * measured, not cautious. Values first: a stored two-character value inside an
+ * `sk-ant-…` key becomes `***`, `*` is in no pattern character class, the rule
+ * stops matching and thirty characters of the key ship in cleartext. Shapes
+ * first: a stored value straddling a shape boundary survives the same way.
+ * Neither order dominates — each has a case where the other is safe.
+ *
+ * Sequencing is unsafe because each pass rewrites the text the next one reads.
+ * So both passes read the ORIGINAL, contribute spans, and the union is redacted
+ * once. A span the value pass finds cannot hide one the pattern pass would have
+ * found, in either direction.
+ *
+ * (The docblock this replaces claimed masking "only shortens" the text, so the
+ * exact pass could not hide a shape. It does not: a value of four characters or
+ * fewer becomes `***`, so `xx ab yy` grows by one.)
+ */
+export function maskSecretsAndPatterns(
+  text: string,
+  values: readonly string[],
+  opts?: { includeGeneric?: boolean },
+): string {
+  const spans: Array<{ start: number; end: number }> = [];
+
+  const patterns = opts?.includeGeneric === true ? SECRET_PATTERNS : SECRET_PATTERNS.slice(0, -1);
+  for (const pattern of patterns) {
+    const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+    for (const m of text.matchAll(global)) {
+      if (m.index !== undefined) spans.push({ start: m.index, end: m.index + m[0].length });
+    }
+  }
+
+  for (const value of values) {
+    // Single characters would match everywhere; the store applies the same floor.
+    if (value.length < 2) continue;
+    let from = 0;
+    for (;;) {
+      const at = text.indexOf(value, from);
+      if (at === -1) break;
+      spans.push({ start: at, end: at + value.length });
+      from = at + value.length;
+    }
+  }
+
+  if (spans.length === 0) return text;
+
+  spans.sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const span of spans) {
+    const last = merged[merged.length - 1];
+    // `<=`, not `<`, and this is PRESENTATION, not safety — measured, because the
+    // first version of this comment claimed the opposite. With `<`, two touching
+    // spans stay separate and BOTH are still masked: `******kkkk` instead of
+    // `***kkkk`. Nothing is revealed either way, so the mutation `<=` -> `<` is
+    // equivalent in the dimension that matters and is not claimed as covered.
+    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+    else merged.push({ ...span });
+  }
+
+  let out = '';
+  let cursor = 0;
+  for (const span of merged) {
+    out += text.slice(cursor, span.start);
+    const matched = text.slice(span.start, span.end);
+    out += matched.length <= 4 ? '***' : `***${matched.slice(-4)}`;
+    cursor = span.end;
+  }
+  return out + text.slice(cursor);
+}
+
 interface InternalSecret {
   name: string;
   value: string;
@@ -363,6 +435,16 @@ export class SecretStore implements SecretStoreLike {
       if (text.includes(secret.value)) return true;
     }
     return false;
+  }
+
+  /**
+   * Both maskers at once, over the original text — see
+   * {@link maskSecretsAndPatterns}. The values never leave this object.
+   */
+  maskAll(text: string, opts?: { includeGeneric?: boolean }): string {
+    const values: string[] = [];
+    for (const secret of this.secrets.values()) values.push(secret.value);
+    return maskSecretsAndPatterns(text, values, opts);
   }
 
   maskSecrets(text: string): string {

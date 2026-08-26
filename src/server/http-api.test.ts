@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import type { Server } from 'node:http';
 import { createHmac, randomBytes } from 'node:crypto';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
@@ -49,6 +50,14 @@ const mockSecretDelete = vi.fn().mockReturnValue(true);
 // Memory routes reject content containing a secret (parity with the memory_store
 // tool). Default: no secret detected; a case can flip it to assert the 400 guard.
 const mockSecretContains = vi.fn().mockReturnValue(false);
+// Value-based masking. The mock delegates to the REAL combined masker with a
+// mutable value list, rather than passing through: a mock that is less capable
+// than the thing it stands for silently removes the pattern half, and five
+// unrelated tests measured exactly that. Tests that care add a value.
+const mockStoreValues: string[] = [];
+const mockSecretMask = vi.fn(
+  (t: string, opts?: { includeGeneric?: boolean }) => maskSecretsAndPatterns(t, mockStoreValues, opts),
+);
 // Hoisted so /api/secrets/status regression tests can swap userConfig per-case
 // (the bug = "userConfig.api_key empty for non-Anthropic providers" needs the
 // returned config to vary without re-instantiating the Engine mock).
@@ -160,6 +169,8 @@ vi.mock('../core/engine.js', () => ({
       deleteSecret: mockSecretDelete,
       resolve: mockSecretResolve,
       containsSecret: mockSecretContains,
+      maskSecrets: mockSecretMask,
+      maskAll: mockSecretMask,
     });
     this.getRunHistory = vi.fn().mockReturnValue({
       getRecentRuns: mockHistoryGetRecentRuns,
@@ -1174,6 +1185,40 @@ describe('LynoxHTTPApi', () => {
       const text = await res.text();
       expect(text).toContain('event: error');
       expect(text).toContain('"fatal":false');
+    });
+
+    it('masks a store VALUE that no pattern can match — and this is the boot wiring', async () => {
+      // Two claims in one test, on purpose.
+      //
+      // The product claim: a credential with no distinguishing shape is masked.
+      // 11 of the 13 patterns are prefix-bound and the other two need either a
+      // `user:pass@` shape or 40+ characters, so a Mistral key — 32 bare
+      // alphanumerics — cannot be caught by any of them. Only the store knows it.
+      //
+      // The wiring claim, which is the one that decays silently: the store is a
+      // module-scoped reference set ONCE after engine.init(). Delete that line
+      // and every unit test that hands a store in itself still passes, while
+      // production masks nothing. So this test asserts through the real boot
+      // path and NEVER calls setClientErrorSecretStore itself — deleting the
+      // wiring line has to be what makes it fail.
+      const mistralKey = 'a'.repeat(32);
+      mockStoreValues.push(mistralKey);
+      try {
+      mockSessionRun.mockImplementationOnce(async () => {
+        throw new Error(`provider rejected ${mistralKey}`);
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'boom' }),
+      });
+
+      const text = await res.text();
+      expect(text).not.toContain(mistralKey);
+      // and the pattern masker demonstrably could NOT have done it
+      expect(maskSecretPatterns(`provider rejected ${mistralKey}`, { includeGeneric: true }))
+        .toContain(mistralKey);
+      } finally { mockStoreValues.length = 0; }
     });
 
     it('masks BEFORE it caps — a secret straddling the cut must not survive in pieces', async () => {
@@ -5600,17 +5645,21 @@ describe('LynoxHTTPApi', () => {
       // `string`. Nothing caught that but a mutation, so this is the test that
       // would have.
       const key = `sk-ant-${'d'.repeat(60)}`;
+      const shapeless = 'd'.repeat(32);
+      mockStoreValues.push(shapeless);
       mockRunSavedWorkflow.mockResolvedValue({
         ok: true,
         runId: 'run-e',
         status: 'failed',
-        error: `workflow aborted: ${key}`,
-        stepErrors: [{ stepId: 'step-2', error: `step refused ${key}`, costUsd: 0 }],
+        error: `workflow aborted: ${key} / ${shapeless}`,
+        stepErrors: [{ stepId: 'step-2', error: `step refused ${key} / ${shapeless}`, costUsd: 0 }],
       });
 
       const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
       const raw = await res.text();
       expect(raw).not.toContain(key);
+      expect(raw).not.toContain(shapeless);
+      mockStoreValues.length = 0;
       const body = JSON.parse(raw) as { error: string; stepErrors: Array<{ stepId: string; error: string }> };
       // masking, not blanket redaction — both diagnoses survive
       expect(body.error).toContain('workflow aborted');
@@ -6159,8 +6208,13 @@ describe('LynoxHTTPApi', () => {
         // independent counts disagreed on whether a template literal counts as
         // deliberate, and a number that does not reproduce is not a measurement.)
         const key = `sk-ant-${'c'.repeat(60)}`;
+        // A SHAPELESS value too: `errorResponse` is the choke point, so it has to
+        // carry the value pass as well as the pattern pass. Without it the site
+        // could be reverted to pattern-only and nothing would notice.
+        const shapeless = 'c'.repeat(32);
+        mockStoreValues.push(shapeless);
         mockSecretSet.mockImplementationOnce(() => {
-          throw new Error(`store refused ${key}`);
+          throw new Error(`store refused ${key} and ${shapeless}`);
         });
         const res = await jsonFetch('/api/secrets/ANTHROPIC_API_KEY', {
           method: 'PUT',
@@ -6168,8 +6222,10 @@ describe('LynoxHTTPApi', () => {
         });
         const body = await res.json() as { error: string };
         expect(body.error).not.toContain(key);
+        expect(body.error).not.toContain(shapeless);
         // masking, not blanket redaction — the diagnosis survives
         expect(body.error).toContain('store refused');
+        mockStoreValues.length = 0;
       });
 
       it('PUT /api/secrets/:name returns 503 when the secret store throws', async () => {
@@ -7246,7 +7302,9 @@ describe('LynoxHTTPApi', () => {
       const oauthCookie = extractFirstCookiePair(startRes, 'lynox_oauth_state');
 
       const key = `sk-ant-${'b'.repeat(60)}`;
-      mockGoogleExchangeRedirectCode.mockRejectedValueOnce(new Error(`refused: ${key}`));
+      const shapeless = 'b'.repeat(32);
+      mockStoreValues.push(shapeless);
+      mockGoogleExchangeRedirectCode.mockRejectedValueOnce(new Error(`refused: ${key} ${shapeless}`));
 
       const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid&state=test-state`, {
         headers: { cookie: oauthCookie! },
@@ -7254,8 +7312,10 @@ describe('LynoxHTTPApi', () => {
       expect(cbRes.status).toBe(500);
       const body = await cbRes.text();
       expect(body).not.toContain(key);
+      expect(body).not.toContain(shapeless);
       // and the surrounding message survives — masking, not blanket redaction
       expect(body).toContain('refused');
+      mockStoreValues.length = 0;
     });
   });
 

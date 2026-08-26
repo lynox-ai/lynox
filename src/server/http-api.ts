@@ -51,7 +51,7 @@ import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
 import { promptOriginOf, parseOriginJson, originWireFields } from '../core/prompt-store.js';
-import type { EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
+import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
 import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
@@ -695,6 +695,68 @@ function capForClient(text: string): string {
 const SSE_ERROR_MAX_CHARS = 600;
 
 /**
+ * The secret store, reachable from a free function.
+ *
+ * `errorResponse` has 264 call sites and no `this`. Threading a store through
+ * all of them, or turning it into a method, both leave the two callers outside
+ * the class without one — so the reference is module-scoped and set ONCE, when
+ * the engine finishes initialising. Module state is the cost; the mitigation is
+ * that the boot wiring has its own test whose mutation deletes the wiring LINE,
+ * not the masking. A test that hands the reference in itself would survive that
+ * deletion and report green while production never sets it.
+ *
+ * Pattern masking runs regardless. This only ADDS the values the store knows —
+ * which is the half no pattern can reach: 11 of 13 rules are prefix-bound, and
+ * a Mistral key is 32 bare alphanumerics with no shape to match.
+ */
+// A SET of resolvers, and both halves of that are corrections.
+//
+// RESOLVER, not the store: caching the store meant the wiring had to run after
+// `engine.init()`, and moving the line one statement earlier wired `null`
+// permanently with a fully green suite — a mutation that survived, because a
+// test cannot see an ordering it does not execute. Lazy resolution removes the
+// ordering requirement instead of guarding it.
+//
+// SET, not a single slot: a single slot is last-writer-wins. A second instance
+// in the same process (tests do this) overwrites the first, and then ITS
+// shutdown leaves the still-serving first instance unwired. Measured — that is
+// what broke the boot test. A set is also safe in the direction that matters:
+// resolving through another instance's store can only redact MORE, never less.
+const clientErrorStoreResolvers = new Set<() => SecretStoreLike | null>();
+
+/** Wire the client-error path to a store LOOKUP. Order-independent by design. */
+export function setClientErrorSecretStore(resolve: (() => SecretStoreLike | null) | null): void {
+  if (resolve) clientErrorStoreResolvers.add(resolve);
+}
+
+/**
+ * Release a lookup, but ONLY if it is still the one installed.
+ *
+ * An unconditional clear on shutdown is wrong in the same way last-writer-wins
+ * is wrong, just pointing the other way: a second instance shutting down would
+ * unwire the first one, which is still serving. Measured — an unconditional
+ * version broke eight unrelated tests.
+ */
+export function releaseClientErrorSecretStore(resolve: (() => SecretStoreLike | null) | null): void {
+  if (resolve) clientErrorStoreResolvers.delete(resolve);
+}
+
+/**
+ * Mask a string bound for a client: known VALUES first, then known SHAPES.
+ *
+ * Values first because a value hit is exact — it needs no guess about what a
+ * credential looks like — and because masking shortens the text, so running the
+ * exact pass first cannot hide a shape from the second pass.
+ */
+function maskForClient(text: string, opts?: { includeGeneric?: boolean }): string {
+  for (const resolve of clientErrorStoreResolvers) {
+    const store = resolve();
+    if (store) return store.maskAll(text, opts);
+  }
+  return maskSecretPatterns(text, opts);
+}
+
+/**
  * Every error the API hands a client goes through here, which is why the mask
  * lives here and not at the call sites. There are 264 call sites (265 textual
  * occurrences, one of which is this definition). The exact literal/dynamic split
@@ -710,7 +772,7 @@ const SSE_ERROR_MAX_CHARS = 600;
  * see the SSE error path, which also caps the length.
  */
 function errorResponse(res: ServerResponse, status: number, message: string): void {
-  jsonResponse(res, status, { error: capForClient(maskSecretPatterns(message)) });
+  jsonResponse(res, status, { error: capForClient(maskForClient(message)) });
 }
 
 /**
@@ -883,6 +945,7 @@ function parseDynamicRoute(scope: AuthScope, method: string, path: string, handl
 
 export class LynoxHTTPApi {
   private engine: Engine | null = null;
+  private clientErrorResolver: (() => SecretStoreLike | null) | null = null;
   private server: Server | null = null;
   private webUiHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | null = null;
   private readonly sessionStore = new SessionStore();
@@ -1086,6 +1149,11 @@ export class LynoxHTTPApi {
       context: { id: 'http-api', name: 'lynox', source: 'pwa', workspaceDir: '' },
     });
     await this.engine.init();
+    // Order-independent on purpose: this hands over a LOOKUP, so it no longer
+    // matters whether it runs before or after init(). Deleting the line is
+    // still the mutation the boot test fails on.
+    this.clientErrorResolver = (): SecretStoreLike | null => this.engine?.getSecretStore() ?? null;
+    setClientErrorSecretStore(this.clientErrorResolver);
     this.engine.startWorkerLoop();
     this._registerRoutes();
     await this._initPushChannel();
@@ -1638,6 +1706,12 @@ export class LynoxHTTPApi {
     // Expire all pending prompts in SQLite on shutdown
     this.engine?.getPromptStore()?.expireAll();
     this.server?.close();
+    // Release the client-error lookup. Module state is last-writer-wins, so a
+    // second instance in the same process (tests do this) would otherwise leave
+    // the reference pointing into a shut-down instance. Not a live leak today —
+    // production constructs exactly one — but the reason it is safe is an
+    // accident of arity, and that is a poor thing to rely on.
+    releaseClientErrorSecretStore(this.clientErrorResolver);
     await this.engine?.shutdown();
   }
 
@@ -3093,7 +3167,7 @@ export class LynoxHTTPApi {
           // a little detail, missing one that is a credential costs the
           // credential. The cap matters on its own — this path was unbounded.
           const rawMsg = err instanceof Error ? err.message : String(err);
-          const msg = capForClient(maskSecretPatterns(rawMsg, { includeGeneric: true }));
+          const msg = capForClient(maskForClient(rawMsg, { includeGeneric: true }));
           // `fatal: true` is not decoration: this path calls res.end() right
           // below, so the turn really is over. Without the field a consumer
           // reading `fatal` would see `undefined` here — falsy, i.e. "keep
@@ -5619,7 +5693,7 @@ export class LynoxHTTPApi {
         // Workflow step errors come from tools, i.e. from whatever a remote
         // service said. Array-valued, so each entry is treated like any other
         // client-bound error string.
-        error: result.error === undefined ? undefined : capForClient(maskSecretPatterns(result.error)),
+        error: result.error === undefined ? undefined : capForClient(maskForClient(result.error)),
         costUsd: result.costUsd ?? 0,
         // By FIELD, not by `typeof`. The first attempt tested `typeof e === 'string'`
         // and was a bit-identical no-op — these are objects, always — while both the
@@ -5627,7 +5701,7 @@ export class LynoxHTTPApi {
         // not see it either: `e` narrows to `never`, and `never` is assignable to
         // `string`, so the dead branch typechecks.
         stepErrors: (result.stepErrors ?? []).map(e => (
-          e.error === undefined ? e : { ...e, error: capForClient(maskSecretPatterns(e.error)) }
+          e.error === undefined ? e : { ...e, error: capForClient(maskForClient(e.error)) }
         )),
       });
     }));
@@ -6718,7 +6792,7 @@ export class LynoxHTTPApi {
         // masked remainder differs. So the order is not load-bearing here — it is
         // load-bearing for a pattern added later, and that is why it is written
         // down instead of left to chance.
-        const msg = maskSecretPatterns(err instanceof Error ? err.message : String(err))
+        const msg = maskForClient(err instanceof Error ? err.message : String(err))
           .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
         res.writeHead(500, { 'Content-Type': 'text/html' });
         res.end(`<html><body><h1>Error</h1><p>${msg}</p></body></html>`);
