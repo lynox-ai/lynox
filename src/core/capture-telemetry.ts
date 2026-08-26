@@ -85,13 +85,17 @@ export interface CaptureTelemetryEntry {
    *  the event being emitted only on a hit. */
   readonly facts?: number | undefined;
   /**
-   * WHO recorded it: the model choosing to call `remember` ('model', the default
-   * when absent) or the turn-end recovery pass ('capture').
+   * WHO recorded it: the model choosing to call `remember` ('model') or the turn-end
+   * recovery pass ('capture').
    *
-   * Without this the two are one number, and the question the report exists to
-   * answer — does the mechanism lift the rate, or did the model start complying —
-   * cannot be asked. The field is optional so every line written before it stays
-   * readable as what it was: a model-chosen write.
+   * Without this the two are one number, and the question the report exists to answer —
+   * does the mechanism lift the rate, or did the model start complying — cannot be asked.
+   *
+   * ⚠ ABSENT is NOT 'model'. An earlier version of this docblock called `'model'` "the
+   * default when absent", and the writer that should have set it never did — so every
+   * model-chosen write ever made carried no source at all, and reading absence as
+   * compliance would have counted the entire pre-deploy history as the model complying.
+   * The report therefore buckets absence as `unknown` and says so; see `rememberBySource`.
    */
   readonly source?: 'model' | 'capture' | undefined;
   /**

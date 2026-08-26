@@ -326,6 +326,38 @@ describe('turn-end capture — what an adversarial round found missing', () => {
     expect(events.find((e) => e.type === 'knowledge_write')).toBeUndefined();
   });
 
+  it('announces ONCE even when the write path throws after the announcement', async () => {
+    // `ks.write` on a busy database, or `onStream` on an SSE response that already ended —
+    // the latter recorded in this file as a measured defect. Both emits firing puts one run
+    // in two states the comment calls mutually exclusive, and the over-count lands exactly
+    // on failing runs, which is where an honest rate matters most.
+    const { inner } = makeAgent();
+    inner.onStream = () => { throw new Error('SSE already ended'); };
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try { await inner._captureFallback(ANSWER, false); } finally { stderr.mockRestore(); }
+    const ran = vi.mocked(appendCaptureTelemetry).mock.calls
+      .map(c => c[1] as unknown as Record<string, unknown>)
+      .filter(e => e['event'] === 'capture_ran');
+    expect(ran, 'one pass announced itself twice').toHaveLength(1);
+    expect(ran[0]!['facts'], 'the surviving line must be the one that knows the count').toBe(1);
+  });
+
+  it('treats a MISSING tool block as a completed empty pass, not as a failure', async () => {
+    // A forced `tool_choice` is not a guarantee: a non-Anthropic fast slot on a hybrid
+    // tenant may not honour it, and a max_tokens truncation can drop the block. The old
+    // line returned before announcing, so that state was silent; it must now read as
+    // "ran, found nothing" rather than vanish.
+    const reply = vi.fn().mockResolvedValue({ content: [{ type: 'text', text: 'kein Werkzeug' }], usage: USAGE });
+    const { inner, write } = makeAgent({ reply });
+    await inner._captureFallback(ANSWER, false);
+    expect(write).not.toHaveBeenCalled();
+    const ran = vi.mocked(appendCaptureTelemetry).mock.calls
+      .map(c => c[1] as unknown as Record<string, unknown>)
+      .filter(e => e['event'] === 'capture_ran');
+    expect(ran).toHaveLength(1);
+    expect(ran[0]!['facts']).toBe(0);
+  });
+
   it('reports the fact COUNT it proposed, not merely that it ran', async () => {
     // A boolean "it ran" cannot separate a classifier proposing three facts from one
     // proposing one and dropping two. The count is what makes the per-turn ceiling

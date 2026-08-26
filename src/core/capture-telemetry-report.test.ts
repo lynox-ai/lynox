@@ -599,11 +599,50 @@ describe('capture_ran — the pass announcing that it executed', () => {
     expect(Object.keys(report.events)).toContain('capture_ran');
   });
 
-  it('separates a dead pass from one that ran and found nothing', async () => {
-    // The whole point, stated as the two windows it must tell apart.
+  it('breaks the passes into the four states the event exists to separate', async () => {
+    // The previous version of this test seeded ONLY the dead window and asserted zeros —
+    // which follow from EVENT_ZEROES alone, so deleting the entire emit left it green. It
+    // described a two-window comparison it never performed. This one seeds all four states
+    // at once, with DISTINCT counts so a swapped bucket shows.
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_ran' }),                    // facts absent → the pass failed
+      entry({ event: 'capture_ran', facts: 0 }),          // completed, nothing found
+      entry({ event: 'capture_ran', facts: 0 }),
+      entry({ event: 'capture_ran', facts: 3 }),          // completed, proposed 3
+      entry({ event: 'capture_ran', facts: 2 }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.capturePasses).toEqual({ failed: 1, empty: 2, produced: 2, factsProposed: 5 });
+    // …and the one integer that used to be the only answer still agrees with the parts.
+    const p = r.capturePasses;
+    expect(p.failed + p.empty + p.produced).toBe(r.events['capture_ran']);
+  });
+
+  it('a dead mechanism and a working one that finds nothing are DIFFERENT reports', async () => {
+    // Stated as the two windows, and actually compared — the distinction is the feature.
     await seed([entry({ event: 'capture_eligible' }), entry({ event: 'capture_eligible' })]);
     const dead = await buildCaptureReport();
-    expect(dead.events['capture_ran']).toBe(0);
-    expect(dead.events['remember_invoked']).toBe(0);
+    expect(dead.capturePasses).toEqual({ failed: 0, empty: 0, produced: 0, factsProposed: 0 });
+
+    await seed([
+      entry({ event: 'capture_eligible' }), entry({ event: 'capture_ran', facts: 0 }),
+      entry({ event: 'capture_eligible' }), entry({ event: 'capture_ran', facts: 0 }),
+    ]);
+    const quiet = await buildCaptureReport();
+    expect(quiet.capturePasses.empty).toBe(2);
+    expect(quiet.capturePasses, 'a working-but-quiet pass reads as a dead one').not.toEqual(dead.capturePasses);
+  });
+
+  it('refuses a nonsense fact count instead of inventing a bucket for it', async () => {
+    await seed([
+      entry({ event: 'capture_ran', facts: -1 as unknown as number }),
+      entry({ event: 'capture_ran', facts: 'drei' as unknown as number }),
+    ]);
+    const r = await buildCaptureReport();
+    // Both fall back to `null`, i.e. "did not complete" — the conservative read. What must
+    // NOT happen is a negative or NaN leaking into `factsProposed`.
+    expect(r.capturePasses.factsProposed).toBe(0);
+    expect(r.capturePasses.failed).toBe(2);
   });
 });

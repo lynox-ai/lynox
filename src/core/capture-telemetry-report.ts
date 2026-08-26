@@ -220,11 +220,29 @@ export interface CaptureReport {
    * model that started calling the tool on its own are the same number — and those two
    * call for opposite next steps.
    *
-   * `unknown` is every line written before the field existed; it is reported rather than
-   * folded into either side, because folding it would make the mechanism's share look
-   * larger or smaller depending purely on how old the retained window is.
+   * `unknown` is every line whose writer did not set the field. That is NOT the same as
+   * "written before the field existed": the tool path carried no source until this build,
+   * so on any window spanning that deploy `unknown` is *every model-chosen write made up
+   * to it*. An operator reading a fresh 50/50 split may be looking at 1-vs-3 with the
+   * remainder sitting in `unknown` — check `windowStart` against the deploy before quoting
+   * a share. It is reported rather than folded into either side precisely because folding
+   * would hide that.
    */
   readonly rememberBySource: Readonly<{ model: number; capture: number; unknown: number }>;
+
+  /**
+   * The turn-end recovery pass, broken into the states its event exists to separate.
+   * `events.capture_ran` alone is one integer over all of them, which answers none of the
+   * questions the pass raises.
+   *
+   *   `failed`   — it ran and its provider call did not complete (timeout/abort/error).
+   *                An expired fast-tier key lands HERE, not in `empty`, and not in silence.
+   *   `empty`    — it completed and judged the turn to hold nothing. The expected answer.
+   *   `produced` — it completed and proposed at least one fact.
+   *   `factsProposed` — the total it proposed, BEFORE the write gate rejects any. The gap
+   *                to `rememberBySource.capture` is what the per-turn ceiling costs.
+   */
+  readonly capturePasses: Readonly<{ failed: number; empty: number; produced: number; factsProposed: number }>;
 
   readonly blindness: CaptureReportBlindness;
 }
@@ -283,6 +301,12 @@ interface ValidatedEntry {
    * reports an UNKNOWN bucket instead of folding those into either side.
    */
   readonly source: 'model' | 'capture' | null;
+  /**
+   * Facts the recovery pass proposed, for a `capture_ran` line. `null` covers BOTH "not a
+   * capture_ran line" and "the pass did not complete" — the two are told apart by `event`,
+   * which is why the pass breakdown below reads them together rather than this field alone.
+   */
+  readonly facts: number | null;
 }
 
 /**
@@ -342,6 +366,13 @@ function validateEntry(raw: unknown): ValidatedEntry | null {
       ? (r['runId'].length > MAX_RUN_KEY_CHARS ? r['runId'].slice(0, MAX_RUN_KEY_CHARS) : r['runId'])
       : null,
     source: r['source'] === 'model' || r['source'] === 'capture' ? r['source'] : null,
+    // Read, not merely accepted. A field the writer emits and the validator drops is an
+    // INERT feature that reads as built — the sentence three lines up says exactly that,
+    // and `facts` was left out anyway on the first cut of this event. It carries the whole
+    // state distinction the event exists for; dropping it collapses three states into one.
+    facts: typeof r['facts'] === 'number' && Number.isFinite(r['facts']) && r['facts'] >= 0
+      ? Math.floor(r['facts'])
+      : null,
   };
 }
 
@@ -367,6 +398,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   let eventsWithoutThread = 0;
   let untrustedEligible = 0;
   const rememberBySource = { model: 0, capture: 0, unknown: 0 };
+  const capturePasses = { failed: 0, empty: 0, produced: 0, factsProposed: 0 };
   // The population split. Sets, not counters: a run that ends two eligible turns is ONE
   // run in the denominator's population, and counting events here would make the overlap
   // look larger than the number of runs that actually exist.
@@ -418,6 +450,11 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
 
     if (event === 'capture_eligible' && entry.untrusted) untrustedEligible++;
     if (event === 'remember_invoked') rememberBySource[entry.source ?? 'unknown']++;
+    if (event === 'capture_ran') {
+      if (entry.facts === null) capturePasses.failed++;
+      else if (entry.facts === 0) capturePasses.empty++;
+      else { capturePasses.produced++; capturePasses.factsProposed += entry.facts; }
+    }
     if (event === 'remember_invoked' && entry.outcome !== null) {
       outcomes[entry.outcome] = (outcomes[entry.outcome] ?? 0) + 1;
     }
@@ -476,6 +513,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     untrustedEligible,
     populations,
     rememberBySource,
+    capturePasses,
     blindness: {
       unparsableLines: scan.unparsableLines,
       malformedRecords,

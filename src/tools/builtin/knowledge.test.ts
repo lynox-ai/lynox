@@ -231,6 +231,18 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     expect(invoked[0]!['source']).toBe('model');
   });
 
+  it('propose_shown carries the source too, so the funnel can be split the same way', async () => {
+    // Unpinned on the first cut: deleting the tag left the whole suite green. Nothing reads
+    // `propose_*` source today, which is exactly why it needs a test — an inert field with
+    // no test is the shape that quietly stops being written.
+    mockSink.mockClear();
+    const { agent } = make({ durableMemoryEnabled: true, sawUntrustedData: true });
+    await rememberTool.handler({ text: 'ACME renews in March', subject: 'ACME' }, agent);
+    const shown = captureEvents().filter((e) => e['event'] === 'propose_shown');
+    expect(shown).toHaveLength(1);
+    expect(shown[0]!['source']).toBe('model');
+  });
+
   it('remember does NOT emit propose_shown for a TRUSTED active write (not a reviewable proposal)', async () => {
     mockSink.mockClear();
     const { agent } = make({ durableMemoryEnabled: true }); // trusted turn → active, not pending_review

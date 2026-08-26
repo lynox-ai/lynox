@@ -1403,6 +1403,12 @@ export class Agent implements IAgent {
 
     const timeout = new AbortController();
     const timer = setTimeout(() => timeout.abort(), CAPTURE_TIMEOUT_MS);
+    // At-most-once per pass. The write loop below can throw AFTER the announcement —
+    // `ks.write` on a busy database, or `onStream` on an SSE response that already ended,
+    // which this file records as a MEASURED defect elsewhere. Both emits would then fire
+    // and one run would occupy two states the comment declares mutually exclusive, with
+    // the over-count landing precisely on failing runs.
+    let announced = false;
     try {
       const provider = getActiveProvider();
       const fastSnap = resolveTierModel('fast', provider);
@@ -1447,6 +1453,7 @@ export class Agent implements IAgent {
       // model skipped `remember` produced no chip and no event, and nothing in the
       // telemetry could say whether the classifier had judged the turn or never executed.
       // `capture_eligible` fires before this method's own guards, so it cannot answer it.
+      announced = true;
       void appendCaptureTelemetry(this._durableMemoryEnabled, {
         ts: Date.now(),
         event: 'capture_ran',
@@ -1529,17 +1536,22 @@ export class Agent implements IAgent {
       // all — and "the pass ran and its provider call failed" collapsed onto "the pass
       // never ran", which is the exact confusion this event was added to end. An expired
       // fast-tier key would have read as a disabled mechanism. `facts` is left UNSET
-      // here: absent means the pass did not complete, `0` means it completed and found
-      // nothing. The report reads what it is given; stderr is not a sink it can read.
-      void appendCaptureTelemetry(this._durableMemoryEnabled, {
-        ts: Date.now(),
-        event: 'capture_ran',
-        thread: this.currentThreadId,
-        model: this.model,
-        untrusted: turnUntrusted,
-        runId: this.currentRunId,
-        source: 'capture',
-      });
+      // here: absent means the pass did not COMPLETE, `0` means it completed and found
+      // nothing. The bucket is deliberately wider than "the provider call failed" — the
+      // try opens before `resolveTierModel`/`clientForTierSnapshot`, so a missing fast-tier
+      // key lands here too, which is the same operator question. stderr is not a sink the
+      // report can read, so this line is what makes the state visible at all.
+      if (!announced) {
+        void appendCaptureTelemetry(this._durableMemoryEnabled, {
+          ts: Date.now(),
+          event: 'capture_ran',
+          thread: this.currentThreadId,
+          model: this.model,
+          untrusted: turnUntrusted,
+          runId: this.currentRunId,
+          source: 'capture',
+        });
+      }
     } finally {
       clearTimeout(timer);
     }
