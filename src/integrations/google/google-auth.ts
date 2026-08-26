@@ -31,14 +31,19 @@ interface TokenData {
  * when any is missing.
  *
  * All three or none, deliberately: a partially configured instance must take
- * the direct path rather than build a half-formed request. The same env names
- * `managed-hook.ts` uses — the engine has exactly one identity toward the CP.
+ * the direct path rather than build a half-formed request. Two are checked for
+ * presence; the URL is checked for usability, which subsumes presence. The same
+ * env names `managed-hook.ts` uses — the engine has exactly one identity toward
+ * the control plane.
  */
 function readControlPlaneIdentity(): { url: string; instanceId: string; secret: string } | null {
   const rawUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] ?? '';
   const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '';
   const secret = process.env['LYNOX_HTTP_SECRET'] ?? '';
-  if (!rawUrl || !instanceId || !secret) return null;
+  // No `!rawUrl` here: `controlPlaneBase` refuses the empty string already
+  // (`new URL('')` throws), so a presence check would be a line no test could
+  // distinguish from its absence.
+  if (!instanceId || !secret) return null;
   const url = controlPlaneBase(rawUrl);
   if (url === null) return null;
   return { url, instanceId, secret };
@@ -66,15 +71,15 @@ function controlPlaneBase(raw: string): string | null {
   // parsed fields let exactly the value through that this guard exists for.
   // Refusing beats silently dropping — an operator's mistake should be loud.
   if (raw.includes('?') || raw.includes('#')) return null;
-  // Credentials in the base would authenticate the request somewhere the
-  // operator did not mean; `origin` drops them silently, so refuse instead.
+  // Credentials would authenticate the request somewhere the operator did not
+  // mean. Refuse rather than strip: `origin` would drop them silently while the
+  // operator still believed the request was authenticated.
   if (parsed.username !== '' || parsed.password !== '') return null;
-  // `origin + pathname` cannot carry a query, a fragment or credentials by
-  // construction. With all three refused above it is byte-equal to `href`
-  // for every value that reaches here — the two are belt and braces, and
-  // that is deliberate: the string check states the intent, this makes it
-  // structural.
-  return (parsed.origin + parsed.pathname).replace(/\/+$/, '');
+  // ONE mechanism, deliberately. Building from `origin + pathname` would make
+  // the same guarantee structurally — and that is exactly the problem: with the
+  // refusals above it can never behave differently, so no test could tell the
+  // two apart and the second line would be uncovered by construction.
+  return parsed.href.replace(/\/+$/, '');
 }
 
 interface ServiceAccountKey {
