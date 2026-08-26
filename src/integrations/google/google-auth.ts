@@ -1,5 +1,6 @@
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
+import type { OAuthRefreshRequest, OAuthRefreshResponse } from '../../contract/http.js';
 import { createSign, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { SecretVault } from '../../core/secret-vault.js';
@@ -11,6 +12,74 @@ interface TokenData {
   refresh_token: string;
   expires_at: number; // epoch ms
   scopes: string[];
+  /**
+   * Present when the control plane sealed the refresh token to this instance.
+   *
+   * With it AND a complete control-plane identity in env, the engine refreshes
+   * THROUGH the control plane and this process never holds lynox's client
+   * secret — which is the point: the alternative was emitting that secret into
+   * every tenant container. Both conditions are required, and the handle alone
+   * is not enough: a half-configured instance falls back to the direct path.
+   * A self-host operator has their own client credentials and no control plane,
+   * so this stays absent there and the direct path below is the only one.
+   */
+  refresh_handle?: string;
+}
+
+/**
+ * The three values a managed instance needs to reach its control plane, or null
+ * when any is missing.
+ *
+ * All three or none, deliberately: a partially configured instance must take
+ * the direct path rather than build a half-formed request. Two are checked for
+ * presence; the URL is checked for usability, which subsumes presence. The same
+ * env names `managed-hook.ts` uses — the engine has exactly one identity toward
+ * the control plane.
+ */
+function readControlPlaneIdentity(): { url: string; instanceId: string; secret: string } | null {
+  const rawUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'] ?? '';
+  const instanceId = process.env['LYNOX_MANAGED_INSTANCE_ID'] ?? '';
+  const secret = process.env['LYNOX_HTTP_SECRET'] ?? '';
+  // No `!rawUrl` here: `controlPlaneBase` refuses the empty string already
+  // (`new URL('')` throws), so a presence check would be a line no test could
+  // distinguish from its absence.
+  if (!instanceId || !secret) return null;
+  const url = controlPlaneBase(rawUrl);
+  if (url === null) return null;
+  return { url, instanceId, secret };
+}
+
+/**
+ * Normalise the CP base URL, or null if it cannot carry a secret safely.
+ *
+ * The value is operator-set, so this is not a trust boundary — it is a
+ * concatenation guard. `${base}/internal/...` on a base that carries a query or
+ * a fragment does not append a path, it extends the query, and the request
+ * would go somewhere else with the instance secret attached. A path PREFIX is
+ * kept, because a CP behind one is a legitimate deployment.
+ */
+function controlPlaneBase(raw: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
+  // Refuse on the RAW string, not on `parsed.search`/`parsed.hash`: an empty
+  // query parses to `search === ''` while `href` keeps the `?`, so reading the
+  // parsed fields let exactly the value through that this guard exists for.
+  // Refusing beats silently dropping — an operator's mistake should be loud.
+  if (raw.includes('?') || raw.includes('#')) return null;
+  // Credentials would authenticate the request somewhere the operator did not
+  // mean. Refuse rather than strip: `origin` would drop them silently while the
+  // operator still believed the request was authenticated.
+  if (parsed.username !== '' || parsed.password !== '') return null;
+  // ONE mechanism, deliberately. Building from `origin + pathname` would make
+  // the same guarantee structurally — and that is exactly the problem: with the
+  // refusals above it can never behave differently, so no test could tell the
+  // two apart and the second line would be uncovered by construction.
+  return parsed.href.replace(/\/+$/, '');
 }
 
 interface ServiceAccountKey {
@@ -112,6 +181,57 @@ function parseTokenData(raw: string): TokenData | null {
     return null;
   }
 }
+
+/**
+ * Validate a refresh response from the control plane.
+ *
+ * The direct path runs every Google response through `validateTokenResponse`.
+ * This is the equivalent for the other one, and deliberately stricter: the
+ * direct path derives `expires_at` from a `expires_in` it has already bounded
+ * to be positive, while this value arrives absolute and unchecked. A `typeof`
+ * check alone is not enough — `NaN` is a number, and an `expires_at` of `NaN` makes the staleness
+ * comparison in `getAccessToken` false forever, so the engine would serve a
+ * dead access token and never refresh again. An out-of-range value fails the
+ * other way: an always-past expiry turns the CP into a dependency of every
+ * Google call rather than of the hourly refresh.
+ */
+function validateControlPlaneRefresh(json: unknown): OAuthRefreshResponse {
+  const bad = (why: string): never => {
+    throw new Error(`Token refresh failed: ${why}.` + REFRESH_FAILURE_REMEDY.transient);
+  };
+  if (typeof json !== 'object' || json === null) {
+    return bad('the control plane returned no usable token');
+  }
+  const data = json as Record<string, unknown>;
+  const token = data['access_token'];
+  if (typeof token !== 'string' || token === '') {
+    return bad('the control plane returned no usable token');
+  }
+  const expiresAt = data['expires_at'];
+  if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) {
+    return bad('the control plane returned no usable expiry');
+  }
+  const now = Date.now();
+  if (expiresAt <= now || expiresAt > now + MAX_CP_TOKEN_LIFETIME_MS) {
+    return bad('the control plane returned an expiry outside the plausible range');
+  }
+  const handle = data['refresh_handle'];
+  if (handle !== undefined && (typeof handle !== 'string' || handle === '')) {
+    return bad('the control plane returned an unusable refresh handle');
+  }
+  return {
+    access_token: token,
+    expires_at: expiresAt,
+    ...(typeof handle === 'string' ? { refresh_handle: handle } : {}),
+  };
+}
+
+/**
+ * The widest access-token lifetime we accept from the control plane. Google's
+ * are an hour; a day is slack for any future change without letting an absurd
+ * value pin a stale token for a year.
+ */
+const MAX_CP_TOKEN_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
 /** Validate a token response from Google and convert to TokenData. */
 function validateTokenResponse(json: unknown): TokenData {
@@ -341,6 +461,14 @@ export class GoogleAuth {
     refresh_token: string;
     expires_at: number;
     scopes: string[];
+    /**
+     * Set by the control plane's claim when it sealed the refresh token to this
+     * instance. Carrying it here is what routes later refreshes through the CP;
+     * dropping it silently would send them to Google with a client secret this
+     * process is not supposed to have — and the failure would appear an hour
+     * later, at the first expiry, with nothing pointing back to the claim.
+     */
+    refresh_handle?: string;
   }): Promise<void> {
     if (typeof data.access_token !== 'string' || data.access_token.length < 10) {
       throw new Error('Invalid token data: access_token must be a string of at least 10 characters');
@@ -359,6 +487,7 @@ export class GoogleAuth {
       refresh_token: data.refresh_token,
       expires_at: data.expires_at,
       scopes: data.scopes,
+      ...(data.refresh_handle ? { refresh_handle: data.refresh_handle } : {}),
     };
     saveTokenData(this.tokenData, this.vault);
   }
@@ -715,7 +844,11 @@ export class GoogleAuth {
   private _clientMisconfiguredUntil: number | null = null;
 
   private async _doRefresh(): Promise<void> {
-    if (!this.tokenData?.refresh_token) {
+    // Either credential can drive a refresh: the raw token on the direct path,
+    // the sealed handle on the control-plane one. Requiring the raw token here
+    // would make a handle-only token — the end state this arc is moving toward —
+    // unrefreshable, and the failure would look like a revoked grant.
+    if (!this.tokenData?.refresh_token && !this.tokenData?.refresh_handle) {
       throw new Error('No refresh token available. Re-connect your Google account in Settings → Channels → Google.');
     }
 
@@ -739,17 +872,58 @@ export class GoogleAuth {
       throw new Error(`Token refresh suppressed.${REFRESH_FAILURE_REMEDY['client-misconfigured']}`);
     }
 
-    const response = await fetch(TOKEN_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: this.clientId,
-        client_secret: this.clientSecret,
-        refresh_token: this.tokenData.refresh_token,
-        grant_type: 'refresh_token',
-      }),
-      signal: AbortSignal.timeout(30_000),
-    });
+    // Two ways to refresh. The control-plane one needs BOTH a sealed handle and
+    // a complete control-plane identity in env — no flag and no version decides
+    // it. Either missing takes the direct call below, which is unchanged for
+    // self-host and for any claim that predates handles.
+    //
+    // Reusing `classifyRefreshFailure` for both paths assumes the CP passes
+    // Google's status and error body through rather than rewriting them. The
+    // wire contract does NOT state that today — it describes the success shape
+    // only — so this is an expectation on the endpoint being built, written
+    // here so it is not discovered by a misclassification later.
+    const handle = this.tokenData.refresh_handle;
+    const cp = handle ? readControlPlaneIdentity() : null;
+
+    // The direct call below reads `refresh_token`. A handle-only token whose
+    // control plane is unreachable — env incomplete, or a URL this build
+    // refuses — would reach it with an EMPTY one, and Google answers 400
+    // `invalid_grant`: indistinguishable here from a revoked grant, so the
+    // grant would be deleted because we could not reach our own control plane.
+    // Fail transient instead. The token survives; the next attempt can work.
+    if (!(cp && handle) && this.tokenData.refresh_token === '') {
+      throw new Error(
+        'Token refresh failed: this instance cannot reach its control plane.'
+        + REFRESH_FAILURE_REMEDY.transient,
+      );
+    }
+
+    const response = cp && handle
+      ? await fetch(`${cp.url}/internal/oauth/google/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-instance-secret': cp.secret },
+          body: JSON.stringify({
+            instance_id: cp.instanceId,
+            refresh_handle: handle,
+          } satisfies OAuthRefreshRequest),
+          // Do not follow redirects: `fetch` replays request headers on a
+          // same-origin hop and this request carries the instance secret. A 3xx
+          // arrives as `!response.ok` below and is classified as transient, so
+          // a CP that starts redirecting degrades instead of leaking.
+          redirect: 'manual',
+          signal: AbortSignal.timeout(30_000),
+        })
+      : await fetch(TOKEN_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: this.clientId,
+            client_secret: this.clientSecret,
+            refresh_token: this.tokenData.refresh_token,
+            grant_type: 'refresh_token',
+          }),
+          signal: AbortSignal.timeout(30_000),
+        });
 
     if (!response.ok) {
       const text = await response.text();
@@ -763,17 +937,54 @@ export class GoogleAuth {
       } else if (failure === 'client-misconfigured') {
         this._clientMisconfiguredUntil = Date.now() + CLIENT_MISCONFIGURED_COOLDOWN_MS;
       }
-      throw new Error(`Token refresh failed: ${response.status} ${text}.${REFRESH_FAILURE_REMEDY[failure]}`);
+      // The remedy text is written for the direct path, where the invalid client
+      // is this instance's own. On the CP path it is lynox's shared client, so
+      // telling the user an operator must fix THIS instance would send them
+      // after the wrong thing — the cool-down still applies either way.
+      // Not a new failure KIND, so not a new `REFRESH_FAILURE_REMEDY` entry:
+      // the same classification with a different audience. On the direct path
+      // the invalid client is this instance's own and an operator can fix it;
+      // on the CP path it is lynox's, and naming the instance would send the
+      // user after something they do not control. It says only that, because
+      // nothing here reports the failure anywhere.
+      const remedy = cp && failure === 'client-misconfigured'
+        ? ' Your Google connection is intact — lynox could not complete the refresh.'
+        : REFRESH_FAILURE_REMEDY[failure];
+      throw new Error(`Token refresh failed: ${response.status} ${text}.${remedy}`);
+    }
+
+    if (cp && handle) {
+      const body = validateControlPlaneRefresh(await response.json());
+      this.tokenData = {
+        ...this.tokenData,
+        access_token: body.access_token,
+        expires_at: body.expires_at,
+        // Google may rotate the refresh token on any refresh. Dropping a
+        // rotated handle would leave us presenting one Google has already
+        // invalidated, and the failure would arrive at the NEXT refresh —
+        // an hour later, with nothing pointing back to here.
+        ...(body.refresh_handle ? { refresh_handle: body.refresh_handle } : {}),
+      };
+      saveTokenData(this.tokenData, this.vault);
+      return;
     }
 
     const refreshed = validateTokenResponse(await response.json());
+    // A rotated refresh token invalidates whatever the control plane sealed:
+    // its handle stands for the token Google just replaced. Carrying it forward
+    // would present an invalidated handle at the next CP refresh, which arrives
+    // as `invalid_grant` — indistinguishable from a real revocation, so it would
+    // delete a living grant. Drop it; a fresh claim seals a new one.
+    const rotated = refreshed.refresh_token !== '' && refreshed.refresh_token !== this.tokenData.refresh_token;
     // Preserve refresh_token and scopes from previous auth if not returned
     this.tokenData = {
+      ...this.tokenData,
       access_token: refreshed.access_token,
       refresh_token: refreshed.refresh_token || this.tokenData.refresh_token,
       expires_at: refreshed.expires_at,
       scopes: refreshed.scopes.length > 0 ? refreshed.scopes : this.tokenData.scopes,
     };
+    if (rotated) delete this.tokenData.refresh_handle;
     saveTokenData(this.tokenData, this.vault);
   }
 
