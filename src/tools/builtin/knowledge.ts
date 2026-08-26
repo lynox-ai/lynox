@@ -152,6 +152,11 @@ export const rememberTool: ToolEntry<RememberInput> = {
       untrusted: sourceUntrusted,
       outcome: result.deduped === true ? 'deduped' : result.status,
       runId: agent.currentRunId,
+      // The MODEL chose to call the tool. Tagged positively rather than left to be
+      // inferred from the absence of `capture`: an untagged line is indistinguishable
+      // from one written before the field existed, so "by elimination" silently folds
+      // pre-field history into model-compliance and overstates it.
+      source: 'model',
     });
 
     // propose_shown (PRD-ONBOARDING §7 / AC-1.4): a NEW pending_review write becomes a
@@ -167,6 +172,7 @@ export const rememberTool: ToolEntry<RememberInput> = {
         model: agent.model,
         untrusted: sourceUntrusted,
         entryId: result.id,
+        source: 'model',
       });
     }
 

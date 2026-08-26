@@ -151,6 +151,15 @@ describe('turn-end capture — when it stays quiet', () => {
     const { inner, write } = makeAgent({ reply });
     await inner._captureFallback(ANSWER, false);
     expect(write).not.toHaveBeenCalled();
+    // …and it must SAY that it ran. Without this the test passes just as happily when the
+    // pass never executed — which is what happened on a live staging turn: no chip, no
+    // event, and no way to tell a correct empty judgement from a dead mechanism.
+    // `facts: 0` is a result; silence is not.
+    const ran = vi.mocked(appendCaptureTelemetry).mock.calls
+      .map(c => c[1] as unknown as Record<string, unknown>)
+      .filter(e => e['event'] === 'capture_ran');
+    expect(ran, 'an empty classification is indistinguishable from a pass that never ran').toHaveLength(1);
+    expect(ran[0]).toMatchObject({ facts: 0, source: 'capture' });
   });
 
   it('never lets a provider failure surface as a turn error', async () => {
@@ -317,6 +326,79 @@ describe('turn-end capture — what an adversarial round found missing', () => {
     expect(events.find((e) => e.type === 'knowledge_write')).toBeUndefined();
   });
 
+  it('announces ONCE even when the write path throws after the announcement', async () => {
+    // `ks.write` on a busy database, or `onStream` on an SSE response that already ended —
+    // the latter recorded in this file as a measured defect. Both emits firing puts one run
+    // in two states the comment calls mutually exclusive, and the over-count lands exactly
+    // on failing runs, which is where an honest rate matters most.
+    const { inner } = makeAgent();
+    inner.onStream = () => { throw new Error('SSE already ended'); };
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try { await inner._captureFallback(ANSWER, false); } finally { stderr.mockRestore(); }
+    const ran = vi.mocked(appendCaptureTelemetry).mock.calls
+      .map(c => c[1] as unknown as Record<string, unknown>)
+      .filter(e => e['event'] === 'capture_ran');
+    expect(ran, 'one pass announced itself twice').toHaveLength(1);
+    expect(ran[0]!['facts'], 'the surviving line must be the one that knows the count').toBe(1);
+  });
+
+  it('treats a MISSING tool block as a completed empty pass, not as a failure', async () => {
+    // A forced `tool_choice` is not a guarantee: a non-Anthropic fast slot on a hybrid
+    // tenant may not honour it, and a max_tokens truncation can drop the block. The old
+    // line returned before announcing, so that state was silent; it must now read as
+    // "ran, found nothing" rather than vanish.
+    const reply = vi.fn().mockResolvedValue({ content: [{ type: 'text', text: 'kein Werkzeug' }], usage: USAGE });
+    const { inner, write } = makeAgent({ reply });
+    await inner._captureFallback(ANSWER, false);
+    expect(write).not.toHaveBeenCalled();
+    const ran = vi.mocked(appendCaptureTelemetry).mock.calls
+      .map(c => c[1] as unknown as Record<string, unknown>)
+      .filter(e => e['event'] === 'capture_ran');
+    expect(ran).toHaveLength(1);
+    expect(ran[0]!['facts']).toBe(0);
+  });
+
+  it('counts what the model OFFERED, not what survived the ceiling', async () => {
+    // The producer half. The report tests seed `proposed` by hand and therefore cannot see
+    // whether anything ever produces it — the same consumer-tested-in-isolation split that
+    // let `facts` reach the sink and never be read. Nine offered, four written.
+    const many = Array.from({ length: 9 }, (_, i) => ({ text: `Dauerhafter Fakt Nummer ${i} über den Kunden.` }));
+    const reply = vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c1', name: CAPTURE_TOOL_NAME, input: { facts: many } }],
+      usage: USAGE,
+    });
+    const { inner, write } = makeAgent({ reply });
+    await inner._captureFallback(ANSWER, false);
+    expect(write, 'the ceiling must still bound what is WRITTEN').toHaveBeenCalledTimes(4);
+    const ran = vi.mocked(appendCaptureTelemetry).mock.calls
+      .map(c => c[1] as unknown as Record<string, unknown>)
+      .filter(e => e['event'] === 'capture_ran');
+    expect(ran).toHaveLength(1);
+    expect(ran[0]!['facts'], 'written through the ceiling').toBe(4);
+    expect(ran[0]!['proposed'], 'offered before it — this is what makes the ceiling measurable').toBe(9);
+  });
+
+  it('reports the fact COUNT it proposed, not merely that it ran', async () => {
+    // A boolean "it ran" cannot separate a classifier proposing three facts from one
+    // proposing one and dropping two. The count is what makes the per-turn ceiling
+    // measurable at all — the legacy corpus lost exactly that to its own schema.
+    const reply = vi.fn().mockResolvedValue({
+      content: [{ type: 'tool_use', id: 'c1', name: CAPTURE_TOOL_NAME, input: { facts: [
+        { text: 'Erster dauerhafter Fakt über den Kunden.' },
+        { text: 'Zweiter dauerhafter Fakt über den Kunden.' },
+        { text: 'Dritter dauerhafter Fakt über den Kunden.' },
+      ] } }],
+      usage: USAGE,
+    });
+    const { inner } = makeAgent({ reply });
+    await inner._captureFallback(ANSWER, false);
+    const ran = vi.mocked(appendCaptureTelemetry).mock.calls
+      .map(c => c[1] as unknown as Record<string, unknown>)
+      .filter(e => e['event'] === 'capture_ran');
+    expect(ran).toHaveLength(1);
+    expect(ran[0]!['facts']).toBe(3);
+  });
+
   it('surfaces a chip for a TRUSTED write too — the one with no panel to recover it', async () => {
     // The pending route has a review panel; the trusted route has nothing. A guard
     // narrowed to `status === 'pending_review'` therefore fails in the direction that
@@ -354,15 +436,19 @@ describe('turn-end capture — what an adversarial round found missing', () => {
     await clean.inner._captureFallback(ANSWER, false);
     const cleanEvents = vi.mocked(appendCaptureTelemetry).mock.calls
       .map((c) => c[1] as unknown as Record<string, unknown>);
-    expect(cleanEvents.map((e) => e['event'])).toEqual(['remember_invoked']);
-    expect(cleanEvents[0]!['outcome']).toBe('active');
+    // `capture_ran` FIRST, then the write. The order is the claim: the pass announces
+    // that it executed before anything depends on what it found, so an empty run and a
+    // dead run stay distinguishable.
+    expect(cleanEvents.map((e) => e['event'])).toEqual(['capture_ran', 'remember_invoked']);
+    expect(cleanEvents[0]!['facts']).toBe(1);
+    expect(cleanEvents[1]!['outcome']).toBe('active');
 
     vi.clearAllMocks();
     const queued = makeAgent({ writeResult: { id: 'k2', status: 'pending_review', deduped: false } });
     await queued.inner._captureFallback(ANSWER, true);
     const queuedEvents = vi.mocked(appendCaptureTelemetry).mock.calls
       .map((c) => c[1] as unknown as Record<string, unknown>);
-    expect(queuedEvents.map((e) => e['event'])).toEqual(['remember_invoked', 'propose_shown']);
+    expect(queuedEvents.map((e) => e['event'])).toEqual(['capture_ran', 'remember_invoked', 'propose_shown']);
     for (const e of [...cleanEvents, ...queuedEvents]) {
       expect(e['source'], 'the mechanism is indistinguishable from model compliance').toBe('capture');
     }
@@ -454,6 +540,16 @@ describe('turn-end capture — what an adversarial round found missing', () => {
       await expect(inner._captureFallback(ANSWER, false)).resolves.toBeUndefined();
       expect(stderr.mock.calls.map((c) => String(c[0])).join('')).toContain('upstream exploded');
     } finally { stderr.mockRestore(); }
+    // …and the SINK hears it as well. stderr is not something the report can read, so a
+    // failure that only reaches stderr is a failure the rate cannot see: it looked
+    // identical to a mechanism that never ran. `facts` ABSENT is what distinguishes a
+    // failed pass from one that completed and found nothing.
+    const ran = vi.mocked(appendCaptureTelemetry).mock.calls
+      .map(c => c[1] as unknown as Record<string, unknown>)
+      .filter(e => e['event'] === 'capture_ran');
+    expect(ran, 'a failed pass is invisible to the report').toHaveLength(1);
+    expect(ran[0]!['facts'], 'a failed pass must not read as "completed, found nothing"').toBeUndefined();
+    expect(ran[0]).toMatchObject({ source: 'capture' });
   });
 
   it('the TURN TRACKS the pass — it is not fired and forgotten', async () => {

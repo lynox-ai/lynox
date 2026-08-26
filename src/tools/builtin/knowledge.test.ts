@@ -224,6 +224,23 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     const invoked = captureEvents().filter((e) => e['event'] === 'remember_invoked');
     expect(invoked).toHaveLength(1);
     expect(invoked[0]!['runId']).toBe('r1');
+    // Tagged POSITIVELY as the model's own choice. Leaving it untagged made "the model
+    // complied" indistinguishable from a line written before the field existed, so the
+    // split that is supposed to separate mechanism from compliance quietly counted all
+    // history as compliance.
+    expect(invoked[0]!['source']).toBe('model');
+  });
+
+  it('propose_shown carries the source too, so the funnel can be split the same way', async () => {
+    // Unpinned on the first cut: deleting the tag left the whole suite green. Nothing reads
+    // `propose_*` source today, which is exactly why it needs a test — an inert field with
+    // no test is the shape that quietly stops being written.
+    mockSink.mockClear();
+    const { agent } = make({ durableMemoryEnabled: true, sawUntrustedData: true });
+    await rememberTool.handler({ text: 'ACME renews in March', subject: 'ACME' }, agent);
+    const shown = captureEvents().filter((e) => e['event'] === 'propose_shown');
+    expect(shown).toHaveLength(1);
+    expect(shown[0]!['source']).toBe('model');
   });
 
   it('remember does NOT emit propose_shown for a TRUSTED active write (not a reviewable proposal)', async () => {

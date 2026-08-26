@@ -1403,6 +1403,12 @@ export class Agent implements IAgent {
 
     const timeout = new AbortController();
     const timer = setTimeout(() => timeout.abort(), CAPTURE_TIMEOUT_MS);
+    // At-most-once per pass. The write loop below can throw AFTER the announcement —
+    // `ks.write` on a busy database, or `onStream` on an SSE response that already ended,
+    // which this file records as a MEASURED defect elsewhere. Both emits would then fire
+    // and one run would occupy two states the comment declares mutually exclusive, with
+    // the over-count landing precisely on failing runs.
+    let announced = false;
     try {
       const provider = getActiveProvider();
       const fastSnap = resolveTierModel('fast', provider);
@@ -1441,8 +1447,25 @@ export class Agent implements IAgent {
       const call = response.content.find(
         (b): b is BetaToolUseBlock => b.type === 'tool_use' && b.name === CAPTURE_TOOL_NAME,
       );
-      if (!call) return;
-      const facts = parseExtractedFacts(call.input);
+      const parsed = call ? parseExtractedFacts(call.input) : { facts: [], proposed: 0 };
+      const facts = parsed.facts;
+      // The pass RAN. Emitted before the empty-return below, and unconditionally, because
+      // the silent return was the whole defect: on a live staging run a turn where the
+      // model skipped `remember` produced no chip and no event, and nothing in the
+      // telemetry could say whether the classifier had judged the turn or never executed.
+      // `capture_eligible` fires before this method's own guards, so it cannot answer it.
+      announced = true;
+      void appendCaptureTelemetry(this._durableMemoryEnabled, {
+        ts: Date.now(),
+        event: 'capture_ran',
+        thread: this.currentThreadId,
+        model: this.model,
+        untrusted: turnUntrusted,
+        runId: this.currentRunId,
+        facts: facts.length,
+        proposed: parsed.proposed,
+        source: 'capture',
+      });
       if (facts.length === 0) return;
 
       for (const fact of facts) {
@@ -1510,6 +1533,27 @@ export class Agent implements IAgent {
       // (fast-model id sent to a client that does not know it) is a 404 that would
       // otherwise be invisible.
       process.stderr.write(`[lynox:capture-fallback] ${getErrorMessage(err)}\n`);
+      // …and the SINK has to hear it too, not only stderr. The emit above sits after
+      // `finalMessage()`, so a timeout, an abort or a provider error produced no line at
+      // all — and "the pass ran and its provider call failed" collapsed onto "the pass
+      // never ran", which is the exact confusion this event was added to end. An expired
+      // fast-tier key would have read as a disabled mechanism. `facts` is left UNSET
+      // here: absent means the pass did not COMPLETE, `0` means it completed and found
+      // nothing. The bucket is deliberately wider than "the provider call failed" — the
+      // try opens before `resolveTierModel`/`clientForTierSnapshot`, so a missing fast-tier
+      // key lands here too, which is the same operator question. stderr is not a sink the
+      // report can read, so this line is what makes the state visible at all.
+      if (!announced) {
+        void appendCaptureTelemetry(this._durableMemoryEnabled, {
+          ts: Date.now(),
+          event: 'capture_ran',
+          thread: this.currentThreadId,
+          model: this.model,
+          untrusted: turnUntrusted,
+          runId: this.currentRunId,
+          source: 'capture',
+        });
+      }
     } finally {
       clearTimeout(timer);
     }

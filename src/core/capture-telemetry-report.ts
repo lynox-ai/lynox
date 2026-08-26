@@ -220,11 +220,39 @@ export interface CaptureReport {
    * model that started calling the tool on its own are the same number — and those two
    * call for opposite next steps.
    *
-   * `unknown` is every line written before the field existed; it is reported rather than
-   * folded into either side, because folding it would make the mechanism's share look
-   * larger or smaller depending purely on how old the retained window is.
+   * `unknown` is every line whose writer did not set the field. That is NOT the same as
+   * "written before the field existed": the tool path carried no source until this build,
+   * so on any window spanning that deploy `unknown` is *every model-chosen write made up
+   * to it*. An operator reading a fresh 50/50 split may be looking at 1-vs-3 with the
+   * remainder sitting in `unknown` — check `windowStart` against the deploy before quoting
+   * a share. It is reported rather than folded into either side precisely because folding
+   * would hide that.
    */
   readonly rememberBySource: Readonly<{ model: number; capture: number; unknown: number }>;
+
+  /**
+   * The turn-end recovery pass, broken into the states its event exists to separate.
+   * `events.capture_ran` alone is one integer over all of them, which answers none of the
+   * questions the pass raises.
+   *
+   *   `failed`   — it ran and did not COMPLETE. Deliberately wider than "the provider call
+   *                failed": the pass's try-block opens before the tier is resolved and
+   *                closes after the cost booking and the tool-block lookup, so a missing
+   *                fast-tier key and a non-Anthropic slot returning an unexpected shape
+   *                both land here. What they share is the operator question — the pass is
+   *                not producing and it is not because the turns are empty.
+   *   `empty`    — it completed and judged the turn to hold nothing. The expected answer.
+   *   `produced` — it completed and proposed at least one fact.
+   *   `factsProposed` — facts OFFERED, before the per-turn ceiling (from the line's
+   *                `proposed`; older lines fall back to the capped `facts`). The gap to
+   *                `rememberBySource.capture` therefore covers BOTH the ceiling and the
+   *                write gate's rejections — it is not attributable to either alone.
+   *
+   * ⚠ These four do NOT sum to `capture_eligible`. That event fires ahead of the pass's own
+   * guards, so the remainder mixes "durable memory off", "no knowledge store" and — the
+   * healthy case — "the model already called `remember`, so the pass stood down".
+   */
+  readonly capturePasses: Readonly<{ failed: number; empty: number; produced: number; factsProposed: number }>;
 
   readonly blindness: CaptureReportBlindness;
 }
@@ -245,6 +273,7 @@ const KNOWN_OUTCOMES: ReadonlySet<string> = new Set<CaptureOutcome>(['active', '
 /** Every event key, so the report always carries a full record rather than a sparse one. */
 const ALL_EVENTS: readonly CaptureEvent[] = [
   'capture_eligible',
+  'capture_ran',
   'remember_invoked',
   'propose_shown',
   'propose_confirmed',
@@ -282,6 +311,17 @@ interface ValidatedEntry {
    * reports an UNKNOWN bucket instead of folding those into either side.
    */
   readonly source: 'model' | 'capture' | null;
+  /**
+   * Facts written through the ceiling, for a `capture_ran` line. `null` covers THREE cases,
+   * not two: a line that is not `capture_ran`; a pass that did not complete; and a
+   * `capture_ran` line whose count was present but unusable (negative, non-numeric,
+   * overflowing). The last is folded into "did not complete" deliberately — a malformed
+   * count is not evidence that the pass produced anything — but it IS a third case, and an
+   * earlier version of this comment said "BOTH" over a set of three.
+   */
+  readonly facts: number | null;
+  /** Facts offered before the ceiling, for a `capture_ran` line; `null` when absent. */
+  readonly proposed: number | null;
 }
 
 /**
@@ -308,6 +348,24 @@ interface ValidatedEntry {
  * they make the narrowing total and cost nothing — but no test pins them, and inventing
  * one that appears to would be worse than saying this.
  */
+/**
+ * A non-negative count from an untrusted line, CLAMPED like `model` and `runId` beside it.
+ *
+ * The clamp is not decoration. This module's own docblock lists, as one of three measured
+ * defects, a `ts` of `1e999` becoming `Infinity` and serialising to `null` — "which this
+ * module's own interface documents as 'the sink is empty' while the counts say otherwise".
+ * A sum of two unclamped `1e308` lines reproduces exactly that, on a field this build adds.
+ * The sink is not on the permission-guard's protected-path list, so a tool can write it.
+ */
+function clampCount(v: unknown): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return null;
+  return Math.min(Math.floor(v), MAX_COUNT_PER_LINE);
+}
+
+/** Ceiling on a per-line count. Far above any real value (the pass caps facts at 4); it
+ *  exists so no arithmetic over the window can reach `Infinity`. */
+const MAX_COUNT_PER_LINE = 1_000_000;
+
 function validateEntry(raw: unknown): ValidatedEntry | null {
   if (typeof raw !== 'object' || raw === null) return null;
   // `source` is read by name below. A field the writer emits and the validator drops is
@@ -341,6 +399,12 @@ function validateEntry(raw: unknown): ValidatedEntry | null {
       ? (r['runId'].length > MAX_RUN_KEY_CHARS ? r['runId'].slice(0, MAX_RUN_KEY_CHARS) : r['runId'])
       : null,
     source: r['source'] === 'model' || r['source'] === 'capture' ? r['source'] : null,
+    // Read, not merely accepted. A field the writer emits and the validator drops is an
+    // INERT feature that reads as built — the sentence three lines up says exactly that,
+    // and `facts` was left out anyway on the first cut of this event. It carries the whole
+    // state distinction the event exists for; dropping it collapses three states into one.
+    facts: clampCount(r['facts']),
+    proposed: clampCount(r['proposed']),
   };
 }
 
@@ -366,6 +430,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   let eventsWithoutThread = 0;
   let untrustedEligible = 0;
   const rememberBySource = { model: 0, capture: 0, unknown: 0 };
+  const capturePasses = { failed: 0, empty: 0, produced: 0, factsProposed: 0 };
   // The population split. Sets, not counters: a run that ends two eligible turns is ONE
   // run in the denominator's population, and counting events here would make the overlap
   // look larger than the number of runs that actually exist.
@@ -417,6 +482,11 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
 
     if (event === 'capture_eligible' && entry.untrusted) untrustedEligible++;
     if (event === 'remember_invoked') rememberBySource[entry.source ?? 'unknown']++;
+    if (event === 'capture_ran') {
+      if (entry.facts === null) capturePasses.failed++;
+      else if (entry.facts === 0) capturePasses.empty++;
+      else { capturePasses.produced++; capturePasses.factsProposed += entry.proposed ?? entry.facts; }
+    }
     if (event === 'remember_invoked' && entry.outcome !== null) {
       outcomes[entry.outcome] = (outcomes[entry.outcome] ?? 0) + 1;
     }
@@ -475,6 +545,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     untrustedEligible,
     populations,
     rememberBySource,
+    capturePasses,
     blindness: {
       unparsableLines: scan.unparsableLines,
       malformedRecords,

@@ -39,6 +39,19 @@ export const CAPTURE_TELEMETRY_LOG_FILE = 'capture-telemetry.jsonl';
 
 export type CaptureEvent =
   | 'capture_eligible'   // a capture-eligible turn ended (denominator)
+  // The turn-end recovery pass RAN and returned. Emitted whatever it found, including
+  // nothing — which is the point. `capture_eligible` fires BEFORE the pass's own guards,
+  // and `remember_invoked` only when something was written, so the most common outcome
+  // (ran, found nothing) had no event at all: on a live staging run it was impossible to
+  // tell a working classifier that judged a turn correctly from a pass that never
+  // executed. Carries `facts` = how many it proposed, so FOUR states separate:
+  //   no event          = the pass did not run (guarded off, or never reached)
+  //   facts ABSENT      = it ran and its provider call failed (timeout/abort/error)
+  //   facts 0           = it ran, completed, and judged the turn to hold nothing
+  //   facts n           = it ran and proposed n
+  // The third and fourth are the ones a rate needs; the second is the one that used to
+  // masquerade as the first, because the failure path wrote only to stderr.
+  | 'capture_ran'
   | 'remember_invoked'   // the model recorded a durable fact (numerator)
   // propose→confirm→apply — ACTIVATED by Onboarding Wave 1 (Layer-1 Faden chips):
   | 'propose_shown'
@@ -67,14 +80,30 @@ export interface CaptureTelemetryEntry {
   readonly untrusted: boolean;
   /** Store outcome — only set for `remember_invoked`. */
   readonly outcome?: CaptureOutcome | undefined;
+  /** How many facts the recovery pass WROTE THROUGH the per-turn ceiling — only set for
+   *  `capture_ran`. Zero is a RESULT, not an absence, and is the reason this field exists
+   *  as a number rather than the event being emitted only on a hit.
+   *  ⚠ ABSENCE is load-bearing since the failure path emits too: no `facts` means the pass
+   *  did not COMPLETE. A third emit site must keep that: writing `0` on a failure disguises
+   *  an outage as an empty result. */
+  readonly facts?: number | undefined;
+  /** Well-formed facts the model OFFERED, before the per-turn ceiling — only set for
+   *  `capture_ran`. `proposed - facts` is what the ceiling costs, and it is the only way to
+   *  see that from production: `facts` alone is capped, so a turn offering nine and a turn
+   *  offering four read identically. */
+  readonly proposed?: number | undefined;
   /**
-   * WHO recorded it: the model choosing to call `remember` ('model', the default
-   * when absent) or the turn-end recovery pass ('capture').
+   * WHO recorded it: the model choosing to call `remember` ('model') or the turn-end
+   * recovery pass ('capture').
    *
-   * Without this the two are one number, and the question the report exists to
-   * answer — does the mechanism lift the rate, or did the model start complying —
-   * cannot be asked. The field is optional so every line written before it stays
-   * readable as what it was: a model-chosen write.
+   * Without this the two are one number, and the question the report exists to answer —
+   * does the mechanism lift the rate, or did the model start complying — cannot be asked.
+   *
+   * ⚠ ABSENT is NOT 'model'. An earlier version of this docblock called `'model'` "the
+   * default when absent", and the writer that should have set it never did — so every
+   * model-chosen write ever made carried no source at all, and reading absence as
+   * compliance would have counted the entire pre-deploy history as the model complying.
+   * The report therefore buckets absence as `unknown` and says so; see `rememberBySource`.
    */
   readonly source?: 'model' | 'capture' | undefined;
   /**

@@ -580,3 +580,112 @@ describe('rememberBySource — mechanism vs. model compliance', () => {
     expect(report.rememberBySource).toEqual({ capture: 0, model: 0, unknown: 1 });
   });
 });
+
+describe('capture_ran — the pass announcing that it executed', () => {
+  it('is COUNTED, so an empty run is visible in the report and not just in the sink', async () => {
+    // Dropping `capture_ran` from ALL_EVENTS left every other test green: the line lands
+    // in the file, the validator accepts it, and the report silently omits it. A sink
+    // entry nobody aggregates answers no question — which is the same defect the event
+    // was added to fix, one layer up.
+    await seed([
+      entry({ event: 'capture_ran' }),
+      entry({ event: 'capture_ran' }),
+      entry({ event: 'capture_eligible' }),
+    ]);
+    const report = await buildCaptureReport();
+    expect(report.events['capture_ran']).toBe(2);
+    // And it must be a FULL record: a report that omits an event key entirely reads as
+    // "this never happened" rather than "this build does not know the key".
+    expect(Object.keys(report.events)).toContain('capture_ran');
+  });
+
+  it('breaks the passes into the four states the event exists to separate', async () => {
+    // The previous version of this test seeded ONLY the dead window and asserted zeros —
+    // which follow from EVENT_ZEROES alone, so deleting the entire emit left it green. It
+    // described a two-window comparison it never performed. This one seeds all four states
+    // at once, with DISTINCT counts so a swapped bucket shows.
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_ran' }),                    // facts absent → the pass failed
+      entry({ event: 'capture_ran', facts: 0 }),          // completed, nothing found
+      entry({ event: 'capture_ran', facts: 0 }),
+      entry({ event: 'capture_ran', facts: 3 }),          // completed, proposed 3
+      entry({ event: 'capture_ran', facts: 2 }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.capturePasses).toEqual({ failed: 1, empty: 2, produced: 2, factsProposed: 5 });
+    // …and the one integer that used to be the only answer still agrees with the parts.
+    const p = r.capturePasses;
+    expect(p.failed + p.empty + p.produced).toBe(r.events['capture_ran']);
+  });
+
+  it('a dead mechanism and a working one that finds nothing are DIFFERENT reports', async () => {
+    // Stated as the two windows, and actually compared — the distinction is the feature.
+    await seed([entry({ event: 'capture_eligible' }), entry({ event: 'capture_eligible' })]);
+    const dead = await buildCaptureReport();
+    expect(dead.capturePasses).toEqual({ failed: 0, empty: 0, produced: 0, factsProposed: 0 });
+
+    await seed([
+      entry({ event: 'capture_eligible' }), entry({ event: 'capture_ran', facts: 0 }),
+      entry({ event: 'capture_eligible' }), entry({ event: 'capture_ran', facts: 0 }),
+    ]);
+    const quiet = await buildCaptureReport();
+    expect(quiet.capturePasses.empty).toBe(2);
+    expect(quiet.capturePasses, 'a working-but-quiet pass reads as a dead one').not.toEqual(dead.capturePasses);
+  });
+
+  it('refuses a nonsense fact count instead of inventing a bucket for it', async () => {
+    await seed([
+      entry({ event: 'capture_ran', facts: -1 as unknown as number }),
+      entry({ event: 'capture_ran', facts: 'drei' as unknown as number }),
+    ]);
+    const r = await buildCaptureReport();
+    // Both fall back to `null`, i.e. "did not complete" — the conservative read. A negative
+    // is stopped by `>= 0`, a string by `typeof`; neither touches the finiteness clause,
+    // which is why the overflow case below is a SEPARATE test and not a third seed here.
+    expect(r.capturePasses.factsProposed).toBe(0);
+    expect(r.capturePasses.failed).toBe(2);
+  });
+
+  it('does not let an overflowing count turn the total into null', async () => {
+    // Written RAW, not via `entry()`: `JSON.stringify` emits Infinity as `null`, so a
+    // hostile value can never reach the parser through the helper and the test would prove
+    // nothing. The same technique is used for `ts` above, for the same reason — and this
+    // field was added WITHOUT the clamp its neighbours carry, so two 1e308 lines summed to
+    // Infinity and serialised back as `null`: "the sink is empty" while the counts say
+    // otherwise. That exact defect is one of the three this module's docblock lists.
+    await seed([
+      '{"event":"capture_ran","ts":1,"untrusted":false,"facts":1e999,"proposed":1e999}',
+      '{"event":"capture_ran","ts":2,"untrusted":false,"facts":1e308,"proposed":1e308}',
+      '{"event":"capture_ran","ts":3,"untrusted":false,"facts":1e308,"proposed":1e308}',
+    ]);
+    const r = await buildCaptureReport();
+    expect(Number.isFinite(r.capturePasses.factsProposed)).toBe(true);
+    expect(JSON.parse(JSON.stringify(r)).capturePasses.factsProposed).not.toBeNull();
+    // The 1e999 line is unusable and reads as "did not complete"; the two 1e308 lines are
+    // clamped rather than dropped, because a huge count is still evidence of a pass.
+    expect(r.capturePasses.failed).toBe(1);
+    expect(r.capturePasses.produced).toBe(2);
+  });
+
+  it('measures what the CEILING costs, not merely what got written', async () => {
+    // `facts` is post-ceiling by construction — the cap is applied inside the parser. A
+    // report built on it alone cannot tell a turn that offered nine facts from one that
+    // offered four, which is precisely how the legacy corpus lost its own distribution to
+    // its schema. `proposed` is the pre-ceiling count; the gap is the cost.
+    await seed([
+      entry({ event: 'capture_ran', facts: 4, proposed: 9 }),
+      entry({ event: 'capture_ran', facts: 2, proposed: 2 }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.capturePasses.factsProposed).toBe(11);
+    expect(r.capturePasses.produced).toBe(2);
+  });
+
+  it('falls back to the capped count on a line written before `proposed` existed', async () => {
+    await seed(['{"event":"capture_ran","ts":1,"untrusted":false,"facts":3}']);
+    const r = await buildCaptureReport();
+    // Not zero, and not dropped: an older line still carries a real lower bound.
+    expect(r.capturePasses.factsProposed).toBe(3);
+  });
+});
