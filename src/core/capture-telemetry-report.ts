@@ -1,5 +1,5 @@
 import { scanBoundedJsonl } from './bounded-jsonl-log.js';
-import { CAPTURE_TELEMETRY_LOG_FILE, type CaptureEvent, type CaptureOutcome } from './capture-telemetry.js';
+import { CAPTURE_TELEMETRY_LOG_FILE, PRE_ELIGIBLE_SUPPRESSED_REASONS, type CaptureEvent, type CaptureOutcome, type CaptureSuppressedReason } from './capture-telemetry.js';
 
 /**
  * The READ half of the durable-knowledge capture telemetry (DEF-dk-capture-observability).
@@ -52,10 +52,37 @@ export interface CaptureModelRate {
  * hook. What remains unmeasured: `isolated_memory` children, the `skipMemoryExtraction`
  * path, and an instance with no `Memory` at all. A non-zero `rememberOutsideEligible` is
  * a fact about the numbers, never a diagnosis.
+ *
+ * ▶ All three named unknowns are now COUNTED rather than reasoned about: `suppressed`
+ * breaks the turn-end hook's early exits down by cause. `isolated_memory` children and "an
+ * instance with no `Memory` at all" are the same `no_memory` counter seen from two ends, and
+ * `skipMemoryExtraction` is `extraction_off`. What stays true is the sentence above — a
+ * count there shows the mechanism firing, never that it explains this sink's gap.
+ *
+ * `suppressedRunsAlsoRemembering` is the one that can go further than a count: a run that
+ * was suppressed AND wrote a `remember_invoked` is a run contributing to the numerator and
+ * not the denominator, which is the gap's shape rather than a candidate for it.
  */
 export interface CapturePopulationSplit {
   /** Distinct runs that produced at least one `capture_eligible` — the denominator's population. */
   readonly eligibleRuns: number;
+  /**
+   * Runs that produced a PRE-ELIGIBLE `capture_suppressed` AND a `remember_invoked` — runs
+   * in the numerator whose turn never reached the denominator, the concrete shape of the
+   * gap `rememberOutsideEligible` can only report the size of.
+   *
+   * "Pre-eligible" is load-bearing, not a qualifier: `fallback_off` fires AFTER
+   * `capture_eligible` on the same run, so counting it here would fill a number defined by
+   * absence with runs that were present. Membership is decided by
+   * `PRE_ELIGIBLE_SUPPRESSED_REASONS`, never re-listed here.
+   *
+   * It exists because the field would otherwise be inert: the writer emits `runId` on every
+   * suppressed line, and before this the reader assigned run ids for `capture_eligible` and
+   * `remember_invoked` only, so the join that the id was carried FOR could not be made. A
+   * field the writer emits and the reader drops is not half a feature, it is one that reads
+   * as built — this file says so twice about other fields, and then did it again.
+   */
+  readonly suppressedRunsAlsoRemembering: number;
   /** Distinct runs that produced at least one `remember_invoked` — the numerator's population. */
   readonly rememberRuns: number;
   /** Distinct runs in BOTH — the only runs the quotient is actually about. */
@@ -254,6 +281,42 @@ export interface CaptureReport {
    */
   readonly capturePasses: Readonly<{ failed: number; empty: number; produced: number; factsProposed: number }>;
 
+  /**
+   * Turns the end-of-turn hook cut BEFORE either path, by which precondition cut them.
+   *
+   * This is the level above `capturePasses`: that one breaks down a pass that RAN, this one
+   * breaks down the turns where nothing ran at all. Before the `capture_suppressed` event
+   * those turns left no trace at either end of the fire-rate, which is why `populations`
+   * below can report the two ends disjoint and cannot say why.
+   *
+   * ⚠ The four reasons do NOT all sit on the same side of `capture_eligible`, and reading
+   * them as if they did is the mistake this list exists to prevent.
+   *
+   * PRE-eligible — the turn never entered the denominator:
+   *   `no_memory`      — no legacy `Memory` on the agent. Reachable on a DK instance: a
+   *                      sub-agent spawned with `isolated_memory: true` has none while still
+   *                      inheriting the DK flag, so it can emit the NUMERATOR and never the
+   *                      denominator. A count here is that mechanism firing; it is not by
+   *                      itself proof that it explains any particular gap.
+   *   `extraction_off` — the ghost/privacy toggle, per thread or per instance.
+   *   `internal_run`   — not a user turn.
+   *
+   * POST-eligible — the turn DID enter the denominator, then found no armed pass:
+   *   `fallback_off`   — every surface except the Web-UI chat endpoint, on every turn.
+   *
+   * And neither:
+   *   `unknown`        — a suppressed line whose reason this build does not recognise.
+   *
+   * ⚠ The pre-eligible THREE are not part of `capture_eligible`, by construction: folding
+   * them in would widen the denominator of a before/after comparison halfway through the
+   * window it is meant to compare, which is the one thing that measurement cannot survive.
+   * `fallback_off` is not in that set — an earlier version of this paragraph said "these"
+   * of all four, which made a false claim about the ONE reason that is already inside the
+   * denominator. `PRE_ELIGIBLE_SUPPRESSED_REASONS` is the single place that decides, and
+   * `suppressedRunsAlsoRemembering` reads it instead of restating the split.
+   */
+  readonly suppressed: Readonly<{ no_memory: number; extraction_off: number; internal_run: number; fallback_off: number; unknown: number }>;
+
   readonly blindness: CaptureReportBlindness;
 }
 
@@ -270,10 +333,15 @@ const MAX_RUN_KEY_CHARS = 128;
 /** Outcome values this build knows. Guards `outcomes` against an out-of-enum sink value. */
 const KNOWN_OUTCOMES: ReadonlySet<string> = new Set<CaptureOutcome>(['active', 'pending_review', 'rejected', 'superseded', 'deduped']);
 
+/** Suppression reasons this build knows. Guards the breakdown against an out-of-enum value. */
+const KNOWN_SUPPRESSED_REASONS: ReadonlySet<string> =
+  new Set<CaptureSuppressedReason>(['no_memory', 'extraction_off', 'internal_run', 'fallback_off']);
+
 /** Every event key, so the report always carries a full record rather than a sparse one. */
 const ALL_EVENTS: readonly CaptureEvent[] = [
   'capture_eligible',
   'capture_ran',
+  'capture_suppressed',
   'remember_invoked',
   'propose_shown',
   'propose_confirmed',
@@ -322,6 +390,13 @@ interface ValidatedEntry {
   readonly facts: number | null;
   /** Facts offered before the ceiling, for a `capture_ran` line; `null` when absent. */
   readonly proposed: number | null;
+  /**
+   * Which precondition cut a `capture_suppressed` turn. `null` on any other event, and on a
+   * suppressed line carrying a reason this build does not know — an out-of-enum value is
+   * counted in `suppressed.unknown` rather than dropped, so a newer writer against an older
+   * reader reads as "cannot tell", never as "did not happen".
+   */
+  readonly reason: CaptureSuppressedReason | null;
 }
 
 /**
@@ -405,6 +480,11 @@ function validateEntry(raw: unknown): ValidatedEntry | null {
     // state distinction the event exists for; dropping it collapses three states into one.
     facts: clampCount(r['facts']),
     proposed: clampCount(r['proposed']),
+    // Read for the same reason `facts` is: without it `capture_suppressed` collapses three
+    // causes into one count, which is the state this event was added to end.
+    reason: typeof r['reason'] === 'string' && KNOWN_SUPPRESSED_REASONS.has(r['reason'])
+      ? r['reason'] as CaptureSuppressedReason
+      : null,
   };
 }
 
@@ -431,10 +511,12 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   let untrustedEligible = 0;
   const rememberBySource = { model: 0, capture: 0, unknown: 0 };
   const capturePasses = { failed: 0, empty: 0, produced: 0, factsProposed: 0 };
+  const suppressed = { no_memory: 0, extraction_off: 0, internal_run: 0, fallback_off: 0, unknown: 0 };
   // The population split. Sets, not counters: a run that ends two eligible turns is ONE
   // run in the denominator's population, and counting events here would make the overlap
   // look larger than the number of runs that actually exist.
   const eligibleRuns = new Set<string>();
+  const suppressedRuns = new Set<string>();
   // Remember EVENTS per run, resolved after the scan: the turn-end event for a run is
   // written AFTER the tool call in that same run, so a single forward pass cannot know
   // yet whether a run will turn out eligible.
@@ -460,7 +542,11 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
       if (windowEnd === null || entry.ts > windowEnd) windowEnd = entry.ts;
     }
     if (entry.model === null) eventsWithoutModel++;
-    if (!entry.hasThread) eventsWithoutThread++;
+    // `capture_suppressed` carries no thread BY DESIGN (see the field's docblock), so it is
+    // excluded here rather than counted: a deliberate omission recorded as blindness would
+    // turn this counter into noise proportional to suppression volume, and the counter's job
+    // is to say when attribution was LOST.
+    if (!entry.hasThread && event !== 'capture_suppressed') eventsWithoutThread++;
 
     // Population assignment. Only the two fire-rate events participate: a `propose_*` or
     // `onboarding_*` line belongs to neither end of the quotient, and folding it into
@@ -469,13 +555,13 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
       if (entry.runId === null) eventsWithoutRun++;
       else if (event === 'capture_eligible') {
         if (!eligibleRuns.has(entry.runId)) {
-          if (eligibleRuns.size + rememberEventsByRun.size < maxEntries) eligibleRuns.add(entry.runId);
+          if (eligibleRuns.size + rememberEventsByRun.size + suppressedRuns.size < maxEntries) eligibleRuns.add(entry.runId);
           else eventsOverRunCap++;
         }
       }
       else if (rememberEventsByRun.has(entry.runId)) {
         rememberEventsByRun.set(entry.runId, rememberEventsByRun.get(entry.runId)! + 1);
-      } else if (eligibleRuns.size + rememberEventsByRun.size < maxEntries) {
+      } else if (eligibleRuns.size + rememberEventsByRun.size + suppressedRuns.size < maxEntries) {
         rememberEventsByRun.set(entry.runId, 1);
       } else eventsOverRunCap++;
     }
@@ -486,6 +572,29 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
       if (entry.facts === null) capturePasses.failed++;
       else if (entry.facts === 0) capturePasses.empty++;
       else { capturePasses.produced++; capturePasses.factsProposed += entry.proposed ?? entry.facts; }
+    }
+    if (event === 'capture_suppressed') {
+      suppressed[entry.reason ?? 'unknown']++;
+      // ONLY the pre-eligible reasons enter the join set. `fallback_off` shares its run
+      // with the `capture_eligible` emitted moments earlier — same `currentRunId` — so
+      // counting it would put fully healthy runs into a number defined as "runs that never
+      // reached the denominator", and the definition, not the count, would be the lie.
+      // `PRE_ELIGIBLE_SUPPRESSED_REASONS` decides, so the partition has ONE owner; wiring
+      // it here is also what stops it being an exported constant with no consumer, which is
+      // the same inert-symbol defect this file warns about twice above.
+      if (entry.runId !== null
+        && entry.reason !== null
+        && PRE_ELIGIBLE_SUPPRESSED_REASONS.has(entry.reason)
+        && !suppressedRuns.has(entry.runId)) {
+        // One budget across all three sets, checked the same way in all three places. The
+        // first cut checked the sum HERE but left the other two checking only each other,
+        // so this set could fill to the cap and the others still start from zero — a bound
+        // that reads as `maxEntries` and holds at 2x. A dropped run is counted, because a
+        // silent drop is a number that looks complete.
+        if (eligibleRuns.size + rememberEventsByRun.size + suppressedRuns.size < maxEntries) {
+          suppressedRuns.add(entry.runId);
+        } else eventsOverRunCap++;
+      }
     }
     if (event === 'remember_invoked' && entry.outcome !== null) {
       outcomes[entry.outcome] = (outcomes[entry.outcome] ?? 0) + 1;
@@ -508,7 +617,12 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   // `rememberOutsideEligible > 0` is the whole gap test: if no remember run overlaps,
   // every remember run is outside and each contributes at least one event, so the
   // "numerator over an empty denominator" shape needs no separate clause.
+  let suppressedRunsAlsoRemembering = 0;
+  for (const runId of suppressedRuns) {
+    if (rememberEventsByRun.has(runId)) suppressedRunsAlsoRemembering++;
+  }
   const populations: CapturePopulationSplit = {
+    suppressedRunsAlsoRemembering,
     eligibleRuns: eligibleRuns.size,
     rememberRuns: rememberEventsByRun.size,
     overlapRuns,
@@ -546,6 +660,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     populations,
     rememberBySource,
     capturePasses,
+    suppressed,
     blindness: {
       unparsableLines: scan.unparsableLines,
       malformedRecords,

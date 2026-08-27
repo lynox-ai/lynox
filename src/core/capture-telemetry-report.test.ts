@@ -248,7 +248,21 @@ describe('buildCaptureReport', () => {
       await seed([JSON.stringify({ ts: 1, event: 'capture_eligible', model: ['X'.repeat(500), 'i'], untrusted: false })]);
       const r = await buildCaptureReport();
       expect(r.byModel).toEqual([]);
-      expect(JSON.stringify(r).length).toBeLessThan(1000);
+      // The bound is on the ATTACKER-controlled part, so it has to be stated relative to
+      // the fixed part rather than as a bare constant. An empty report is the whole schema
+      // with zeros in it, and that grows every time a counter is added — this assertion
+      // went red on a 4-field addition for two characters, which is the assertion catching
+      // schema growth, not poison. Measuring the DELTA keeps it pinned on the 500-char
+      // payload: it must not survive anywhere in the output.
+      // No size assertion. It was a PROXY for "did the payload survive into the output",
+      // and a proxy on total length breaks whenever the schema grows — it went red on a
+      // four-counter addition, by two characters, in a test about poison. Worse, the
+      // obvious repair compared against a clean-model baseline that carries a `byModel`
+      // entry the poisoned report does not, so the delta ran NEGATIVE and the stated
+      // headroom was not the bound it read as. The two assertions below say the thing
+      // directly instead, and both die when the clamp is removed.
+      const poisoned = JSON.stringify(r);
+      expect(poisoned).not.toContain('X'.repeat(50));
     });
 
     it('clamps an over-long STRING model rather than dropping it', async () => {
@@ -687,5 +701,149 @@ describe('capture_ran — the pass announcing that it executed', () => {
     const r = await buildCaptureReport();
     // Not zero, and not dropped: an older line still carries a real lower bound.
     expect(r.capturePasses.factsProposed).toBe(3);
+  });
+});
+
+describe('capture_suppressed — the turns where NOTHING ran', () => {
+  it('breaks the hook\'s early exits into the causes the report used to call unmeasured', async () => {
+    // Distinct counts per bucket on purpose: equal ones would survive a swapped bucket.
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
+      entry({ event: 'capture_suppressed', reason: 'extraction_off' }),
+      entry({ event: 'capture_suppressed', reason: 'extraction_off' }),
+      entry({ event: 'capture_suppressed', reason: 'internal_run' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.suppressed).toEqual({ no_memory: 3, extraction_off: 2, internal_run: 1, fallback_off: 0, unknown: 0 });
+    // The parts must agree with the one integer, or one of the two is lying.
+    const s = r.suppressed;
+    expect(s.no_memory + s.extraction_off + s.internal_run + s.fallback_off + s.unknown).toBe(r.events['capture_suppressed']);
+  });
+
+  it('is in ALL_EVENTS — an event nobody aggregates answers nothing', async () => {
+    // The mutation that motivates this: dropping the key from ALL_EVENTS leaves the line in
+    // the sink, the validator accepting it, and the report silently omitting it. That exact
+    // survivor was found one layer down on `capture_ran`.
+    await seed([entry({ event: 'capture_suppressed', reason: 'internal_run' })]);
+    const r = await buildCaptureReport();
+    expect(Object.keys(r.events)).toContain('capture_suppressed');
+    expect(r.events['capture_suppressed']).toBe(1);
+  });
+
+  it('keeps an unrecognised reason as UNKNOWN rather than dropping the line', async () => {
+    // A newer writer against an older reader must read as "cannot tell", never as
+    // "did not happen" — the same rule `source` already follows.
+    await seed([
+      entry({ event: 'capture_suppressed', reason: 'a_future_cause' as never }),
+      entry({ event: 'capture_suppressed' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.suppressed.unknown).toBe(2);
+    expect(r.events['capture_suppressed']).toBe(2);
+  });
+
+  it('does NOT feed the denominator — fireRate is untouched by suppressed turns', async () => {
+    // The property the whole change rests on: widening `capture_eligible` mid-window would
+    // corrupt the before/after comparison this telemetry exists to serve.
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+    ]);
+    const without = await buildCaptureReport();
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
+      entry({ event: 'capture_suppressed', reason: 'internal_run' }),
+    ]);
+    const with_ = await buildCaptureReport();
+    expect(with_.fireRate).toBe(without.fireRate);
+    expect(with_.events['capture_eligible']).toBe(without.events['capture_eligible']);
+  });
+
+  it('a reason on a NON-suppressed event is ignored, not counted', async () => {
+    // Otherwise a stray field on an unrelated line inflates the breakdown, and the number
+    // that is supposed to explain a gap becomes another source of one.
+    await seed([entry({ event: 'capture_eligible', reason: 'no_memory' })]);
+    const r = await buildCaptureReport();
+    expect(r.suppressed).toEqual({ no_memory: 0, extraction_off: 0, internal_run: 0, fallback_off: 0, unknown: 0 });
+  });
+});
+
+describe('capture_suppressed — the JOIN that makes its runId worth carrying', () => {
+  it('names the runs that are in the numerator and not the denominator', async () => {
+    // The gap's SHAPE, not just its size: a run that was suppressed and still wrote a
+    // `remember_invoked` is exactly the isolated-memory child the `no_memory` counter is
+    // about. Without this the emitted `runId` was inert — read by the validator, used by
+    // nothing, which this file warns about twice for other fields.
+    await seed([
+      entry({ event: 'capture_suppressed', reason: 'no_memory', runId: 'r1' }),
+      entry({ event: 'remember_invoked', outcome: 'active', runId: 'r1' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory', runId: 'r2' }),
+      entry({ event: 'remember_invoked', outcome: 'active', runId: 'r3' }),
+      entry({ event: 'capture_eligible', runId: 'r3' }),
+    ]);
+    const r = await buildCaptureReport();
+    // r1 only: suppressed AND remembered. r2 suppressed but never remembered; r3 remembered
+    // but was eligible, so it is not a gap at all.
+    expect(r.populations.suppressedRunsAlsoRemembering).toBe(1);
+  });
+
+  it('EXCLUDES fallback_off — those runs did reach the denominator', async () => {
+    // `fallback_off` shares its run with the `capture_eligible` emitted moments before it,
+    // so counting it would fill a number defined as "never reached the denominator" with
+    // runs that did. Seeded as the realistic shape: eligible + suppressed + remembered, all
+    // one run — a fully healthy turn on an unarmed surface.
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r1' }),
+      entry({ event: 'capture_suppressed', reason: 'fallback_off', runId: 'r1' }),
+      entry({ event: 'remember_invoked', outcome: 'active', runId: 'r1' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.populations.suppressedRunsAlsoRemembering).toBe(0);
+    expect(r.suppressed.fallback_off).toBe(1);
+  });
+
+  it('is zero when no suppressed run ever remembered — not merely absent', async () => {
+    await seed([
+      entry({ event: 'capture_suppressed', reason: 'internal_run', runId: 'r9' }),
+      entry({ event: 'capture_eligible', runId: 'r8' }),
+      entry({ event: 'remember_invoked', outcome: 'active', runId: 'r8' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.populations.suppressedRunsAlsoRemembering).toBe(0);
+    // …and the sibling numbers still read as before, so the join did not disturb them.
+    expect(r.populations.overlapRuns).toBe(1);
+    expect(r.populations.rememberOutsideEligible).toBe(0);
+  });
+
+  it('counts fallback_off, the reason that IS in the denominator', async () => {
+    // The partition readers must not lose: three reasons fire INSTEAD of `capture_eligible`,
+    // `fallback_off` fires after it. Seeded together so a report cannot merge them.
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r1' }),
+      entry({ event: 'capture_suppressed', reason: 'fallback_off', runId: 'r1' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory', runId: 'r2' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.suppressed.fallback_off).toBe(1);
+    expect(r.suppressed.no_memory).toBe(1);
+    expect(r.events['capture_eligible']).toBe(1);
+  });
+
+  it('a thread-less suppressed line is NOT counted as lost attribution', async () => {
+    // The writer omits `thread` on purpose, so counting it as blindness would make that
+    // counter grow with suppression volume and stop meaning "attribution was lost".
+    await seed([
+      entry({ event: 'capture_suppressed', reason: 'no_memory', thread: undefined }),
+      entry({ event: 'capture_eligible', thread: undefined }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.blindness.eventsWithoutThread).toBe(1);
   });
 });

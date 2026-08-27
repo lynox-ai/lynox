@@ -52,6 +52,28 @@ export type CaptureEvent =
   // The third and fourth are the ones a rate needs; the second is the one that used to
   // masquerade as the first, because the failure path wrote only to stderr.
   | 'capture_ran'
+  // The turn-end hook was reached and returned WITHOUT reaching either path, naming which
+  // of its three preconditions returned first (`reason`). It is the level above
+  // `capture_ran`: that event separates four outcomes of a pass that RAN, this one separates
+  // "the pass did not run" into its causes instead of leaving it as an absence.
+  //
+  // Why it had to exist: `capture_eligible` fires AFTER these guards, while the `remember`
+  // TOOL HANDLER (`knowledge.ts`) fires behind none of them — so a turn cut here left no
+  // trace at either end of the fire-rate. The sink could show the two populations disjoint
+  // (measured: 910 numerator events against 0 denominator events) and could not say why.
+  // `capture-telemetry-report.ts` named these same three as unmeasured; they are now counted.
+  //
+  // ⚠ The asymmetry belongs to that WRITER, not to the event. Since the recovery pass
+  // shipped, `remember_invoked` has TWO writers — the tool handler, behind no guard, and
+  // `_captureFallback`, behind all three. An earlier version of this comment said the EVENT
+  // fires behind none of them, which is false and would have had a reader treat one number
+  // as one population. Two writers of a column are two signals sharing a name; `source`
+  // exists precisely so the report can tell them apart.
+  //
+  // ⚠ This event is NOT a second denominator. It deliberately does not widen
+  // `capture_eligible`, whose population has to stay comparable across a before/after
+  // window — that is the whole shape of the measurement it serves.
+  | 'capture_suppressed'
   | 'remember_invoked'   // the model recorded a durable fact (numerator)
   // propose→confirm→apply — ACTIVATED by Onboarding Wave 1 (Layer-1 Faden chips):
   | 'propose_shown'
@@ -61,6 +83,44 @@ export type CaptureEvent =
   | 'onboarding_started'
   | 'onboarding_step_completed'
   | 'onboarding_abandoned';
+
+/**
+ * Which precondition of the turn-end hook returned first, when the event is
+ * `capture_suppressed`.
+ *
+ * The values are the guards in their ORIGINAL short-circuit order, and the reader resolves
+ * them in that same order — a turn can satisfy two at once, so a reordering would silently
+ * re-label the population rather than change it.
+ *
+ * `fallback_off` is the one that does NOT belong to the prologue: the turn passed every
+ * precondition and emitted `capture_eligible`, then the recovery pass found itself unarmed.
+ * It exists because `captureFallback` is opted into at exactly ONE surface (the Web-UI chat
+ * endpoint), while `worker-loop.ts` runs scheduled tasks through a non-internal Session that
+ * has a `Memory` and therefore DOES count toward the denominator. Those turns had no
+ * mechanism and, until this reason existed, said nothing about it — the same silent-exit
+ * defect this event was created to end, one level further down.
+ *
+ * Deliberately NOT emitted for the `_sawRememberCall` exit beside it: that is the healthy
+ * case (the model already recorded the fact), and it is already visible as
+ * `remember_invoked` with `source: 'model'`. Counting it as a suppression would file a
+ * success under a failure heading.
+ *
+ * `no_memory` is the one worth reading twice: it is a null-check on the LEGACY store object
+ * that also gates the DK path, which never touches it. A sub-agent spawned with
+ * `isolated_memory: true` gets no `Memory` while still inheriting the DK flag, so it can
+ * emit the fire-rate's numerator and never its denominator. That is a mechanism, not yet a
+ * diagnosis of any particular sink.
+ */
+export type CaptureSuppressedReason = 'no_memory' | 'extraction_off' | 'internal_run' | 'fallback_off';
+
+/**
+ * The three reasons that fire INSTEAD of `capture_eligible` — the turn never entered the
+ * denominator. `fallback_off` is the odd one out and fires AFTER it, so a `fallback_off`
+ * turn IS in the denominator. The partition matters when reading the numbers, which is why
+ * it is a named constant rather than a sentence someone has to remember.
+ */
+export const PRE_ELIGIBLE_SUPPRESSED_REASONS: ReadonlySet<CaptureSuppressedReason> =
+  new Set<CaptureSuppressedReason>(['no_memory', 'extraction_off', 'internal_run']);
 
 /** The store outcome of a capture write, when the event is `remember_invoked`.
  *  Mirrors `KnowledgeStatus` (active/pending_review/rejected/superseded) + the
@@ -146,6 +206,18 @@ export interface CaptureTelemetryEntry {
   readonly primary?: boolean | undefined;
   /** `onboarding_*`: the funnel step index (no content). */
   readonly step?: number | undefined;
+  /**
+   * `capture_suppressed`: which precondition returned first. An enum, never text.
+   *
+   * ⚠ A `capture_suppressed` line deliberately carries NO `thread`. `extraction_off` is the
+   * ghost/privacy toggle — the mode for handing the instance to someone else — and a
+   * per-turn line naming the conversation would put metadata about a third party's session
+   * where that user had chosen to leave none. Nothing reads `thread` here, so the field
+   * costs a privacy question and buys nothing. `runId` IS kept: joining a suppressed run to
+   * a `remember_invoked` run is the evidence that decides whether these turns explain the
+   * fire-rate gap, and it is an opaque handle rather than a conversation pointer.
+   */
+  readonly reason?: CaptureSuppressedReason | undefined;
 }
 
 /**

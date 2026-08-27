@@ -70,7 +70,10 @@ interface Internals {
   _pendingMemory: Array<Promise<unknown>>;
   secretStore: { containsSecret(t: string): boolean; maskSecrets(t: string): string } | null;
   currentRunId: string | undefined;
+  currentThreadId: string | undefined;
   isInternalRun: boolean;
+  skipMemoryExtraction: boolean;
+  captureFallback: boolean;
 }
 
 const USAGE = { input_tokens: 900, output_tokens: 120, cache_creation_input_tokens: null, cache_read_input_tokens: null };
@@ -573,5 +576,235 @@ describe('turn-end capture — what an adversarial round found missing', () => {
     expect(inner._pendingMemory.length, 'the pass is not in the queue the turn awaits').toBe(1);
     release?.();
     await Promise.all(inner._pendingMemory);
+  });
+});
+
+/**
+ * The turn-end hook's early exits — the level ABOVE the pass.
+ *
+ * Every test above drives `_captureFallback` directly, so all of them stay green when the
+ * hook returns before ever reaching it. That is not hypothetical: `capture_eligible` fires
+ * AFTER these guards and `remember_invoked` fires behind none of them, so a turn cut here
+ * left no trace at either end of the fire-rate — measured as 910 numerator events against
+ * 0 denominator events, with no way to say why.
+ *
+ * For the four REASON tests the killing mutation is deleting or reordering the matching
+ * clause in `_captureGate`, not breaking the classifier. The other three are pinned by
+ * something else and say so at the test — the gate flag, the denominator, and the positive
+ * control. An earlier version of this sentence claimed all of them, which the PR's own
+ * mutation table contradicted.
+ */
+describe('turn-end capture — the SILENT exits, now named', () => {
+  function dkAgent(mutate: (inner: Agent & Internals) => void) {
+    const { inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    mutate(inner);
+    return inner;
+  }
+
+  function suppressedCalls() {
+    return vi.mocked(appendCaptureTelemetry).mock.calls
+      .filter(([, entry]) => entry?.event === 'capture_suppressed');
+  }
+
+  beforeEach(() => { vi.mocked(appendCaptureTelemetry).mockClear(); });
+
+  it('an isolated-memory child (no Memory) is COUNTED, not silent', () => {
+    // The live path: spawn.ts hands `memory: undefined` for `isolated_memory: true` while
+    // still passing `durableMemoryEnabled` through, so this agent can emit the numerator
+    // from the `remember` handler and could never emit anything from here.
+    const inner = dkAgent((a) => { a.memory = null; });
+    inner._captureAtTurnEnd(ANSWER);
+    const calls = suppressedCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![1]).toMatchObject({ event: 'capture_suppressed', reason: 'no_memory' });
+    expect(calls[0]![0]).toBe(true);
+  });
+
+  it('a DK-OFF instance passes the gate FALSE — the sink stays a no-op', () => {
+    // The assertion above cannot carry this on its own: in a DK-on agent the flag and a
+    // hard-coded `true` are indistinguishable, so replacing `this._durableMemoryEnabled`
+    // with `true` at the emit site SURVIVED the whole suite. Measured, not assumed — it is
+    // the one mutation this file did not kill on the first cut. The property at stake is
+    // the sink's founding one: byte-identical no-op wherever DK is off.
+    const { inner } = makeAgent();
+    inner._durableMemoryEnabled = false;
+    inner.memory = null;
+    inner._captureAtTurnEnd(ANSWER);
+    const calls = suppressedCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0], 'the emit ignores the DK flag — a DK-off instance would write').toBe(false);
+  });
+
+  it('the ghost/privacy toggle is counted as itself, not as an absence', () => {
+    const inner = dkAgent((a) => { a.skipMemoryExtraction = true; });
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()[0]![1]).toMatchObject({ reason: 'extraction_off' });
+  });
+
+  it('an internal run is counted as itself', () => {
+    const inner = dkAgent((a) => { a.isInternalRun = true; });
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()[0]![1]).toMatchObject({ reason: 'internal_run' });
+  });
+
+  it('reports the guard that ACTUALLY returned first when two hold at once', () => {
+    // Order is load-bearing: a reordering re-LABELS the population instead of changing it,
+    // and nothing else in the suite would notice. `no_memory` precedes `extraction_off`.
+    const inner = dkAgent((a) => {
+      a.memory = null;
+      a.skipMemoryExtraction = true;
+    });
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()[0]![1]).toMatchObject({ reason: 'no_memory' });
+  });
+
+  it('pins the OTHER half of the order — extraction_off precedes internal_run', () => {
+    // The first order test only pinned `no_memory` vs `extraction_off`; swapping the lower
+    // two survived the whole suite. Half a pinned order is an unpinned order: the code calls
+    // the sequence load-bearing, so every adjacent pair has to be.
+    const inner = dkAgent((a) => { a.skipMemoryExtraction = true; a.isInternalRun = true; });
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()[0]![1]).toMatchObject({ reason: 'extraction_off' });
+  });
+
+  it('carries the REAL taint on a suppressed line, not a constant', () => {
+    // The field's docblock argues it keeps suppression and untrustedness separable. Nothing
+    // read it, so hard-coding `untrusted: false` passed everything — the same defect the
+    // sibling turn-end test was written for after an adversarial round flipped that argument.
+    const inner = dkAgent((a) => {
+      a.skipMemoryExtraction = true;
+      (a as unknown as { _conversationSawUntrusted: boolean })._conversationSawUntrusted = true;
+    });
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()[0]![1]).toMatchObject({ reason: 'extraction_off', untrusted: true });
+  });
+
+  it('an ARMED-BUT-OFF pass is counted, and it is IN the denominator', async () => {
+    // The exit one level down, found by an adversarial refuter: `worker-loop.ts` runs
+    // scheduled tasks through a non-internal Session that HAS a Memory, so those turns pass
+    // every prologue guard, emit `capture_eligible`, and then find `captureFallback` false.
+    // Both lines must appear — the turn IS an opportunity, and it had no mechanism.
+    const { agent, inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    agent.captureFallback = false;
+    inner._captureAtTurnEnd(ANSWER);
+    await Promise.all(inner._pendingMemory);
+    const calls = vi.mocked(appendCaptureTelemetry).mock.calls;
+    expect(calls.filter(([, e]) => e?.event === 'capture_eligible')).toHaveLength(1);
+    const sup = calls.filter(([, e]) => e?.event === 'capture_suppressed');
+    expect(sup).toHaveLength(1);
+    expect(sup[0]![1]).toMatchObject({ reason: 'fallback_off' });
+  });
+
+  it('the HEALTHY stand-down is not filed as a suppression — ARMED surface', async () => {
+    // `_sawRememberCall` shares the exit but is the success case, already visible as
+    // `remember_invoked` with `source: 'model'`. Counting it here would put a success under
+    // a failure heading and inflate exactly the number that is supposed to explain a gap.
+    const { inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    inner._turnToolNames.add('remember');
+    inner._captureAtTurnEnd(ANSWER);
+    await Promise.all(inner._pendingMemory);
+    expect(suppressedCalls()).toHaveLength(0);
+  });
+
+  it('the HEALTHY stand-down is not filed as a suppression — UNARMED surface either', async () => {
+    // The combination the test above cannot reach: `makeAgent` arms the pass, so every
+    // assertion about the healthy exit was made on the one surface where `captureFallback`
+    // is true. On EVERY other surface — worker-loop, telegram, MCP, CLI — it is false on
+    // every turn, so emitting `fallback_off` before the `_sawRememberCall` check filed each
+    // turn where the model DID record a fact as a suppression. That defect passed the whole
+    // suite. The killing mutation is putting the emit back above that check.
+    const { agent, inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    agent.captureFallback = false;
+    inner._turnToolNames.add('remember');
+    inner._captureAtTurnEnd(ANSWER);
+    await Promise.all(inner._pendingMemory);
+    expect(suppressedCalls(), 'a turn the model DID record is filed as a suppression').toHaveLength(0);
+  });
+
+  it('the SECOND writer pins its own fields — thread and taint, not just the prologue', async () => {
+    // Two writers of one event are two signals sharing a name, and every field assertion
+    // above was made on the PROLOGUE writer only. Measured: re-adding `thread` and
+    // hard-coding `untrusted: false` at the `fallback_off` emit both SURVIVED the suite.
+    // The docblock's promise is an allquantor over every `capture_suppressed` line, and one
+    // of its two producers was unpinned — the same two-writer defect this branch corrects in
+    // the prose, found one level down in my own tests.
+    const { agent, inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    agent.captureFallback = false;
+    inner.currentThreadId = 'thread-xyz';
+    (inner as unknown as { _conversationSawUntrusted: boolean })._conversationSawUntrusted = true;
+    inner._captureAtTurnEnd(ANSWER);
+    await Promise.all(inner._pendingMemory);
+    const sup = suppressedCalls();
+    expect(sup).toHaveLength(1);
+    expect(sup[0]![1]).toMatchObject({ reason: 'fallback_off', untrusted: true });
+    expect(sup[0]![1].thread, 'the second writer leaks the conversation id').toBeUndefined();
+    // The control that makes the `thread` assertion mean something on THIS writer: the same
+    // agent DOES put the id on the `capture_eligible` line of the very same turn.
+    const eligible = vi.mocked(appendCaptureTelemetry).mock.calls
+      .filter(([, e]) => e?.event === 'capture_eligible');
+    expect(eligible[0]![1].thread).toBe('thread-xyz');
+  });
+
+  // ⚠ NOT covered, and deliberately not faked: hard-coding the DK gate to `true` at that
+  // same emit ALSO survives — but it is an EQUIVALENT mutant, not a gap. `_captureFallback`
+  // has exactly one call site (`agent.ts:1695`) and it sits inside `if (this._durableMemory
+  // Enabled)`, so the flag is provably true wherever this line runs. Writing a test that
+  // drives an unreachable state to kill it would manufacture coverage for a branch that
+  // cannot occur. The argument is kept because a second call site would make it load-bearing.
+
+  it('does NOT widen the denominator — a suppressed turn emits no capture_eligible', () => {
+    // The restraint this change is built on. `capture_eligible` is the denominator of a
+    // before/after comparison; a suppressed turn appearing there would corrupt the window.
+    const inner = dkAgent((a) => { a.memory = null; });
+    inner._captureAtTurnEnd(ANSWER);
+    const eligible = vi.mocked(appendCaptureTelemetry).mock.calls
+      .filter(([, entry]) => entry?.event === 'capture_eligible');
+    expect(eligible).toHaveLength(0);
+  });
+
+  it('carries NO thread — the privacy toggle must not leave per-conversation metadata', () => {
+    // `extraction_off` is the ghost mode used when handing the instance to someone else.
+    // A per-turn line naming the conversation would put metadata about a third party's
+    // session where that user chose to leave none, and nothing reads the field here.
+    const inner = dkAgent((a) => {
+      a.skipMemoryExtraction = true;
+      // A thread id MUST be present on the agent, or the assertion below is satisfied by the
+      // fixture rather than by the code — re-adding `thread: this.currentThreadId` survived
+      // the whole suite until this line existed. The sibling `capture_eligible` assertion
+      // proves the id is reachable, so an absent `thread` here is a decision, not a default.
+      a.currentThreadId = 'thread-abc';
+    });
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()[0]![1].thread, 'a suppressed line names the conversation').toBeUndefined();
+
+    // The control that makes the assertion above mean something: the same agent DOES put the
+    // id on an eligible line, so the omission is scoped to suppression.
+    vi.mocked(appendCaptureTelemetry).mockClear();
+    const ok = dkAgent((a) => { a.currentThreadId = 'thread-abc'; });
+    ok._captureAtTurnEnd(ANSWER);
+    const eligible = vi.mocked(appendCaptureTelemetry).mock.calls
+      .filter(([, e]) => e?.event === 'capture_eligible');
+    expect(eligible[0]![1].thread).toBe('thread-abc');
+  });
+
+  it('a turn that passes every guard emits capture_eligible and NO suppression line', () => {
+    // The positive control. Without it every assertion above is satisfied by a hook that
+    // suppresses unconditionally.
+    const inner = dkAgent(() => {});
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()).toHaveLength(0);
+    const eligible = vi.mocked(appendCaptureTelemetry).mock.calls
+      .filter(([, entry]) => entry?.event === 'capture_eligible');
+    expect(eligible).toHaveLength(1);
   });
 });
