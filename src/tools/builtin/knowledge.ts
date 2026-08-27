@@ -147,6 +147,9 @@ export const rememberTool: ToolEntry<RememberInput> = {
     void appendCaptureTelemetry(agent.durableMemoryEnabled === true, {
       ts: Date.now(),
       event: 'remember_invoked',
+      // Reuses the value derived once above, so the cause-log, the SSE chip, the model-visible
+      // string and this line can never disagree about why the write was queued.
+      cause: untrustedCause,
       thread: agent.currentThreadId,
       model: agent.model,
       untrusted: sourceUntrusted,
