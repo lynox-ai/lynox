@@ -33,6 +33,25 @@
  * - **The vault is read DIRECTLY, not through `SecretStore`.** The store cannot
  *   answer "does the vault have this?" once an environment value occupies the
  *   slot — the vault value is not out-ranked there, it is absent.
+ * - **The vault outranks the environment here, and for the SECRET half that
+ *   INVERTS the platform rule.** `SecretStore` states the opposite for secrets
+ *   in general — "explicit runtime env always overrides vault" — but only
+ *   `GOOGLE_CLIENT_SECRET` sits on the well-known preload list that enacts it
+ *   (`secret-store.ts`). The ID half is not on that list, so for it there is
+ *   nothing to invert; stating the rule as a whole-pair inversion overstates it.
+ *   The axis is ownership, not recency: a vault pair is a credential someone
+ *   deliberately put there — through Settings (managed BYO included, see
+ *   `CUSTOMER_WRITABLE_INFRA_PATTERNS` in `http-api.ts`), by the config→vault
+ *   migration, or restored wholesale by a migration import
+ *   (`migration-import.ts › restoreSecrets` writes back what
+ *   `migration-export.ts` took from `vault.getAll()` — filtered for empty
+ *   values, never by NAME) — while an
+ *   environment pair is whatever the deployment hands the process at start.
+ *   A deliberate act outranks ambient configuration, so changing the
+ *   environment must not silently move a running deployment off credentials
+ *   someone chose by hand. The order is not defended by this paragraph alone:
+ *   `google-client-pair.test.ts` pins it — swapping the two blocks below breaks
+ *   three asserts in "takes the VAULT pair when both exist".
  * - **A source must supply BOTH halves or it is skipped.** Never mixed.
  * - **Empty strings do not count**, and the reason is not the one it looks like.
  *   The old readers never handed `''` to Google either — the `if (id && secret)`
