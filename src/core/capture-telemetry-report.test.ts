@@ -36,6 +36,16 @@ function entry(e: Partial<CaptureTelemetryEntry> & Pick<CaptureTelemetryEntry, '
   return JSON.stringify({ ts: 1000, thread: 't1', model: 'ministral-14b-2512', untrusted: false, ...e });
 }
 
+/**
+ * The report a sink with NOTHING in it produces — the fixed cost of the schema itself.
+ * Used as the baseline for the size assertion below so that adding a counter cannot fail a
+ * test about POISON, while a payload that survives into the output still does.
+ */
+async function buildEmptyReportForSizing(): Promise<Awaited<ReturnType<typeof buildCaptureReport>>> {
+  await seed([]);
+  return buildCaptureReport();
+}
+
 /** Collect a scan into an array — convenience for the assertions below, never in prod code. */
 async function collect(): Promise<{ entries: CaptureTelemetryEntry[]; scan: Awaited<ReturnType<typeof scanBoundedJsonl>> }> {
   const entries: CaptureTelemetryEntry[] = [];
@@ -248,7 +258,15 @@ describe('buildCaptureReport', () => {
       await seed([JSON.stringify({ ts: 1, event: 'capture_eligible', model: ['X'.repeat(500), 'i'], untrusted: false })]);
       const r = await buildCaptureReport();
       expect(r.byModel).toEqual([]);
-      expect(JSON.stringify(r).length).toBeLessThan(1000);
+      // The bound is on the ATTACKER-controlled part, so it has to be stated relative to
+      // the fixed part rather than as a bare constant. An empty report is the whole schema
+      // with zeros in it, and that grows every time a counter is added — this assertion
+      // went red on a 4-field addition for two characters, which is the assertion catching
+      // schema growth, not poison. Measuring the DELTA keeps it pinned on the 500-char
+      // payload: it must not survive anywhere in the output.
+      const emptyBaseline = JSON.stringify(await buildEmptyReportForSizing()).length;
+      expect(JSON.stringify(r).length - emptyBaseline).toBeLessThan(100);
+      expect(JSON.stringify(r)).not.toContain('X'.repeat(50));
     });
 
     it('clamps an over-long STRING model rather than dropping it', async () => {
@@ -687,5 +705,76 @@ describe('capture_ran — the pass announcing that it executed', () => {
     const r = await buildCaptureReport();
     // Not zero, and not dropped: an older line still carries a real lower bound.
     expect(r.capturePasses.factsProposed).toBe(3);
+  });
+});
+
+describe('capture_suppressed — the turns where NOTHING ran', () => {
+  it('breaks the hook\'s early exits into the causes the report used to call unmeasured', async () => {
+    // Distinct counts per bucket on purpose: equal ones would survive a swapped bucket.
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
+      entry({ event: 'capture_suppressed', reason: 'extraction_off' }),
+      entry({ event: 'capture_suppressed', reason: 'extraction_off' }),
+      entry({ event: 'capture_suppressed', reason: 'internal_run' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.suppressed).toEqual({ no_memory: 3, extraction_off: 2, internal_run: 1, unknown: 0 });
+    // The parts must agree with the one integer, or one of the two is lying.
+    const s = r.suppressed;
+    expect(s.no_memory + s.extraction_off + s.internal_run + s.unknown).toBe(r.events['capture_suppressed']);
+  });
+
+  it('is in ALL_EVENTS — an event nobody aggregates answers nothing', async () => {
+    // The mutation that motivates this: dropping the key from ALL_EVENTS leaves the line in
+    // the sink, the validator accepting it, and the report silently omitting it. That exact
+    // survivor was found one layer down on `capture_ran`.
+    await seed([entry({ event: 'capture_suppressed', reason: 'internal_run' })]);
+    const r = await buildCaptureReport();
+    expect(Object.keys(r.events)).toContain('capture_suppressed');
+    expect(r.events['capture_suppressed']).toBe(1);
+  });
+
+  it('keeps an unrecognised reason as UNKNOWN rather than dropping the line', async () => {
+    // A newer writer against an older reader must read as "cannot tell", never as
+    // "did not happen" — the same rule `source` already follows.
+    await seed([
+      entry({ event: 'capture_suppressed', reason: 'a_future_cause' as never }),
+      entry({ event: 'capture_suppressed' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.suppressed.unknown).toBe(2);
+    expect(r.events['capture_suppressed']).toBe(2);
+  });
+
+  it('does NOT feed the denominator — fireRate is untouched by suppressed turns', async () => {
+    // The property the whole change rests on: widening `capture_eligible` mid-window would
+    // corrupt the before/after comparison this telemetry exists to serve.
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+    ]);
+    const without = await buildCaptureReport();
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
+      entry({ event: 'capture_suppressed', reason: 'internal_run' }),
+    ]);
+    const with_ = await buildCaptureReport();
+    expect(with_.fireRate).toBe(without.fireRate);
+    expect(with_.events['capture_eligible']).toBe(without.events['capture_eligible']);
+  });
+
+  it('a reason on a NON-suppressed event is ignored, not counted', async () => {
+    // Otherwise a stray field on an unrelated line inflates the breakdown, and the number
+    // that is supposed to explain a gap becomes another source of one.
+    await seed([entry({ event: 'capture_eligible', reason: 'no_memory' })]);
+    const r = await buildCaptureReport();
+    expect(r.suppressed).toEqual({ no_memory: 0, extraction_off: 0, internal_run: 0, unknown: 0 });
   });
 });

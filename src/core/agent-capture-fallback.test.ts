@@ -575,3 +575,103 @@ describe('turn-end capture — what an adversarial round found missing', () => {
     await Promise.all(inner._pendingMemory);
   });
 });
+
+/**
+ * The turn-end hook's early exits — the level ABOVE the pass.
+ *
+ * Every test above drives `_captureFallback` directly, so all of them stay green when the
+ * hook returns before ever reaching it. That is not hypothetical: `capture_eligible` fires
+ * AFTER these guards and `remember_invoked` fires behind none of them, so a turn cut here
+ * left no trace at either end of the fire-rate — measured as 910 numerator events against
+ * 0 denominator events, with no way to say why.
+ *
+ * The killing mutation for each test below is deleting or reordering the matching clause in
+ * `_captureSuppressionReason`, NOT breaking the classifier.
+ */
+describe('turn-end capture — the SILENT exits, now named', () => {
+  function dkAgent(mutate: (inner: Agent & Internals) => void) {
+    const { inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    mutate(inner);
+    return inner;
+  }
+
+  function suppressedCalls() {
+    return vi.mocked(appendCaptureTelemetry).mock.calls
+      .filter(([, entry]) => entry?.event === 'capture_suppressed');
+  }
+
+  beforeEach(() => { vi.mocked(appendCaptureTelemetry).mockClear(); });
+
+  it('an isolated-memory child (no Memory) is COUNTED, not silent', () => {
+    // The live path: spawn.ts hands `memory: undefined` for `isolated_memory: true` while
+    // still passing `durableMemoryEnabled` through, so this agent can emit the numerator
+    // from the `remember` handler and could never emit anything from here.
+    const inner = dkAgent((a) => { a.memory = null; });
+    inner._captureAtTurnEnd(ANSWER);
+    const calls = suppressedCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![1]).toMatchObject({ event: 'capture_suppressed', reason: 'no_memory' });
+    expect(calls[0]![0]).toBe(true);
+  });
+
+  it('a DK-OFF instance passes the gate FALSE — the sink stays a no-op', () => {
+    // The assertion above cannot carry this on its own: in a DK-on agent the flag and a
+    // hard-coded `true` are indistinguishable, so replacing `this._durableMemoryEnabled`
+    // with `true` at the emit site SURVIVED the whole suite. Measured, not assumed — it is
+    // the one mutation this file did not kill on the first cut. The property at stake is
+    // the sink's founding one: byte-identical no-op wherever DK is off.
+    const { inner } = makeAgent();
+    inner._durableMemoryEnabled = false;
+    inner.memory = null;
+    inner._captureAtTurnEnd(ANSWER);
+    const calls = suppressedCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0], 'the emit ignores the DK flag — a DK-off instance would write').toBe(false);
+  });
+
+  it('the ghost/privacy toggle is counted as itself, not as an absence', () => {
+    const inner = dkAgent((a) => { (a as unknown as { skipMemoryExtraction: boolean }).skipMemoryExtraction = true; });
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()[0]![1]).toMatchObject({ reason: 'extraction_off' });
+  });
+
+  it('an internal run is counted as itself', () => {
+    const inner = dkAgent((a) => { a.isInternalRun = true; });
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()[0]![1]).toMatchObject({ reason: 'internal_run' });
+  });
+
+  it('reports the guard that ACTUALLY returned first when two hold at once', () => {
+    // Order is load-bearing: a reordering re-LABELS the population instead of changing it,
+    // and nothing else in the suite would notice. `no_memory` precedes `extraction_off`.
+    const inner = dkAgent((a) => {
+      a.memory = null;
+      (a as unknown as { skipMemoryExtraction: boolean }).skipMemoryExtraction = true;
+    });
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()[0]![1]).toMatchObject({ reason: 'no_memory' });
+  });
+
+  it('does NOT widen the denominator — a suppressed turn emits no capture_eligible', () => {
+    // The restraint this change is built on. `capture_eligible` is the denominator of a
+    // before/after comparison; a suppressed turn appearing there would corrupt the window.
+    const inner = dkAgent((a) => { a.memory = null; });
+    inner._captureAtTurnEnd(ANSWER);
+    const eligible = vi.mocked(appendCaptureTelemetry).mock.calls
+      .filter(([, entry]) => entry?.event === 'capture_eligible');
+    expect(eligible).toHaveLength(0);
+  });
+
+  it('a turn that passes every guard emits capture_eligible and NO suppression line', () => {
+    // The positive control. Without it every assertion above is satisfied by a hook that
+    // suppresses unconditionally.
+    const inner = dkAgent(() => {});
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()).toHaveLength(0);
+    const eligible = vi.mocked(appendCaptureTelemetry).mock.calls
+      .filter(([, entry]) => entry?.event === 'capture_eligible');
+    expect(eligible).toHaveLength(1);
+  });
+});

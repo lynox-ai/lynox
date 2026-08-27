@@ -52,6 +52,21 @@ export type CaptureEvent =
   // The third and fourth are the ones a rate needs; the second is the one that used to
   // masquerade as the first, because the failure path wrote only to stderr.
   | 'capture_ran'
+  // The turn-end hook was reached and returned WITHOUT reaching either path, naming which
+  // of its three preconditions returned first (`reason`). It is the level above
+  // `capture_ran`: that event separates four outcomes of a pass that RAN, this one separates
+  // "the pass did not run" into its causes instead of leaving it as an absence.
+  //
+  // Why it had to exist: `capture_eligible` fires AFTER these guards and `remember_invoked`
+  // fires behind none of them, so a turn cut here left no trace at either end of the
+  // fire-rate — the sink could show the two populations disjoint (measured: 910 numerator
+  // events against 0 denominator events) and could not say why. `capture-telemetry-report.ts`
+  // named these same three as unmeasured; they are now counted.
+  //
+  // ⚠ This event is NOT a second denominator. It deliberately does not widen
+  // `capture_eligible`, whose population has to stay comparable across a before/after
+  // window — that is the whole shape of the measurement it serves.
+  | 'capture_suppressed'
   | 'remember_invoked'   // the model recorded a durable fact (numerator)
   // propose→confirm→apply — ACTIVATED by Onboarding Wave 1 (Layer-1 Faden chips):
   | 'propose_shown'
@@ -61,6 +76,22 @@ export type CaptureEvent =
   | 'onboarding_started'
   | 'onboarding_step_completed'
   | 'onboarding_abandoned';
+
+/**
+ * Which precondition of the turn-end hook returned first, when the event is
+ * `capture_suppressed`.
+ *
+ * The values are the guards in their ORIGINAL short-circuit order, and the reader resolves
+ * them in that same order — a turn can satisfy two at once, so a reordering would silently
+ * re-label the population rather than change it.
+ *
+ * `no_memory` is the one worth reading twice: it is a null-check on the LEGACY store object
+ * that also gates the DK path, which never touches it. A sub-agent spawned with
+ * `isolated_memory: true` gets no `Memory` while still inheriting the DK flag, so it can
+ * emit the fire-rate's numerator and never its denominator. That is a mechanism, not yet a
+ * diagnosis of any particular sink.
+ */
+export type CaptureSuppressedReason = 'no_memory' | 'extraction_off' | 'internal_run';
 
 /** The store outcome of a capture write, when the event is `remember_invoked`.
  *  Mirrors `KnowledgeStatus` (active/pending_review/rejected/superseded) + the
@@ -146,6 +177,8 @@ export interface CaptureTelemetryEntry {
   readonly primary?: boolean | undefined;
   /** `onboarding_*`: the funnel step index (no content). */
   readonly step?: number | undefined;
+  /** `capture_suppressed`: which precondition returned first. An enum, never text. */
+  readonly reason?: CaptureSuppressedReason | undefined;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { scanBoundedJsonl } from './bounded-jsonl-log.js';
-import { CAPTURE_TELEMETRY_LOG_FILE, type CaptureEvent, type CaptureOutcome } from './capture-telemetry.js';
+import { CAPTURE_TELEMETRY_LOG_FILE, type CaptureEvent, type CaptureOutcome, type CaptureSuppressedReason } from './capture-telemetry.js';
 
 /**
  * The READ half of the durable-knowledge capture telemetry (DEF-dk-capture-observability).
@@ -52,6 +52,13 @@ export interface CaptureModelRate {
  * hook. What remains unmeasured: `isolated_memory` children, the `skipMemoryExtraction`
  * path, and an instance with no `Memory` at all. A non-zero `rememberOutsideEligible` is
  * a fact about the numbers, never a diagnosis.
+ *
+ * ▶ Two of the three named unknowns are now COUNTED, not reasoned about: `suppressed`
+ * breaks the turn-end hook's early exits down by cause, so `no_memory` (which is what an
+ * `isolated_memory` child hits) and `extraction_off` are numbers on the same report. What
+ * stays true is the sentence above it — a count there shows the mechanism firing, not that
+ * it explains this sink's gap. The third, "an instance with no `Memory` at all", is the
+ * same `no_memory` counter seen from the instance rather than the child.
  */
 export interface CapturePopulationSplit {
   /** Distinct runs that produced at least one `capture_eligible` — the denominator's population. */
@@ -254,6 +261,29 @@ export interface CaptureReport {
    */
   readonly capturePasses: Readonly<{ failed: number; empty: number; produced: number; factsProposed: number }>;
 
+  /**
+   * Turns the end-of-turn hook cut BEFORE either path, by which precondition cut them.
+   *
+   * This is the level above `capturePasses`: that one breaks down a pass that RAN, this one
+   * breaks down the turns where nothing ran at all. Before the `capture_suppressed` event
+   * those turns left no trace at either end of the fire-rate, which is why `populations`
+   * below can report the two ends disjoint and cannot say why.
+   *
+   *   `no_memory`      — no legacy `Memory` on the agent. Reachable on a DK instance: a
+   *                      sub-agent spawned with `isolated_memory: true` has none while still
+   *                      inheriting the DK flag, so it can emit the NUMERATOR and never the
+   *                      denominator. A count here is that mechanism firing; it is not by
+   *                      itself proof that it explains any particular gap.
+   *   `extraction_off` — the ghost/privacy toggle, per thread or per instance.
+   *   `internal_run`   — not a user turn.
+   *   `unknown`        — a suppressed line whose reason this build does not recognise.
+   *
+   * ⚠ These are NOT part of `capture_eligible`, by construction. Folding them in would
+   * widen the denominator of a before/after comparison halfway through the window it is
+   * meant to compare, which is the one thing that measurement cannot survive.
+   */
+  readonly suppressed: Readonly<{ no_memory: number; extraction_off: number; internal_run: number; unknown: number }>;
+
   readonly blindness: CaptureReportBlindness;
 }
 
@@ -270,10 +300,15 @@ const MAX_RUN_KEY_CHARS = 128;
 /** Outcome values this build knows. Guards `outcomes` against an out-of-enum sink value. */
 const KNOWN_OUTCOMES: ReadonlySet<string> = new Set<CaptureOutcome>(['active', 'pending_review', 'rejected', 'superseded', 'deduped']);
 
+/** Suppression reasons this build knows. Guards the breakdown against an out-of-enum value. */
+const KNOWN_SUPPRESSED_REASONS: ReadonlySet<string> =
+  new Set<CaptureSuppressedReason>(['no_memory', 'extraction_off', 'internal_run']);
+
 /** Every event key, so the report always carries a full record rather than a sparse one. */
 const ALL_EVENTS: readonly CaptureEvent[] = [
   'capture_eligible',
   'capture_ran',
+  'capture_suppressed',
   'remember_invoked',
   'propose_shown',
   'propose_confirmed',
@@ -322,6 +357,13 @@ interface ValidatedEntry {
   readonly facts: number | null;
   /** Facts offered before the ceiling, for a `capture_ran` line; `null` when absent. */
   readonly proposed: number | null;
+  /**
+   * Which precondition cut a `capture_suppressed` turn. `null` on any other event, and on a
+   * suppressed line carrying a reason this build does not know — an out-of-enum value is
+   * counted in `suppressed.unknown` rather than dropped, so a newer writer against an older
+   * reader reads as "cannot tell", never as "did not happen".
+   */
+  readonly reason: CaptureSuppressedReason | null;
 }
 
 /**
@@ -405,6 +447,11 @@ function validateEntry(raw: unknown): ValidatedEntry | null {
     // state distinction the event exists for; dropping it collapses three states into one.
     facts: clampCount(r['facts']),
     proposed: clampCount(r['proposed']),
+    // Read for the same reason `facts` is: without it `capture_suppressed` collapses three
+    // causes into one count, which is the state this event was added to end.
+    reason: typeof r['reason'] === 'string' && KNOWN_SUPPRESSED_REASONS.has(r['reason'])
+      ? r['reason'] as CaptureSuppressedReason
+      : null,
   };
 }
 
@@ -431,6 +478,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   let untrustedEligible = 0;
   const rememberBySource = { model: 0, capture: 0, unknown: 0 };
   const capturePasses = { failed: 0, empty: 0, produced: 0, factsProposed: 0 };
+  const suppressed = { no_memory: 0, extraction_off: 0, internal_run: 0, unknown: 0 };
   // The population split. Sets, not counters: a run that ends two eligible turns is ONE
   // run in the denominator's population, and counting events here would make the overlap
   // look larger than the number of runs that actually exist.
@@ -487,6 +535,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
       else if (entry.facts === 0) capturePasses.empty++;
       else { capturePasses.produced++; capturePasses.factsProposed += entry.proposed ?? entry.facts; }
     }
+    if (event === 'capture_suppressed') suppressed[entry.reason ?? 'unknown']++;
     if (event === 'remember_invoked' && entry.outcome !== null) {
       outcomes[entry.outcome] = (outcomes[entry.outcome] ?? 0) + 1;
     }
@@ -546,6 +595,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     populations,
     rememberBySource,
     capturePasses,
+    suppressed,
     blindness: {
       unparsableLines: scan.unparsableLines,
       malformedRecords,

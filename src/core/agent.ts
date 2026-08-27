@@ -35,6 +35,7 @@ import { deriveTurnUntrusted, describeTurnUntrusted } from './untrusted-signals.
 import { appendUntrustedCauseLog } from './untrusted-cause-log.js';
 import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
+import type { CaptureSuppressedReason } from './capture-telemetry.js';
 import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
@@ -1559,8 +1560,53 @@ export class Agent implements IAgent {
     }
   }
 
+  /**
+   * Which of `_captureAtTurnEnd`'s preconditions returns first, or null when the turn
+   * proceeds. Split out so the reported reason and the control flow cannot drift: the
+   * order below IS the order of the guard it replaced, and reordering it would re-label
+   * the population rather than change it.
+   */
+  private _captureSuppressionReason(): CaptureSuppressedReason | null {
+    if (!this.memory) return 'no_memory';
+    if (this.skipMemoryExtraction) return 'extraction_off';
+    if (this.isInternalRun) return 'internal_run';
+    return null;
+  }
+
   private _captureAtTurnEnd(text: string): void {
-    if (!this.memory || this.skipMemoryExtraction || this.isInternalRun) return;
+    // The three preconditions the LEGACY extractor needed. The DK branch below inherited
+    // all three, and two of them carry the same meaning on both paths: an internal run is
+    // not a user turn, and `skipMemoryExtraction` is the ghost/privacy toggle, which the
+    // DK review queue must honour exactly as the legacy extractor did.
+    //
+    // The third does not. `!this.memory` is a null-check on the LEGACY store object, and
+    // `_captureFallback` never reads it — it writes through `toolContext.knowledgeStore`.
+    // A sub-agent spawned with `isolated_memory: true` gets `memory === undefined` while
+    // still inheriting `durableMemoryEnabled` (spawn.ts), so it can emit the fire-rate's
+    // NUMERATOR from the `remember` handler and can never emit the denominator from here.
+    //
+    // That coupling is NOT dissolved here, and the restraint is the point: `capture_eligible`
+    // is the denominator of a before/after comparison, so widening its population mid-window
+    // would corrupt the comparison it exists for. What changes is that the exit stops being
+    // SILENT — until now all three returned with no event at all, which is why the report can
+    // say the two populations are disjoint but not why. Whether the DK path should depend on
+    // the legacy object at all is a separate decision, filed rather than taken here.
+    const suppressedReason = this._captureSuppressionReason();
+    if (suppressedReason !== null) {
+      void appendCaptureTelemetry(this._durableMemoryEnabled, {
+        ts: Date.now(),
+        event: 'capture_suppressed',
+        thread: this.currentThreadId,
+        model: this.model,
+        // Carried for the same reason every other line carries it: a suppressed turn that
+        // was ALSO untrusted would have routed to review rather than been minted, so the
+        // two questions stay separable in the record instead of collapsing into one.
+        untrusted: deriveTurnUntrusted(this),
+        reason: suppressedReason,
+        runId: this.currentRunId,
+      });
+      return;
+    }
     // The FULL untrusted union (deriveTurnUntrusted) — marker OR an external-content tool ran
     // this turn OR the conversation ingested untrusted content. The bare `_sawUntrustedData`
     // marker is allowlist-by-omission (`web_research`/`bash`/`read_file` return external content
@@ -1624,6 +1670,8 @@ export class Agent implements IAgent {
     // untrusted turn does not ROUTE the capture, it CANCELS it. There is no queue entry to
     // find afterwards, so without the line above this abstention leaves no trace at all.
     if (turnUntrusted) return;
+    // Narrowing only — `no_memory` already returned above, so this can never be the exit.
+    if (!this.memory) return;
     const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
     this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
   }
