@@ -340,6 +340,27 @@ export interface CaptureReport {
     unattributed: number; conversationOnlyShare: number | null;
   }>;
 
+  /**
+   * The capture rate STRATIFIED BY CAUSE — eligible turns, remember-writes and the rate
+   * between them, per untrusted member.
+   *
+   * This is what makes the numerator's `cause` load-bearing rather than decorative. An earlier
+   * cut wrote the field at every writer and consumed it only on `capture_eligible`, which is
+   * precisely the inert-field defect this sink has produced repeatedly: written, validated,
+   * read by nothing. Here both ends are consumed, and the per-cause rate is the quantity part
+   * (b) actually asks for — the capture rate held constant for turn type, which the row's own
+   * 08-03 block demands and a single boolean cannot deliver.
+   *
+   * ⚠ `rate` is null where a cause has no eligible turns: an absent stratum is "cannot tell",
+   * never zero.
+   */
+  readonly rateByCause: ReadonlyArray<{
+    readonly cause: UntrustedCause | 'unattributed';
+    readonly eligible: number;
+    readonly remembered: number;
+    readonly rate: number | null;
+  }>;
+
   readonly suppressed: Readonly<{ no_memory: number; extraction_off: number; internal_run: number; fallback_off: number; unknown: number }>;
 
   readonly blindness: CaptureReportBlindness;
@@ -515,11 +536,13 @@ function validateEntry(raw: unknown): ValidatedEntry | null {
     // state distinction the event exists for; dropping it collapses three states into one.
     facts: clampCount(r['facts']),
     proposed: clampCount(r['proposed']),
-    // Read for the same reason `facts` is: without it `capture_suppressed` collapses three
-    // causes into one count, which is the state this event was added to end.
+    // Which untrusted member fired. Read on BOTH ends, because a numerator stratified by
+    // cause against an unstratified denominator is not a ratio.
     cause: typeof r['cause'] === 'string' && KNOWN_CAUSES.has(r['cause'])
       ? r['cause'] as UntrustedCause
       : null,
+    // Read for the same reason `facts` is: without it `capture_suppressed` collapses its
+    // causes into one count, which is the state that event was added to end.
     reason: typeof r['reason'] === 'string' && KNOWN_SUPPRESSED_REASONS.has(r['reason'])
       ? r['reason'] as CaptureSuppressedReason
       : null,
@@ -551,6 +574,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   const capturePasses = { failed: 0, empty: 0, produced: 0, factsProposed: 0 };
   const suppressed = { no_memory: 0, extraction_off: 0, internal_run: 0, fallback_off: 0, unknown: 0 };
   const byCause = { none: 0, marker: 0, 'external-tool': 0, conversation: 0, unattributed: 0 };
+  const rememberByCause = { none: 0, marker: 0, 'external-tool': 0, conversation: 0, unattributed: 0 };
   // The population split. Sets, not counters: a run that ends two eligible turns is ONE
   // run in the denominator's population, and counting events here would make the overlap
   // look larger than the number of runs that actually exist.
@@ -606,10 +630,11 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     }
 
     if (event === 'capture_eligible' && entry.untrusted) untrustedEligible++;
-    // ONLY the denominator's own event feeds this. Folding `remember_invoked` in as well would
-    // mix the two ends into one histogram, and the share below would stop being a share of
-    // eligible turns while still carrying the name.
+    // The two ends stay in SEPARATE histograms. Folding them into one would keep the field
+    // name and silently change what the share is a share of — and an `=== 'capture_eligible'`
+    // guard that quietly widens to any other event is the mutation the tests below seed for.
     if (event === 'capture_eligible') byCause[entry.cause ?? 'unattributed']++;
+    if (event === 'remember_invoked') rememberByCause[entry.cause ?? 'unattributed']++;
     if (event === 'remember_invoked') rememberBySource[entry.source ?? 'unknown']++;
     if (event === 'capture_ran') {
       if (entry.facts === null) capturePasses.failed++;
@@ -678,6 +703,8 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     blindNote: eventsWithoutRun > 0 || eventsOverRunCap > 0 ? BLIND_NOTE : null,
   };
 
+  const rateByCause = (['none', 'marker', 'external-tool', 'conversation', 'unattributed'] as const)
+    .map((c) => ({ cause: c, eligible: byCause[c], remembered: rememberByCause[c], rate: rate(rememberByCause[c], byCause[c]) }));
   const attributedEligible = byCause.none + byCause.marker + byCause['external-tool'] + byCause.conversation;
   const eligibleByCause = {
     ...byCause,
@@ -710,6 +737,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     rememberBySource,
     capturePasses,
     eligibleByCause,
+    rateByCause,
     suppressed,
     blindness: {
       unparsableLines: scan.unparsableLines,

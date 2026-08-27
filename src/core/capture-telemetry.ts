@@ -217,12 +217,32 @@ export interface CaptureTelemetryEntry {
    * sharing one field name. The cause survives that boundary: it names the member, and the
    * member is what the redesign removes.
    *
-   * What makes it decision-grade is the PRIORITY ORDER of `describeTurnUntrusted`
-   * (marker → external-tool → conversation): `cause === 'conversation'` implies the other two
-   * are false, so its share of capture-eligible turns is exactly the set that would come clean
-   * if the conversation-sticky half went — from ONE window, with no after-window, because
-   * `knowledge-store.ts` maps taint to status with a ternary. An UPPER BOUND, not a point
-   * estimate: the PRD is two-part and only Regime A becomes data-scoped.
+   * The PRIORITY ORDER of `describeTurnUntrusted` (marker → external-tool → conversation) makes
+   * `cause === 'conversation'` imply the other two are false, so that count is exactly the set
+   * of turns held tainted by the conversation-sticky latch ALONE.
+   *
+   * ⚠ What that number is NOT, corrected after an adversarial round refuted the first version.
+   * It is **not** an upper bound on what `DEF-data-scoped-taint` would flip. That PRD scopes
+   * Part A to engine-written, model-untouched values and says so in as many words — *"Explicitly
+   * NOT `remember` (regime B)"* (§5 A1) — while §6 B5 decides *"Do not weaken the latch for
+   * regime B."* Every event this field rides is regime B: the model produced the value, or the
+   * recovery pass extracted it from the model's output. Under the PRD as written the flip count
+   * for this population is ZERO BY SCOPE, so calling the share an upper bound bounds a known
+   * zero: true, and empty.
+   *
+   * What it IS, and this is the useful reading: **the price the regime-B latch charges.**
+   * `DEF-data-scoped-taint` carries a `gating` claim that the latch is why capture looks dead
+   * fleet-wide. That claim and B5 cannot both stand — if the latch is that expensive, the
+   * decision not to weaken it for regime B is the expensive one, and it is B5 that needs
+   * re-opening rather than Part A. This share is the number that settles which.
+   *
+   * ⚠ And it settles ROUTING only. `knowledge-store.ts` maps taint to status with a ternary,
+   * so where a write lands is computable from the taint — but the ternary runs per WRITE while
+   * this share is per TURN (the pass writes up to four), so the two are not the same quantity.
+   * Worse for the "no after-window" claim: the taint is MODEL-VISIBLE. `knowledge.ts` returns a
+   * cause-naming string to the model and sends a review chip to the user, so changing the rule
+   * changes what both do next. The routing half is predictable; the behavioural half is not,
+   * and only a real after-window can carry it.
    *
    * WHO WRITES IT, spelled out because this event family keeps growing a second writer nobody
    * notices. Every writer derives it from `describeTurnUntrusted` over the same agent at the
@@ -232,9 +252,12 @@ export interface CaptureTelemetryEntry {
    *   `remember_invoked` — TWO writers: the `remember` tool handler (`source: 'model'`) and
    *                        the recovery pass (`source: 'capture'`). Both set it.
    *
-   * The invariant to pin: `cause === 'none'` ⟺ `untrusted === false`, on every line from every
-   * writer. Both come from one signal set; a line where they disagree means some writer
-   * computed one of them somewhere else.
+   * The invariant to pin: `cause === 'none'` ⟺ `untrusted === false`, on every line **that
+   * carries a cause**. The scope matters and the first version got it wrong: `http-api.ts`
+   * emits `onboarding_step_completed` with an `untrusted` boolean and no cause at all, so a
+   * claim over *every* writer is false — and the test cannot see it, because it filters to
+   * cause-carrying lines. Within that scope both fields come from one evaluation, derived
+   * together and passed down rather than re-read (see `_captureFallback`).
    *
    * ⚠ Deliberately NOT set on `capture_suppressed`, as a decision rather than an oversight.
    * The pre-eligible reasons never enter the denominator, so their cause cannot enter the

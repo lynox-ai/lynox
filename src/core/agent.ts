@@ -32,6 +32,7 @@ import { StreamProcessor } from './stream.js';
 import { CostGuard } from './cost-guard.js';
 import { classifyProviderFailure, type RunFailure } from './provider-failure.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from './untrusted-signals.js';
+import type { UntrustedCause } from './untrusted-signals.js';
 import { appendUntrustedCauseLog } from './untrusted-cause-log.js';
 import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
@@ -1383,7 +1384,16 @@ export class Agent implements IAgent {
    * Silent by design when it finds nothing: most turns hold no durable fact, and
    * the classifier is told that an empty list is the expected answer.
    */
-  private async _captureFallback(text: string, turnUntrusted: boolean): Promise<void> {
+  /**
+   * `turnCause` is PASSED IN, not re-derived. Both taint fields on this pass's lines must come
+   * from one evaluation: the emits below run AFTER `await stream.finalMessage()`, so deriving
+   * the cause here would read the signals at a later moment than the boolean beside it, and the
+   * two could disagree the instant any caller stops being terminal. Not reachable today — every
+   * `_captureAtTurnEnd` site is the end of its turn — and a same-tick test cannot see it, which
+   * is exactly why it is closed by construction instead of by assertion. `knowledge.ts` derives
+   * once for the same reason.
+   */
+  private async _captureFallback(text: string, turnUntrusted: boolean, turnCause: UntrustedCause): Promise<void> {
     // `_sawRememberCall` — do not second-guess a model that already did the work.
     // Same shape as the follow-up guard: the fallback recovers, it never duplicates.
     //
@@ -1490,7 +1500,7 @@ export class Agent implements IAgent {
         thread: this.currentThreadId,
         model: this.model,
         untrusted: turnUntrusted,
-        cause: describeTurnUntrusted(this),
+        cause: turnCause,
         runId: this.currentRunId,
         facts: facts.length,
         proposed: parsed.proposed,
@@ -1526,7 +1536,7 @@ export class Agent implements IAgent {
           thread: this.currentThreadId,
           model: this.model,
           untrusted: turnUntrusted,
-          cause: describeTurnUntrusted(this),
+          cause: turnCause,
           outcome: result.deduped === true ? 'deduped' : result.status,
           runId: this.currentRunId,
           source: 'capture',
@@ -1581,7 +1591,7 @@ export class Agent implements IAgent {
           thread: this.currentThreadId,
           model: this.model,
           untrusted: turnUntrusted,
-          cause: describeTurnUntrusted(this),
+          cause: turnCause,
           runId: this.currentRunId,
           source: 'capture',
         });
@@ -1659,6 +1669,9 @@ export class Agent implements IAgent {
     // poison, 2026-07-20). The union closes that: external-content turns are skipped; clean
     // business-conversation turns still auto-capture — no capture gap.
     const turnUntrusted = deriveTurnUntrusted(this);
+    // Derived beside the boolean, from the same signals at the same moment, and handed to the
+    // pass rather than re-read there. See `_captureFallback`.
+    const turnCause = describeTurnUntrusted(this);
     if (this._durableMemoryEnabled) {
       void appendCaptureTelemetry(true, {
         ts: Date.now(),
@@ -1668,7 +1681,7 @@ export class Agent implements IAgent {
         untrusted: turnUntrusted,
         // The DENOMINATOR's half of the pair. Missing here, the report would stratify a
         // numerator by cause against a denominator that is not — which is not a ratio.
-        cause: describeTurnUntrusted(this),
+        cause: turnCause,
         // The join key. This site sits behind the three guards above; the NUMERATOR's
         // site (`knowledge.ts`) sits behind none of them, so the two ends of the fire
         // -rate can describe different runs. `runId` is what lets the report SHOW that
@@ -1698,7 +1711,7 @@ export class Agent implements IAgent {
       // appeared on the NEXT turn's line or nowhere; and `costGuard` never saw the
       // spend for its own run. The turn already drains this list in its `finally`,
       // for exactly the reason it exists — an orphaned stream.
-      this._pendingMemory.push(this._captureFallback(text, turnUntrusted));
+      this._pendingMemory.push(this._captureFallback(text, turnUntrusted, turnCause));
       return;
     }
     // Recorded on BOTH branches, because a numerator without a denominator answers

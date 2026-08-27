@@ -898,11 +898,17 @@ describe('eligibleByCause — the substrate for part (b)', () => {
       entry({ event: 'capture_eligible', cause: 'none' }),
       entry({ event: 'remember_invoked', outcome: 'active', cause: 'conversation' }),
       entry({ event: 'capture_ran', facts: 1, cause: 'conversation' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
     ]);
     const r = await buildCaptureReport();
     expect(r.eligibleByCause.conversation, 'a numerator line leaked into the denominator histogram').toBe(0);
     expect(r.eligibleByCause.none).toBe(1);
     expect(r.eligibleByCause.conversationOnlyShare).toBe(0);
+    // A suppressed line is seeded because widening the guard to `capture_eligible ||
+    // capture_suppressed` passed every other test here — no suppressed line was ever present,
+    // so the leak had nothing to leak. It would land in `unattributed` (suppressed lines carry
+    // no cause by design), which is why that bucket is asserted rather than the total.
+    expect(r.eligibleByCause.unattributed, 'a suppressed line leaked into the denominator').toBe(0);
   });
 
   it('treats an out-of-enum cause as unattributed rather than inventing a bucket', async () => {
@@ -913,5 +919,48 @@ describe('eligibleByCause — the substrate for part (b)', () => {
     const r = await buildCaptureReport();
     expect(r.eligibleByCause.unattributed).toBe(1);
     expect(r.eligibleByCause.conversationOnlyShare).toBe(1);
+  });
+});
+
+describe('rateByCause — the capture rate held constant for turn type', () => {
+  it('forms a rate per cause from BOTH histograms, not from one', async () => {
+    // The quantity part (b) asks for: the row's 08-03 block demands the turn TYPE be held
+    // constant, and a single boolean cannot do it. Distinct numbers per stratum so a swapped
+    // bucket or a shared histogram shows.
+    await seed([
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'remember_invoked', outcome: 'active', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'conversation' }),
+      entry({ event: 'capture_eligible', cause: 'conversation' }),
+      entry({ event: 'remember_invoked', outcome: 'pending_review', cause: 'conversation' }),
+    ]);
+    const r = await buildCaptureReport();
+    const byName = Object.fromEntries(r.rateByCause.map((x) => [x.cause, x]));
+    expect(byName['none']).toMatchObject({ eligible: 4, remembered: 1, rate: 0.25 });
+    expect(byName['conversation']).toMatchObject({ eligible: 2, remembered: 1, rate: 0.5 });
+  });
+
+  it('a stratum with no eligible turns reports null, never zero', async () => {
+    // Zero would read as "capture never fires on marker turns"; null reads as "no such turns".
+    await seed([entry({ event: 'capture_eligible', cause: 'none' })]);
+    const r = await buildCaptureReport();
+    const marker = r.rateByCause.find((x) => x.cause === 'marker')!;
+    expect(marker).toMatchObject({ eligible: 0, remembered: 0, rate: null });
+  });
+
+  it('counts the numerator SEPARATELY — a remember line is not an eligible turn', async () => {
+    // Kills the mutation that feeds one histogram from both events.
+    await seed([
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'remember_invoked', outcome: 'active', cause: 'conversation' }),
+    ]);
+    const r = await buildCaptureReport();
+    const conv = r.rateByCause.find((x) => x.cause === 'conversation')!;
+    expect(conv.eligible, 'a numerator line was counted as an eligible turn').toBe(0);
+    expect(conv.remembered).toBe(1);
+    expect(conv.rate, 'a numerator with no denominator is not a rate').toBeNull();
   });
 });
