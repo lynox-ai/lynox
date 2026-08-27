@@ -1386,7 +1386,29 @@ export class Agent implements IAgent {
   private async _captureFallback(text: string, turnUntrusted: boolean): Promise<void> {
     // `_sawRememberCall` — do not second-guess a model that already did the work.
     // Same shape as the follow-up guard: the fallback recovers, it never duplicates.
-    if (!this.captureFallback || this._sawRememberCall) return;
+    //
+    // The two are split because only ONE of them is a gap. `captureFallback` is opted into
+    // at a single surface (`http-api.ts`), while `worker-loop.ts` runs scheduled tasks
+    // through a non-internal Session that HAS a `Memory` — so those turns pass every
+    // prologue guard, count toward `capture_eligible`, and then find no mechanism here.
+    // That is a denominator population the pass structurally cannot serve, and until this
+    // emit it was as silent as the exits one level up.
+    //
+    // `_sawRememberCall` gets no line on purpose: it is the healthy outcome, already
+    // visible as `remember_invoked` with `source: 'model'`.
+    if (!this.captureFallback) {
+      void appendCaptureTelemetry(this._durableMemoryEnabled, {
+        ts: Date.now(),
+        event: 'capture_suppressed',
+        thread: undefined,
+        model: this.model,
+        untrusted: turnUntrusted,
+        reason: 'fallback_off',
+        runId: this.currentRunId,
+      });
+      return;
+    }
+    if (this._sawRememberCall) return;
     if (this.isInternalRun || this._suppressTools) return;
     if (!text.trim()) return;
     const ks = this.toolContext?.knowledgeStore;
@@ -1561,16 +1583,27 @@ export class Agent implements IAgent {
   }
 
   /**
-   * Which of `_captureAtTurnEnd`'s preconditions returns first, or null when the turn
-   * proceeds. Split out so the reported reason and the control flow cannot drift: the
-   * order below IS the order of the guard it replaced, and reordering it would re-label
-   * the population rather than change it.
+   * Which of `_captureAtTurnEnd`'s preconditions returns first, or a pass carrying the
+   * legacy store. Split out so the reported reason and the control flow cannot drift: the
+   * order below IS the order of the guard it replaced, and reordering it would re-label the
+   * population rather than change it.
+   *
+   * A DISCRIMINATED result rather than a bare reason, and that is substance not taste: the
+   * caller's legacy branch needs a non-null `Memory`, and the two other ways to give it one
+   * are both defects here. A second `if (!this.memory) return` puts an unannounced exit into
+   * the one function whose entire subject is that no exit is unannounced; a `!` assertion
+   * states a guarantee the compiler cannot check. Handing back the value that was already
+   * tested makes it structural, so a later reorder is a TYPE ERROR instead of a silent
+   * behaviour change — which is how this was actually caught.
    */
-  private _captureSuppressionReason(): CaptureSuppressedReason | null {
-    if (!this.memory) return 'no_memory';
-    if (this.skipMemoryExtraction) return 'extraction_off';
-    if (this.isInternalRun) return 'internal_run';
-    return null;
+  private _captureGate():
+    | { readonly suppressed: CaptureSuppressedReason }
+    | { readonly suppressed: null; readonly memory: IMemory } {
+    const memory = this.memory;
+    if (!memory) return { suppressed: 'no_memory' };
+    if (this.skipMemoryExtraction) return { suppressed: 'extraction_off' };
+    if (this.isInternalRun) return { suppressed: 'internal_run' };
+    return { suppressed: null, memory };
   }
 
   private _captureAtTurnEnd(text: string): void {
@@ -1591,18 +1624,20 @@ export class Agent implements IAgent {
     // SILENT — until now all three returned with no event at all, which is why the report can
     // say the two populations are disjoint but not why. Whether the DK path should depend on
     // the legacy object at all is a separate decision, filed rather than taken here.
-    const suppressedReason = this._captureSuppressionReason();
-    if (suppressedReason !== null) {
+    const gate = this._captureGate();
+    if (gate.suppressed !== null) {
       void appendCaptureTelemetry(this._durableMemoryEnabled, {
         ts: Date.now(),
         event: 'capture_suppressed',
-        thread: this.currentThreadId,
+        // No `thread`, deliberately — see the field's docblock in `capture-telemetry.ts`.
+        // `extraction_off` is the privacy toggle, and nothing reads a thread id here.
+        thread: undefined,
         model: this.model,
         // Carried for the same reason every other line carries it: a suppressed turn that
         // was ALSO untrusted would have routed to review rather than been minted, so the
         // two questions stay separable in the record instead of collapsing into one.
         untrusted: deriveTurnUntrusted(this),
-        reason: suppressedReason,
+        reason: gate.suppressed,
         runId: this.currentRunId,
       });
       return;
@@ -1670,10 +1705,8 @@ export class Agent implements IAgent {
     // untrusted turn does not ROUTE the capture, it CANCELS it. There is no queue entry to
     // find afterwards, so without the line above this abstention leaves no trace at all.
     if (turnUntrusted) return;
-    // Narrowing only — `no_memory` already returned above, so this can never be the exit.
-    if (!this.memory) return;
     const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-    this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
+    this._scheduleMemoryExtraction(gate.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
   }
 
   private _scheduleMemoryExtraction(promise: Promise<void>): void {

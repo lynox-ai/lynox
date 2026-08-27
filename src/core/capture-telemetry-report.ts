@@ -53,16 +53,31 @@ export interface CaptureModelRate {
  * path, and an instance with no `Memory` at all. A non-zero `rememberOutsideEligible` is
  * a fact about the numbers, never a diagnosis.
  *
- * ▶ Two of the three named unknowns are now COUNTED, not reasoned about: `suppressed`
- * breaks the turn-end hook's early exits down by cause, so `no_memory` (which is what an
- * `isolated_memory` child hits) and `extraction_off` are numbers on the same report. What
- * stays true is the sentence above it — a count there shows the mechanism firing, not that
- * it explains this sink's gap. The third, "an instance with no `Memory` at all", is the
- * same `no_memory` counter seen from the instance rather than the child.
+ * ▶ All three named unknowns are now COUNTED rather than reasoned about: `suppressed`
+ * breaks the turn-end hook's early exits down by cause. `isolated_memory` children and "an
+ * instance with no `Memory` at all" are the same `no_memory` counter seen from two ends, and
+ * `skipMemoryExtraction` is `extraction_off`. What stays true is the sentence above — a
+ * count there shows the mechanism firing, never that it explains this sink's gap.
+ *
+ * `suppressedRunsAlsoRemembering` is the one that can go further than a count: a run that
+ * was suppressed AND wrote a `remember_invoked` is a run contributing to the numerator and
+ * not the denominator, which is the gap's shape rather than a candidate for it.
  */
 export interface CapturePopulationSplit {
   /** Distinct runs that produced at least one `capture_eligible` — the denominator's population. */
   readonly eligibleRuns: number;
+  /**
+   * Runs that produced a `capture_suppressed` AND a `remember_invoked`. These are runs in
+   * the numerator whose turn never reached the denominator — the concrete shape of the gap
+   * `rememberOutsideEligible` can only report the size of.
+   *
+   * It exists because the field would otherwise be inert: the writer emits `runId` on every
+   * suppressed line, and before this the reader assigned run ids for `capture_eligible` and
+   * `remember_invoked` only, so the join that the id was carried FOR could not be made. A
+   * field the writer emits and the reader drops is not half a feature, it is one that reads
+   * as built — this file says so twice about other fields, and then did it again.
+   */
+  readonly suppressedRunsAlsoRemembering: number;
   /** Distinct runs that produced at least one `remember_invoked` — the numerator's population. */
   readonly rememberRuns: number;
   /** Distinct runs in BOTH — the only runs the quotient is actually about. */
@@ -282,7 +297,7 @@ export interface CaptureReport {
    * widen the denominator of a before/after comparison halfway through the window it is
    * meant to compare, which is the one thing that measurement cannot survive.
    */
-  readonly suppressed: Readonly<{ no_memory: number; extraction_off: number; internal_run: number; unknown: number }>;
+  readonly suppressed: Readonly<{ no_memory: number; extraction_off: number; internal_run: number; fallback_off: number; unknown: number }>;
 
   readonly blindness: CaptureReportBlindness;
 }
@@ -302,7 +317,7 @@ const KNOWN_OUTCOMES: ReadonlySet<string> = new Set<CaptureOutcome>(['active', '
 
 /** Suppression reasons this build knows. Guards the breakdown against an out-of-enum value. */
 const KNOWN_SUPPRESSED_REASONS: ReadonlySet<string> =
-  new Set<CaptureSuppressedReason>(['no_memory', 'extraction_off', 'internal_run']);
+  new Set<CaptureSuppressedReason>(['no_memory', 'extraction_off', 'internal_run', 'fallback_off']);
 
 /** Every event key, so the report always carries a full record rather than a sparse one. */
 const ALL_EVENTS: readonly CaptureEvent[] = [
@@ -478,11 +493,12 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   let untrustedEligible = 0;
   const rememberBySource = { model: 0, capture: 0, unknown: 0 };
   const capturePasses = { failed: 0, empty: 0, produced: 0, factsProposed: 0 };
-  const suppressed = { no_memory: 0, extraction_off: 0, internal_run: 0, unknown: 0 };
+  const suppressed = { no_memory: 0, extraction_off: 0, internal_run: 0, fallback_off: 0, unknown: 0 };
   // The population split. Sets, not counters: a run that ends two eligible turns is ONE
   // run in the denominator's population, and counting events here would make the overlap
   // look larger than the number of runs that actually exist.
   const eligibleRuns = new Set<string>();
+  const suppressedRuns = new Set<string>();
   // Remember EVENTS per run, resolved after the scan: the turn-end event for a run is
   // written AFTER the tool call in that same run, so a single forward pass cannot know
   // yet whether a run will turn out eligible.
@@ -508,7 +524,11 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
       if (windowEnd === null || entry.ts > windowEnd) windowEnd = entry.ts;
     }
     if (entry.model === null) eventsWithoutModel++;
-    if (!entry.hasThread) eventsWithoutThread++;
+    // `capture_suppressed` carries no thread BY DESIGN (see the field's docblock), so it is
+    // excluded here rather than counted: a deliberate omission recorded as blindness would
+    // turn this counter into noise proportional to suppression volume, and the counter's job
+    // is to say when attribution was LOST.
+    if (!entry.hasThread && event !== 'capture_suppressed') eventsWithoutThread++;
 
     // Population assignment. Only the two fire-rate events participate: a `propose_*` or
     // `onboarding_*` line belongs to neither end of the quotient, and folding it into
@@ -535,7 +555,16 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
       else if (entry.facts === 0) capturePasses.empty++;
       else { capturePasses.produced++; capturePasses.factsProposed += entry.proposed ?? entry.facts; }
     }
-    if (event === 'capture_suppressed') suppressed[entry.reason ?? 'unknown']++;
+    if (event === 'capture_suppressed') {
+      suppressed[entry.reason ?? 'unknown']++;
+      // Under the SAME cap as the other two run sets, and counted into the same budget:
+      // an unbounded third set would reintroduce the retention problem the cap exists for.
+      if (entry.runId !== null
+        && !suppressedRuns.has(entry.runId)
+        && eligibleRuns.size + rememberEventsByRun.size + suppressedRuns.size < maxEntries) {
+        suppressedRuns.add(entry.runId);
+      }
+    }
     if (event === 'remember_invoked' && entry.outcome !== null) {
       outcomes[entry.outcome] = (outcomes[entry.outcome] ?? 0) + 1;
     }
@@ -557,7 +586,12 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   // `rememberOutsideEligible > 0` is the whole gap test: if no remember run overlaps,
   // every remember run is outside and each contributes at least one event, so the
   // "numerator over an empty denominator" shape needs no separate clause.
+  let suppressedRunsAlsoRemembering = 0;
+  for (const runId of suppressedRuns) {
+    if (rememberEventsByRun.has(runId)) suppressedRunsAlsoRemembering++;
+  }
   const populations: CapturePopulationSplit = {
+    suppressedRunsAlsoRemembering,
     eligibleRuns: eligibleRuns.size,
     rememberRuns: rememberEventsByRun.size,
     overlapRuns,

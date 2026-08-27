@@ -70,7 +70,10 @@ interface Internals {
   _pendingMemory: Array<Promise<unknown>>;
   secretStore: { containsSecret(t: string): boolean; maskSecrets(t: string): string } | null;
   currentRunId: string | undefined;
+  currentThreadId: string | undefined;
   isInternalRun: boolean;
+  skipMemoryExtraction: boolean;
+  captureFallback: boolean;
 }
 
 const USAGE = { input_tokens: 900, output_tokens: 120, cache_creation_input_tokens: null, cache_read_input_tokens: null };
@@ -585,8 +588,11 @@ describe('turn-end capture — what an adversarial round found missing', () => {
  * left no trace at either end of the fire-rate — measured as 910 numerator events against
  * 0 denominator events, with no way to say why.
  *
- * The killing mutation for each test below is deleting or reordering the matching clause in
- * `_captureSuppressionReason`, NOT breaking the classifier.
+ * For the four REASON tests the killing mutation is deleting or reordering the matching
+ * clause in `_captureGate`, not breaking the classifier. The other three are pinned by
+ * something else and say so at the test — the gate flag, the denominator, and the positive
+ * control. An earlier version of this sentence claimed all of them, which the PR's own
+ * mutation table contradicted.
  */
 describe('turn-end capture — the SILENT exits, now named', () => {
   function dkAgent(mutate: (inner: Agent & Internals) => void) {
@@ -632,7 +638,7 @@ describe('turn-end capture — the SILENT exits, now named', () => {
   });
 
   it('the ghost/privacy toggle is counted as itself, not as an absence', () => {
-    const inner = dkAgent((a) => { (a as unknown as { skipMemoryExtraction: boolean }).skipMemoryExtraction = true; });
+    const inner = dkAgent((a) => { a.skipMemoryExtraction = true; });
     inner._captureAtTurnEnd(ANSWER);
     expect(suppressedCalls()[0]![1]).toMatchObject({ reason: 'extraction_off' });
   });
@@ -648,10 +654,62 @@ describe('turn-end capture — the SILENT exits, now named', () => {
     // and nothing else in the suite would notice. `no_memory` precedes `extraction_off`.
     const inner = dkAgent((a) => {
       a.memory = null;
-      (a as unknown as { skipMemoryExtraction: boolean }).skipMemoryExtraction = true;
+      a.skipMemoryExtraction = true;
     });
     inner._captureAtTurnEnd(ANSWER);
     expect(suppressedCalls()[0]![1]).toMatchObject({ reason: 'no_memory' });
+  });
+
+  it('pins the OTHER half of the order — extraction_off precedes internal_run', () => {
+    // The first order test only pinned `no_memory` vs `extraction_off`; swapping the lower
+    // two survived the whole suite. Half a pinned order is an unpinned order: the code calls
+    // the sequence load-bearing, so every adjacent pair has to be.
+    const inner = dkAgent((a) => { a.skipMemoryExtraction = true; a.isInternalRun = true; });
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()[0]![1]).toMatchObject({ reason: 'extraction_off' });
+  });
+
+  it('carries the REAL taint on a suppressed line, not a constant', () => {
+    // The field's docblock argues it keeps suppression and untrustedness separable. Nothing
+    // read it, so hard-coding `untrusted: false` passed everything — the same defect the
+    // sibling turn-end test was written for after an adversarial round flipped that argument.
+    const inner = dkAgent((a) => {
+      a.skipMemoryExtraction = true;
+      (a as unknown as { _conversationSawUntrusted: boolean })._conversationSawUntrusted = true;
+    });
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()[0]![1]).toMatchObject({ reason: 'extraction_off', untrusted: true });
+  });
+
+  it('an ARMED-BUT-OFF pass is counted, and it is IN the denominator', async () => {
+    // The exit one level down, found by an adversarial refuter: `worker-loop.ts` runs
+    // scheduled tasks through a non-internal Session that HAS a Memory, so those turns pass
+    // every prologue guard, emit `capture_eligible`, and then find `captureFallback` false.
+    // Both lines must appear — the turn IS an opportunity, and it had no mechanism.
+    const { agent, inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    agent.captureFallback = false;
+    inner._captureAtTurnEnd(ANSWER);
+    await Promise.all(inner._pendingMemory);
+    const calls = vi.mocked(appendCaptureTelemetry).mock.calls;
+    expect(calls.filter(([, e]) => e?.event === 'capture_eligible')).toHaveLength(1);
+    const sup = calls.filter(([, e]) => e?.event === 'capture_suppressed');
+    expect(sup).toHaveLength(1);
+    expect(sup[0]![1]).toMatchObject({ reason: 'fallback_off' });
+  });
+
+  it('the HEALTHY stand-down is not filed as a suppression', async () => {
+    // `_sawRememberCall` shares the exit but is the success case, already visible as
+    // `remember_invoked` with `source: 'model'`. Counting it here would put a success under
+    // a failure heading and inflate exactly the number that is supposed to explain a gap.
+    const { inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    inner._turnToolNames.add('remember');
+    inner._captureAtTurnEnd(ANSWER);
+    await Promise.all(inner._pendingMemory);
+    expect(suppressedCalls()).toHaveLength(0);
   });
 
   it('does NOT widen the denominator — a suppressed turn emits no capture_eligible', () => {
@@ -662,6 +720,31 @@ describe('turn-end capture — the SILENT exits, now named', () => {
     const eligible = vi.mocked(appendCaptureTelemetry).mock.calls
       .filter(([, entry]) => entry?.event === 'capture_eligible');
     expect(eligible).toHaveLength(0);
+  });
+
+  it('carries NO thread — the privacy toggle must not leave per-conversation metadata', () => {
+    // `extraction_off` is the ghost mode used when handing the instance to someone else.
+    // A per-turn line naming the conversation would put metadata about a third party's
+    // session where that user chose to leave none, and nothing reads the field here.
+    const inner = dkAgent((a) => {
+      a.skipMemoryExtraction = true;
+      // A thread id MUST be present on the agent, or the assertion below is satisfied by the
+      // fixture rather than by the code — re-adding `thread: this.currentThreadId` survived
+      // the whole suite until this line existed. The sibling `capture_eligible` assertion
+      // proves the id is reachable, so an absent `thread` here is a decision, not a default.
+      a.currentThreadId = 'thread-abc';
+    });
+    inner._captureAtTurnEnd(ANSWER);
+    expect(suppressedCalls()[0]![1].thread, 'a suppressed line names the conversation').toBeUndefined();
+
+    // The control that makes the assertion above mean something: the same agent DOES put the
+    // id on an eligible line, so the omission is scoped to suppression.
+    vi.mocked(appendCaptureTelemetry).mockClear();
+    const ok = dkAgent((a) => { a.currentThreadId = 'thread-abc'; });
+    ok._captureAtTurnEnd(ANSWER);
+    const eligible = vi.mocked(appendCaptureTelemetry).mock.calls
+      .filter(([, e]) => e?.event === 'capture_eligible');
+    expect(eligible[0]![1].thread).toBe('thread-abc');
   });
 
   it('a turn that passes every guard emits capture_eligible and NO suppression line', () => {
