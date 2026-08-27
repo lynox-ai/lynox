@@ -1,5 +1,5 @@
 import { scanBoundedJsonl } from './bounded-jsonl-log.js';
-import { CAPTURE_TELEMETRY_LOG_FILE, type CaptureEvent, type CaptureOutcome, type CaptureSuppressedReason } from './capture-telemetry.js';
+import { CAPTURE_TELEMETRY_LOG_FILE, PRE_ELIGIBLE_SUPPRESSED_REASONS, type CaptureEvent, type CaptureOutcome, type CaptureSuppressedReason } from './capture-telemetry.js';
 
 /**
  * The READ half of the durable-knowledge capture telemetry (DEF-dk-capture-observability).
@@ -67,9 +67,14 @@ export interface CapturePopulationSplit {
   /** Distinct runs that produced at least one `capture_eligible` — the denominator's population. */
   readonly eligibleRuns: number;
   /**
-   * Runs that produced a `capture_suppressed` AND a `remember_invoked`. These are runs in
-   * the numerator whose turn never reached the denominator — the concrete shape of the gap
-   * `rememberOutsideEligible` can only report the size of.
+   * Runs that produced a PRE-ELIGIBLE `capture_suppressed` AND a `remember_invoked` — runs
+   * in the numerator whose turn never reached the denominator, the concrete shape of the
+   * gap `rememberOutsideEligible` can only report the size of.
+   *
+   * "Pre-eligible" is load-bearing, not a qualifier: `fallback_off` fires AFTER
+   * `capture_eligible` on the same run, so counting it here would fill a number defined by
+   * absence with runs that were present. Membership is decided by
+   * `PRE_ELIGIBLE_SUPPRESSED_REASONS`, never re-listed here.
    *
    * It exists because the field would otherwise be inert: the writer emits `runId` on every
    * suppressed line, and before this the reader assigned run ids for `capture_eligible` and
@@ -284,6 +289,10 @@ export interface CaptureReport {
    * those turns left no trace at either end of the fire-rate, which is why `populations`
    * below can report the two ends disjoint and cannot say why.
    *
+   * ⚠ The four reasons do NOT all sit on the same side of `capture_eligible`, and reading
+   * them as if they did is the mistake this list exists to prevent.
+   *
+   * PRE-eligible — the turn never entered the denominator:
    *   `no_memory`      — no legacy `Memory` on the agent. Reachable on a DK instance: a
    *                      sub-agent spawned with `isolated_memory: true` has none while still
    *                      inheriting the DK flag, so it can emit the NUMERATOR and never the
@@ -291,11 +300,20 @@ export interface CaptureReport {
    *                      itself proof that it explains any particular gap.
    *   `extraction_off` — the ghost/privacy toggle, per thread or per instance.
    *   `internal_run`   — not a user turn.
+   *
+   * POST-eligible — the turn DID enter the denominator, then found no armed pass:
+   *   `fallback_off`   — every surface except the Web-UI chat endpoint, on every turn.
+   *
+   * And neither:
    *   `unknown`        — a suppressed line whose reason this build does not recognise.
    *
-   * ⚠ These are NOT part of `capture_eligible`, by construction. Folding them in would
-   * widen the denominator of a before/after comparison halfway through the window it is
-   * meant to compare, which is the one thing that measurement cannot survive.
+   * ⚠ The pre-eligible THREE are not part of `capture_eligible`, by construction: folding
+   * them in would widen the denominator of a before/after comparison halfway through the
+   * window it is meant to compare, which is the one thing that measurement cannot survive.
+   * `fallback_off` is not in that set — an earlier version of this paragraph said "these"
+   * of all four, which made a false claim about the ONE reason that is already inside the
+   * denominator. `PRE_ELIGIBLE_SUPPRESSED_REASONS` is the single place that decides, and
+   * `suppressedRunsAlsoRemembering` reads it instead of restating the split.
    */
   readonly suppressed: Readonly<{ no_memory: number; extraction_off: number; internal_run: number; fallback_off: number; unknown: number }>;
 
@@ -537,13 +555,13 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
       if (entry.runId === null) eventsWithoutRun++;
       else if (event === 'capture_eligible') {
         if (!eligibleRuns.has(entry.runId)) {
-          if (eligibleRuns.size + rememberEventsByRun.size < maxEntries) eligibleRuns.add(entry.runId);
+          if (eligibleRuns.size + rememberEventsByRun.size + suppressedRuns.size < maxEntries) eligibleRuns.add(entry.runId);
           else eventsOverRunCap++;
         }
       }
       else if (rememberEventsByRun.has(entry.runId)) {
         rememberEventsByRun.set(entry.runId, rememberEventsByRun.get(entry.runId)! + 1);
-      } else if (eligibleRuns.size + rememberEventsByRun.size < maxEntries) {
+      } else if (eligibleRuns.size + rememberEventsByRun.size + suppressedRuns.size < maxEntries) {
         rememberEventsByRun.set(entry.runId, 1);
       } else eventsOverRunCap++;
     }
@@ -557,12 +575,25 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     }
     if (event === 'capture_suppressed') {
       suppressed[entry.reason ?? 'unknown']++;
-      // Under the SAME cap as the other two run sets, and counted into the same budget:
-      // an unbounded third set would reintroduce the retention problem the cap exists for.
+      // ONLY the pre-eligible reasons enter the join set. `fallback_off` shares its run
+      // with the `capture_eligible` emitted moments earlier — same `currentRunId` — so
+      // counting it would put fully healthy runs into a number defined as "runs that never
+      // reached the denominator", and the definition, not the count, would be the lie.
+      // `PRE_ELIGIBLE_SUPPRESSED_REASONS` decides, so the partition has ONE owner; wiring
+      // it here is also what stops it being an exported constant with no consumer, which is
+      // the same inert-symbol defect this file warns about twice above.
       if (entry.runId !== null
-        && !suppressedRuns.has(entry.runId)
-        && eligibleRuns.size + rememberEventsByRun.size + suppressedRuns.size < maxEntries) {
-        suppressedRuns.add(entry.runId);
+        && entry.reason !== null
+        && PRE_ELIGIBLE_SUPPRESSED_REASONS.has(entry.reason)
+        && !suppressedRuns.has(entry.runId)) {
+        // One budget across all three sets, checked the same way in all three places. The
+        // first cut checked the sum HERE but left the other two checking only each other,
+        // so this set could fill to the cap and the others still start from zero — a bound
+        // that reads as `maxEntries` and holds at 2x. A dropped run is counted, because a
+        // silent drop is a number that looks complete.
+        if (eligibleRuns.size + rememberEventsByRun.size + suppressedRuns.size < maxEntries) {
+          suppressedRuns.add(entry.runId);
+        } else eventsOverRunCap++;
       }
     }
     if (event === 'remember_invoked' && entry.outcome !== null) {

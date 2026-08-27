@@ -254,14 +254,14 @@ describe('buildCaptureReport', () => {
       // went red on a 4-field addition for two characters, which is the assertion catching
       // schema growth, not poison. Measuring the DELTA keeps it pinned on the 500-char
       // payload: it must not survive anywhere in the output.
-      // The baseline is the SAME fixture with a clean model, not an empty sink: an empty
-      // report does not trip `BLIND_NOTE`, so most of a flat headroom would have been spent
-      // on that fixed string rather than on the payload. Same shape, one field poisoned.
-      await seed([JSON.stringify({ ts: 1, event: 'capture_eligible', model: 'clean-model', untrusted: false })]);
-      const cleanBaseline = JSON.stringify(await buildCaptureReport()).length;
-      await seed([JSON.stringify({ ts: 1, event: 'capture_eligible', model: ['X'.repeat(500), 'i'], untrusted: false })]);
-      const poisoned = JSON.stringify(await buildCaptureReport());
-      expect(poisoned.length - cleanBaseline).toBeLessThan(100);
+      // No size assertion. It was a PROXY for "did the payload survive into the output",
+      // and a proxy on total length breaks whenever the schema grows — it went red on a
+      // four-counter addition, by two characters, in a test about poison. Worse, the
+      // obvious repair compared against a clean-model baseline that carries a `byModel`
+      // entry the poisoned report does not, so the delta ran NEGATIVE and the stated
+      // headroom was not the bound it read as. The two assertions below say the thing
+      // directly instead, and both die when the clamp is removed.
+      const poisoned = JSON.stringify(r);
       expect(poisoned).not.toContain('X'.repeat(50));
     });
 
@@ -792,6 +792,21 @@ describe('capture_suppressed — the JOIN that makes its runId worth carrying', 
     // r1 only: suppressed AND remembered. r2 suppressed but never remembered; r3 remembered
     // but was eligible, so it is not a gap at all.
     expect(r.populations.suppressedRunsAlsoRemembering).toBe(1);
+  });
+
+  it('EXCLUDES fallback_off — those runs did reach the denominator', async () => {
+    // `fallback_off` shares its run with the `capture_eligible` emitted moments before it,
+    // so counting it would fill a number defined as "never reached the denominator" with
+    // runs that did. Seeded as the realistic shape: eligible + suppressed + remembered, all
+    // one run — a fully healthy turn on an unarmed surface.
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r1' }),
+      entry({ event: 'capture_suppressed', reason: 'fallback_off', runId: 'r1' }),
+      entry({ event: 'remember_invoked', outcome: 'active', runId: 'r1' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.populations.suppressedRunsAlsoRemembering).toBe(0);
+    expect(r.suppressed.fallback_off).toBe(1);
   });
 
   it('is zero when no suppressed run ever remembered — not merely absent', async () => {

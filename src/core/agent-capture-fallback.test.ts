@@ -699,7 +699,7 @@ describe('turn-end capture — the SILENT exits, now named', () => {
     expect(sup[0]![1]).toMatchObject({ reason: 'fallback_off' });
   });
 
-  it('the HEALTHY stand-down is not filed as a suppression', async () => {
+  it('the HEALTHY stand-down is not filed as a suppression — ARMED surface', async () => {
     // `_sawRememberCall` shares the exit but is the success case, already visible as
     // `remember_invoked` with `source: 'model'`. Counting it here would put a success under
     // a failure heading and inflate exactly the number that is supposed to explain a gap.
@@ -711,6 +711,56 @@ describe('turn-end capture — the SILENT exits, now named', () => {
     await Promise.all(inner._pendingMemory);
     expect(suppressedCalls()).toHaveLength(0);
   });
+
+  it('the HEALTHY stand-down is not filed as a suppression — UNARMED surface either', async () => {
+    // The combination the test above cannot reach: `makeAgent` arms the pass, so every
+    // assertion about the healthy exit was made on the one surface where `captureFallback`
+    // is true. On EVERY other surface — worker-loop, telegram, MCP, CLI — it is false on
+    // every turn, so emitting `fallback_off` before the `_sawRememberCall` check filed each
+    // turn where the model DID record a fact as a suppression. That defect passed the whole
+    // suite. The killing mutation is putting the emit back above that check.
+    const { agent, inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    agent.captureFallback = false;
+    inner._turnToolNames.add('remember');
+    inner._captureAtTurnEnd(ANSWER);
+    await Promise.all(inner._pendingMemory);
+    expect(suppressedCalls(), 'a turn the model DID record is filed as a suppression').toHaveLength(0);
+  });
+
+  it('the SECOND writer pins its own fields — thread and taint, not just the prologue', async () => {
+    // Two writers of one event are two signals sharing a name, and every field assertion
+    // above was made on the PROLOGUE writer only. Measured: re-adding `thread` and
+    // hard-coding `untrusted: false` at the `fallback_off` emit both SURVIVED the suite.
+    // The docblock's promise is an allquantor over every `capture_suppressed` line, and one
+    // of its two producers was unpinned — the same two-writer defect this branch corrects in
+    // the prose, found one level down in my own tests.
+    const { agent, inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    agent.captureFallback = false;
+    inner.currentThreadId = 'thread-xyz';
+    (inner as unknown as { _conversationSawUntrusted: boolean })._conversationSawUntrusted = true;
+    inner._captureAtTurnEnd(ANSWER);
+    await Promise.all(inner._pendingMemory);
+    const sup = suppressedCalls();
+    expect(sup).toHaveLength(1);
+    expect(sup[0]![1]).toMatchObject({ reason: 'fallback_off', untrusted: true });
+    expect(sup[0]![1].thread, 'the second writer leaks the conversation id').toBeUndefined();
+    // The control that makes the `thread` assertion mean something on THIS writer: the same
+    // agent DOES put the id on the `capture_eligible` line of the very same turn.
+    const eligible = vi.mocked(appendCaptureTelemetry).mock.calls
+      .filter(([, e]) => e?.event === 'capture_eligible');
+    expect(eligible[0]![1].thread).toBe('thread-xyz');
+  });
+
+  // ⚠ NOT covered, and deliberately not faked: hard-coding the DK gate to `true` at that
+  // same emit ALSO survives — but it is an EQUIVALENT mutant, not a gap. `_captureFallback`
+  // has exactly one call site (`agent.ts:1695`) and it sits inside `if (this._durableMemory
+  // Enabled)`, so the flag is provably true wherever this line runs. Writing a test that
+  // drives an unreachable state to kill it would manufacture coverage for a branch that
+  // cannot occur. The argument is kept because a second call site would make it load-bearing.
 
   it('does NOT widen the denominator — a suppressed turn emits no capture_eligible', () => {
     // The restraint this change is built on. `capture_eligible` is the denominator of a

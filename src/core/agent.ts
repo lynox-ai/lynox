@@ -1395,7 +1395,14 @@ export class Agent implements IAgent {
     // emit it was as silent as the exits one level up.
     //
     // `_sawRememberCall` gets no line on purpose: it is the healthy outcome, already
-    // visible as `remember_invoked` with `source: 'model'`.
+    // visible as `remember_invoked` with `source: 'model'`. It is tested FIRST, and the
+    // order is the whole correctness of this block: on every surface that does not opt in
+    // — worker-loop, telegram, MCP, CLI — `captureFallback` is false on EVERY turn, so
+    // emitting before this check filed each turn where the model DID record a fact as a
+    // suppression. That is verbatim the thing the paragraph above says must not happen,
+    // written directly beneath it. Both exits still just return, so the swap changes what
+    // is REPORTED and nothing else.
+    if (this._sawRememberCall) return;
     if (!this.captureFallback) {
       void appendCaptureTelemetry(this._durableMemoryEnabled, {
         ts: Date.now(),
@@ -1408,7 +1415,6 @@ export class Agent implements IAgent {
       });
       return;
     }
-    if (this._sawRememberCall) return;
     if (this.isInternalRun || this._suppressTools) return;
     if (!text.trim()) return;
     const ks = this.toolContext?.knowledgeStore;
