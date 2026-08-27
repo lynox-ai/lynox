@@ -354,6 +354,26 @@ export interface CaptureReport {
    * ⚠ `rate` is null where a cause has no eligible turns: an absent stratum is "cannot tell",
    * never zero.
    */
+  /**
+   * What the recovery pass PRODUCED, split by turn type.
+   *
+   * The row's own 08-03 block demands holding the turn TYPE constant, and that demand does not
+   * stop at the rate: if the pass finds fewer facts on research turns for reasons that have
+   * nothing to do with trust, a rate difference by cause is partly its yield difference. This
+   * is the term that lets the two be told apart.
+   *
+   * It also exists because the alternative was worse. `cause` was being written on both
+   * `capture_ran` emits and read by nothing — the fifth instance of the written-validated-
+   * dropped defect in this sink, and the first one caught by a mechanism rather than a
+   * reviewer. Consuming it was the smaller correction; the other option was to stop writing it
+   * and say so.
+   */
+  readonly passesByCause: ReadonlyArray<{
+    readonly cause: UntrustedCause | 'unattributed';
+    readonly completed: number;
+    readonly factsProposed: number;
+  }>;
+
   readonly rateByCause: ReadonlyArray<{
     readonly cause: UntrustedCause | 'unattributed';
     readonly eligible: number;
@@ -575,6 +595,8 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   const suppressed = { no_memory: 0, extraction_off: 0, internal_run: 0, fallback_off: 0, unknown: 0 };
   const byCause = { none: 0, marker: 0, 'external-tool': 0, conversation: 0, unattributed: 0 };
   const rememberByCause = { none: 0, marker: 0, 'external-tool': 0, conversation: 0, unattributed: 0 };
+  const passCompletedByCause = { none: 0, marker: 0, 'external-tool': 0, conversation: 0, unattributed: 0 };
+  const passFactsByCause = { none: 0, marker: 0, 'external-tool': 0, conversation: 0, unattributed: 0 };
   // The population split. Sets, not counters: a run that ends two eligible turns is ONE
   // run in the denominator's population, and counting events here would make the overlap
   // look larger than the number of runs that actually exist.
@@ -640,6 +662,13 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
       if (entry.facts === null) capturePasses.failed++;
       else if (entry.facts === 0) capturePasses.empty++;
       else { capturePasses.produced++; capturePasses.factsProposed += entry.proposed ?? entry.facts; }
+      // Only a COMPLETED pass contributes: a failed one proposed nothing, and counting it would
+      // read as a turn where the pass found nothing rather than one where it never answered.
+      if (entry.facts !== null) {
+        const c = entry.cause ?? 'unattributed';
+        passCompletedByCause[c]++;
+        passFactsByCause[c] += entry.proposed ?? entry.facts;
+      }
     }
     if (event === 'capture_suppressed') {
       suppressed[entry.reason ?? 'unknown']++;
@@ -703,6 +732,8 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     blindNote: eventsWithoutRun > 0 || eventsOverRunCap > 0 ? BLIND_NOTE : null,
   };
 
+  const passesByCause = (['none', 'marker', 'external-tool', 'conversation', 'unattributed'] as const)
+    .map((c) => ({ cause: c, completed: passCompletedByCause[c], factsProposed: passFactsByCause[c] }));
   const rateByCause = (['none', 'marker', 'external-tool', 'conversation', 'unattributed'] as const)
     .map((c) => ({ cause: c, eligible: byCause[c], remembered: rememberByCause[c], rate: rate(rememberByCause[c], byCause[c]) }));
   const attributedEligible = byCause.none + byCause.marker + byCause['external-tool'] + byCause.conversation;
@@ -737,6 +768,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     rememberBySource,
     capturePasses,
     eligibleByCause,
+    passesByCause,
     rateByCause,
     suppressed,
     blindness: {
