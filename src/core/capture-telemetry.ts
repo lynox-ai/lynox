@@ -1,4 +1,5 @@
 import { appendBoundedJsonl } from './bounded-jsonl-log.js';
+import type { UntrustedCause } from './untrusted-signals.js';
 
 /**
  * Durable-knowledge CAPTURE telemetry — the measure-first substrate for the
@@ -206,6 +207,44 @@ export interface CaptureTelemetryEntry {
   readonly primary?: boolean | undefined;
   /** `onboarding_*`: the funnel step index (no content). */
   readonly step?: number | undefined;
+  /**
+   * WHICH member of the untrusted union fired on this turn — `none` | `marker` |
+   * `external-tool` | `conversation`, straight from `describeTurnUntrusted`.
+   *
+   * Not redundant beside the boolean, and the difference is the whole point. `untrusted` says
+   * a turn WAS tainted; `DEF-data-scoped-taint` changes WHICH RULE taints, so a before/after
+   * stratified on the boolean compares two populations defined by two different functions
+   * sharing one field name. The cause survives that boundary: it names the member, and the
+   * member is what the redesign removes.
+   *
+   * What makes it decision-grade is the PRIORITY ORDER of `describeTurnUntrusted`
+   * (marker → external-tool → conversation): `cause === 'conversation'` implies the other two
+   * are false, so its share of capture-eligible turns is exactly the set that would come clean
+   * if the conversation-sticky half went — from ONE window, with no after-window, because
+   * `knowledge-store.ts` maps taint to status with a ternary. An UPPER BOUND, not a point
+   * estimate: the PRD is two-part and only Regime A becomes data-scoped.
+   *
+   * WHO WRITES IT, spelled out because this event family keeps growing a second writer nobody
+   * notices. Every writer derives it from `describeTurnUntrusted` over the same agent at the
+   * same moment as `untrusted`:
+   *   `capture_eligible` — the turn-end hook, once per eligible turn (the denominator).
+   *   `capture_ran`      — the recovery pass, at BOTH emit sites (completed and failed).
+   *   `remember_invoked` — TWO writers: the `remember` tool handler (`source: 'model'`) and
+   *                        the recovery pass (`source: 'capture'`). Both set it.
+   *
+   * The invariant to pin: `cause === 'none'` ⟺ `untrusted === false`, on every line from every
+   * writer. Both come from one signal set; a line where they disagree means some writer
+   * computed one of them somewhere else.
+   *
+   * ⚠ Deliberately NOT set on `capture_suppressed`, as a decision rather than an oversight.
+   * The pre-eligible reasons never enter the denominator, so their cause cannot enter the
+   * ratio; and a `fallback_off` turn already emitted `capture_eligible` on the same run, which
+   * carries it. Setting it there would add a field with no consumer — the inert-symbol defect
+   * this sink has already produced three times.
+   *
+   * Same data class as `untrusted`: four literals describing the SYSTEM, never the person.
+   */
+  readonly cause?: UntrustedCause | undefined;
   /**
    * `capture_suppressed`: which precondition returned first. An enum, never text.
    *

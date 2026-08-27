@@ -847,3 +847,71 @@ describe('capture_suppressed — the JOIN that makes its runId worth carrying', 
     expect(r.blindness.eventsWithoutThread).toBe(1);
   });
 });
+
+describe('eligibleByCause — the substrate for part (b)', () => {
+  it('computes the conversation-only share over ATTRIBUTED eligible turns', async () => {
+    // Distinct counts per bucket so a swapped bucket shows. 2 of 8 attributed are
+    // conversation-only → 0.25, the upper bound on what data-scoped taint could flip.
+    await seed([
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'marker' }),
+      entry({ event: 'capture_eligible', cause: 'external-tool' }),
+      entry({ event: 'capture_eligible', cause: 'external-tool' }),
+      entry({ event: 'capture_eligible', cause: 'conversation' }),
+      entry({ event: 'capture_eligible', cause: 'conversation' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.eligibleByCause).toEqual({
+      none: 3, marker: 1, 'external-tool': 2, conversation: 2,
+      unattributed: 0, conversationOnlyShare: 0.25,
+    });
+  });
+
+  it('keeps a pre-field line as UNATTRIBUTED and out of the denominator', async () => {
+    // The share must not be dragged toward zero by lines that cannot carry the answer — that
+    // would read as a measurement of the taint rule when it measures the sink's age.
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_eligible', cause: 'conversation' }),
+      entry({ event: 'capture_eligible', cause: 'none' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.eligibleByCause.unattributed).toBe(2);
+    // 1 of 2 ATTRIBUTED, not 1 of 4.
+    expect(r.eligibleByCause.conversationOnlyShare).toBe(0.5);
+  });
+
+  it('refuses to divide when nothing is attributed — null, not zero', async () => {
+    await seed([entry({ event: 'capture_eligible' }), entry({ event: 'capture_eligible' })]);
+    const r = await buildCaptureReport();
+    expect(r.eligibleByCause.unattributed).toBe(2);
+    expect(r.eligibleByCause.conversationOnlyShare, 'zero would read as "no turns would flip"').toBeNull();
+  });
+
+  it('counts ONLY the denominator event — a numerator line must not enter the histogram', async () => {
+    // Mixing the two ends into one histogram would keep the field name and silently change
+    // what the share is a share OF. Seeded so a leak is visible as a wrong bucket count.
+    await seed([
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'remember_invoked', outcome: 'active', cause: 'conversation' }),
+      entry({ event: 'capture_ran', facts: 1, cause: 'conversation' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.eligibleByCause.conversation, 'a numerator line leaked into the denominator histogram').toBe(0);
+    expect(r.eligibleByCause.none).toBe(1);
+    expect(r.eligibleByCause.conversationOnlyShare).toBe(0);
+  });
+
+  it('treats an out-of-enum cause as unattributed rather than inventing a bucket', async () => {
+    await seed([
+      entry({ event: 'capture_eligible', cause: 'a-future-rule' as never }),
+      entry({ event: 'capture_eligible', cause: 'conversation' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.eligibleByCause.unattributed).toBe(1);
+    expect(r.eligibleByCause.conversationOnlyShare).toBe(1);
+  });
+});

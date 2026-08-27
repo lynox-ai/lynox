@@ -231,6 +231,33 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     expect(invoked[0]!['source']).toBe('model');
   });
 
+  it('remember_invoked carries the CAUSE — this handler is the numerator\'s other writer', async () => {
+    // `remember_invoked` has two writers: this one (`source: 'model'`) and the recovery pass
+    // in `agent.ts` (`source: 'capture'`). The pass's writer is pinned in its own suite, and
+    // dropping the field HERE survived that suite completely — one writer covered, one not.
+    // Fourth instance of that shape in this arc, which is why it gets its own test rather
+    // than a shared one.
+    mockSink.mockClear();
+    const { agent } = make({ durableMemoryEnabled: true, sawUntrustedData: true });
+    await rememberTool.handler({ text: 'ACME renews in March', subject: 'ACME' }, agent);
+    const invoked = captureEvents().filter((e) => e['event'] === 'remember_invoked');
+    expect(invoked).toHaveLength(1);
+    expect(invoked[0]!['cause']).toBe('marker');
+    // The invariant the field is only useful under: cause and boolean come from one signal
+    // set, so `none` and `untrusted: false` must agree on every line from every writer.
+    expect(invoked[0]!['cause'] === 'none').toBe(invoked[0]!['untrusted'] === false);
+  });
+
+  it('a CLEAN turn tags cause `none`, not an absent field', async () => {
+    // Without this, hard-coding the cause to a constant taint value passes the test above.
+    mockSink.mockClear();
+    const { agent } = make({ durableMemoryEnabled: true });
+    await rememberTool.handler({ text: 'ACME renews in March', subject: 'ACME' }, agent);
+    const invoked = captureEvents().filter((e) => e['event'] === 'remember_invoked');
+    expect(invoked[0]!['cause']).toBe('none');
+    expect(invoked[0]!['untrusted']).toBe(false);
+  });
+
   it('propose_shown carries the source too, so the funnel can be split the same way', async () => {
     // Unpinned on the first cut: deleting the tag left the whole suite green. Nothing reads
     // `propose_*` source today, which is exactly why it needs a test — an inert field with

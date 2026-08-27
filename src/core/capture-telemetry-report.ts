@@ -1,5 +1,6 @@
 import { scanBoundedJsonl } from './bounded-jsonl-log.js';
 import { CAPTURE_TELEMETRY_LOG_FILE, PRE_ELIGIBLE_SUPPRESSED_REASONS, type CaptureEvent, type CaptureOutcome, type CaptureSuppressedReason } from './capture-telemetry.js';
+import type { UntrustedCause } from './untrusted-signals.js';
 
 /**
  * The READ half of the durable-knowledge capture telemetry (DEF-dk-capture-observability).
@@ -315,6 +316,30 @@ export interface CaptureReport {
    * denominator. `PRE_ELIGIBLE_SUPPRESSED_REASONS` is the single place that decides, and
    * `suppressedRunsAlsoRemembering` reads it instead of restating the split.
    */
+  /**
+   * Capture-eligible turns by WHICH untrusted rule fired — the substrate for
+   * `DEF-dk-capture-observability` part (b).
+   *
+   * `conversationOnlyShare` is what the row is for. `describeTurnUntrusted` is priority-ordered,
+   * so a `conversation` cause implies the other two members did not fire; this share is
+   * therefore exactly the fraction of eligible turns that would come clean if the
+   * conversation-sticky half were removed. Since `knowledge-store.ts` maps taint to status with
+   * a ternary, that share IS the effect on the active/queued split — no after-window needed.
+   *
+   * ⚠ An UPPER bound: the data-scoped-taint PRD is two-part and only Regime A becomes
+   * data-scoped, so at most this many turns flip. Decision-grade in one direction — near zero
+   * means the redesign cannot move capture materially, whatever else holds.
+   *
+   * ⚠ `unattributed` counts eligible lines with no usable cause (written before the field, or
+   * out-of-enum). The share is computed over ATTRIBUTED lines only and is null when there are
+   * none: a denominator that silently included lines which cannot carry the answer would drag
+   * the bound toward zero for a reason unrelated to the taint rule.
+   */
+  readonly eligibleByCause: Readonly<{
+    none: number; marker: number; 'external-tool': number; conversation: number;
+    unattributed: number; conversationOnlyShare: number | null;
+  }>;
+
   readonly suppressed: Readonly<{ no_memory: number; extraction_off: number; internal_run: number; fallback_off: number; unknown: number }>;
 
   readonly blindness: CaptureReportBlindness;
@@ -332,6 +357,9 @@ const MAX_RUN_KEY_CHARS = 128;
 
 /** Outcome values this build knows. Guards `outcomes` against an out-of-enum sink value. */
 const KNOWN_OUTCOMES: ReadonlySet<string> = new Set<CaptureOutcome>(['active', 'pending_review', 'rejected', 'superseded', 'deduped']);
+
+/** Untrusted causes this build knows. Guards the breakdown against an out-of-enum sink value. */
+const KNOWN_CAUSES: ReadonlySet<string> = new Set<UntrustedCause>(['none', 'marker', 'external-tool', 'conversation']);
 
 /** Suppression reasons this build knows. Guards the breakdown against an out-of-enum value. */
 const KNOWN_SUPPRESSED_REASONS: ReadonlySet<string> =
@@ -390,6 +418,13 @@ interface ValidatedEntry {
   readonly facts: number | null;
   /** Facts offered before the ceiling, for a `capture_ran` line; `null` when absent. */
   readonly proposed: number | null;
+  /**
+   * Which member of the untrusted union fired, on the lines that carry it. `null` on a line
+   * that predates the field or omits it by design (`capture_suppressed`) — which is why the
+   * breakdown counts an `unattributed` bucket rather than folding those into `none`. An absent
+   * cause is "cannot tell"; `none` is a measurement saying the turn was clean.
+   */
+  readonly cause: UntrustedCause | null;
   /**
    * Which precondition cut a `capture_suppressed` turn. `null` on any other event, and on a
    * suppressed line carrying a reason this build does not know — an out-of-enum value is
@@ -482,6 +517,9 @@ function validateEntry(raw: unknown): ValidatedEntry | null {
     proposed: clampCount(r['proposed']),
     // Read for the same reason `facts` is: without it `capture_suppressed` collapses three
     // causes into one count, which is the state this event was added to end.
+    cause: typeof r['cause'] === 'string' && KNOWN_CAUSES.has(r['cause'])
+      ? r['cause'] as UntrustedCause
+      : null,
     reason: typeof r['reason'] === 'string' && KNOWN_SUPPRESSED_REASONS.has(r['reason'])
       ? r['reason'] as CaptureSuppressedReason
       : null,
@@ -512,6 +550,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   const rememberBySource = { model: 0, capture: 0, unknown: 0 };
   const capturePasses = { failed: 0, empty: 0, produced: 0, factsProposed: 0 };
   const suppressed = { no_memory: 0, extraction_off: 0, internal_run: 0, fallback_off: 0, unknown: 0 };
+  const byCause = { none: 0, marker: 0, 'external-tool': 0, conversation: 0, unattributed: 0 };
   // The population split. Sets, not counters: a run that ends two eligible turns is ONE
   // run in the denominator's population, and counting events here would make the overlap
   // look larger than the number of runs that actually exist.
@@ -567,6 +606,10 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     }
 
     if (event === 'capture_eligible' && entry.untrusted) untrustedEligible++;
+    // ONLY the denominator's own event feeds this. Folding `remember_invoked` in as well would
+    // mix the two ends into one histogram, and the share below would stop being a share of
+    // eligible turns while still carrying the name.
+    if (event === 'capture_eligible') byCause[entry.cause ?? 'unattributed']++;
     if (event === 'remember_invoked') rememberBySource[entry.source ?? 'unknown']++;
     if (event === 'capture_ran') {
       if (entry.facts === null) capturePasses.failed++;
@@ -635,6 +678,12 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     blindNote: eventsWithoutRun > 0 || eventsOverRunCap > 0 ? BLIND_NOTE : null,
   };
 
+  const attributedEligible = byCause.none + byCause.marker + byCause['external-tool'] + byCause.conversation;
+  const eligibleByCause = {
+    ...byCause,
+    conversationOnlyShare: attributedEligible > 0 ? byCause.conversation / attributedEligible : null,
+  };
+
   const ranked: CaptureModelRate[] = [...perModel.entries()]
     .map(([model, b]) => ({ model, eligible: b.eligible, remembered: b.remembered, fireRate: rate(b.remembered, b.eligible) }))
     .sort((a, b) => (b.eligible + b.remembered) - (a.eligible + a.remembered));
@@ -660,6 +709,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     populations,
     rememberBySource,
     capturePasses,
+    eligibleByCause,
     suppressed,
     blindness: {
       unparsableLines: scan.unparsableLines,

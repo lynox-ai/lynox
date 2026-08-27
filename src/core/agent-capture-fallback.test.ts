@@ -808,3 +808,120 @@ describe('turn-end capture — the SILENT exits, now named', () => {
     expect(eligible).toHaveLength(1);
   });
 });
+
+/**
+ * The `cause` column — DEF-dk-capture-observability (b).
+ *
+ * The killing mutation these are built for is NOT "the field is absent". It is the field
+ * present at ONE end and missing at the other: a numerator stratified by cause against a
+ * denominator that is not stratified is not a ratio, and every per-site presence check stays
+ * green while that is true. So each test below drives a real turn and asserts the pair.
+ */
+describe('cause — both ends of the ratio, or it is not a ratio', () => {
+  beforeEach(() => { vi.mocked(appendCaptureTelemetry).mockClear(); });
+
+  function linesFor(event: string) {
+    return vi.mocked(appendCaptureTelemetry).mock.calls
+      .filter(([, e]) => e?.event === event)
+      .map(([, e]) => e!);
+  }
+
+  it('a clean turn carries cause `none` on the DENOMINATOR and on the pass', async () => {
+    const { inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    inner._captureAtTurnEnd(ANSWER);
+    await Promise.all(inner._pendingMemory);
+    const eligible = linesFor('capture_eligible');
+    const ran = linesFor('capture_ran');
+    expect(eligible).toHaveLength(1);
+    expect(ran.length, 'the pass did not run, so this asserts nothing about it').toBeGreaterThan(0);
+    // The PAIR. Either one alone survives the mutation this test exists for.
+    expect(eligible[0]!.cause).toBe('none');
+    expect(ran[0]!.cause).toBe('none');
+  });
+
+  it('a conversation-tainted turn carries `conversation` at BOTH ends', async () => {
+    // The member the whole row turns on: priority order means `conversation` implies the other
+    // two did not fire, so its share over eligible turns is the upper bound on what the
+    // data-scoped-taint redesign could flip.
+    const { inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    (inner as unknown as { _conversationSawUntrusted: boolean })._conversationSawUntrusted = true;
+    inner._captureAtTurnEnd(ANSWER);
+    await Promise.all(inner._pendingMemory);
+    expect(linesFor('capture_eligible')[0]!.cause).toBe('conversation');
+    expect(linesFor('capture_ran')[0]!.cause).toBe('conversation');
+    expect(linesFor('remember_invoked')[0]!.cause).toBe('conversation');
+  });
+
+  it('cause `none` and untrusted `false` never disagree, on every line', async () => {
+    // The invariant that catches a writer deriving one of the two from somewhere else. Checked
+    // across every emitted line rather than a chosen one, so a single divergent writer fails.
+    const { inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    (inner as unknown as { _conversationSawUntrusted: boolean })._conversationSawUntrusted = true;
+    inner._captureAtTurnEnd(ANSWER);
+    await Promise.all(inner._pendingMemory);
+    const withCause = vi.mocked(appendCaptureTelemetry).mock.calls
+      .map(([, e]) => e!)
+      .filter((e) => e.cause !== undefined);
+    expect(withCause.length, 'no line carried a cause — the invariant is vacuous').toBeGreaterThan(1);
+    for (const line of withCause) {
+      expect((line.cause === 'none'), `${line.event}: cause=${line.cause} untrusted=${line.untrusted}`)
+        .toBe(line.untrusted === false);
+    }
+  });
+
+  it('the recovery pass tags its OWN remember_invoked, not just the tool handler', async () => {
+    // `remember_invoked` has two writers. The tool handler is covered by knowledge.ts's own
+    // suite; this pins the one inside the pass, which is the writer a `source: 'capture'` line
+    // comes from and the one that was added later.
+    const { inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    inner._captureAtTurnEnd(ANSWER);
+    await Promise.all(inner._pendingMemory);
+    const remembered = linesFor('remember_invoked');
+    expect(remembered).toHaveLength(1);
+    expect(remembered[0]).toMatchObject({ source: 'capture', cause: 'none' });
+  });
+
+  it('the FAILED pass carries the cause too — the emit path the success test misses', async () => {
+    // `capture_ran` has two writers: the success emit and the catch. Dropping `cause` from the
+    // catch survived every test above, because they all drive a provider that answers. A
+    // failed pass whose taint is unknown cannot be compared with a completed one, which is the
+    // whole reason the failure emits at all.
+    const reply = vi.fn().mockRejectedValue(new Error('provider down'));
+    const { inner } = makeAgent({ reply });
+    inner._durableMemoryEnabled = true;
+    inner.memory = {};
+    (inner as unknown as { _conversationSawUntrusted: boolean })._conversationSawUntrusted = true;
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      inner._captureAtTurnEnd(ANSWER);
+      await Promise.all(inner._pendingMemory);
+    } finally { stderr.mockRestore(); }
+    const ran = linesFor('capture_ran');
+    expect(ran).toHaveLength(1);
+    // `facts` absent is what marks this as the failure state; the cause must ride along.
+    expect(ran[0]!.facts, 'this drove the SUCCESS path, so it proves nothing about the catch').toBeUndefined();
+    expect(ran[0]!.cause).toBe('conversation');
+  });
+
+  it('a SUPPRESSED line deliberately carries no cause', async () => {
+    // Stated as a test so the omission cannot be read later as an oversight and "fixed" into
+    // an inert field. A suppressed turn is not in the denominator, so its cause cannot enter
+    // the ratio; a fallback_off turn already emitted its cause on `capture_eligible`.
+    const { inner } = makeAgent();
+    inner._durableMemoryEnabled = true;
+    inner.memory = null;
+    inner._captureAtTurnEnd(ANSWER);
+    await Promise.all(inner._pendingMemory);
+    const sup = linesFor('capture_suppressed');
+    expect(sup).toHaveLength(1);
+    expect(sup[0]!.cause).toBeUndefined();
+  });
+});

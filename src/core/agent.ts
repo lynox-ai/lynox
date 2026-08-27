@@ -1490,6 +1490,7 @@ export class Agent implements IAgent {
         thread: this.currentThreadId,
         model: this.model,
         untrusted: turnUntrusted,
+        cause: describeTurnUntrusted(this),
         runId: this.currentRunId,
         facts: facts.length,
         proposed: parsed.proposed,
@@ -1525,6 +1526,7 @@ export class Agent implements IAgent {
           thread: this.currentThreadId,
           model: this.model,
           untrusted: turnUntrusted,
+          cause: describeTurnUntrusted(this),
           outcome: result.deduped === true ? 'deduped' : result.status,
           runId: this.currentRunId,
           source: 'capture',
@@ -1579,6 +1581,7 @@ export class Agent implements IAgent {
           thread: this.currentThreadId,
           model: this.model,
           untrusted: turnUntrusted,
+          cause: describeTurnUntrusted(this),
           runId: this.currentRunId,
           source: 'capture',
         });
@@ -1663,6 +1666,9 @@ export class Agent implements IAgent {
         thread: this.currentThreadId,
         model: this.model,
         untrusted: turnUntrusted,
+        // The DENOMINATOR's half of the pair. Missing here, the report would stratify a
+        // numerator by cause against a denominator that is not — which is not a ratio.
+        cause: describeTurnUntrusted(this),
         // The join key. This site sits behind the three guards above; the NUMERATOR's
         // site (`knowledge.ts`) sits behind none of them, so the two ends of the fire
         // -rate can describe different runs. `runId` is what lets the report SHOW that
