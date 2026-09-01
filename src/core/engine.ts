@@ -1962,7 +1962,11 @@ export class Engine {
     // too and gets the same CP backups — only the LLM key is the customer's. LYNOX_BILLING_TIER
     // is emitted to all three CP tiers and absent on self-host, which is exactly the check the
     // managed hook makes ~15 lines below. Same signal, same meaning, no new concept.
-    if (this._backupManager && this._googleAuth) {
+    // No `&& this._googleAuth` here: a brokered credential is built on the first
+    // claim, long after this runs, and a boot-time check would leave the
+    // uploader unwired for exactly the tenants the broker exists for. The
+    // resolver below decides per call instead.
+    if (this._backupManager) {
       try {
         // Both symbols from ONE dynamic import, INSIDE the try. The first version hoisted a
         // second `await import` above this block to reach the gate — outside the catch, in an
@@ -1970,7 +1974,19 @@ export class Engine {
         // been fatal to boot on every tier. A gate is not worth a crash.
         const { GDriveBackupUploader, driveBackupAllowed } = await import('./backup-upload-gdrive.js');
         if (driveBackupAllowed()) {
-          this._backupManager.setGDriveUploader(new GDriveBackupUploader(this._googleAuth));
+          // A resolving shim, not the instance: `BackupAuthProvider` is the two
+          // methods the uploader calls, so a late-built credential is picked up
+          // without threading the resolver through that module's public shape.
+          // Refusing when there is nothing to resolve keeps the failure at the
+          // upload, where it can be reported, rather than at boot.
+          this._backupManager.setGDriveUploader(new GDriveBackupUploader({
+            getAccessToken: async () => {
+              const auth = this._googleAuth;
+              if (!auth) throw new Error('Google is not connected — no Drive backup upload.');
+              return auth.getAccessToken();
+            },
+            hasScope: (scope: string) => this._googleAuth?.hasScope(scope) ?? false,
+          }));
         }
       } catch {
         // Non-critical — GDrive backup upload not available
@@ -2123,6 +2139,35 @@ export class Engine {
     opts?: { limit?: number | undefined },
   ): import('./subject-footprint-reader.js').SubjectFootprint | null {
     return this._subjectFootprintReader?.getFootprint(subjectId, opts) ?? null;
+  }
+
+  /**
+   * The Google credential, building a BROKERED one if there is none.
+   *
+   * The claim route used to gate on `getGoogleAuth()`, which is circular: the
+   * claim is what CREATES the credential, and on a brokered tenant no client
+   * pair ever resolves, so the gate refused exactly the user the broker exists
+   * for (PRD Stage 1 §3.2).
+   *
+   * Gated on the control-plane identity, not on `isManagedBrokerPair` — that
+   * one needs `source === 'env'` and is false in broker mode by construction.
+   * A self-host instance with no pair gets `null` and the caller refuses, which
+   * is correct: there is nothing for it to claim.
+   */
+  async ensureGoogleAuth(): Promise<import('../integrations/google/google-auth.js').GoogleAuth | null> {
+    if (this._googleAuth) return this._googleAuth;
+    if (!process.env['LYNOX_MANAGED_INSTANCE_ID']) return null;
+    try {
+      const { createGoogleAuth } = await import('../integrations/google/index.js');
+      this._googleAuth = createGoogleAuth({
+        serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
+        vault: this.secretVault ?? undefined,
+        scopes: this.userConfig.google_oauth_scopes,
+      });
+      return this._googleAuth;
+    } catch {
+      return null;
+    }
   }
 
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }

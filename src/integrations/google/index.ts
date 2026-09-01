@@ -18,8 +18,9 @@ import { createCalendarTool } from './google-calendar.js';
 import { createDocsTool } from './google-docs.js';
 
 export interface GoogleToolsOptions {
-  clientId: string;
-  clientSecret: string;
+  /** Absent on a brokered tenant — see `GoogleAuthOptions`. */
+  clientId?: string | undefined;
+  clientSecret?: string | undefined;
   serviceAccountKeyPath?: string | undefined;
   vault?: import('../../core/secret-vault.js').SecretVault | undefined;
   /** Override default OAuth scopes. Defaults to read-only. */
