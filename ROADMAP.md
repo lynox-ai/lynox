@@ -25,11 +25,10 @@ Recent capabilities that are live today, so you can tell them apart from plans:
 ## next
 
 - **Reversible knowledge edits** — being able to split or undo a merge, so the agent's memory is genuinely correctable rather than append-only. It is the item with the widest blast radius: as long as merging two same-named things is a one-way door, everything built on top inherits that. A first piece is in — when two records share a name, the agent refuses the ambiguous match and asks instead of silently picking one. That stops new merges from going wrong. Undoing the ones already made is the part still ahead — until it lands, treat a merge as permanent: the agent asks before it merges, but there is no undo in the interface yet.
-- **One memory store instead of two** — durable knowledge currently runs alongside the older memory archive rather than replacing it. Consolidating them means one place where memory is stored, corrected and exported — instead of two with different capabilities.
+- **One memory store instead of two** — durable knowledge currently runs alongside the older memory archive rather than replacing it. Consolidating them means one place where memory is stored, corrected and exported — instead of two with different capabilities. The safeguards it depends on come first: deleting a memory now also clears the bare names it left behind. Retiring the older store is the last step, not the first.
 - **Calendar writing** — creating and changing events, not just reading them. The read path shipped first deliberately; the write path is a different design question and is not settled yet.
-- **OpenAI as a first-class provider** — alongside Anthropic and Mistral, rather than only through the OpenAI-compatible gateway path.
 - **MCP client** — connect to external MCP servers, both catalog and custom.
-- **OAuth authorization-code callbacks** — closing the remaining gap in connecting APIs that need a redirect flow.
+- **OAuth authorization-code callbacks** — closing the remaining gap in connecting APIs that need a redirect flow. The groundwork is in for the first provider; making it a general capability of the connector, rather than one integration's private path, is the part that matters.
 
 ## later
 
