@@ -2268,8 +2268,11 @@ export class Session {
     };
 
     let basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
-    // Append Google Workspace docs only when Google tools are registered
-    if (engine.getGoogleAuth()) {
+    // Append the Google docs only when the tenant has a GRANT — not when a
+    // credential merely resolves. The tools are registered from boot either way
+    // (PRD Stage 1 §3.2); the suffix names them as usable, and the model
+    // believes it, so this one keys on the connection.
+    if (engine.getGoogleAuth()?.isAuthenticated() === true) {
       basePrompt += GOOGLE_PROMPT_SUFFIX;
     }
     // Append pipeline docs only when pipeline tools are registered

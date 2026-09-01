@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Changed — BREAKING (library consumers)
+- **`createGoogleTools` no longer builds the credential, and its signature changed.**
+  It was `createGoogleTools(options) → { tools, auth }`; it is now
+  `createGoogleTools(resolveAuth: () => GoogleAuth | null) → { tools }`, and the
+  credential half moved to the new `createGoogleAuth(options) → GoogleAuth`. Both
+  are exported from the package barrel, as is the new `GOOGLE_NOT_CONNECTED`
+  constant.
+
+  The reason is not tidiness: the four Google tools are now registered from boot
+  whether or not Google is connected, so a model that can see the tool can tell
+  the user the feature exists and how to switch it on. A tool that must exist
+  before its credential does cannot close over that credential — hence the
+  resolver. Each tool answers `GOOGLE_NOT_CONNECTED` until there is something to
+  resolve, and the resolver is re-read per call so a reconnect takes effect
+  without a process restart.
+
+  **Migration:** `const { tools, auth } = createGoogleTools(opts)` becomes
+  `const auth = createGoogleAuth(opts); const { tools } = createGoogleTools(() => auth);`
+
 ## 2.14.2 — 2026-08-18
 
 A second repair, on the slot 2.14.1 brought back to life. Pointing the `fast`

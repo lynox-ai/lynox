@@ -93,7 +93,8 @@ function readForms(row: EnvRegistryRow): RegExp[] {
       //
       // What actually binds this call site to THIS pair is
       // src/core/engine-client-pair-boot.test.ts — it boots a real Engine and
-      // asserts the values handed to createGoogleTools. Measured 2026-08-25:
+      // asserts the values handed to createGoogleAuth (createGoogleTools until the
+      // 2026-09-01 split, which moved the credential to its own factory). Measured 2026-08-25:
       // pointing engine.ts at a foreign descriptor keeps tsc and this file green
       // and fails that one. (An earlier version of this comment said "three
       // times"; the count depends on which call site is repointed, so it was a
@@ -461,7 +462,7 @@ describe('env-ABI: credential-pair reads are swept and declared', () => {
   //   · the two tests below — every pair-resolver row's members are rows, and
   //     every minted descriptor matches its registry rows in BOTH directions;
   //   · src/core/engine-client-pair-boot.test.ts — boots a real Engine and
-  //     asserts the VALUES handed to createGoogleTools, which is what actually
+  //     asserts the VALUES handed to createGoogleAuth, which is what actually
   //     fails if engine.ts stops reading this pair.
   //
   // The names still appear in `reads` via the direct `process.env[…]` at the

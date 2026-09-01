@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
+import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
@@ -110,7 +111,7 @@ function formatAttendees(attendees: CalendarEvent['attendees']): string {
 
 const CALENDAR_WRITE_ACTIONS = new Set<CalendarInput['action']>(['create_event', 'update_event', 'delete_event']);
 
-export function createCalendarTool(auth: GoogleAuth): ToolEntry<CalendarInput> {
+export function createCalendarTool(getAuth: () => GoogleAuth | null): ToolEntry<CalendarInput> {
   return {
     destructive: {
       mode: 'external',
@@ -203,6 +204,9 @@ export function createCalendarTool(auth: GoogleAuth): ToolEntry<CalendarInput> {
       },
     },
     handler: async (input: CalendarInput, agent: IAgent): Promise<string> => {
+      // Registered from boot, connected or not — see google/index.ts.
+      const auth = getAuth();
+      if (!auth) return GOOGLE_NOT_CONNECTED;
       try {
         // Check write scope
         if (WRITE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.CALENDAR_EVENTS)) {

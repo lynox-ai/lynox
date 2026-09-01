@@ -2202,10 +2202,10 @@ describe('isDangerous', () => {
       const fakeAuth = {} as Parameters<typeof createDriveTool>[0];
 
       const cases: Array<{ tool: ToolEntry; write: string; safe: string }> = [
-        { tool: createDriveTool(fakeAuth),    write: 'upload',       safe: 'search' },
-        { tool: createCalendarTool(fakeAuth), write: 'create_event', safe: 'list_events' },
-        { tool: createSheetsTool(fakeAuth),   write: 'write',        safe: 'read' },
-        { tool: createDocsTool(fakeAuth),     write: 'create',       safe: 'read' },
+        { tool: createDriveTool(() => fakeAuth),    write: 'upload',       safe: 'search' },
+        { tool: createCalendarTool(() => fakeAuth), write: 'create_event', safe: 'list_events' },
+        { tool: createSheetsTool(() => fakeAuth),   write: 'write',        safe: 'read' },
+        { tool: createDocsTool(() => fakeAuth),     write: 'create',       safe: 'read' },
       ];
       for (const { tool, write, safe } of cases) {
         expect(tool.destructive, `${tool.definition.name} must declare destructive`).toBeTruthy();
