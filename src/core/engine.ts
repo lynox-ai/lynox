@@ -1579,22 +1579,21 @@ export class Engine {
     // resolving the halves independently produced a mixed credential.
     const googlePair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
     this._googleClientSource = googlePair?.source ?? null;
+    // Registration is UNCONDITIONAL and does not wait for a credential: a model
+    // that can see the tool can tell the user the feature exists and how to
+    // connect it (PRD Stage 1 §3.2). Each tool answers GOOGLE_NOT_CONNECTED
+    // until there is something to resolve.
+    await this.registerGoogleTools();
     if (googlePair) {
-      const googleClientId = googlePair.clientId;
-      const googleClientSecret = googlePair.clientSecret;
       try {
-        const { createGoogleTools } = await import('../integrations/google/index.js');
-        const { tools: googleTools, auth: googleAuth } = createGoogleTools({
-          clientId: googleClientId,
-          clientSecret: googleClientSecret,
+        const { createGoogleAuth } = await import('../integrations/google/index.js');
+        this._googleAuth = createGoogleAuth({
+          clientId: googlePair.clientId,
+          clientSecret: googlePair.clientSecret,
           serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
           vault: this.secretVault ?? undefined,
           scopes: this.userConfig.google_oauth_scopes,
         });
-        for (const tool of googleTools) {
-          this.registry.register(tool);
-        }
-        this._googleAuth = googleAuth;
       } catch {
         // Google Workspace init failed — non-critical, continue without it
       }
@@ -2142,29 +2141,51 @@ export class Engine {
     return runEscalation(this.getThreadStore(), this.getNotificationRouter(), opts);
   }
 
-  /** Re-initialize Google Workspace integration after credentials change. */
+  /**
+   * Register the four Google tools. Called ONCE from init, before any
+   * credential exists — the entries resolve their auth per call.
+   *
+   * This exists so the registration loop has one home. It used to be an inline
+   * `for` duplicated here and in `reloadGoogle()`, each under its own copy of
+   * the `createGoogleTools` block; a change to one was a change nobody made to
+   * the other.
+   */
+  private async registerGoogleTools(): Promise<void> {
+    try {
+      const { createGoogleTools } = await import('../integrations/google/index.js');
+      const { tools } = createGoogleTools(() => this._googleAuth);
+      for (const tool of tools) {
+        this.registry.register(tool);
+      }
+    } catch {
+      // Non-critical: without the tools the agent simply cannot reach Google.
+    }
+  }
+
+  /**
+   * Re-build the Google credential after a credential change.
+   *
+   * It no longer touches the registry: the tools are registered from boot and
+   * read `this._googleAuth` through a resolver, so swapping the instance here
+   * is the whole of the change. That is also why the resolver must not memoise
+   * — see `google/index.ts`.
+   */
   async reloadGoogle(): Promise<boolean> {
     const pair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
     this._googleClientSource = pair?.source ?? null;
-    const clientId = pair?.clientId;
-    const clientSecret = pair?.clientSecret;
-    if (!clientId || !clientSecret) {
+    if (!pair) {
       this._googleAuth = null;
       return false;
     }
     try {
-      const { createGoogleTools } = await import('../integrations/google/index.js');
-      const { tools: googleTools, auth: googleAuth } = createGoogleTools({
-        clientId,
-        clientSecret,
+      const { createGoogleAuth } = await import('../integrations/google/index.js');
+      this._googleAuth = createGoogleAuth({
+        clientId: pair.clientId,
+        clientSecret: pair.clientSecret,
         serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
         vault: this.secretVault ?? undefined,
         scopes: this.userConfig.google_oauth_scopes,
       });
-      for (const tool of googleTools) {
-        this.registry.register(tool);
-      }
-      this._googleAuth = googleAuth;
       return true;
     } catch {
       return false;

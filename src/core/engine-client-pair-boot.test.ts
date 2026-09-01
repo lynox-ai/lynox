@@ -17,8 +17,11 @@ import type { LynoxConfig } from '../types/index.js';
  * for. Point the engine back at the store and every resolver test stays green.
  *
  * So this boots a real Engine against a tmp data dir and asserts what the engine
- * HANDED TO `createGoogleTools`: the source it chose and, for the case that
- * matters, the secret VALUE. A resolver that returns the vault id with the env
+ * HANDED TO the auth factory: the source it chose and, for the case that
+ * matters, the secret VALUE. (Until 2026-09-01 that factory was
+ * `createGoogleTools`, which built the credential AND the tools together. The
+ * two were split so the tools can exist before the credential does; the pair
+ * now goes to `createGoogleAuth`, and this file follows the pair.) A resolver that returns the vault id with the env
  * secret still reports `source: 'vault'` — the value is the assertion.
  */
 const PROBE_TOOL = 'google_probe_tool';
@@ -26,9 +29,14 @@ const PROBE_TOOL = 'google_probe_tool';
  * The fixture is a suspect, and here it was the defect. It used to return
  * `tools: []` and capture only `clientId`/`clientSecret`, which made two things
  * UNOBSERVABLE BY CONSTRUCTION rather than by omission: whether the registration
- * loop runs at all, and whether the vault, scopes and key path reach
- * createGoogleTools. Deleting any of those lines from the engine left every test
- * green. It returns one real tool now and captures the whole options object.
+ * loop runs at all, and whether the vault, scopes and key path reach the auth
+ * factory. Deleting any of those lines from the engine left every test green.
+ * It returns one real tool now and captures the whole options object.
+ *
+ * Both halves are mocked because the engine now calls both: `createGoogleTools`
+ * unconditionally (it takes a resolver and no credential), `createGoogleAuth`
+ * only when a pair resolved. `calls` therefore records the PAIR decisions, which
+ * is what every assertion below is about.
  */
 const captured = vi.hoisted(() => ({
   calls: [] as Record<string, unknown>[],
@@ -36,13 +44,13 @@ const captured = vi.hoisted(() => ({
   explode: false,
 }));
 vi.mock('../integrations/google/index.js', () => ({
-  createGoogleTools: (opts: Record<string, unknown>) => {
+  createGoogleTools: () => ({
+    tools: [{ definition: { name: 'google_probe_tool', description: 'probe', parameters: {} }, execute: async () => '' }],
+  }),
+  createGoogleAuth: (opts: Record<string, unknown>) => {
     captured.calls.push({ ...opts });
-    if (captured.explode) throw new Error('createGoogleTools failed');
-    return {
-      tools: [{ definition: { name: 'google_probe_tool', description: 'probe', parameters: {} }, execute: async () => '' }],
-      auth: { isAuthenticated: () => false },
-    };
+    if (captured.explode) throw new Error('createGoogleAuth failed');
+    return { isAuthenticated: () => false };
   },
 }));
 
@@ -215,7 +223,7 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     // pair at all — the assert above still passes against `undefined`, so the
     // whole test went green with NOTHING built.
     const built = captured.calls.at(-1);
-    expect(built, 'the config pair must reach createGoogleTools').toBeDefined();
+    expect(built, 'the config pair must reach createGoogleAuth').toBeDefined();
     expect(built?.clientSecret).not.toBe('PROJECT-A-secret');
     expect(built).toMatchObject({ clientId: 'PROJECT-B-id', clientSecret: 'PROJECT-B-secret' });
     expect(engine.getGoogleClientSource()).not.toBe('vault');
@@ -257,7 +265,7 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     // The vault handle itself, asserted where one actually exists: nulling this
     // argument would leave the tools unable to read a stored token, and until
     // now nothing looked at it.
-    expect(reloaded?.['vault'], 'the vault must reach createGoogleTools').toBeDefined();
+    expect(reloaded?.['vault'], 'the vault must reach createGoogleAuth').toBeDefined();
   });
 
   it('reloadGoogle drives the whole reported state, in both directions', async () => {
@@ -296,14 +304,14 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     // registration loop used to survive every suite, because the fixture
     // returned no tools. It returns one now, so the loop is observable.
     expect(engine.registry.find(PROBE_TOOL), 'the built tools must reach the registry').toBeDefined();
-    // The other three arguments createGoogleTools is handed. Deleting any of them
+    // The other three arguments the auth factory is handed. Deleting any of them
     // used to survive every suite, because the fixture captured only id and
     // secret. Presence, not value — in THIS phase there is no vault key and no
     // configured scope list, so the values are legitimately undefined; the
     // vault's VALUE is asserted in the migration case below, where one exists.
     const opts = Object.keys(captured.calls.at(-1) ?? {});
     for (const key of ['vault', 'scopes', 'serviceAccountKeyPath']) {
-      expect(opts, `createGoogleTools must still be handed ${key}`).toContain(key);
+      expect(opts, `the auth factory must still be handed ${key}`).toContain(key);
     }
     // An env pair alone is NOT the managed broker — the provisioning marker is
     // the other half of that verdict.
@@ -336,7 +344,7 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
 
   it('reloadGoogle reports failure when building the tools throws', async () => {
     // The try/catch has two ways to answer false and only one was asserted.
-    // A throwing createGoogleTools with `catch { return true }` would have
+    // A throwing createGoogleAuth with `catch { return true }` would have
     // POST /api/google/reload answer ok while the engine kept whatever handle it
     // had — the same lie as the early-return branch, through the other door.
     freshDataDir('cp-reload-throw');

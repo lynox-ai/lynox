@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
+import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapChannelMessage } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
@@ -85,7 +86,7 @@ function formatFileSize(bytes: string | undefined): string {
 
 const DRIVE_WRITE_ACTIONS = new Set<DriveInput['action']>(['upload', 'create_doc', 'move', 'share']);
 
-export function createDriveTool(auth: GoogleAuth): ToolEntry<DriveInput> {
+export function createDriveTool(getAuth: () => GoogleAuth | null): ToolEntry<DriveInput> {
   return {
     destructive: {
       mode: 'external',
@@ -157,6 +158,9 @@ export function createDriveTool(auth: GoogleAuth): ToolEntry<DriveInput> {
       },
     },
     handler: async (input: DriveInput, agent: IAgent): Promise<string> => {
+      // Registered from boot, connected or not — see google/index.ts.
+      const auth = getAuth();
+      if (!auth) return GOOGLE_NOT_CONNECTED;
       try {
         // Check scopes
         if (WRITE_SCOPE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.DRIVE_FILE)) {

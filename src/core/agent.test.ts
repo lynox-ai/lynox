@@ -4078,10 +4078,10 @@ describe('Agent lazy-tools assembly (Slice 1)', () => {
         typeof (v as { definition: unknown }).definition === 'object',
     );
     const factoryEntries: ToolEntry[] = [
-      createCalendarTool(googleAuth),
-      createDocsTool(googleAuth),
-      createDriveTool(googleAuth),
-      createSheetsTool(googleAuth),
+      createCalendarTool(() => googleAuth),
+      createDocsTool(() => googleAuth),
+      createDriveTool(() => googleAuth),
+      createSheetsTool(() => googleAuth),
       ...createMailTools(mailRegistry),
     ];
     const allEntries = [...staticEntries, ...factoryEntries];

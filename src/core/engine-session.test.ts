@@ -453,7 +453,12 @@ describe('Engine + Session (Orchestrator)', () => {
       // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
       // isn't configured; +5 mail tools when vault is available.
       // `calendar_read` is NOT here: it ships behind `calendar_enabled`, default off.
-      expect([41, 46]).toContain(mockRegister.mock.calls.length);
+      // +4 Google tools ALWAYS since 2026-09-01: registration no longer waits for a
+      // client pair (PRD Stage 1 §3.2 — a model that can see the tool can ask the
+      // user to connect it). They answer GOOGLE_NOT_CONNECTED until there is a
+      // credential. This pin exists to catch tool-surface growth nobody decided,
+      // so the number moves WITH the reason, never alone.
+      expect([45, 50]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -1221,7 +1226,12 @@ describe('Engine + Session (Orchestrator)', () => {
       // 38 builtin always (incl. edit_file + update_workflow_steps + export_workflow + import_workflow + diagnose_workflow_run + media_process + suggest_follow_ups); +1 `web_research`
       // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
       // isn't configured; +5 mail tools when vault is available.
-      expect([41, 46]).toContain(mockRegister.mock.calls.length);
+      // +4 Google tools ALWAYS since 2026-09-01: registration no longer waits for a
+      // client pair (PRD Stage 1 §3.2 — a model that can see the tool can ask the
+      // user to connect it). They answer GOOGLE_NOT_CONNECTED until there is a
+      // credential. This pin exists to catch tool-surface growth nobody decided,
+      // so the number moves WITH the reason, never alone.
+      expect([45, 50]).toContain(mockRegister.mock.calls.length);
     });
 
     it('does NOT register calendar_read while the flag is off', async () => {

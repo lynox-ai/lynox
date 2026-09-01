@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
+import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
 import type { DocsDocument } from './google-docs-format.js';
 import { docsToMarkdown, markdownToHtml } from './google-docs-format.js';
 import { getErrorMessage } from '../../core/utils.js';
@@ -54,7 +55,7 @@ async function docsFetch(auth: GoogleAuth, url: string, options?: RequestInit): 
 // permission prompts — keep it aligned with the enumerated write actions.
 const DOCS_WRITE_ACTIONS = new Set<DocsInput['action']>(['create', 'append', 'replace']);
 
-export function createDocsTool(auth: GoogleAuth): ToolEntry<DocsInput> {
+export function createDocsTool(getAuth: () => GoogleAuth | null): ToolEntry<DocsInput> {
   return {
     destructive: {
       mode: 'external',
@@ -104,6 +105,9 @@ export function createDocsTool(auth: GoogleAuth): ToolEntry<DocsInput> {
       },
     },
     handler: async (input: DocsInput, _agent: IAgent): Promise<string> => {
+      // Registered from boot, connected or not — see google/index.ts.
+      const auth = getAuth();
+      if (!auth) return GOOGLE_NOT_CONNECTED;
       try {
         // Check write scope
         if (WRITE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.DOCS)) {
