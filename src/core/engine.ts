@@ -1577,13 +1577,17 @@ export class Engine {
     // Google Workspace tools (conditional — requires client ID + secret)
     // Resolved as a PAIR, from ONE source — see google-client-pair.ts for why
     // resolving the halves independently produced a mixed credential.
-    const googlePair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
-    this._googleClientSource = googlePair?.source ?? null;
     // Registration is UNCONDITIONAL and does not wait for a credential: a model
     // that can see the tool can tell the user the feature exists and how to
     // connect it (PRD Stage 1 §3.2). Each tool answers GOOGLE_NOT_CONNECTED
     // until there is something to resolve.
+    //
+    // It runs BEFORE the resolve, not after: "unconditional" that sits behind a
+    // call which could one day throw is conditional on that call, and the
+    // ordering is free to get right today.
     await this.registerGoogleTools();
+    const googlePair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
+    this._googleClientSource = googlePair?.source ?? null;
     if (googlePair) {
       try {
         const { createGoogleAuth } = await import('../integrations/google/index.js');

@@ -79,14 +79,36 @@ describe('Engine boot — the Google tools are visible before a credential exist
     }
   });
 
-  it('registers them exactly once — the loop has one home now', async () => {
-    // MUTATION THIS KILLS: re-adding the registration loop to `reloadGoogle()`,
-    // which is where the duplicate lived until this change.
-    const engine = await bootWithoutCredential();
-    await engine.reloadGoogle();
-    const names = engine.getRegistry().getEntries().map(e => e.definition.name);
-    for (const t of GOOGLE_TOOLS) {
-      expect(names.filter(n => n === t), `${t} registered once`).toHaveLength(1);
-    }
+  it('reloadGoogle does not touch the registry — the loop has one home now', async () => {
+    // ⚠ The first version of this test asserted `names.filter(n => n === t)` had
+    // length 1. That CANNOT FAIL: `ToolRegistry.register` is `this.tools.set(name,
+    // entry)` on a Map, so a duplicate is impossible for any implementation. And
+    // its named mutation never ran, because `reloadGoogle()` returns at `if
+    // (!pair)` and the fixture booted without one. Two independent reasons for a
+    // green that meant nothing.
+    //
+    // The falsifiable quantity is the registry's own counter: `register()`
+    // increments `_version` on every CALL, duplicate or not. So a registration
+    // loop re-added to `reloadGoogle()` moves it, and this asserts it does not.
+    //
+    // MUTATION THIS KILLS: put the `for (const tool of tools) register(tool)` loop
+    // back into `reloadGoogle()`.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-gvis-reload-'));
+    dirs.push(dir);
+    for (const k of ENV_KEYS) setEnv(k, undefined);
+    setEnv('LYNOX_DATA_DIR', dir);
+    // A real pair, so `reloadGoogle()` gets PAST its early return — without one
+    // the mutation above would not execute and the test would prove nothing.
+    setEnv('GOOGLE_CLIENT_ID', 'reload-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'reload-secret');
+    reloadConfig();
+    const engine = new Engine({} as LynoxConfig);
+    engines.push(engine);
+    await engine.init();
+
+    const before = engine.getRegistry().version;
+    const ok = await engine.reloadGoogle();
+    expect(ok, 'the fixture must reach the credential branch, or the mutation cannot run').toBe(true);
+    expect(engine.getRegistry().version - before, 'reloadGoogle must register nothing').toBe(0);
   });
 });

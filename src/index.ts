@@ -72,7 +72,7 @@ export { resolveContext } from './core/context.js';
 export type { LynoxContext, ContextSource } from './types/index.js';
 // Telegram integration removed 2026-05-15 (data sovereignty + attack-surface reduction;
 // PWA + Mail/Voice cover every Telegram use case).
-export { GoogleAuth, SCOPES, READ_ONLY_SCOPES, WRITE_SCOPES, createGoogleTools } from './integrations/google/index.js';
+export { GoogleAuth, SCOPES, READ_ONLY_SCOPES, WRITE_SCOPES, createGoogleTools, createGoogleAuth, GOOGLE_NOT_CONNECTED } from './integrations/google/index.js';
 export type { GoogleAuthOptions, DeviceFlowPrompt, LocalAuthResult } from './integrations/google/index.js';
 export { getRole, getRoleNames, BUILTIN_ROLES } from './core/roles.js';
 export type { RoleConfig } from './core/roles.js';
