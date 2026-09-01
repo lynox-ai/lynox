@@ -568,7 +568,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       hasScope: vi.fn().mockReturnValue(true),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
-    const ctxWithAuth = new MailContext(stateDb, backend, undefined, {}, () => auth);
+    const ctxWithAuth = new MailContext(stateDb, backend, undefined, {}, auth);
     try {
       await ctxWithAuth.init();
       const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
@@ -592,11 +592,11 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       hasScope: vi.fn().mockReturnValue(true),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
-    const ctx1 = new MailContext(stateDb, backend, undefined, {}, () => auth);
+    const ctx1 = new MailContext(stateDb, backend, undefined, {}, auth);
     await ctx1.init();
     await ctx1.close();
 
-    const ctx2 = new MailContext(stateDb, backend, undefined, {}, () => auth);
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
     try {
       await ctx2.init();
       const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
@@ -613,7 +613,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       hasScope: vi.fn(),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
-    const ctx2 = new MailContext(stateDb, backend, undefined, {}, () => auth);
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
     try {
       await ctx2.init();
       expect(stateDb.listAccounts().filter(a => a.authType === 'oauth_google')).toHaveLength(0);
@@ -637,7 +637,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
     stateDb.upsertAccount(GMAIL_ACCOUNT);
     backend.set('MAIL_ACCOUNT_RAFAEL_GMAIL', JSON.stringify({ user: 'x', pass: 'y', storedAt: 'now' }));
 
-    const ctxBoth = new MailContext(stateDb, backend, undefined, {}, () => auth);
+    const ctxBoth = new MailContext(stateDb, backend, undefined, {}, auth);
     try {
       await ctxBoth.init();
       // Both providers present
@@ -656,7 +656,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       hasScope: vi.fn().mockReturnValue(true),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
-    const ctx2 = new MailContext(stateDb, backend, undefined, {}, () => auth);
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
     try {
       await ctx2.init();
       // No row created — but no crash either
@@ -689,7 +689,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       hasScope: vi.fn().mockReturnValue(true),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
-    const ctx2 = new MailContext(stateDb, backend, undefined, {}, () => auth);
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
     try {
       await ctx2.init();
       const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
@@ -712,7 +712,7 @@ describe('MailContext — OAuth-Gmail boot migration', () => {
       hasScope: vi.fn().mockReturnValue(true),
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
-    const ctx2 = new MailContext(stateDb, backend, undefined, {}, () => auth);
+    const ctx2 = new MailContext(stateDb, backend, undefined, {}, auth);
     try {
       await ctx2.init();
       const accounts = stateDb.listAccounts().filter(a => a.authType === 'oauth_google');
@@ -819,7 +819,7 @@ describe('MailContext — persisted default flag', () => {
     } as unknown as import('../google/google-auth.js').GoogleAuth;
 
     try {
-      const ctxBoot = new MailContext(stateDb, backend, undefined, {}, () => auth);
+      const ctxBoot = new MailContext(stateDb, backend, undefined, {}, auth);
       try {
         await ctxBoot.init();
         // OAuth row was the first to exist → claims default

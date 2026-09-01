@@ -1626,7 +1626,7 @@ export class Engine {
       // the live MailContext that still holds the original connection).
       this._mailStateDb = mailStateDb;
       if (this.secretVault) {
-        const mailCtx = new MailContext(mailStateDb, this.secretVault, undefined, {}, () => this._googleAuth);
+        const mailCtx = new MailContext(mailStateDb, this.secretVault, undefined, {}, this._googleAuth);
         await mailCtx.init();
         for (const tool of mailCtx.tools()) {
           this.registry.register(tool);
