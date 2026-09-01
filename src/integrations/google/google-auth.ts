@@ -94,8 +94,18 @@ interface ServiceAccountKey {
 }
 
 export interface GoogleAuthOptions {
-  clientId: string;
-  clientSecret: string;
+  /**
+   * The OAuth app credential. **Optional since the broker split**: a tenant
+   * whose tokens the control plane mints and refreshes never receives a pair
+   * (PRD Stage 1 §3.2), and the object still has to exist so the claim has
+   * somewhere to put the tokens.
+   *
+   * Optional rather than a `brokered: true` flag on purpose: the absence IS the
+   * mode, and making it a type lets the compiler enumerate every site that
+   * needs a decision instead of a grep finding the ones somebody remembered.
+   */
+  clientId?: string | undefined;
+  clientSecret?: string | undefined;
   serviceAccountKeyPath?: string | undefined;
   vault?: SecretVault | undefined;
   /** Override default OAuth scopes. Defaults to READ_ONLY_SCOPES. */
@@ -426,8 +436,8 @@ const ERROR_HTML = (msg: string) => {
 // === GoogleAuth Class ===
 
 export class GoogleAuth {
-  private readonly clientId: string;
-  private readonly clientSecret: string;
+  private readonly clientId: string | undefined;
+  private readonly clientSecret: string | undefined;
   private readonly serviceAccountKeyPath: string | undefined;
   private readonly vault: SecretVault | undefined;
   private readonly configuredScopes: readonly string[] | undefined;
@@ -436,6 +446,55 @@ export class GoogleAuth {
   private refreshInFlight: Promise<void> | null = null;
   private serviceAccountTokenCache: { token: string; expires_at: number } | null = null;
   private serviceAccountTokenInFlight: Promise<string> | null = null;
+
+  /**
+   * The instance's OWN OAuth app credential, or a refusal.
+   *
+   * A brokered tenant has none: the control plane holds the pair, mints the
+   * tokens and refreshes them, and the pair never reaches the tenant (PRD
+   * Stage 1 §3.2). Every path that talks to Google's OAuth endpoints AS this
+   * app therefore has to ask, and every one of them is a self-host path.
+   *
+   * It throws rather than returning null because the alternative is what the
+   * type change replaced: posting `client_id=undefined` to Google and reading
+   * whatever comes back as if it were about the user's grant. What Google
+   * answers to that is not measured here, and does not need to be — the request
+   * is a bug on our side and stops before it leaves.
+   */
+  /**
+   * The self-host refresh: this instance's own pair, straight to Google.
+   *
+   * Split out of the ternary in `_doRefresh` so the pair requirement sits at
+   * the top of the branch that needs it. A brokered token reaching here means
+   * its sealed handle went missing, and the named refusal says so instead of
+   * posting an empty `client_id` and reading Google's answer as a verdict on
+   * the user's grant.
+   */
+  private async refreshDirect(refreshToken: string): Promise<Response> {
+    const { clientId, clientSecret } = this.requireOwnPair('a direct token refresh');
+    return fetch(TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+  }
+
+  private requireOwnPair(caller: string): { clientId: string; clientSecret: string } {
+    if (!this.clientId || !this.clientSecret) {
+      throw new Error(
+        `${caller} needs this instance's own Google client pair, and there is none. `
+        + 'A brokered connection is refreshed by the control plane; use the managed '
+        + 'claim flow instead of the self-host OAuth entry points.',
+      );
+    }
+    return { clientId: this.clientId, clientSecret: this.clientSecret };
+  }
 
   constructor(options: GoogleAuthOptions) {
     this.clientId = options.clientId;
@@ -543,6 +602,7 @@ export class GoogleAuth {
    * waits for Google to redirect back with the auth code.
    */
   async startLocalAuth(scopes?: string[]): Promise<{ authUrl: string; waitForCode: () => Promise<void> }> {
+    const { clientId, clientSecret } = this.requireOwnPair('startLocalAuth');
     const requestedScopes = scopes ?? this.configuredScopes ?? DEFAULT_SCOPES;
 
     // Generate CSRF protection state
@@ -553,7 +613,7 @@ export class GoogleAuth {
     const redirectUri = `http://localhost:${port}`;
 
     const params = new URLSearchParams({
-      client_id: this.clientId,
+      client_id: clientId,
       redirect_uri: redirectUri,
       response_type: 'code',
       scope: requestedScopes.join(' '),
@@ -572,8 +632,8 @@ export class GoogleAuth {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({
-            client_id: this.clientId,
-            client_secret: this.clientSecret,
+            client_id: clientId,
+            client_secret: clientSecret,
             code,
             grant_type: 'authorization_code',
             redirect_uri: redirectUri,
@@ -603,11 +663,13 @@ export class GoogleAuth {
    * with the code to complete the flow.
    */
   startRedirectAuth(redirectUri: string, scopes?: string[]): { authUrl: string; state: string } {
+    // Only the id reaches the consent URL; the guard is here for the refusal.
+    const { clientId } = this.requireOwnPair('startRedirectAuth');
     const requestedScopes = scopes ?? this.configuredScopes ?? DEFAULT_SCOPES;
     const state = randomUUID();
 
     const params = new URLSearchParams({
-      client_id: this.clientId,
+      client_id: clientId,
       redirect_uri: redirectUri,
       response_type: 'code',
       scope: requestedScopes.join(' '),
@@ -623,12 +685,13 @@ export class GoogleAuth {
    * Exchange an authorization code from redirect-based OAuth flow.
    */
   async exchangeRedirectCode(code: string, redirectUri: string): Promise<void> {
+    const { clientId, clientSecret } = this.requireOwnPair('exchangeRedirectCode');
     const response = await fetch(TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
-        client_id: this.clientId,
-        client_secret: this.clientSecret,
+        client_id: clientId,
+        client_secret: clientSecret,
         code,
         grant_type: 'authorization_code',
         redirect_uri: redirectUri,
@@ -651,13 +714,14 @@ export class GoogleAuth {
    * enters the code, and the method polls until authorized.
    */
   async startDeviceFlow(scopes?: string[]): Promise<DeviceFlowPrompt & { waitForAuth: () => Promise<void> }> {
+    const { clientId, clientSecret } = this.requireOwnPair('startDeviceFlow');
     const requestedScopes = scopes ?? this.configuredScopes ?? DEFAULT_SCOPES;
 
     const response = await fetch(DEVICE_AUTH_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
-        client_id: this.clientId,
+        client_id: clientId,
         scope: requestedScopes.join(' '),
       }),
       signal: AbortSignal.timeout(30_000),
@@ -688,8 +752,8 @@ export class GoogleAuth {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({
-            client_id: this.clientId,
-            client_secret: this.clientSecret,
+            client_id: clientId,
+            client_secret: clientSecret,
             device_code: data.device_code,
             grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
           }),
@@ -950,17 +1014,7 @@ export class GoogleAuth {
           redirect: 'manual',
           signal: AbortSignal.timeout(30_000),
         })
-      : await fetch(TOKEN_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: new URLSearchParams({
-            client_id: this.clientId,
-            client_secret: this.clientSecret,
-            refresh_token: this.tokenData.refresh_token,
-            grant_type: 'refresh_token',
-          }),
-          signal: AbortSignal.timeout(30_000),
-        });
+      : await this.refreshDirect(this.tokenData.refresh_token);
 
     if (!response.ok) {
       const text = await response.text();

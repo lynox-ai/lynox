@@ -239,7 +239,28 @@ export class MailContext {
    * connection so users who connected Gmail via OAuth before this refactor
    * see their mailbox without re-authorizing.
    */
-  readonly googleAuth: GoogleAuth | null;
+  /**
+   * Resolved per call, never captured.
+   *
+   * It used to be the instance itself, bound at construction. Since a brokered
+   * `GoogleAuth` is built on the first claim (PRD Stage 1 §3.2) — after this
+   * context exists — a captured one is `null` forever.
+   *
+   * ⚠ **This is necessary and NOT sufficient, and the difference is measured.**
+   * `init()` is guarded by `this.initialized`, and the OAuth-Gmail migration
+   * plus the provider loop run only inside it. So a tenant that connects AFTER
+   * boot gets the four Google tools working — they resolve per call — and
+   * Gmail-over-OAuth **not registered until the process restarts**, which a
+   * managed tenant cannot trigger. The resolver removes the captured null; what
+   * is still missing is something that re-runs the Google half after a claim.
+   * Filed as DEF-mailcontext-google-half-needs-a-post-claim-retrigger.
+   *
+   * Because nothing re-enters after `init()`, the per-call read is currently
+   * **unobservable**: a mutation that captures the value survives the suite, and
+   * that is honest rather than a missing test. It becomes pinnable with the
+   * re-trigger, and the row carries that as its verify-done.
+   */
+  private readonly resolveGoogleAuth: () => GoogleAuth | null;
 
   private handler: MailWatcherHandler;
   private initialized = false;
@@ -249,13 +270,13 @@ export class MailContext {
     credBackend: MailCredentialBackend,
     handler: MailWatcherHandler = DEFAULT_HANDLER,
     hooks: MailHooks = {},
-    googleAuth: GoogleAuth | null = null,
+    resolveGoogleAuth: (() => GoogleAuth | null) | null = null,
   ) {
     this.stateDb = stateDb;
     this.credStore = new MailCredentialStore(credBackend);
     this.registry = new InMemoryMailRegistry();
     this.hooks = hooks;
-    this.googleAuth = googleAuth;
+    this.resolveGoogleAuth = resolveGoogleAuth ?? (() => null);
 
     // Wrap the user handler so that every inbound envelope also fires
     // onInboundMail hooks AND resolves any matching follow-ups.
@@ -422,8 +443,9 @@ export class MailContext {
    */
   private async _buildProvider(account: MailAccountConfig): Promise<MailProvider | null> {
     if (account.authType === 'oauth_google') {
-      if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return null;
-      return new OAuthGmailProvider(account, this.googleAuth);
+      const googleAuth = this.resolveGoogleAuth();
+      if (!googleAuth || !googleAuth.isAuthenticated()) return null;
+      return new OAuthGmailProvider(account, googleAuth);
     }
     if (account.authType === 'imap') {
       // Credentials may be missing if the DB row survived a vault rotation.
@@ -447,7 +469,8 @@ export class MailContext {
    * try again.
    */
   private async _migrateOAuthGmailRow(): Promise<void> {
-    if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return;
+    const googleAuth = this.resolveGoogleAuth();
+    if (!googleAuth || !googleAuth.isAuthenticated()) return;
 
     // Fetch the *current* Google account email up front. Doing this before
     // the early-return lets us detect a disconnect→reconnect-with-different-
@@ -496,9 +519,10 @@ export class MailContext {
 
   /** Returns the live Google profile email, or null on transient failure. */
   private async _fetchGoogleProfileEmail(): Promise<string | null> {
-    if (!this.googleAuth) return null;
+    const googleAuth = this.resolveGoogleAuth();
+    if (!googleAuth) return null;
     try {
-      const token = await this.googleAuth.getAccessToken();
+      const token = await googleAuth.getAccessToken();
       const res = await globalThis.fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
         headers: { Authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(10_000),

@@ -112,3 +112,55 @@ describe('Engine boot — the Google tools are visible before a credential exist
     expect(engine.getRegistry().version - before, 'reloadGoogle must register nothing').toBe(0);
   });
 });
+
+describe('Engine — the brokered credential is built late, on the claim', () => {
+  const dirs2: string[] = [];
+  const engines2: Engine[] = [];
+  const saved2 = new Map<string, string | undefined>();
+  function setEnv2(key: string, value: string | undefined): void {
+    if (!saved2.has(key)) saved2.set(key, process.env[key]);
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+  afterEach(async () => {
+    for (const e of engines2) { try { await e.shutdown(); } catch { /* best effort */ } }
+    engines2.length = 0;
+    for (const [k, v] of saved2) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    saved2.clear();
+    for (const d of dirs2) rmSync(d, { recursive: true, force: true });
+    dirs2.length = 0;
+    reloadConfig();
+  });
+  async function boot(managed: boolean): Promise<Engine> {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-gbrk-'));
+    dirs2.push(dir);
+    for (const k of ['LYNOX_DATA_DIR', 'LYNOX_VAULT_KEY', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET',
+      'GOOGLE_SERVICE_ACCOUNT_KEY', 'LYNOX_MANAGED_INSTANCE_ID']) setEnv2(k, undefined);
+    setEnv2('LYNOX_DATA_DIR', dir);
+    if (managed) setEnv2('LYNOX_MANAGED_INSTANCE_ID', 'inst-1');
+    reloadConfig();
+    const engine = new Engine({} as LynoxConfig);
+    engines2.push(engine);
+    await engine.init();
+    return engine;
+  }
+
+  it('a managed tenant with no pair gets one built on demand', async () => {
+    // The claim route calls this. Before the change it asked getGoogleAuth() and
+    // refused — the claim is what CREATES the credential, so the gate refused the
+    // only flow that could satisfy it.
+    // MUTATION THIS KILLS: point the claim route back at getGoogleAuth().
+    const engine = await boot(true);
+    expect(engine.getGoogleAuth(), 'nothing at boot — no pair resolves').toBeNull();
+    const auth = await engine.ensureGoogleAuth();
+    expect(auth, 'a managed tenant must get a brokered credential').not.toBeNull();
+    expect(engine.getGoogleAuth(), 'and it must be installed, not handed out once').toBe(auth);
+  });
+
+  it('a SELF-HOST instance with no pair gets nothing — it has nothing to claim', async () => {
+    // MUTATION THIS KILLS: dropping the LYNOX_MANAGED_INSTANCE_ID gate, which
+    // would hand every self-host instance a credential that can do nothing and
+    // silently disable its own OAuth entry points.
+    const engine = await boot(false);
+    await expect(engine.ensureGoogleAuth()).resolves.toBeNull();
+  });
+});

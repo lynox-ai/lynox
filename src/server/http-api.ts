@@ -6829,7 +6829,11 @@ export class LynoxHTTPApi {
 
     // Claim Google tokens from managed control plane OAuth broker
     this.addStatic('user', 'POST /api/google/claim-managed', async (_req, res, _params, body) => {
-      const google = engine.getGoogleAuth();
+      // `ensureGoogleAuth`, not `getGoogleAuth`: on a brokered tenant no client
+      // pair resolves, so gating the claim on an existing credential refused the
+      // one flow that creates it. It still refuses on a NON-managed instance,
+      // which has nothing to claim.
+      const google = await engine.ensureGoogleAuth();
       if (!requireService(res, google, 'Google auth')) return;
 
       const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];
