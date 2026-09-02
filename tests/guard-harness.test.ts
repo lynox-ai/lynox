@@ -250,6 +250,26 @@ const GATES: Readonly<Record<string, GateEntry>> = {
       'resolves its schema relative to the script, so the working directory cannot starve it — and it already carries the assertion this harness generalises ("read zero fields … refusing to report a clean run")',
     expectStrippedExit: 0,
   },
+  // Same shape as `no-ai-attribution` below: its input is a commit RANGE passed as
+  // arguments, not a tree it enumerates, so the starvation this harness models —
+  // an empty file list read as a clean tree — cannot reach it. What it does refuse
+  // is a call that supplies only half a range, and that refusal is decided before
+  // any pattern is read, which is what makes it the same answer on every machine.
+  //
+  // What the probe does NOT cover, said here because an exemption that lists only
+  // its wins is how a gap becomes invisible: this class is inert until an operator
+  // puts patterns in ~/.lynox/private-names.re, and with none it warns and exits 0
+  // — which is what a FULL range does on this machine today, measured, not feared.
+  // That IS a fail-open, deliberate and with no CI twin. It is not unproven,
+  // though — tests/public-repo-guard.test.ts covers it directly ("stands down
+  // without a pattern, and refuses a half-given range"); the arming itself is an
+  // operator duty no check in this repo can stand in for.
+  'public-repo-guard-meta': {
+    kind: 'exempt',
+    reason:
+      'takes its commit range as arguments and enumerates no tree, and refuses a call that does not supply both — same shape as no-ai-attribution below',
+    expectStrippedExit: 2,
+  },
   'no-ai-attribution': {
     kind: 'exempt',
     reason: 'takes a commit-message file as an argument; it enumerates no tree and refuses a call without one',
@@ -287,6 +307,16 @@ function strippedDir(): string {
 const EXEMPT_COMMAND: Readonly<Record<string, { cmd: string; args: string[] }>> = {
   'security-scan': { cmd: 'sh', args: [join(repoRoot, 'scripts/security-scan.sh')] },
   'default-on-inventory': { cmd: 'bash', args: [join(repoRoot, 'scripts/default-on-inventory.sh')] },
+  // A HALF-given range on purpose. A full one would exit 0 here whenever the
+  // operator's pattern list is empty, so the probe's answer would depend on the
+  // home directory it runs in — measured, not predicted: on this machine the
+  // list holds 33 comment lines and no pattern, and `check-meta A B` returns 0
+  // having scanned nothing. The argument-count refusal is decided before any
+  // pattern lookup, so it is the same answer everywhere.
+  'public-repo-guard-meta': {
+    cmd: 'bash',
+    args: [join(repoRoot, 'scripts/public-repo-guard.sh'), 'check-meta', 'HEAD'],
+  },
   'no-ai-attribution': { cmd: 'bash', args: [join(repoRoot, 'scripts/no-ai-attribution.sh')] },
   'hex-guard': { cmd: 'bash', args: [join(repoRoot, 'packages/web-ui/scripts/hex-guard.sh')] },
 };
