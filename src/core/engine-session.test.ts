@@ -21,6 +21,10 @@ vi.mock('@anthropic-ai/sdk', () => ({
 
 const mockSend = vi.fn().mockResolvedValue('response');
 const mockReset = vi.fn();
+// Provider billing/quota classification the Agent exposes to Session on the
+// failure path. Defaults to null; a test sets it per-call to assert Session
+// carries it onto the RunContext (link 2 of DEF-provider-billing-alert).
+const mockGetLastProviderFailure = vi.fn().mockReturnValue(null);
 const mockAbort = vi.fn();
 const mockGetMessages = vi.fn().mockReturnValue([]);
 // Shared so an override survives the compaction-tier `_recreateAgent` swap (the
@@ -30,15 +34,38 @@ const mockLoadMessages = vi.fn();
 const mockSetContinuationPrompt = vi.fn();
 const mockSetKnowledgeContext = vi.fn();
 
-vi.mock('./agent.js', () => ({
-  // Real class so `err instanceof RunAbortedError` in session.ts (which imports
-  // from this same mocked module) matches the instances the tests construct.
-  RunAbortedError: class RunAbortedError extends Error {
+vi.mock('./agent.js', () => {
+  // Real classes so `err instanceof RunAbortedError` /
+  // `err instanceof ToolLoopBreakError` in session.ts (which imports from this
+  // same mocked module) match the instances the tests construct. The loop-break
+  // subclass extends the mocked RunAbortedError for the same reason session.ts
+  // treats it as an abort-family error.
+  class MockRunAbortedError extends Error {
     constructor(message = 'Run interrupted before completion') {
       super(message);
       this.name = 'RunAbortedError';
     }
-  },
+  }
+  class MockToolLoopBreakError extends MockRunAbortedError {
+    readonly loopKey: string;
+    constructor(loopKey: string) {
+      super('Run stopped: the same tool call was repeated after repeated warnings');
+      this.name = 'ToolLoopBreakError';
+      this.loopKey = loopKey;
+    }
+  }
+  class MockContinuationLoopError extends MockRunAbortedError {
+    readonly loopPrefix: string;
+    constructor(loopPrefix: string) {
+      super('Run stopped: truncated-response continuations repeated without progress');
+      this.name = 'ContinuationLoopError';
+      this.loopPrefix = loopPrefix;
+    }
+  }
+  return {
+    RunAbortedError: MockRunAbortedError,
+    ToolLoopBreakError: MockToolLoopBreakError,
+    ContinuationLoopError: MockContinuationLoopError,
   Agent: vi.fn().mockImplementation(function (config: {
     toolResultBlobStore?: unknown;
     onStream?: ((event: unknown) => void | Promise<void>) | undefined;
@@ -51,6 +78,8 @@ vi.mock('./agent.js', () => ({
     this.onWireSnapshot = (config as { onWireSnapshot?: unknown })?.onWireSnapshot;
     // @ts-expect-error mock constructor
     this.send = mockSend;
+    // @ts-expect-error mock constructor — read by Session's failure path onto RunContext.
+    this.getLastProviderFailure = mockGetLastProviderFailure;
     // @ts-expect-error mock constructor
     this.reset = mockReset;
     // @ts-expect-error mock constructor
@@ -101,7 +130,8 @@ vi.mock('./agent.js', () => ({
     // @ts-expect-error mock constructor
     this.setThinking = vi.fn();
   }),
-}));
+  };
+});
 
 vi.mock('./memory.js', () => ({
   Memory: vi.fn().mockImplementation(function () {
@@ -423,7 +453,12 @@ describe('Engine + Session (Orchestrator)', () => {
       // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
       // isn't configured; +5 mail tools when vault is available.
       // `calendar_read` is NOT here: it ships behind `calendar_enabled`, default off.
-      expect([41, 46]).toContain(mockRegister.mock.calls.length);
+      // +4 Google tools ALWAYS since 2026-09-01: registration no longer waits for a
+      // client pair (PRD Stage 1 §3.2 — a model that can see the tool can ask the
+      // user to connect it). They answer GOOGLE_NOT_CONNECTED until there is a
+      // credential. This pin exists to catch tool-surface growth nobody decided,
+      // so the number moves WITH the reason, never alone.
+      expect([45, 50]).toContain(mockRegister.mock.calls.length);
 
       // Agent should have been created by Session
       expect(Agent).toHaveBeenCalled();
@@ -560,6 +595,57 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(completedCall, 'an aborted run must never be stamped completed').toBeUndefined();
     });
 
+
+    // The half of DEF-hung-run-books-no-cost that core#1267 is supposed to have
+    // closed, asserted rather than reasoned about.
+    //
+    // The dogfooded run (rafael, prod 2026-08-24) sat parked on a prompt for 15 h
+    // and reached the ledger with cost_usd = 0 / tokens 0-0 while the UI chip
+    // showed $0.10 / 32k tokens for the same turn. The cause was NOT "the failure
+    // path forgets to book" — it books thoroughly, and has since 2026-06-05. It
+    // was that the run never TERMINATED, so neither try nor catch ever finished.
+    //
+    // Since the stop button actually aborts a parked run, that run now throws
+    // RunAbortedError and lands in the same catch. This pins the consequence:
+    // an aborted run books the tokens it really burned. Without it, the claim
+    // "core#1267 shrinks the cost hole" rests on reading, not on a test — and a
+    // later refactor could move the booking onto the success path with every
+    // other test still green.
+    it('an aborted run books the tokens it burned before the abort (not cost 0)', async () => {
+      const { engine, session } = await createEngineAndSession();
+      // Pin the pricing source: getPricing lazily reads ~/.lynox/pricing.json and
+      // accepts 0 as a valid rate, so a dev machine with a zeroed override entry
+      // would fail this test for a reason that has nothing to do with the product.
+      const { _resetOverridePricingForTests } = await import('./pricing.js');
+      _resetOverridePricingForTests(null);
+
+      // A run that did real work and was then interrupted — the parked-prompt
+      // shape, where the tokens are already spent with the provider.
+      mockSend.mockImplementationOnce(async () => {
+        session.usage.input_tokens += 30_000;
+        session.usage.output_tokens += 2_000;
+        throw new RunAbortedError();
+      });
+
+      await expect(session.run('find the repo')).rejects.toBeInstanceOf(RunAbortedError);
+
+      const rh = engine.getRunHistory()!;
+      const calls = (rh.updateRun as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+      const aborted = calls.find(c => (c[1] as { status?: string })?.status === 'aborted');
+      expect(aborted, 'the abort must reach the booking path').toBeDefined();
+
+      const booked = aborted![1] as { costUsd: number; tokensIn: number; tokensOut: number };
+      expect(booked.tokensIn).toBe(30_000);
+      expect(booked.tokensOut).toBe(2_000);
+      // The EXACT figure, not `> 0`. `getPricing` falls back to a non-zero table
+      // for any unknown model, so `> 0` would hold for almost any mutation that
+      // still passes a positive token count — it is degenerate with the two
+      // assertions above. 30_000 x $3/M + 2_000 x $15/M = $0.12 is deterministic,
+      // and pinning it also kills a swapped in/out, a whole-session-usage
+      // (instead of the run delta), and a dropped cache term.
+      expect(booked.costUsd).toBeCloseTo(0.12, 6);
+    });
+
     it('H2: a failed run still fires onAfterRun with the partial spend (managed debit)', async () => {
       const { engine, session } = await createEngineAndSession();
       const after = vi.fn();
@@ -583,6 +669,44 @@ describe('Engine + Session (Orchestrator)', () => {
       expect(failedCall, 'onAfterRun must fire on the failure path').toBeDefined();
       expect(failedCall![1] as number).toBeGreaterThan(0); // partial cost debited
       expect(typeof failedCall![0]).toBe('string'); // the failed run's id
+    });
+
+    it('link 2: a failed run carries the agent\'s provider-billing failure onto the RunContext', async () => {
+      // The wiring fb_boot_wiring_test warns about: Session must actually READ
+      // agent.getLastProviderFailure() and put it on the context it hands the
+      // managed hook — not just have the field exist. Session is real here (only
+      // Agent is mocked), so this drives Session's real failure-path code.
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+
+      mockGetLastProviderFailure.mockReturnValueOnce({
+        kind: 'provider_billing', providerHost: 'api.fireworks.ai', status: 412,
+      });
+      mockSend.mockRejectedValueOnce(new Error('provider billing outage'));
+
+      await expect(session.run('go')).rejects.toThrow('provider billing outage');
+
+      const failedCall = after.mock.calls.find(c => (c[2] as { modelTier?: string })?.modelTier !== 'fast');
+      expect(failedCall, 'onAfterRun must fire on the failure path').toBeDefined();
+      expect((failedCall![2] as { failure?: unknown }).failure).toEqual({
+        kind: 'provider_billing', providerHost: 'api.fireworks.ai', status: 412,
+      });
+    });
+
+    it('link 2: a failed run with NO provider-billing classification leaves failure unset', async () => {
+      const { engine, session } = await createEngineAndSession();
+      const after = vi.fn();
+      engine.registerHooks({ onAfterRun: after });
+
+      // getLastProviderFailure returns null (the default) → no failure on context.
+      mockSend.mockRejectedValueOnce(new Error('some other error'));
+
+      await expect(session.run('go')).rejects.toThrow('some other error');
+
+      const failedCall = after.mock.calls.find(c => (c[2] as { modelTier?: string })?.modelTier !== 'fast');
+      expect(failedCall).toBeDefined();
+      expect((failedCall![2] as { failure?: unknown }).failure).toBeUndefined();
     });
 
     it('a failed run records the tool calls it made, like the success path', async () => {
@@ -1102,7 +1226,12 @@ describe('Engine + Session (Orchestrator)', () => {
       // 38 builtin always (incl. edit_file + update_workflow_steps + export_workflow + import_workflow + diagnose_workflow_run + media_process + suggest_follow_ups); +1 `web_research`
       // from the DuckDuckGo HTML-scrape fallback that lands whenever SearXNG
       // isn't configured; +5 mail tools when vault is available.
-      expect([41, 46]).toContain(mockRegister.mock.calls.length);
+      // +4 Google tools ALWAYS since 2026-09-01: registration no longer waits for a
+      // client pair (PRD Stage 1 §3.2 — a model that can see the tool can ask the
+      // user to connect it). They answer GOOGLE_NOT_CONNECTED until there is a
+      // credential. This pin exists to catch tool-surface growth nobody decided,
+      // so the number moves WITH the reason, never alone.
+      expect([45, 50]).toContain(mockRegister.mock.calls.length);
     });
 
     it('does NOT register calendar_read while the flag is off', async () => {

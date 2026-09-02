@@ -120,7 +120,7 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   // contradicted by the catalog note this same PR wrote). The old set paid $7.50/M
   // output for a main (mistral-medium) that the /model-smoke sweep found weakest on
   // open turns, while its deep slot already routed here.
-  //   fast  — deepseek-v4-flash: fast-bench HOLD at 89.1% literal recall against a
+  //   fast  — deepseek-v4-flash-0731: fast-bench HOLD at 89.1% literal recall against a
   //           90.4% haiku-4.5 reference, with the BEST judge score of the field
   //           (7.83 vs 7.13), at $0.14/$0.28 instead of haiku's $1/$5. This is the
   //           fast SLOT only — it was never benched as a main (rafael 2026-08-10).
@@ -134,12 +134,14 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   //           pin it without a deep bench — see the guard note in
   //           tier-presets.test.ts; the evidence is the chat sweep, not a replay.
   // Everything here is CN-provenance served from the US Fireworks host — the
-  // affirmative sourcing rule holds, and eu-sovereign below exists so that choice
-  // stays explicit rather than hidden inside "efficient".
+  // affirmative sourcing rule holds. An EU set was meant to sit below so that the
+  // choice stayed explicit rather than hidden inside "efficient" — it was PULLED
+  // before merging (see the note further down), so today there is no explicit EU
+  // option and this sentence describes an intent, not the shipped ladder.
   efficient: {
     routing_mode: 'hybrid',
     tier_set: {
-      fast: fireworks('accounts/fireworks/models/deepseek-v4-flash'),
+      fast: fireworks('accounts/fireworks/models/deepseek-v4-flash-0731'),
       balanced: fireworks('accounts/fireworks/models/minimax-m3'),
       deep: fireworks('accounts/fireworks/models/kimi-k3'),
     },
@@ -159,14 +161,32 @@ export const TIER_PRESETS: Record<TierPresetName, TierPreset> = {
   // ⚠️ CONSEQUENCE, stated because it is not obvious: like ⚡ efficient this is an
   // all-Fireworks set, so it requires `LYNOX_MANAGED_FIREWORKS_ENABLED` (a DPA-gated
   // sub-processor, OFF unless the CP opts an instance in). A managed tenant without
-  // it sees only 🇪🇺 eu-sovereign and 💎 max-quality. Mistral Large 3 was the drafted
-  // Fireworks-free alternative and was rejected on quality (rafael 2026-08-10:
-  // "mistral large ist kein starker main"); no measurement of it as a main exists
-  // either way — it was never in the sweep.
+  // it sees only 💎 max-quality. Mistral Large 3 was the drafted Fireworks-free
+  // alternative and was rejected on quality (rafael 2026-08-10: "mistral large ist
+  // kein starker main"); no measurement of it as a main exists either way — it was
+  // never in the sweep.
+  //
+  // This line used to name a third preset, `eu-sovereign`, which is not in
+  // TIER_PRESETS today — see the PULLED note above. It is not a phantom: #1185
+  // added it here AND to TIER_PRESET_NAMES (the Record is keyed on the contract
+  // type, so a preset cannot exist without its name), then removed it before the
+  // branch merged. The line simply outlived it.
+  //
+  // Worth stating because the obvious check misses it: a QUOTED-KEY search for the
+  // name on this file came back empty, since squash-merge collapses a symbol that
+  // is added and removed inside one PR. Absence of trace on main is not absence.
+  // The unquoted `git log -S"eu-sovereign" -- src/core/tier-presets.ts` does find
+  // it. Phrased without the quoted command on purpose: writing it here would make
+  // it match this very paragraph, so citing its output as evidence self-falsifies.
+  //
+  // So a preset NAME entering the shared vocabulary and being withdrawn is not
+  // hypothetical — it happened once, and what caught it was a pre-merge review
+  // rather than any mechanism. That is an argument for the rescue path in
+  // config.ts, not against it.
   balanced: {
     routing_mode: 'hybrid',
     tier_set: {
-      fast: fireworks('accounts/fireworks/models/deepseek-v4-flash'),
+      fast: fireworks('accounts/fireworks/models/deepseek-v4-flash-0731'),
       balanced: fireworks('accounts/fireworks/models/glm-5p2'),
       deep: fireworks('accounts/fireworks/models/kimi-k3'),
     },

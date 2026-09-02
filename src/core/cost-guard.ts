@@ -54,6 +54,15 @@ export class CostGuard {
     return costExceeded || this.iterations >= this.maxIterations;
   }
 
+  /** True once the iteration cap is consumed. Lets the caller tell "out of turns"
+   *  from "out of money" when `recordTurn` reports exceeded — the two need
+   *  different words on the way out (a turn cap is raised with `max_turns`, a
+   *  budget with `max_budget_usd`), and a stop that names the wrong one sends
+   *  the caller to the wrong knob. */
+  iterationCapReached(): boolean {
+    return this.iterations >= this.maxIterations;
+  }
+
   snapshot(): CostSnapshot {
     const cost = this.estimateCost();
     return {

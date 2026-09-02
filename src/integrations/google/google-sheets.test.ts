@@ -34,7 +34,7 @@ describe('google_sheets tool', () => {
   describe('read', () => {
     it('reads range and returns markdown table', async () => {
       const auth = createMockAuth();
-      const tool = createSheetsTool(auth);
+      const tool = createSheetsTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -65,7 +65,7 @@ describe('google_sheets tool', () => {
 
     it('handles empty range', async () => {
       const auth = createMockAuth();
-      const tool = createSheetsTool(auth);
+      const tool = createSheetsTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -87,7 +87,7 @@ describe('google_sheets tool', () => {
 
     it('requires spreadsheet_id and range', async () => {
       const auth = createMockAuth();
-      const tool = createSheetsTool(auth);
+      const tool = createSheetsTool(() => auth);
 
       let result = await tool.handler({ action: 'read' }, createMockAgent());
       expect(result).toContain('spreadsheet_id');
@@ -100,7 +100,7 @@ describe('google_sheets tool', () => {
   describe('write', () => {
     it('requires write scope', async () => {
       const auth = createMockAuth([]); // No write scope
-      const tool = createSheetsTool(auth);
+      const tool = createSheetsTool(() => auth);
 
       const result = await tool.handler({
         action: 'write',
@@ -114,7 +114,7 @@ describe('google_sheets tool', () => {
 
     it('writes data with confirmation', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/spreadsheets']);
-      const tool = createSheetsTool(auth);
+      const tool = createSheetsTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -139,7 +139,7 @@ describe('google_sheets tool', () => {
 
     it('cancels on user decline', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/spreadsheets']);
-      const tool = createSheetsTool(auth);
+      const tool = createSheetsTool(() => auth);
 
       const result = await tool.handler({
         action: 'write',
@@ -159,13 +159,13 @@ describe('google_sheets tool', () => {
     const FORMAT_REQ = [{ deleteSheet: { sheetId: 0 } }];
 
     it('is flagged destructive to the permission guard', () => {
-      const tool = createSheetsTool(createMockAuth(['https://www.googleapis.com/auth/spreadsheets']));
+      const tool = createSheetsTool(() => createMockAuth(['https://www.googleapis.com/auth/spreadsheets']));
       expect(tool.destructive?.check?.({ action: 'format', spreadsheet_id: 'id', format_requests: FORMAT_REQ })).toBe('format');
     });
 
     it('fail-safe blocks format when no interactive prompt is available', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/spreadsheets']);
-      const tool = createSheetsTool(auth);
+      const tool = createSheetsTool(() => auth);
       const result = await tool.handler({
         action: 'format', spreadsheet_id: 'id', format_requests: FORMAT_REQ,
       }, createMockAgent()); // no promptUser → autonomous/background
@@ -175,7 +175,7 @@ describe('google_sheets tool', () => {
 
     it('cancels format on user decline', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/spreadsheets']);
-      const tool = createSheetsTool(auth);
+      const tool = createSheetsTool(() => auth);
       const result = await tool.handler({
         action: 'format', spreadsheet_id: 'id', format_requests: FORMAT_REQ,
       }, createMockAgent('No'));
@@ -185,7 +185,7 @@ describe('google_sheets tool', () => {
 
     it('proceeds with format after explicit confirmation', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/spreadsheets']);
-      const tool = createSheetsTool(auth);
+      const tool = createSheetsTool(() => auth);
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ replies: [{}] }) });
       const result = await tool.handler({
         action: 'format', spreadsheet_id: 'id', format_requests: FORMAT_REQ,
@@ -198,7 +198,7 @@ describe('google_sheets tool', () => {
   describe('append', () => {
     it('appends rows with confirmation', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/spreadsheets']);
-      const tool = createSheetsTool(auth);
+      const tool = createSheetsTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -226,7 +226,7 @@ describe('google_sheets tool', () => {
   describe('create', () => {
     it('creates new spreadsheet', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/spreadsheets']);
-      const tool = createSheetsTool(auth);
+      const tool = createSheetsTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -252,7 +252,7 @@ describe('google_sheets tool', () => {
   describe('list', () => {
     it('lists spreadsheets from Drive', async () => {
       const auth = createMockAuth();
-      const tool = createSheetsTool(auth);
+      const tool = createSheetsTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -273,7 +273,7 @@ describe('google_sheets tool', () => {
   describe('tool definition', () => {
     it('has correct name and schema', () => {
       const auth = createMockAuth();
-      const tool = createSheetsTool(auth);
+      const tool = createSheetsTool(() => auth);
 
       expect(tool.definition.name).toBe('google_sheets');
       expect(tool.definition.input_schema.required).toEqual(['action']);

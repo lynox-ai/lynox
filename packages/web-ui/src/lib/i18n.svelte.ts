@@ -83,6 +83,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'spawn.status_ok': { de: 'erfolgreich', en: 'succeeded' },
 	'spawn.status_fail': { de: 'fehlgeschlagen', en: 'failed' },
 	'spawn.subagents': { de: 'Subagenten', en: 'Sub-agents' },
+	'spawn.downgraded_note': { de: 'auf balanced — deep abgelehnt', en: 'on balanced — deep declined' },
 	'spawn.slow': { de: 'ungewöhnlich lang', en: 'taking unusually long' },
 	'spawn.est_max_hint': {
 		de: 'Obergrenze, die die Engine für diese Delegation reserviert hat — die tatsächlichen Kosten liegen meist deutlich darunter und ersetzen diese Zahl, sobald ein Subagent fertig ist.',
@@ -113,6 +114,13 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.knowledge.review_edit_aria': { de: 'Zur Prüfung bearbeiten', en: 'Edit for review' },
 	'knowledge.queue.empty': { de: 'Nichts zu prüfen — die Warteschlange ist leer.', en: 'Nothing to review — the queue is empty.' },
 	'knowledge.queue.pending_tag': { de: 'ungeprüft', en: 'pending' },
+	// The subject a queued entry would bind to on approval. `target_new` is the one that
+	// changes a decision: approving does not just file the fact, it CREATES the subject.
+	'knowledge.queue.target_new': { de: 'wird neu angelegt', en: 'will be created' },
+	'knowledge.queue.target_ambiguous': { de: 'mehrdeutig · keine Verknüpfung', en: 'ambiguous · no link' },
+	'knowledge.queue.target_existing_title': { de: 'Bei Freigabe wird der Fakt mit diesem vorhandenen Subjekt verknüpft.', en: 'On approval the fact is linked to this existing subject.' },
+	'knowledge.queue.target_new_title': { de: 'Dieser Name ist im Graph unbekannt — die Freigabe legt dafür eine Organisation an.', en: 'The graph does not know this name — approving creates an organization for it.' },
+	'knowledge.queue.target_ambiguous_title': { de: 'Mehrere Subjekte tragen diesen Namen. Die Freigabe verknüpft mit keinem davon.', en: 'Several subjects carry this name. Approving links to none of them.' },
 	'knowledge.queue.approve': { de: 'Freigeben', en: 'Approve' },
 	'knowledge.queue.edit': { de: 'Bearbeiten…', en: 'Edit…' },
 	'knowledge.queue.save_approve': { de: 'Speichern + freigeben', en: 'Save + approve' },
@@ -743,6 +751,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.note.generic': { de: 'Ein Fehler hat diese Runde unterbrochen. Tippe deine Nachricht erneut, um es nochmal zu versuchen.', en: 'An error interrupted this turn. Send your message again to retry.' },
 	'chat.note.run_interrupted.title': { de: 'Runde unterbrochen', en: 'Turn interrupted' },
 	'chat.note.run_interrupted': { de: 'Diese Runde wurde gestoppt, bevor sie fertig war. Tippe deine Nachricht erneut, um fortzufahren.', en: 'This turn was stopped before it finished. Send your message again to continue.' },
+	'chat.note.tool_loop_break.title': { de: 'Wiederholung gestoppt', en: 'Repetition stopped' },
+	'chat.note.continuation_loop.title': { de: 'Abgebrochen: Antwort ohne Fortschritt', en: 'Stopped: response without progress' },
+	'chat.note.continuation_loop': { de: 'Die Antwort wurde wiederholt abgeschnitten, ohne dass der Agent weiterkam — meist versucht er, eine sehr grosse Datei direkt in die Antwort zu schreiben. Teile die Aufgabe in kleinere Schritte oder lade die Datei erneut hoch (grosse Dateien werden automatisch als Datei gespeichert, nicht in die Nachricht eingebettet).', en: 'The response was truncated repeatedly without the agent making progress — usually it is trying to write a very large file into the reply itself. Split the task into smaller steps or upload the file again (large uploads are stored as a file automatically, not embedded in the message).' },
+	
+	'chat.note.tool_loop_break': { de: 'Der Agent hat dieselbe Aktion wiederholt, ohne dass sich etwas geändert hat, und wurde deshalb gestoppt. Beschreibe den nächsten Schritt anders oder nenne fehlende Angaben direkt in deiner Nachricht.', en: 'The agent repeated the same action with no change and was stopped for it. Describe the next step differently, or include any missing details in your message.' },
 	'chat.note.context_compacted.title': { de: 'Unterhaltung zusammengefasst', en: 'Conversation summarized' },
 	'chat.note.context_compacted': { de: 'Der Verlauf wurde hier gekürzt, um Kontext freizugeben. Frühere Nachrichten bleiben in deiner Historie, aber der Agent arbeitet ab hier mit einer Zusammenfassung. Fehlt etwas Wichtiges, erinnere ihn kurz daran.', en: 'The history was summarized here to free up context. Earlier messages stay in your history, but the agent now works from a summary. If something important is missing, just remind it.' },
 	'chat.run_blocked': { de: 'Anfrage blockiert', en: 'Request blocked' },
@@ -842,6 +855,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'chat.error_blocked_by_prompt': { de: 'Beantworte zuerst die offene Anfrage oben — sie blockiert den Agenten.', en: 'Answer the open prompt above first — it is blocking the agent.' },
 	'chat.allow': { de: 'Erlauben', en: 'Allow' },
 	'chat.deny': { de: 'Ablehnen', en: 'Deny' },
+	'chat.consent_allow_deep': { de: 'Deep erlauben', en: 'Allow deep' },
+	'chat.consent_run_balanced': { de: 'Auf balanced ausführen', en: 'Run on balanced' },
+	'chat.consent_cancel': { de: 'Abbrechen', en: 'Cancel' },
 	'chat.permission_running': { de: 'Erlaubt — wird ausgeführt…', en: 'Allowed — running…' },
 	'chat.permission_denied_running': { de: 'Abgelehnt — wird beendet…', en: 'Denied — finishing up…' },
 	'chat.skip': { de: 'Überspringen', en: 'Skip' },
@@ -854,6 +870,12 @@ const translations: Record<string, Record<Locale, string>> = {
 	// reads worse than the half that is true.
 	'chat.prompt_origin_workflow': { de: 'Workflow „{name}“', en: 'Workflow "{name}"' },
 	'chat.prompt_origin_step': { de: 'Schritt „{id}“', en: 'Step "{id}"' },
+	// Deliberately WITHOUT a {name} placeholder, unlike the two above. The
+	// sub-agent's name is written by the model that spawned it, so the claim and
+	// the name must not share a string: the claim is the only part of this line
+	// the user can rely on, and it has to stay true even when the name says
+	// something else entirely.
+	'chat.prompt_origin_subagent': { de: 'Ein Unter-Agent fragt', en: 'A sub-agent is asking' },
 	'chat.batch_mode': { de: 'Fragen beantworten', en: 'Answer questions' },
 
 	// Pipeline status v2 — prompt anchor (sticky bar above the chat input)
@@ -866,6 +888,9 @@ const translations: Record<string, Record<Locale, string>> = {
 	'attention.badge': { de: 'Antwort nötig · lynox', en: 'Answer needed · lynox' },
 	'attention.notify_title': { de: 'lynox wartet auf deine Antwort', en: 'lynox is waiting for your answer' },
 	'attention.notify_body': { de: 'Öffne den Chat, um zu antworten.', en: 'Open the chat to answer.' },
+	'chat.secret_title': { de: 'Zugangsdaten eingeben', en: 'Enter a credential' },
+	'chat.secret_key_label': { de: 'Schlüsselname', en: 'Key name' },
+	'chat.secret_agent_said': { de: 'Der Assistent sagt', en: 'The assistant says' },
 	'chat.secret_consent': { de: 'Wird lokal verschlüsselt gespeichert und niemals an die KI gesendet.', en: 'Stored encrypted locally and never sent to AI.' },
 	'chat.secret_save': { de: 'Speichern', en: 'Save' },
 	'chat.secret_cancel': { de: 'Abbrechen', en: 'Cancel' },

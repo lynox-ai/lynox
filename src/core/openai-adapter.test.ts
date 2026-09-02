@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo, translateMessages } from './openai-adapter.js';
+import { OpenAIAdapter, getCacheKeySalt, _resetCacheKeySaltMemo, translateMessages, REASONING_SUPPRESSION_MAX_TOKENS } from './openai-adapter.js';
 import { modelCapability } from '../types/models.js';
 import { StreamProcessor } from './stream.js';
 import type Anthropic from '@anthropic-ai/sdk';
@@ -1156,7 +1156,7 @@ describe('OpenAIAdapter', () => {
     // unflagged case therefore uses a MISTRAL model (its own features object).
     const GLM = 'accounts/fireworks/models/glm-5p2';
 
-    async function captureBody(model: string, outputConfig: unknown): Promise<Record<string, unknown>> {
+    async function captureBody(model: string, outputConfig: unknown, maxTokens = 100): Promise<Record<string, unknown>> {
       let captured = '';
       const server = await createMockServer((req, res) => {
         let body = '';
@@ -1174,7 +1174,7 @@ describe('OpenAIAdapter', () => {
       try {
         const adapter = new OpenAIAdapter({ baseURL: `http://localhost:${server.port}`, apiKey: 'key', modelId: model });
         await collectEvents(adapter.beta.messages.stream({
-          model, max_tokens: 100,
+          model, max_tokens: maxTokens,
           messages: [{ role: 'user', content: 'Go.' }],
           ...(outputConfig !== undefined ? { output_config: outputConfig } : {}),
         } as unknown as Parameters<typeof adapter.beta.messages.stream>[0]));
@@ -1212,6 +1212,59 @@ describe('OpenAIAdapter', () => {
 
     it('drops a malformed effort value instead of forwarding it', async () => {
       const body = await withFlag(() => captureBody(GLM, { effort: 'turbo' }));
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+
+    // ── defaultReasoningEffort ────────────────────────────────────────────
+    // A hybrid-reasoning model whose thinking floor is bigger than its callers'
+    // output budgets answers HTTP 200 with an EMPTY string. Measured against the
+    // live Fireworks API on 2026-08-18: 4 of 6 fast-tier callers came back empty
+    // at their real max_tokens, each having spent 100% of the budget on
+    // reasoning tokens. These pin the suppression that fixes it.
+    const FAST = 'accounts/fireworks/models/deepseek-v4-flash-0731';
+    const NO_DEFAULT = 'accounts/fireworks/models/minimax-m3';
+
+    it("sends reasoning_effort:'none' for a model that declares the default", async () => {
+      const body = await captureBody(FAST, undefined);
+      expect(body['reasoning_effort']).toBe('none');
+    });
+
+    it('applies the default even when the caller sent an effort — the model is not ladder-flagged', async () => {
+      // Documents the real precedence rather than the one the field name
+      // suggests. `'low'` was measured NOT to suppress the floor, so a caller
+      // able to override down to it would reinstate the empty-response bug.
+      const body = await captureBody(FAST, { effort: 'high' });
+      expect(body['reasoning_effort']).toBe('none');
+    });
+
+    it('wins over the ladder when a model sets both — `features` is a SHARED object', async () => {
+      // Flagging any ONE Fireworks model for the ladder flags all six (they
+      // point at the same FIREWORKS_TEXT_FEATURES reference), and the agent's
+      // post-run effort restore would then put `medium` on this wire. `'low'`
+      // was measured not to suppress the floor, so yielding here would make the
+      // empty-response bug reachable from an unrelated model's flag.
+      const cap = modelCapability(FAST)! as { features: { reasoningEffort?: boolean } };
+      cap.features.reasoningEffort = true;
+      try {
+        const body = await captureBody(FAST, { effort: 'high' });
+        expect(body['reasoning_effort']).toBe('none');
+      } finally {
+        delete cap.features.reasoningEffort;
+      }
+    });
+
+    it('leaves a call above the budget bound self-adaptive — a spawned sub-agent keeps its thinking', async () => {
+      const body = await captureBody(FAST, undefined, REASONING_SUPPRESSION_MAX_TOKENS + 1);
+      expect(body).not.toHaveProperty('reasoning_effort');
+    });
+
+    it('still suppresses exactly AT the bound', async () => {
+      const body = await captureBody(FAST, undefined, REASONING_SUPPRESSION_MAX_TOKENS);
+      expect(body['reasoning_effort']).toBe('none');
+    });
+
+    it('sends nothing for a model that declares no default', async () => {
+      const body = await captureBody(NO_DEFAULT, undefined);
       expect(body).not.toHaveProperty('reasoning_effort');
     });
 
@@ -1640,6 +1693,36 @@ describe('translateMessages — user content is never silently dropped', () => {
     ).toThrow(/cannot process images/i);
   });
 
+  // Fireworks vision candidates (2026-08-14): registry → adapter, same shape as
+  // the Mistral #2 guard. The online test (tests/online/fireworks-vision.test.ts)
+  // proves the wire against the real Fireworks endpoint but skips without
+  // FIREWORKS_API_KEY — this CI-visible twin catches a flip-back to
+  // FIREWORKS_TEXT_FEATURES on the three candidate entries.
+  it('fireworks: kimi-k3 / qwen3p7-plus / minimax-m3 resolve vision:true → adapter translates the image', () => {
+    for (const id of ['accounts/fireworks/models/kimi-k3', 'accounts/fireworks/models/qwen3p7-plus', 'accounts/fireworks/models/minimax-m3']) {
+      const visionSupport = modelCapability(id)?.features?.vision;
+      expect(visionSupport, id).toBe(true);
+      const out = translateMessages(undefined, [{ role: 'user', content: [{ type: 'text', text: 'hi' }, IMG] }], {
+        visionSupport, modelLabel: id,
+      });
+      const parts = out.find((m) => m.role === 'user')!.content as Array<{ type: string }>;
+      expect(parts.some((p) => p.type === 'image_url'), id).toBe(true);
+    }
+  });
+
+  it('fireworks: genuinely non-vision siblings stay vision:false → adapter throws (no shared-object flip)', () => {
+    // GLM 5.2 / DeepSeek v4 / gpt-oss-120b have no image input on Fireworks. If
+    // someone "fixes" the candidates by flipping FIREWORKS_TEXT_FEATURES itself,
+    // these models would silently start receiving images their pages disavow.
+    for (const id of ['accounts/fireworks/models/glm-5p2', 'accounts/fireworks/models/deepseek-v4-pro', 'accounts/fireworks/models/deepseek-v4-flash-0731', 'accounts/fireworks/models/gpt-oss-120b']) {
+      const visionSupport = modelCapability(id)?.features?.vision;
+      expect(visionSupport, id).toBe(false);
+      expect(() =>
+        translateMessages(undefined, [{ role: 'user', content: [IMG] }], { visionSupport, modelLabel: id }),
+      ).toThrow(/cannot process images/i);
+    }
+  });
+
   it('DEF-0074: preserves user text that shares a turn with a tool_result', () => {
     const out = translateMessages(undefined, [
       { role: 'user', content: [
@@ -1653,6 +1736,48 @@ describe('translateMessages — user content is never silently dropped', () => {
     expect(tool.tool_call_id).toBe('call_1');
     const user = out.find((m) => m.role === 'user')!;
     expect(user.content).toBe('and here is my follow-up');
+  });
+
+  it('DEF-openai-wire-toolerr: prefixes an is_error tool_result so the model sees the failure', () => {
+    // The Anthropic wire carries is_error on tool_result; the OpenAI wire has no
+    // such field on role:'tool'. Without a marker, agent.ts error results
+    // ('Permission denied', tool exceptions) reach the model as ordinary
+    // success-shaped text on every openai-compat provider.
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'call_e', content: 'Permission denied', is_error: true },
+      ] },
+    ]);
+    expect(out).toEqual([{ role: 'tool', tool_call_id: 'call_e', content: '[Tool error] Permission denied' }]);
+  });
+
+  it('DEF-openai-wire-toolerr: prefixes is_error with block-array content too', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [
+        {
+          type: 'tool_result', tool_use_id: 'call_b', is_error: true,
+          content: [{ type: 'text', text: 'HTTP 403' }, { type: 'text', text: 'forbidden' }],
+        },
+      ] },
+    ]);
+    const tool = out.find((m) => m.role === 'tool')!;
+    expect(tool.content).toBe('[Tool error] HTTP 403\nforbidden');
+  });
+
+  it('DEF-openai-wire-toolerr: an is_error result with empty content still carries the marker', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_x', is_error: true }] },
+    ]);
+    // '[Tool error] ' with a trailing space would be the only content on the
+    // message — assert the bare marker instead.
+    expect(out).toEqual([{ role: 'tool', tool_call_id: 'call_x', content: '[Tool error]' }]);
+  });
+
+  it('DEF-openai-wire-toolerr: a successful tool_result carries no prefix', () => {
+    const out = translateMessages(undefined, [
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_ok', content: 'fine', is_error: false }] },
+    ]);
+    expect(out).toEqual([{ role: 'tool', tool_call_id: 'call_ok', content: 'fine' }]);
   });
 
   it('byte-parity: a text-only user message stays a plain string (no array)', () => {

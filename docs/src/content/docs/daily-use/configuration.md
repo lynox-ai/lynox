@@ -171,6 +171,15 @@ Controls the agent's outbound network access for the `http_request`, `api_setup`
 - `allow-list` — allow only the hosts listed in `network_allowed_hosts`.
 - `guarded` — surface-aware lockdown: discovery surfaces stay open, while full-control requests reach only the vetted baseline hosts, the operator floor, and hosts you have explicitly accepted for a connected API.
 
+:::caution[What `network_policy` does not cover]
+It is a policy over **those three tools**, not over the machine. Even on `deny-all`, outbound traffic still leaves the container on paths this setting never sees:
+
+- the engine's own connections — the LLM provider, mail, push notifications, backups, and connected Google services;
+- **anything a shell command starts.** The `bash` tool is not one of the three gated tools, so a program it runs — or writes and then runs — reaches the network normally.
+
+So read `deny-all` as "these three tools will refuse", not as "this machine is offline". If you need the stronger property, it has to come from the layer below: run the container on a network that cannot route outbound (for example a local model plus an egress-filtered Docker network), because no setting inside the engine can promise it.
+:::
+
 Override with the `LYNOX_NETWORK_POLICY` and `LYNOX_NETWORK_ALLOWED_HOSTS` (comma-separated) environment variables.
 
 ### Extensions

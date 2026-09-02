@@ -27,6 +27,11 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # Scoped because this job downloads a third-party executable and runs it
+    # over the checkout, and because the install action is handed a token: the
+    # comment that calls it read-only is now enforced rather than asserted.
+    permissions:
+      contents: read
     # The suite spawns subprocesses (the cross-repo convention pins run workflow
     # shell against a stubbed curl). Their own timeout signals the shell it
     # started, not that shell's own children — an orphaned grandchild outlives
@@ -45,29 +50,34 @@ jobs:
       # because it shells out to `pnpm audit`, and pnpm audit still hits the
       # retired npm legacy advisory endpoint (HTTP 410). osv-scanner reads
       # pnpm-lock.yaml natively and queries OSV.dev (aggregates GHSA + npm
-      # advisories + more). High/critical fail the job; moderate/low are
-      # reported as warnings to match the prior Phase 1 policy.
-      - name: Install osv-scanner
-        run: |
-          curl -sSfL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 -o /tmp/osv-scanner
-          chmod +x /tmp/osv-scanner
-          sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
-          osv-scanner --version
+      # advisories + more). High/critical fail the job; moderate/low are listed
+      # and do not block, which keeps the prior Phase 1 policy — and a finding
+      # whose severity the report does not state now fails too, which is the
+      # change, not a detail. scripts/osv-report-gate.mjs carries the
+      # measurement behind it.
+      #
+      # The install is a composite action so the pin has ONE home; release.yml
+      # and dep-scan-daily.yml call the same one.
+      - uses: ./.github/actions/install-osv-scanner
+        with:
+          token: ${{ github.token }}
+
+      # The exit code is CAPTURED and handed to the gate rather than discarded.
+      # Measured on 2.5.1: an unreadable lockfile exits 127 and a lockfile that
+      # yields no packages exits 128, and neither writes the report. Under the
+      # old `|| true` that was survivable only by accident — the missing file
+      # broke the jq that followed. The accident is what is being removed.
+      #
+      # `--output-file` because `--output` is deprecated in 2.5.1 and prints a
+      # warning; the file it writes is the same.
       - name: Scan dependencies (high+critical hard-fail)
         run: |
           set -euo pipefail
-          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output=/tmp/osv.json || true
-          osv-scanner scan source --lockfile=pnpm-lock.yaml || true
-          HIGH=$(jq '[.results[]?.packages[]?.vulnerabilities[]? | select((.database_specific.severity // "") | IN("HIGH","CRITICAL"))] | length' /tmp/osv.json)
-          TOTAL=$(jq '[.results[]?.packages[]?.vulnerabilities[]?] | length' /tmp/osv.json)
-          echo "total=${TOTAL} high_or_critical=${HIGH}"
-          if [ "${HIGH}" -gt 0 ]; then
-            echo "::error::${HIGH} high/critical vulnerability(ies) — failing CI"
-            exit 1
-          fi
-          if [ "${TOTAL}" -gt 0 ]; then
-            echo "::warning::${TOTAL} moderate/low vulnerability(ies) reported (not blocking)"
-          fi
+          set +e
+          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json
+          OSV_RC=$?
+          set -e
+          node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}"
 
       - run: pnpm run lint
       - run: pnpm run typecheck

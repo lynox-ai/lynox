@@ -8,8 +8,8 @@ import type {
   ToolEntry,
   BatchRequest,
   BatchResult,
-  StreamHandler,
-  StreamEvent,
+  EmittingStreamHandler,
+  EmittedStreamEvent,
   ModelTier,
   ThreadModelSource,
   LLMProvider,
@@ -30,7 +30,7 @@ import { effectiveContextWindow } from '../types/index.js';
 import { resolveRunModel, resolveTierModel, hybridSlotClientConfig, effectiveProviderForRun } from './tier-resolver.js';
 import { getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveProviderApiKey } from './llm/provider-keys.js';
-import { Agent, RunAbortedError } from './agent.js';
+import { Agent, RunAbortedError, ToolLoopBreakError, ContinuationLoopError } from './agent.js';
 import { hashPrompt } from './prompt-hash.js';
 import { calculateCost } from './pricing.js';
 import { fireBeforeRunGate, reportMeteredCost } from './metered-request.js';
@@ -171,7 +171,7 @@ export interface SessionOptions {
   thinking?: ThinkingMode | undefined;
   autonomy?: import('../types/index.js').AutonomyLevel | undefined;
   briefing?: string | undefined;
-  onStream?: StreamHandler | undefined;
+  onStream?: EmittingStreamHandler | undefined;
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;
   promptSecret?: PromptSecretFn | undefined;
@@ -184,6 +184,9 @@ export interface SessionOptions {
    *  the suffix asks for the chips, this catches the models that do not deliver.
    *  See `Agent.followUpFallback`. */
   followUpFallback?: boolean | undefined;
+  /** See `Agent.captureFallback` — the turn-end fact recovery. Opt-in for the
+   *  same reason: only a surface that can SHOW a proposal should make one. */
+  captureFallback?: boolean | undefined;
   costGuard?: import('../types/index.js').CostGuardConfig | undefined;
 }
 
@@ -254,6 +257,7 @@ export class Session {
     excludeTools?: string[] | undefined;
     systemPromptSuffix?: string | undefined;
     followUpFallback?: boolean | undefined;
+    captureFallback?: boolean | undefined;
     autonomy?: import('../types/index.js').AutonomyLevel | undefined;
     costGuard?: import('../types/index.js').CostGuardConfig | undefined;
   } = {};
@@ -291,7 +295,10 @@ export class Session {
    *  reset when usage drops back below COMPACT_PREPARE_PERCENT or after a
    *  compaction, so it can re-offer on the next fill but doesn't nag every turn. */
   private _compactionOffered = false;
-  onStream: StreamHandler | null = null;
+  // Emitting: everything the session forwards here comes from core's own
+  // producers. Callers may still assign a plain StreamHandler — a handler that
+  // accepts the published (wider) union accepts this one.
+  onStream: EmittingStreamHandler | null = null;
   private _promptUser: PromptUserFn | null = null;
   private _promptTabs: PromptTabsFn | null = null;
   private _promptSecret: PromptSecretFn | null = null;
@@ -418,6 +425,9 @@ export class Session {
     }
     if (opts?.followUpFallback) {
       this.agentOverrides.followUpFallback = true;
+    }
+    if (opts?.captureFallback) {
+      this.agentOverrides.captureFallback = true;
     }
     if (opts?.autonomy) {
       this.agentOverrides.autonomy = opts.autonomy;
@@ -1225,6 +1235,14 @@ export class Session {
       // path. Record it distinctly as 'aborted' (not the scary 'failed') and
       // surface a calm interruption note instead of a provider-error banner.
       const isAbort = err instanceof RunAbortedError;
+      // A hard loop break is an abort by the guard, not the user — same calm
+      // rendering, but its OWN note code so the thread says WHY (the tool call
+      // that was repeated past all warnings) instead of a bare "interrupted".
+      const isLoopBreak = err instanceof ToolLoopBreakError;
+      // A continuation loop (truncated responses repeating without progress)
+      // is the same calm family — its own code so the note names the repeated
+      // prefix instead of a bare "interrupted".
+      const isContinuationLoop = err instanceof ContinuationLoopError;
       // Bugsink capture — structured error with tags
       void import('./error-reporting.js').then(({ captureLynoxError, captureError: captureReportedError }) => {
         if (err instanceof LynoxError) {
@@ -1318,6 +1336,12 @@ export class Session {
       // the success path fired onAfterRun and then threw before returning bills a
       // single debit either way.
       if (this.currentRunId) {
+        // A provider billing/quota stop for this run's LLM call, if the agent
+        // classified one before giving up. Carries to the managed hook via the
+        // RunContext so the control plane learns the provider account is down —
+        // the failure class that otherwise stays invisible (0-token failure, and
+        // /api/health stays green).
+        const providerFailure = this.agent?.getLastProviderFailure?.() ?? null;
         const failedRunContext: RunContext = {
           runId: this.currentRunId,
           contextId: context?.id ?? '',
@@ -1325,6 +1349,7 @@ export class Session {
           durationMs: Date.now() - startTime,
           source: context?.source ?? 'cli',
           ...(this._tenantId ? { tenantId: this._tenantId } : {}),
+          ...(providerFailure ? { failure: providerFailure } : {}),
         };
         for (const hook of this.engine.getHooks()) {
           if (hook.onAfterRun) {
@@ -1372,7 +1397,7 @@ export class Session {
         error: err,
         // An abort renders a calm "interrupted" note; a real error keeps the
         // provider-error banner + sanitized detail.
-        noteCode: isAbort ? 'run_interrupted' : 'provider_error',
+        noteCode: isContinuationLoop ? 'continuation_loop' : isLoopBreak ? 'tool_loop_break' : isAbort ? 'run_interrupted' : 'provider_error',
         // An internal (compaction) run must NOT surface a visible note — the
         // success path skips persisting its messages entirely (_persistMessages +
         // the end-of-run append both no-op for an internal run), so mirror that
@@ -2066,6 +2091,7 @@ export class Session {
       // Travels WITH the suffix: the suffix asks for the chips, this recovers
       // them. A rebuild that dropped it would silently stop recovering mid-thread.
       followUpFallback: this.agentOverrides.followUpFallback,
+      captureFallback: this.agentOverrides.captureFallback,
       autonomy: supplied.autonomy ?? this.agentOverrides.autonomy,
       costGuard: this.agentOverrides.costGuard, // never a caller's to set here
       // per-rebuild — reset unless this call supplies one
@@ -2197,7 +2223,17 @@ export class Session {
     // is load-bearing (a dropped endsTurn made suggest_follow_ups loop).
     const tools = pluginManager ? applyPluginToolGate(entries, pluginManager) : entries;
 
-    const streamHandler: StreamHandler = async (event: StreamEvent) => {
+    // Emitting on BOTH sides: this wrapper receives what core produced and
+    // forwards it to the session's sink, so widening it here would launder the
+    // decision back into an unknown. It is one of five such choke points — the
+    // spawn forwarder is the second; http-api's SSE closure the third; the raw
+    // SSE writer in http-api's catch is the fourth and is not typed at all, so
+    // only a test holds that one; the run buffer's replay writer is the fifth.
+    // The count went three -> four -> five across two delta rounds, each time
+    // because someone forwarded core-produced events through the WIDE union.
+    // Written out rather than left as "several" precisely because it kept
+    // being wrong.
+    const streamHandler: EmittingStreamHandler = async (event: EmittedStreamEvent) => {
       if (event.type === 'turn_end') {
         // Inject actual model so the client can compute correct costs
         (event as { model?: string }).model = model;
@@ -2232,8 +2268,11 @@ export class Session {
     };
 
     let basePrompt = this._systemPrompt ?? SYSTEM_PROMPT;
-    // Append Google Workspace docs only when Google tools are registered
-    if (engine.getGoogleAuth()) {
+    // Append the Google docs only when the tenant has a GRANT — not when a
+    // credential merely resolves. The tools are registered from boot either way
+    // (PRD Stage 1 §3.2); the suffix names them as usable, and the model
+    // believes it, so this one keys on the connection.
+    if (engine.getGoogleAuth()?.isAuthenticated() === true) {
       basePrompt += GOOGLE_PROMPT_SUFFIX;
     }
     // Append pipeline docs only when pipeline tools are registered
@@ -2415,6 +2454,9 @@ export class Session {
     // Web-UI surfaces only: catch a turn that ended without the chips.
     if (this.agentOverrides.followUpFallback === true) {
       this.agent.followUpFallback = true;
+    }
+    if (this.agentOverrides.captureFallback === true) {
+      this.agent.captureFallback = true;
     }
   }
 

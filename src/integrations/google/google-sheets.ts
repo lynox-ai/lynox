@@ -1,6 +1,7 @@
 import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
+import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapUntrustedData } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
@@ -94,7 +95,7 @@ function valuesToMarkdownTable(values: string[][]): string {
 // this set: changing it changes user-visible permission prompts.
 const SHEETS_WRITE_ACTIONS = new Set<SheetsInput['action']>(['write', 'append', 'format']);
 
-export function createSheetsTool(auth: GoogleAuth): ToolEntry<SheetsInput> {
+export function createSheetsTool(getAuth: () => GoogleAuth | null): ToolEntry<SheetsInput> {
   return {
     destructive: {
       mode: 'external',
@@ -147,6 +148,9 @@ export function createSheetsTool(auth: GoogleAuth): ToolEntry<SheetsInput> {
       },
     },
     handler: async (input: SheetsInput, agent: IAgent): Promise<string> => {
+      // Registered from boot, connected or not — see google/index.ts.
+      const auth = getAuth();
+      if (!auth) return GOOGLE_NOT_CONNECTED;
       try {
         // Check write scope
         if (WRITE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.SHEETS)) {

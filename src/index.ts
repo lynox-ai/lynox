@@ -21,7 +21,14 @@ process.emit = function (event: string, ...args: unknown[]) {
 } as typeof process.emit;
 // === Module exports ===
 export { Agent } from './core/agent.js';
+export type { SendStop, SendStopCause } from './core/agent.js';
 export { StreamProcessor } from './core/stream.js';
+// Residuum 4 of four (closing comment 2026-08-02). A tool OUTSIDE this
+// package — a plugin, an integration in pro — cannot signal "completed but
+// did not succeed" without this symbol, so its calls stay booked as
+// successes no matter what the ledger does. Exporting it is what makes the
+// contract available rather than internal.
+export { ToolSoftFailure, isToolSoftFailure } from './core/tool-soft-failure.js';
 export { Memory } from './core/memory.js';
 export { Engine } from './core/engine.js';
 export { Session } from './core/session.js';
@@ -65,13 +72,14 @@ export { resolveContext } from './core/context.js';
 export type { LynoxContext, ContextSource } from './types/index.js';
 // Telegram integration removed 2026-05-15 (data sovereignty + attack-surface reduction;
 // PWA + Mail/Voice cover every Telegram use case).
-export { GoogleAuth, SCOPES, READ_ONLY_SCOPES, WRITE_SCOPES, createGoogleTools } from './integrations/google/index.js';
+export { GoogleAuth, SCOPES, READ_ONLY_SCOPES, WRITE_SCOPES, createGoogleTools, createGoogleAuth, GOOGLE_NOT_CONNECTED } from './integrations/google/index.js';
 export type { GoogleAuthOptions, DeviceFlowPrompt, LocalAuthResult } from './integrations/google/index.js';
 export { getRole, getRoleNames, BUILTIN_ROLES } from './core/roles.js';
 export type { RoleConfig } from './core/roles.js';
 export { isFeatureEnabled, getFeatureFlags, getFeatureEnvVar, registerFeature, clearDynamicFeatures } from './core/features.js';
 export type { FeatureFlag } from './core/features.js';
 export type { LynoxHooks, RunContext, AccumulatedUsage } from './core/engine.js';
+export type { RunFailure, ProviderBillingFailure } from './core/provider-failure.js';
 export { NotificationRouter } from './core/notification-router.js';
 export type { NotificationChannel, NotificationMessage } from './core/notification-router.js';
 export { WorkerLoop } from './core/worker-loop.js';

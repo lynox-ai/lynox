@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import type Anthropic from '@anthropic-ai/sdk';
 import { createLLMClient, initLLMProvider } from './llm-client.js';
+import type { RunFailure } from './provider-failure.js';
 import { resolveProviderApiKey, enrichTierSetCreds } from './llm/provider-keys.js';
 import { evaluateEndpointBootGate, buildBootRefusalMessage, buildBootAcceptedWarning } from './llm/endpoint-allowlist.js';
 import type {
@@ -32,7 +33,6 @@ import type { SecretStore } from './secret-store.js';
 import type { SecretVault } from './secret-vault.js';
 import type { EmbeddingProvider } from './embedding.js';
 import type { KnowledgeLayer } from './knowledge-layer.js';
-import type { DataStoreBridge } from './datastore-bridge.js';
 
 import {
   bashTool,
@@ -98,7 +98,6 @@ import {
   initMemoryInstance,
   initEmbeddingProvider,
   initKnowledgeLayer,
-  initDataStoreBridge,
   setupMemoryStoreSubscription,
 } from './engine-init.js';
 import { submitBatch, pollBatch } from './batch.js';
@@ -112,6 +111,7 @@ import { escalateToUser as runEscalation, type EscalateOpts } from './escalation
 import { WorkerLoop } from './worker-loop.js';
 import { Session } from './session.js';
 import type { SessionOptions } from './session.js';
+import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -125,6 +125,12 @@ export interface RunContext {
   source: ContextSource;
   /** Active tenant ID, set via Session.tenantId (Pro). */
   tenantId?: string | undefined;
+  /** Set on the FAILURE path only: a classified provider billing/quota stop for
+   *  this run's LLM call. The managed hook reports it to the control plane as an
+   *  incident (see managed-hook.ts) — the failure class that today reaches a
+   *  customer before it reaches us. `undefined` on success and on non-billing
+   *  failures. */
+  failure?: RunFailure | undefined;
 }
 
 /**
@@ -187,6 +193,30 @@ export function resolveInboxLlmRegion(opts: {
 export class Engine {
   readonly config: LynoxConfig;
   private userConfig: LynoxUserConfig;
+
+  /**
+   * The three tiers `resolveClientPair` reads, in ONE place.
+   *
+   * The config KEYS are Google's and the resolver is not, so the caller has to
+   * name them — but naming them at each call site meant two hand-written copies
+   * of the same two-key mapping, and only the first was covered: swapping or
+   * deleting the copy in `reloadGoogle` left the pair suites green. One copy,
+   * so one mutation reaches both call sites.
+   *
+   * The reload copy was reachable, contrary to the first version of this
+   * comment: the config→vault migration is conditional, and the pair-atomic
+   * case in engine-client-pair-boot.test.ts is a boot where it does not run.
+   * That case now drives the reload. Deduplicating is still the right call —
+   * two hand-written copies of a credential mapping is the shape this module
+   * exists to prevent — but "untestable" was not the reason, and it was wrong.
+   */
+  private googleClientSources(): ClientPairSources {
+    return {
+      vault: this.secretVault,
+      env: process.env,
+      config: { id: this.userConfig?.google_client_id, secret: this.userConfig?.google_client_secret },
+    };
+  }
   readonly registry = new ToolRegistry();
   client: Anthropic;
   private readonly batchIndex = new BatchIndex();
@@ -205,7 +235,6 @@ export class Engine {
   private pluginManager: PluginManager | null = null;
   private embeddingProvider: EmbeddingProvider | null = null;
   private knowledgeLayer: KnowledgeLayer | null = null;
-  private dataStoreBridge: DataStoreBridge | null = null;
   private secretVault: SecretVault | null = null;
   private secretStore: SecretStore | null = null;
   private userId: string | null = null;
@@ -239,6 +268,26 @@ export class Engine {
   private _hooks: LynoxHooks[] = [];
   private _toolContext: ToolContext;
   private _googleAuth: import('../integrations/google/google-auth.js').GoogleAuth | null = null;
+  /** Which source supplied the Google client pair — the UI routes the card on it. */
+  private _googleClientSource: ClientPairSource | null = null;
+
+  /**
+   * Which source supplied the Google client pair.
+   *
+   * Read by `GET /api/google/status` — but only AFTER that route returns early
+   * on a null GoogleAuth, so it is not the surface where a stale value shows.
+   * That is `GET /api/secrets/status`, whose `configured.google` is this value
+   * being non-null: a source left standing after the credentials are gone
+   * reports Google as configured on an engine that resolves nothing.
+   */
+  getGoogleClientSource(): ClientPairSource | null {
+    return this._googleClientSource;
+  }
+
+  /** True when the resolved pair is lynox's shared broker client, not the tenant's own. */
+  isGoogleManagedBroker(): boolean {
+    return isManagedBrokerPair(this._googleClientSource);
+  }
   private _mailContext: import('../integrations/mail/context.js').MailContext | null = null;
   private _scheduledSendPoller: import('../integrations/mail/mail-scheduled-poller.js').ScheduledSendPoller | null = null;
   private _inboxRuntime: import('../integrations/inbox/bootstrap.js').InboxRuntime | null = null;
@@ -1206,11 +1255,6 @@ export class Engine {
     // onBeforeRun/onAfterRun lifecycle as chat/voice). No-op on self-host.
     this.knowledgeLayer?.setMeteredHost(this);
 
-    // Initialize DataStore ↔ Knowledge Graph Bridge
-    if (this.knowledgeLayer && this._dataStore) {
-      this.dataStoreBridge = initDataStoreBridge(this.knowledgeLayer, this._dataStore);
-    }
-
     // Inject KPI context into briefing (now that KnowledgeLayer is available)
     if (this.knowledgeLayer) {
       try {
@@ -1444,6 +1488,14 @@ export class Engine {
       process.stderr.write(`[lynox] DataStore init failed: ${err instanceof Error ? err.message : String(err)}\n`);
       this._dataStore = null;
     }
+    // DEF-0015: the orphan-subject reap needs the record store to answer "does a table row
+    // still link this subject?". Handed over HERE — after the DataStore init block succeeded
+    // (a store whose init threw is null by then, so the reap stays fail-closed) and not in
+    // _initKnowledge(): that step runs BEFORE this one, so `this._dataStore` does not exist
+    // there yet. A guard on it in `_initKnowledge` can therefore never fire — which is exactly
+    // how the DataStore→KG bridge stayed dead from 2026-05-14 until it was removed. The reap
+    // must not sit on that side of the split.
+    if (this._dataStore) this.knowledgeLayer?.setRecordStore(this._dataStore);
 
     // Initialize ArtifactStore (best-effort)
     try {
@@ -1523,26 +1575,29 @@ export class Engine {
     }
 
     // Google Workspace tools (conditional — requires client ID + secret)
-    const googleClientId = this.secretStore?.resolve('GOOGLE_CLIENT_ID')
-      ?? process.env['GOOGLE_CLIENT_ID']
-      ?? this.userConfig.google_client_id;
-    const googleClientSecret = this.secretStore?.resolve('GOOGLE_CLIENT_SECRET')
-      ?? process.env['GOOGLE_CLIENT_SECRET']
-      ?? this.userConfig.google_client_secret;
-    if (googleClientId && googleClientSecret) {
+    // Resolved as a PAIR, from ONE source — see google-client-pair.ts for why
+    // resolving the halves independently produced a mixed credential.
+    // Registration is UNCONDITIONAL and does not wait for a credential: a model
+    // that can see the tool can tell the user the feature exists and how to
+    // connect it (PRD Stage 1 §3.2). Each tool answers GOOGLE_NOT_CONNECTED
+    // until there is something to resolve.
+    //
+    // It runs BEFORE the resolve, not after: "unconditional" that sits behind a
+    // call which could one day throw is conditional on that call, and the
+    // ordering is free to get right today.
+    await this.registerGoogleTools();
+    const googlePair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
+    this._googleClientSource = googlePair?.source ?? null;
+    if (googlePair) {
       try {
-        const { createGoogleTools } = await import('../integrations/google/index.js');
-        const { tools: googleTools, auth: googleAuth } = createGoogleTools({
-          clientId: googleClientId,
-          clientSecret: googleClientSecret,
+        const { createGoogleAuth } = await import('../integrations/google/index.js');
+        this._googleAuth = createGoogleAuth({
+          clientId: googlePair.clientId,
+          clientSecret: googlePair.clientSecret,
           serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
           vault: this.secretVault ?? undefined,
           scopes: this.userConfig.google_oauth_scopes,
         });
-        for (const tool of googleTools) {
-          this.registry.register(tool);
-        }
-        this._googleAuth = googleAuth;
       } catch {
         // Google Workspace init failed — non-critical, continue without it
       }
@@ -1792,6 +1847,25 @@ export class Engine {
         this._toolContext.threadStore = this._threadStore;
         this.registry.register(setThreadContextTool);
         this.registry.register(subjectsMergeTool);
+
+        // Sweep expired merge ledgers once at boot, in addition to the sweep inside runMerge.
+        // Without this the retention has a hole exactly where it is needed most: a backup
+        // restore and a migration import both LAND ledgers without a merge ever running, so an
+        // instance that stops merging would keep that personal data forever — and a restore is
+        // the very case the retention exists for. Best-effort, never fatal: a cleanup must not
+        // be able to stop the engine from starting.
+        try {
+          const { pruneExpiredLedgers } = await import('./subject-merge-runner.js');
+          pruneExpiredLedgers(join(getLynoxDir(), 'sweeps'), new Date().toISOString());
+        } catch {
+          // Unreadable directory, permissions, a partially restored tree — none of it is
+          // worth failing boot over. The next merge sweeps again.
+        }
+        // The CALL is covered, not just the decision: `engine-init-wiring-boot.test.ts` boots a
+        // real Engine against a tmp data dir and asserts that a restored, expired ledger is gone
+        // afterwards, so deleting this line turns that test red. It shipped as a declared
+        // survivor on the premise that reaching init() needs a heavy mock chain; the precedent
+        // for booting one directly (`engine-startup-reap-boot.test.ts`) already existed.
         // Record-on-spine (R1 write + R1.5 query): wire the subject-column bridge
         // so `subject`-typed DataStore columns resolve a row's name → a real
         // subject_id on insert (the SAME findOrCreate dedup that feeds the graph),
@@ -1877,11 +1951,43 @@ export class Engine {
       }
     }
 
-    // Wire Google Drive backup upload if Google auth is available
-    if (this._backupManager && this._googleAuth) {
+    // Wire Google Drive backup upload — SELF-HOSTED ONLY.
+    //
+    // On a CP-provisioned instance the control plane already runs restic backups, so a second
+    // backup path to a third party adds exposure without adding safety. Since core#1240 that
+    // exposure is concrete: the backup carries the merge ledger, which embeds email, phone,
+    // vat_id and domain.
+    //
+    // The boundary is who HOSTS, not the word "managed": BYOK (`hosted`) runs on lynox hosts
+    // too and gets the same CP backups — only the LLM key is the customer's. LYNOX_BILLING_TIER
+    // is emitted to all three CP tiers and absent on self-host, which is exactly the check the
+    // managed hook makes ~15 lines below. Same signal, same meaning, no new concept.
+    // No `&& this._googleAuth` here: a brokered credential is built on the first
+    // claim, long after this runs, and a boot-time check would leave the
+    // uploader unwired for exactly the tenants the broker exists for. The
+    // resolver below decides per call instead.
+    if (this._backupManager) {
       try {
-        const { GDriveBackupUploader } = await import('./backup-upload-gdrive.js');
-        this._backupManager.setGDriveUploader(new GDriveBackupUploader(this._googleAuth));
+        // Both symbols from ONE dynamic import, INSIDE the try. The first version hoisted a
+        // second `await import` above this block to reach the gate — outside the catch, in an
+        // `init()` that has none, so a module-load failure in an OPTIONAL feature would have
+        // been fatal to boot on every tier. A gate is not worth a crash.
+        const { GDriveBackupUploader, driveBackupAllowed } = await import('./backup-upload-gdrive.js');
+        if (driveBackupAllowed()) {
+          // A resolving shim, not the instance: `BackupAuthProvider` is the two
+          // methods the uploader calls, so a late-built credential is picked up
+          // without threading the resolver through that module's public shape.
+          // Refusing when there is nothing to resolve keeps the failure at the
+          // upload, where it can be reported, rather than at boot.
+          this._backupManager.setGDriveUploader(new GDriveBackupUploader({
+            getAccessToken: async () => {
+              const auth = this._googleAuth;
+              if (!auth) throw new Error('Google is not connected — no Drive backup upload.');
+              return auth.getAccessToken();
+            },
+            hasScope: (scope: string) => this._googleAuth?.hasScope(scope) ?? false,
+          }));
+        }
       } catch {
         // Non-critical — GDrive backup upload not available
       }
@@ -2035,6 +2141,35 @@ export class Engine {
     return this._subjectFootprintReader?.getFootprint(subjectId, opts) ?? null;
   }
 
+  /**
+   * The Google credential, building a BROKERED one if there is none.
+   *
+   * The claim route used to gate on `getGoogleAuth()`, which is circular: the
+   * claim is what CREATES the credential, and on a brokered tenant no client
+   * pair ever resolves, so the gate refused exactly the user the broker exists
+   * for (PRD Stage 1 §3.2).
+   *
+   * Gated on the control-plane identity, not on `isManagedBrokerPair` — that
+   * one needs `source === 'env'` and is false in broker mode by construction.
+   * A self-host instance with no pair gets `null` and the caller refuses, which
+   * is correct: there is nothing for it to claim.
+   */
+  async ensureGoogleAuth(): Promise<import('../integrations/google/google-auth.js').GoogleAuth | null> {
+    if (this._googleAuth) return this._googleAuth;
+    if (!process.env['LYNOX_MANAGED_INSTANCE_ID']) return null;
+    try {
+      const { createGoogleAuth } = await import('../integrations/google/index.js');
+      this._googleAuth = createGoogleAuth({
+        serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
+        vault: this.secretVault ?? undefined,
+        scopes: this.userConfig.google_oauth_scopes,
+      });
+      return this._googleAuth;
+    } catch {
+      return null;
+    }
+  }
+
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
   getMailContext(): import('../integrations/mail/context.js').MailContext | null { return this._mailContext; }
   getInboxRuntime(): import('../integrations/inbox/bootstrap.js').InboxRuntime | null { return this._inboxRuntime; }
@@ -2055,31 +2190,51 @@ export class Engine {
     return runEscalation(this.getThreadStore(), this.getNotificationRouter(), opts);
   }
 
-  /** Re-initialize Google Workspace integration after credentials change. */
+  /**
+   * Register the four Google tools. Called ONCE from init, before any
+   * credential exists — the entries resolve their auth per call.
+   *
+   * This exists so the registration loop has one home. It used to be an inline
+   * `for` duplicated here and in `reloadGoogle()`, each under its own copy of
+   * the `createGoogleTools` block; a change to one was a change nobody made to
+   * the other.
+   */
+  private async registerGoogleTools(): Promise<void> {
+    try {
+      const { createGoogleTools } = await import('../integrations/google/index.js');
+      const { tools } = createGoogleTools(() => this._googleAuth);
+      for (const tool of tools) {
+        this.registry.register(tool);
+      }
+    } catch {
+      // Non-critical: without the tools the agent simply cannot reach Google.
+    }
+  }
+
+  /**
+   * Re-build the Google credential after a credential change.
+   *
+   * It no longer touches the registry: the tools are registered from boot and
+   * read `this._googleAuth` through a resolver, so swapping the instance here
+   * is the whole of the change. That is also why the resolver must not memoise
+   * — see `google/index.ts`.
+   */
   async reloadGoogle(): Promise<boolean> {
-    const clientId = this.secretStore?.resolve('GOOGLE_CLIENT_ID')
-      ?? process.env['GOOGLE_CLIENT_ID']
-      ?? this.userConfig.google_client_id;
-    const clientSecret = this.secretStore?.resolve('GOOGLE_CLIENT_SECRET')
-      ?? process.env['GOOGLE_CLIENT_SECRET']
-      ?? this.userConfig.google_client_secret;
-    if (!clientId || !clientSecret) {
+    const pair = resolveClientPair(GOOGLE_CLIENT_PAIR, this.googleClientSources());
+    this._googleClientSource = pair?.source ?? null;
+    if (!pair) {
       this._googleAuth = null;
       return false;
     }
     try {
-      const { createGoogleTools } = await import('../integrations/google/index.js');
-      const { tools: googleTools, auth: googleAuth } = createGoogleTools({
-        clientId,
-        clientSecret,
+      const { createGoogleAuth } = await import('../integrations/google/index.js');
+      this._googleAuth = createGoogleAuth({
+        clientId: pair.clientId,
+        clientSecret: pair.clientSecret,
         serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
         vault: this.secretVault ?? undefined,
         scopes: this.userConfig.google_oauth_scopes,
       });
-      for (const tool of googleTools) {
-        this.registry.register(tool);
-      }
-      this._googleAuth = googleAuth;
       return true;
     } catch {
       return false;

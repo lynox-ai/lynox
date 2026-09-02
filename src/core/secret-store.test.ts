@@ -6,7 +6,7 @@ vi.mock('./observability.js', () => ({
   },
 }));
 
-import { SecretStore, SECRET_REF_PATTERN, isInfraSecret } from './secret-store.js';
+import { SecretStore, SECRET_REF_PATTERN, isInfraSecret, maskSecretPatterns } from './secret-store.js';
 import type { LynoxUserConfig, SecretScope } from '../types/index.js';
 import type { SecretVault } from './secret-vault.js';
 
@@ -470,5 +470,77 @@ describe('SecretStore', () => {
       const store = new SecretStore();
       expect(store.findNameMatches('GOOGLE_MAPS_KEY')).toEqual([]);
     });
+  });
+});
+
+describe('maskSecretPatterns — prefixed key forms', () => {
+  // These are pinned HERE and not on the error-reporting path, deliberately.
+  // That path passes `includeGeneric`, whose 40+ char catcher masks these by
+  // accident of length — so a test there stays green with the specific patterns
+  // deleted. Every OTHER caller runs without `includeGeneric`, and there these
+  // rules are the only thing standing between a real key and a log line.
+  it('masks an OpenAI project key, whose token contains - and _', () => {
+    // The plain `sk-[A-Za-z0-9]{20,}` rule stops at the first dash and matches
+    // four characters, so this shipped verbatim until 2026-08-24. The old test
+    // fixture (`sk-ant-` + 40 A's) was alnum-only, which is why it looked
+    // covered.
+    const key = 'sk-proj-Ab1Cd2Ef3Gh4Ij5_Kl6Mn7-Op8Qr9St0Uv1Wx2Yz3';
+    expect(maskSecretPatterns(`key=${key}`)).not.toContain(key);
+  });
+
+  it('masks a service-account key', () => {
+    const key = 'sk-svcacct-Ab1Cd2Ef3_Gh4Ij5-Kl6Mn7Op8Qr9St0';
+    expect(maskSecretPatterns(`key=${key}`)).not.toContain(key);
+  });
+
+  it('masks a credential embedded in a connection URL', () => {
+    const url = 'postgres://lynox:Hunter2Pw@db.internal:5432/lynox';
+    const out = maskSecretPatterns(`connect failed: ${url}`);
+    expect(out).not.toContain('Hunter2Pw');
+  });
+
+  it('leaves an ordinary URL alone', () => {
+    // The userinfo rule needs the `:`…`@` shape. Without this the pattern would
+    // be a false-positive machine over every URL in every message.
+    const url = 'https://api.example.com/v1/users?id=3';
+    expect(maskSecretPatterns(`GET ${url}`)).toContain(url);
+  });
+
+  it('does not apply the generic catcher unless asked', () => {
+    // The default stays conservative for prose surfaces; only the error-report
+    // path opts in.
+    const hash = 'a'.repeat(64);
+    expect(maskSecretPatterns(`sha=${hash}`)).toContain(hash);
+    expect(maskSecretPatterns(`sha=${hash}`, { includeGeneric: true })).not.toContain(hash);
+  });
+});
+
+
+describe('URL-userinfo rule stays linear', () => {
+  it('does not degrade quadratically on a long dotted run', () => {
+    // The trigger is specific and the obvious fixture MISSES it: a solid hex or
+    // base64 blob is linear (one `\b` start), and a space-broken stack trace is
+    // linear (short runs). What degrades is ONE unbroken `[a-z0-9+.-]` run with
+    // many internal word boundaries — `a.a.a.…` — because the scheme quantifier
+    // restarts at each of them. Unbounded this measured 40 KB -> ~500 ms of
+    // blocked event loop, and a regex cannot be interrupted.
+    const input = 'a.'.repeat(20_000); // 40 KB
+    const started = performance.now();
+    maskSecretPatterns(input, { includeGeneric: true });
+    const elapsed = performance.now() - started;
+    // Headroom, measured inside vitest rather than estimated: bounded runs
+    // 3–5 ms idle and 14 ms worst case under load (16 hogs on 8 cores), so the
+    // bar sits ~10x above the bad case. Unbounded measures ~960 ms here, so the
+    // bar sits ~6x below it. Both gaps are smaller than the "two orders of
+    // magnitude" this comment first claimed — a bare wall-clock assertion with
+    // no scaling comparison, kept because it demonstrably fails on the real
+    // regression and holds under load, not because the margin is generous.
+    expect(elapsed).toBeLessThan(150);
+  });
+
+  it('still matches the schemes the bound has to keep', () => {
+    for (const scheme of ['postgres', 'amqp', 'mongodb+srv', 'https']) {
+      expect(maskSecretPatterns(`${scheme}://user:hunter2@host/db`)).not.toContain('hunter2');
+    }
   });
 });

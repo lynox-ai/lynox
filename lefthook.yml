@@ -30,6 +30,36 @@ pre-push:
       skip:
         - merge
         - rebase
+    public-repo-guard-meta:
+      # The customer-name class does NOT scan the tree — it scans commit
+      # messages, which is where that leak actually happens and the one surface
+      # that cannot be edited after a merge. So it needs its own invocation:
+      # without this the class would be enforced nowhere at all locally, since
+      # the scan above never looks at a message.
+      #
+      # merge-base gives the commits this push adds, relative to HEAD. Known
+      # limit, stated rather than hidden: pushing a branch you are not standing
+      # on (`git push origin other`) computes the range from HEAD, so it walks
+      # nothing. That case prints "NO commits scanned" — visible, not silent —
+      # and this class has no CI twin to catch it afterwards.
+      #
+      # Without ~/.lynox/private-names.re the class warns and stands down rather
+      # than blocking: an unpushable hook is how people learn --no-verify.
+      # The `|| echo HEAD` is load-bearing. Without it, a clone that has no local
+      # origin/main — a --single-branch clone, a differently named remote, a repo
+      # with no origin at all — makes the substitution empty, the guard sees a
+      # missing argument and exits 2, and the push is BLOCKED for a reason its
+      # message never mentions. Falling back to HEAD yields an empty range, which
+      # the guard reports as "NO commits" and lets through: it says it checked
+      # nothing rather than blocking. That is the deliberate trade, and it is NOT
+      # softened by a CI twin — this class has none (see the comment above, and
+      # CLAUDE.md). It is chosen because a hook nobody can push through is how
+      # people learn --no-verify, and because the state it lets through announces
+      # itself in the output instead of passing as a clean scan.
+      run: bash scripts/public-repo-guard.sh check-meta "$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)" HEAD
+      skip:
+        - merge
+        - rebase
     drift-guard:
       # Catch the mechanizable slices of doc/code drift gitleaks + public-repo-
       # guard don't: committed merge-conflict markers, removed features (Telegram
@@ -65,7 +95,26 @@ pre-commit:
         -- || true
       fail_text: "Potential secrets detected in staged files"
     typecheck:
-      run: npm run typecheck
+      # A fresh worktree has no node_modules, and the typecheck then dies deep inside
+      # tsc/pnpm output where the real cause is invisible. What the operator sees is not
+      # "install your dependencies" — it is a failed commit, then `git push` creating an
+      # EMPTY branch, then `gh pr create` saying "No commits between". Three documented
+      # occurrences on 2026-08-20 alone, in three different sessions, against a rule that
+      # is written in /track step 3 and in two memory files. Prose lost; this is the
+      # mechanism. A loud one-line refusal beats a rule everyone has already read.
+      run: |
+        test -d node_modules || {
+          echo ""
+          echo "  ✋ node_modules is missing in this worktree — the typecheck cannot run."
+          echo "     Run:  pnpm install --force"
+          echo ""
+          echo "     (A fresh worktree needs this once. Without it the commit fails here,"
+          echo "      the push creates an empty branch, and gh pr create reports"
+          echo "      \"No commits between\" — three sessions hit exactly that on 2026-08-20.)"
+          echo ""
+          exit 1
+        }
+        npm run typecheck
       stage_fixed: true
     hex-guard:
       # Fail if a web-ui change introduces hardcoded 6-digit hex outside the

@@ -478,6 +478,33 @@ export class DataStore {
   }
 
   /**
+   * Record-on-spine — the EXISTS form of {@link getRecordsForSubject}: does any row, in
+   * any collection, link `subjectId` through a `subject`-typed column? One indexed probe
+   * per collection (the R2a per-subject index), short-circuits on the first hit, never
+   * projects a row. The orphan-subject reap (DEF-0015) asks this for every subject an
+   * erased memory was linked to, so it stays O(collections), not O(rows). Same
+   * schema-validated identifiers + bound subject id as the full read.
+   */
+  hasRecordsForSubject(subjectId: string): boolean {
+    const collections = this.db
+      .prepare('SELECT name, schema_json FROM ds_collections')
+      .all() as Array<{ name: string; schema_json: string }>;
+    for (const c of collections) {
+      const columns = JSON.parse(c.schema_json) as DataStoreColumnDef[];
+      const subjectCols = columns.filter(col => col.type === 'subject').map(col => col.name);
+      if (subjectCols.length === 0) continue;
+      const whereOr = subjectCols.map(col => `"${col}" = ?`).join(' OR ');
+      // Identifiers are schema-validated (same invariant as getRecordsForSubject); the
+      // subject id is bound. Built as a const, not inlined into .prepare — the file's
+      // parameterized-query pattern, which the security suite's line guard pins.
+      const existsSql = `SELECT 1 FROM "ds_${c.name}" WHERE ${whereOr} LIMIT 1`;
+      const hit = this.db.prepare(existsSql).get(...subjectCols.map(() => subjectId));
+      if (hit) return true;
+    }
+    return false;
+  }
+
+  /**
    * Record-on-spine R2b — the cross-DB read half of a subject's footprint. Gather
    * EVERY row, across every collection, that links `subjectId` through a
    * `subject`-typed column, each projected with its occurrence time: the

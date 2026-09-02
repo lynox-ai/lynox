@@ -255,7 +255,7 @@ export function translateMessages(
       if (typeof m.content === 'string') {
         result.push({ role: 'user', content: m.content });
       } else if (Array.isArray(m.content)) {
-        const blocks = m.content as Array<{ type: string; text?: string; tool_use_id?: string; content?: unknown; source?: { media_type?: string; data?: string } }>;
+        const blocks = m.content as Array<{ type: string; text?: string; tool_use_id?: string; content?: unknown; is_error?: boolean; source?: { media_type?: string; data?: string } }>;
 
         // 1. Tool results → role:'tool' messages (they answer the prior
         //    assistant's tool_calls, so they come first).
@@ -268,6 +268,12 @@ export function translateMessages(
               .filter(b => b.type === 'text')
               .map(b => b.text ?? '')
               .join('\n');
+          }
+          // The OpenAI wire has no is_error field on role:'tool' — an unmarked
+          // error result reads as success to the model (agent.ts flags denied
+          // permissions and tool exceptions with is_error:true, DEF-openai-wire-toolerr).
+          if (tr.is_error === true) {
+            content = content ? `[Tool error] ${content}` : '[Tool error]';
           }
           result.push({ role: 'tool', tool_call_id: tr.tool_use_id ?? '', content });
         }
@@ -687,6 +693,22 @@ export type ApiKeyProvider = string | (() => Promise<string>);
  *  this long — covers both a dead-before-headers connection and a mid-stream stall. A long
  *  generation is unaffected (the timer re-arms per chunk). Env override:
  *  `LYNOX_OPENAI_REQUEST_TIMEOUT_MS`. */
+/**
+ * Above this `max_tokens`, a model declaring `defaultReasoningEffort` keeps its
+ * own thinking depth. The value is the LARGEST budget any fast-tier utility
+ * caller passes today, enumerated from source on 2026-08-18 — 64 (thread title)
+ * · 256 (retrieval HyDE) · 512 (follow-up pills, entity extraction, search
+ * rerank) · 1024 (memory extraction) — not a round number picked for feel.
+ *
+ * It is a bound, not a threshold to tune: the point is to separate "a
+ * single-shot utility call that cannot afford to think" from "a sub-agent run
+ * at `getDefaultMaxTokens`", and those differ by more than an order of
+ * magnitude. A new utility caller budgeting above it would silently opt out —
+ * which is why the empty-response class deserves its own detector rather than
+ * this constant carrying the whole defence.
+ */
+export const REASONING_SUPPRESSION_MAX_TOKENS = 1024;
+
 export const DEFAULT_OPENAI_REQUEST_TIMEOUT_MS = 180_000;
 
 function resolveOpenAIRequestTimeoutMs(): number {
@@ -948,13 +970,47 @@ export class OpenAIAdapter {
     // gate keeps that from happening until a flip is a measured decision, and the
     // model stays self-adaptive (today's behaviour) everywhere else.
     // 'max'/'xhigh' (Anthropic-only tiers) clamp to 'high', the wire's ceiling.
-    if (modelCapability(model)?.features?.reasoningEffort === true) {
+    const cap = modelCapability(model);
+    if (cap?.features?.reasoningEffort === true) {
       const oc = params['output_config'];
       const effortRaw = typeof oc === 'object' && oc !== null && 'effort' in oc
         ? (oc as { effort?: unknown }).effort : undefined;
       const mapped = effortRaw === 'max' || effortRaw === 'xhigh' ? 'high' : effortRaw;
       if (mapped === 'low' || mapped === 'medium' || mapped === 'high') {
         body['reasoning_effort'] = mapped;
+      }
+    }
+
+    // A model whose thinking floor exceeds the output budget of the call
+    // returns an EMPTY string with HTTP 200 (`finish_reason: 'length'`, the
+    // whole budget spent on reasoning tokens). Measured on
+    // `deepseek-v4-flash-0731` 2026-08-18: 4 of 6 fast-tier callers came back
+    // empty at their real `max_tokens`; with `'none'` all six answer, in about
+    // half the tokens and half the latency.
+    //
+    // Two deliberate narrowings, both from the review of the first draft:
+    //
+    // 1. It WINS over the ladder above rather than yielding to it. `features`
+    //    is a SHARED object — six Fireworks models point at the same
+    //    `FIREWORKS_TEXT_FEATURES` reference — so flagging any ONE of them for
+    //    the ladder also flags this model, and the agent's post-run effort
+    //    restore (`agent.ts`, `output_config.effort`) would then put `medium`
+    //    on the wire. `'low'` was measured NOT to suppress the floor, so a
+    //    ladder value reaching this model reinstates the empty-response bug.
+    //    Yielding would make the fix depend on an unrelated model's flag.
+    //
+    // 2. It applies only BELOW a budget bound. The suppression exists for calls
+    //    too tight to afford thinking; a `spawn_agent` on the fast tier runs at
+    //    `getDefaultMaxTokens` (16k), where the floor fits and the reasoning is
+    //    presumably why the model benched well there. The bound is the largest
+    //    budget any fast-tier utility caller passes today (memory extraction,
+    //    1024) — enumerated from source, not chosen: 64 · 256 · 512 · 512 ·
+    //    512 · 1024. A call above it keeps the model self-adaptive.
+    const declaredEffort = cap?.defaultReasoningEffort;
+    if (declaredEffort !== undefined) {
+      const maxTokens = params['max_tokens'];
+      if (typeof maxTokens === 'number' && maxTokens <= REASONING_SUPPRESSION_MAX_TOKENS) {
+        body['reasoning_effort'] = declaredEffort;
       }
     }
 

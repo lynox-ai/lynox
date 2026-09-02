@@ -899,9 +899,21 @@ prefer \`api_setup\` action=bootstrap with an OpenAPI URL; only hand-write a pro
     if (p.auth) {
       const authDesc = p.auth.type === 'none' ? 'None (public API — no credentials required)'
         : p.auth.type === 'basic'
-          ? p.auth.basic_format === 'pre_encoded_b64'
-            ? 'Basic Auth (pre-encoded Base64 secret — send as-is in Authorization header)'
-            : 'Basic Auth — the ENGINE attaches it from the stored username + password. Do NOT set an Authorization header yourself and do NOT try to Base64-encode anything; you do not hold the values.'
+          // Three cases, not two. `basic_format` is OPTIONAL (validated only when
+          // present, and `api_setup bootstrap` writes it only when the extraction
+          // produced one), so a profile with none is ordinary — and it used to fall
+          // into the else branch and be told "the ENGINE attaches it, do NOT set an
+          // Authorization header yourself". The engine attaches nothing there: the
+          // only basic branch in http.ts requires `=== 'user_pass_split'`, and a test
+          // pins that ("does NOT attach for a bare basic profile with no
+          // basic_format"). So the shipped profile text instructed the model to omit
+          // the one header nobody else was going to set. Silence would have been
+          // better than that sentence.
+          ? p.auth.basic_format === 'user_pass_split'
+            ? 'Basic Auth — the ENGINE attaches it from the stored username + password. Do NOT set an Authorization header yourself and do NOT try to Base64-encode anything; you do not hold the values.'
+            : p.auth.basic_format === 'pre_encoded_b64'
+              ? 'Basic Auth (pre-encoded Base64 secret — YOURS to send, the engine does not attach it): set `Authorization: Basic secret:<VAULT_KEY>` yourself, as-is.'
+              : 'Basic Auth with no basic_format recorded — the engine attaches NOTHING here, so this header is yours to set. If the vault key holds an already-Base64-encoded `login:password`, send `Authorization: Basic secret:<VAULT_KEY>`. If it holds the two halves under separate keys, set auth.basic_format="user_pass_split" via api_setup({action:"update"}) and the engine takes it over.'
         : p.auth.type === 'bearer' ? 'Bearer Token in Authorization header'
         : p.auth.type === 'header' ? `API key in header: ${p.auth.header_name ?? 'X-Api-Key'}`
         : p.auth.type === 'oauth2' ? 'OAuth2 (managed refresh-token flow)'

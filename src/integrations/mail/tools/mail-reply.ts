@@ -16,6 +16,7 @@ import {
 } from '../provider.js';
 import type { MailContext } from '../context.js';
 import { buildBodyBlock, previewAddressList } from '../send-core.js';
+import { reflowMailBody } from '../body-reflow.js';
 import { pv, singleLine } from '../../../core/prompt-value.js';
 import { resolveThreadKey } from '../thread-key.js';
 import { resolveProvider, type MailRegistry } from './registry.js';
@@ -216,7 +217,12 @@ ${bodyPreview}`;
         const sendInput: MailSendInput = {
           to: toAddrs,
           subject,
-          text: input.body,
+          // Same wire rule as the send-core pipeline: reflow the model's hard
+          // editing-wrap (mail_reply sends directly, NOT via sendMail — the
+          // review found reflow placed in send-core covered mail_send + the
+          // scheduled poller but left this path, which is where agent-authored
+          // hard-wrapped bodies are most common).
+          text: reflowMailBody(input.body),
         };
         if (ccAddrs.length > 0) sendInput.cc = ccAddrs;
         if (origMessageId) sendInput.inReplyTo = origMessageId;

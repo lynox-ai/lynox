@@ -38,7 +38,7 @@ vi.mock('../../src/core/stream.js', () => ({
 }));
 
 vi.mock('../../src/tools/permission-guard.js', () => ({
-  isDangerous: vi.fn().mockReturnValue(null),
+  isDangerous: vi.fn().mockReturnValue(null), isDangerousDetailed: vi.fn().mockReturnValue(null),
 }));
 
 vi.mock('../../src/core/observability.js', () => ({
@@ -351,9 +351,13 @@ describe('Agent Loop Integration', () => {
     });
     const result = await agent.send('Loop forever');
 
-    // After 2 iterations with tool_use, it falls through and returns extractText([]) which is ''
-    expect(result).toBe('');
     expect(mockProcess).toHaveBeenCalledTimes(2);
+    // Pre-fix this fell through to extractText([]) === '' — the same string a
+    // model that answered nothing returns. A cap that drops a pending tool call
+    // now SAYS so (see Agent.getLastStop / SendStop).
+    expect(result).not.toBe('');
+    expect(result).toContain('turn limit was reached');
+    expect(agent.getLastStop()?.cause).toBe('iteration_cap');
   });
 
   // -- 8. Abort mid-loop --

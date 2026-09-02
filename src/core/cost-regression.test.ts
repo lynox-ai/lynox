@@ -131,12 +131,25 @@ function measureStaticPrefixTokens(): number {
 
 // ── Budget constants ─────────────────────────────────────────────────────
 //
-// Each budget = measured baseline + ~15 % headroom. The headroom is wide
-// enough that an ordinary small prompt tweak (a sentence, a clarifying
-// clause, a tightened tool description) does NOT trip the guard, but tight
-// enough that a real bloat — a new heavy tool, a multi-KB prompt section,
-// a verbose schema — does. Bumping a budget is an intentional, one-line,
-// reviewable change.
+// STATIC_PREFIX_BUDGET is a RATCHET, not a ceiling with slack: it carries the
+// exact current measurement, so ANY growth of the static prefix trips it and
+// has to be bumped deliberately. That is the "intentional, one-line,
+// reviewable change" below, and it is what the values in this file have
+// actually done — on origin/main the budget was 23634 against a measured
+// 23634, to the token.
+//
+// This paragraph used to open "measured baseline + ~15 % headroom … an
+// ordinary small prompt tweak does NOT trip the guard", which contradicted
+// both the next sentence and every value under it. Corrected 2026-08-23 to
+// describe the guard that exists. (The value below does move in the same
+// commit, from 23634 to 23817 — for the prompt edit that commit ships, not
+// for this correction.) If the ratchet is
+// ever the wrong design, that is a deliberate change to make, and the fix is
+// to widen the values, not to keep prose that tells the next reader their
+// prompt edit will sail through when it will not.
+//
+// The per-tool budget below is a different shape and does carry slack —
+// it bounds the largest single tool definition, not a sum.
 //
 // Baselines measured on origin/main @ 8560d3b3, 2026-05-21, via
 // `estimateTokens` (≈3.5 chars/token):
@@ -285,7 +298,73 @@ function measureStaticPrefixTokens(): number {
 // workflow step, which buys back far more than the prefix pays. Descriptions
 // were tightened before bumping — neither names a tool list (the caller's own
 // toolset is in context; an invalid name fails loudly at save).
-const STATIC_PREFIX_BUDGET = 23500;
+// 2026-08-18: +125 tokens for the http_request session cap and the task_create
+// `params` field — the two halves of one change, so the bump is one entry.
+//
+// What it buys, measured rather than argued: the 100-request cap appeared in no
+// tool description and no prompt, so the model learned it by HITTING it. A live
+// bulk on 2026-08-18 asked for 130 records, got exactly 100, and stopped at id
+// 101 — correctly reported, but it had no way to have batched differently,
+// because it could not know the ceiling existed. The escape it now names is
+// real: a saved workflow fired per batch gets fresh counters (proved by two
+// headless runs of 60 requests each, 120 total, none blocked), and `params` is
+// what makes one workflow serve many batches.
+//
+// The alternative was leaving the model to discover a hard wall mid-job on a
+// customer's 2000-record import. 125 tokens a turn is the cheaper failure.
+// Both descriptions were tightened before this bump (176 → 125) — the first
+// draft spelled out what the shorter one implies.
+// 2026-08-20: +9 (measured 23634) for one clause on `subjects_merge`'s description —
+// "It cannot be undone from chat." The tool used to promise the opposite ("This is
+// reversible"), which was false three ways, and the honest correction cannot live in
+// `detailedGuidance` alone: that carrier is injected AFTER the first call
+// (`agent.ts:1774-1785`), so on the first merge in a thread the model composes its message
+// to the user having read only the cached description. Paying 9 tokens a turn is the
+// price of the model not telling a user something untrue at the one moment it matters.
+// WHO pays it, stated precisely rather than as "the fleet": `subjects_merge` is registered
+// only when `subject_graph_enabled` is true (`engine.ts:1786`), so a tenant with the flag
+// off pays ZERO — this guard counts it worst-case, as it does `set_thread_context`. The
+// four prod instances run with the flag on (measured, not assumed), so there it is real.
+// Not claimed to be minimal: "No undo from chat." would be ~4 tokens cheaper and is
+// equally true; the fuller sentence was kept because this text is parsed by a model
+// deciding whether to call a destructive tool.
+// The MECHANISM (ledger path, absent from backup and migration) stays on
+// `detailedGuidance` where the on-use split puts it — the full-mechanism wording in the
+// description measured 23649, i.e. +15 more for prose the model does not need to decide.
+// +183 (23634 → 23817): the no-install policy in `## Tools`, plus the bash
+// description losing "package management" and gaining the rule that replaces
+// it. Measured, not estimated.
+// WHAT IT BUYS, measured rather than argued — the chain is a `read this PDF`
+// task followed by three distinct missing-tool failures (pdftotext, PyPDF2,
+// pdf-parse), n=4 per arm:
+//   Anthropic Haiku 4.5 — install attempts 2/4 → 0/4 (`apt-get update &&
+//     apt-get install -y poppler-utils`), still calling tools 4/4 → 0/4.
+//   Mistral large-2512  — 0/4 → 0/4 on both. It already stopped and reported,
+//     so this text is a no-op there. The failure is model-dependent, and the
+//     honest claim is "buys something on one of the two", not "on both".
+// The reference case is a real thread: 41 bash calls spent on installs and five
+// hand-written PDF extractors before giving up. One avoided thread of that shape
+// costs far more than 184 cached-prefix tokens across the turns it would take to
+// repay — which is the whole trade, since bash is registered for EVERY tenant
+// (unlike `subjects_merge` above, which a flag can switch off).
+// NOT claimed to be minimal, and one part is unmeasured: the first draft cost
+// +291 and was cut to +184 with the effect re-verified on the exact shipped text.
+// Whether the "offer what exists" half earns its share is pinned by tests but has
+// no behaviour measurement of its own.
+const STATIC_PREFIX_BUDGET = 23817;
+
+/**
+ * How far ABOVE the measurement the budget may sit before the ratchet is a
+ * fiction. Without this, the guard has a silent escape hatch: bumping the
+ * budget to a round number well past the measurement keeps every test green
+ * while banking headroom nobody reviewed — the exact mutation this file's
+ * comment claims cannot happen ("ANY growth trips it"). A claim in prose that
+ * nothing enforces is not a rule, so it is enforced here.
+ *
+ * 50 tokens ≈ 0.2 % — room for a one-word edit landing between a measurement
+ * and its commit, not room for a paragraph.
+ */
+const STATIC_PREFIX_SLACK = 50;
 
 /**
  * Budget for any single builtin tool's serialized `definition`, in estimated
@@ -302,6 +381,18 @@ describe('Tier-1 cost-regression guard', () => {
   });
 
   // Guard A — static cacheable-prefix budget.
+  it('keeps STATIC_PREFIX_BUDGET pinned to the measurement, not parked above it', () => {
+    const measured = measureStaticPrefixTokens();
+    expect(
+      STATIC_PREFIX_BUDGET - measured,
+      `STATIC_PREFIX_BUDGET is ${STATIC_PREFIX_BUDGET} against a measured ${measured} — ` +
+        `${STATIC_PREFIX_BUDGET - measured} tokens of unused headroom. ` +
+        `If you SHRANK the prefix, lower the budget to ${measured}. ` +
+        `If you raised the budget, set it to the measurement instead: ` +
+        `the guard is a ratchet, not a ceiling with slack.`,
+    ).toBeLessThanOrEqual(STATIC_PREFIX_SLACK);
+  });
+
   it('keeps the static cacheable prefix within STATIC_PREFIX_BUDGET', () => {
     const measured = measureStaticPrefixTokens();
     expect(
@@ -345,6 +436,7 @@ describe('extended-tool-description-on-use split invariants', () => {
     { name: 'ask_secret', movedPhrase: 'dead end' },
     { name: 'memory_recall', movedPhrase: 'may be stale' },
     { name: 'api_setup', movedPhrase: 'auto-attached' },
+    { name: 'subjects_merge', movedPhrase: 'Never tell the user a merge is reversible' },
   ] as const;
 
   for (const { name, movedPhrase } of TARGETS) {

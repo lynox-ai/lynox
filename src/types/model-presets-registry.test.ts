@@ -18,7 +18,7 @@ describe('model-presets Wave 1 — new model registrations', () => {
       'accounts/fireworks/models/glm-5p2',
       'accounts/fireworks/models/deepseek-v4-pro',
       'accounts/fireworks/models/kimi-k3',
-      'accounts/fireworks/models/deepseek-v4-flash',
+      'accounts/fireworks/models/deepseek-v4-flash-0731',
       'accounts/fireworks/models/qwen3p7-plus',
       'accounts/fireworks/models/gpt-oss-120b',
       'accounts/fireworks/models/kimi-k2p6',
@@ -80,7 +80,7 @@ describe('model-presets Wave 1 — new model registrations', () => {
     expect(m.provenance).toBe('CN');
   });
 
-  it('Kimi K3 (Fireworks) — verified $3/$15 + $0.30 cached, text-only pending vision validation, CN', () => {
+  it('Kimi K3 (Fireworks) — verified $3/$15 + $0.30 cached, vision validated live, CN', () => {
     const m = MODEL_CAPABILITIES['accounts/fireworks/models/kimi-k3']!;
     expect(m.provider).toBe('openai');
     // Read from the Fireworks model page 2026-08-09. cacheRead $0.30 is Kimi's
@@ -88,14 +88,14 @@ describe('model-presets Wave 1 — new model registrations', () => {
     // $0.14 of GLM/DeepSeek; each page is its own source).
     expect(m.pricing).toEqual({ input: 3.0, output: 15.0, cacheWrite: 3.0, cacheRead: 0.30 });
     expect(m.contextWindow).toBeGreaterThanOrEqual(1_000_000);
-    // Fireworks serves Kimi K3 WITH image input; vision stays false here until
-    // the openai-wire image path is validated — flipping it is a separate change.
-    expect(m.features.vision).toBe(false);
+    // Vision validated live 2026-08-14 (tests/online/fireworks-vision.test.ts:
+    // red/blue probe named both halves through the real adapter + endpoint).
+    expect(m.features.vision).toBe(true);
     expect(m.provenance).toBe('CN');
   });
 
   it('DeepSeek v4 Flash (Fireworks) — verified $0.14/$0.28 + $0.028 cached, text-only, CN', () => {
-    const m = MODEL_CAPABILITIES['accounts/fireworks/models/deepseek-v4-flash']!;
+    const m = MODEL_CAPABILITIES['accounts/fireworks/models/deepseek-v4-flash-0731']!;
     expect(m.provider).toBe('openai');
     // Read from the Fireworks model page 2026-08-09.
     expect(m.pricing).toEqual({ input: 0.14, output: 0.28, cacheWrite: 0.14, cacheRead: 0.028 });
@@ -104,14 +104,14 @@ describe('model-presets Wave 1 — new model registrations', () => {
     expect(m.provenance).toBe('CN');
   });
 
-  it('Qwen3.7 Plus (Fireworks) — verified $0.40/$1.60 + $0.08 cached, 262k ctx, text-only pending vision validation, CN', () => {
+  it('Qwen3.7 Plus (Fireworks) — verified $0.40/$1.60 + $0.08 cached, 262k ctx, vision validated live, CN', () => {
     const m = MODEL_CAPABILITIES['accounts/fireworks/models/qwen3p7-plus']!;
     expect(m.provider).toBe('openai');
-    // Read from the Fireworks model page 2026-08-09. Vision stays false pending
-    // openai-wire image validation (Fireworks lists image input as supported).
+    // Read from the Fireworks model page 2026-08-09. Vision validated live
+    // 2026-08-14 (tests/online/fireworks-vision.test.ts, red/blue probe).
     expect(m.pricing).toEqual({ input: 0.40, output: 1.60, cacheWrite: 0.40, cacheRead: 0.08 });
     expect(m.contextWindow).toBe(262_144);
-    expect(m.features.vision).toBe(false);
+    expect(m.features.vision).toBe(true);
     expect(m.provenance).toBe('CN');
   });
 
@@ -145,12 +145,13 @@ describe('model-presets Wave 1 — new model registrations', () => {
     expect(m.provenance).toBe('CN');
   });
 
-  it('MiniMax M3 (Fireworks) — verified $0.30/$1.20 + $0.059 cached, 512k ctx, text-only pending vision validation, CN', () => {
+  it('MiniMax M3 (Fireworks) — verified $0.30/$1.20 + $0.059 cached, 512k ctx, vision validated live, CN', () => {
     const m = MODEL_CAPABILITIES['accounts/fireworks/models/minimax-m3']!;
     expect(m.provider).toBe('openai');
     expect(m.pricing).toEqual({ input: 0.30, output: 1.20, cacheWrite: 0.30, cacheRead: 0.059 });
     expect(m.contextWindow).toBe(524_288);
-    expect(m.features.vision).toBe(false);
+    // Vision validated live 2026-08-14 (tests/online/fireworks-vision.test.ts).
+    expect(m.features.vision).toBe(true);
     expect(m.provenance).toBe('CN');
   });
 });

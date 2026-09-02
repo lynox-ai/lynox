@@ -39,10 +39,11 @@ vi.mock('../core/roles.js', async (importOriginal) => {
 });
 
 import { Agent } from '../core/agent.js';
-import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
+import { spawnInline, spawnViaAgent, spawnPipeline, resolveModel, buildSubAgentPromptCallbacks, stripHumanInTheLoopTools, buildReplayInstruction, INLINE_CORE_TOOLS, undeclaredInlineStepTier, createStepStreamHandler, newRunTaint, noteStepTaint, noteStepTaintLive, runTaintArmed, wrapWithGate, type RunTaint, type SubAgentPromptHandles, type StepToolRecorder } from './runtime-adapter.js';
 import type { AgentDef } from '../types/orchestration.js';
 import type { StreamEvent } from '../types/index.js';
 import { PromptBudget, PromptBudgetExceededError } from './prompt-budget.js';
+import { ToolSoftFailure } from '../core/tool-soft-failure.js';
 import type { ManifestStep } from '../types/orchestration.js';
 
 const mockConfig = { api_key: 'test-key' } as unknown as LynoxUserConfig;
@@ -1543,5 +1544,37 @@ describe('durableMemoryEnabled rides to step agents (one flag governs the whole 
     const dkOn = { ...mockConfig, durable_memory_enabled: true } as LynoxUserConfig;
     await spawnViaAgent(namedStep, agentDef, {}, dkOn, undefined, 'run-1');
     expect(lastCfg()['durableMemoryEnabled']).toBe(true);
+  });
+});
+
+describe('wrapWithGate — the approval wrapper is transparent to a ToolSoftFailure', () => {
+  // Same seam as `applyPluginToolGate` on the session side, one layer over: a
+  // pipeline step's tools are re-wrapped with gate approval, and every wrapper
+  // between a tool and its consumer is a place where the distinction can be
+  // swallowed. `bash`, `web_research` and every RETURNED refusal in
+  // `http_request` report a completed-but-failed call by throwing
+  // `ToolSoftFailure`, and a wrapper that caught and re-threw a plain `Error`
+  // would destroy it before anything downstream could use it.
+  //
+  // ⚠ What this does NOT assert, because an earlier version of this comment did
+  // and had it backwards: on the pipeline path the ledger row does not come
+  // from `.reason` at all. Steps build their Agent without `recordToolCall`, so
+  // the row is written from the stream event and carries the RESULT. The
+  // transparency asserted here is what a future fix to that path will need; it
+  // is not evidence that the ledger is correct there today.
+  const approvingGate = {
+    submit: vi.fn().mockResolvedValue('approval-1'),
+    waitForDecision: vi.fn().mockResolvedValue({ status: 'approved' }),
+  } as never;
+  const meta = { runId: 'r1', stepId: 's1' } as never;
+
+  it('lets it through UNCHANGED once the gate approves', async () => {
+    const soft = new ToolSoftFailure('what the model reads', 'what the ledger counts');
+    const tool: ToolEntry = {
+      definition: { name: 'http_request', description: '', input_schema: { type: 'object', properties: {} } },
+      handler: vi.fn().mockRejectedValue(soft),
+    };
+    const wrapped = wrapWithGate(tool, approvingGate, meta);
+    await expect(wrapped.handler({}, {} as never)).rejects.toBe(soft);
   });
 });

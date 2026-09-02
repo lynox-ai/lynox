@@ -24,7 +24,21 @@
  *   asserts. `sdk-internal` is the only consuming kind without a readSite
  *   (consumed inside SDK constructors — justify in `note`). `none` = not read
  *   by the engine at all; the forward test asserts ABSENCE from the read
- *   inventory.
+ *   inventory. `pair-resolver` = read as one half of a credential PAIR via
+ *   the `resolveClientPair` helper. `pair` names BOTH members of one credential,
+ *   as DATA: each member's row declares the same descriptor, so which two names
+ *   belong together is readable here without parsing code.
+ *
+ *   This file deliberately does NOT describe what the forward test asserts from
+ *   that, nor what core's compile welds do. Three attempts to summarise it here
+ *   each shipped a false sentence — the mechanisms live in other files and move
+ *   independently of this one, so a summary written here is stale the moment
+ *   either changes. `tests/contract-env.test.ts` documents its own form,
+ *   `src/core/google-client-pair-welds.ts` documents what it welds, and
+ *   `DEF-pair-forward-form-provider-blind` records the gap between them.
+ *
+ *   The direct `process.env` form is accepted only at `alsoReadAt` sites, so the
+ *   primary read site stays pinned to the resolver.
  * - `secret.redact` — `exact-name`: the env-preview masks this key's value.
  *   `whole-value`: the value embeds secrets under OTHER names (e.g. a JSON
  *   blob with api_key fields) and must be masked as a whole.
@@ -65,6 +79,7 @@ export type EngineReadKind =
   | 'env-alias' // readEnvAlias('NAME') / envTier('NAME') via src/core/env.ts
   | 'env-float' // envFloat('NAME')
   | 'direct' // process.env read at an arbitrary core site
+  | 'pair-resolver' // resolveClientPair(<branded pair descriptor>) — one half of a credential pair
   | 'web-ui' // read inside packages/web-ui/src (runs in the engine process)
   | 'sdk-internal' // consumed inside an SDK constructor — no greppable readSite
   | 'none'; // not read by the engine (denylisted phantoms)
@@ -75,6 +90,8 @@ export interface EngineConsumption {
   readSite?: string;
   /** Additional read sites the forward test also asserts (e.g. web-ui next to core). */
   alsoReadAt?: string[];
+  /** For `pair-resolver` rows: both members of the pair. */
+  pair?: { id: string; secret: string };
   /**
    * For `features` rows: the flag slug + a real consumer call-site. The forward
    * test asserts BOTH the env-name map entry in features.ts AND
@@ -129,7 +146,7 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
   // ── Model-tier axis (cost band) ───────────────────────────────────────────
   { name: 'LYNOX_DEFAULT_MODEL_TIER', valueKind: 'model-tier', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, legacyReadAliases: ['LYNOX_DEFAULT_TIER'], engineConsumed: { kind: 'env-alias', readSite: 'src/core/config.ts' }, note: 'The everyday SEED, not a lock — applied only when config.json has no default_tier; the user pick wins thereafter.' },
   { name: 'LYNOX_MAX_MODEL_TIER', valueKind: 'model-tier', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, legacyReadAliases: ['LYNOX_MAX_TIER'], engineConsumed: { kind: 'env-alias', readSite: 'src/core/config.ts' }, note: 'The CEILING (clampTier).' },
-  { name: 'LYNOX_TIER_PRESET', valueKind: 'opaque', emitPolicy: 'when-non-default', engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Named hybrid strategy from the TIER_PRESETS table (e.g. "efficient") — the ROUTING axis (which model sits behind each band), orthogonal to LYNOX_{MAX,DEFAULT}_MODEL_TIER (which band). A LOCK, not a seed: env wins over config.json, because the preset picks the PROVIDER and provider choice is DPA-bound (sub-processor disclosure) plus CP-paid on the managed tiers. Emitted only when the CP pins one; unset = the engine keeps its own default routing, so an OLDER engine ignoring the var is the pre-change behaviour. An unknown name, or one resolving to a model absent from MODEL_CAPABILITIES, throws at load — never a silent fallthrough to the Opus-rate fallback.' },
+  { name: 'LYNOX_TIER_PRESET', valueKind: 'opaque', emitPolicy: 'when-non-default', engineConsumed: { kind: 'config', readSite: 'src/core/config.ts', alsoReadAt: ['src/server/http-api.ts'] }, note: 'Named hybrid strategy from the TIER_PRESETS table (e.g. "efficient") — the ROUTING axis (which model sits behind each band), orthogonal to LYNOX_{MAX,DEFAULT}_MODEL_TIER (which band). A SEED, not a lock: it fills an EMPTY config.json tier_preset and never overwrites a tenant pick, same shape as LYNOX_DEFAULT_MODEL_TIER. It DID overwrite until 2026-08-17, argued as an operator decision on DPA/cost grounds; measured on staging, that argument did not hold — a tenant writing explicit tier_set slots already beat the pin (config.json slots spread OVER the preset), so the rule bound only the settings picker, and there it failed SILENTLY: the write gate accepted the tenant preset, it persisted, /api/config reported it, and the loader discarded it. Emitted only when the CP pins one; unset = the engine keeps its own default routing, so an OLDER engine ignoring the var is the pre-change behaviour. A name THIS engine does not know is IGNORED with a warning and the instance keeps its default routing — deliberately NOT the fail-closed throw that a config.json name gets, because an unknown pin degrades to exactly the documented meaning of an unset one (no tier_set, no unregistered model, hence no Opus-rate fallback misbill), while a throw takes the container down with no tenant-side recovery. If the instance ALSO carries an unresolvable name in its own config.json, that one is dropped too rather than thrown on: the two fail together in a version skew, and rescuing one while throwing on the other leaves the same crash-loop with the same missing exit. A name that resolves but references a model absent from MODEL_CAPABILITIES still throws. An ignored pin is reported as `env_overrides.tier_preset_ignored` on GET /api/config, carrying the ESCAPED name (stripping a stray byte would rename an unresolvable pin into a known preset, destroying the evidence). The field covers the UNKNOWN-NAME case only: since the pin is a seed, the commoner way it has no effect is that the tenant already chose, and that is reported by `tier_preset` itself rather than by this marker. Note also that no UI consumes the field yet, and the crash it replaces used to be the operator signal by itself — the control-plane half is tracked separately. This paragraph used to assert the opposite AND to add "the CP API validates the name on write, so an invalid pin should not reach the fleet at all" — that reasoning does not survive deployment skew: the CP validates once at write time against ITS vendored copy of this file, then emits the value raw forever, while the fleet rolls out separately and pinned instances are skipped by rollouts indefinitely. Trusting an upstream that can be NEWER than the reader is what made this fatal instead of inert. Where a preset is unbacked (a Fireworks set without the credential) the managed constraints drop every slot AND clear the name, so the loader stops reporting a routing that is not running — visible on GET /api/config only where that surface reads the LOADER rather than the raw config file.' },
   { name: 'LYNOX_BLOCKED_MODEL_IDS', valueKind: 'opaque', emitPolicy: 'when-non-default', engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Comma-separated model-id PREFIXES (case-insensitive) the engine refuses to run — a per-model lock orthogonal to the max_tier cost band. Enforced at config load (tier_set slot drop), config write (403), and tier resolution (pinned id refusal; default resolution falls back to the fast tier). Emitted only when the CP locks specific models for an instance; unset/empty = nothing blocked (byte-identical default path). An OLDER engine ignores the var (skew default).' },
 
   // ── Cost guardrails ───────────────────────────────────────────────────────
@@ -145,6 +162,10 @@ export const ENV_REGISTRY: readonly EnvRegistryRow[] = [
   { name: 'LYNOX_MANAGED_FIREWORKS_ENABLED', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'direct', readSite: 'src/core/tier-presets.ts' }, note: 'Unlocks the Fireworks slot for managed; emitted only alongside FIREWORKS_API_KEY (DPA-gated sub-processor).' },
   { name: 'LYNOX_FEATURE_PROACTIVE_DEEP', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'proactive-deep', consumerSite: 'src/core/session.ts' } }, note: 'Fleet opt-in for proactive deep escalation; engine still cost-gates on the deep-slot provider.' },
   { name: 'LYNOX_FEATURE_PROACTIVE_DEEP_ANTHROPIC', valueKind: 'bool', emitPolicy: 'when-true', engineConsumed: { kind: 'features', readSite: 'src/core/features.ts', featureFlag: { slug: 'proactive-deep-anthropic', consumerSite: 'src/core/session.ts' } }, note: 'Allows proactive deep even on an Anthropic deep slot (premium).' },
+
+  // ── OAuth app credentials (per provider) ──────────────────────────────────
+  { name: 'GOOGLE_CLIENT_ID', valueKind: 'opaque', emitPolicy: 'operator-only', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'pair-resolver', pair: { id: 'GOOGLE_CLIENT_ID', secret: 'GOOGLE_CLIENT_SECRET' }, readSite: 'src/core/engine.ts', alsoReadAt: ['src/core/engine-init.ts'] }, note: 'OAuth APP credential, not a user token. The value is public by construction — it travels in the browser redirect — and is still declared secret, because an undeclared key is masked fail-closed downstream and a row that opts OUT of that default needs a stronger reason than the value being harmless. Operators set it per deployment; no control plane emits it. The policy was briefly conditional, for a broker model in which the control plane would have handed each tenant a shared client pair — that model was dropped on 2026-08-26 in favour of the control plane exchanging tokens itself, so the pair never reaches a tenant and the row is operator-only again. Policy and emit site move together in BOTH directions: an emitting policy with no emit site, and an emit under a non-emitting policy, each fail their own side of the ABI check — which is why this row moves back rather than waiting for an emit that is not coming.' },
+  { name: 'GOOGLE_CLIENT_SECRET', valueKind: 'opaque', emitPolicy: 'operator-only', secret: { redact: 'exact-name' }, engineConsumed: { kind: 'pair-resolver', pair: { id: 'GOOGLE_CLIENT_ID', secret: 'GOOGLE_CLIENT_SECRET' }, readSite: 'src/core/engine.ts', alsoReadAt: ['src/core/engine-init.ts'] }, note: 'The secret half of the GOOGLE_CLIENT_ID pair. Also read in src/core/secret-store.ts, but through process.env[envVar] with a VARIABLE, which no literal form can assert — not listed as a read site.' },
 
   // ── Worker / model-profiles bridge ────────────────────────────────────────
   { name: 'LYNOX_WORKER_PROFILE', valueKind: 'opaque', emitPolicy: 'tier', requiredForTier: MANAGED_TIERS, engineConsumed: { kind: 'config', readSite: 'src/core/config.ts' }, note: 'Names a profile key inside LYNOX_MODEL_PROFILES_JSON; engine clears a dangling one.' },

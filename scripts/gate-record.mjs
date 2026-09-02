@@ -12,7 +12,10 @@
  * CI cannot judge whether a review was any good. It can enforce that a record
  * EXISTS and PINS THE EXACT HEAD SHA, which converts the second failure into a
  * hard stop and makes the first one a deliberate lie rather than an oversight.
- * Everything past SHA-freshness is an attestation and is documented as one.
+ * Most of what follows is an attestation and is documented as one — but not all:
+ * the gates a diff OWES are derived from the real file list, which is a fact this
+ * check establishes on its own. (The line used to read "everything past
+ * SHA-freshness is an attestation", which was never quite true.)
  *
  * NOT A SECURITY BOUNDARY. Anyone who can open a PR can write the block. The
  * point is friction in the right place and a durable record on the PR, not
@@ -124,10 +127,36 @@ export function extractRecord(body, mark = MARK) {
   if (found.length === 0) return null;
   if (found.length > 1) return { error: `found ${found.length} record blocks; a body may carry one` };
 
+  // Every non-blank line in the block must parse, and no key may appear twice.
+  //
+  // The loop used to skip whatever it did not recognise, which turned the record
+  // into a place where writing something and having nothing read it looked
+  // identical to writing nothing. Two measured shapes, both green before this:
+  //   · `closes: DEF-a,` with the second id on a continuation line — the id was
+  //     dropped, silently, by the guard whose entire purpose is to stop a datum
+  //     from going missing;
+  //   · a second `closes:` line below the first — the last one won, so a
+  //     leftover `closes: none` could quietly overwrite a real answer.
+  // That is the same reasoning the two-blocks rule above already states, one
+  // level down: picking silently is how a stale claim survives.
   const fields = {};
+  const junk = [];
+  const dupes = [];
   for (const line of found[0][1].split('\n')) {
+    if (!line.trim()) continue;
     const m = /^\s*([a-z-]+)\s*:\s*(.*?)\s*$/.exec(line);
-    if (m) fields[m[1]] = m[2];
+    if (!m) { junk.push(line.trim()); continue; }
+    if (Object.prototype.hasOwnProperty.call(fields, m[1])) dupes.push(m[1]);
+    fields[m[1]] = m[2];
+  }
+  if (dupes.length > 0) {
+    return { error: `record repeats \`${dupes[0]}:\` — two values for one field, and the later one wins silently` };
+  }
+  if (junk.length > 0) {
+    return {
+      error: `record line \`${junk[0].slice(0, 60)}\` is not \`field: value\` — nothing reads it, ` +
+        'so anything written there is lost. Keep the block to one field per line and put prose below it.',
+    };
   }
   return { fields };
 }
@@ -168,18 +197,64 @@ export function evaluate({ body, head, files, author }) {
     return { ok: true, notes: [`author ${author} is a bot — dependency PRs merge through their own workflow`] };
   }
 
-  const required = requiredGates(files);
+  let required = requiredGates(files);
   if (required === 'empty') {
     return {
       ok: false,
       errors: ['no changed files were reported — refusing to pass on a diff this check could not see'],
     };
   }
-  if (required === null) {
-    return { ok: true, notes: ['diff touches documentation only'] };
-  }
 
   const rec = extractRecord(body ?? '');
+
+  // ── docs-only: nothing is OWED, which is not the same as nothing being READ ──
+  //
+  // This used to `return { ok: true }` right here, BEFORE `extractRecord` — so on a
+  // documentation diff the check reported success without reading the block at all.
+  // Two questions had been collapsed into one: "which gates does this diff owe?" and
+  // "is the record the author wrote well-formed?". Only the first depends on what the
+  // diff touches.
+  //
+  // Why that was expensive, in the words this file already uses about `'empty'`: the
+  // output could not tell "checked and clean" from "never looked". Both printed the
+  // same tick. Measured 2026-09-02: a session judged three docs-only PRs by their
+  // `gate-record` block and, on one, re-pinned `head:` after an `update-branch` and
+  // read the green check as confirmation. It had never been read.
+  //
+  // And it does not stay quiet. A malformed record on a docs PR is INVISIBLE until
+  // someone adds one source file to the same branch — then every field is read at
+  // once, on a record that has been "passing" for weeks. Live instance at the time of
+  // writing: pro#685 wrote `gates:` as a bullet list, so the two gate attestations
+  // under it are read by nothing at all.
+  //
+  // The fix is an EMPTY requirement set, not a demand for gates a docs diff does not
+  // owe: `for (const g of required)` iterates nothing and `required.has('delta')` is
+  // false, while the head pin, the gate NAMES, and the shape of every field that IS
+  // written are held to exactly what they will be held to the day a source file joins
+  // the branch.
+  //
+  // Two things stay exempt, and both are measured rather than assumed:
+  //   1. A docs PR with NO record still passes. Of the 5 open docs-only PRs across
+  //      both repos, 4 carry no block; demanding one would turn a fix for a silent
+  //      check into a wave of red on work that never claimed anything.
+  //   2. `closes:` is not demanded here. `docsOnlyRecord` carries that, and the
+  //      exemption is older than this change — a test asserts it directly ("does not
+  //      demand it where no record is demanded at all"), and it was deliberately
+  //      strengthened to use a record that IS present with `closes:` absent, i.e. it
+  //      argues for exactly this case rather than passing by accident.
+  //
+  // The residue, stated rather than glossed: a docs PR whose record omits `closes:`
+  // still turns red the day a source file lands. That path is narrower than it was —
+  // it can no longer carry a false CLAIM, only a missing field — but it is not zero.
+  const docsOnlyRecord = required === null;
+  if (docsOnlyRecord) {
+    if (rec === null) {
+      return { ok: true, notes: ['diff touches documentation only — no gate record required'] };
+    }
+    required = new Set();
+    notes.push('diff touches documentation only — no gates required; the record is still read');
+  }
+
   if (rec === null) {
     return {
       ok: false,
@@ -187,6 +262,9 @@ export function evaluate({ body, head, files, author }) {
         'no gate record in the PR body.',
         `Add a \`\`\`${MARK} block naming the head SHA it was taken at, the gates that ran,`,
         'the delta-round verdict, and the mutation count. See .github/pull_request_template.md.',
+        'A round is CLEAN when nothing it found is left unhandled — fixed here, or filed as a',
+        'register row. Findings do not make a round unclean; carrying them silently does.',
+        'A filed row does NOT belong in `closes:` — that field names rows this PR settles.',
       ],
     };
   }
@@ -194,7 +272,7 @@ export function evaluate({ body, head, files, author }) {
 
   const f = rec.fields;
 
-  // The load-bearing check. Everything else here is an attestation; this one is
+  // The load-bearing check. Nearly everything else here is an attestation; this one is
   // a fact CI can establish on its own, and it is the failure that actually
   // recurs — gates run, then more commits land.
   // Compared case-insensitively: a SHA pasted from a tool that upper-cases it is
@@ -223,14 +301,100 @@ export function evaluate({ body, head, files, author }) {
     if (!claimed.has(g)) errors.push(`this diff requires the \`${g}\` gate; the record does not list it`);
   }
 
-  // A delta round that did not come back clean is a reason not to merge, so
-  // there is exactly one accepted value.
+  // ── closes: which register rows this PR settles ─────────────────────────────
+  //
+  // MANDATORY, with `none` as a valid answer. That combination is the whole
+  // point and it is not pedantry: an OPTIONAL field is absent both when a PR
+  // closes nothing and when its author was in a hurry, so absence says nothing
+  // and a query over it cannot be trusted. Required-with-`none` turns "this
+  // closes no row" into a statement someone made, and costs that author four
+  // characters.
+  //
+  // Measured reason it exists: on 2026-08-24 two register rows still read
+  // `open` four days after their fix merged, and the week's cut ranked finished
+  // work above unfinished. The detector our own notes recommend for that —
+  // `git log --grep "<DEF-id>"` — was measured at recall 0/2, because neither
+  // fix commit named its row. Nothing required it to. This is that requirement;
+  // the query is exact once the datum exists.
+  //
+  // SHAPE only, never existence — and NOTHING else checks existence either, in
+  // either repo. `deferred-id-guard` reads REGISTER.md for duplicate ids; it
+  // never sees a PR body, and core has no such script at all. So a `closes:`
+  // naming a row that does not exist passes, and that is a stated gap rather
+  // than a division of labour (an earlier version of this comment claimed the
+  // latter, which was a control that did not exist).
+  //
+  // Existence is not checkable HERE for a real reason: the register lives in the
+  // pro repo, so a core PR cannot reach it, and a rule that passes in one repo
+  // and fails in the other teaches people to leave the field out.
+  const closes = f.closes;
+  if (closes === undefined) {
+    // Nested rather than `&& !docsOnlyRecord` on the `if`: that form skipped the
+    // error and then fell into the `else if`, which dereferences `closes`. The
+    // existing test caught the crash on the first run.
+    if (!docsOnlyRecord) errors.push(
+      '`closes:` is missing — name the register rows this PR settles, or `closes: none`. ' +
+      'It is required WITH `none` allowed on purpose: an optional field is absent both when ' +
+      'nothing is closed and when someone forgot, and then nobody can tell those apart.',
+    );
+  } else if (closes.toLowerCase() !== 'none') {
+    // Case-insensitive, for the same reason `head:` is: `None` is what a person
+    // types, and a false red on a legitimate PR is how a guard earns a bypass.
+    const ids = closes.split(/[,·]/).map((s) => s.trim()).filter(Boolean);
+    if (ids.length === 0) {
+      errors.push('`closes:` is empty — write `closes: none` if this PR settles no register row');
+    }
+    for (const id of ids) {
+      // `[A-Za-z0-9-]`, not `[a-z0-9-]`. The register really does contain
+      // `DEF-dk-engineDb-init-partial-wire`, and the lower-case-only class
+      // refused a row that EXISTS — a false red on a correct answer, which this
+      // file elsewhere calls the way a guard earns a bypass. Found in pro, where
+      // the same class ALSO made the heading scan mint a phantom id; core has no
+      // heading scan (the register is not in this repo, see below), so only the
+      // shape half applies here.
+      if (!/^DEF-[A-Za-z0-9-]+$/.test(id)) {
+        errors.push(`\`closes: ${id}\` is not a register id — use \`DEF-<slug>\`, a comma-separated list, or \`none\``);
+      }
+    }
+  }
+
   // `delta` and `mutations` describe a CODE round, so they are demanded only when one
   // was owed. A markdown-only legal change has neither, and forcing those fields would
   // buy a fabricated line — a record filled in to get past CI is worth less than none.
   if (required.has('delta')) {
+    // A delta round that did not come back clean is a reason not to merge, so
+    // there is exactly one accepted value.
+    //
+    // WHAT `clean` MEANS, because the one-line version got read as "no round ever
+    // found anything" — and that reading makes the gate UNSATISFIABLE for exactly
+    // the PRs reviewed hardest: a PR whose review found something could never
+    // attest, and the `head:` check above would be pointless. Two parts:
+    //   1. nothing the round found is left unhandled — fixed in this diff, or filed
+    //      as a register row. NOT via `closes:`, which names rows this PR SETTLES;
+    //      a freshly filed row is open, and putting it there corrupts the very
+    //      datum that field exists to make queryable.
+    //   2. it ran at the head `head:` names. No exception, and that is deliberate.
+    //
+    // Deliberate because every fix produces a new head, so this is strict: fix,
+    // re-run, attest. It terminates the ordinary way — when a round finds nothing.
+    //
+    // An escape hatch for "the delta since only deleted something harmless" was
+    // drafted and CUT: review found a defect in every draft of it. Do not re-draft
+    // it here — `DEF-gate-record-round-sha-not-pinned` carries what each draft got
+    // wrong, and names what replaces it: a `round: <sha>` field plus a CI diff,
+    // which turns this exception into a measurement instead of a description.
+    //
+    // NOT a second accepted value either: someone merging while attesting an unclean
+    // round is the failure this field exists for. The restriction was never the
+    // problem — its description was.
     if (f.delta !== 'clean') {
-      errors.push(`\`delta:\` must be \`clean\` (got \`${f.delta ?? '<missing>'}\`) — an unclean delta round is not a merge`);
+      errors.push(
+        `\`delta:\` must be \`clean\` (got \`${f.delta ?? '<missing>'}\`) — an unclean delta round is not a merge.`,
+        'Clean does NOT mean the round found nothing. It means nothing it found is left',
+        'unhandled — fixed here, or filed as a register row (not listed in `closes:`, which',
+        'names rows this PR settles) — and that it ran at the head `head:` names.',
+        'Findings are normal; carrying them silently is not.',
+      );
     }
 
     const mut = /^\s*(\d+)\s+killed\s*[,/]\s*(\d+)\s+survived\s*$/.exec(f.mutations ?? '');
@@ -245,7 +409,7 @@ export function evaluate({ body, head, files, author }) {
   // flags, never advice, and its counsel-half is explicitly not self-authorable — so the
   // wording needs a human yes on the record before it reaches a customer.
   //
-  // An attestation, like every line here except `head:`. It cannot prove the sign-off
+  // An attestation, like most lines here. It cannot prove the sign-off
   // happened; it makes FORGETTING impossible — the failure that actually recurs — and
   // turns the alternative into a deliberate lie rather than an oversight.
   if (required.has('legal')) {

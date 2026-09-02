@@ -528,27 +528,27 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         label: 'Kimi K3',
         context_window: 1_000_000,
         pricing: { input: 3.00, output: 15.00 },
-        capabilities: ['tool_use'],
+        capabilities: ['vision', 'tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '1M context; deep slot of the efficient + balanced presets — operator decision on the chat sweep, no deep bench exists. Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
+        notes: '1M context; deep slot of the efficient + balanced presets — operator decision on the chat sweep, no deep bench exists. Vision validated on the openai wire 2026-08-14 (fireworks-vision online test).',
       },
       {
-        id: 'accounts/fireworks/models/deepseek-v4-flash',
+        id: 'accounts/fireworks/models/deepseek-v4-flash-0731',
         label: 'DeepSeek v4 Flash',
         context_window: 1_000_000,
         pricing: { input: 0.14, output: 0.28 },
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '1M context; FAST slot only — benched there (89.1% recall, best judge of the field), never as a main. Text-only (no vision).',
+        notes: '1M context; FAST slot only — benched there (89.1% recall, best judge of the field), never as a main. Text-only (no vision). Dated id: Fireworks retired the unsuffixed alias on 2026-08-14.',
       },
       {
         id: 'accounts/fireworks/models/qwen3p7-plus',
         label: 'Qwen3.7 Plus',
         context_window: 262_144,
         pricing: { input: 0.40, output: 1.60 },
-        capabilities: ['tool_use'],
+        capabilities: ['vision', 'tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '262k context; fast-slot bench HOLD (87.9% recall / judge 6.96) and the quickest of the sweep. Pinned by no preset — lost the efficient main to minimax-m3 on quality. Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
+        notes: '262k context; fast-slot bench HOLD (87.9% recall / judge 6.96) and the quickest of the sweep. Pinned by no preset — lost the efficient main to minimax-m3 on quality. Vision validated on the openai wire 2026-08-14 (fireworks-vision online test).',
       },
       {
         id: 'accounts/fireworks/models/gpt-oss-120b',
@@ -557,7 +557,14 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         pricing: { input: 0.15, output: 0.60 },
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance US (OpenAI open weights)',
-        notes: '131k context; balanced candidate — the one whose tool_use wire the reachability suite has proven. Text-only.',
+        // Measured 2026-08-09/10, kept selectable but no longer recommended: on an
+        // open-ended chat turn it plans a reply in `reasoning_content` and then emits
+        // an EMPTY `content` with only the tool call, so the user sees no answer — and
+        // it sometimes prints the tool JSON into the visible text as well. Both are
+        // model behaviour, not our wire handling: the same adapter serves eight other
+        // openai-wire models cleanly. Its compaction recall also came in at 66% against
+        // a 90% reference. Fine for a scripted tool round-trip, poor as a chat model.
+        notes: '131k context; tool_use wire proven by the reachability suite. Text-only. NOT recommended as a chat model: measured empty-text turns and tool-JSON leaking into the visible answer (model behaviour), plus weak recall when summarizing.',
       },
       {
         id: 'accounts/fireworks/models/kimi-k2p6',
@@ -582,9 +589,9 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         label: 'MiniMax M3',
         context_window: 524_288,
         pricing: { input: 0.30, output: 1.20 },
-        capabilities: ['tool_use'],
+        capabilities: ['vision', 'tool_use'],
         residency: 'US (Fireworks AI) — model provenance CN',
-        notes: '512k context; main slot of the efficient preset — chat sweep, no main-slot bench. Text-only for now (Fireworks serves vision, not yet validated on the openai wire).',
+        notes: '512k context; main slot of the efficient preset — chat sweep, no main-slot bench. Vision validated on the openai wire 2026-08-14 (fireworks-vision online test).',
       },
     ],
   },

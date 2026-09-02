@@ -1,4 +1,5 @@
 import type { ToolEntry, IAgent, TabQuestion, StepHint } from '../../types/index.js';
+import { promptValue } from '../../core/prompt-value.js';
 
 /** An option can be a plain string or an object with an optional StepHint. */
 type AskUserOption = string | { label: string; hint?: StepHint | undefined };
@@ -170,8 +171,15 @@ export const askUserTool: ToolEntry<AskUserInput> = {
       // Sequential fallback: ask each question one at a time
       const answers: string[] = [];
       for (const q of input.questions) {
+        // The single path refuses an empty question (below); the batch loop did
+        // not. It matters now that the text travels as a VALUE: `promptValue('')`
+        // yields NO segments, the renderer falls back to the markdown branch,
+        // and the user gets a dialog with no question in it.
+        if (typeof q.question !== 'string' || q.question.trim() === '') {
+          throw new Error('ask_user: every entry in `questions` needs a non-empty `question`.');
+        }
         const labels = q.options && q.options.length > 0 ? [...toLabels(q.options), '\x00'] : undefined;
-        const answer = await agent.promptUser(q.question, labels);
+        const answer = await agent.promptUser(promptValue(q.question), labels);
         // Store hint for this answer
         const hint = findHint(q.options, answer);
         if (hint) {
@@ -192,9 +200,14 @@ export const askUserTool: ToolEntry<AskUserInput> = {
     const labels = input.options && input.options.length > 0 ? [...toLabels(input.options), '\x00'] : undefined;
     // Only pass the meta arg in the multi-select case so single-select calls
     // stay byte-identical to before (2 args) — no back-compat surprise.
+    // The question is the AGENT's text, whole and entire — so it is a VALUE. A
+    // bare string means "all frame" (`types/agent.ts`), i.e. the claim that the
+    // system wrote it, and the renderer acts on that claim: `**…**` becomes
+    // <strong>, `## …` an <h2>. `promptValue` exists for this caller and names
+    // it in its own doc.
     const answer = input.multiSelect
-      ? await agent.promptUser(question, labels, { multiSelect: true })
-      : await agent.promptUser(question, labels);
+      ? await agent.promptUser(promptValue(question), labels, { multiSelect: true })
+      : await agent.promptUser(promptValue(question), labels);
 
     // Multi-select answers come back as a JSON-encoded string[] of labels.
     // Present them to the model as a clean comma-joined list; a step hint only

@@ -24,6 +24,8 @@ export interface SecretStoreLike {
   findNameMatches?(requested: string): string[];
   containsSecret(text: string): boolean;
   maskSecrets(text: string): string;
+  /** Shapes AND known values, computed over the original text. */
+  maskAll(text: string, opts?: { includeGeneric?: boolean }): string;
   recordConsent(name: string): void;
   hasConsent(name: string): boolean;
   isExpired(name: string): boolean;

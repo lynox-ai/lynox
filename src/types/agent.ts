@@ -1,6 +1,6 @@
 // === 4.4 IAgent Interface ===
 
-import type { ToolEntry, StreamHandler } from './tools.js';
+import type { ToolEntry, EmittingStreamHandler } from './tools.js';
 import type { IMemory, MemoryScopeRef } from './memory.js';
 import type { SecretStoreLike, IsolationConfig } from './security.js';
 import type { AutonomyLevel } from './modes.js';
@@ -17,14 +17,50 @@ export interface TabQuestion {
  * visible cause in the thread — the step's tool calls carry an empty
  * `context_id` and never enter `thread_messages` — so the dialog has to carry
  * its own provenance or the user sees a bare "Allow / Deny" for a command
- * nothing on screen asked for. Populated by the pipeline spawners; the
- * main-agent path leaves every field undefined (there the cause IS on screen).
+ * nothing on screen asked for. Populated by the pipeline spawners and by
+ * `spawn_agent`; the main-agent path leaves every field undefined (there the
+ * cause IS on screen).
+ *
+ * ⚠ EVERY field here is authored by a model, and the sub-agent fields by the
+ * very agent the line exists to make the user suspicious of: an injected parent
+ * chooses its child's name and task freely and would name it "Main assistant"
+ * given the chance. So none of these fields may carry the WARNING — they are
+ * values, bounded and stripped by `toPromptOrigin`. The claim "a sub-agent
+ * asked" is frame, written by the renderer, and stays true whatever the name
+ * says.
  */
 export interface PromptOrigin {
   /** The workflow that owns `stepId`, as the user named it. */
   workflowName?: string | undefined;
   stepId?: string | undefined;
   stepTask?: string | undefined;
+  /**
+   * ⭐ The FACT that a `spawn_agent` child raised this prompt — and the only
+   * field here the model cannot touch. Set by the spawn path itself, never
+   * derived from anything a spec carries.
+   *
+   * A pipeline step does NOT set it, deliberately: that path already names its
+   * own cause (`workflowName` + `stepId` + `stepTask`), so the user is told who
+   * asked either way. This flag exists for the case where there was nothing
+   * else to say.
+   *
+   * It exists because the first version had the renderer key its whole claim on
+   * `subagentName` — and a name of one zero-width space passes `validateSpawnInput`
+   * (non-empty, no C0) and cleans down to nothing, so an injected parent could
+   * DELETE the line warning about it by choosing a name. Getting the claim's
+   * WORDING out of the model's reach was not enough; its EXISTENCE had to leave
+   * too, and a boolean is the one shape that cannot be emptied.
+   */
+  subagent?: true | undefined;
+  /**
+   * The spawned sub-agent that raised the prompt (`SpawnSpec.name`), and its
+   * task — decoration on the fact above, not the fact. Independent of the step
+   * fields rather than folded into them: a step that spawns produces BOTH, and
+   * collapsing them would drop whichever was written second. The deepest spawner
+   * wins, which is the immediate asker.
+   */
+  subagentName?: string | undefined;
+  subagentTask?: string | undefined;
 }
 
 /**
@@ -235,7 +271,12 @@ export interface IAgent {
    * construction; never to telemetry, error-report, or stdout.
    */
   getProviderConfig(): ProviderConfigSnapshot;
-  onStream:        StreamHandler | null;
+  // `EmittingStreamHandler`, not `StreamHandler`: this field is what core's own
+  // producers call, so it has to reject an error event that forgot to say
+  // whether the turn is over. It does NOT narrow what callers may plug in — a
+  // plain StreamHandler accepts the wider union and is therefore still
+  // assignable here.
+  onStream:        EmittingStreamHandler | null;
   promptUser?: PromptUserFn | undefined;
   promptTabs?: PromptTabsFn | undefined;
   promptSecret?: PromptSecretFn | undefined;
@@ -295,6 +336,13 @@ export interface IAgent {
    * {@link SessionCounters}.
    */
   readonly sessionCounters: SessionCounters;
+  /**
+   * Return and clear the tier downgrade chosen at the most recent permission GO
+   * ("Run on balanced" on a deep-tier consent gate), if any. The spawn handler
+   * reads this to clamp deep specs to the cheaper tier. Optional: ad-hoc agents
+   * built outside a Session never produce one.
+   */
+  consumePendingDowngrade?: () => import('./models.js').ModelTier | undefined;
   /**
    * Per-conversation store of large tool results evicted at the last
    * compaction. The `recall_tool_result` tool reads it to re-fetch a payload

@@ -211,6 +211,65 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
     for (const v of Object.values(proposeShown[0]!)) expect(v).not.toBe(secret);
   });
 
+  // The NUMERATOR's join key. `remember_invoked` fires from this handler, which any run
+  // carrying the tool reaches; `capture_eligible` fires only from the turn-end hook, which
+  // returns early for several run shapes. Without `runId` on BOTH the report can divide
+  // the two but cannot show they describe the same runs — a real sink carried 910
+  // numerator events against 0 denominator events (DEF-firerate-mixes-two-populations).
+  // Dropping the field from this emit is a live mutation and dies here.
+  it('remember_invoked carries the run id, so the numerator can be joined to the denominator', async () => {
+    mockSink.mockClear();
+    const { agent } = make({ durableMemoryEnabled: true });
+    await rememberTool.handler({ text: 'ACME renews in March', subject: 'ACME' }, agent);
+    const invoked = captureEvents().filter((e) => e['event'] === 'remember_invoked');
+    expect(invoked).toHaveLength(1);
+    expect(invoked[0]!['runId']).toBe('r1');
+    // Tagged POSITIVELY as the model's own choice. Leaving it untagged made "the model
+    // complied" indistinguishable from a line written before the field existed, so the
+    // split that is supposed to separate mechanism from compliance quietly counted all
+    // history as compliance.
+    expect(invoked[0]!['source']).toBe('model');
+  });
+
+  it('remember_invoked carries the CAUSE — this handler is the numerator\'s other writer', async () => {
+    // `remember_invoked` has two writers: this one (`source: 'model'`) and the recovery pass
+    // in `agent.ts` (`source: 'capture'`). The pass's writer is pinned in its own suite, and
+    // dropping the field HERE survived that suite completely — one writer covered, one not.
+    // Fourth instance of that shape in this arc, which is why it gets its own test rather
+    // than a shared one.
+    mockSink.mockClear();
+    const { agent } = make({ durableMemoryEnabled: true, sawUntrustedData: true });
+    await rememberTool.handler({ text: 'ACME renews in March', subject: 'ACME' }, agent);
+    const invoked = captureEvents().filter((e) => e['event'] === 'remember_invoked');
+    expect(invoked).toHaveLength(1);
+    expect(invoked[0]!['cause']).toBe('marker');
+    // The invariant the field is only useful under: cause and boolean come from one signal
+    // set, so `none` and `untrusted: false` must agree on every line from every writer.
+    expect(invoked[0]!['cause'] === 'none').toBe(invoked[0]!['untrusted'] === false);
+  });
+
+  it('a CLEAN turn tags cause `none`, not an absent field', async () => {
+    // Without this, hard-coding the cause to a constant taint value passes the test above.
+    mockSink.mockClear();
+    const { agent } = make({ durableMemoryEnabled: true });
+    await rememberTool.handler({ text: 'ACME renews in March', subject: 'ACME' }, agent);
+    const invoked = captureEvents().filter((e) => e['event'] === 'remember_invoked');
+    expect(invoked[0]!['cause']).toBe('none');
+    expect(invoked[0]!['untrusted']).toBe(false);
+  });
+
+  it('propose_shown carries the source too, so the funnel can be split the same way', async () => {
+    // Unpinned on the first cut: deleting the tag left the whole suite green. Nothing reads
+    // `propose_*` source today, which is exactly why it needs a test — an inert field with
+    // no test is the shape that quietly stops being written.
+    mockSink.mockClear();
+    const { agent } = make({ durableMemoryEnabled: true, sawUntrustedData: true });
+    await rememberTool.handler({ text: 'ACME renews in March', subject: 'ACME' }, agent);
+    const shown = captureEvents().filter((e) => e['event'] === 'propose_shown');
+    expect(shown).toHaveLength(1);
+    expect(shown[0]!['source']).toBe('model');
+  });
+
   it('remember does NOT emit propose_shown for a TRUSTED active write (not a reviewable proposal)', async () => {
     mockSink.mockClear();
     const { agent } = make({ durableMemoryEnabled: true }); // trusted turn → active, not pending_review
@@ -389,6 +448,29 @@ describe('DK.1 tools (remember / recall / memory_block_edit)', () => {
   it('remember rejects an over-long entry (S8 size bound)', async () => {
     const { agent, ks } = make();
     const out = await rememberTool.handler({ text: 'x'.repeat(8001) }, agent);
+    expect(out).toMatch(/too long/i);
+    expect(ks.pendingCount()).toBe(0);
+  });
+
+  it('remember rejects a credential in the SUBJECT, not only in the text', async () => {
+    // The gate read `text` while the write also stored `subject`, and `subject_hint`
+    // is the column that is NOT encrypted at rest — it renders into the review panel
+    // and into every later focus block. An innocuous sentence with a key as its
+    // subject passed a check that was looking at the wrong field. Found by an
+    // adversarial round on the capture path; the same hole was here.
+    const { agent, ks } = make();
+    const out = await rememberTool.handler(
+      { text: 'Der Kunde hat eine Projekt-Kennung hinterlegt.', subject: `sk_live_${'a'.repeat(40)}` },
+      agent,
+    );
+    expect(out).toMatch(/secret|credential/i);
+    expect(ks.pendingCount()).toBe(0);
+    expect(ks.recall({ query: 'Projekt-Kennung' }).length).toBe(0);
+  });
+
+  it('remember rejects an over-long SUBJECT too', async () => {
+    const { agent, ks } = make();
+    const out = await rememberTool.handler({ text: 'Kurzer Fakt.', subject: 'x'.repeat(8001) }, agent);
     expect(out).toMatch(/too long/i);
     expect(ks.pendingCount()).toBe(0);
   });

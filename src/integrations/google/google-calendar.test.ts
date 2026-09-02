@@ -34,7 +34,7 @@ describe('google_calendar tool', () => {
   describe('list_events', () => {
     it('lists upcoming events', async () => {
       const auth = createMockAuth();
-      const tool = createCalendarTool(auth);
+      const tool = createCalendarTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -71,7 +71,7 @@ describe('google_calendar tool', () => {
 
     it('handles empty calendar', async () => {
       const auth = createMockAuth();
-      const tool = createCalendarTool(auth);
+      const tool = createCalendarTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -86,7 +86,7 @@ describe('google_calendar tool', () => {
   describe('create_event', () => {
     it('requires write scope', async () => {
       const auth = createMockAuth([]);
-      const tool = createCalendarTool(auth);
+      const tool = createCalendarTool(() => auth);
 
       const result = await tool.handler({
         action: 'create_event',
@@ -100,7 +100,7 @@ describe('google_calendar tool', () => {
 
     it('creates event with confirmation', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/calendar.events']);
-      const tool = createCalendarTool(auth);
+      const tool = createCalendarTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -126,7 +126,7 @@ describe('google_calendar tool', () => {
 
     it('cancels on user decline', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/calendar.events']);
-      const tool = createCalendarTool(auth);
+      const tool = createCalendarTool(() => auth);
 
       const result = await tool.handler({
         action: 'create_event',
@@ -140,7 +140,7 @@ describe('google_calendar tool', () => {
 
     it('requires start and end', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/calendar.events']);
-      const tool = createCalendarTool(auth);
+      const tool = createCalendarTool(() => auth);
 
       const result = await tool.handler({ action: 'create_event' }, createMockAgent('Yes'));
       expect(result).toContain('"start" is required');
@@ -150,7 +150,7 @@ describe('google_calendar tool', () => {
   describe('delete_event', () => {
     it('deletes event with confirmation', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/calendar.events']);
-      const tool = createCalendarTool(auth);
+      const tool = createCalendarTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({ ok: true });
 
@@ -166,7 +166,7 @@ describe('google_calendar tool', () => {
   describe('free_busy', () => {
     it('checks free/busy times', async () => {
       const auth = createMockAuth();
-      const tool = createCalendarTool(auth);
+      const tool = createCalendarTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -193,7 +193,7 @@ describe('google_calendar tool', () => {
   describe('tool definition', () => {
     it('has correct name and schema', () => {
       const auth = createMockAuth();
-      const tool = createCalendarTool(auth);
+      const tool = createCalendarTool(() => auth);
 
       expect(tool.definition.name).toBe('google_calendar');
       expect(tool.definition.input_schema.required).toEqual(['action']);

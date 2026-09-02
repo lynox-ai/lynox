@@ -9,6 +9,7 @@
 import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import type { BackupManifest } from './backup.js';
+import { isProvisionedInstance } from './wire-capture.js';
 
 const DRIVE_BASE = 'https://www.googleapis.com/drive/v3';
 const UPLOAD_BASE = 'https://www.googleapis.com/upload/drive/v3';
@@ -55,6 +56,36 @@ export interface BackupAuthProvider {
 }
 
 const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+
+/**
+ * Whether this instance may upload backups to Google Drive at all.
+ *
+ * Self-hosted only. On a CP-provisioned instance the control plane already runs restic
+ * backups, so a second backup path to a third party adds exposure without adding safety —
+ * and since core#1240 that exposure is concrete: the backup carries the merge ledger, which
+ * embeds email, phone, vat_id and domain.
+ *
+ * ⚠ The boundary is who HOSTS, not the word "managed". BYOK (`hosted`, the cheapest tier)
+ * runs on lynox hosts too and gets the same CP backups; only the LLM key is the customer's.
+ * A check written against `managed`/`managed_pro` would leave the redundant path open for
+ * BYOK. `LYNOX_BILLING_TIER` is emitted to all three CP tiers and absent on self-host, which
+ * is the same signal the managed hook uses.
+ *
+ * It delegates to `isProvisionedInstance`, which this repo already uses to answer exactly this
+ * question — and answers it across THREE markers (`LYNOX_MANAGED_INSTANCE_ID`,
+ * `LYNOX_BILLING_TIER`, `LYNOX_MANAGED_MODE`), so a half-provisioned environment still counts as
+ * provisioned. The first version here read only `LYNOX_BILLING_TIER` and so failed OPEN on
+ * partial env: a CP instance missing that one variable would have uploaded to Drive. Same
+ * question, one answer — the earlier claim of "no new concept" was only true after this change.
+ *
+ * Extracted from the engine's wiring so the DECISION is testable independently of a boot. The
+ * one line that CALLS it is covered too, by `engine-init-wiring-boot.test.ts` — both directions,
+ * so neither dropping the call nor dropping the `if` around it can pass unnoticed.
+ */
+export function driveBackupAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !isProvisionedInstance(env);
+}
+
 
 /** Authenticated fetch helper for Drive API. */
 async function driveFetch(auth: BackupAuthProvider, url: string, options?: RequestInit): Promise<Response> {

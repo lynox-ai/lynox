@@ -6,10 +6,7 @@
  * passes everything is indistinguishable from no guard, and it is WORSE, because
  * a green check reads as verification.
  *
- * So each test names the thing that would otherwise slip through, and the suite
- * is deliberately unbalanced towards the SHA-freshness case — the one fact CI can
- * establish on its own, and the one that actually recurs (gates run, then more
- * commits land).
+ * So each test names the thing that would otherwise slip through.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -26,6 +23,7 @@ function record(over: Record<string, string> = {}): string {
     gates: 'code-review, delta',
     delta: 'clean',
     mutations: '12 killed, 0 survived',
+    closes: 'none',
     ...over,
   };
   const body = Object.entries(f)
@@ -340,5 +338,313 @@ describe('gate-record — the block is found where it is written', () => {
 
   it('returns null rather than throwing on an empty body', () => {
     expect(extractRecord('')).toBeNull();
+  });
+});
+
+describe('gate-record — `closes:`, required with `none` allowed', () => {
+  it('⭐ refuses a record that omits it, so absence cannot mean two things', () => {
+    // The whole design in one test. An OPTIONAL field is missing both when a PR
+    // closes nothing and when its author was in a hurry — and a query over a
+    // field like that cannot tell those apart, which is exactly why the detector
+    // built on `git log --grep "<DEF-id>"` measured recall 0/2.
+    const v = evaluate({ body: record({ closes: '' }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('`closes:` is missing');
+  });
+
+  it('accepts `none` — declining is an answer, not a silence', () => {
+    expect(evaluate({ body: record({ closes: 'none' }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  it('accepts one id and a list, in either separator this register uses', () => {
+    for (const value of ['DEF-merge-consent-inherited-mode',
+                         'DEF-a-row, DEF-b-row',
+                         'DEF-a-row · DEF-b-row']) {
+      const v = evaluate({ body: record({ closes: value }), head: HEAD, files: CODE });
+      expect(v.ok, `rejected ${value}`).toBe(true);
+    }
+  });
+
+  it('refuses something that is not a register id, and says so about `closes`', () => {
+    // Including the near-misses a person actually types: a PR number, prose that
+    // reads like an answer, and the template's own placeholder — `head:` has a
+    // dedicated placeholder test and this field had none.
+    for (const value of ['#1262', 'nothing', 'DEF_underscore', 'def-lowercase-prefix',
+                         '<DEF-… ids this PR settles, or none>']) {
+      const v = evaluate({ body: record({ closes: value }), head: HEAD, files: CODE });
+      expect(v.ok, `accepted ${value}`).toBe(false);
+      // Asserting only `ok:false` lets a mutant that reds for an unrelated reason
+      // survive — the reader would be sent to the wrong field.
+      expect(v.errors?.join(' '), `wrong error for ${value}`).toContain('closes');
+    }
+  });
+
+  it('tells an EMPTY field apart from a missing one', () => {
+    // Two different mistakes and two different instructions: one forgot the line,
+    // the other left it blank. The helper drops empty values, so a blank line has
+    // to be built by hand — which is why this branch went untested.
+    const blank = record().replace('closes: none', 'closes:');
+    const v = evaluate({ body: blank, head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('`closes:` is empty');
+    expect(v.errors?.join(' ')).not.toContain('is missing');
+  });
+
+  it('accepts `none` whatever its case, as `head:` accepts a SHA in any case', () => {
+    // `None` is what a person types. A false red on a legitimate PR is how a
+    // guard earns a bypass — this file says so about `head:` and it is the same
+    // argument here.
+    for (const value of ['none', 'None', 'NONE']) {
+      expect(evaluate({ body: record({ closes: value }), head: HEAD, files: CODE }).ok, value).toBe(true);
+    }
+  });
+
+  it('⭐ does not demand it where no record is demanded at all', () => {
+    // The two standing exemptions must keep working, or every dependabot PR goes
+    // permanently red and this field's first effect is to break auto-merge.
+    //
+    // The record is PRESENT and its `closes:` absent — that combination is the
+    // point. An earlier version passed `body: ''`, which has no record at all,
+    // so the exemption returned before reaching any new code: it passed on the
+    // implementation from BEFORE this change and proved nothing about it.
+    const noCloses = record({ closes: '' });
+    expect(evaluate({ body: noCloses, head: HEAD, files: ['docs/getting-started.md'] }).ok).toBe(true);
+    expect(evaluate({ body: noCloses, head: HEAD, files: CODE, author: 'dependabot[bot]' }).ok).toBe(true);
+    // The control: the same body on a non-exempt, human, code diff IS refused —
+    // without it the two lines above would also pass if the check never ran.
+    expect(evaluate({ body: noCloses, head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  it('⭐ reports the missing field ALONGSIDE other problems, not instead of them', () => {
+    // A check that returns on the first error teaches people to fix one thing
+    // per CI round. The record here is wrong in two independent ways and both
+    // must be named in one run.
+    const v = evaluate({ body: record({ closes: '', gates: 'code-review' }), head: HEAD, files: CODE });
+    const joined = v.errors?.join(' ') ?? '';
+    expect(joined).toContain('`closes:` is missing');
+    expect(joined).toContain('requires the `delta` gate');
+  });
+});
+
+describe('gate-record — a line nothing reads is a line that lost something', () => {
+  it('⭐ refuses an id continued on the next line instead of dropping it', () => {
+    // The failure this whole PR exists to prevent, reproduced INSIDE the fix: a
+    // second id on a continuation line parsed as nothing, and the guard against
+    // a datum going missing let a datum go missing. Green tick, id gone.
+    const body = record().replace('closes: none', 'closes: DEF-a-row,\n  DEF-b-row');
+    const v = evaluate({ body, head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('nothing reads it');
+  });
+
+  it('⭐ refuses a repeated field rather than letting the last one win', () => {
+    // A leftover `closes: none` under a real answer silently overwrote it. Same
+    // reasoning this file already applies to two BLOCKS, one level down.
+    const body = record().replace('closes: none', 'closes: DEF-a-row\ncloses: none');
+    const v = evaluate({ body, head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('repeats');
+  });
+
+  it('still accepts blank lines inside the block', () => {
+    // The control. Rejecting every unparsed line must not reject the ones people
+    // use to group fields — that would be a false red on a correct record.
+    const body = record().replace('delta: clean', '\ndelta: clean\n');
+    expect(evaluate({ body, head: HEAD, files: CODE }).ok).toBe(true);
+  });
+});
+
+describe('gate-record — a real register id may carry a capital', () => {
+  it('⭐ accepts DEF-dk-engineDb-init-partial-wire, which is a row that exists', () => {
+    // The lower-case-only shape refused it, so that row could never be named in
+    // `closes:` — a guard that cannot express a correct answer. Core cannot check
+    // existence (the register is in the private repo), which makes getting the
+    // SHAPE right the only thing standing between a typo and a green tick here.
+    expect(evaluate({ body: record({ closes: 'DEF-dk-engineDb-init-partial-wire' }), head: HEAD, files: CODE }).ok)
+      .toBe(true);
+  });
+
+  it('still refuses what is not an id at all', () => {
+    // The control: widening for capitals must not widen into accepting anything.
+    for (const value of ['#1262', 'DEF_underscore', 'Def-wrong-prefix', 'nothing']) {
+      expect(evaluate({ body: record({ closes: value }), head: HEAD, files: CODE }).ok, value).toBe(false);
+    }
+  });
+});
+
+describe('gate-record — a docs diff owes no gates, which is not the same as owing no record', () => {
+  const DOCS = ['docs/getting-started.md'];
+
+  // The check used to `return { ok: true }` the moment it saw a docs-only diff —
+  // before `extractRecord` ran. So on those PRs it printed a tick without reading a
+  // single field, and the output could not tell "checked and clean" from "never
+  // looked". Both look the same from outside, which is the whole cost: on
+  // 2026-09-02 a session judged three docs-only PRs by their `gate-record` block
+  // and, on one of them, re-pinned `head:` after an `update-branch` and read the
+  // green check as confirmation. It had never been read.
+  it('THE POINT: a stale head pin on a docs PR is refused, where it used to pass unread', () => {
+    const stale = record({ head: '9999999999999999999999999999999999999999' });
+    const v = evaluate({ body: stale, head: HEAD, files: DOCS });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('record pins head');
+  });
+
+  // pro#685, live at the time of writing: `gates:` written as a bullet list, so the
+  // two gate attestations under it are read by nothing at all.
+  it('a line that is not `field: value` is refused on a docs PR too', () => {
+    const body = [
+      '## Summary', '', 'Docs.', '', '```gate-record',
+      `head: ${HEAD.slice(0, 8)}`,
+      'gates:',
+      '  - code-review: not-run (docs-only diff)',
+      '```', '',
+    ].join('\n');
+    const v = evaluate({ body, head: HEAD, files: DOCS });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('is not `field: value`');
+  });
+
+  it('an unknown gate name is refused on a docs PR too', () => {
+    const v = evaluate({ body: record({ gates: 'code-review, vibes' }), head: HEAD, files: DOCS });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('unknown gate');
+  });
+
+  // The delayed ignition, as one assertion: the SAME body, silently passing on a
+  // docs diff and refused the day a source file joins the branch. That gap is what
+  // made the defect expensive — a record can be "passing" for weeks and then fail
+  // all at once, on a PR nobody touched.
+  it('⭐ the same broken record no longer passes on docs and fails on code', () => {
+    const stale = record({ head: '9999999999999999999999999999999999999999' });
+    expect(evaluate({ body: stale, head: HEAD, files: DOCS }).ok).toBe(false);
+    expect(evaluate({ body: stale, head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  // What a docs diff genuinely does not owe. Each of these would be an error on a
+  // code diff, and demanding them here would buy a fabricated line.
+  it('no gate is demanded, and neither is a delta round', () => {
+    const v = evaluate({ body: record({ gates: '', delta: '', mutations: '' }), head: HEAD, files: DOCS });
+    expect(v.ok).toBe(true);
+    // The control: the same record on a code diff IS refused, or the line above
+    // would also pass if the docs branch skipped every check as it used to.
+    expect(evaluate({ body: record({ gates: '', delta: '', mutations: '' }), head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  it('a docs PR with no record at all still passes', () => {
+    // 4 of the 5 open docs-only PRs across both repos carry no block. Demanding one
+    // would turn a fix for a silent check into a wave of red on work that never
+    // claimed anything.
+    const v = evaluate({ body: '## Summary\n\nJust docs.\n', head: HEAD, files: DOCS });
+    expect(v.ok).toBe(true);
+    expect(v.notes?.join(' ')).toContain('no gate record required');
+  });
+
+  // The finding was that the OUTPUT could not distinguish the two states. A fix that
+  // leaves them printing the same thing has not closed it.
+  it('⭐ says which of the two happened, so a reader can tell them apart', () => {
+    const read = evaluate({ body: record(), head: HEAD, files: DOCS });
+    expect(read.ok).toBe(true);
+    expect(read.notes?.join(' ')).toContain('the record is still read');
+    const unread = evaluate({ body: '## Summary\n\nJust docs.\n', head: HEAD, files: DOCS });
+    expect(unread.notes?.join(' ')).not.toContain('the record is still read');
+  });
+
+  it('the bot exemption still returns before any of this', () => {
+    const stale = record({ head: '9999999999999999999999999999999999999999' });
+    expect(evaluate({ body: stale, head: HEAD, files: CODE, author: 'dependabot[bot]' }).ok).toBe(true);
+  });
+});
+
+// An independent mutation round against the block above found 9 survivors in 19
+// mutations — while the author's own 6 all died. Not one survivor was a defect:
+// every behaviour below was already correct and measured to be correct. What was
+// missing was the assertion, which is the same thing as the guard being deletable.
+//
+// Kept in one place because they share a cause: each pins a boundary that the
+// existing tests approached from one side only.
+describe('gate-record — boundaries a foreign mutation set walked straight through', () => {
+  const DOCS = ['docs/getting-started.md'];
+
+  // The docs block asserts head, gates and parse shape — and never touches
+  // `closes:`. So the one field this change deliberately does NOT demand there was
+  // also the one whose SHAPE went unchecked, which is the delayed ignition again:
+  // green for weeks, red the day a source file lands.
+  it('a malformed `closes:` is refused on a docs PR too — not demanded is not unread', () => {
+    const v = evaluate({ body: record({ closes: '#1262' }), head: HEAD, files: DOCS });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('is not a register id');
+  });
+
+  // `startsWith`, not `includes`. A pin taken from the MIDDLE of the SHA would
+  // otherwise satisfy "pins this commit", and the field's whole job is to name one
+  // commit rather than to appear somewhere in it.
+  it('a non-prefix substring of the head is not a pin', () => {
+    const middle = HEAD.slice(3, 11);
+    expect(HEAD).toContain(middle);          // control: it really is a substring
+    expect(HEAD.startsWith(middle)).toBe(false);
+    expect(evaluate({ body: record({ head: middle }), head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  // The floor is 7. The existing test uses a 4-character pin, so every floor from 5
+  // to 7 passed it — the boundary was pinned from one side only.
+  it('the pin floor is 7, checked from just below it', () => {
+    expect(evaluate({ body: record({ head: HEAD.slice(0, 6) }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(evaluate({ body: record({ head: HEAD.slice(0, 7) }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  // The junk-line check exists so a line nothing reads cannot sit in the block
+  // pretending to. Its tests used bullets and continuation lines; a capitalised key
+  // is the form that LOOKS like a field, which is the one that would actually be
+  // written by someone.
+  it('`Note: prose` is junk too — a capital does not make it a field', () => {
+    const body = [
+      '## Summary', '', 'x', '', '```gate-record',
+      `head: ${HEAD.slice(0, 8)}`, 'gates: code-review, delta', 'delta: clean',
+      'mutations: 12 killed, 0 survived', 'closes: none',
+      'Note: prose that nothing reads',
+      '```', '',
+    ].join('\n');
+    const v = evaluate({ body, head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('is not `field: value`');
+  });
+
+  // `delta:` is an EQUALITY check. The rejection cases are all words that do not
+  // contain "clean", so a substring implementation passed every one of them and
+  // died only on the shipped PR template's `<clean?>` placeholder — i.e. the
+  // equality was held up by a test about something else, and a reworded template
+  // would have dropped it silently.
+  it('`delta: not clean` is refused — equality, not a substring match', () => {
+    const v = evaluate({ body: record({ delta: 'not clean' }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('must be `clean`');
+  });
+
+  // DOC_ONLY is anchored on both ends. Unanchored, `notes.md.ts` reads as markdown
+  // and a whole source file is exempt from every gate — the same class as the
+  // "append a line to the README" hole, reached through the pattern instead of
+  // through the file mix.
+  it('a source file is not documentation because `.md` or `docs/` appears inside its path', () => {
+    expect(requiredGates(['src/core/notes.md.ts'])).not.toBe(null);
+    expect(requiredGates(['src/server/docs/handler.ts'])).not.toBe(null);
+    // Controls, so the assertions above cannot pass by the filter being broken:
+    expect(requiredGates(['docs/getting-started.md'])).toBe(null);
+    expect(requiredGates(['README.md'])).toBe(null);
+  });
+
+  // The bot exemption returns FIRST, ahead of both the `empty` guard and the docs
+  // branch. Ordering is the whole content of that claim, and the test named after it
+  // ran with a code diff — which exercises neither. Pinned here as it behaves, with
+  // the tension stated rather than changed: a bot PR whose file list failed to
+  // arrive is exempted, and the `empty` guard exists precisely for that shape.
+  it('the bot exemption really is first — including ahead of the `empty` guard', () => {
+    const bot = { body: record(), head: HEAD, author: 'dependabot[bot]' };
+    const onEmpty = evaluate({ ...bot, files: [] });
+    expect(onEmpty.ok).toBe(true);
+    expect(onEmpty.notes?.join(' ')).toContain('is a bot');
+    const onDocs = evaluate({ ...bot, files: DOCS });
+    expect(onDocs.notes?.join(' ')).toContain('is a bot');
+    // The control: without the bot author, the empty list is refused.
+    expect(evaluate({ body: record(), head: HEAD, files: [] }).ok).toBe(false);
   });
 });

@@ -14,7 +14,7 @@ import { LLM_CATALOG } from './llm/catalog.js';
  */
 describe('tier-presets (model-presets W2 SoT)', () => {
   it('ships exactly the three hybrid presets', () => {
-    // eu-sovereign joined 2026-08-10: the EU choice used to be a side effect of
+    // An EU set was drafted 2026-08-10 and PULLED before merging; the EU choice used to be a side effect of
     // picking "efficient", which meant a customer needing EU processing had to
     // know that. Reshaping efficient to open weights would have removed it silently.
     expect(Object.keys(TIER_PRESETS).sort()).toEqual(['balanced', 'efficient', 'max-quality']);
@@ -63,7 +63,7 @@ describe('tier-presets (model-presets W2 SoT)', () => {
       // BENCH — fast-slot compaction 2026-08-10: 89.1% literal recall vs a 90.4%
       // haiku-4.5 reference, best judge score of the field (7.83 vs 7.13) → HOLD.
       // Benched as a FAST slot only; it is not a measured main (rafael 2026-08-10).
-      'accounts/fireworks/models/deepseek-v4-flash',
+      'accounts/fireworks/models/deepseek-v4-flash-0731',
       // BENCH — fast-slot compaction 2026-08-10: HOLD at 87.9% recall / judge 6.96,
       // and the quickest model of the sweep in every probe that did not stall on an
       // ask_user question. No longer pinned by any preset (lost the efficient main
@@ -102,7 +102,7 @@ describe('tier-presets (model-presets W2 SoT)', () => {
   });
 
   it('EVERY preset prices its bands in ascending order — escalating must never get cheaper', () => {
-    // The ladder claim that the eu-sovereign comment spends 25 lines defending
+    // The ladder claim that the pulled-EU-set comment spends 25 lines defending
     // ("the price rises with the band ... the reverse order was considered and
     // rejected") was backed by nothing until a delta review pointed it out. It is the
     // one invariant that holds across ALL four presets and the reason a preset is a

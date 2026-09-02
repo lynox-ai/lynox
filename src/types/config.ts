@@ -4,7 +4,7 @@ import type { AnthropicBeta } from '@anthropic-ai/sdk/resources/beta/beta.js';
 
 import type { ModelTier, ThinkingMode, EffortLevel, LLMProvider, ModelProfile } from './models.js';
 import type { ProviderKey } from './provider-registry.js';
-import type { ToolEntry, StreamHandler } from './tools.js';
+import type { ToolEntry, EmittingStreamHandler } from './tools.js';
 import type { TabQuestion, PromptUserFn, PromptTabsFn, PromptSecretFn, PromptMailConnectFn, ToolCallRecorder } from './agent.js';
 import type { IMemory, MemoryScopeRef, LynoxContext } from './memory.js';
 import type { IWorkerPool } from './worker.js';
@@ -21,7 +21,9 @@ export interface AgentConfig {
   effort?:          EffortLevel | undefined;
   maxTokens?:       number | undefined;
   memory?:          IMemory | undefined;
-  onStream?:        StreamHandler | undefined;
+  // Emitting: the agent built from this config writes INTO this handler, so it
+  // is an emit sink. A plain StreamHandler is still assignable here.
+  onStream?:        EmittingStreamHandler | undefined;
   workerPool?:      IWorkerPool | undefined;
   promptUser?:      PromptUserFn | undefined;
   promptTabs?:      PromptTabsFn | undefined;
@@ -354,6 +356,12 @@ export interface LynoxUserConfig {
    */
   balanced_model?: string | undefined;
   max_session_cost_usd?: number | undefined;
+  /** Policy ceiling on workflow steps (overrides the MAX_STEPS=20 default). A
+   *  tenant running large bulk workflows (e.g. a 2000-contact triage needing
+   *  >20 batch steps) raises this so the workflow isn't rejected at validation.
+   *  Enforced on the run paths in pipeline.ts via maxStepsFor; the manifest
+   *  schema keeps an absolute 1000-step sanity ceiling regardless. */
+  max_workflow_steps?: number | undefined;
   /** Max chat runs executing concurrently across all threads (Tier-2 run
    *  executor). Bounds LLM-cost blast + run-buffer memory from many parallel
    *  headless runs. A fresh dispatch past this is refused with HTTP 429

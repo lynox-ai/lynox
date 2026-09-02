@@ -16,6 +16,7 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash, createHmac, timingSafeEqual, randomUUID, randomBytes } from 'node:crypto';
 import { Engine } from '../core/engine.js';
+import type { KnowledgeEntry } from '../types/memory.js';
 import { promptSegments, flattenPrompt } from '../core/prompt-value.js';
 import { MemoryFacade } from '../core/memory-facade.js';
 import { stripUntrustedSeparators, sanitizeAttachmentFilename, sanitizeUploadFilename } from '../core/sanitize.js';
@@ -26,7 +27,7 @@ import { ensureHttpSecret } from '../core/engine-init.js';
 import { fireBeforeRunGate, reportMeteredCost } from '../core/metered-request.js';
 import { backfillMetadata as inboxBackfillMetadata } from '../integrations/inbox/backfill-metadata.js';
 import type { Lang } from '../core/speak.js';
-import { loadConfig } from '../core/config.js';
+import { loadConfig, describePinForDisplay } from '../core/config.js';
 import { expandTierPreset, FIREWORKS_API_BASE, managedFireworksEnabled } from '../core/tier-presets.js';
 import { buildTierPresetSignal } from '../core/tier-preset-signal.js';
 import { readEnvAlias } from '../core/env.js';
@@ -49,10 +50,10 @@ import { deriveBusinessDomain, buildDomainSearchQuery } from '../core/onboarding
 import { appendCaptureTelemetry } from '../core/capture-telemetry.js';
 import { buildCaptureReport } from '../core/capture-telemetry-report.js';
 import { maskSecretPatterns, isInfraSecret } from '../core/secret-store.js';
-import { promptOriginOf, parseOriginJson } from '../core/prompt-store.js';
-import type { StreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
+import { promptOriginOf, parseOriginJson, originWireFields } from '../core/prompt-store.js';
+import type { SecretStoreLike, EmittedStreamEvent, PromptMeta, PromptText, PromptSegment, CapabilityLocks, SecretOutcome, MailConnectPromptData, MailConnectOutcome, EntityRecord, TabQuestion } from '../types/index.js';
 import { isTierSlot } from '../types/config.js';
-import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
+import { MODEL_MAP, effectiveContextWindow, resolveNativeContextWindow, FALLBACK_CAPABILITY, getModelId, getProviderDescriptor, modelCapability, normalizeTier, normalizeThreadModelSource, resolveBalancedModel, SERVED_BALANCED_SONNET_IDS, isBlockedModelId, isDurableCaptureDegraded } from '../types/index.js';
 import { isHostedInstance, cpSuppliesLLMKey, normalizeBillingTier } from './billing-tier.js';
 import type {
   HealthBody,
@@ -270,7 +271,45 @@ const MANAGED_EFFECTIVE_DEFAULTS: Record<string, unknown> = {
 // calendar" with "contact support@lynox.ai" — for a value support does not have.
 const USER_OWNED_INFRA_PATTERNS: ReadonlyArray<RegExp> = [/^CALENDAR_FEED_/];
 
-function isAdminOnlySecret(name: string): boolean {
+/**
+ * Infra names the CUSTOMER may write through Settings, but the AGENT may still
+ * not be prompted for. This list is the reason the two predicates below exist
+ * separately, so read the distinction before adding to it.
+ *
+ * `GOOGLE_CLIENT_*` is a credential pair for the customer's OWN Google Cloud
+ * project. Managed BYO is a supported state, so the customer must be able to
+ * save and remove it — that is a deliberate action in their own settings.
+ *
+ * The agent must NOT be able to raise a prompt for it. `ask_secret` is an
+ * always-on tool whose `name` AND `prompt` text both come from the model, and
+ * the dialog renders as product-native UI. A prompt-injected agent asking for
+ * "your Google client secret" in lynox's own dialog is a phishing primitive
+ * inside the product, and the blocked-name check is what stops it existing.
+ * Opening the write path is a product decision; opening the prompt path is not
+ * the same decision and was never made.
+ */
+export const CUSTOMER_WRITABLE_INFRA_PATTERNS: ReadonlyArray<RegExp> = [/^GOOGLE_CLIENT_/];
+
+/**
+ * Blocked on the CUSTOMER's own write path (`PUT`/`DELETE /api/secrets/:name`),
+ * where the actor is a signed-in human acting in their own settings.
+ */
+function blockedForCustomerWrite(name: string): boolean {
+  return isInfraSecret(name)
+    && !USER_OWNED_INFRA_PATTERNS.some(p => p.test(name))
+    && !CUSTOMER_WRITABLE_INFRA_PATTERNS.some(p => p.test(name));
+}
+
+/**
+ * Blocked on the AGENT-initiated prompt path (`ask_secret` → `promptSecret`),
+ * where the actor is a model that may be acting on injected instructions.
+ *
+ * Strictly wider than {@link blockedForCustomerWrite}: everything the customer
+ * cannot write is also refused here, plus the names the customer MAY write but
+ * the agent may not ask for. If these two ever return the same answer for a
+ * `CUSTOMER_WRITABLE_INFRA_PATTERNS` name, the split has been undone.
+ */
+function blockedForAgentPrompt(name: string): boolean {
   return isInfraSecret(name) && !USER_OWNED_INFRA_PATTERNS.some(p => p.test(name));
 }
 
@@ -506,6 +545,115 @@ function enforceManagedProviderConstraints(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/** One projected durable-knowledge entry — the diagnostic surface, without internal ids. */
+interface DebugKnowledgeEntry {
+  text: string; kind: string; status: string; source_type: string; source_channel: string | null;
+  source_untrusted: boolean; pinned: boolean; importance: number;
+  subject_name: string | null; subject_hint: string | null; created_at: string;
+  /** Whether the entry was captured in THIS thread — replaces the raw foreign thread id. */
+  from_this_thread: boolean;
+}
+
+/** Every return path of {@link readDurableKnowledgeForDebug} has this exact shape. */
+interface DebugKnowledgeBlock {
+  substrate: string; available: boolean; entries_shown: number; pending_shown: number;
+  may_be_incomplete: boolean; entries: DebugKnowledgeEntry[]; pending_entries: DebugKnowledgeEntry[];
+  error?: string;
+}
+
+const DK_SUBSTRATE = 'knowledge_entries (durable knowledge)';
+/** Shared so every non-happy path is shape-IDENTICAL: a missing `entries_shown` reads as
+ *  `undefined`, which is indistinguishable from `0` — the exact confusion this block exists to
+ *  prevent. Same device as the Art. 15 export's `EMPTY_KNOWLEDGE`. */
+const EMPTY_DK: Omit<DebugKnowledgeBlock, 'entries' | 'pending_entries'> = {
+  substrate: DK_SUBSTRATE, available: false, entries_shown: 0, pending_shown: 0,
+  may_be_incomplete: false,
+};
+
+/**
+ * Why an allowlist and not the row object, stated as what it actually REMOVES — an earlier
+ * version of this comment justified the list with a field the very next line kept, which is
+ * worse than no rationale because it invites the next reader to trust it.
+ *
+ * Removed: internal ids (`id`, `subjectId`, `sourceRunId`, `supersededBy`) — no diagnostic value
+ * outside the instance — and `sourceThreadId`, which in a SINGLE-thread export a user forwards
+ * would name a DIFFERENT thread the recipient was never given. Its diagnostic question survives
+ * as `from_this_thread`.
+ *
+ * Kept, deliberately: `subject_name` / `subject_hint`. They are names, but no more revealing
+ * than the entry `text` printed beside them, which is what the name was extracted from — and the
+ * snapshot exists to diagnose cross-subject bleed, which cannot be read without the subject.
+ * Note they do NOT pass `_maskText` (that covers `.text` only); the whole-bundle secret scrub is
+ * what covers them, which is sufficient for a name and would not be for a credential.
+ *
+ * The reason lives HERE, next to the list, so the next field added has to argue with it.
+ */
+function projectKnowledgeEntry(e: KnowledgeEntry & { subjectName?: string | null }, threadId: string): DebugKnowledgeEntry {
+  return {
+    text: e.text, kind: e.kind, status: e.status, source_type: e.sourceType,
+    source_channel: e.sourceChannel, source_untrusted: e.sourceUntrusted,
+    pinned: e.pinned, importance: e.importance,
+    subject_name: e.subjectName ?? null, subject_hint: e.subjectHint,
+    created_at: e.createdAt,
+    // The raw `sourceThreadId` would name a DIFFERENT thread in a single-thread export a user
+    // forwards — a pointer at data the recipient was never given. The diagnostic question it
+    // answers ("did this fact come from the thread I am looking at?") survives as a boolean.
+    from_this_thread: e.sourceThreadId === threadId,
+  };
+}
+
+/**
+ * The durable-knowledge half of the debug export's memory snapshot — the substrate the legacy
+ * `memories` table does NOT contain once durable knowledge is on.
+ *
+ * Independent of the KnowledgeLayer ON PURPOSE. The layer is null when the knowledge GRAPH is
+ * off or the embedding provider failed (`engine-init.ts`), while durable knowledge is gated
+ * solely on `durable_memory_enabled` (`engine.ts`). Those are separate conditions, so a DK
+ * tenant without a graph — the very case this block exists for — must still get its entries.
+ *
+ * Each half gets its OWN try/catch: `listActive` and `listPending` both decrypt every row, and
+ * one unreadable pending row must not discard readable active entries. A failure yields a
+ * NAMED, EMPTY half with `may_be_incomplete: true` rather than vanishing — "I could not read
+ * this" and "there is nothing here" must not look the same to someone diagnosing a missing
+ * memory. Entries are projected (see {@link projectKnowledgeEntry}), mirroring the field
+ * allowlist the legacy block applies rather than shipping the row object whole.
+ */
+/** Exported for the array-identity test: shared state between calls is invisible through HTTP,
+ *  because JSON round-tripping mints fresh arrays either way. */
+export function readDurableKnowledgeForDebug(engine: Engine, threadId: string): DebugKnowledgeBlock {
+  const store = engine.getKnowledgeStore();
+  if (!store) return { ...EMPTY_DK, entries: [], pending_entries: [] };
+  const ENTRY_CAP = 200;
+  let entries: DebugKnowledgeEntry[] = [];
+  let pending: DebugKnowledgeEntry[] = [];
+  let incomplete = false;
+  let failed: string | null = null;
+  try {
+    const active = store.listActive(ENTRY_CAP);
+    entries = active.map(e => projectKnowledgeEntry(e, threadId));
+    if (active.length >= ENTRY_CAP) incomplete = true;
+  } catch { failed = 'active entries unreadable'; incomplete = true; }
+  try {
+    // THREAD-SCOPED and masked. Scoped because `listPending` orders `created_at ASC` and caps:
+    // with a full queue of OLDER entries from other threads, this thread's freshly captured one
+    // falls outside the window — i.e. the export added to answer "was anything captured here?"
+    // would be missing exactly that entry. `listPendingForThread` filters in SQL BEFORE the
+    // limit and its docstring records that same trap from an earlier review. Masked because this
+    // is a file that gets stored and forwarded.
+    const raw = store.listPendingForThreadMasked(threadId, ENTRY_CAP);
+    pending = raw.map(e => projectKnowledgeEntry(e, threadId));
+    if (raw.length >= ENTRY_CAP) incomplete = true;
+  } catch { failed = failed ? 'durable knowledge unreadable' : 'pending queue unreadable'; incomplete = true; }
+  const block: DebugKnowledgeBlock = {
+    substrate: DK_SUBSTRATE, available: true,
+    entries_shown: entries.length, pending_shown: pending.length,
+    // `may_be_incomplete` rather than `truncated`, for the reason spelled out at the Art. 15
+    // export below: hitting exactly the cap cannot be told from having exactly that many.
+    may_be_incomplete: incomplete, entries, pending_entries: pending,
+  };
+  return failed ? { ...block, error: failed } : block;
+}
+
 function jsonResponse(res: ServerResponse, status: number, body: unknown): void {
   const json = JSON.stringify(body);
   res.writeHead(status, {
@@ -515,8 +663,116 @@ function jsonResponse(res: ServerResponse, status: number, body: unknown): void 
   res.end(json);
 }
 
+/**
+ * Cap a client-bound error string AFTER it has been masked. Never before.
+ *
+ * This docblock argued the opposite for two commits and was the reason a
+ * disclosure oracle got built. The reasoning was: the masker is superlinear on
+ * one rule, so cut first and the cost is bounded. What that misses is that every
+ * rule has a minimum length and some need a terminator — cut inside a secret and
+ * the rule no longer matches, so the REMAINDER ships in cleartext. Measured
+ * across 15 credential shapes and 700 offsets: masking first leaks nothing
+ * beyond the sanctioned `***<last4>`; cutting first leaks up to 38 of 39
+ * characters of a Google key. And the offset is caller-controllable wherever a
+ * message interpolates user input ahead of the secret.
+ *
+ * The cost belongs to the regex, not to the call order — see the bounded
+ * quantifier in `secret-store.ts`. Bounding it there costs nothing and leaves
+ * this order free to be the safe one.
+ */
+function capForClient(text: string): string {
+  return text.length > SSE_ERROR_MAX_CHARS ? `${text.slice(0, SSE_ERROR_MAX_CHARS)}…` : text;
+}
+
+/**
+ * Upper bound on the error text the run stream hands the browser. The toast
+ * that renders it already truncates at 140 chars for layout; this is the
+ * transport-level bound, generous enough to keep a real stack frame readable
+ * and small enough that a provider returning a paragraph cannot ship the whole
+ * thing. Not a security control on its own — the mask is — but an unbounded
+ * field is how a payload nobody inspected leaves the process.
+ */
+const SSE_ERROR_MAX_CHARS = 600;
+
+/**
+ * The secret store, reachable from a free function.
+ *
+ * `errorResponse` has 264 call sites and no `this`. Threading a store through
+ * all of them, or turning it into a method, both leave the two callers outside
+ * the class without one — so the reference is module-scoped and set ONCE, when
+ * the engine finishes initialising. Module state is the cost; the mitigation is
+ * that the boot wiring has its own test whose mutation deletes the wiring LINE,
+ * not the masking. A test that hands the reference in itself would survive that
+ * deletion and report green while production never sets it.
+ *
+ * Pattern masking runs regardless. This only ADDS the values the store knows —
+ * which is the half no pattern can reach: 11 of 13 rules are prefix-bound, and
+ * a Mistral key is 32 bare alphanumerics with no shape to match.
+ */
+// A SET of resolvers, and both halves of that are corrections.
+//
+// RESOLVER, not the store: caching the store meant the wiring had to run after
+// `engine.init()`, and moving the line one statement earlier wired `null`
+// permanently with a fully green suite — a mutation that survived, because a
+// test cannot see an ordering it does not execute. Lazy resolution removes the
+// ordering requirement instead of guarding it.
+//
+// SET, not a single slot: a single slot is last-writer-wins. A second instance
+// in the same process (tests do this) overwrites the first, and then ITS
+// shutdown leaves the still-serving first instance unwired. Measured — that is
+// what broke the boot test. A set is also safe in the direction that matters:
+// resolving through another instance's store can only redact MORE, never less.
+const clientErrorStoreResolvers = new Set<() => SecretStoreLike | null>();
+
+/** Wire the client-error path to a store LOOKUP. Order-independent by design. */
+export function setClientErrorSecretStore(resolve: (() => SecretStoreLike | null) | null): void {
+  if (resolve) clientErrorStoreResolvers.add(resolve);
+}
+
+/**
+ * Release a lookup, but ONLY if it is still the one installed.
+ *
+ * An unconditional clear on shutdown is wrong in the same way last-writer-wins
+ * is wrong, just pointing the other way: a second instance shutting down would
+ * unwire the first one, which is still serving. Measured — an unconditional
+ * version broke eight unrelated tests.
+ */
+export function releaseClientErrorSecretStore(resolve: (() => SecretStoreLike | null) | null): void {
+  if (resolve) clientErrorStoreResolvers.delete(resolve);
+}
+
+/**
+ * Mask a string bound for a client: known VALUES first, then known SHAPES.
+ *
+ * Values first because a value hit is exact — it needs no guess about what a
+ * credential looks like — and because masking shortens the text, so running the
+ * exact pass first cannot hide a shape from the second pass.
+ */
+function maskForClient(text: string, opts?: { includeGeneric?: boolean }): string {
+  for (const resolve of clientErrorStoreResolvers) {
+    const store = resolve();
+    if (store) return store.maskAll(text, opts);
+  }
+  return maskSecretPatterns(text, opts);
+}
+
+/**
+ * Every error the API hands a client goes through here, which is why the mask
+ * lives here and not at the call sites. There are 264 call sites (265 textual
+ * occurrences, one of which is this definition). The exact literal/dynamic split
+ * is NOT restated here: two independent counts disagreed depending on whether a
+ * `${}` template counts as deliberate, and a number that does not reproduce is
+ * not a measurement. What holds either way: roughly two dozen hand a caught
+ * `err.message` straight through, and fixing those by hand leaves the next one
+ * to be written tomorrow.
+ *
+ * Known credential shapes only (no `includeGeneric`): most callers pass a
+ * deliberate sentence, and the generic 40+ char catcher would redact ordinary
+ * prose. For a message that is entirely uncontrolled the caller asks for more —
+ * see the SSE error path, which also caps the length.
+ */
 function errorResponse(res: ServerResponse, status: number, message: string): void {
-  jsonResponse(res, status, { error: message });
+  jsonResponse(res, status, { error: capForClient(maskForClient(message)) });
 }
 
 /**
@@ -597,10 +853,13 @@ function requiresAdminSplitGate(value: string | undefined): boolean {
 
 /**
  * Predict whether an ask_secret call for the given name will be rejected by
- * the vault PUT (managed tier + name matches an admin-only infrastructure
- * pattern). Almost all agent-issued secrets pass — the predicate now fires
- * only for the narrow set of LYNOX_/MANAGED_/MAIL_ACCOUNT_/
- * GOOGLE_OAUTH_/SMTP_/IMAP_ infrastructure names.
+ * the AGENT-PROMPT path. It no longer predicts the vault PUT: since the predicate
+ * split, a customer may write some names the agent may not be prompted for — see
+ * CUSTOMER_WRITABLE_INFRA_PATTERNS. Almost all agent-issued secrets still pass; this
+ * fires for the infrastructure names LYNOX_/MANAGED_/MAIL_ACCOUNT_/GOOGLE_OAUTH_/
+ * GOOGLE_CLIENT_/SMTP_/IMAP_ — GOOGLE_CLIENT_ included, deliberately: `google-auth.ts`
+ * records why ("infra-walled precisely so the agent never learns to go asking for
+ * them"), and the customer-side carve-out does not change that.
  *
  * Exported so the session.promptSecret wire can short-circuit the UI prompt
  * for the rare admin-only cases AND unit tests can lock the predicate
@@ -609,7 +868,7 @@ function requiresAdminSplitGate(value: string | undefined): boolean {
  * setups can stub the env per case.
  */
 export function predictManagedBlocked(name: string): boolean {
-  return requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && isAdminOnlySecret(name);
+  return requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && blockedForAgentPrompt(name);
 }
 
 /** Provider / cost-caps / integrations are CP-managed → PUT /api/config needs the field allowlist. Pool tiers only. */
@@ -686,6 +945,7 @@ function parseDynamicRoute(scope: AuthScope, method: string, path: string, handl
 
 export class LynoxHTTPApi {
   private engine: Engine | null = null;
+  private clientErrorResolver: (() => SecretStoreLike | null) | null = null;
   private server: Server | null = null;
   private webUiHandler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | null = null;
   private readonly sessionStore = new SessionStore();
@@ -694,6 +954,37 @@ export class LynoxHTTPApi {
   // closes; if a pending prompt is then blocking the previous run, a fresh
   // /run can take it over instead of 409-looping forever (Bug 3).
   private readonly runningSessions = new Map<string, { streamAlive: boolean; takeover: () => void; lastEventAt: number }>();
+
+  /**
+   * Unwind whatever run holds this session's slot, so the slot's `finally` can
+   * run and the next request is not refused with a 409.
+   *
+   * Needed because a run PARKED on a pending prompt does not observe
+   * `session.abort()`: it is suspended in `waitForSettled(promptId,
+   * sessionAbortController.signal)`, and neither the prompt row nor that
+   * controller belongs to the Session. Only the slot's `takeover` unwinds all
+   * three. Deliberately keyed on `runningSessions` and NOT on the Session — a
+   * deleted thread drops the Session while the slot (and its run-executor
+   * reservation) lives on, and that is precisely when reclaiming matters.
+   *
+   * Best-effort by design, mirroring RunExecutor.abort: a teardown must not turn
+   * into a 500 for the caller who asked for it. Two consequences that are real
+   * and are NOT closed here:
+   *   - `takeover` ends with `session.abort()`, and `Session.abort` still calls
+   *     the PROCESS-WIDE `abortSpawnedAgents()`/`abortPipelineAgents()`
+   *     (`spawn.ts`, `runtime-adapter.ts` keep module-level Sets). So this also
+   *     aborts sub-agents belonging to OTHER threads. That is pre-existing — the
+   *     stop button has always done it — but every caller added here inherits it.
+   *   - if the swallowed throw came from `expirePrompt`, the run is unwound but
+   *     the prompt row stays `pending` until its 24 h TTL, and the next
+   *     `insertAskUser` on this session hits the unique index. Strictly better
+   *     than a wedged slot, not free.
+   */
+  private reclaimRunSlot(sessionId: string): void {
+    try {
+      this.runningSessions.get(sessionId)?.takeover();
+    } catch { /* best-effort — the caller's teardown continues regardless */ }
+  }
   private readonly rateCounts = new Map<string, { count: number; resetAt: number }>();
   private readonly staticRoutes = new Map<string, RouteHandler>();
   /**
@@ -858,6 +1149,11 @@ export class LynoxHTTPApi {
       context: { id: 'http-api', name: 'lynox', source: 'pwa', workspaceDir: '' },
     });
     await this.engine.init();
+    // Order-independent on purpose: this hands over a LOOKUP, so it no longer
+    // matters whether it runs before or after init(). Deleting the line is
+    // still the mutation the boot test fails on.
+    this.clientErrorResolver = (): SecretStoreLike | null => this.engine?.getSecretStore() ?? null;
+    setClientErrorSecretStore(this.clientErrorResolver);
     this.engine.startWorkerLoop();
     this._registerRoutes();
     await this._initPushChannel();
@@ -1410,6 +1706,12 @@ export class LynoxHTTPApi {
     // Expire all pending prompts in SQLite on shutdown
     this.engine?.getPromptStore()?.expireAll();
     this.server?.close();
+    // Release the client-error lookup. Module state is last-writer-wins, so a
+    // second instance in the same process (tests do this) would otherwise leave
+    // the reference pointing into a shut-down instance. Not a live leak today —
+    // production constructs exactly one — but the reason it is safe is an
+    // accident of arity, and that is a poor thing to rely on.
+    releaseClientErrorSecretStore(this.clientErrorResolver);
     await this.engine?.shutdown();
   }
 
@@ -1996,6 +2298,7 @@ export class LynoxHTTPApi {
         // do not deliver them. Set together so a surface can never request the
         // chips without the recovery, or pay for recovery where nothing asked.
         followUpFallback: true,
+        captureFallback: true,
       });
       const tier = session.getModelTier();
       const threadStore = engine.getThreadStore();
@@ -2035,6 +2338,10 @@ export class LynoxHTTPApi {
       const session = this.sessionStore.get(params['id']!);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
+      // A parked run ignores abort() and would keep both the slot and its
+      // run-executor reservation after the Session is dropped below — with no
+      // handle left to reach it.
+      this.reclaimRunSlot(params['id']!);
       this.sessionStore.reset(params['id']!);
       jsonResponse(res, 200, { ok: true });
     }));
@@ -2227,6 +2534,12 @@ export class LynoxHTTPApi {
         const MAX_IMAGE_B64_BYTES = 5 * 1024 * 1024;
         const MAX_FILE_B64_BYTES = 10 * 1024 * 1024;
         const MAX_TEXT_FILE_DECODED_CHARS = 200_000;
+        // DEF-chat-upload-inline-only-no-file: above this the upload becomes a
+        // real file in the tenant's file area instead of message content.
+        const INLINE_FILE_MAX_CHARS = 20_000;
+        const INLINE_FILE_PREVIEW_CHARS = 2_000;
+        // Lazy import — consistent with the other workspace imports below.
+        const { persistChatUpload: persistChatUploadRef } = await import('../core/workspace.js');
         // Allowlist matches what Anthropic vision accepts AND what the frontend
         // resize path produces. Anything else here is either client tampering
         // or an unsupported format that we should reject before forwarding.
@@ -2287,6 +2600,13 @@ export class LynoxHTTPApi {
                 // hygiene the user's own message text and the watch page-text
                 // get — before it is framed to the model AND persisted+recalled.
                 const safeBody = stripUntrustedSeparators(extracted.text);
+                // Same file-area rule as decoded text files below: an extracted
+                // document body past the inline threshold becomes a real file
+                // (the knowledge-layer ingest below still runs — recall is not
+                // affected by how the model receives the text).
+                const bigDoc = safeBody.length > INLINE_FILE_MAX_CHARS
+                  ? persistChatUploadRef(`${safeName}.txt`, safeBody)
+                  : null;
                 // WRAPPED, not merely sanitised. An uploaded document is third-party-authored
                 // — the person attached the file, they did not write what is inside it — so it
                 // is the same class of input as a fetched page or a received mail, both of
@@ -2294,7 +2614,14 @@ export class LynoxHTTPApi {
                 // one that was missing: the model sees an explicit content boundary, AND the
                 // turn counts as having handled untrusted content, so a `remember` on it routes
                 // to the review queue instead of landing active and pinnable.
-                content.push({ type: 'text', text: wrapUntrustedData(`[File: ${safeName}]\n${safeBody}`, 'file_upload') });
+                content.push(bigDoc !== null
+                  ? { type: 'text', text: wrapUntrustedData(
+                      `[File: ${safeName}] — extracted text, ${String(safeBody.length)} chars, too large to inline into the message. `
+                      + `Saved to the files area as \`${bigDoc.rel}\`. `
+                      + `Work on it there: read_file('${bigDoc.abs}'), or bash/python on '${bigDoc.rel}' (the workspace cwd) — do NOT rewrite its content into a tool call or the reply.\n\n`
+                      + `Preview (first ${String(INLINE_FILE_PREVIEW_CHARS)} chars):\n${safeBody.slice(0, INLINE_FILE_PREVIEW_CHARS)}`,
+                      'file_upload') }
+                  : { type: 'text', text: wrapUntrustedData(`[File: ${safeName}]\n${safeBody}`, 'file_upload') });
                 // U1 persist+recall: store the document into the knowledge layer
                 // (best-effort, OFF the request path) so it survives the turn and
                 // is auto-recalled on later turns. Never awaited — embedding /
@@ -2358,6 +2685,39 @@ export class LynoxHTTPApi {
             // `_sawUntrustedData` stays false, so a `remember` in that turn writes straight to
             // active knowledge instead of the review queue. The formats that skipped the gate
             // were the majority, and the plainest ones.
+            //
+            // DEF-chat-upload-inline-only-no-file (2026-08-14, thread 8c09e50a):
+            // above INLINE_FILE_MAX_CHARS the decoded text is NOT inlined. An
+            // inlined 90 KB CSV forced the model to echo the whole file through a
+            // write_file tool input to process it — which hit max_tokens MID
+            // tool_use, the truncated call was discarded, the continuation
+            // restarted the same text, and the loop burned every continuation of
+            // a 5-minute run (no tool call ever dispatched). Large uploads now
+            // land as a REAL FILE in the tenant's file area (served by
+            // /api/files/download, readable by read_file/bash/python via the
+            // workspace cwd), and the message carries the reference plus a short
+            // preview. The turn still counts as untrusted — the wrapper stays.
+            if (decoded.length > INLINE_FILE_MAX_CHARS) {
+              // Persist the FULL decoded text (pre-cap): the 200k decode cap
+              // limits what may ride INLINE — not what lands on disk (review).
+              const stored = persistChatUploadRef(safeName, decoded);
+              if (stored !== null) {
+                const preview = decoded.slice(0, INLINE_FILE_PREVIEW_CHARS);
+                // ABSOLUTE path in the instruction: read_file resolves relative
+                // paths against the process cwd, NOT the file area — the
+                // relative form failed 100% of first attempts in review.
+                content.push({ type: 'text', text: wrapUntrustedData(
+                  `[File: ${safeName}] — ${String(decoded.length)} chars, too large to inline into the message. `
+                  + `It has been saved to the files area as \`${stored.rel}\`. `
+                  + `Work on it there: read_file('${stored.abs}'), or use bash/python on '${stored.rel}' (the workspace cwd) — do NOT rewrite its content into a tool call or the reply.\n\n`
+                  + `Preview (first ${String(INLINE_FILE_PREVIEW_CHARS)} chars):\n${preview}`,
+                  'file_upload') });
+                continue;
+              }
+              // File-area write failed (no workspace writable? disk full?): fall
+              // through to the inline path below rather than lose the upload —
+              // the old behavior is the fallback, not the void.
+            }
             content.push({ type: 'text', text: wrapUntrustedData(`[File: ${safeName}]\n${text}`, 'file_upload') });
           }
         }
@@ -2406,7 +2766,12 @@ export class LynoxHTTPApi {
       // resume from `?since=<lastSeq>`. The buffer append happens even while
       // `aborted` (the SSE is dead but the headless run keeps producing events
       // for a reconnecting subscriber).
-      session.onStream = async (event: StreamEvent) => {
+      // `EmittedStreamEvent`, matching the slot: this closure is the path every
+      // engine event takes to the browser. Annotated with the wide union it
+      // compiled, and an explicit field projection here — the pattern already
+      // used 20 lines below — would have dropped `fatal` from every error on the
+      // wire without a single test or type failing.
+      session.onStream = async (event: EmittedStreamEvent) => {
         const seq = runBuffer?.append(event);
         if (aborted) return;
         const data = JSON.stringify(event);
@@ -2476,7 +2841,7 @@ export class LynoxHTTPApi {
             // Omitted when there is nothing to distinguish (an all-frame
             // prompt), so the payload does not grow for un-migrated callers.
             segments: segments.some((s: PromptSegment) => s.kind === 'value') ? segments : undefined,
-            step_id: meta?.stepId, step_task: meta?.stepTask, workflow_name: meta?.workflowName,
+            ...originWireFields(meta),
             // Multi-select pills (toggle several + Send). The client posts the
             // chosen labels back as a JSON array string via the normal /reply;
             // the ask_user tool parses it. A reconnect mid-prompt (which loads
@@ -2509,7 +2874,7 @@ export class LynoxHTTPApi {
           if (!aborted && !res.writableEnded) {
             const data = JSON.stringify({
               promptId, questions, timeoutMs: PROMPT_TIMEOUT_MS,
-              step_id: meta?.stepId, step_task: meta?.stepTask, workflow_name: meta?.workflowName,
+              ...originWireFields(meta),
             });
             res.write(`event: prompt_tabs\ndata: ${data}\n\n`);
           }
@@ -2577,7 +2942,7 @@ export class LynoxHTTPApi {
         if (!aborted && !res.writableEnded) {
           const data = JSON.stringify({
             promptId, name, prompt, key_type: keyType,
-            step_id: meta?.stepId, step_task: meta?.stepTask, workflow_name: meta?.workflowName,
+            ...originWireFields(meta),
           });
           res.write(`event: secret_prompt\ndata: ${data}\n\n`);
         }
@@ -2617,7 +2982,7 @@ export class LynoxHTTPApi {
         if (!aborted && !res.writableEnded) {
           const payload = JSON.stringify({
             promptId, ...data,
-            step_id: meta?.stepId, step_task: meta?.stepTask, workflow_name: meta?.workflowName,
+            ...originWireFields(meta),
           });
           res.write(`event: mail_connect_prompt\ndata: ${payload}\n\n`);
         }
@@ -2750,17 +3115,21 @@ export class LynoxHTTPApi {
       // Takeover hook: a future /run for this session can call this to free
       // the slot when our SSE stream is dead and we're stuck on a prompt.
       const takeover = (): void => {
-        const pending = promptStore?.getPending(sessionId);
-        if (pending) promptStore?.expirePrompt(pending.id);
+        // Unwind BEFORE the bookkeeping. `waitForSettled` resolves on the signal
+        // alone, so aborting first means a throw from the prompt store (closed
+        // db, SQLITE_BUSY) can no longer leave the run parked — which is the
+        // exact failure this handle exists to prevent.
         sessionAbortController.abort();
         session.abort();
+        const pending = promptStore?.getPending(sessionId);
+        if (pending) promptStore?.expirePrompt(pending.id);
       };
       this.runningSessions.set(sessionId, { streamAlive: true, takeover, lastEventAt: Date.now() });
       try {
         // Reserve a concurrency slot + register the abort handle so the run can
         // be aborted by id from any connection (DELETE /api/runs/:runId) —
         // including a headless run whose original SSE is already gone. `takeover`
-        // is the same expire-prompt + abort path the stale-run reclaim uses (for
+        // is the same abort-then-expire path the stale-run reclaim uses (for
         // a headless run `aborted` is already true, so no terminal is owed).
         // INSIDE the try so a throw from runRegistry.start (SQLite busy/disk-full)
         // still hits the finally's release() — otherwise the slot would leak and
@@ -2790,8 +3159,22 @@ export class LynoxHTTPApi {
         if (err instanceof RunAbortedError) {
           if (!res.writableEnded && !res.destroyed) res.end();
         } else if (!aborted) {
-          const msg = err instanceof Error ? err.message : String(err);
-          res.write(`event: error\ndata: ${JSON.stringify({ error: msg })}\n\n`);
+          // Masked AND capped: this string is a runtime/provider error rendered
+          // into the tenant's error banner, an 8s toast, and a one-click copy
+          // button — and in the managed tiers the LLM key it might quote is
+          // OURS, not the tenant's, so whoever induces a provider error is the
+          // one reading it. `includeGeneric` for the reason error-reporting.ts
+          // gives: masking a long opaque token that turns out to be a hash costs
+          // a little detail, missing one that is a credential costs the
+          // credential. The cap matters on its own — this path was unbounded.
+          const rawMsg = err instanceof Error ? err.message : String(err);
+          const msg = capForClient(maskForClient(rawMsg, { includeGeneric: true }));
+          // `fatal: true` is not decoration: this path calls res.end() right
+          // below, so the turn really is over. Without the field a consumer
+          // reading `fatal` would see `undefined` here — falsy, i.e. "keep
+          // waiting" — and the fix for the ambiguous channel would have created
+          // a worse bug than the one it closes.
+          res.write(`event: error\ndata: ${JSON.stringify({ error: msg, fatal: true })}\n\n`);
           res.end();
         }
       } finally {
@@ -2894,7 +3277,11 @@ export class LynoxHTTPApi {
         'X-Accel-Buffering': 'no',
       });
 
-      const write = (seq: number, event: StreamEvent): void => {
+      // Narrow, matching what the buffer now stores. As at the live closure
+      // above, the annotation is precision only — the payload goes into
+      // JSON.stringify, so a field projection here still typechecks. What
+      // holds it is the replay test asserting an error arrives with its flag.
+      const write = (seq: number, event: EmittedStreamEvent): void => {
         if (res.writableEnded) return;
         res.write(`id: ${seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
       };
@@ -3181,7 +3568,17 @@ export class LynoxHTTPApi {
     }));
 
     this.dynamicRoutes.push(parseDynamicRoute('user', 'POST', '/api/sessions/:id/abort', async (_req, res, params) => {
-      const session = this.sessionStore.get(params['id']!);
+      const sessionId = params['id']!;
+      // BEFORE the 404: the slot does not live on the Session, and the case that
+      // needs reclaiming most is the one where the Session is already gone
+      // (a thread deleted while its run was parked). Guarding this on
+      // `sessionStore.get` would make the backstop unreachable exactly there.
+      // Stop means stop: if a secret/mail prompt is open, this settles it, so a
+      // save that had not yet POSTed /secret-saved finds the prompt gone. That is
+      // the intended reading of the button — before this, stop left the flow
+      // running (dogfood 2026-08-24: a parked run held its thread for 15 h).
+      this.reclaimRunSlot(sessionId);
+      const session = this.sessionStore.get(sessionId);
       if (!session) { errorResponse(res, 404, 'Session not found'); return; }
       session.abort();
       jsonResponse(res, 200, { ok: true });
@@ -3388,7 +3785,15 @@ export class LynoxHTTPApi {
       if (!requireService(res, threadStore, 'Thread store')) return;
       const thread = threadStore.getThread(params['id']!);
       if (!thread) { errorResponse(res, 404, 'Thread not found'); return; }
-      // Also clean up in-memory session
+      // Also clean up in-memory session. Reclaim first: this route drops the
+      // Session outright, so a run still holding the slot (parked on a prompt,
+      // which abort() does not reach) would keep both the slot and its
+      // run-executor reservation with no route the UI offers to free them.
+      // `DELETE /api/runs/:runId` still reaches it by runId — that is the escape
+      // hatch, not a path any client walks. sessionId IS the threadId here
+      // (POST /api/sessions returns `threadId: sessionId`), so this can only
+      // ever reclaim this thread's own run.
+      this.reclaimRunSlot(params['id']!);
       this.sessionStore.reset(params['id']!);
       threadStore.deleteThread(params['id']!);
       // Extended debug capture: drop the thread's captured wire_snapshots too (the
@@ -3591,20 +3996,51 @@ export class LynoxHTTPApi {
 
       // Memory snapshot (retention-safe): the tenant's OWN stored facts + KG stats, so a
       // debugger can see cross-subject bleed / poisoning directly — the runtime <fact>
-      // injection the agent reacts to is derived from exactly this. Reads ALREADY-persisted
-      // memory (the legacy write-authoritative store, complete regardless of the read-cutover
-      // flag) — NO new always-on retention. Capped, and secret-scrubbed with the rest of the
-      // bundle below; PII is kept (the user's own data, exported by their own action — see
-      // sharing_notice). Best-effort: a KG hiccup must not fail the whole export.
+      // injection the agent reacts to is derived from exactly this. NO new always-on
+      // retention. Capped, and secret-scrubbed with the rest of the bundle below; PII is kept
+      // (the user's own data, exported by their own action — see sharing_notice).
+      //
+      // TWO SUBSTRATES, REPORTED SEPARATELY AND LABELLED. `memories` is the legacy store;
+      // durable knowledge writes to `knowledge_entries` instead, so a DK tenant's recent facts
+      // are absent from the first and present only in the second. Reading only `memories` made
+      // every memory diagnosis over this export blind — and the plausible repair (point
+      // `listAllActiveMemories` at engine.db) is green and leaves it EXACTLY as blind, because
+      // the two `memories` tables are id-identical: the split is table-level, not database-level.
+      // They stay two named blocks rather than one merged list: on the instance where this was
+      // measured (2026-08-23) the legacy table held far more rows than the durable one and none
+      // newer than the cutover, so merging them would bury the live facts among dead ones and
+      // hide which substrate a row came from — trading a blind instrument for a misleading one.
       const MEMORY_SNAPSHOT_CAP = 200;
       const knowledgeLayer = engine.getKnowledgeLayer();
-      let memory: unknown = null;
-      if (knowledgeLayer) {
+      // Read OUTSIDE the layer check. The two substrates have INDEPENDENT preconditions, and
+      // conflating them is what made the first version of this fix miss its own target case:
+      //   - the legacy half needs a KnowledgeLayer — null when `knowledge_graph_enabled` is
+      //     false OR the embedding provider failed (`engine-init.ts`)
+      //   - the durable half needs a KnowledgeStore — gated solely on `durable_memory_enabled`
+      //     (`engine.ts`)
+      // So all four combinations are real, and the export serves every one of them; each half
+      // reports its own availability rather than the pair collapsing to `memory: null`:
+      //   layer ✓ / DK ✓ → both blocks    · layer ✓ / DK ✗ → durable `available: false`
+      //   layer ✗ / DK ✓ → `legacy_available: false`, durable populated  ← the DK-only tenant
+      //   layer ✗ / DK ✗ → both named and empty; still an object, never null
+      // The boundary is held by tests rather than by this comment: `it.each` over the four
+      // states asserts each half's availability flag.
+      const durableKnowledge = readDurableKnowledgeForDebug(engine, id);
+      let legacyHalf: Record<string, unknown>;
+      if (!knowledgeLayer) {
+        legacyHalf = { kg_stats: null, active_memories_substrate: 'memories (legacy store)', active_memories_shown: 0, active_memories_may_be_incomplete: false, active_memories: [], legacy_available: false };
+      } else {
         try {
-          memory = {
+          const legacyRows = knowledgeLayer.getDb().listAllActiveMemories(MEMORY_SNAPSHOT_CAP);
+          legacyHalf = {
             kg_stats: await knowledgeLayer.stats(),
-            active_memories_shown: 0,
-            active_memories: knowledgeLayer.getDb().listAllActiveMemories(MEMORY_SNAPSHOT_CAP).map((m) => ({
+            active_memories_substrate: 'memories (legacy store)',
+            active_memories_shown: legacyRows.length,
+            // The cap was silent before. A truncated snapshot that does not say so reads as
+            // the whole picture — the same class of defect as reading one substrate of two.
+            active_memories_may_be_incomplete: legacyRows.length >= MEMORY_SNAPSHOT_CAP,
+            legacy_available: true,
+            active_memories: legacyRows.map((m) => ({
               text: m.text,
               namespace: m.namespace,
               scope: `${m.scope_type}:${m.scope_id}`,
@@ -3615,10 +4051,14 @@ export class LynoxHTTPApi {
               created_at: m.created_at,
             })),
           };
-          (memory as { active_memories_shown: number; active_memories: unknown[] }).active_memories_shown =
-            (memory as { active_memories: unknown[] }).active_memories.length;
-        } catch { memory = { error: 'memory snapshot unavailable' }; }
+        } catch {
+          // Only the legacy half is lost. Replacing the WHOLE object here (as this did) made a
+          // readable durable block disappear unnamed — the same forbidden shape as a silent
+          // empty, just from the other side.
+          legacyHalf = { kg_stats: null, active_memories_substrate: 'memories (legacy store)', active_memories_shown: 0, active_memories_may_be_incomplete: true, active_memories: [], legacy_available: true, legacy_error: 'memory snapshot unavailable' };
+        }
       }
+      const memory: unknown = { ...legacyHalf, durable_knowledge: durableKnowledge };
 
       // Assembled from the strongly-typed `wireSummaryRows` collected during the per-run
       // snapshot build above — no re-parse of the emitted bundle.
@@ -3634,7 +4074,7 @@ export class LynoxHTTPApi {
         engine: { version: PKG_VERSION, build_sha: buildSha.length > 0 ? buildSha : null },
         // The export is the user's own data, exported by their own action; it contains PII
         // (kept — scrubbing it would destroy the diagnostic value) with SECRETS masked below.
-        sharing_notice: 'This export contains your own conversation data — including personal information and stored memories — with secrets masked. Share it only with recipients you trust.',
+        sharing_notice: 'This export contains your own conversation data — including personal information, stored memories, and knowledge entries still awaiting your review — with secrets masked. Share it only with recipients you trust.',
         thread,
         debug_summary: debugSummary,
         wire_capture_summary: wireCaptureSummary,
@@ -3735,7 +4175,22 @@ export class LynoxHTTPApi {
       if (!requireService(res, store, 'Durable memory')) return;
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit')) || 100, 500));
-      jsonResponse(res, 200, { entries: store.listPending(limit), pendingCount: store.pendingCount() });
+      // DEF-dk-review-chip-resume-invisible: the chat resume re-hydrates a
+      // thread's pending review chips from THIS endpoint, so it can ask for
+      // exactly one conversation's queue. Thread-scoped reads filter in SQL
+      // BEFORE the limit (review F2) — a post-filter let 100+ foreign pending
+      // rows crowd this thread's entries out while the count still saw them.
+      const threadId = url.searchParams.get('threadId');
+      const entries = threadId === null
+        ? store.listPending(limit)
+        : store.listPendingForThread(threadId, limit);
+      // Each entry carries the subject its hint WOULD bind to on approval
+      // (DEF-review-approve-target-opaque). `reviewEntry` resolves the hint AFTER the
+      // human decision, so without this the reviewer approves a link nobody showed them
+      // — including the case where approving MINTS a new organization. Resolved here,
+      // on the response that already feeds the review surface, so a second surface
+      // cannot serve the queue without the target.
+      jsonResponse(res, 200, { entries: store.withHintTargets(entries), pendingCount: store.pendingCount() });
     });
 
     // Cheap badge poll (the Intelligence-Hub tab pill). `?thread=` narrows it to one
@@ -4118,7 +4573,7 @@ export class LynoxHTTPApi {
     // NAMES only, never values. The list is unfiltered (it includes infra/channel
     // key names too, not just the customer's own); that's names-only and exposes
     // no secret material, and PUT/DELETE still gate infra/channel secrets via
-    // isAdminOnlySecret. (A managed-customer-visible filter is a possible
+    // blockedForCustomerWrite. (A managed-customer-visible filter is a possible
     // follow-up; not needed for the scope fix.)
     this.addStatic('user', 'GET /api/secrets', async (_req, res) => {
       const store = engine.getSecretStore();
@@ -4197,7 +4652,10 @@ export class LynoxHTTPApi {
           // best-effort, not configured.
           search: !!searxngUrl,
           searxng: !!searxngUrl,
-          google: names.has('GOOGLE_CLIENT_ID') || names.has('GOOGLE_CLIENT_SECRET'),
+          // A PAIR or nothing. The `||` this replaces reported configured on a
+          // half-filled vault, while the resolver builds nothing from half a pair —
+          // the status surface said yes and the feature was absent.
+          google: engine.getGoogleClientSource() !== null,
           bugsink: names.has('LYNOX_BUGSINK_DSN'),
         },
         count: names.size,
@@ -4211,7 +4669,7 @@ export class LynoxHTTPApi {
       // for any name EXCEPT infrastructure / channel-managed patterns (see
       // INFRA_ADMIN_ONLY_PATTERNS doc). Self-host has no admin secret, so
       // cookie users are already promoted to admin and this gate never applies.
-      if (requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && isAdminOnlySecret(name)) {
+      if (requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && blockedForCustomerWrite(name)) {
         errorResponse(res, 403, `Managed mode: secret "${name}" is admin-managed (infrastructure or channel-managed). Set this via the relevant integration UI or contact support@lynox.ai.`);
         return;
       }
@@ -4269,7 +4727,7 @@ export class LynoxHTTPApi {
       // infra / channel-managed secret (LYNOX_VAULT_KEY, MANAGED_*, MAIL_ACCOUNT_*,
       // GOOGLE_*, …) must never be deletable — only the customer's own tool
       // credentials (SHOPIFY_*, …) delete freely. Mirrors the PUT gate.
-      if (requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && isAdminOnlySecret(name)) {
+      if (requiresAdminSplitGate(readEnvAlias('LYNOX_BILLING_TIER')) && blockedForCustomerWrite(name)) {
         errorResponse(res, 403, `Managed mode: secret "${name}" is admin-managed (infrastructure or channel-managed). Manage this via the relevant integration UI or contact support@lynox.ai.`);
         return;
       }
@@ -4373,12 +4831,17 @@ export class LynoxHTTPApi {
 
     // ── Config ──
     this.addStatic('user', 'GET /api/config', async (_req, res) => {
-      const { readUserConfig, applyManagedTierSetConstraints, loadConfig: loadEffectiveConfig } = await import('../core/config.js');
+      const { readUserConfig, loadConfig: loadEffectiveConfig } = await import('../core/config.js');
       const config = readUserConfig();
+      // The loader's OWN output. `readUserConfig()` above is the raw file;
+      // `loadConfig()` additionally merges the CP-pinned env layers and applies
+      // the managed constraints, so anything that must describe what the engine
+      // actually routes on reads this, not `config`.
+      const effectiveConfig = loadEffectiveConfig();
       // Effective model blocklist (env-merged by loadConfig — readUserConfig is
       // the raw file): threaded into the preset-availability signal and the
       // picker labels so neither advertises a model the loader drops.
-      const effectiveBlockedModelIds = loadEffectiveConfig().blocked_model_ids;
+      const effectiveBlockedModelIds = effectiveConfig.blocked_model_ids;
       // Canonical redaction: strips top-level secrets (with `${key}_configured`
       // markers for the UI) AND nested tier_set/model_profiles api_keys.
       const redacted = redactConfigForResponse(config);
@@ -4501,23 +4964,55 @@ export class LynoxHTTPApi {
       // disable settings that don't apply to the active model.
       const activeProvider = getActiveProvider();
       const activeTier = config.default_tier ?? 'balanced';
-      const activeModelId = getModelId(activeTier, activeProvider);
+      // The tier_set the ENGINE routes on, taken from the loader instead of
+      // re-derived here. `readUserConfig()` is file-only (config.ts:640), while
+      // `loadConfig()` also merges the CP-pinned `LYNOX_TIER_PRESET` — a SEED
+      // since 2026-08-17: it fills an empty `tier_preset` and rescues an
+      // unresolvable one, but a tenant pick wins — and `LYNOX_TIER_SET_JSON`, then
+      // applies the managed constraints. Re-deriving from config.json misses that
+      // whole channel: on a CP-pinned preset it reports the base provider's model,
+      // and where config.json and the CP env disagree it makes `active_model` and
+      // `main_chat_tiers` agree on the STALE model — destroying the disagreement
+      // that exposed this bug on staging in the first place.
+      const resolvedTierSet = effectiveConfig.routing_mode === 'hybrid' ? effectiveConfig.tier_set : undefined;
+      // A hybrid slot pins BOTH the model and its wire. `getModelId` only knows
+      // the BASE provider's tier map, so on any hybrid tenant it answers for a
+      // model that does not run — and the capability lookup, feature flags and
+      // uiLabel beside it inherit that wrong answer. Measured on staging
+      // 2026-08-11: `active_model` reported `claude-sonnet-5` / `anthropic` with
+      // Claude's feature matrix while the run executed
+      // `accounts/fireworks/models/glm-5p2`, whose features are all-false.
+      const activeSlot = resolvedTierSet?.[activeTier];
+      const activeModelId = activeSlot?.model_id ?? getModelId(activeTier, activeProvider);
+      // Resolve the slot's WIRE through the registry — the same source
+      // `hybridSlotClientConfig` reads (tier-resolver.ts:296). A hand-rolled
+      // "anything but anthropic/vertex is openai" is wrong for `custom`, which is
+      // registered `wireClient: 'anthropic'` (models.ts:340), and for any
+      // unregistered key, which the registry also resolves to the Anthropic wire:
+      // both would be reported as openai while running Anthropic, and the openai
+      // reading then trips the Anthropic-fallback trap in
+      // `resolveNativeContextWindow` (models.ts:1207). With no slot, keep
+      // reporting the runtime-active provider for the reason documented below.
+      const activeModelProvider: LLMProvider = activeSlot
+        ? (getProviderDescriptor(activeSlot.provider)?.wireClient ?? 'anthropic')
+        : activeProvider;
       const activeCap = modelCapability(activeModelId);
       // SSOT window resolution: a declared `openai_context_window` (self-host)
       // wins; else the registry; else an honest default — and crucially NOT a
       // Claude window when an openai/custom tier resolver fell back to an
       // Anthropic id. Same helper the agent + /api/sessions use, so the radio
       // filter can't drift from what the engine actually trims against.
-      const activeNativeWindow = resolveNativeContextWindow(activeModelId, activeProvider, config.openai_context_window);
+      const activeNativeWindow = resolveNativeContextWindow(activeModelId, activeModelProvider, config.openai_context_window);
       if (activeCap) {
         redacted['active_model'] = {
           id: activeCap.id,
           tier: activeTier,
-          // Use the runtime-active provider, not `activeCap.provider`, so an
+          // Use the resolved wire provider, not `activeCap.provider`, so an
           // openai-compat instance whose tier resolver fell back to an
           // Anthropic id (no MISTRAL_MODEL_MAP bootstrap) still reports
-          // `'openai'` to the UI for tier-awareness gating.
-          provider: activeProvider,
+          // `'openai'` to the UI for tier-awareness gating — and so a hybrid
+          // slot reports ITS wire rather than the base provider's.
+          provider: activeModelProvider,
           // Resolver, not `activeCap.contextWindow`: honours a declared
           // self-host window and dodges the Anthropic-fallback Claude window.
           contextWindow: activeNativeWindow,
@@ -4535,7 +5030,7 @@ export class LynoxHTTPApi {
         redacted['active_model'] = {
           id: activeModelId,
           tier: activeTier,
-          provider: activeProvider,
+          provider: activeModelProvider,
           contextWindow: activeNativeWindow,
           defaultMaxOutput: FALLBACK_CAPABILITY.defaultMaxOutput,
           maxContinuations: FALLBACK_CAPABILITY.maxContinuations,
@@ -4580,15 +5075,12 @@ export class LynoxHTTPApi {
       // Mirror the loader's explicit-over-preset precedence (config.ts: `{...expanded,
       // ...config.tier_set}`) so a hand-edited config carrying BOTH a preset and an
       // explicit tier_set slot labels what actually routes, not the bare preset.
-      const effectiveTierSet = config.tier_preset
-        ? { ...expandTierPreset(config.tier_preset)?.tier_set, ...(config.tier_set ?? {}) }
-        : (config.routing_mode === 'hybrid' ? config.tier_set : undefined);
-      if (effectiveTierSet) {
-        // On a managed tenant the runtime drops any tier_set slot the CP can't back (no key for
-        // that provider), so the picker must label the CONSTRAINED set — otherwise it shows a
-        // model that never routes (e.g. "Ausgewogen (Mistral Large)" while it routes Sonnet).
-        const constrained = isManagedTier ? applyManagedTierSetConstraints(effectiveTierSet, effectiveBlockedModelIds) : effectiveTierSet;
-        const tierLabels = mainChatTierLabelsFromTierSet(constrained, activeProvider);
+      // Same loader-resolved set as `active_model` above. It already carries the
+      // managed constraints (the runtime drops any slot the CP can't back), so the
+      // picker cannot label a model that never routes — and sharing the one value
+      // is what keeps these labels and `active_model` from disagreeing.
+      if (resolvedTierSet) {
+        const tierLabels = mainChatTierLabelsFromTierSet(resolvedTierSet, activeProvider);
         if (tierLabels) redacted['main_chat_tiers'] = tierLabels;
       } else {
         const mainChatEntry = getCatalogEntryByKey(resolveCatalogKey(activeProvider, config.api_base_url));
@@ -4603,6 +5095,24 @@ export class LynoxHTTPApi {
       // the CP can't back. Server-authoritative so the client needs no
       // @lynox-ai/core import and the disclosure gate stays honest.
       redacted['available_tier_presets'] = tierPresetSignal;
+      // The strategy fields themselves come from the LOADER, not the raw file.
+      // `redacted` is built from `readUserConfig()` (config.json only), while every
+      // neighbouring field above — `active_model`, `main_chat_tiers` — already reads
+      // `effectiveConfig`. For `tier_preset` that difference is the whole CP channel:
+      // a pinned instance has no `tier_preset` in its config.json at all, so the raw
+      // read reported "no preset" while the engine routed one, and the picker drew
+      // the "Standard" card next to an `active_model` that disagreed with it.
+      //
+      // This is also the surface an operator uses to CHECK that a pin took effect,
+      // which is why it cannot be left reporting the file instead of the engine.
+      // `routing_mode` gets the same treatment for the same reason — the expander
+      // sets it at load, so config.json carries it only for a hand-written hybrid.
+      //
+      // Both are plain vocabulary values (a preset name, `standard`/`hybrid`), never
+      // credentials, so no redaction applies — the `redact` pass above is about
+      // api_keys in `tier_set` slots, which are unaffected.
+      redacted['tier_preset'] = effectiveConfig.tier_preset ?? null;
+      redacted['routing_mode'] = effectiveConfig.routing_mode ?? 'standard';
       // Bugsink-toggle UX requires the page to know whether a DSN is
       // configured (env or vault) without leaking the DSN itself.
       redacted['bugsink_dsn_configured'] = !!(process.env['LYNOX_BUGSINK_DSN'] || secretNames.has('LYNOX_BUGSINK_DSN') || config.bugsink_dsn);
@@ -4621,12 +5131,55 @@ export class LynoxHTTPApi {
       const wireCaptureEnv = process.env['LYNOX_DEBUG_WIRE_CAPTURE'];
       const wireCaptureEnvOn = wireCaptureEnv === 'true' || wireCaptureEnv === '1';
       const wireCaptureEnvOff = wireCaptureEnv === 'false' || wireCaptureEnv === '0';
+      // A CP-pinned preset this engine does not know is IGNORED at load rather
+      // than fatal, which keeps the container up — but "ignored" has to be
+      // OBSERVABLE or the pin silently reads as applied. Before, an unknown pin
+      // took the container down, and that failure WAS the operator signal: the
+      // control plane's health monitor escalates an unreachable instance on its
+      // own. Ignoring removes that signal, so it has to be replaced rather than
+      // dropped, and `env_overrides` is where this surface already reports "your
+      // setting is being overridden by the environment" (the provider case
+      // above renders a banner instead of accepting the click in silence).
+      //
+      // Carries the NAME, not a boolean: the operator needs to know WHICH name
+      // this engine could not resolve to tell a version skew from a typo.
+      //
+      // ⚠️ This is the tenant/operator-facing half only. The automatic
+      // control-plane escalation that the crash-loop used to trigger is NOT
+      // restored by this — the CP would have to read it, and the CP still
+      // reports the pin as set from its own row. Tracked as a follow-up rather
+      // than half-built here.
+      // VALIDATE THE RAW VALUE, SANITISE ONLY FOR DISPLAY — and in that order.
+      //
+      // The loader decides on `process.env[...]?.trim()` and nothing else. If this
+      // marker validated a cleaned-up copy instead, the two would disagree in the
+      // one direction that matters: a name carrying a control character is unknown
+      // to the loader, which drops the pin — while a sanitise-first check would
+      // strip the character, resolve the name, and report nothing at all. Silence
+      // reads as applied, which is the exact failure this field exists to prevent.
+      //
+      // The bound then applies to what is ECHOED, because the marker appears
+      // precisely when the value is not a known preset, i.e. precisely when it is
+      // arbitrary text. Operator-set rather than attacker-set and the route is
+      // authenticated, so this is hygiene rather than a hole — but a response
+      // field should not be an unbounded passthrough of an environment variable.
+      //
+      // ⚠️ Honest scope: NO UI reads this field yet. The comparison with the
+      // `provider` flag above is about WHERE the signal belongs, not about what
+      // ships — that one renders a banner, this one is currently only visible to
+      // whoever inspects the response. Covers the unknown-NAME case only: a pin
+      // that resolves but lost to the tenant's own choice reports nothing here,
+      // because `tier_preset` already says what is running.
+      const rawPin = process.env['LYNOX_TIER_PRESET']?.trim();
+      const pinIgnored = rawPin !== undefined && rawPin !== '' && !expandTierPreset(rawPin);
+      const pinnedPreset = rawPin === undefined ? undefined : describePinForDisplay(rawPin);
       redacted['env_overrides'] = {
         provider: !!process.env['LYNOX_LLM_PROVIDER'],
         // Env-pinned marker for the Privacy toggle: the raw disk value spread
         // above can read OFF while capture actually runs, so the UI needs both
         // the pin (disable the toggle) and the EFFECTIVE value (overwritten below).
         debug_wire_capture: wireCaptureEnvOn || wireCaptureEnvOff,
+        ...(pinIgnored ? { tier_preset_ignored: pinnedPreset } : {}),
       };
       if (wireCaptureEnvOn) {
         redacted['debug_wire_capture'] = true;
@@ -5138,9 +5691,19 @@ export class LynoxHTTPApi {
         ran: true,
         runId: result.runId,
         status: result.status,
-        error: result.error,
+        // Workflow step errors come from tools, i.e. from whatever a remote
+        // service said. Array-valued, so each entry is treated like any other
+        // client-bound error string.
+        error: result.error === undefined ? undefined : capForClient(maskForClient(result.error)),
         costUsd: result.costUsd ?? 0,
-        stepErrors: result.stepErrors ?? [],
+        // By FIELD, not by `typeof`. The first attempt tested `typeof e === 'string'`
+        // and was a bit-identical no-op — these are objects, always — while both the
+        // comment and the commit message claimed the surface was covered. tsc could
+        // not see it either: `e` narrows to `never`, and `never` is assignable to
+        // `string`, so the dead branch typechecks.
+        stepErrors: (result.stepErrors ?? []).map(e => (
+          e.error === undefined ? e : { ...e, error: capForClient(maskForClient(e.error)) }
+        )),
       });
     }));
 
@@ -6094,6 +6657,13 @@ export class LynoxHTTPApi {
       jsonResponse(res, 200, {
         available: true,
         authenticated: google.isAuthenticated(),
+        // Which source supplied the client pair, and whether that pair is lynox's
+        // shared broker rather than the tenant's own. Added FOR the card to route on
+        // — it does not yet: GoogleStatus does not declare these and GoogleSettings
+        // still branches on isManaged(). Saying "the card routes on these" would be
+        // the third false wiring claim in this change alone.
+        client_source: engine.getGoogleClientSource(),
+        managed_broker: engine.isGoogleManagedBroker(),
         ...google.getAccountInfo(),
       });
     });
@@ -6210,7 +6780,20 @@ export class LynoxHTTPApi {
         LynoxHTTPApi._appendSetCookie(res, this._clearOAuthStateCookie());
         sendSuccessRedirect();
       } catch (err: unknown) {
-        const msg = (err instanceof Error ? err.message : String(err))
+        // Masked BEFORE escaping: escaping makes the string safe to render, not
+        // safe to reveal. This page is the OAuth failure a user actually sees,
+        // and the message is whatever the token endpoint said.
+        //
+        // Order note, corrected twice. The first version claimed no fixture could
+        // separate mask-then-escape from escape-then-mask; a delta round built one
+        // (`postgres://svc:pa&ss@host` — the URL-userinfo class admits the very
+        // characters escaping rewrites). The second version then overshot and said
+        // the two orders differ in WHETHER the secret is masked. Measured for all
+        // five escape characters: both orders mask it; only the rendering of the
+        // masked remainder differs. So the order is not load-bearing here — it is
+        // load-bearing for a pattern added later, and that is why it is written
+        // down instead of left to chance.
+        const msg = maskForClient(err instanceof Error ? err.message : String(err))
           .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
         res.writeHead(500, { 'Content-Type': 'text/html' });
         res.end(`<html><body><h1>Error</h1><p>${msg}</p></body></html>`);
@@ -6246,7 +6829,11 @@ export class LynoxHTTPApi {
 
     // Claim Google tokens from managed control plane OAuth broker
     this.addStatic('user', 'POST /api/google/claim-managed', async (_req, res, _params, body) => {
-      const google = engine.getGoogleAuth();
+      // `ensureGoogleAuth`, not `getGoogleAuth`: on a brokered tenant no client
+      // pair resolves, so gating the claim on an existing credential refused the
+      // one flow that creates it. It still refuses on a NON-managed instance,
+      // which has nothing to claim.
+      const google = await engine.ensureGoogleAuth();
       if (!requireService(res, google, 'Google auth')) return;
 
       const controlPlaneUrl = process.env['LYNOX_MANAGED_CONTROL_PLANE_URL'];

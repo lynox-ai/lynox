@@ -34,7 +34,7 @@ describe('google_drive tool', () => {
   describe('search', () => {
     it('searches files and returns results', async () => {
       const auth = createMockAuth();
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -54,7 +54,7 @@ describe('google_drive tool', () => {
 
     it('requires query parameter', async () => {
       const auth = createMockAuth();
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
       const result = await tool.handler({ action: 'search' }, createMockAgent());
       expect(result).toContain('Error: "query" is required');
     });
@@ -63,7 +63,7 @@ describe('google_drive tool', () => {
   describe('read', () => {
     it('exports Google Docs as text', async () => {
       const auth = createMockAuth();
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       // Metadata
       mockFetch.mockResolvedValueOnce({
@@ -88,7 +88,7 @@ describe('google_drive tool', () => {
 
     it('downloads text files directly', async () => {
       const auth = createMockAuth();
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -114,7 +114,7 @@ describe('google_drive tool', () => {
   describe('upload', () => {
     it('requires drive.file scope', async () => {
       const auth = createMockAuth([]);
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       const result = await tool.handler({
         action: 'upload',
@@ -127,7 +127,7 @@ describe('google_drive tool', () => {
 
     it('uploads file with confirmation', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -150,7 +150,7 @@ describe('google_drive tool', () => {
 
     it('declares Content-Transfer-Encoding: base64 for a binary upload and strips whitespace', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -174,7 +174,7 @@ describe('google_drive tool', () => {
 
     it('strips a leading data-URI prefix from base64 content', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -196,7 +196,7 @@ describe('google_drive tool', () => {
 
     it('does NOT add a transfer-encoding header for a normal text upload', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/drive.file']);
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -218,7 +218,7 @@ describe('google_drive tool', () => {
   describe('list', () => {
     it('lists folder contents', async () => {
       const auth = createMockAuth();
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -241,7 +241,7 @@ describe('google_drive tool', () => {
   describe('share', () => {
     it('requires full Drive scope', async () => {
       const auth = createMockAuth([]);
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       const result = await tool.handler({
         action: 'share',
@@ -256,7 +256,7 @@ describe('google_drive tool', () => {
   describe('tool definition', () => {
     it('has correct name and schema', () => {
       const auth = createMockAuth();
-      const tool = createDriveTool(auth);
+      const tool = createDriveTool(() => auth);
 
       expect(tool.definition.name).toBe('google_drive');
       expect(tool.definition.input_schema.required).toEqual(['action']);

@@ -101,11 +101,61 @@ export function checkWriteContent(content: string, filePath: string): WriteCheck
 // === Tool result injection scanning ===
 
 /**
+ * The wrapper's OWN terminal closing tag — ours, not the content's.
+ *
+ * `wrapUntrustedData` emits `<untrusted_data …>\n{body}\n</untrusted_data>`, and
+ * `detectInjectionAttempt` flags a literal `</untrusted_data>` as a boundary
+ * escape. Scanning the finished block therefore flagged the block's own last
+ * line, so EVERY wrapped external tool result came back prefixed with
+ * "resembles prompt injection" — measured on a harmless page. A warning that is
+ * always on carries no information, and this one reaches both the model context
+ * and the audit table, so it was loudest exactly where a real escape would be.
+ *
+ * It costs no detection the body could have produced: `neutralizeBoundaryTags`
+ * runs BEFORE wrapping and rewrites a literal closing tag in the body to
+ * `&lt;/untrusted_data&gt;`, the entity forms to `[blocked:boundary_escape]`. So
+ * in a well-formed block the terminal tag is the only literal one, and a
+ * complete tag anywhere earlier stays inside the scanned region.
+ *
+ * Two things it does NOT claim, both measured:
+ *  - An UNTERMINATED `&lt;/untrusted_data` (no `&gt;`) passes the neutralizer
+ *    untouched and is not detected in the region either. That is a pre-existing
+ *    gap in the neutralizer's own pattern, not one this opens — and what it
+ *    removes here is the always-on warning, not information.
+ *  - This is a SHAPE check, not a provenance check. A tool returning raw
+ *    external text can forge an envelope and buy the exemption. Contained by
+ *    construction: the head test is strictly stronger than
+ *    `containsUntrustedMarker`, so anything exempted is necessarily already
+ *    marked untrusted — forging costs the attacker taint rather than buying
+ *    trust, and a forgery carrying a real injection is still flagged on its body.
+ *
+ * Deliberately strict: byte-exact tail, and the head must be the tag itself
+ * (`&lt;untrusted_data` followed by a space or `&gt;` — a plain prefix test also
+ * matched `&lt;untrusted_database…`). Anything else is scanned whole, because a
+ * missed exemption costs a spurious warning while a loose one costs a real
+ * detection.
+ */
+const OWN_WRAPPER_HEAD = /^<untrusted_data[ >]/;
+const OWN_WRAPPER_TAIL = /\n<\/untrusted_data>$/;
+
+function scanRegionOf(result: string): string {
+  // Replaced by the newline it consumed, NOT by nothing. That newline is the
+  // last character of the body, and three patterns need it: `role
+  // impersonation` (/^(assistant|human):\s/im) and both `provenance marker
+  // forgery` variants match only when the body's final token is followed by
+  // whitespace. Dropping it silently disarmed all three for any wrapped result
+  // whose body ENDS in `assistant:`, `human:`, `<fact` or `&lt;fact` —
+  // measured, and doubly silent because `wrapUntrustedData`'s own inner scan
+  // runs on the raw body, where that trailing whitespace does not exist either.
+  return OWN_WRAPPER_HEAD.test(result) ? result.replace(OWN_WRAPPER_TAIL, '\n') : result;
+}
+
+/**
  * Scan a tool result for prompt injection attempts.
  * Returns the result with a warning prefix if injection is detected.
  */
 export function scanToolResult(result: string, toolName: string): string {
-  const injection = detectInjectionAttempt(result);
+  const injection = detectInjectionAttempt(scanRegionOf(result));
   if (injection.detected) {
     if (channels.securityInjection.hasSubscribers) {
       channels.securityInjection.publish({
@@ -155,6 +205,27 @@ export class ToolCallTracker {
   ]);
 
   /**
+   * Credential-shaped file paths, for the read-then-exfil patterns below. One
+   * constant because the same literal used to be spelled twice — patterns 1 and 3
+   * — which is how the two copies would have drifted.
+   *
+   * `.access-token` is listed EXPLICITLY rather than by widening the separator
+   * class to `[.-]`. Both spellings catch it; the broad one also catches every
+   * ordinary source file whose name ends in `-key`, `-token`, `-secret` or `-env`.
+   * Measured against this repo's own tracked filenames: 1 match before, 10 after.
+   *
+   * That difference is not cosmetic here. This detector runs in SHADOW MODE and
+   * the decision to enforce it is explicitly waiting on its observed
+   * false-positive rate (see the comment at its call site in `agent.ts`). A
+   * tenfold jump in matches against ordinary paths would move exactly the number
+   * that decision gets read from, and it would look like a product signal rather
+   * than a regex edit. One named alternative costs nothing and leaves the
+   * measurement intact.
+   */
+  private static readonly SENSITIVE_READ_PATH =
+    /(\.(env|pem|key|secret|token)\b|\.access-token\b|credentials|authorized_keys|\.ssh\/)/i;
+
+  /**
    * Check for suspicious tool call patterns.
    * Returns a warning string if anomaly detected, null otherwise.
    */
@@ -171,7 +242,7 @@ export class ToolCallTracker {
     if (lastHttpIdx >= 0) {
       for (let j = lastHttpIdx - 1; j >= 0; j--) {
         const prev = recent[j]!;
-        if (prev.tool === 'read_file' && /(\.(env|pem|key|secret|token)\b|credentials|authorized_keys|\.ssh\/)/i.test(prev.inputPreview)) {
+        if (prev.tool === 'read_file' && ToolCallTracker.SENSITIVE_READ_PATH.test(prev.inputPreview)) {
           if (channels.securityFlagged.hasSubscribers) {
             channels.securityFlagged.publish({
               event_type: 'anomaly_read_then_exfil',
@@ -224,7 +295,7 @@ export class ToolCallTracker {
     // Pattern 3: Google read followed by read_file on sensitive path (credential harvesting)
     for (let i = recent.length - 1; i >= 0; i--) {
       const entry = recent[i]!;
-      if (entry.tool === 'read_file' && /(\.(env|pem|key|secret|token)\b|credentials|authorized_keys|\.ssh\/)/i.test(entry.inputPreview)) {
+      if (entry.tool === 'read_file' && ToolCallTracker.SENSITIVE_READ_PATH.test(entry.inputPreview)) {
         for (let j = i - 1; j >= 0; j--) {
           if (ToolCallTracker.GOOGLE_READ_TOOLS.has(recent[j]!.tool)) {
             const detail = `${recent[j]!.tool} followed by read_file on "${entry.inputPreview}"`;
@@ -268,6 +339,9 @@ export class ToolCallTracker {
 
 export interface RepeatCallSkip {
   readonly escalatedResult: string;
+  /** How many consecutive escalations for this latched key this is (1, 2, …) —
+   *  the agent run breaks hard once this reaches `BREAK_AFTER_ESCALATIONS`. */
+  readonly consecutiveSkips: number;
 }
 
 /**
@@ -292,6 +366,12 @@ export interface RepeatCallSkip {
 export class RepeatCallGuard {
   private key: string | null = null;
   private lastResult = '';
+  /** Consecutive skips already served for the latched key. Reset with the streak. */
+  private skipCount = 0;
+  /** Latched once the model has IGNORED `BREAK_AFTER_ESCALATIONS` escalated
+   *  results — read (and kept) by the agent loop to end the run hard. Carries
+   *  the `tool\x00input` key so the break error can name the call. */
+  private breakKey: string | null = null;
   private identicalCount = 0;
 
   /**
@@ -302,21 +382,37 @@ export class RepeatCallGuard {
    */
   static readonly REPEAT_LIMIT = 3;
 
+  /**
+   * After this many consecutive ESCALATED skips for the same latched key — i.e.
+   * the model received the "do NOT call this again" result this many times and
+   * re-issued the identical call anyway — the agent loop ends the run hard
+   * (ToolLoopBreakError). The escalated result alone was measured NOT to stop
+   * weaker models: the 2026-08-14 prod loop (thread 861f3e4b, GLM) re-issued the
+   * identical `api_setup view` ~25 times, reading the escalation every time.
+   * Two ignored warnings is a stuck loop with certainty; one is a hiccup.
+   */
+  static readonly BREAK_AFTER_ESCALATIONS = 2;
+
   private static readonly EXCERPT_MAX = 300;
 
   /**
    * Call BEFORE executing a tool. Returns a skip directive when this exact call
    * has already produced this exact result REPEAT_LIMIT times in a row;
-   * otherwise null (execute normally). State is left UNTOUCHED on skip, so the
-   * guard stays latched until a different call resets it — every further
-   * identical repeat is skipped too.
+   * otherwise null (execute normally). The streak itself stays untouched on
+   * skip (no record() runs), so the guard stays latched until a different call
+   * resets it — every further identical repeat is skipped too. The SKIP,
+   * however, is state: it counts toward the hard break (skipCount/breakKey), so
+   * an ignored escalation eventually ends the run rather than repeating forever.
    */
   check(key: string): RepeatCallSkip | null {
     if (key !== this.key || this.identicalCount < RepeatCallGuard.REPEAT_LIMIT) return null;
     const excerpt = this.lastResult.length > RepeatCallGuard.EXCERPT_MAX
       ? this.lastResult.slice(0, RepeatCallGuard.EXCERPT_MAX) + '…'
       : this.lastResult;
+    this.skipCount++;
+    if (this.skipCount >= RepeatCallGuard.BREAK_AFTER_ESCALATIONS) this.breakKey = key;
     return {
+      consecutiveSkips: this.skipCount,
       escalatedResult:
         `This exact call was already made ${String(this.identicalCount)} times in a row and returned the same result each time:\n\n` +
         `${excerpt}\n\n` +
@@ -328,7 +424,8 @@ export class RepeatCallGuard {
   /**
    * Call AFTER executing a tool, with the result content the agent actually saw.
    * Grows the streak when the same key yields the same result; otherwise starts
-   * a fresh streak of 1.
+   * a fresh streak of 1. Any progress (different call or different result)
+   * clears the escalation counters and unlatches a pending break.
    */
   record(key: string, result: string): void {
     if (key === this.key && result === this.lastResult) {
@@ -337,7 +434,20 @@ export class RepeatCallGuard {
       this.key = key;
       this.lastResult = result;
       this.identicalCount = 1;
+      this.skipCount = 0;
+      this.breakKey = null;
     }
+  }
+
+  /**
+   * The latched hard-break key, if the model has ignored
+   * `BREAK_AFTER_ESCALATIONS` escalated results. Deliberately NOT consumed: if
+   * the caller's throw were ever swallowed upstream, the next read still
+   * reports the break — the latch clears only on progress (`record`) or run
+   * entry (`reset`).
+   */
+  breakLatched(): string | null {
+    return this.breakKey;
   }
 
   /** Clear all state — call at the start of each agent run. */
@@ -345,5 +455,7 @@ export class RepeatCallGuard {
     this.key = null;
     this.lastResult = '';
     this.identicalCount = 0;
+    this.skipCount = 0;
+    this.breakKey = null;
   }
 }

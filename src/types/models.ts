@@ -472,6 +472,31 @@ export interface ModelCapability {
    *  three axes per model). Absent on models the presets don't surface, where the
    *  host implies it. */
   provenance?: WeightsOrigin | undefined;
+  /**
+   * The `reasoning_effort` this model gets on the openai wire for calls whose
+   * `max_tokens` is at or below `REASONING_SUPPRESSION_MAX_TOKENS`. It WINS over
+   * `features.reasoningEffort`, and it does not care what the caller asked for —
+   * see the adapter for why both are deliberate. Only `'none'` is expressible
+   * here, and it exists for one measured failure mode: a hybrid-reasoning model whose thinking floor is
+   * larger than the output budget its callers give it returns `finish_reason:
+   * 'length'` with an EMPTY string and HTTP 200 — no error anywhere.
+   *
+   * Measured on `deepseek-v4-flash-0731` against the live Fireworks API,
+   * 2026-08-18, at each fast-tier caller's real `max_tokens`: 4 of 6 came back
+   * empty (title/64, retrieval-HyDE/256, entity-extraction/512, search-rerank/
+   * 512), each having spent 100% of its budget on reasoning tokens. With
+   * `'none'` all six answer, in roughly half the tokens and half the latency.
+   *
+   * `'low'` is NOT a substitute — measured, it still spent the full 512 and
+   * still returned empty, which is why this field takes the wire's `'none'`
+   * rather than reusing the low/medium/high ladder in `features.reasoningEffort`.
+   *
+   * Precedence: this field wins where a model sets BOTH — `features` is a shared
+   * object across six Fireworks entries, so flagging any one of them for the
+   * ladder would otherwise silently un-suppress this one, and `'low'` (the
+   * ladder's floor) was measured not to suppress the thinking floor at all.
+   */
+  defaultReasoningEffort?: 'none' | undefined;
 }
 
 const CLAUDE_FEATURES: ModelFeatures = {
@@ -517,15 +542,27 @@ const MISTRAL_FEATURES_GEN3: ModelFeatures = {
 };
 
 // Fireworks-hosted openai-compat text models. Text + tool-use + prompt-cache;
-// vision:false for ALL consumers, for two different reasons: GLM 5.2, DeepSeek
-// v4 Pro/Flash and gpt-oss-120b genuinely have none (their Fireworks pages
-// state "image input: not supported"), while the Kimi/Qwen/MiniMax candidates
-// DO serve image input on Fireworks but stay text-only here until the
-// openai-wire image path is validated. Either way vision:false yields a clean
-// pre-flight throw on an image-attach, never a silent drop. extendedThinking
-// is the Anthropic-specific mechanism → false on the openai wire.
+// vision:false for the models that genuinely have none: GLM 5.2, DeepSeek
+// v4 Pro/Flash and gpt-oss-120b (their Fireworks pages state "image input:
+// not supported"). vision:false yields a clean pre-flight throw on an
+// image-attach, never a silent drop. extendedThinking is the
+// Anthropic-specific mechanism → false on the openai wire.
 const FIREWORKS_TEXT_FEATURES: ModelFeatures = {
   vision: false,
+  extendedThinking: false,
+  toolUse: true,
+  promptCaching: true,
+  pdfInput: false,
+};
+
+// Fireworks candidates whose pages list image input — validated live
+// 2026-08-14 via tests/online/fireworks-vision.test.ts (red/blue split PNG →
+// the model names both halves through the real adapter + Fireworks endpoint).
+// Same shape as FIREWORKS_TEXT_FEATURES except vision:true. A model that
+// later proves non-multimodal on the wire rolls back to the text object —
+// the online test is the tripwire.
+const FIREWORKS_VISION_FEATURES: ModelFeatures = {
+  vision: true,
   extendedThinking: false,
   toolUse: true,
   promptCaching: true,
@@ -1023,11 +1060,9 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // Kimi K3 (Moonshot). Pricing read from its Fireworks page 2026-08-09 —
   // cacheRead $0.30 here IS input×0.1, unlike the flat $0.14 of the two above
   // (each page is its own source of truth). Fireworks lists image-input support,
-  // but the entry stays FIREWORKS_TEXT_FEATURES (vision:false → loud attach
-  // refusal, not a silent drop) until the openai-wire image path is validated —
-  // flipping vision on is a separate, tested change. Context: the page says
-  // "1040k"; pinned to the round 1M the sibling entries use — a conservative
-  // floor for compaction, not a capability claim.
+  // validated live 2026-08-14 (fireworks-vision online test) → vision:true.
+  // Context: the page says "1040k"; pinned to the round 1M the sibling entries
+  // use — a conservative floor for compaction, not a capability claim.
   'accounts/fireworks/models/kimi-k3': {
     id: 'accounts/fireworks/models/kimi-k3',
     provider: 'openai',
@@ -1036,7 +1071,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
-    features: FIREWORKS_TEXT_FEATURES,
+    features: FIREWORKS_VISION_FEATURES,
     pricing: { input: 3.00, output: 15.00, cacheWrite: 3.00, cacheRead: 0.30 },
     uiLabel: 'Kimi K3',
     provenance: 'CN',
@@ -1045,8 +1080,18 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
   // underperforms as the main on real requests (rafael), so the picker offers
   // alternatives to test. Pricing read from each model's Fireworks page — the
   // cached rates differ per model (0.028 / 0.08), never derived.
-  'accounts/fireworks/models/deepseek-v4-flash': {
-    id: 'accounts/fireworks/models/deepseek-v4-flash',
+  // Fireworks retired the UNSUFFIXED alias on 2026-08-14: the last successful call
+  // on a production instance was 09:05:49 that day, the first 404 at 09:44:31, and
+  // every call since has failed with `Model not found, inaccessible, and/or not
+  // deployed`. The model list now offers only the dated snapshot, so the id carries
+  // the date. Verified against the live API on 2026-08-18: the bare id 404s, this
+  // one answers 200.
+  //
+  // A dated id is the thing this codebase normally avoids (see the Mistral
+  // stable-tag rule) — but here the choice is not between dated and floating. The
+  // floating alias is GONE; the only alternative is no fast slot at all.
+  'accounts/fireworks/models/deepseek-v4-flash-0731': {
+    id: 'accounts/fireworks/models/deepseek-v4-flash-0731',
     provider: 'openai',
     tier: null,
     contextWindow: 1_000_000,
@@ -1057,9 +1102,16 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     pricing: { input: 0.14, output: 0.28, cacheWrite: 0.14, cacheRead: 0.028 },
     uiLabel: 'DeepSeek v4 Flash',
     provenance: 'CN',
+    // Hybrid-reasoning: it thinks before it answers, and the floor is task-
+    // dependent (54 tokens for a one-word question, 512+ for entity extraction,
+    // 727 for memory extraction). The single-shot utility callers budget
+    // 64-1024, so without this the slot silently returns "" on the tight ones.
+    // A `spawn_agent` on this tier runs far above that bound and keeps its
+    // thinking. See the field doc for the measurement.
+    defaultReasoningEffort: 'none',
   },
-  // Fireworks lists image input for Qwen3.7 Plus; text-only here for the same
-  // reason as Kimi K3 (vision flip = separate, validated change). 262k context.
+  // Fireworks lists image input for Qwen3.7 Plus — validated live 2026-08-14
+  // (fireworks-vision online test) → vision:true. 262k context.
   'accounts/fireworks/models/qwen3p7-plus': {
     id: 'accounts/fireworks/models/qwen3p7-plus',
     provider: 'openai',
@@ -1068,7 +1120,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
-    features: FIREWORKS_TEXT_FEATURES,
+    features: FIREWORKS_VISION_FEATURES,
     pricing: { input: 0.40, output: 1.60, cacheWrite: 0.40, cacheRead: 0.08 },
     uiLabel: 'Qwen3.7 Plus',
     provenance: 'CN',
@@ -1120,6 +1172,8 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     uiLabel: 'Kimi K2.7 Code',
     provenance: 'CN',
   },
+  // MiniMax M3 — Fireworks lists image input; validated live 2026-08-14
+  // (fireworks-vision online test) → vision:true.
   'accounts/fireworks/models/minimax-m3': {
     id: 'accounts/fireworks/models/minimax-m3',
     provider: 'openai',
@@ -1128,7 +1182,7 @@ export const MODEL_CAPABILITIES: Record<string, ModelCapability> = {
     defaultMaxOutput: 16_000,
     maxContinuations: 10,
     betaHeaders: [],
-    features: FIREWORKS_TEXT_FEATURES,
+    features: FIREWORKS_VISION_FEATURES,
     pricing: { input: 0.30, output: 1.20, cacheWrite: 0.30, cacheRead: 0.059 },
     uiLabel: 'MiniMax M3',
     provenance: 'CN',

@@ -9,6 +9,8 @@ import {
 	performRetire,
 	performReview,
 	projectKnowledgeWrite,
+	queueEntriesToChips,
+	anchorKnowledgeChips,
 	reviewRequestBody,
 	reviewResolution,
 	retireResolution,
@@ -447,5 +449,61 @@ describe('ChatView re-anchors for a late knowledge chip (source guard)', () => {
 		// identifier must never satisfy this guard.
 		expect(signal, 'streamSignal must count knowledgeWrites so a late chip re-anchors the view')
 			.toMatch(/if \(m\.knowledgeWrites\) s \+= m\.knowledgeWrites\.length;/);
+	});
+});
+
+// ── DEF-dk-review-chip-resume-invisible: queue re-hydration ────────────────
+
+describe('queueEntriesToChips', () => {
+	const row = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+		id: 'ke_1',
+		subjectHint: 'SVA',
+		kind: 'fact',
+		status: 'pending_review',
+		text: 'Die SVA-Anmeldung ist seit gestern durch.',
+		...over,
+	});
+
+	it('projects a pending queue row into a pending_review chip (subjectHint → subject)', () => {
+		const [chip] = queueEntriesToChips([], [row()]);
+		expect(chip).toBeDefined();
+		expect(chip!.status).toBe('pending_review');
+		expect(chip!.subject).toBe('SVA');
+		expect(chip!.text).toContain('SVA-Anmeldung');
+	});
+
+	it('drops entries whose id is already chipped (reload after a carried chip)', () => {
+		const existing: KnowledgeWriteChip[] = [{ id: 'ke_1', status: 'pending_review', text: 'x' }];
+		expect(queueEntriesToChips(existing, [row()])).toHaveLength(0);
+	});
+
+	it('skips malformed entries instead of throwing', () => {
+		expect(queueEntriesToChips([], [null, 'string', 3, row()])).toHaveLength(1);
+	});
+
+	it('an already-approved row keeps its queue filter server-side — only pending rows arrive', () => {
+		// The endpoint filters status=pending_review; nothing here can mint an
+		// `active` chip from a queue row even if a future caller passes one
+		// whose stored status drifted.
+		const [chip] = queueEntriesToChips([], [row({ status: 'active' })]);
+		expect(chip!.status).toBe('pending_review');
+	});
+});
+
+describe('anchorKnowledgeChips (review F1)', () => {
+	const bearer = (role: 'user' | 'assistant'): ChipBearer => ({ role, content: '' });
+
+	it('anchors on the last ASSISTANT message even when the transcript ends on a user turn', () => {
+		const list = [bearer('user'), bearer('assistant'), bearer('assistant'), bearer('user')];
+		expect(anchorKnowledgeChips(list)).toBe(list[2]);
+	});
+
+	it('returns undefined when there is no assistant message at all (nothing renders chips)', () => {
+		expect(anchorKnowledgeChips([bearer('user'), bearer('user')])).toBeUndefined();
+	});
+
+	it('returns the last message when it is itself assistant', () => {
+		const list = [bearer('user'), bearer('assistant')];
+		expect(anchorKnowledgeChips(list)).toBe(list[1]);
 	});
 });

@@ -1,7 +1,7 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { KnowledgeKind, MemoryBlockEditMode } from '../../types/memory.js';
 import { matchesSecretPattern, maskSecretPatterns } from '../../core/secret-store.js';
-import { BlockEditError, BlockOverLimitError, MAX_KNOWLEDGE_ENTRY_CHARS } from '../../core/knowledge-store.js';
+import { BlockEditError, BlockOverLimitError, checkKnowledgeText } from '../../core/knowledge-store.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { appendCaptureTelemetry } from '../../core/capture-telemetry.js';
 import type { UntrustedCause } from '../../core/untrusted-signals.js';
@@ -97,20 +97,12 @@ export const rememberTool: ToolEntry<RememberInput> = {
 
     const text = input.text?.trim();
     if (!text) return 'Pass a non-empty `text` to remember.';
-    // S8/S6: bound the durable write. A knowledge entry is ONE concise fact — an unbounded
-    // `remember` (or an injected loop of them) would bloat engine.db at rest. Loud reject, not
-    // a silent trim; long material belongs in a document / data_store, not a memory entry.
-    if (text.length > MAX_KNOWLEDGE_ENTRY_CHARS) {
-      return `That is too long for a single memory (${text.length} chars, max ${MAX_KNOWLEDGE_ENTRY_CHARS}). Record one concise fact, or put the full material in a document / data_store.`;
-    }
-
-    // H7: a secret-SHAPED scan on the write path (not only tenant-known secrets). Reject
-    // clear credentials (API keys, tokens, Bearer/JWT) — reject, never queue: a decrypted
-    // credential must not sit in the review panel. Legitimate business facts (incl. IBANs,
-    // which are not credentials) are unaffected.
-    if (matchesSecretPattern(text) || agent.secretStore?.containsSecret(text) === true) {
-      return 'Cannot record content that looks like a secret or credential. Store secrets via ask_secret / the vault, not in memory.';
-    }
+    // S8/S6 (length) + H7 (secret-SHAPED reject, never queue) both live in
+    // `checkKnowledgeText`, shared with the turn-end capture path so the two write paths
+    // cannot drift apart — they already had, once. Its reasons are user-visible returns of
+    // this tool and are pinned in `tests/eval/probe-freshness.test.ts` on that surface.
+    const check = checkKnowledgeText(text, agent.secretStore, input.subject);
+    if (!check.ok) return check.reason;
 
     // H4: the source is untrusted if the run saw the content boundary marker OR any
     // external-content tool ran this turn (the capability denylist — the marker alone is
@@ -146,13 +138,28 @@ export const rememberTool: ToolEntry<RememberInput> = {
     // Capture telemetry (DEF-dk-capture-observability): the NUMERATOR of the fire
     // -rate — the model actually recorded a durable fact, with the store outcome.
     // Gated on the DK flag so it logs only where we measure (the canary).
+    //
+    // `runId` is what makes the numerator JOINABLE to the denominator: this site fires
+    // from any run that has the tool, while `capture_eligible` fires only from the
+    // turn-end hook, which returns early for several run shapes. Without the run key the
+    // report can divide the two but cannot show they describe the same runs
+    // (DEF-firerate-mixes-two-populations).
     void appendCaptureTelemetry(agent.durableMemoryEnabled === true, {
       ts: Date.now(),
       event: 'remember_invoked',
+      // Reuses the value derived once above, so the cause-log, the SSE chip, the model-visible
+      // string and this line can never disagree about why the write was queued.
+      cause: untrustedCause,
       thread: agent.currentThreadId,
       model: agent.model,
       untrusted: sourceUntrusted,
       outcome: result.deduped === true ? 'deduped' : result.status,
+      runId: agent.currentRunId,
+      // The MODEL chose to call the tool. Tagged positively rather than left to be
+      // inferred from the absence of `capture`: an untagged line is indistinguishable
+      // from one written before the field existed, so "by elimination" silently folds
+      // pre-field history into model-compliance and overstates it.
+      source: 'model',
     });
 
     // propose_shown (PRD-ONBOARDING §7 / AC-1.4): a NEW pending_review write becomes a
@@ -168,6 +175,7 @@ export const rememberTool: ToolEntry<RememberInput> = {
         model: agent.model,
         untrusted: sourceUntrusted,
         entryId: result.id,
+        source: 'model',
       });
     }
 

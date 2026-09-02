@@ -13,6 +13,7 @@ import Database from 'better-sqlite3';
 import { computeFileChecksum, computeManifestChecksum, verifyBackup } from './backup-verify.js';
 import { deriveBackupKey, encryptFile, decryptFile, isEncryptedBackupFile } from './backup-crypto.js';
 import type { BackupFileEntry, VerifyResult } from './backup-verify.js';
+import { BACKUP_SQLITE_DBS, BACKUP_COPY_DIRS, BACKUP_COPY_FILES } from './data-dir-inventory.js';
 
 /** Metadata stored alongside every backup. */
 export interface BackupManifest {
@@ -48,14 +49,14 @@ export interface BackupConfig {
   gdriveUploader?: import('./backup-upload-gdrive.js').GDriveBackupUploader | undefined;
 }
 
-// Foundation Rework v2: `engine.db` is the new consolidated subject-graph store.
-// During S0/S1 it co-exists with the legacy files (which still hold the live
-// data), so ALL are backed up — `mail-state.db` is added here too, fixing a
-// pre-existing omission (inbox/mail state was never backed up). At S2 the legacy
-// files fold into engine.db and are deleted; trim this list to the 3-file set then.
-const SQLITE_DBS = ['engine.db', 'history.db', 'vault.db', 'datastore.db', 'agent-memory.db', 'mail-state.db', 'push-subscriptions.db'] as const;
-const COPY_DIRS = ['memory', 'sessions'] as const;
-const COPY_FILES = ['config.json', 'vapid-keys.json'] as const;
+// DERIVED, not restated. These three lists and the migration set used to be maintained
+// independently and drifted: on 2026-08-20 the merge ledger was in neither, `artifacts/`
+// was in migration only, and `apis/`, `workspace/` and a hand-placed `files/` holding a
+// customer contract were in neither. `data-dir-inventory.ts` is now the single table both
+// paths read, and it must state a REASON for anything it does not carry.
+const SQLITE_DBS = BACKUP_SQLITE_DBS;
+const COPY_DIRS = BACKUP_COPY_DIRS;
+const COPY_FILES = BACKUP_COPY_FILES;
 
 export class BackupManager {
   private readonly lynoxDir: string;
@@ -487,6 +488,14 @@ export class BackupManager {
     for (const entry of entries) {
       const srcPath = join(src, entry.name);
       const destPath = join(dest, entry.name);
+      // Symlinks are skipped, not followed, and this is deliberately fixed HERE rather
+      // than in one caller: it applies to every COPY_DIRS entry at once. Following one
+      // would (a) copy whatever it points at INTO the backup as a plain file — and
+      // backups are optionally uploaded to Google Drive — and (b) hard-fail the whole
+      // backup on a dangling link or a link to a directory (ENOENT / ENOTSUP from
+      // copyFileSync), losing every other file in the run. `isDirectory()` is dirent-
+      // based, so a symlink-to-directory takes the file branch and hits exactly that.
+      if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory()) {
         this.copyDirRecursive(srcPath, destPath);
       } else {

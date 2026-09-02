@@ -34,7 +34,7 @@ describe('google_docs tool', () => {
   describe('read', () => {
     it('reads document and converts to markdown', async () => {
       const auth = createMockAuth();
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -86,7 +86,7 @@ describe('google_docs tool', () => {
 
     it('requires document_id', async () => {
       const auth = createMockAuth();
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
       const result = await tool.handler({ action: 'read' }, createMockAgent());
       expect(result).toContain('"document_id" is required');
     });
@@ -95,7 +95,7 @@ describe('google_docs tool', () => {
   describe('create', () => {
     it('requires write scope', async () => {
       const auth = createMockAuth([]);
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       const result = await tool.handler({
         action: 'create',
@@ -108,7 +108,7 @@ describe('google_docs tool', () => {
 
     it('creates document via Drive HTML upload', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/documents']);
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       // Drive multipart upload
       mockFetch.mockResolvedValueOnce({
@@ -137,7 +137,7 @@ describe('google_docs tool', () => {
   describe('append', () => {
     it('appends text to existing document', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/documents']);
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       // Read doc for end index
       mockFetch.mockResolvedValueOnce({
@@ -176,7 +176,7 @@ describe('google_docs tool', () => {
   describe('replace', () => {
     it('replaces text with confirmation', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/documents']);
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       mockFetch.mockResolvedValueOnce({
         ok: true,
@@ -198,7 +198,7 @@ describe('google_docs tool', () => {
 
     it('requires find and replace_with', async () => {
       const auth = createMockAuth(['https://www.googleapis.com/auth/documents']);
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       let result = await tool.handler({
         action: 'replace',
@@ -218,7 +218,7 @@ describe('google_docs tool', () => {
   describe('tool definition', () => {
     it('has correct name and schema', () => {
       const auth = createMockAuth();
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
 
       expect(tool.definition.name).toBe('google_docs');
       expect(tool.definition.input_schema.required).toEqual(['action']);
@@ -228,7 +228,7 @@ describe('google_docs tool', () => {
   describe('destructive guard', () => {
     it('gates every write action (append included) but not read', () => {
       const auth = createMockAuth();
-      const tool = createDocsTool(auth);
+      const tool = createDocsTool(() => auth);
       const check = tool.destructive?.check;
       expect(check).toBeDefined();
       // append mutates the doc — it must fire the "modifies external data"

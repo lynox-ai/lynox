@@ -53,6 +53,22 @@ describe('Wave 0 — 0.2/0.3 read path: confMult dropped, confidence not rendere
     const confirmed = db.createMemory({ text, namespace: NS, scopeType: scope.type, scopeId: scope.id, embedding: emb });
     for (let i = 0; i < 20; i++) db.confirmMemory(confirmed); // cc=20, confidence pinned 1.0
 
+    // Pin both rows to ONE creation instant. Without this the test is not measuring what
+    // it claims: `createMemory` stamps `created_at` at millisecond resolution
+    // (agent-memory-db.ts), and the age-decay term `exp(-ageDays/365)` turns a 1 ms
+    // difference between the two inserts into a score gap of 1.395e-11 — deterministic and
+    // exactly linear in the millisecond delta, NOT float noise. Two consecutive inserts
+    // land in the same millisecond about half the time, so the assert below was a coin
+    // flip: it passed 3/3 isolated and failed twice in a full run, at 1.26e-10 (~9 ms) and
+    // 2.09e-10 (~15 ms), against a 5e-11 bar.
+    //
+    // The first attempt at this fixed the BAR instead of the fixture, and that was the
+    // wrong end — the test three cases below already pins `created_at` exactly this way.
+    // Pinned, the measured gap is 0 in 6/6 runs.
+    const pinnedAt = new Date().toISOString();
+    const rawDb = (db as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): unknown } } }).db;
+    rawDb.prepare('UPDATE memories SET created_at = ? WHERE id IN (?, ?)').run(pinnedAt, fresh, confirmed);
+
     const opts = { topK: 10, threshold: 0.1, useHyDE: false, useGraphExpansion: false };
 
     const v2 = await v2Engine.retrieve(text, [scope], opts);
@@ -60,14 +76,34 @@ describe('Wave 0 — 0.2/0.3 read path: confMult dropped, confidence not rendere
     const vConfirmed = v2.memories.find(m => m.id === confirmed)!;
     expect(vFresh).toBeDefined();
     expect(vConfirmed).toBeDefined();
-    // No confMult: the retrieval-tally no longer moves the score at all.
-    expect(vConfirmed.finalScore).toBeCloseTo(vFresh.finalScore, 10);
 
     const legacy = await legacyEngine.retrieve(text, [scope], opts);
     const lFresh = legacy.memories.find(m => m.id === fresh)!;
     const lConfirmed = legacy.memories.find(m => m.id === confirmed)!;
-    // Legacy branch retained: the confirmed twin still scores strictly higher.
-    expect(lConfirmed.finalScore).toBeGreaterThan(lFresh.finalScore);
+    expect(lFresh).toBeDefined();
+    expect(lConfirmed).toBeDefined();
+
+    // Control, WITH a magnitude. `toBeGreaterThan` alone cannot fail from confMult loss:
+    // `confirmed` is inserted second, so the timestamp noise always pushes it the passing
+    // way — it passed on a 7e-11 "effect" with confMult removed entirely. Measured here:
+    // 0.055.
+    const legacyEffect = lConfirmed.finalScore - lFresh.finalScore;
+    expect(legacyEffect, 'legacy confMult no longer produces an effect — this control is dead')
+      .toBeGreaterThan(1e-2);
+
+    // No confMult: the retrieval-tally does not move the v2 score at all.
+    //
+    // The bar is an absolute constant, deliberately NOT a ratio of `legacyEffect`: tying it
+    // to the legacy path would make an unrelated tuning move it. Verified — changing the
+    // initial-confidence literal in `agent-memory-db.ts` from 0.75 to 0.30 triples
+    // `legacyEffect`, and a ratio bar then lets a real v2 regression through.
+    //
+    // 1e-9 is grounded in the one residual this fixture cannot pin: `_namespacedDecay`
+    // reads `Date.now()` per candidate, so the two can still straddle a millisecond inside
+    // the scoring loop — worth 1.4e-11, i.e. ~70x below this bar. Detection floor in the
+    // other direction: 0.44 * 20 * k > 1e-9 catches a resurrected `(1 + cc*k)` from
+    // k ≈ 1.1e-10 upward, seven orders of magnitude finer than the ratio version managed.
+    expect(Math.abs(vConfirmed.finalScore - vFresh.finalScore)).toBeLessThan(1e-9);
   });
 
   it('0.2: an OLD never-retrieved row is no longer penalized by the sticky confirmDecay when ON', async () => {

@@ -445,11 +445,15 @@ export class AgentMemoryDb {
    * an entity out of what reaches the model.
    *
    * ⚠️ Dormant is NOT the same as "has no active mentions", and the difference is a
-   * regression waiting to happen: entities that never had a mention at all are perfectly
-   * legitimate. `DataStoreBridge.registerCollection` creates one per collection and never
-   * calls `createMention`, so treating mention-less as dead would silently drop every
-   * DataStore hint from the context graph. Only an entity that HAD mentions and has lost
-   * them all is dormant.
+   * regression waiting to happen. Only an entity that HAD mentions and has lost them all is
+   * dormant; one that never had a mention must not be treated as dead.
+   *
+   * As of 2026-08-24 there is NO producer of mention-less entities left: the DataStore→KG
+   * bridge was the only one and was removed as never-attached, and every `createEntity` call
+   * in the layer is followed immediately by `createMention`. The distinction is kept anyway —
+   * it is a fail-safe, not a description of current traffic, and re-introducing a bulk ingest
+   * that mints without mentioning is exactly the change that would otherwise silently start
+   * dropping entities.
    *
    * Deliberately NOT applied inside `EntityResolver.resolve`: the same call also serves
    * extraction, where refusing to match a dormant entity would create a duplicate instead
@@ -926,11 +930,19 @@ export class AgentMemoryDb {
   }
 
   /**
-   * All active memories, newest first, across every scope (capped). The debug-export
-   * snapshot: it answers "what facts does this tenant's memory hold" for diagnosing
+   * All active memories, newest first, across every scope (capped). Part of the debug-export
+   * snapshot: it answers "what facts does this tenant's LEGACY memory hold" for diagnosing
    * cross-subject bleed / poisoning, so it is deliberately scope-INDEPENDENT (unlike
-   * {@link listActiveMemories}, which the recall path scopes). Reads the legacy store —
-   * write-authoritative and complete regardless of the read-cutover flag.
+   * {@link listActiveMemories}, which the recall path scopes).
+   *
+   * ⚠ This is ONE substrate, not the whole picture. The doc here used to call the legacy store
+   * write-authoritative and exhaustive whatever the read cutover did — true in 2026-07, and
+   * false since durable knowledge went default-on: DK writes to `knowledge_entries` in engine.db
+   * and never to `memories`, so a DK tenant's recent facts are absent from every row this
+   * returns. The claim was worse than the gap, because it told the next reader not to look —
+   * a debug export built on it showed a memory store frozen weeks in the past and looked
+   * healthy. Callers diagnosing "nothing was saved" must read BOTH substrates
+   * (`readDurableKnowledgeForDebug` in `src/server/http-api.ts` is the other half).
    */
   listAllActiveMemories(limit = 200): MemoryRow[] {
     const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.floor(limit), 1), 1000) : 200;
@@ -1371,9 +1383,8 @@ export class AgentMemoryDb {
 
     // An orphan is an entity that HAD mentions and has lost them all — the same definition
     // {@link entityIsDormant} uses, and for the reason its docstring already gives: an entity
-    // that never had a mention is perfectly legitimate. `DataStoreBridge.registerCollection`
-    // creates one per collection and `indexRecords` one per person/organization it extracts
-    // from a record, and NEITHER calls `createMention`.
+    // that never had a mention must not be treated as dead. No producer of such entities
+    // remains as of 2026-08-24 (see that docstring); the distinction is a fail-safe.
     //
     // Without the first EXISTS this deletes every one of them, together with their
     // `has_data_in` relations, on every single run — and `runStartupReap` runs it at every
