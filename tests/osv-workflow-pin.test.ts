@@ -294,17 +294,18 @@ const PINNED: Readonly<Record<string, readonly string[]>> = {
   // Only the osv slice of a longer step: the issue bookkeeping around it is
   // allowed to change without a ceremony, the scanning is not.
   'dep-scan-daily.yml:dep-scan': [
-    'set +e',
-    'osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json',
-    'OSV_RC=$?',
-    'osv-scanner scan source --lockfile=pnpm-lock.yaml > /tmp/osv-table.txt 2>&1',
-    'set -e',
-    'set +e',
-    'node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}" --format=json > /tmp/osv-verdict.json',
-    'set -e',
-    `jq -e 'has("blocking") and has("below") and ((.errors // ["no verdict"]) | length == 0)' /tmp/osv-verdict.json > /dev/null`,
-    `HIGH=$(jq '.blocking | length' /tmp/osv-verdict.json)`,
-    `TOTAL=$(jq '(.blocking | length) + (.below | length)' /tmp/osv-verdict.json)`,
+    "set -euo pipefail",
+    "set +e",
+    "osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json",
+    "OSV_RC=$?",
+    "osv-scanner scan source --lockfile=pnpm-lock.yaml > /tmp/osv-table.txt 2>&1",
+    "set -e",
+    "set +e",
+    "node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\" --format=json > /tmp/osv-verdict.json",
+    "set -e",
+    "jq -e 'has(\"blocking\") and has(\"below\") and ((.errors // [\"no verdict\"]) | length == 0)' /tmp/osv-verdict.json > /dev/null",
+    "HIGH=$(jq '.blocking | length' /tmp/osv-verdict.json)",
+    "TOTAL=$(jq '(.blocking | length) + (.below | length)' /tmp/osv-verdict.json)",
   ],
 };
 
@@ -324,12 +325,14 @@ function pinnedSlice(where: string): string[] {
   if (where === 'actions/install-osv-scanner') return steps.flatMap((s) => commands(s.run));
 
   if (where === 'dep-scan-daily.yml:dep-scan') {
+    // From the step's FIRST command, not from its first `set +e`. Anchoring on
+    // `set +e` left the prologue outside the pin, and a `node()` shell function
+    // defined there returned a clean verdict — the watch then closed its
+    // tracking issue, which is exactly what the lines below forbid.
     const lines = steps.flatMap((s) => commands(s.run));
-    const lo = lines.findIndex((l) => l === 'set +e');
     const hi = lines.findIndex((l) => l.startsWith('TOTAL=$(jq'));
-    expect(lo, 'the osv slice no longer starts where the pin expects').toBeGreaterThan(-1);
-    expect(hi, 'the osv slice no longer ends where the pin expects').toBeGreaterThan(lo);
-    return lines.slice(lo, hi + 1);
+    expect(hi, 'the osv slice no longer ends where the pin expects').toBeGreaterThan(-1);
+    return lines.slice(0, hi + 1);
   }
 
   const scan = steps.filter((s) => (s.name ?? '').startsWith('Scan dependencies'));
@@ -457,9 +460,7 @@ const PINNED_JOB: Readonly<Record<string, unknown>> = {
       },
       {
         "env": {
-          "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
-          "RUN_URL": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-          "TITLE": "🔴 Dependency vulnerability (HIGH/CRITICAL) detected on main"
+          "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}"
         },
         "name": "Scan dependencies and sync tracking issue"
       }
@@ -533,8 +534,13 @@ function pinnedJobOf(where: string): unknown {
   expect(gate, `${where}: no \`Scan dependencies\` step — the pin is now blind`).toBeGreaterThan(-1);
   raw.steps = steps.slice(0, gate + 1).map((s, i) => {
     if (where !== 'dep-scan-daily.yml:dep-scan' || i !== gate) return s;
-    const { run, ...rest } = s;
-    return rest;
+    // Two exclusions on this one step, both named. `run` because its issue
+    // bookkeeping should change freely and its osv lines are pinned separately;
+    // `TITLE`/`RUN_URL` because they are the wording of an issue, and pinning a
+    // sentence puts the friction on copy-editing rather than on meaning.
+    const { run, env, ...rest } = s as Step & { env?: Record<string, string> };
+    const kept = Object.fromEntries(Object.entries(env ?? {}).filter(([k]) => k !== 'TITLE' && k !== 'RUN_URL'));
+    return Object.keys(kept).length > 0 ? { ...rest, env: kept } : rest;
   });
   return normalise(raw);
 }
@@ -576,6 +582,65 @@ function workflowLevelOf(file: string): unknown {
   const rest = Object.fromEntries(Object.entries(doc).filter(([k]) => k !== 'name' && k !== 'on' && k !== 'jobs'));
   return normalise(rest);
 }
+
+/**
+ * The action itself, whole — the seventh dropped dimension and the same class
+ * as the six before it.
+ *
+ * Its `runs:` was read as `steps[0].run` plus one negative check on GH_TOKEN.
+ * The step's `env:` is what feeds `${OSV_SCANNER_VERSION}` and
+ * `${OSV_SCANNER_SHA256}` INTO that pinned shell, so replacing both mappings
+ * with literals installed a different scanner with the whole suite green, while
+ * `inputs.*.default` still read the reviewed version and hash. The shell was
+ * pinned and its inputs were not.
+ *
+ * `description` is not pinned: it is prose, it changes nothing, and pinning it
+ * would put the friction on wording.
+ */
+const PINNED_ACTION: Readonly<Record<string, unknown>> = {
+  "inputs": {
+    "sha256": {
+      "default": "f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be",
+      "required": false
+    },
+    "token": {
+      "default": "",
+      "required": false
+    },
+    "version": {
+      "default": "2.5.1",
+      "required": false
+    }
+  },
+  "runs": {
+    "steps": [
+      {
+        "env": {
+          "OSV_GH_TOKEN": "${{ inputs.token }}",
+          "OSV_SCANNER_SHA256": "${{ inputs.sha256 }}",
+          "OSV_SCANNER_VERSION": "${{ inputs.version }}"
+        },
+        "name": "Download, verify and install osv-scanner",
+        "run": "set -euo pipefail\ncurl -sSfL \"https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64\" -o /tmp/osv-scanner\necho \"${OSV_SCANNER_SHA256}  /tmp/osv-scanner\" | sha256sum -c -\n# After the checksum, which is local and free, and before `sudo mv`,\n# because neither control is worth anything once the file is on PATH.\n# `--bundle` is load-bearing: without it the command queries the\n# attestations API, which 404s for a SLSA-generator artefact \u2014 a check\n# that measures the wrong thing and passes for the wrong reason.\ncurl -sSfL \"https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/multiple.intoto.jsonl\" -o /tmp/osv-provenance.jsonl\nGH_TOKEN=\"${OSV_GH_TOKEN}\" gh attestation verify /tmp/osv-scanner \\\n  --bundle /tmp/osv-provenance.jsonl \\\n  --repo google/osv-scanner \\\n  --predicate-type https://slsa.dev/provenance/v0.2 \\\n  --signer-repo slsa-framework/slsa-github-generator\nchmod +x /tmp/osv-scanner\nsudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner\n# Diagnostic, not a control \u2014 the checksum already fixes the bytes, and\n# a pin edited without its hash fails there first. What this catches is\n# narrower: a release whose binary does not report the version it is\n# published under.\nosv-scanner --version | tee /tmp/osv-version\ngrep -qx \"osv-scanner version: ${OSV_SCANNER_VERSION}\" /tmp/osv-version\n",
+        "shell": "bash"
+      }
+    ],
+    "using": "composite"
+  }
+};
+
+describe('the install action, whole', () => {
+  it('runs exactly the reviewed program with the reviewed inputs', () => {
+    const doc = parseYaml(readFileSync(ACTION, 'utf8')) as {
+      inputs: Record<string, { default?: unknown; required?: unknown }>;
+      runs: unknown;
+    };
+    const inputs = Object.fromEntries(
+      Object.entries(doc.inputs).map(([k, v]) => [k, { default: v.default, required: v.required }]),
+    );
+    expect(normalise({ inputs, runs: doc.runs })).toEqual(PINNED_ACTION);
+  });
+});
 
 describe('the surroundings of the pinned shell', () => {
   for (const where of Object.keys(PINNED_JOB)) {
