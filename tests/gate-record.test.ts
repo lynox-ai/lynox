@@ -554,3 +554,97 @@ describe('gate-record — a docs diff owes no gates, which is not the same as ow
     expect(evaluate({ body: stale, head: HEAD, files: CODE, author: 'dependabot[bot]' }).ok).toBe(true);
   });
 });
+
+// An independent mutation round against the block above found 9 survivors in 19
+// mutations — while the author's own 6 all died. Not one survivor was a defect:
+// every behaviour below was already correct and measured to be correct. What was
+// missing was the assertion, which is the same thing as the guard being deletable.
+//
+// Kept in one place because they share a cause: each pins a boundary that the
+// existing tests approached from one side only.
+describe('gate-record — boundaries a foreign mutation set walked straight through', () => {
+  const DOCS = ['docs/getting-started.md'];
+
+  // The docs block asserts head, gates and parse shape — and never touches
+  // `closes:`. So the one field this change deliberately does NOT demand there was
+  // also the one whose SHAPE went unchecked, which is the delayed ignition again:
+  // green for weeks, red the day a source file lands.
+  it('a malformed `closes:` is refused on a docs PR too — not demanded is not unread', () => {
+    const v = evaluate({ body: record({ closes: '#1262' }), head: HEAD, files: DOCS });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('is not a register id');
+  });
+
+  // `startsWith`, not `includes`. A pin taken from the MIDDLE of the SHA would
+  // otherwise satisfy "pins this commit", and the field's whole job is to name one
+  // commit rather than to appear somewhere in it.
+  it('a non-prefix substring of the head is not a pin', () => {
+    const middle = HEAD.slice(3, 11);
+    expect(HEAD).toContain(middle);          // control: it really is a substring
+    expect(HEAD.startsWith(middle)).toBe(false);
+    expect(evaluate({ body: record({ head: middle }), head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  // The floor is 7. The existing test uses a 4-character pin, so every floor from 5
+  // to 7 passed it — the boundary was pinned from one side only.
+  it('the pin floor is 7, checked from just below it', () => {
+    expect(evaluate({ body: record({ head: HEAD.slice(0, 6) }), head: HEAD, files: CODE }).ok).toBe(false);
+    expect(evaluate({ body: record({ head: HEAD.slice(0, 7) }), head: HEAD, files: CODE }).ok).toBe(true);
+  });
+
+  // The junk-line check exists so a line nothing reads cannot sit in the block
+  // pretending to. Its tests used bullets and continuation lines; a capitalised key
+  // is the form that LOOKS like a field, which is the one that would actually be
+  // written by someone.
+  it('`Note: prose` is junk too — a capital does not make it a field', () => {
+    const body = [
+      '## Summary', '', 'x', '', '```gate-record',
+      `head: ${HEAD.slice(0, 8)}`, 'gates: code-review, delta', 'delta: clean',
+      'mutations: 12 killed, 0 survived', 'closes: none',
+      'Note: prose that nothing reads',
+      '```', '',
+    ].join('\n');
+    const v = evaluate({ body, head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('is not `field: value`');
+  });
+
+  // `delta:` is an EQUALITY check. The rejection cases are all words that do not
+  // contain "clean", so a substring implementation passed every one of them and
+  // died only on the shipped PR template's `<clean?>` placeholder — i.e. the
+  // equality was held up by a test about something else, and a reworded template
+  // would have dropped it silently.
+  it('`delta: not clean` is refused — equality, not a substring match', () => {
+    const v = evaluate({ body: record({ delta: 'not clean' }), head: HEAD, files: CODE });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('must be `clean`');
+  });
+
+  // DOC_ONLY is anchored on both ends. Unanchored, `notes.md.ts` reads as markdown
+  // and a whole source file is exempt from every gate — the same class as the
+  // "append a line to the README" hole, reached through the pattern instead of
+  // through the file mix.
+  it('a source file is not documentation because `.md` or `docs/` appears inside its path', () => {
+    expect(requiredGates(['src/core/notes.md.ts'])).not.toBe(null);
+    expect(requiredGates(['src/server/docs/handler.ts'])).not.toBe(null);
+    // Controls, so the assertions above cannot pass by the filter being broken:
+    expect(requiredGates(['docs/getting-started.md'])).toBe(null);
+    expect(requiredGates(['README.md'])).toBe(null);
+  });
+
+  // The bot exemption returns FIRST, ahead of both the `empty` guard and the docs
+  // branch. Ordering is the whole content of that claim, and the test named after it
+  // ran with a code diff — which exercises neither. Pinned here as it behaves, with
+  // the tension stated rather than changed: a bot PR whose file list failed to
+  // arrive is exempted, and the `empty` guard exists precisely for that shape.
+  it('the bot exemption really is first — including ahead of the `empty` guard', () => {
+    const bot = { body: record(), head: HEAD, author: 'dependabot[bot]' };
+    const onEmpty = evaluate({ ...bot, files: [] });
+    expect(onEmpty.ok).toBe(true);
+    expect(onEmpty.notes?.join(' ')).toContain('is a bot');
+    const onDocs = evaluate({ ...bot, files: DOCS });
+    expect(onDocs.notes?.join(' ')).toContain('is a bot');
+    // The control: without the bot author, the empty list is refused.
+    expect(evaluate({ body: record(), head: HEAD, files: [] }).ok).toBe(false);
+  });
+});
