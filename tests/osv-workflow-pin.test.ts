@@ -303,6 +303,7 @@ const PINNED: Readonly<Record<string, readonly string[]>> = {
     "set +e",
     "node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\" --format=json > /tmp/osv-verdict.json",
     "set -e",
+    "jq -r '.errors[]? | \"::error::osv watch: \" + .' /tmp/osv-verdict.json",
     "jq -e 'has(\"blocking\") and has(\"below\") and ((.errors // [\"no verdict\"]) | length == 0)' /tmp/osv-verdict.json > /dev/null",
     "HIGH=$(jq '.blocking | length' /tmp/osv-verdict.json)",
     "TOTAL=$(jq '(.blocking | length) + (.below | length)' /tmp/osv-verdict.json)",
@@ -645,7 +646,14 @@ describe('the install action, whole', () => {
 describe('the surroundings of the pinned shell', () => {
   for (const where of Object.keys(PINNED_JOB)) {
     it(`${where} is exactly the reviewed job, up to and including the gate`, () => {
-      expect(pinnedJobOf(where)).toEqual(PINNED_JOB[where]);
+      // The message matters as much as the check: this fires on a routine
+      // edit to a gate job, and an author who cannot tell "you broke the gate"
+      // from "update the expectation" will reach for the second reading either
+      // way. Say which, and say it here.
+      expect(
+        pinnedJobOf(where),
+        `${where} differs from the reviewed job. If you changed it deliberately, update PINNED_JOB in this file in the SAME commit and say what moved in the pull request. If you did not, something edited the dependency gate.`,
+      ).toEqual(PINNED_JOB[where]);
     });
   }
 
