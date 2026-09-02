@@ -492,7 +492,15 @@ describe('ApiStore', () => {
       expect(out).not.toMatch(/Do NOT set an Authorization header yourself/);
       expect(out).not.toMatch(/the ENGINE attaches it/);
       expect(out).toContain('no basic_format recorded');
-      expect(out).toContain('yours to set');
+      // NOT `toContain('yours to set')` — the first cut used exactly that, and
+      // "the header is NOT yours to set" satisfies it. The shipped defect could be
+      // reinstated word for word with all three asserts green. A substring assert on
+      // a sentence whose negation contains the substring pins the letters, not the claim.
+      expect(out).toContain('the engine attaches NOTHING here');
+      // The ACTIONABLE half, which nothing pinned: both recovery clauses could be
+      // deleted outright and the test stayed green.
+      expect(out).toContain('Authorization: Basic secret:<VAULT_KEY>');
+      expect(out).toContain('set auth.basic_format="user_pass_split"');
     });
 
     it('user_pass_split keeps the engine-attaches sentence — it is true for that one', () => {
@@ -517,6 +525,9 @@ describe('ApiStore', () => {
       const out = store.formatProfile(store.get('pre-b64')!);
       expect(out).toContain('the engine does not attach it');
       expect(out).not.toMatch(/the ENGINE attaches it/);
+      // Same gap as above: the instruction that tells the model what to actually DO
+      // could be replaced with anything at all.
+      expect(out).toContain('set `Authorization: Basic secret:<VAULT_KEY>` yourself, as-is');
     });
   });
 

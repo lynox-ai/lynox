@@ -395,8 +395,29 @@ interface AttachedAuth {
   slot?: string | undefined;
   /** Set when the engine REFUSED — the handler returns this verbatim and sends nothing. */
   refusal?: string | undefined;
-  /** Set when the engine declined to attach for a recoverable reason. Surfaced on a 401. */
-  hint?: string | undefined;
+  /**
+   * Set when the engine did not attach, for a reason worth naming. Surfaced on a 401.
+   *
+   * A THUNK, not a string, and both reasons came out of review rather than design.
+   * Built eagerly it ran `secretStore.resolve()` on EVERY request to a model-owned
+   * profile — publishing a `secretAccess` audit event for a credential the engine
+   * never used, on requests that mostly did not 401. And it fixed the wording
+   * before the redirect chain was known, while `redirectHopHeaders` strips
+   * Authorization on a cross-origin hop: the text then claimed "you set the header
+   * yourself" about a request that reached the answering host without one. Both
+   * facts are settled only once the response is.
+   */
+  hint?: ((ctx: HintContext) => string) | undefined;
+}
+
+/** What a hint may only know once the response is back. */
+interface HintContext {
+  /**
+   * The final hop changed origin, so `redirectHopHeaders` dropped Authorization /
+   * Cookie (`CROSS_ORIGIN_DROP_HEADERS`) — a header the model set did NOT reach
+   * the host that answered.
+   */
+  crossOriginRedirect: boolean;
 }
 
 /**
@@ -540,7 +561,7 @@ async function attachEngineManagedAuth(
     // catch a profile reaching for something it may not have.
     const tokenKey = auth.vault_keys?.[0];
     if (!tokenKey) {
-      return { hint: `api_profile "${profile.id}" is auth.type="${auth.type}" but names no vault key, so the engine could not attach the credential. Set auth.vault_keys: ["YOUR_KEY_NAME"] via api_setup({ action: "update", ... }) and store the value with ask_secret.` };
+      return { hint: () => `api_profile "${profile.id}" is auth.type="${auth.type}" but names no vault key, so the engine could not attach the credential. Set auth.vault_keys: ["YOUR_KEY_NAME"] via api_setup({ action: "update", ... }) and store the value with ask_secret.` };
     }
     // The bound the oauth2 branch gets for free by deriving its key from the profile
     // id. This name comes from the PROFILE, which a prompt-injected agent can author:
@@ -552,16 +573,16 @@ async function attachEngineManagedAuth(
       return { refusal: protectedKeyRefusal(profile.id, tokenKey) };
     }
     if (!hostVetted) {
-      return { hint: `api_profile "${profile.id}" maps to ${hostname}, which is not a vetted sub-processor and carries no recorded acceptance, so the engine did not attach the stored credential. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted.` };
+      return { hint: () => `api_profile "${profile.id}" maps to ${hostname}, which is not a vetted sub-processor and carries no recorded acceptance, so the engine did not attach the stored credential. Re-save the profile via api_setup({ action: "update", ... }) and accept controller-responsibility when prompted.` };
     }
     if (!url.toLowerCase().startsWith('https://')) {
-      return { hint: `api_profile "${profile.id}" uses a stored credential and the engine will not attach it over a non-HTTPS URL. Use https://.` };
+      return { hint: () => `api_profile "${profile.id}" uses a stored credential and the engine will not attach it over a non-HTTPS URL. Use https://.` };
     }
     const token = secretStore.resolve(tokenKey);
     // Truthiness, not a null check — an empty value would ship a bare `Bearer `,
     // which reads on the wire as a bad token rather than as a missing one.
     if (!token) {
-      return { hint: `api_profile "${profile.id}" is auth.type="${auth.type}" but the vault has no usable value for ${tokenKey}. Ask the user for the credential with ask_secret, then retry.` };
+      return { hint: () => `api_profile "${profile.id}" is auth.type="${auth.type}" but the vault has no usable value for ${tokenKey}. Ask the user for the credential with ask_secret, then retry.` };
     }
     // `header` names its own slot and carries the raw token; `bearer` is the
     // Authorization/`Bearer ` special case. The default matches what the profile
@@ -580,31 +601,55 @@ async function attachEngineManagedAuth(
     return put(slot, value);
   }
 
-  // Everything that reaches here is a shape the engine deliberately does NOT
-  // attach. It still gets a name — see modelOwnedAuthHint.
+  // Everything that reaches here is a shape the engine does NOT attach. It still
+  // gets a name — see modelOwnedAuthHint. `slotFilled` is read from the request as
+  // it stood at attach time (nothing writes `headers` after this point: every `put`
+  // returns immediately); the vault is not read until the 401 actually arrives.
+  const filled = modelFilledSlot(auth, headers, url);
   return {
-    hint: modelOwnedAuthHint({
+    hint: ctx => modelOwnedAuthHint({
       profileId: profile.id,
-      authType: auth.type,
-      basicFormat: auth.basic_format,
-      headerName: auth.header_name,
-      queryParam: auth.query_param,
-      vaultKeys: auth.vault_keys,
-      slotFilled: modelFilledSlot(auth, headers, url),
+      auth,
+      hostname,
+      hostVetted,
+      slotFilled: filled,
+      crossOriginRedirect: ctx.crossOriginRedirect,
       secretStore,
     }),
   };
 }
 
 /**
+ * Header, query-param and vault-key names come from the PROFILE, and a
+ * prompt-injected agent can author one: `validateProfile` shape-checks
+ * `username_key`/`password_key` but never `vault_keys`, `header_name` or
+ * `query_param`. These land in a hint that is appended OUTSIDE the
+ * `untrusted_data` wrap on purpose — system guidance, which the model is meant to
+ * trust — so a name carrying newlines can forge a reminder of its own.
+ *
+ * That channel is not new (the bearer/header hints have interpolated `vault_keys[0]`
+ * since they were written, and the root fix belongs in `validateProfile`, not here).
+ * What IS new is widening it to two fields never interpolated before across three
+ * more shapes, so the filter goes on everything this file prints, old hints included.
+ */
+const SAFE_PROFILE_TOKEN = /^[A-Za-z0-9._-]{1,64}$/;
+function safeToken(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return SAFE_PROFILE_TOKEN.test(value) ? value : '<name rejected: fix it via api_setup>';
+}
+
+/**
  * Did the MODEL already put the profile's credential where this auth shape wants it?
  *
- * Read off the outgoing request, never predicted: `headers` at this point is the
- * agent's own map (nothing has been `put` on a path that reaches here), and for
- * `query` the parameter is in the URL the agent composed. The distinction the
- * caller needs is "nothing authenticated this request" versus "a value went out
- * and came back rejected" — two different next steps, and a 401 alone tells them apart
- * for nobody.
+ * Read off the outgoing request, never predicted: `headers` here is the agent's own
+ * map, and for `query` the parameter is in the URL the agent composed. The caller
+ * needs "nothing authenticated this request" apart from "a value went out and came
+ * back rejected" — two different next steps that a 401 alone separates for nobody.
+ *
+ * Emptiness counts as absent on BOTH sides. `searchParams.has()` is true for a bare
+ * `?api_key=`, which would have reported a half-credential as a sent one — the same
+ * distinction the engine-owned branches make explicitly when they refuse an empty
+ * vault value rather than shipping `Basic base64("ck:")`.
  */
 function modelFilledSlot(
   auth: { type: string; header_name?: string | undefined; query_param?: string | undefined },
@@ -613,85 +658,157 @@ function modelFilledSlot(
 ): boolean {
   if (auth.type === 'query') {
     try {
-      return new URL(url).searchParams.has(auth.query_param ?? 'key');
+      return (new URL(url).searchParams.get(auth.query_param ?? 'key') ?? '').trim() !== '';
     } catch {
       return false;
     }
   }
-  const slot = (auth.header_name ?? 'Authorization').toLowerCase();
-  return Object.entries(headers).some(([k, v]) => k.toLowerCase() === slot && v.trim() !== '');
+  return Object.entries(headers).some(([k, v]) => k.toLowerCase() === modelOwnedSlot(auth).toLowerCase() && v.trim() !== '');
 }
 
 /**
- * The 401-hint for the auth shapes the engine deliberately does NOT attach.
+ * Which header this shape expects the model to fill.
+ *
+ * `basic` is `Authorization` by protocol — NOT `auth.header_name`. That field is
+ * meant for `auth.type: 'header'`, `validateProfile` neither validates it nor binds
+ * it to a type, and reading it here produced `headers: { "X-Foo": "Basic secret:K" }`
+ * for a profile that had set it: an instruction that cannot work, in the engine's
+ * own trusted voice, at the moment the model is looking for one to follow.
+ */
+function modelOwnedSlot(auth: { type: string; header_name?: string | undefined }): string {
+  if (auth.type === 'basic') return 'Authorization';
+  return safeToken(auth.header_name) ?? 'Authorization';
+}
+
+/**
+ * The 401-hint for the auth shapes the engine does NOT attach.
  *
  * `basic`+`pre_encoded_b64`, `basic` with no `basic_format`, and `query` are the
- * MODEL's to set, on purpose and test-pinned ("leaves pre_encoded_b64 alone —
- * that path is still the model's to set", "does NOT attach for a bare basic
- * profile with no basic_format", "SECURITY: a pre_encoded_b64 basic profile keeps
- * the model-set header"). Attaching them here would break integrations that work
- * today and kill that security test; refusing would stop them outright, which the
- * docstring above rules out for exactly the same reason.
+ * MODEL's to set, on purpose and test-pinned ("leaves pre_encoded_b64 alone — that
+ * path is still the model's to set", "does NOT attach for a bare basic profile with
+ * no basic_format", "SECURITY: a pre_encoded_b64 basic profile keeps the model-set
+ * header"). Attaching them here would break integrations that work today and kill
+ * that security test; refusing would stop them outright, which the docstring above
+ * rules out for the same reason.
  *
  * What was missing is neither. It is a NAME for the failure. Every ENGINE-owned
- * shape that declines to attach says why and the reason rides along on the 401
- * (the four `hint` returns above). The MODEL-owned shapes returned an empty object,
- * so a 401 there looked identical whether the credential was rejected or never
- * sent at all — and nothing in the response distinguishes those.
+ * shape that declines to attach says why, and the reason rides along on the 401.
+ * The model-owned shapes returned an empty object, so a 401 there looked identical
+ * whether the credential was rejected or never sent — and nothing in the response
+ * separates those.
  *
  * Measured on a real thread (2026-09-02, engine 2.14.2, build 7e905219): a
- * `pre_encoded_b64` DataForSEO profile 401'd on a request that carried no
- * Authorization header. The agent read that as "the secret is missing or invalid",
- * contradicting its own answer one turn earlier, and asked the user to re-supply a
- * credential the vault already held. That is the loop the 401-hint above was built
- * to end — "three token rotations against a request that carried no credential" —
- * running in the half it did not cover.
+ * `pre_encoded_b64` DataForSEO profile 401'd on a request carrying no Authorization
+ * header. The agent read that as "the secret is missing or invalid", contradicting
+ * its own answer one turn earlier, and asked the user to re-supply a credential the
+ * vault already held. That is the loop the 401-hint was built to end — "three token
+ * rotations against a request that carried no credential" — running in the half it
+ * did not cover.
  *
- * The vault line is what ends it: whether the named key HAS a value is a fact the
- * engine holds and the model cannot observe. Key NAMES only, never a value.
+ * ⚠ A WRONG name is worse than none: it carries the engine's authority into the
+ * moment the model is deciding what to do. Every claim below is therefore either
+ * read off this request or not made at all.
  */
 function modelOwnedAuthHint(a: {
   profileId: string;
-  authType: string;
-  basicFormat?: string | undefined;
-  headerName?: string | undefined;
-  queryParam?: string | undefined;
-  vaultKeys?: string[] | undefined;
+  auth: {
+    type: string;
+    basic_format?: string | undefined;
+    header_name?: string | undefined;
+    query_param?: string | undefined;
+    username_key?: string | undefined;
+    password_key?: string | undefined;
+    vault_keys?: string[] | undefined;
+  };
+  hostname: string;
+  hostVetted: boolean;
   slotFilled: boolean;
+  crossOriginRedirect: boolean;
   secretStore: { resolve(key: string): string | null | undefined };
 }): string {
+  const { auth } = a;
+  const slot = modelOwnedSlot(auth);
+
+  // The acceptance the ENGINE-owned shapes check before attaching. It does not gate
+  // this path — the model's own header was never blocked here, and that is what the
+  // security test pins — but telling it to send a stored credential to a host with no
+  // recorded acceptance, without saying so, is advice the engine would not take itself.
+  const vetting = a.hostVetted
+    ? ''
+    : ` Note: ${a.hostname} is not a vetted sub-processor and carries no recorded acceptance — for the shapes the ENGINE attaches, that alone stops the attach. Re-save the profile via api_setup({ action: "update", id: "${a.profileId}" }) and accept controller-responsibility before sending a stored credential there.`;
+
   // `none` is not a model-owned shape — it is a profile claiming this API needs no
-  // credential while the host says otherwise. Naming the contradiction beats
-  // pointing at a vault key the profile never declared.
-  if (a.authType === 'none') {
-    return `api_profile "${a.profileId}" declares auth.type="none" (no credentials required), but this host answered 401 — the profile is wrong about this endpoint, not the credential. Correct it with api_setup({ action: "update", id: "${a.profileId}" }), then store the credential with ask_secret.`;
+  // credential while the host says otherwise.
+  if (auth.type === 'none') {
+    return a.slotFilled
+      ? `api_profile "${a.profileId}" declares auth.type="none" (no credentials required), yet this host answered 401 AND this request carried a ${slot} header you set. Both can be true: the profile may be wrong about this endpoint, or that credential may have been rejected. The engine cannot separate them — a "none" profile names no vault key to check. Correct the profile with api_setup({ action: "update", id: "${a.profileId}" }).${vetting}`
+      : `api_profile "${a.profileId}" declares auth.type="none" (no credentials required), but this host answered 401 — the profile is wrong about this endpoint, not the credential. Correct it with api_setup({ action: "update", id: "${a.profileId}" }), then store the credential with ask_secret.${vetting}`;
   }
 
-  const key = a.vaultKeys?.[0];
+  // Key precedence mirrors the engine's own (`auth.username_key ?? auth.vault_keys[0]`).
+  // Reading `vault_keys` alone told a profile that names username_key/password_key
+  // that it "names no vault key", and sent the model to ask_secret for a credential
+  // the vault already held — the very loop this hint exists to end.
+  const userKey = auth.username_key ?? auth.vault_keys?.[0];
+  const passKey = auth.password_key ?? auth.vault_keys?.[1];
+
+  // A basic profile naming TWO keys is a SPLIT credential with the format field
+  // missing, not a pre-encoded one. Naming `Basic secret:<username>` there is a
+  // string that can never authenticate; the fix is the format field, and the engine
+  // takes the header over once it is set.
+  if (auth.type === 'basic' && auth.basic_format === undefined && userKey !== undefined && passKey !== undefined) {
+    return `The engine did not attach a credential: api_profile "${a.profileId}" is auth.type="basic" with no basic_format recorded, and it names TWO vault keys (${safeToken(userKey) ?? '?'} + ${safeToken(passKey) ?? '?'}) — a split username/password credential whose format field is missing. Do NOT hand-build a header from one of them; Basic is base64(user:pass) and half of it never authenticates. Set auth.basic_format="user_pass_split" via api_setup({ action: "update", id: "${a.profileId}" }) and the ENGINE attaches it from both keys on every request.${vetting}`;
+  }
+
+  const key = auth.type === 'basic' ? userKey : auth.vault_keys?.[0];
+  const label = safeToken(key);
+
+  // The key NAME comes from the profile, so it can name a slot that belongs to the
+  // platform or holds the tenant's own provider key. The engine-owned branches refuse
+  // such a profile before resolving. Refusing HERE would block a request that works
+  // today, so this declines to look it up instead: the value never entered the string
+  // either way, but "the vault DOES hold a value under ANTHROPIC_API_KEY" is an
+  // existence oracle over exactly the slots that refusal exists to fence off — and it
+  // reaches `isInfraSecret` names too, which `listAgentVisibleNames` keeps out of the
+  // agent's view on purpose.
   const vault = key === undefined
-    ? `This profile names no vault key (auth.vault_keys is empty), so there is nothing to reference yet — add one via api_setup({ action: "update", id: "${a.profileId}" }) and store the value with ask_secret.`
-    : a.secretStore.resolve(key)
-      ? `The vault DOES hold a value under "${key}" — do NOT ask the user to supply or re-paste it, reference it as \`secret:${key}\`.`
-      : `The vault has NO value under "${key}" — collect it with ask_secret({ name: "${key}" }), then retry.`;
+    ? `This profile names no vault key, so there is nothing to reference yet — add one via api_setup({ action: "update", id: "${a.profileId}" }) and store the value with ask_secret.`
+    : isProtectedSecretWrite(key)
+      ? `This profile names the protected secret "${label}" as its credential. Those belong to the platform or hold the tenant's own provider key, are never attached to an outbound request, and the engine will not look one up to tell you whether it is set. Use a credential the user supplied for this API.`
+      : a.secretStore.resolve(key)
+        ? `The vault DOES hold a value under "${label}" — do NOT ask the user to supply or re-paste it, reference it as \`secret:${label}\`.`
+        : `The vault has NO value under "${label}" — collect it with ask_secret({ name: "${label}" }), then retry.`;
 
-  const shape = a.authType === 'basic'
-    ? `auth.type="basic"${a.basicFormat === undefined ? ' with no basic_format recorded' : ` / basic_format="${a.basicFormat}"`}`
-    : `auth.type="${a.authType}"`;
+  // "deliberately" is a claim about intent and is only true for the three shapes the
+  // engine excludes on purpose. An unknown type or a misspelled basic_format reaches
+  // here through `loadFromDirectory`, which validates none of it — that is a broken
+  // profile, and calling it deliberate would send the reader past the actual fault.
+  const known = auth.type === 'query'
+    || (auth.type === 'basic' && (auth.basic_format === undefined || auth.basic_format === 'pre_encoded_b64'));
+  const shape = auth.type === 'basic'
+    ? `auth.type="basic"${auth.basic_format === undefined ? ' with no basic_format recorded' : ` / basic_format="${safeToken(auth.basic_format) ?? '?'}"`}`
+    : `auth.type="${safeToken(auth.type) ?? '?'}"`;
+  const why = known
+    ? 'which is the MODEL\'s to set — deliberately, so a working hand-set credential is never overwritten'
+    : 'which the engine does not recognise, so it attached nothing. Check the profile: an unknown auth.type or a misspelled basic_format is a misconfiguration, not a design';
 
-  if (a.authType === 'query') {
-    const param = a.queryParam ?? 'key';
+  if (auth.type === 'query') {
+    const param = safeToken(auth.query_param) ?? 'key';
     const carried = a.slotFilled
-      ? `This request already carried "${param}" in the query string, so the 401 points at the value rather than at a missing parameter.`
-      : `This request carried no "${param}" query parameter at all — nothing authenticated it.`;
-    return `The engine does not attach this profile's credential: api_profile "${a.profileId}" is ${shape}, which is the MODEL's to put in the URL — deliberately, so a working hand-set request is never rewritten. ${carried} ${vault}`;
+      ? `This request already carried a non-empty "${param}" in the query string, so the 401 points at the value rather than at a missing parameter.`
+      : `This request carried no usable "${param}" query parameter — nothing authenticated it.${key === undefined ? '' : ` Put it in the URL yourself: ?${param}=secret:${label ?? ''}.`}`;
+    return `The engine did not attach this profile's credential: api_profile "${a.profileId}" is ${shape}, ${why}. ${carried} ${vault}${vetting}`;
   }
 
-  const slot = a.headerName ?? 'Authorization';
-  const prefix = a.authType === 'basic' ? 'Basic ' : '';
-  const carried = a.slotFilled
-    ? `You set the ${slot} header yourself on this request, so the 401 points at the credential's validity rather than at a missing header.`
-    : `This request carried no ${slot} header at all — nothing authenticated it.${key === undefined ? '' : ` Set it yourself: headers: { "${slot}": "${prefix}secret:${key}" }.`}`;
-  return `The engine does not attach this profile's credential: api_profile "${a.profileId}" is ${shape}, which is the MODEL's to set — deliberately, so a working hand-set header is never overwritten. ${carried} ${vault}`;
+  // A cross-origin redirect strips Authorization/Cookie, so on that path the header
+  // the model set did not reach the host that answered — asserting "you set it, so
+  // the value was rejected" would send it to rotate a working credential.
+  const carried = a.crossOriginRedirect
+    ? `This request was redirected to a different origin, and ${slot} is stripped on such a hop — so a header you set did NOT reach the host that answered 401. Request the final URL directly before touching the credential.`
+    : a.slotFilled
+      ? `You set the ${slot} header on this request yourself; the engine neither added nor replaced it. Nothing here says the value is wrong — only that the engine is not the one supplying it.`
+      : `This request carried no usable ${slot} header — nothing authenticated it.${key === undefined ? '' : ` Set it yourself: headers: { "${slot}": "${auth.type === 'basic' ? 'Basic ' : ''}secret:${label ?? ''}" }.`}`;
+  return `The engine did not attach this profile's credential: api_profile "${a.profileId}" is ${shape}, ${why}. ${carried} ${vault}${vetting}`;
 }
 
 /** Shared wording — the same refusal for basic and bearer/header. */
@@ -1181,7 +1298,18 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
       // end: three token rotations against a request that carried no credential.
       // Outside the untrusted_data wrap: system guidance, not response data.
       if (response.status === 401 && auth.hint !== undefined) {
-        wrapped += `\n\n**[Agent reminder — the engine did not attach this profile's credential]**\n${auth.hint}\nUntil then the request goes out with only the headers you set yourself.`;
+        // The hint is resolved HERE, not at attach time. Two facts it needs are only
+        // settled now: whether a cross-origin hop stripped the credential header
+        // (`redirectHopHeaders`), and — the reason this matters beyond wording —
+        // whether the vault should be read at all. Built eagerly it read the vault on
+        // every request to a model-owned profile, most of which never 401.
+        let crossOriginRedirect = false;
+        try {
+          crossOriginRedirect = new URL(finalRequestUrl).origin !== new URL(input.url).origin;
+        } catch {
+          // Either URL unparseable — treat as same-origin and make no redirect claim.
+        }
+        wrapped += `\n\n**[Agent reminder — the engine did not attach this profile's credential]**\n${auth.hint({ crossOriginRedirect })}\nUntil then the request goes out with only the headers you set yourself.`;
       }
 
       // OAuth2 401-hint: append OUTSIDE the untrusted_data wrap so the
