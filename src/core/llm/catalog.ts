@@ -557,7 +557,14 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
         pricing: { input: 0.15, output: 0.60 },
         capabilities: ['tool_use'],
         residency: 'US (Fireworks AI) — model provenance US (OpenAI open weights)',
-        notes: '131k context; balanced candidate — the one whose tool_use wire the reachability suite has proven. Text-only.',
+        // Measured 2026-08-09/10, kept selectable but no longer recommended: on an
+        // open-ended chat turn it plans a reply in `reasoning_content` and then emits
+        // an EMPTY `content` with only the tool call, so the user sees no answer — and
+        // it sometimes prints the tool JSON into the visible text as well. Both are
+        // model behaviour, not our wire handling: the same adapter serves eight other
+        // openai-wire models cleanly. Its compaction recall also came in at 66% against
+        // a 90% reference. Fine for a scripted tool round-trip, poor as a chat model.
+        notes: '131k context; tool_use wire proven by the reachability suite. Text-only. NOT recommended as a chat model: measured empty-text turns and tool-JSON leaking into the visible answer (model behaviour), plus weak recall when summarizing.',
       },
       {
         id: 'accounts/fireworks/models/kimi-k2p6',
