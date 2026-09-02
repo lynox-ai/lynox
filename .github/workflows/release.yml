@@ -10,6 +10,11 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Scoped for the same reason as ci.yml's `test`: this job downloads a
+    # third-party executable, runs it over the checkout, and hands the install
+    # action a token.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

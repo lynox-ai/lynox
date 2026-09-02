@@ -23,25 +23,62 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 
 const WORKFLOW_DIR = fileURLToPath(new URL('../.github/workflows/', import.meta.url));
+const ACTION_DIR = fileURLToPath(new URL('../.github/actions/', import.meta.url));
 const ACTION = fileURLToPath(new URL('../.github/actions/install-osv-scanner/action.yml', import.meta.url));
 const ACTION_REF = './.github/actions/install-osv-scanner';
 
-type Step = { name?: string; run?: string; with?: Record<string, string>; uses?: string };
+type Step = {
+  name?: string;
+  run?: string;
+  with?: Record<string, string>;
+  uses?: string;
+  'continue-on-error'?: boolean | string;
+  if?: string;
+};
+type Job = { where: string; steps: Step[]; usesWorkflow: boolean };
 
-function stepsOf(yamlText: string): Step[] {
-  const doc = parseYaml(yamlText) as { jobs?: Record<string, { steps?: Step[] }>; runs?: { steps?: Step[] } };
-  const fromJobs = Object.values(doc.jobs ?? {}).flatMap((j) => j.steps ?? []);
-  return [...fromJobs, ...(doc.runs?.steps ?? [])];
+/**
+ * Every job of every workflow, kept SEPARATE.
+ *
+ * Flattening a whole file into one step list was the first version, and it
+ * proved the wrong thing: with the install action in one job and the scan in
+ * another, "this workflow installs it and scans with it" is true of the file
+ * and false of anything that runs. A job that delegates to a reusable workflow
+ * contributes no steps, so it is flagged rather than counted as empty.
+ */
+function jobsOf(file: string, yamlText: string): Job[] {
+  const doc = parseYaml(yamlText) as { jobs?: Record<string, { steps?: Step[]; uses?: string }> };
+  return Object.entries(doc.jobs ?? {}).map(([name, j]) => ({
+    where: `${file}:${name}`,
+    steps: j.steps ?? [],
+    usesWorkflow: typeof j.uses === 'string',
+  }));
 }
 
-function workflows(): { file: string; text: string; steps: Step[] }[] {
-  return readdirSync(WORKFLOW_DIR)
+/** Workflows AND composite actions — a second action could install it by hand too. */
+function allJobs(): Job[] {
+  const wf = readdirSync(WORKFLOW_DIR)
     .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
-    .map((f) => {
-      const text = readFileSync(WORKFLOW_DIR + f, 'utf8');
-      return { file: f, text, steps: stepsOf(text) };
+    .flatMap((f) => jobsOf(f, readFileSync(WORKFLOW_DIR + f, 'utf8')));
+  const actions = readdirSync(ACTION_DIR, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => {
+      const file = `${ACTION_DIR}${d.name}/action.yml`;
+      const doc = parseYaml(readFileSync(file, 'utf8')) as { runs?: { steps?: Step[] } };
+      return { where: `actions/${d.name}`, steps: doc.runs?.steps ?? [], usesWorkflow: false };
     });
+  return [...wf, ...actions];
 }
+
+/** The jobs that MUST carry the gate. Named, so deleting one is not "no match". */
+const REQUIRED_GATE_JOBS = ['ci.yml:test', 'release.yml:test', 'dep-scan-daily.yml:dep-scan'];
+/** The one place allowed to fetch the binary, and the reason the rest may not. */
+const SANCTIONED_INSTALLER = 'actions/install-osv-scanner';
+
+/** Anything that runs the binary or installs it, wherever it lives. */
+const INSTALLS = /(curl|wget|gh\s+release\s+download)[^|]*osv-scanner/;
+/** Exit codes discarded by shell, in the three spellings that all mean the same. */
+const SWALLOWS = /\|\|\s*(true|:|exit\s+0)\s*$/;
 
 /** Drop a trailing `#` comment, respecting quotes so a `#` inside a string survives. */
 function stripComment(line: string): string {
@@ -98,10 +135,14 @@ describe('the parsing layer these assertions read through', () => {
 
 describe('the install action, which is the only place the pin lives', () => {
   it('downloads a pinned version, never `releases/latest`', () => {
-    const curls = commands(actionStep().run).filter((l) => /\bcurl\b/.test(l));
-    expect(curls.length).toBeGreaterThan(0);
-    for (const c of curls) expect(c).not.toContain('releases/latest');
-    expect(curls.some((c) => c.includes('releases/download/v${OSV_SCANNER_VERSION}'))).toBe(true);
+    const lines = commands(actionStep().run);
+    for (const l of lines) expect(l, 'a floating download').not.toContain('releases/latest');
+    // Keyed on the ARTEFACT, not on `curl`: swapping in `wget` for the binary
+    // left the provenance `curl` behind to satisfy a tool-shaped assertion
+    // while the executable itself came down unpinned.
+    const binary = lines.filter((l) => l.includes('osv-scanner_linux_amd64'));
+    expect(binary, 'nothing in the action fetches the binary').toHaveLength(1);
+    expect(binary[0]).toContain('releases/download/v${OSV_SCANNER_VERSION}');
     expect(actionInputs().version?.default).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
@@ -148,61 +189,113 @@ describe('the install action, which is the only place the pin lives', () => {
   });
 });
 
-describe('every workflow that touches osv-scanner', () => {
-  const mentions = () => workflows().filter((w) => w.text.includes('osv-scanner'));
+describe('every job that touches osv-scanner', () => {
+  // Through the stripping layer, like everything else here. The first version
+  // of these two matched the RAW run text, so a comment saying "this used to
+  // curl osv-scanner_linux_amd64" made a correct workflow look like an
+  // unsanctioned installer — the very failure the layer exists to prevent,
+  // reintroduced in the code that documents it.
+  const touchesOsv = (s: Step): boolean =>
+    commands(s.run).some((l) => INSTALLS.test(l) || /osv-scanner|osv-report-gate/.test(l)) || s.uses === ACTION_REF;
 
-  it('is more than one, so this sweep is doing something', () => {
-    expect(mentions().length).toBeGreaterThan(1);
+  const touching = () =>
+    allJobs()
+      .filter((j) => j.where !== SANCTIONED_INSTALLER)
+      .filter((j) => j.steps.some(touchesOsv));
+
+  it('leaves exactly one place that fetches the binary', () => {
+    const fetchers = allJobs().filter((j) => j.steps.some((s) => commands(s.run).some((l) => INSTALLS.test(l))));
+    expect(fetchers.map((j) => j.where)).toEqual([SANCTIONED_INSTALLER]);
+  });
+
+  it('is exactly the jobs that are supposed to have it', () => {
+    // Anchored to NAMES, not to a filter over the same text the assertions
+    // read. Derived membership was the first version and it was worthless:
+    // deleting the entire gate from ci.yml's required `test` job dropped that
+    // job out of the set, and every remaining assertion passed on the two
+    // survivors. A guard that protects the SHAPE of a gate but not its
+    // EXISTENCE is the more dangerous half missing.
+    expect(touching().map((j) => j.where).sort()).toEqual([...REQUIRED_GATE_JOBS].sort());
+  });
+
+  it('has no job that delegates the gate to a reusable workflow this cannot see', () => {
+    for (const j of touching()) expect(j.usesWorkflow, `${j.where} is a workflow call`).toBe(false);
   });
 
   it('installs it only through the shared action', () => {
-    for (const w of mentions()) {
-      for (const s of w.steps) {
+    for (const j of touching()) {
+      for (const s of j.steps) {
         for (const line of commands(s.run)) {
-          expect(line, `${w.file}: installs osv-scanner outside the shared action`)
-            .not.toMatch(/curl[^|]*osv-scanner_linux/);
+          expect(line, `${j.where}: installs osv-scanner outside the shared action`).not.toMatch(INSTALLS);
         }
       }
-      expect(w.steps.some((s) => s.uses === ACTION_REF), `${w.file}: mentions osv-scanner but never installs it`).toBe(true);
+      expect(j.steps.some((s) => s.uses === ACTION_REF), `${j.where}: never installs it`).toBe(true);
     }
   });
 
-  it('classifies with the shared gate script and never with an inline jq severity rule', () => {
-    for (const w of mentions()) {
-      const all = w.steps.flatMap((s) => commands(s.run));
-      expect(all.some((l) => l.includes('scripts/osv-report-gate.mjs')), `${w.file}: no gate`).toBe(true);
+  it('classifies with the shared gate script and never with an inline severity rule', () => {
+    for (const j of touching()) {
+      const all = j.steps.flatMap((s) => commands(s.run));
+      expect(all.some((l) => l.includes('scripts/osv-report-gate.mjs')), `${j.where}: no gate`).toBe(true);
       for (const line of all) {
-        expect(line, `${w.file}: an inline severity rule beside the shared one`)
-          .not.toContain('database_specific.severity');
+        // `database_specific` alone, because `jq '.database_specific | .severity'`
+        // is the same rule written to slip past a dotted-path match.
+        expect(line, `${j.where}: an inline severity rule beside the shared one`).not.toContain('database_specific');
       }
     }
   });
 
   it('hands the captured exit code to the gate, from the file the scan wrote', () => {
-    for (const w of mentions()) {
-      const lines = w.steps.flatMap((s) => commands(s.run));
+    for (const j of touching()) {
+      const lines = j.steps.flatMap((s) => commands(s.run));
       const scan = lines.find((l) => /osv-scanner scan source.*--output-file=/.test(l));
-      expect(scan, `${w.file}: no scan writing a report`).toBeDefined();
-      const out = /--output-file=(\S+)/.exec(scan as string)?.[1];
+      expect(scan, `${j.where}: no scan writing a report`).toBeDefined();
+      const out = /--output-file=(\S+)/.exec(scan as string)?.[1] as string;
 
       const capture = lines.findIndex((l) => /^OSV_RC=\$\?$/.test(l));
-      expect(capture, `${w.file}: the exit code is never captured`).toBeGreaterThan(-1);
-      expect(lines[capture - 1], `${w.file}: OSV_RC captures the wrong command`).toBe(scan);
+      expect(capture, `${j.where}: the exit code is never captured`).toBeGreaterThan(-1);
+      expect(lines[capture - 1], `${j.where}: OSV_RC captures the wrong command`).toBe(scan);
 
       const gate = lines.find((l) => l.includes('scripts/osv-report-gate.mjs')) as string;
       // `--rc 0` would satisfy a bare `toContain('--rc')` while re-introducing
       // exactly the discarded-exit-code defect this replaced.
-      expect(gate, `${w.file}: the gate is not given the captured code`).toMatch(/--rc\s+"\$\{OSV_RC\}"/);
-      expect(gate, `${w.file}: the gate reads a different file than the scan wrote`).toContain(`--report ${out}`);
+      expect(gate, `${j.where}: the gate is not given the captured code`).toMatch(/--rc\s+"\$\{OSV_RC\}"/);
+      // Anchored: `--report /tmp/osv.json.stale` starts with `--report /tmp/osv.json`.
+      expect(gate, `${j.where}: the gate reads a different file than the scan wrote`)
+        .toMatch(new RegExp(`--report ${out.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`));
     }
   });
 
-  it('swallows no exit code on an osv-scanner or gate line', () => {
-    for (const w of mentions()) {
-      for (const s of w.steps) {
+  it('makes the watch that only READS the verdict refuse a verdict it cannot trust', () => {
+    // dep-scan-daily reports instead of failing, so it reads counts rather than
+    // the exit code — and a refusal has the same counts as a clean tree. Its
+    // first version checked that the count keys were present, which they always
+    // are, and would have closed its tracking issue with "no HIGH/CRITICAL"
+    // after a scan that never completed.
+    const watch = allJobs().find((j) => j.where === 'dep-scan-daily.yml:dep-scan');
+    expect(watch, 'the watch job was renamed; this assertion is now blind').toBeDefined();
+    const lines = (watch as Job).steps.flatMap((s) => commands(s.run));
+    const consumesCounts = lines.some((l) => /jq .*\.blocking/.test(l));
+    expect(consumesCounts, 'the watch no longer reads the verdict; re-aim this test').toBe(true);
+    expect(
+      lines.some((l) => /jq -e.*\.errors/.test(l)),
+      'the watch reads the counts but never checks whether the gate could judge at all',
+    ).toBe(true);
+  });
+
+  it('lets no osv step be defanged — by shell, by continue-on-error, or by a condition', () => {
+    for (const j of touching()) {
+      for (const s of j.steps) {
+        const osv = s.uses === ACTION_REF || commands(s.run).some((l) => /osv-scanner|osv-report-gate/.test(l));
+        if (!osv) continue;
+        // `continue-on-error: true` is GitHub's own spelling of `|| true`, and
+        // an `if:` that is never true is a third. All of them turn a required
+        // check into a decoration without touching a single shell line.
+        expect(s['continue-on-error'], `${j.where}: continue-on-error on an osv step`).toBeUndefined();
+        expect(s.if, `${j.where}: a condition on an osv step`).toBeUndefined();
         for (const line of commands(s.run)) {
           if (!/osv-scanner|osv-report-gate/.test(line)) continue;
-          expect(line, `${w.file}: \`|| true\` on ${line.slice(0, 40)}`).not.toMatch(/\|\|\s*true\s*$/);
+          expect(line, `${j.where}: a discarded exit code on ${line.slice(0, 40)}`).not.toMatch(SWALLOWS);
         }
       }
     }

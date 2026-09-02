@@ -280,6 +280,21 @@ describe('the contract CI actually depends on', () => {
     }
   });
 
+  it('makes a REFUSAL distinguishable from a clean run in the json verdict', () => {
+    // The daily watch reads counts, not an exit code. A refused verdict carries
+    // `blocking: []` and `below: []` exactly like a clean tree, so a consumer
+    // checking only that those keys EXIST reads "nothing found" and closes its
+    // tracking issue. It happened in this PR. `errors` is the field that
+    // separates the two, and this pins that it is populated.
+    const r = run({ results: null }, '0', ['--format=json']);
+    const v = JSON.parse(r.stdout);
+    expect(v.blocking).toEqual([]);
+    expect(v.below).toEqual([]);
+    expect(v.ok).toBe(false);
+    expect(v.errors.length).toBeGreaterThan(0);
+    expect(r.status).toBe(1);
+  });
+
   it('refuses an option it does not understand rather than ignoring it', () => {
     const r = run({ results: [] }, '0', ['--formt=json']);
     expect(r.status).toBe(1);

@@ -14,10 +14,13 @@ name: dep-scan-daily
 # deduplicated tracking issue (found by the `dep-scan` label, never by re-opening a
 # fresh issue each day). The issue auto-closes when the count returns to zero.
 #
-# The install + scan command are mirrored verbatim from ci.yml's `test` job so the
-# two never drift. osv-scanner reads pnpm-lock.yaml natively, so no node/pnpm setup
-# is required here (ci.yml only installs pnpm because that job later runs
-# lint/typecheck/vitest).
+# The install and the classification are SHARED with ci.yml rather than copied:
+# the composite action installs the binary, scripts/osv-report-gate.mjs decides
+# what counts. This paragraph used to say the two were "mirrored verbatim … so
+# they never drift", and nothing ever compared them — they had drifted, and this
+# job carried its own severity rule that could not see a malicious-package entry.
+# It needs node for the gate script (pnpm is still not needed: osv-scanner reads
+# pnpm-lock.yaml natively and nothing here runs the suite).
 
 on:
   schedule:
@@ -40,6 +43,8 @@ jobs:
       # Scheduled runs check out the default branch (main) by default.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: '22' }
       - uses: ./.github/actions/install-osv-scanner
         with:
           token: ${{ github.token }}
@@ -71,11 +76,17 @@ jobs:
           node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}" --format=json > /tmp/osv-verdict.json
           set -e
 
-          # What must NOT be survivable is the gate failing to produce a verdict
-          # at all — an unreadable report, a scan that never completed. That path
-          # writes no JSON, so this line fails the job under `set -e` instead of
-          # letting a silent zero close the tracking issue.
-          jq -e 'has("blocking") and has("below")' /tmp/osv-verdict.json > /dev/null
+          # What must NOT be survivable is the gate declining to judge — an
+          # unreadable report, a drifted envelope, a scan that never completed.
+          # The first version of this line checked that the two count keys were
+          # PRESENT, which they always are: a refusal emits
+          # `{"ok":false,"blocking":[],"below":[],"errors":[…]}`, so the check
+          # passed, HIGH came out 0, and the branch below closed the tracking
+          # issue with "no HIGH/CRITICAL as of <today>". A watch that reports
+          # all-clear because it could not look is worse than one that is down.
+          # `.errors` is therefore what decides, and an absent key counts as a
+          # refusal rather than as silence.
+          jq -e '(.errors // ["no verdict"]) | length == 0' /tmp/osv-verdict.json > /dev/null
 
           HIGH=$(jq '.blocking | length' /tmp/osv-verdict.json)
           TOTAL=$(jq '(.blocking | length) + (.below | length)' /tmp/osv-verdict.json)

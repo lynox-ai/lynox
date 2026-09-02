@@ -232,7 +232,7 @@ describe('positioning-guard', () => {
  */
 type GateEntry =
   | { kind: 'covered' }
-  | { kind: 'exempt'; reason: string; expectStrippedExit: number }
+  | { kind: 'exempt'; reason: string; expectStrippedExit: number; expectStrippedStderr?: RegExp }
   | { kind: 'external'; reason: string };
 
 const GATES: Readonly<Record<string, GateEntry>> = {
@@ -265,6 +265,10 @@ const GATES: Readonly<Record<string, GateEntry>> = {
     reason:
       'judges a report handed to it rather than a tree it enumerates, so it cannot be starved by an empty directory — and it refuses a call with no report instead of reporting clean',
     expectStrippedExit: 1,
+    // The exit code alone proves nothing here: a syntax error, a bad import and
+    // a deliberate refusal all exit 1. The sentence is what separates "refused"
+    // from "crashed", which is the whole claim the exemption makes.
+    expectStrippedStderr: /--report <path> is required/,
   },
   // Not our scripts, so there is nothing here to harden — but they still have to
   // be ACCOUNTED for, otherwise "every gate has a line" is only true of the ones
@@ -381,6 +385,10 @@ describe('gate coverage', () => {
         const res = runFull(spec!.cmd, spec!.args, d);
         expect(res.status, `exemption reason claims exit ${entry.expectStrippedExit}: ${entry.reason}`)
           .toBe(entry.expectStrippedExit);
+        if (entry.expectStrippedStderr) {
+          expect(`${res.stdout}${res.stderr}`, `${name} must SAY why it refused, not merely exit`)
+            .toMatch(entry.expectStrippedStderr);
+        }
       } finally {
         rmSync(d, { recursive: true, force: true });
       }

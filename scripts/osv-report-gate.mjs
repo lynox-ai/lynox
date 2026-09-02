@@ -201,7 +201,7 @@ function parseArgs(argv) {
     const value = eq === -1 ? argv[i + 1] : token.slice(eq + 1);
     if (key === 'report') out.report = value;
     else if (key === 'rc') out.rc = Number.parseInt(value ?? '', 10);
-    else if (key === 'format') out.format = value;
+    else if (key === 'format') out.format = value ?? '';
     else out.unknown.push(token);
   }
   return out;
@@ -217,6 +217,8 @@ export function main(argv) {
     console.error('osv-report-gate: --report <path> is required');
     return 1;
   }
+  // `--format` as the last token leaves `value` undefined, which would read as
+  // "no format asked for" and quietly print prose to a caller expecting JSON.
   if (format !== undefined && format !== 'json') {
     console.error(`osv-report-gate: --format takes "json", not ${JSON.stringify(format)}`);
     return 1;
