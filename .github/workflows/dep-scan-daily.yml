@@ -90,11 +90,13 @@ jobs:
           # "the gate produced one and declined to judge". Replacing the first
           # with the second was the second version of this line, and it let a
           # file with no counts in it through.
-          # Surface the reason BEFORE the check that trips on it. Without this
-          # the log shows a bare `jq` failure, and a watch whose whole job is
-          # reporting should not fail mutely — in this one combination (a gate
-          # that refused AND real findings) it fails where main would have filed
-          # an issue, so the log has to say which.
+          # Print the gate's own reasons before the check below trips on them.
+          # It covers ONE of that check's three conditions — a verdict with a
+          # non-empty `errors` — which is the case that actually occurs; a file
+          # that is not a verdict at all still fails bare, one line down. The
+          # line exists because in one combination (a gate that refused AND real
+          # findings) this job dies where main would have filed an issue, and a
+          # watch whose whole purpose is reporting should not do that mutely.
           jq -r '.errors[]? | "::error::osv watch: " + .' /tmp/osv-verdict.json
           jq -e 'has("blocking") and has("below") and ((.errors // ["no verdict"]) | length == 0)' /tmp/osv-verdict.json > /dev/null
 

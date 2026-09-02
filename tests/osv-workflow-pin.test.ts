@@ -652,7 +652,7 @@ describe('the surroundings of the pinned shell', () => {
       // way. Say which, and say it here.
       expect(
         pinnedJobOf(where),
-        `${where} differs from the reviewed job. If you changed it deliberately, update PINNED_JOB in this file in the SAME commit and say what moved in the pull request. If you did not, something edited the dependency gate.`,
+        `${where} differs from the reviewed job. If you changed it deliberately, update PINNED_JOB in this file in the SAME commit and say what moved in the pull request. If you did not, something edited this job's setup or its dependency gate — the pin covers the checkout, the toolchain and the scan alike.`,
       ).toEqual(PINNED_JOB[where]);
     });
   }
