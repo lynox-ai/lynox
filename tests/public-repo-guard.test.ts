@@ -568,6 +568,46 @@ describe('public-repo-guard — private-name class', () => {
     expect(head).not.toBe(base);
   });
 
+  it('is not fooled by a refs/replace entry standing in front of the commit', () => {
+    // `git replace` swaps a sanitised twin in front of the real object for every
+    // read — including `cat-file` — and it is LOCAL state that is not pushed by
+    // default, so the twin stays on the machine while the real object goes to the
+    // remote. It shrinks the range walk too: measured, 2 commits reported as 1,
+    // with the counter that exists to make an unwalked range visible reporting
+    // the smaller number without complaint. `--no-replace-objects` on both reads
+    // is what this case pins.
+    const base = commit('baseline');
+    const head = commit(`Fix for ${FICTIONAL_NAME}`);
+    const twin = commit('A perfectly ordinary change');
+    execFileSync('git', ['replace', '-f', head, twin], { cwd: dir, env: GIT_ENV });
+    expect(
+      execFileSync('git', ['cat-file', 'commit', head], { cwd: dir, env: GIT_ENV, encoding: 'utf8' }),
+      'the fixture must actually be replaced, or this case proves nothing',
+    ).toContain('A perfectly ordinary change');
+    const r = runMeta(base, head);
+    expect(r.code, 'a replace ref must not hide a name').toBe(1);
+    expect(r.out).toMatch(/private name in the message of commit/);
+
+    // The RANGE is the second half and needs a different shape: `rev-list` prints
+    // the ORIGINAL sha even when it traverses a replacement, so replacing the tip
+    // changes nothing the message read can notice. What it can change is WHICH
+    // commits are listed — so put the name on a middle commit and give the tip a
+    // twin whose parent is the base. The middle commit then drops out of the walk
+    // entirely and is never read at all, and the counter reports the smaller
+    // number without complaint.
+    const b2 = commit('baseline two');
+    const middle = commit(`Fix for ${FICTIONAL_NAME} again`);
+    const tip = commit('tip');
+    const shortTip = execFileSync('git',
+      ['commit-tree', `${b2}^{tree}`, '-p', b2, '-m', 'A perfectly ordinary change'],
+      { cwd: dir, env: GIT_ENV, encoding: 'utf8' }).trim();
+    execFileSync('git', ['replace', '-f', tip, shortTip], { cwd: dir, env: GIT_ENV });
+    expect(middle).not.toBe(tip);
+    const r2 = runMeta(b2, tip);
+    expect(r2.code, 'a shortened ancestry must not drop a commit out of the walk').toBe(1);
+    expect(r2.out).toMatch(/private name in the message of commit/);
+  });
+
   it('reads the raw commit object, so a lying encoding header cannot hide a name', () => {
     // `i18n.commitEncoding` writes an `encoding` header into the OBJECT while the
     // bytes stay whatever the terminal produced. Every rendering read
