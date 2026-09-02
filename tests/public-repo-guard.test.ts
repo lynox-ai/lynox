@@ -447,14 +447,18 @@ describe('public-repo-guard — private-name class', () => {
     execFileSync('git', args, {
       cwd: dir,
       env: {
-        ...process.env,
+        // GIT_ENV, not process.env: without the pins a developer's global
+        // core.hooksPath runs foreign hooks on these fixture commits, and a
+        // global i18n setting re-encodes what git hands back. Measured: 21 of
+        // 55 cases fail under a hostile global config without this.
+        ...GIT_ENV,
         GIT_AUTHOR_NAME: 't',
         GIT_AUTHOR_EMAIL: 't@t.t',
         GIT_COMMITTER_NAME: 't',
         GIT_COMMITTER_EMAIL: 't@t.t',
       },
     });
-    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, env: GIT_ENV, encoding: 'utf8' }).trim();
   }
 
   function runMeta(base: string, head: string, env: Record<string, string> = {}): Run {
@@ -496,14 +500,14 @@ describe('public-repo-guard — private-name class', () => {
       cwd: dir,
       input: `Fix for ${FICTIONAL_NAME}\n\n${'x'.repeat(2_000_000)}\n`,
       env: {
-        ...process.env,
+        ...GIT_ENV,
         GIT_AUTHOR_NAME: 't',
         GIT_AUTHOR_EMAIL: 't@t.t',
         GIT_COMMITTER_NAME: 't',
         GIT_COMMITTER_EMAIL: 't@t.t',
       },
     });
-    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, env: GIT_ENV, encoding: 'utf8' }).trim();
 
     expect(runMeta(base, head).code).toBe(1);
   });
@@ -523,6 +527,26 @@ describe('public-repo-guard — private-name class', () => {
     const head = commit('A clean follow-up');
 
     expect(runMeta(base, head).code).toBe(0);
+  });
+
+  it('is not blinded by a global i18n.logOutputEncoding', () => {
+    // Found by a refuter, reproduced before fixing, and it is a PRODUCTION
+    // fail-open rather than a test-only one: this class runs at pre-push with the
+    // developer's real ~/.gitconfig. With `i18n.logOutputEncoding = UTF-16` set
+    // there, `git show --format=%B` hands back UTF-16, grep matches nothing, and
+    // the guard printed `clean ✓ (1 commit(s) scanned)` and exit 0 on a commit
+    // whose subject plainly carried the name — the counter added to make an
+    // unwalked range visible instead certifying a walk that could not match.
+    // ISO-8859-1 does the same to an umlaut. The fix pins the encoding on the
+    // `git show`, the way guard-file-list.sh already pins core.quotePath on
+    // `ls-files`; this case is what keeps it pinned.
+    const base = commit('baseline');
+    const head = commit(`Fix for ${FICTIONAL_NAME}`);
+    const hostile = join(dir, 'hostile.gitconfig');
+    writeFileSync(hostile, '[i18n]\n\tlogOutputEncoding = UTF-16\n');
+    const r = runMeta(base, head, { GIT_CONFIG_GLOBAL: hostile });
+    expect(r.code, 'a global output encoding must not blind the scan').toBe(1);
+    expect(r.out).not.toContain(FICTIONAL_NAME);
   });
 
   it('matches case-insensitively — prose capitalises a company name', () => {
@@ -613,16 +637,16 @@ describe('public-repo-guard — private-name class', () => {
 describe('public-repo-guard — private-name pattern source and preflight', () => {
   function commitNamed(): { base: string; head: string } {
     const env = {
-      ...process.env,
+      ...GIT_ENV,
       GIT_AUTHOR_NAME: 't',
       GIT_AUTHOR_EMAIL: 't@t.t',
       GIT_COMMITTER_NAME: 't',
       GIT_COMMITTER_EMAIL: 't@t.t',
     };
     execFileSync('git', ['commit', '-q', '--allow-empty', '-m', 'base'], { cwd: dir, env });
-    const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    const base = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, env: GIT_ENV, encoding: 'utf8' }).trim();
     execFileSync('git', ['commit', '-q', '--allow-empty', '-m', `Fix for ${FICTIONAL_NAME}`], { cwd: dir, env });
-    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, env: GIT_ENV, encoding: 'utf8' }).trim();
     return { base, head };
   }
 

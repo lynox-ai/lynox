@@ -51,8 +51,11 @@ pre-push:
       # missing argument and exits 2, and the push is BLOCKED for a reason its
       # message never mentions. Falling back to HEAD yields an empty range, which
       # the guard reports as "NO commits" and lets through: it says it checked
-      # nothing rather than blocking, which is the right trade for a hook whose
-      # CI twin is the actual gate.
+      # nothing rather than blocking. That is the deliberate trade, and it is NOT
+      # softened by a CI twin — this class has none (see the comment above, and
+      # CLAUDE.md). It is chosen because a hook nobody can push through is how
+      # people learn --no-verify, and because the state it lets through announces
+      # itself in the output instead of passing as a clean scan.
       run: bash scripts/public-repo-guard.sh check-meta "$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)" HEAD
       skip:
         - merge

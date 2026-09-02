@@ -255,11 +255,13 @@ REF_OPENER="\\[\\[${REF_SLUG_BODY}\$"
 #
 # NOT covered here, and NOT covered by the private-name class above either: the
 # OPERATOR's own name used as a deployment identifier ("canary <name>", "<name>
-# prod"). The header of this class used to estimate ~16 such mentions; measured
-# against the tree on 2026-08-10 it is 32 in that phrasing, out of 251 mentions of
-# the name overall. Adding the pattern would paint the guard permanently red,
-# which teaches bypassing rather than fixing, so that cleanup is tracked
-# separately. The name is legitimately public in its own right (LICENSE,
+# prod"). It is spread over enough of the tree that adding the pattern would paint
+# the guard permanently red. A count used to stand here; it was dated 2026-08-10
+# and had already drifted by the time this branch reached main, and nothing keeps
+# it fresh — so the argument is stated without it. Re-derive it before acting on
+# this note rather than trusting a number in a comment. A permanently red guard
+# teaches bypassing rather than fixing, so that cleanup is tracked separately.
+# The name is legitimately public in its own right (LICENSE,
 # TRADEMARK.md, README, package.json) — what does not belong here is a customer's,
 # and that is what the class above covers.
 SOFT='engine\.lynox\.cloud|control\.lynox\.cloud'
@@ -360,9 +362,18 @@ if $mode_meta; then
       # an unwalked range visible, attesting a walk that found nothing because
       # it was killed. Small messages were unaffected, which is what makes this
       # the kind of bug that ships.
-      msg="$(git show -s --format='%B' "$sha")"
+      # `-c i18n.logOutputEncoding=UTF-8`, for the same reason guard-file-list.sh
+      # pins core.quotePath on `ls-files`: this runs at pre-push with the
+      # DEVELOPER's ~/.gitconfig, and that file can re-encode git's output.
+      # Measured: with `i18n.logOutputEncoding = UTF-16` set globally, a commit
+      # whose subject plainly carries a name produced
+      # `clean ✓ (1 commit(s) scanned)` and exit 0 — the counter added to make an
+      # unwalked range visible instead attesting a walk that could not match.
+      # ISO-8859-1 does the same to an umlaut. A guard that a config line can
+      # blind is worse than none on the one surface that cannot be repaired.
+      msg="$(git -c i18n.logOutputEncoding=UTF-8 show -s --format='%B' "$sha")"
       if grep -qEi "$PRIVATE_NAMES_RE" <<<"$msg"; then
-        echo "❌ private name in the message of commit $(git show -s --format='%h' "$sha")"
+        echo "❌ private name in the message of commit $(git -c i18n.logOutputEncoding=UTF-8 show -s --format='%h' "$sha")"
         meta_hits=$((meta_hits + 1))
       fi
     done

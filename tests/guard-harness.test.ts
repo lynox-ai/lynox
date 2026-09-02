@@ -267,7 +267,7 @@ const GATES: Readonly<Record<string, GateEntry>> = {
   'public-repo-guard-meta': {
     kind: 'exempt',
     reason:
-      'takes its commit range as arguments and enumerates no tree, and refuses a call that does not supply both — same shape as no-ai-attribution below',
+      'takes its commit range as arguments and enumerates no tree, and refuses a call that does not supply both — same shape as no-ai-attribution below. NOT exempt from exiting 0 after checking nothing: with no pattern configured it does exactly that, deliberately, and the comment above says so',
     expectStrippedExit: 2,
   },
   'no-ai-attribution': {
