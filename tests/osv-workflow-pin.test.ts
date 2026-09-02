@@ -35,7 +35,13 @@ type Step = {
   'continue-on-error'?: boolean | string;
   if?: string;
 };
-type Job = { where: string; steps: Step[]; usesWorkflow: boolean };
+type Job = {
+  where: string;
+  steps: Step[];
+  usesWorkflow: boolean;
+  if?: string;
+  continueOnError?: boolean | string;
+};
 
 /**
  * Every job of every workflow, kept SEPARATE.
@@ -47,11 +53,18 @@ type Job = { where: string; steps: Step[]; usesWorkflow: boolean };
  * contributes no steps, so it is flagged rather than counted as empty.
  */
 function jobsOf(file: string, yamlText: string): Job[] {
-  const doc = parseYaml(yamlText) as { jobs?: Record<string, { steps?: Step[]; uses?: string }> };
+  const doc = parseYaml(yamlText) as {
+    jobs?: Record<string, { steps?: Step[]; uses?: string; if?: string; 'continue-on-error'?: boolean | string }>;
+  };
   return Object.entries(doc.jobs ?? {}).map(([name, j]) => ({
     where: `${file}:${name}`,
     steps: j.steps ?? [],
     usesWorkflow: typeof j.uses === 'string',
+    // Read at JOB level too, because `if:` and `continue-on-error:` exist at
+    // both, and the step-level check alone passed on a required gate switched
+    // off one level up.
+    if: j.if,
+    continueOnError: j['continue-on-error'],
   }));
 }
 
@@ -65,7 +78,7 @@ function allJobs(): Job[] {
     .map((d) => {
       const file = `${ACTION_DIR}${d.name}/action.yml`;
       const doc = parseYaml(readFileSync(file, 'utf8')) as { runs?: { steps?: Step[] } };
-      return { where: `actions/${d.name}`, steps: doc.runs?.steps ?? [], usesWorkflow: false };
+      return { where: `actions/${d.name}`, steps: doc.runs?.steps ?? [], usesWorkflow: false } as Job;
     });
   return [...wf, ...actions];
 }
@@ -77,8 +90,15 @@ const SANCTIONED_INSTALLER = 'actions/install-osv-scanner';
 
 /** Anything that runs the binary or installs it, wherever it lives. */
 const INSTALLS = /(curl|wget|gh\s+release\s+download)[^|]*osv-scanner/;
-/** Exit codes discarded by shell, in the three spellings that all mean the same. */
-const SWALLOWS = /\|\|\s*(true|:|exit\s+0)\s*$/;
+/**
+ * Exit codes discarded by shell, in the spellings that all mean the same.
+ *
+ * NOT anchored to end-of-line, and that is the point: `gh attestation verify x
+ * || true \` with the flags on continuation lines is a working defang whose
+ * `|| true` sits in the middle of the line. An end-anchored version of this
+ * survived exactly that mutation.
+ */
+const SWALLOWS = /\|\|\s*(true|:|exit\s+0)\b/;
 
 /** Drop a trailing `#` comment, respecting quotes so a `#` inside a string survives. */
 function stripComment(line: string): string {
@@ -190,11 +210,12 @@ describe('the install action, which is the only place the pin lives', () => {
 });
 
 describe('every job that touches osv-scanner', () => {
-  // Through the stripping layer, like everything else here. The first version
-  // of these two matched the RAW run text, so a comment saying "this used to
-  // curl osv-scanner_linux_amd64" made a correct workflow look like an
-  // unsanctioned installer — the very failure the layer exists to prevent,
-  // reintroduced in the code that documents it.
+  // Through the stripping layer, like everything else here. Both of these two
+  // helpers were written in the same change that added this comment, and both
+  // first matched the RAW run text: a comment saying "this used to curl
+  // osv-scanner_linux_amd64" then made a correct workflow look like an
+  // unsanctioned installer. The failure the layer exists to prevent, in the
+  // code documenting it. A control mutation that must stay green pins it.
   const touchesOsv = (s: Step): boolean =>
     commands(s.run).some((l) => INSTALLS.test(l) || /osv-scanner|osv-report-gate/.test(l)) || s.uses === ACTION_REF;
 
@@ -210,11 +231,13 @@ describe('every job that touches osv-scanner', () => {
 
   it('is exactly the jobs that are supposed to have it', () => {
     // Anchored to NAMES, not to a filter over the same text the assertions
-    // read. Derived membership was the first version and it was worthless:
-    // deleting the entire gate from ci.yml's required `test` job dropped that
-    // job out of the set, and every remaining assertion passed on the two
-    // survivors. A guard that protects the SHAPE of a gate but not its
-    // EXISTENCE is the more dangerous half missing.
+    // read. Measured on the real file: deleting the gate block from ci.yml's
+    // required `test` job left ZERO occurrences of `osv-scanner` in that file,
+    // so the file left the derived set and the remaining assertions passed on
+    // the two survivors — 13/13 green with the gate gone. A guard that protects
+    // the SHAPE of a gate but not its EXISTENCE is the more dangerous half
+    // missing. (Deleting only the steps and keeping the prose does NOT
+    // reproduce it; the comment is what keeps the file in a text-derived set.)
     expect(touching().map((j) => j.where).sort()).toEqual([...REQUIRED_GATE_JOBS].sort());
   });
 
@@ -277,24 +300,40 @@ describe('every job that touches osv-scanner', () => {
     const lines = (watch as Job).steps.flatMap((s) => commands(s.run));
     const consumesCounts = lines.some((l) => /jq .*\.blocking/.test(l));
     expect(consumesCounts, 'the watch no longer reads the verdict; re-aim this test').toBe(true);
+    // Pinned to the COMPARISON, because `jq -e '.errors | length >= 0'` reads
+    // the field and always succeeds. This is a source-shaped guard and cannot
+    // be more than that from here; what proves the semantics is the gate-side
+    // test that a refusal carries a non-empty `errors`.
     expect(
-      lines.some((l) => /jq -e.*\.errors/.test(l)),
-      'the watch reads the counts but never checks whether the gate could judge at all',
+      lines.some((l) => /jq -e.*\.errors.*length\s*==\s*0/.test(l)),
+      'the watch reads the counts but never requires the error list to be EMPTY',
+    ).toBe(true);
+    expect(
+      lines.some((l) => /jq -e[^|]*has\("blocking"\)/.test(l)),
+      'the watch no longer checks that the file is a verdict at all',
     ).toBe(true);
   });
 
   it('lets no osv step be defanged — by shell, by continue-on-error, or by a condition', () => {
-    for (const j of touching()) {
+    // Over allJobs(), NOT over touching(): touching() excludes the sanctioned
+    // installer, and the one place that checksums and attests the binary was
+    // therefore the one place allowed to write `sha256sum -c - || true`.
+    for (const j of allJobs()) {
+      const osvJob = j.where === SANCTIONED_INSTALLER || touching().some((x) => x.where === j.where);
+      if (!osvJob) continue;
+      // `continue-on-error: true` is GitHub's own spelling of `|| true`, an
+      // `if:` that is never true is a third, and BOTH exist at job level as
+      // well as step level — switching the whole job off there left every
+      // step-level assertion green.
+      expect(j.continueOnError, `${j.where}: continue-on-error on the JOB`).toBeUndefined();
+      expect(j.if, `${j.where}: a condition on the JOB`).toBeUndefined();
       for (const s of j.steps) {
-        const osv = s.uses === ACTION_REF || commands(s.run).some((l) => /osv-scanner|osv-report-gate/.test(l));
+        const osv = s.uses === ACTION_REF || commands(s.run).some((l) => /osv-scanner|osv-report-gate|sha256sum|attestation/.test(l));
         if (!osv) continue;
-        // `continue-on-error: true` is GitHub's own spelling of `|| true`, and
-        // an `if:` that is never true is a third. All of them turn a required
-        // check into a decoration without touching a single shell line.
         expect(s['continue-on-error'], `${j.where}: continue-on-error on an osv step`).toBeUndefined();
         expect(s.if, `${j.where}: a condition on an osv step`).toBeUndefined();
         for (const line of commands(s.run)) {
-          if (!/osv-scanner|osv-report-gate/.test(line)) continue;
+          if (!/osv-scanner|osv-report-gate|sha256sum|gh attestation/.test(line)) continue;
           expect(line, `${j.where}: a discarded exit code on ${line.slice(0, 40)}`).not.toMatch(SWALLOWS);
         }
       }

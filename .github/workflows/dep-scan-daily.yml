@@ -84,9 +84,13 @@ jobs:
           # passed, HIGH came out 0, and the branch below closed the tracking
           # issue with "no HIGH/CRITICAL as of <today>". A watch that reports
           # all-clear because it could not look is worse than one that is down.
-          # `.errors` is therefore what decides, and an absent key counts as a
-          # refusal rather than as silence.
-          jq -e '(.errors // ["no verdict"]) | length == 0' /tmp/osv-verdict.json > /dev/null
+          # `.errors` is therefore part of what decides — ADDED to the shape
+          # check rather than swapped for it, because the two catch different
+          # things: shape catches "this is not a verdict at all", errors catches
+          # "the gate produced one and declined to judge". Replacing the first
+          # with the second was the second version of this line, and it let a
+          # file with no counts in it through.
+          jq -e 'has("blocking") and has("below") and ((.errors // ["no verdict"]) | length == 0)' /tmp/osv-verdict.json > /dev/null
 
           HIGH=$(jq '.blocking | length' /tmp/osv-verdict.json)
           TOTAL=$(jq '(.blocking | length) + (.below | length)' /tmp/osv-verdict.json)
