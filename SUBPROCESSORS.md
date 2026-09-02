@@ -4,7 +4,9 @@
 
 This file is the canonical, repo-checked-in list of sub-processors engaged for the **lynox Managed Hosting** service (`engine.lynox.cloud` / `*.lynox.cloud` tenant instances).
 
-The **self-hosted lynox software** (`@lynox-ai/core` and `@lynox-ai/web-ui`) engages **no sub-processors** — when you run lynox on your own infrastructure, the software only communicates with the LLM provider whose API key you configure. This list applies only to lynox AI's managed offering.
+This list applies only to lynox AI's managed offering. The **self-hosted lynox software** (`@lynox-ai/core` and `@lynox-ai/web-ui`) is a different case: what it connects to is **not limited to** the LLM provider whose API key you configure. It follows from how you configure the deployment and what you ask the agent to do — a default install reaches a web-search backend, and connected accounts, third-party APIs and addresses the agent is asked to fetch are contacted by your deployment directly.
+
+Whether any of those third parties is a sub-processor, a recipient, or neither depends on your deployment and your own role as controller. This document does not answer that question, and does not need to: it lists the sub-processors **lynox AI** engages for the managed service. For processing lynox AI carries out for you, the binding text is the Data Processing Agreement.
 
 The website page <https://lynox.ai/subprocessors> and this file mirror the customer-facing list. The contractually binding list lives in the **Data Processing Agreement** at <https://lynox.ai/dpa>. If any version diverges, the DPA prevails.
 
