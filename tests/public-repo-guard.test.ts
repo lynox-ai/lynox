@@ -600,7 +600,22 @@ describe('public-repo-guard — private-name class', () => {
     const tip = commit('tip');
     const shortTip = execFileSync('git',
       ['commit-tree', `${b2}^{tree}`, '-p', b2, '-m', 'A perfectly ordinary change'],
-      { cwd: dir, env: GIT_ENV, encoding: 'utf8' }).trim();
+      {
+        cwd: dir,
+        // `commit-tree` writes a commit, so it needs an identity — and GIT_ENV
+        // pins the global config away, which is the point. Locally the ambient
+        // config filled the gap and hid this; on a CI runner with no identity at
+        // all it failed with `Author identity unknown`. Pass the same identity
+        // `commit()` uses.
+        env: {
+          ...GIT_ENV,
+          GIT_AUTHOR_NAME: 't',
+          GIT_AUTHOR_EMAIL: 't@t.t',
+          GIT_COMMITTER_NAME: 't',
+          GIT_COMMITTER_EMAIL: 't@t.t',
+        },
+        encoding: 'utf8',
+      }).trim();
     execFileSync('git', ['replace', '-f', tip, shortTip], { cwd: dir, env: GIT_ENV });
     expect(middle).not.toBe(tip);
     const r2 = runMeta(b2, tip);
