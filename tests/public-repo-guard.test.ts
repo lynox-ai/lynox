@@ -450,7 +450,9 @@ describe('public-repo-guard — private-name class', () => {
         // GIT_ENV, not process.env: without the pins a developer's global
         // core.hooksPath runs foreign hooks on these fixture commits. Measured
         // by running this file under a hostile ambient `core.hooksPath` with
-        // this one spread reverted: 13 of 56 cases fail. With the pins: 56/56.
+        // this one spread reverted: 13 of the cases then in the file fail. With the
+        // pins: all of them pass. (The count is left out on purpose — this commit
+        // appended three more cases and invalidated the denominator immediately.)
         ...GIT_ENV,
         // One case needs the fixture COMMIT written under a hostile config — the
         // lying `encoding` header is baked in at commit time, not at scan time —
@@ -544,7 +546,7 @@ describe('public-repo-guard — private-name class', () => {
     const base = commit('baseline');
     const head = commit('Fix for Z\u00d6RBLATT Industries');
     const r = runMeta(base, head, { __PATTERN__: 'Z\u00f6rblatt', LC_ALL: 'C' });
-    expect(r.code, 'an unfoldable pattern must refuse, not report clean').toBe(1);
+    expect(r.code, 'a refusal is "never looked" (2), not "found something" (1)').toBe(2);
     expect(r.out).toMatch(/cannot fold/);
     expect(head).not.toBe(base);
   });
@@ -582,6 +584,13 @@ describe('public-repo-guard — private-name class', () => {
     ).toMatch(/^encoding ISO-8859-1$/m);
     const r = runMeta(base, head, { __PATTERN__: 'Z\u00f6rblatt' });
     expect(r.code, 'a lying encoding header must not hide a name').toBe(1);
+    // The pattern here is non-ASCII and the locale is deliberately NOT pinned, so
+    // on an ASCII-locale machine the locale preflight would refuse before a single
+    // commit is read — and used to satisfy this case, which asserted only the
+    // exit code. Two mutants survived it that way, including a revert of the very
+    // line it exists to pin. Assert WHICH outcome this was.
+    expect(r.out, 'this must be a HIT, not the locale refusal').toMatch(/private name in the message of commit/);
+    expect(r.out).not.toMatch(/cannot fold/);
   });
 
   it('is not blinded by a global i18n.logOutputEncoding', () => {
@@ -799,7 +808,7 @@ describe('public-repo-guard — private-name pattern source and preflight', () =
     // nobody writes `()` as a customer name, and a test that accepted the local
     // behaviour would be asserting the bug.
     const r = run(['check-meta', base, head], { __PATTERN__: `(${FICTIONAL_NAME}|)` });
-    expect(r.code).toBe(1);
+    expect(r.code).toBe(2);
     expect(r.out).toMatch(/empty line|cannot compile/);
   });
 
@@ -811,7 +820,7 @@ describe('public-repo-guard — private-name pattern source and preflight', () =
     const { base, head } = commitNamed();
     const r = run(['check-meta', base, head], { __PATTERN__: `(?i)${FICTIONAL_NAME}` });
 
-    expect(r.code).toBe(1);
+    expect(r.code).toBe(2);
     expect(r.out).toContain('PCRE group');
     expect(r.out).not.toContain(FICTIONAL_NAME);
   });

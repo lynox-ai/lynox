@@ -359,7 +359,11 @@ if $mode_meta; then
   meta_commits=0
   names_active=false
   if [ -n "$PRIVATE_NAMES_RE" ]; then
-    preflight_names_re || exit 1
+    # exit 2, not 1: a preflight refusal is "the gate never looked", which is
+    # exactly the distinction the third code exists for (see the header). It used
+    # to exit 1, and that made a refusal indistinguishable from a hit by exit code
+    # alone — which let a mutation survive a case that asserted only the code.
+    preflight_names_re || exit 2
     names_active=true
   else
     echo "⚠️  public-repo-guard: private-name class SKIPPED — no pattern configured."
@@ -375,7 +379,7 @@ if $mode_meta; then
     # command substitution inside a for-list, and the empty result read exactly
     # like "no commits carry a name". Green, for a scan that never ran.
     meta_revs=''
-    if ! meta_revs="$(git rev-list "${meta_base}..${meta_head}" 2>/dev/null)"; then
+    if ! meta_revs="$(git --no-replace-objects rev-list "${meta_base}..${meta_head}" 2>/dev/null)"; then
       echo "❌ public-repo-guard: cannot resolve ${meta_base}..${meta_head}." >&2
       echo "   Refusing to report a clean range that was never walked. In CI this" >&2
       echo "   usually means the checkout is too shallow — it needs fetch-depth: 0." >&2
@@ -418,13 +422,20 @@ if $mode_meta; then
       #
       # `--encoding=none` and `i18n.logOutputEncoding=none` were both tried and
       # mangle identically. `cat-file` is the only read that hands back the bytes
-      # that are actually stored.
+      # as stored — with one exception, hence `--no-replace-objects` here and on
+      # the rev-list above: a `refs/replace` entry swaps a sanitised twin in front
+      # of the real object for every read, is local repo state that is NOT pushed
+      # by default, and defeats the range walk as well (measured: 2 commits become
+      # 1, and the counter that exists to make an unwalked range visible reports
+      # the smaller number without complaint). It takes a deliberate `git replace`,
+      # so it is not the accidental path this class is built for — but the flag
+      # costs nothing and the sentence would otherwise be false.
       #
       # The `sed` is load-bearing, not cosmetic: it drops the object header, so
       # the scan reads the MESSAGE and not the `author`/`committer` lines. Without
       # it a pattern that ever contains the operator's own name would fire on
       # every commit they wrote.
-      msg="$(git cat-file commit "$sha" | sed '1,/^$/d')"
+      msg="$(git --no-replace-objects cat-file commit "$sha" | sed '1,/^$/d')"
       if grep -qEi "$PRIVATE_NAMES_RE" <<<"$msg"; then
         echo "❌ private name in the message of commit ${sha:0:9}"
         meta_hits=$((meta_hits + 1))
