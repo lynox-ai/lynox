@@ -18,7 +18,7 @@
  * workflow. The fixture in the first describe block is what proves it.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 
@@ -41,6 +41,7 @@ type Job = {
   usesWorkflow: boolean;
   if?: string;
   continueOnError?: boolean | string;
+  raw?: Record<string, unknown>;
 };
 
 /**
@@ -53,18 +54,20 @@ type Job = {
  * contributes no steps, so it is flagged rather than counted as empty.
  */
 function jobsOf(file: string, yamlText: string): Job[] {
-  const doc = parseYaml(yamlText) as {
-    jobs?: Record<string, { steps?: Step[]; uses?: string; if?: string; 'continue-on-error'?: boolean | string }>;
-  };
+  const doc = parseYaml(yamlText) as { jobs?: Record<string, Record<string, unknown>> };
   return Object.entries(doc.jobs ?? {}).map(([name, j]) => ({
     where: `${file}:${name}`,
-    steps: j.steps ?? [],
+    steps: (j.steps as Step[]) ?? [],
     usesWorkflow: typeof j.uses === 'string',
-    // Read at JOB level too, because `if:` and `continue-on-error:` exist at
-    // both, and the step-level check alone passed on a required gate switched
-    // off one level up.
-    if: j.if,
-    continueOnError: j['continue-on-error'],
+    if: j.if as string | undefined,
+    continueOnError: j['continue-on-error'] as boolean | string | undefined,
+    // The WHOLE job, kept for the comparison below. Reading four keys out of it
+    // was the sixth round's finding: `needs:` on a job that is itself skipped,
+    // an `env: PATH` that shadows the pinned binary, a
+    // `defaults.run.working-directory` that points the pinned commands at a
+    // different lockfile, `container:`, `runs-on: self-hosted`,
+    // `strategy.matrix` and `permissions: write-all` all left the suite green.
+    raw: j,
   }));
 }
 
@@ -76,9 +79,11 @@ function allJobs(): Job[] {
   const actions = readdirSync(ACTION_DIR, { withFileTypes: true })
     .filter((d) => d.isDirectory())
     .map((d) => {
-      const file = `${ACTION_DIR}${d.name}/action.yml`;
-      const doc = parseYaml(readFileSync(file, 'utf8')) as { runs?: { steps?: Step[] } };
-      return { where: `actions/${d.name}`, steps: doc.runs?.steps ?? [], usesWorkflow: false } as Job;
+      const candidates = [`${ACTION_DIR}${d.name}/action.yml`, `${ACTION_DIR}${d.name}/action.yaml`];
+      const file = candidates.find((c) => existsSync(c));
+      expect(file, `${d.name} has no action.yml or action.yaml`).toBeDefined();
+      const doc = parseYaml(readFileSync(file as string, 'utf8')) as { runs?: { steps?: Step[] } };
+      return { where: `actions/${d.name}`, steps: doc.runs?.steps ?? [], usesWorkflow: false, raw: doc as Record<string, unknown> } as Job;
     });
   return [...wf, ...actions];
 }
@@ -333,111 +338,134 @@ function pinnedSlice(where: string): string[] {
 }
 
 /**
- * FULL-FIDELITY, because five rounds of PROJECTIONS each lost a different
+ * FULL-FIDELITY, because six rounds of PROJECTIONS each lost a different
  * dimension and the next round found it.
  *
- * The projections and what they dropped, in order: the step's first `run` line
- * (a second line appended to `pnpm install` truncated the lockfile, invisibly);
- * that line sliced to 30 characters (`pnpm install --frozen-lockfile` is
- * exactly 30); the identity without `with:` (an `actions/checkout` pointed at
- * `repository: attacker/…` scanned a foreign tree); the trigger's KEY without
- * its filters (`paths-ignore: ['**']`, `branches: [no-such-branch]`,
- * `types: [prereleased]`, `cron: '0 6 31 2 *'` — all present, none firing).
+ * What each projection dropped, in order: the step's first `run` line (a second
+ * line appended to `pnpm install` truncated the lockfile, invisibly); that line
+ * cut to thirty characters (`pnpm install --frozen-lockfile` is exactly thirty);
+ * the identity without `with:` (an `actions/checkout` aimed at another
+ * repository scanned a foreign tree); the trigger's key without its filters
+ * (`paths-ignore: ['**']`, `branches: [no-such-branch]`, `types: [prereleased]`,
+ * `cron: '0 6 31 2 *'` — present, none firing); and finally the STEPS without
+ * the job around them (`needs:` on a job that is itself skipped, an `env: PATH`
+ * shadowing the pinned binary, `defaults.run.working-directory` pointing the
+ * pinned commands at another lockfile, `container:`, `runs-on: self-hosted`,
+ * `strategy.matrix`, `permissions: write-all`).
  *
- * Each fix widened the projection and the next round beat it, which is the
- * signal that the shape is wrong rather than the width. So nothing is projected
- * here: the step objects are compared whole, key-order normalised, and so is
- * the trigger block. A comparison that drops nothing cannot lose the dimension
- * that matters.
+ * Six widenings, six defeats. So the job object is compared WHOLE — every key,
+ * its steps through the gate included, key order normalised. The one deliberate
+ * hole is named rather than left implicit: the watch's scan step has its `run`
+ * excluded here, because its issue bookkeeping should change without ceremony
+ * and its osv lines are pinned separately below. Everything else about that
+ * step, and every step before it, is compared in full.
  *
- * The scope is chosen, not accidental. ci.yml and release.yml are pinned
- * through the scan step, so lint/typecheck/vitest after it stay free. The watch
- * is pinned only up to the scan step, because its scanning lines are pinned
- * separately below and its issue bookkeeping is allowed to change without
- * ceremony — a control mutation checks that it still can.
- *
- * To regenerate after a deliberate change: run the workflow through the same
- * key-sorting normaliser and paste the result, in the same commit, with the
- * reason in the PR body. That friction is the product.
+ * To regenerate after a deliberate change: normalise the job the same way and
+ * paste it, in the same commit, with the reason in the pull request.
  */
-const PINNED_JOB_PREFIX: Readonly<Record<string, readonly unknown[]>> = {
-  "ci.yml:test": [
-    {
-      "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+const PINNED_JOB: Readonly<Record<string, unknown>> = {
+  "ci.yml:test": {
+    "permissions": {
+      "contents": "read"
     },
-    {
-      "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
-      "with": {
-        "node-version": "22"
+    "runs-on": "ubuntu-latest",
+    "steps": [
+      {
+        "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+      },
+      {
+        "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+        "with": {
+          "node-version": "22"
+        }
+      },
+      {
+        "uses": "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271",
+        "with": {
+          "version": "10"
+        }
+      },
+      {
+        "run": "pnpm install --frozen-lockfile"
+      },
+      {
+        "uses": "./.github/actions/install-osv-scanner",
+        "with": {
+          "token": "${{ github.token }}"
+        }
+      },
+      {
+        "name": "Scan dependencies (high+critical hard-fail)",
+        "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\"\n"
       }
+    ],
+    "timeout-minutes": 20
+  },
+  "release.yml:test": {
+    "permissions": {
+      "contents": "read"
     },
-    {
-      "uses": "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271",
-      "with": {
-        "version": "10"
+    "runs-on": "ubuntu-latest",
+    "steps": [
+      {
+        "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+      },
+      {
+        "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+        "with": {
+          "node-version": "22"
+        }
+      },
+      {
+        "uses": "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271",
+        "with": {
+          "version": "10"
+        }
+      },
+      {
+        "run": "pnpm install --frozen-lockfile"
+      },
+      {
+        "uses": "./.github/actions/install-osv-scanner",
+        "with": {
+          "token": "${{ github.token }}"
+        }
+      },
+      {
+        "name": "Scan dependencies (high+critical hard-fail)",
+        "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\"\n"
       }
-    },
-    {
-      "run": "pnpm install --frozen-lockfile"
-    },
-    {
-      "uses": "./.github/actions/install-osv-scanner",
-      "with": {
-        "token": "${{ github.token }}"
+    ]
+  },
+  "dep-scan-daily.yml:dep-scan": {
+    "runs-on": "ubuntu-latest",
+    "steps": [
+      {
+        "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+      },
+      {
+        "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+        "with": {
+          "node-version": "22"
+        }
+      },
+      {
+        "uses": "./.github/actions/install-osv-scanner",
+        "with": {
+          "token": "${{ github.token }}"
+        }
+      },
+      {
+        "env": {
+          "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+          "RUN_URL": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+          "TITLE": "🔴 Dependency vulnerability (HIGH/CRITICAL) detected on main"
+        },
+        "name": "Scan dependencies and sync tracking issue"
       }
-    },
-    {
-      "name": "Scan dependencies (high+critical hard-fail)",
-      "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\"\n"
-    }
-  ],
-  "release.yml:test": [
-    {
-      "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
-    },
-    {
-      "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
-      "with": {
-        "node-version": "22"
-      }
-    },
-    {
-      "uses": "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271",
-      "with": {
-        "version": "10"
-      }
-    },
-    {
-      "run": "pnpm install --frozen-lockfile"
-    },
-    {
-      "uses": "./.github/actions/install-osv-scanner",
-      "with": {
-        "token": "${{ github.token }}"
-      }
-    },
-    {
-      "name": "Scan dependencies (high+critical hard-fail)",
-      "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\"\n"
-    }
-  ],
-  "dep-scan-daily.yml:dep-scan": [
-    {
-      "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
-    },
-    {
-      "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
-      "with": {
-        "node-version": "22"
-      }
-    },
-    {
-      "uses": "./.github/actions/install-osv-scanner",
-      "with": {
-        "token": "${{ github.token }}"
-      }
-    }
-  ]
+    ],
+    "timeout-minutes": 10
+  }
 };
 
 /** The whole trigger block, filters included. Presence of a key proves nothing. */
@@ -495,17 +523,64 @@ function triggersOf(file: string): unknown {
   return normalise(on);
 }
 
+/** The job as pinned: everything, with steps cut at the gate. */
+function pinnedJobOf(where: string): unknown {
+  const job = allJobs().find((j) => j.where === where);
+  expect(job, `${where} no longer exists`).toBeDefined();
+  const raw = { ...((job as Job).raw as Record<string, unknown>) };
+  const steps = ((job as Job).steps ?? []);
+  const gate = steps.findIndex((s) => (s.name ?? '').startsWith('Scan dependencies'));
+  expect(gate, `${where}: no \`Scan dependencies\` step — the pin is now blind`).toBeGreaterThan(-1);
+  raw.steps = steps.slice(0, gate + 1).map((s, i) => {
+    if (where !== 'dep-scan-daily.yml:dep-scan' || i !== gate) return s;
+    const { run, ...rest } = s;
+    return rest;
+  });
+  return normalise(raw);
+}
+
+/**
+ * The WORKFLOW level, which sits above the job and reaches into it.
+ *
+ * `env:`, `defaults:` and `permissions:` written here apply to every job in the
+ * file, so a `PATH` that shadows the pinned binary — the exact mutation the job
+ * pin kills — simply moves one line up and is invisible again. Same class, one
+ * level higher, so it is compared the same way: everything except `name`, `on`
+ * and `jobs`, which have their own pins.
+ */
+const PINNED_WORKFLOW: Readonly<Record<string, unknown>> = {
+  "ci.yml": {
+    "env": {
+      "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24": true
+    }
+  },
+  "release.yml": {
+    "env": {
+      "FORCE_JAVASCRIPT_ACTIONS_TO_NODE24": true
+    }
+  },
+  "dep-scan-daily.yml": {
+    "concurrency": {
+      "cancel-in-progress": true,
+      "group": "dep-scan-daily"
+    },
+    "permissions": {
+      "contents": "read",
+      "issues": "write"
+    }
+  }
+};
+
+function workflowLevelOf(file: string): unknown {
+  const doc = parseYaml(readFileSync(WORKFLOW_DIR + file, 'utf8')) as Record<string, unknown>;
+  const rest = Object.fromEntries(Object.entries(doc).filter(([k]) => k !== 'name' && k !== 'on' && k !== 'jobs'));
+  return normalise(rest);
+}
+
 describe('the surroundings of the pinned shell', () => {
-  for (const where of Object.keys(PINNED_JOB_PREFIX)) {
-    it(`${where} runs exactly the reviewed steps before the gate`, () => {
-      const job = allJobs().find((j) => j.where === where);
-      expect(job, `${where} no longer exists`).toBeDefined();
-      const expected = PINNED_JOB_PREFIX[where] as readonly unknown[];
-      const actual = (job as Job).steps.slice(0, expected.length).map(normalise);
-      expect(actual).toEqual([...expected]);
-      // The prefix must still be a prefix: a job that lost steps would compare
-      // a shorter list against a shorter slice and pass.
-      expect((job as Job).steps.length).toBeGreaterThanOrEqual(expected.length);
+  for (const where of Object.keys(PINNED_JOB)) {
+    it(`${where} is exactly the reviewed job, up to and including the gate`, () => {
+      expect(pinnedJobOf(where)).toEqual(PINNED_JOB[where]);
     });
   }
 
@@ -515,14 +590,29 @@ describe('the surroundings of the pinned shell', () => {
     });
   }
 
+  for (const file of Object.keys(PINNED_WORKFLOW)) {
+    it(`${file} carries exactly the reviewed workflow-level keys`, () => {
+      expect(workflowLevelOf(file)).toEqual(PINNED_WORKFLOW[file]);
+    });
+  }
+
   it('installs the scanner the action pins, with no call-site override', () => {
     for (const j of allJobs()) {
       for (const s of j.steps) {
         if (s.uses !== ACTION_REF) continue;
-        // `token` is optional, so its absence is fine; anything else here would
-        // install a different binary while the action's own assertions pass.
         const extra = Object.keys(s.with ?? {}).filter((k) => k !== 'token');
         expect(extra, `${j.where}: overrides the pinned scanner`).toEqual([]);
+      }
+    }
+  });
+
+  it('reaches for no local action other than the sanctioned installer', () => {
+    // `uses: ./tools/whatever` is a local action this sweep does not read.
+    for (const where of Object.keys(PINNED_JOB)) {
+      const job = allJobs().find((j) => j.where === where) as Job;
+      for (const s of job.steps) {
+        if (typeof s.uses !== 'string' || !s.uses.startsWith('./')) continue;
+        expect(s.uses, `${where}: an unread local action`).toBe(ACTION_REF);
       }
     }
   });
