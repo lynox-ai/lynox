@@ -333,84 +333,185 @@ function pinnedSlice(where: string): string[] {
 }
 
 /**
- * The surroundings, because pinning the shell moved the class rather than
- * closing it — measured in the fourth review round, each of these green:
+ * FULL-FIDELITY, because five rounds of PROJECTIONS each lost a different
+ * dimension and the next round found it.
  *
- *  · a step inserted BEFORE the pinned one that truncates `pnpm-lock.yaml`, or
- *    drops a stub `osv-scanner` onto PATH: the pinned commands then run
- *    faithfully against nothing;
- *  · `release:` swapped for `workflow_dispatch:`, or the daily `schedule:`
- *    deleted: the gate is intact and never runs;
- *  · a call-site `with: version/sha256` that installs a different scanner,
- *    since only the action's DEFAULTS were asserted.
+ * The projections and what they dropped, in order: the step's first `run` line
+ * (a second line appended to `pnpm install` truncated the lockfile, invisibly);
+ * that line sliced to 30 characters (`pnpm install --frozen-lockfile` is
+ * exactly 30); the identity without `with:` (an `actions/checkout` pointed at
+ * `repository: attacker/…` scanned a foreign tree); the trigger's KEY without
+ * its filters (`paths-ignore: ['**']`, `branches: [no-such-branch]`,
+ * `types: [prereleased]`, `cron: '0 6 31 2 *'` — all present, none firing).
  *
- * Three distinct surfaces, each closable by naming what belongs there rather
- * than by pattern-matching what does not. Steps are pinned only up to and
- * including the scan, so adding a lint or a test step downstream stays free.
+ * Each fix widened the projection and the next round beat it, which is the
+ * signal that the shape is wrong rather than the width. So nothing is projected
+ * here: the step objects are compared whole, key-order normalised, and so is
+ * the trigger block. A comparison that drops nothing cannot lose the dimension
+ * that matters.
+ *
+ * The scope is chosen, not accidental. ci.yml and release.yml are pinned
+ * through the scan step, so lint/typecheck/vitest after it stay free. The watch
+ * is pinned only up to the scan step, because its scanning lines are pinned
+ * separately below and its issue bookkeeping is allowed to change without
+ * ceremony — a control mutation checks that it still can.
+ *
+ * To regenerate after a deliberate change: run the workflow through the same
+ * key-sorting normaliser and paste the result, in the same commit, with the
+ * reason in the PR body. That friction is the product.
  */
-const PINNED_STEPS: Readonly<Record<string, readonly string[]>> = {
-  'ci.yml:test': [
-    'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5',
-    'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
-    'pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271',
-    'run:pnpm install --frozen-lockfile',
-    './.github/actions/install-osv-scanner',
-    'Scan dependencies (high+critical hard-fail)',
+const PINNED_JOB_PREFIX: Readonly<Record<string, readonly unknown[]>> = {
+  "ci.yml:test": [
+    {
+      "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+    },
+    {
+      "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+      "with": {
+        "node-version": "22"
+      }
+    },
+    {
+      "uses": "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271",
+      "with": {
+        "version": "10"
+      }
+    },
+    {
+      "run": "pnpm install --frozen-lockfile"
+    },
+    {
+      "uses": "./.github/actions/install-osv-scanner",
+      "with": {
+        "token": "${{ github.token }}"
+      }
+    },
+    {
+      "name": "Scan dependencies (high+critical hard-fail)",
+      "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\"\n"
+    }
   ],
-  'release.yml:test': [
-    'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5',
-    'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
-    'pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271',
-    'run:pnpm install --frozen-lockfile',
-    './.github/actions/install-osv-scanner',
-    'Scan dependencies (high+critical hard-fail)',
+  "release.yml:test": [
+    {
+      "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+    },
+    {
+      "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+      "with": {
+        "node-version": "22"
+      }
+    },
+    {
+      "uses": "pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271",
+      "with": {
+        "version": "10"
+      }
+    },
+    {
+      "run": "pnpm install --frozen-lockfile"
+    },
+    {
+      "uses": "./.github/actions/install-osv-scanner",
+      "with": {
+        "token": "${{ github.token }}"
+      }
+    },
+    {
+      "name": "Scan dependencies (high+critical hard-fail)",
+      "run": "set -euo pipefail\nset +e\nosv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json\nOSV_RC=$?\nset -e\nnode scripts/osv-report-gate.mjs --report /tmp/osv.json --rc \"${OSV_RC}\"\n"
+    }
   ],
-  'dep-scan-daily.yml:dep-scan': [
-    'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5',
-    'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
-    './.github/actions/install-osv-scanner',
-    'Scan dependencies and sync tracking issue',
-  ],
+  "dep-scan-daily.yml:dep-scan": [
+    {
+      "uses": "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
+    },
+    {
+      "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+      "with": {
+        "node-version": "22"
+      }
+    },
+    {
+      "uses": "./.github/actions/install-osv-scanner",
+      "with": {
+        "token": "${{ github.token }}"
+      }
+    }
+  ]
 };
 
-/** What must fire the workflow. A gate that cannot run is not a gate. */
-const REQUIRED_TRIGGERS: Readonly<Record<string, readonly string[]>> = {
-  'ci.yml': ['push', 'pull_request'],
-  'release.yml': ['release'],
-  'dep-scan-daily.yml': ['schedule'],
+/** The whole trigger block, filters included. Presence of a key proves nothing. */
+const PINNED_TRIGGERS: Readonly<Record<string, unknown>> = {
+  "ci.yml": {
+    "pull_request": {
+      "paths-ignore": [
+        "docs/**"
+      ]
+    },
+    "push": {
+      "branches": [
+        "main"
+      ],
+      "paths-ignore": [
+        "docs/**"
+      ]
+    }
+  },
+  "release.yml": {
+    "release": {
+      "types": [
+        "published"
+      ]
+    }
+  },
+  "dep-scan-daily.yml": {
+    "schedule": [
+      {
+        "cron": "0 6 * * *"
+      }
+    ],
+    "workflow_dispatch": null
+  }
 };
 
-function stepIdentity(s: Step): string {
-  return s.uses ?? s.name ?? `run:${(s.run ?? '').trim().split('\n')[0]?.slice(0, 30)}`;
+/** Key order is not meaning; everything else in these objects is. */
+function normalise(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalise);
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value as Record<string, unknown>).sort().map((k) => [k, normalise((value as Record<string, unknown>)[k])]),
+    );
+  }
+  return value;
 }
 
-function triggersOf(file: string): string[] {
+function triggersOf(file: string): unknown {
   const doc = parseYaml(readFileSync(WORKFLOW_DIR + file, 'utf8')) as Record<string, unknown>;
-  // `on` is the YAML 1.1 boolean `true` once parsed, which is why reading it
-  // as a string key silently returns nothing.
-  const on = (doc as { on?: unknown; true?: unknown }).on ?? (doc as { true?: unknown }).true;
-  expect(on, `${file}: no triggers parsed — the reader, not the file`).toBeDefined();
-  return Object.keys(on as Record<string, unknown>);
+  // This parser is YAML 1.2 core, so `on` stays the string key `on`. An earlier
+  // comment here claimed it folds to the boolean `true` — that is YAML 1.1, and
+  // measuring it against the parser this file actually loads showed otherwise.
+  const on = doc.on;
+  expect(on, `${file}: no \`on:\` parsed — suspect the reader before the file`).toBeDefined();
+  return normalise(on);
 }
 
 describe('the surroundings of the pinned shell', () => {
-  for (const where of Object.keys(PINNED_STEPS)) {
-    it(`${where} runs nothing before the gate that could hollow it out`, () => {
+  for (const where of Object.keys(PINNED_JOB_PREFIX)) {
+    it(`${where} runs exactly the reviewed steps before the gate`, () => {
       const job = allJobs().find((j) => j.where === where);
       expect(job, `${where} no longer exists`).toBeDefined();
-      const expected = PINNED_STEPS[where] as readonly string[];
-      const actual = (job as Job).steps.map(stepIdentity).slice(0, expected.length);
+      const expected = PINNED_JOB_PREFIX[where] as readonly unknown[];
+      const actual = (job as Job).steps.slice(0, expected.length).map(normalise);
       expect(actual).toEqual([...expected]);
-      // …and the last of them really is the scan, so the slice cannot be
-      // satisfied by a prefix that stops short of it.
-      expect(actual[actual.length - 1]).toBe(expected[expected.length - 1]);
+      // The prefix must still be a prefix: a job that lost steps would compare
+      // a shorter list against a shorter slice and pass.
+      expect((job as Job).steps.length).toBeGreaterThanOrEqual(expected.length);
     });
   }
 
-  for (const [file, needed] of Object.entries(REQUIRED_TRIGGERS)) {
-    it(`${file} still has the trigger that makes its gate run`, () => {
-      const have = triggersOf(file);
-      for (const n of needed) expect(have, `${file}: \`${n}:\` is gone`).toContain(n);
+  for (const file of Object.keys(PINNED_TRIGGERS)) {
+    it(`${file} still fires on exactly what was reviewed`, () => {
+      expect(triggersOf(file)).toEqual(PINNED_TRIGGERS[file]);
     });
   }
 
@@ -418,9 +519,10 @@ describe('the surroundings of the pinned shell', () => {
     for (const j of allJobs()) {
       for (const s of j.steps) {
         if (s.uses !== ACTION_REF) continue;
-        // Only `token` may be passed. `version`/`sha256` here would install a
-        // different binary while every assertion about the action stays green.
-        expect(Object.keys(s.with ?? {}).sort(), `${j.where}: overrides the pinned scanner`).toEqual(['token']);
+        // `token` is optional, so its absence is fine; anything else here would
+        // install a different binary while the action's own assertions pass.
+        const extra = Object.keys(s.with ?? {}).filter((k) => k !== 'token');
+        expect(extra, `${j.where}: overrides the pinned scanner`).toEqual([]);
       }
     }
   });
