@@ -470,6 +470,54 @@ describe('ApiStore', () => {
       expect(out).not.toContain('vault keys');
       expect(out).not.toContain('Bearer');
     });
+
+    // `basic_format` is OPTIONAL — validated only when present, and `api_setup
+    // bootstrap` writes it only if the docs extraction produced one. A profile
+    // without it used to render "the ENGINE attaches it from the stored username +
+    // password. Do NOT set an Authorization header yourself", because the branch
+    // tested for `pre_encoded_b64` and swept everything else into the engine-managed
+    // sentence. http.ts attaches nothing for that shape, and a test pins it ("does
+    // NOT attach for a bare basic profile with no basic_format"). So the profile the
+    // product shipped instructed the model to omit the one header nobody else would
+    // set — the only one of the three model-owned shapes that misleads rather than
+    // merely staying silent.
+    it('a basic profile with NO basic_format is not told the engine attaches it', () => {
+      const p: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'bare-basic',
+        auth: { type: 'basic', vault_keys: ['SOME_B64'] },
+      };
+      store.register(p);
+      const out = store.formatProfile(store.get('bare-basic')!);
+      expect(out).not.toMatch(/Do NOT set an Authorization header yourself/);
+      expect(out).not.toMatch(/the ENGINE attaches it/);
+      expect(out).toContain('no basic_format recorded');
+      expect(out).toContain('yours to set');
+    });
+
+    it('user_pass_split keeps the engine-attaches sentence — it is true for that one', () => {
+      const p: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'split-basic',
+        auth: { type: 'basic', basic_format: 'user_pass_split', username_key: 'U', password_key: 'P' },
+      };
+      store.register(p);
+      const out = store.formatProfile(store.get('split-basic')!);
+      expect(out).toContain('the ENGINE attaches it');
+      expect(out).toContain('Do NOT set an Authorization header yourself');
+    });
+
+    it('pre_encoded_b64 says outright that the engine does not attach it', () => {
+      const p: ApiProfile = {
+        ...SAMPLE_PROFILE,
+        id: 'pre-b64',
+        auth: { type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: ['SOME_B64'] },
+      };
+      store.register(p);
+      const out = store.formatProfile(store.get('pre-b64')!);
+      expect(out).toContain('the engine does not attach it');
+      expect(out).not.toMatch(/the ENGINE attaches it/);
+    });
   });
 
   describe('formatSuggestedApisForSystemPrompt', () => {

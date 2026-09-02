@@ -2081,6 +2081,128 @@ describe('httpRequestTool', () => {
     });
   });
 
+  // rafael's own instance, 2026-09-02, engine 2.14.2 (build 7e905219), thread
+  // "DataForSEO Functionality Check". The profile is `basic` + `pre_encoded_b64`,
+  // which the engine does not attach ON PURPOSE — the three tests above pin that,
+  // including a SECURITY one. So this is NOT a missing branch, and neither an
+  // attaching `if` nor a refusal is the fix: the first kills that security test,
+  // the second stops every model-owned profile that works today.
+  //
+  // What was missing is that the 401 had no NAME. The engine-owned shapes each
+  // explain themselves and the reason rides along on the 401; the model-owned ones
+  // returned an empty object. From the response alone "you forgot the header" and
+  // "the credential was rejected" are the same event — and the agent guessed, twice,
+  // in opposite directions: it reported the vault held the key, then on the 401 said
+  // the key was missing or invalid and asked the user to re-supply it. The vault
+  // already held it. The whole loop is one fact the engine has and the model cannot see.
+  describe('401-hint for the auth shapes the engine does not attach', () => {
+    const ACK = { accepted: true, hosts: ['api.dataforseo.com'], accepted_at: '2026-09-02T10:00:00.000Z' };
+    const SECRET = 'cmFmYWVsQGV4YW1wbGUuY29tOnB3';
+
+    async function storeWith(auth: Record<string, unknown>): Promise<unknown> {
+      const { ApiStore } = await import('../../core/api-store.js');
+      const store = new ApiStore();
+      store.register({
+        id: 'dataforseo', name: 'DataForSEO', base_url: 'https://api.dataforseo.com/v3',
+        description: 'SEO data', auth: auth as never, custom_endpoint_ack: ACK as never,
+      });
+      return store;
+    }
+
+    function agentWith(store: unknown, secrets: Record<string, string>): never {
+      return {
+        toolContext: { apiStore: store },
+        secretStore: { resolve: (k: string) => secrets[k] ?? null },
+        sessionCounters: testCounters,
+      } as never;
+    }
+
+    function reply(status: number): void {
+      mockDnsPublic();
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(createMockResponse({ status, json: { msg: 'x' } })));
+    }
+
+    const URL_ = 'https://api.dataforseo.com/v3/appendix/user_data';
+
+    it('THE POINT: a 401 on a request that carried no header says so, and says the vault HAS the key', async () => {
+      const store = await storeWith({ type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: ['DFS_B64'] });
+      reply(401);
+      const result = await visible({ url: URL_ }, agentWith(store, { DFS_B64: SECRET }));
+      // The half that ends the guessing: which of the two 401s this is.
+      expect(result).toContain('carried no Authorization header at all');
+      // The half that ends the re-ask. Both halves, or the agent still has a choice to get wrong.
+      expect(result).toContain('The vault DOES hold a value under "DFS_B64"');
+      expect(result).toMatch(/do NOT ask the user to supply or re-paste it/i);
+      // Actionable, not just diagnostic — the exact header it must set.
+      expect(result).toContain('"Authorization": "Basic secret:DFS_B64"');
+      expect(result).toContain('dataforseo');
+    });
+
+    it('never puts the credential VALUE in the hint — only the key name', async () => {
+      const store = await storeWith({ type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: ['DFS_B64'] });
+      reply(401);
+      const result = await visible({ url: URL_ }, agentWith(store, { DFS_B64: SECRET }));
+      expect(result).not.toContain(SECRET);
+    });
+
+    it('says the vault is EMPTY when it is — the opposite instruction, from the same shape', async () => {
+      const store = await storeWith({ type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: ['DFS_B64'] });
+      reply(401);
+      const result = await visible({ url: URL_ }, agentWith(store, {}));
+      expect(result).toContain('The vault has NO value under "DFS_B64"');
+      expect(result).toContain('ask_secret({ name: "DFS_B64" })');
+      expect(result).not.toContain('DOES hold a value');
+    });
+
+    it('a header the model DID set is not reported as missing', async () => {
+      const store = await storeWith({ type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: ['DFS_B64'] });
+      reply(401);
+      const result = await visible(
+        { url: URL_, headers: { Authorization: 'Basic bW9kZWxzZXQ=' } },
+        agentWith(store, { DFS_B64: SECRET }),
+      );
+      expect(result).toContain('You set the Authorization header yourself');
+      // The inverse assertion is the one with teeth: a hint that always says "missing"
+      // would pass the test above and send the agent to re-paste a working credential.
+      expect(result).not.toContain('carried no Authorization header at all');
+    });
+
+    it('does NOT fire on a 200 — the hint rides on the 401, not on the shape', async () => {
+      const store = await storeWith({ type: 'basic', basic_format: 'pre_encoded_b64', vault_keys: ['DFS_B64'] });
+      reply(200);
+      const result = await visible({ url: URL_ }, agentWith(store, { DFS_B64: SECRET }));
+      expect(result).not.toMatch(/the engine did not attach/i);
+      expect(result).not.toContain('The vault DOES hold a value');
+    });
+
+    it('a bare basic profile with no basic_format gets the hint too, and is named as such', async () => {
+      // The shape whose PROFILE TEXT used to tell the model the engine would attach it.
+      const store = await storeWith({ type: 'basic', vault_keys: ['DFS_B64'] });
+      reply(401);
+      const result = await visible({ url: URL_ }, agentWith(store, { DFS_B64: SECRET }));
+      expect(result).toContain('no basic_format recorded');
+      expect(result).toContain('carried no Authorization header at all');
+    });
+
+    it('query-param auth is the same class and is named in its own vocabulary', async () => {
+      const store = await storeWith({ type: 'query', query_param: 'api_key', vault_keys: ['DFS_KEY'] });
+      reply(401);
+      const result = await visible({ url: URL_ }, agentWith(store, { DFS_KEY: 'k' }));
+      expect(result).toContain('carried no "api_key" query parameter at all');
+      // Not the header vocabulary — a hint that told it to set a header would be worse
+      // than silence, because it is confidently wrong about the mechanism.
+      expect(result).not.toMatch(/Authorization header/);
+    });
+
+    it('auth.type="none" + 401 blames the PROFILE, not a credential it never declared', async () => {
+      const store = await storeWith({ type: 'none' });
+      reply(401);
+      const result = await visible({ url: URL_ }, agentWith(store, {}));
+      expect(result).toContain('the profile is wrong about this endpoint');
+      expect(result).not.toMatch(/vault/i);
+    });
+  });
+
   // A customer could not connect bexio at all on 2026-08-08 (thread export
   // "Connecting Bexio Via API Integration", engine 2.12.1). `bearer` and `header`
   // were the last two auth types with no engine-side attachment, so the model had

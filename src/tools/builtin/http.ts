@@ -412,14 +412,21 @@ interface AttachedAuth {
  *   - `refusal` — the engine says no and nothing is sent. Reserved for a profile
  *                 that is trying something it may not: a protected vault key, a
  *                 CRLF-bearing header name. These are attacks, not misconfigurations.
- *   - `hint`    — bearer/header only: could not attach for a recoverable reason (no acceptance on
- *                 record, no vault key, empty value). Nothing is dropped, the
+ *   - `hint`    — did not attach, for a reason worth naming. Nothing is dropped, the
  *                 model's own header stands, and the request proceeds exactly as
  *                 it does today; the hint rides along on a 401 so the cause is
  *                 nameable instead of silent. `custom_endpoint_ack` only exists
  *                 since 2026-07-02 and `regateMigratedApiConnections` strips it on
  *                 self→managed import, so refusing here would break integrations
  *                 that work today, on upgrade, with no action by their owner.
+ *
+ *                 TWO populations, and they were one line apart in intent for a
+ *                 while: bearer/header decline for a RECOVERABLE reason (no
+ *                 acceptance on record, no vault key, empty value), while the
+ *                 model-owned shapes below — basic/pre_encoded_b64, basic with no
+ *                 basic_format, query, and `none` — are working as designed and
+ *                 hint anyway. A shape the engine will never attach is precisely
+ *                 the one whose 401 the model cannot explain on its own.
  */
 async function attachEngineManagedAuth(
   url: string,
@@ -573,7 +580,118 @@ async function attachEngineManagedAuth(
     return put(slot, value);
   }
 
-  return {};
+  // Everything that reaches here is a shape the engine deliberately does NOT
+  // attach. It still gets a name — see modelOwnedAuthHint.
+  return {
+    hint: modelOwnedAuthHint({
+      profileId: profile.id,
+      authType: auth.type,
+      basicFormat: auth.basic_format,
+      headerName: auth.header_name,
+      queryParam: auth.query_param,
+      vaultKeys: auth.vault_keys,
+      slotFilled: modelFilledSlot(auth, headers, url),
+      secretStore,
+    }),
+  };
+}
+
+/**
+ * Did the MODEL already put the profile's credential where this auth shape wants it?
+ *
+ * Read off the outgoing request, never predicted: `headers` at this point is the
+ * agent's own map (nothing has been `put` on a path that reaches here), and for
+ * `query` the parameter is in the URL the agent composed. The distinction the
+ * caller needs is "nothing authenticated this request" versus "a value went out
+ * and came back rejected" — two different next steps, and a 401 alone tells them apart
+ * for nobody.
+ */
+function modelFilledSlot(
+  auth: { type: string; header_name?: string | undefined; query_param?: string | undefined },
+  headers: Record<string, string>,
+  url: string,
+): boolean {
+  if (auth.type === 'query') {
+    try {
+      return new URL(url).searchParams.has(auth.query_param ?? 'key');
+    } catch {
+      return false;
+    }
+  }
+  const slot = (auth.header_name ?? 'Authorization').toLowerCase();
+  return Object.entries(headers).some(([k, v]) => k.toLowerCase() === slot && v.trim() !== '');
+}
+
+/**
+ * The 401-hint for the auth shapes the engine deliberately does NOT attach.
+ *
+ * `basic`+`pre_encoded_b64`, `basic` with no `basic_format`, and `query` are the
+ * MODEL's to set, on purpose and test-pinned ("leaves pre_encoded_b64 alone —
+ * that path is still the model's to set", "does NOT attach for a bare basic
+ * profile with no basic_format", "SECURITY: a pre_encoded_b64 basic profile keeps
+ * the model-set header"). Attaching them here would break integrations that work
+ * today and kill that security test; refusing would stop them outright, which the
+ * docstring above rules out for exactly the same reason.
+ *
+ * What was missing is neither. It is a NAME for the failure. Every ENGINE-owned
+ * shape that declines to attach says why and the reason rides along on the 401
+ * (the four `hint` returns above). The MODEL-owned shapes returned an empty object,
+ * so a 401 there looked identical whether the credential was rejected or never
+ * sent at all — and nothing in the response distinguishes those.
+ *
+ * Measured on a real thread (2026-09-02, engine 2.14.2, build 7e905219): a
+ * `pre_encoded_b64` DataForSEO profile 401'd on a request that carried no
+ * Authorization header. The agent read that as "the secret is missing or invalid",
+ * contradicting its own answer one turn earlier, and asked the user to re-supply a
+ * credential the vault already held. That is the loop the 401-hint above was built
+ * to end — "three token rotations against a request that carried no credential" —
+ * running in the half it did not cover.
+ *
+ * The vault line is what ends it: whether the named key HAS a value is a fact the
+ * engine holds and the model cannot observe. Key NAMES only, never a value.
+ */
+function modelOwnedAuthHint(a: {
+  profileId: string;
+  authType: string;
+  basicFormat?: string | undefined;
+  headerName?: string | undefined;
+  queryParam?: string | undefined;
+  vaultKeys?: string[] | undefined;
+  slotFilled: boolean;
+  secretStore: { resolve(key: string): string | null | undefined };
+}): string {
+  // `none` is not a model-owned shape — it is a profile claiming this API needs no
+  // credential while the host says otherwise. Naming the contradiction beats
+  // pointing at a vault key the profile never declared.
+  if (a.authType === 'none') {
+    return `api_profile "${a.profileId}" declares auth.type="none" (no credentials required), but this host answered 401 — the profile is wrong about this endpoint, not the credential. Correct it with api_setup({ action: "update", id: "${a.profileId}" }), then store the credential with ask_secret.`;
+  }
+
+  const key = a.vaultKeys?.[0];
+  const vault = key === undefined
+    ? `This profile names no vault key (auth.vault_keys is empty), so there is nothing to reference yet — add one via api_setup({ action: "update", id: "${a.profileId}" }) and store the value with ask_secret.`
+    : a.secretStore.resolve(key)
+      ? `The vault DOES hold a value under "${key}" — do NOT ask the user to supply or re-paste it, reference it as \`secret:${key}\`.`
+      : `The vault has NO value under "${key}" — collect it with ask_secret({ name: "${key}" }), then retry.`;
+
+  const shape = a.authType === 'basic'
+    ? `auth.type="basic"${a.basicFormat === undefined ? ' with no basic_format recorded' : ` / basic_format="${a.basicFormat}"`}`
+    : `auth.type="${a.authType}"`;
+
+  if (a.authType === 'query') {
+    const param = a.queryParam ?? 'key';
+    const carried = a.slotFilled
+      ? `This request already carried "${param}" in the query string, so the 401 points at the value rather than at a missing parameter.`
+      : `This request carried no "${param}" query parameter at all — nothing authenticated it.`;
+    return `The engine does not attach this profile's credential: api_profile "${a.profileId}" is ${shape}, which is the MODEL's to put in the URL — deliberately, so a working hand-set request is never rewritten. ${carried} ${vault}`;
+  }
+
+  const slot = a.headerName ?? 'Authorization';
+  const prefix = a.authType === 'basic' ? 'Basic ' : '';
+  const carried = a.slotFilled
+    ? `You set the ${slot} header yourself on this request, so the 401 points at the credential's validity rather than at a missing header.`
+    : `This request carried no ${slot} header at all — nothing authenticated it.${key === undefined ? '' : ` Set it yourself: headers: { "${slot}": "${prefix}secret:${key}" }.`}`;
+  return `The engine does not attach this profile's credential: api_profile "${a.profileId}" is ${shape}, which is the MODEL's to set — deliberately, so a working hand-set header is never overwritten. ${carried} ${vault}`;
 }
 
 /** Shared wording — the same refusal for basic and bearer/header. */
