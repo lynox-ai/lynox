@@ -471,3 +471,86 @@ describe('gate-record — a real register id may carry a capital', () => {
     }
   });
 });
+
+describe('gate-record — a docs diff owes no gates, which is not the same as owing no record', () => {
+  const DOCS = ['docs/getting-started.md'];
+
+  // The check used to `return { ok: true }` the moment it saw a docs-only diff —
+  // before `extractRecord` ran. So on those PRs it printed a tick without reading a
+  // single field, and the output could not tell "checked and clean" from "never
+  // looked". Both look the same from outside, which is the whole cost: on
+  // 2026-09-02 a session judged three docs-only PRs by their `gate-record` block
+  // and, on one of them, re-pinned `head:` after an `update-branch` and read the
+  // green check as confirmation. It had never been read.
+  it('THE POINT: a stale head pin on a docs PR is refused, where it used to pass unread', () => {
+    const stale = record({ head: '9999999999999999999999999999999999999999' });
+    const v = evaluate({ body: stale, head: HEAD, files: DOCS });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('record pins head');
+  });
+
+  // pro#685, live at the time of writing: `gates:` written as a bullet list, so the
+  // two gate attestations under it are read by nothing at all.
+  it('a line that is not `field: value` is refused on a docs PR too', () => {
+    const body = [
+      '## Summary', '', 'Docs.', '', '```gate-record',
+      `head: ${HEAD.slice(0, 8)}`,
+      'gates:',
+      '  - code-review: not-run (docs-only diff)',
+      '```', '',
+    ].join('\n');
+    const v = evaluate({ body, head: HEAD, files: DOCS });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('is not `field: value`');
+  });
+
+  it('an unknown gate name is refused on a docs PR too', () => {
+    const v = evaluate({ body: record({ gates: 'code-review, vibes' }), head: HEAD, files: DOCS });
+    expect(v.ok).toBe(false);
+    expect(v.errors?.join(' ')).toContain('unknown gate');
+  });
+
+  // The delayed ignition, as one assertion: the SAME body, silently passing on a
+  // docs diff and refused the day a source file joins the branch. That gap is what
+  // made the defect expensive — a record can be "passing" for weeks and then fail
+  // all at once, on a PR nobody touched.
+  it('⭐ the same broken record no longer passes on docs and fails on code', () => {
+    const stale = record({ head: '9999999999999999999999999999999999999999' });
+    expect(evaluate({ body: stale, head: HEAD, files: DOCS }).ok).toBe(false);
+    expect(evaluate({ body: stale, head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  // What a docs diff genuinely does not owe. Each of these would be an error on a
+  // code diff, and demanding them here would buy a fabricated line.
+  it('no gate is demanded, and neither is a delta round', () => {
+    const v = evaluate({ body: record({ gates: '', delta: '', mutations: '' }), head: HEAD, files: DOCS });
+    expect(v.ok).toBe(true);
+    // The control: the same record on a code diff IS refused, or the line above
+    // would also pass if the docs branch skipped every check as it used to.
+    expect(evaluate({ body: record({ gates: '', delta: '', mutations: '' }), head: HEAD, files: CODE }).ok).toBe(false);
+  });
+
+  it('a docs PR with no record at all still passes', () => {
+    // 4 of the 5 open docs-only PRs across both repos carry no block. Demanding one
+    // would turn a fix for a silent check into a wave of red on work that never
+    // claimed anything.
+    const v = evaluate({ body: '## Summary\n\nJust docs.\n', head: HEAD, files: DOCS });
+    expect(v.ok).toBe(true);
+    expect(v.notes?.join(' ')).toContain('no gate record required');
+  });
+
+  // The finding was that the OUTPUT could not distinguish the two states. A fix that
+  // leaves them printing the same thing has not closed it.
+  it('⭐ says which of the two happened, so a reader can tell them apart', () => {
+    const read = evaluate({ body: record(), head: HEAD, files: DOCS });
+    expect(read.ok).toBe(true);
+    expect(read.notes?.join(' ')).toContain('the record is still read');
+    const unread = evaluate({ body: '## Summary\n\nJust docs.\n', head: HEAD, files: DOCS });
+    expect(unread.notes?.join(' ')).not.toContain('the record is still read');
+  });
+
+  it('the bot exemption still returns before any of this', () => {
+    const stale = record({ head: '9999999999999999999999999999999999999999' });
+    expect(evaluate({ body: stale, head: HEAD, files: CODE, author: 'dependabot[bot]' }).ok).toBe(true);
+  });
+});
