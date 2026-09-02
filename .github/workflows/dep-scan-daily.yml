@@ -40,13 +40,9 @@ jobs:
       # Scheduled runs check out the default branch (main) by default.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      # Mirror of ci.yml `test` job, "Install osv-scanner" step.
-      - name: Install osv-scanner
-        run: |
-          curl -sSfL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 -o /tmp/osv-scanner
-          chmod +x /tmp/osv-scanner
-          sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
-          osv-scanner --version
+      - uses: ./.github/actions/install-osv-scanner
+        with:
+          token: ${{ github.token }}
 
       - name: Scan dependencies and sync tracking issue
         env:
@@ -56,12 +52,33 @@ jobs:
         run: |
           set -euo pipefail
 
-          # --- Scan (same command as ci.yml's test job) ---
-          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output=/tmp/osv.json || true
-          osv-scanner scan source --lockfile=pnpm-lock.yaml > /tmp/osv-table.txt 2>&1 || true
+          # --- Scan, then classify with the SAME script the merge gate uses ---
+          # This job used to hold its own copy of the severity rules and called
+          # itself "mirrored verbatim" from ci.yml, with nothing checking that.
+          # It read `.database_specific.severity` only, so the malicious-package
+          # entries that carry no band would never have opened an issue either.
+          set +e
+          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json
+          OSV_RC=$?
+          osv-scanner scan source --lockfile=pnpm-lock.yaml > /tmp/osv-table.txt 2>&1
+          set -e
 
-          HIGH=$(jq '[.results[]?.packages[]?.vulnerabilities[]? | select((.database_specific.severity // "") | IN("HIGH","CRITICAL"))] | length' /tmp/osv.json)
-          TOTAL=$(jq '[.results[]?.packages[]?.vulnerabilities[]?] | length' /tmp/osv.json)
+          # A watch reports rather than blocks, so it reads counts instead of an
+          # exit status — but from the same classifier, so the two cannot drift.
+          # The gate exits 1 whenever anything blocks, which here is the normal
+          # case worth an issue, so its status is captured rather than trusted.
+          set +e
+          node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}" --format=json > /tmp/osv-verdict.json
+          set -e
+
+          # What must NOT be survivable is the gate failing to produce a verdict
+          # at all — an unreadable report, a scan that never completed. That path
+          # writes no JSON, so this line fails the job under `set -e` instead of
+          # letting a silent zero close the tracking issue.
+          jq -e 'has("blocking") and has("below")' /tmp/osv-verdict.json > /dev/null
+
+          HIGH=$(jq '.blocking | length' /tmp/osv-verdict.json)
+          TOTAL=$(jq '(.blocking | length) + (.below | length)' /tmp/osv-verdict.json)
           STAMP=$(date -u +'%Y-%m-%d %H:%M UTC')
           echo "total=${TOTAL} high_or_critical=${HIGH}"
 

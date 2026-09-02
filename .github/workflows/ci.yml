@@ -27,6 +27,11 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    # Scoped because this job downloads a third-party executable and runs it
+    # over the checkout, and because the install action is handed a token: the
+    # comment that calls it read-only is now enforced rather than asserted.
+    permissions:
+      contents: read
     # The suite spawns subprocesses (the cross-repo convention pins run workflow
     # shell against a stubbed curl). Their own timeout signals the shell it
     # started, not that shell's own children — an orphaned grandchild outlives
@@ -48,62 +53,23 @@ jobs:
       # advisories + more). High/critical fail the job; moderate/low are listed
       # and do not block, which keeps the prior Phase 1 policy — and a finding
       # whose severity the report does not state now fails too, which is the
-      # change, not a detail. See scripts/osv-report-gate.mjs for the
-      # measurement: the whole `MAL-` feed carries no severity, so "unclassified
-      # means not blocking" made OSV's malicious-package data decorative.
+      # change, not a detail. scripts/osv-report-gate.mjs carries the
+      # measurement behind it.
       #
-      # PINNED AND CHECKSUMMED. `releases/latest` fetched a different executable
-      # on every run, `sudo mv`'d it onto PATH, and ran it over the checkout —
-      # and it is the binary that decides whether an advisory blocks a merge.
-      # The hash lives in this file rather than beside the artefact on purpose:
-      # the release publishes `osv-scanner_SHA256SUMS`, but fetching the
-      # expectation from the same place as the bytes only proves the transfer.
-      # Written here it is under review like an action SHA. Taken from that
-      # published file AND recomputed from the downloaded binary, 2026-09-02.
-      #
-      # ⚠ Bounded: the attestation refuses bytes that no google/osv-scanner
-      # release attested. It does NOT bind them to this tag, so a downgrade to a
-      # genuinely published older release passes the checksum only because the
-      # checksum moves with the pin — the provenance check alone would not catch
-      # it. Downgrade-to-a-real-vulnerable-version is covered by nothing here.
-      #
-      # This mirrors lynox-pro's audit job (pro#813). The two are separate files
-      # with no mechanism keeping them honest, which is its own recorded gap.
-      - name: Install osv-scanner
-        env:
-          OSV_SCANNER_VERSION: '2.5.1'
-          OSV_SCANNER_SHA256: 'f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be'
-          # Bundle verification reads a signature, not the API, so it needs no
-          # token. The line is here so a future `gh` that reinstates auth turns
-          # into nothing rather than a permanently red required check — which is
-          # the state that earns a `|| true`. Read-only scope.
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          curl -sSfL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64" -o /tmp/osv-scanner
-          echo "${OSV_SCANNER_SHA256}  /tmp/osv-scanner" | sha256sum -c -
-          # After the checksum because that one is local and free, before the
-          # `sudo mv` because neither control is worth anything once the file is
-          # on PATH. Both flags below are load-bearing: without `--bundle` this
-          # queries the attestations API and 404s on a SLSA-generator artefact.
-          curl -sSfL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/multiple.intoto.jsonl" -o /tmp/osv-provenance.jsonl
-          gh attestation verify /tmp/osv-scanner \
-            --bundle /tmp/osv-provenance.jsonl \
-            --repo google/osv-scanner \
-            --predicate-type https://slsa.dev/provenance/v0.2 \
-            --signer-repo slsa-framework/slsa-github-generator
-          chmod +x /tmp/osv-scanner
-          sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
-          # Diagnostic, not the control — the checksum already fixes the bytes.
-          # It catches a hand-edit that moves the pin without moving the hash.
-          osv-scanner --version | tee /tmp/osv-version
-          grep -qx "osv-scanner version: ${OSV_SCANNER_VERSION}" /tmp/osv-version
+      # The install is a composite action so the pin has ONE home; release.yml
+      # and dep-scan-daily.yml call the same one.
+      - uses: ./.github/actions/install-osv-scanner
+        with:
+          token: ${{ github.token }}
 
       # The exit code is CAPTURED and handed to the gate rather than discarded.
       # Measured on 2.5.1: an unreadable lockfile exits 127 and a lockfile that
       # yields no packages exits 128, and neither writes the report. Under the
       # old `|| true` that was survivable only by accident — the missing file
       # broke the jq that followed. The accident is what is being removed.
+      #
+      # `--output-file` because `--output` is deprecated in 2.5.1 and prints a
+      # warning; the file it writes is the same.
       - name: Scan dependencies (high+critical hard-fail)
         run: |
           set -euo pipefail

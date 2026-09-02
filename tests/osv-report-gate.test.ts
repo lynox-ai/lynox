@@ -10,7 +10,10 @@
  * than a missing one, because a green check reads as verification.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 // @ts-expect-error — plain ESM CLI, no type declarations by design.
 import { evaluate, resolveSeverity, bandForScore } from '../scripts/osv-report-gate.mjs';
@@ -170,5 +173,116 @@ describe('the scanner exit code, which the old step discarded', () => {
     // error the log showed will simply be red again on the next push.
     const r = evaluate({ doc: { results: null }, rc: 42 });
     expect(r.errors.length).toBeGreaterThan(1);
+  });
+});
+
+describe('the shape the gate refuses to guess at', () => {
+  it('does not let a string `groups[].ids` substring-match a finding into a band', () => {
+    // `(g?.ids ?? []).includes('A')` on the STRING "zzAzz" is true, and the
+    // finding then inherits that group's max_severity. Measured before the fix:
+    // an UNRESOLVED — blocking — finding came out as a non-blocking LOW. It is
+    // the one shape found here that flips this gate from closed to open.
+    const doc = {
+      results: [{
+        source: { path: 'pnpm-lock.yaml' },
+        packages: [{
+          package: { name: 'x', version: '1' },
+          vulnerabilities: [{ id: 'A', database_specific: { 'malicious-packages-origins': [] }, severity: null }],
+          groups: [{ ids: 'zzAzz', max_severity: '1.0' }],
+        }],
+      }],
+    };
+    const r = evaluate({ doc, rc: 1 });
+    expect(r.ok).toBe(false);
+    expect(r.blocking.map((b: { severity: string }) => b.severity)).toEqual(['UNRESOLVED']);
+    expect(r.below).toHaveLength(0);
+  });
+
+  it('records a drifted nesting level instead of throwing a stack trace at it', () => {
+    for (const doc of [
+      { results: [{ packages: {} }] },
+      { results: [{ packages: [{ package: { name: 'x', version: '1' }, vulnerabilities: 5 }] }] },
+      { results: [{ packages: [{ package: { name: 'x', version: '1' }, vulnerabilities: [], groups: 'nope' }] }] },
+    ]) {
+      const r = evaluate({ doc, rc: 0 });
+      expect(r.ok, JSON.stringify(doc)).toBe(false);
+      expect(r.errors.join(' ')).toContain('where a list belongs');
+    }
+  });
+});
+
+describe('the contract CI actually depends on', () => {
+  const SCRIPT = fileURLToPath(new URL('../scripts/osv-report-gate.mjs', import.meta.url));
+
+  function run(doc: unknown, rc: string, extraArgs: string[] = []) {
+    const dir = mkdtempSync(join(tmpdir(), 'osv-gate-'));
+    const file = join(dir, 'osv.json');
+    writeFileSync(file, JSON.stringify(doc));
+    return spawnSync(process.execPath, [SCRIPT, '--report', file, '--rc', rc, ...extraArgs], { encoding: 'utf8' });
+  }
+
+  it('exits non-zero on a blocking finding and zero on a clean report', () => {
+    // Driven as a PROCESS, because the exit status is the whole interface
+    // between this script and the workflow. Calling evaluate() directly cannot
+    // see `return ok ? 0 : 1` become `return 0`.
+    expect(run(MALICIOUS_REPORT, '1').status).toBe(1);
+    expect(run({ results: [] }, '0').status).toBe(0);
+  });
+
+  it('exits non-zero and says so when the report cannot be read at all', () => {
+    const r = spawnSync(process.execPath, [SCRIPT, '--report', '/nonexistent/osv.json', '--rc', '0'], { encoding: 'utf8' });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('cannot read');
+  });
+
+  it('names the blocking finding in the output, not only in the exit code', () => {
+    const r = run(MALICIOUS_REPORT, '1');
+    expect(r.stderr).toContain('MAL-2023-8697');
+    expect(r.stderr).toContain('UNRESOLVED');
+  });
+
+  it('keeps the below-floor findings as an annotation, as the step it replaces did', () => {
+    // A line in a three-thousand-line log that nobody scrolls to is not a
+    // report; the jq step this replaces emitted `::warning::` and losing that
+    // silently would be a regression nothing else here would notice.
+    const doc = {
+      results: [{
+        source: { path: 'pnpm-lock.yaml' },
+        packages: [{
+          package: { name: 'left-pad', version: '1.0.0' },
+          vulnerabilities: [{ id: 'GHSA-a-b-c', database_specific: { severity: 'LOW' } }],
+          groups: [{ ids: ['GHSA-a-b-c'], max_severity: '2.0' }],
+        }],
+      }],
+    };
+    const r = run(doc, '1');
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('::warning::');
+    expect(r.stdout).toContain('below the floor: left-pad@1.0.0 GHSA-a-b-c (LOW)');
+  });
+
+  it('refuses a --format it does not implement instead of falling back to prose', () => {
+    const r = run({ results: [] }, '0', ['--format=yaml']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('--format takes');
+  });
+
+  it('emits a machine-readable verdict for the daily watch, with both counts', () => {
+    // Both spellings, because the workflow uses one and the first version of
+    // parseArgs only understood the other — it ignored the flag and wrote the
+    // human report into the file the next step parsed as JSON.
+    for (const args of [['--format=json'], ['--format', 'json']]) {
+      const r = run(MALICIOUS_REPORT, '1', args);
+      const verdict = JSON.parse(r.stdout);
+      expect(verdict.blocking, args.join(' ')).toHaveLength(1);
+      expect(verdict.below, args.join(' ')).toHaveLength(0);
+      expect(r.status).toBe(1);
+    }
+  });
+
+  it('refuses an option it does not understand rather than ignoring it', () => {
+    const r = run({ results: [] }, '0', ['--formt=json']);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('unknown option');
   });
 });

@@ -260,6 +260,12 @@ const GATES: Readonly<Record<string, GateEntry>> = {
     reason: 'staged-mode only, where an empty candidate set is the normal case (most commits stage no component)',
     expectStrippedExit: 0,
   },
+  'osv-report-gate': {
+    kind: 'exempt',
+    reason:
+      'judges a report handed to it rather than a tree it enumerates, so it cannot be starved by an empty directory — and it refuses a call with no report instead of reporting clean',
+    expectStrippedExit: 1,
+  },
   // Not our scripts, so there is nothing here to harden — but they still have to
   // be ACCOUNTED for, otherwise "every gate has a line" is only true of the ones
   // that happened to be shell scripts.
@@ -289,6 +295,7 @@ const EXEMPT_COMMAND: Readonly<Record<string, { cmd: string; args: string[] }>> 
   'default-on-inventory': { cmd: 'bash', args: [join(repoRoot, 'scripts/default-on-inventory.sh')] },
   'no-ai-attribution': { cmd: 'bash', args: [join(repoRoot, 'scripts/no-ai-attribution.sh')] },
   'hex-guard': { cmd: 'bash', args: [join(repoRoot, 'packages/web-ui/scripts/hex-guard.sh')] },
+  'osv-report-gate': { cmd: 'node', args: [join(repoRoot, 'scripts/osv-report-gate.mjs')] },
 };
 
 /** Gate names derived from the OTHER executor: the workflow files. Mapped by

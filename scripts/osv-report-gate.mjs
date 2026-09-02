@@ -13,9 +13,11 @@
  *
  * The finding is `MAL-2023-8697`. Its `database_specific` holds
  * `malicious-packages-origins` and no `severity` key, its `severity` array is
- * `null`, and the scanner's own `groups[].max_severity` is `""`. So the whole
- * `MAL-` feed — OSV's malicious-package data, the single class this scan is most
- * valuable for — was unclassifiable, and unclassifiable meant green. Not a
+ * `null`, and the scanner's own `groups[].max_severity` is `""`. Nothing in it
+ * can be classified, and unclassifiable meant green. One entry was measured,
+ * not the feed — but a `MAL-` record describes a malicious package rather than
+ * a scored weakness, so having no CVSS band is what the record IS, and the
+ * class this scan is most valuable for is the class it could not act on. Not a
  * crash anyone would notice: the output looks complete and says "not blocking".
  *
  * The inversion is the point. An unresolvable severity now BLOCKS. That is the
@@ -53,9 +55,11 @@ const BLOCKING_BANDS = new Set(['HIGH', 'CRITICAL']);
 const KNOWN_BANDS = new Set(['LOW', 'MODERATE', 'MEDIUM', 'HIGH', 'CRITICAL']);
 
 /**
- * CVSS v3 base-score bands, used only when the report carries a score and no
- * name. The boundaries are the published ones; `0.0` is NONE and is not a
- * finding anyone files, so it resolves LOW rather than inventing a band.
+ * CVSS v3 base-score bands. Reached whenever a NAME is absent or unrecognised —
+ * from a numeric `severity[].score` and from `groups[].max_severity` alike. The
+ * boundaries are the published ones; `0.0` is NONE and is not a finding anyone
+ * files, so it resolves LOW rather than inventing a band. A value that is not a
+ * number at all returns `null`, which the caller reads as "does not say".
  */
 export function bandForScore(score) {
   const n = typeof score === 'number' ? score : Number.parseFloat(String(score ?? ''));
@@ -97,10 +101,25 @@ export function resolveSeverity(vuln, groupMaxSeverity) {
 }
 
 /**
+ * A list where the report should hold one. Anything else is recorded and read
+ * as empty, rather than thrown: a stack trace also exits non-zero, but it says
+ * nothing about which envelope drifted.
+ */
+function asArray(value, errors, what) {
+  if (Array.isArray(value)) return value;
+  if (value !== undefined && value !== null) {
+    errors.push(`${what} is ${JSON.stringify(value)} where a list belongs — the report shape drifted`);
+  }
+  return [];
+}
+
+/**
  * Evaluate a parsed report plus the exit code the scanner returned.
  *
- * Returns every reason it refuses rather than the first, so one CI run tells the
- * author the whole story instead of one layer of it.
+ * Collects every reason it can still compute rather than the first, so one CI
+ * run tells the author the whole story. The one early exit is a `results` that
+ * is not a list: nothing below it can be counted, so the exit-code cross-check
+ * that follows would be comparing against a fiction.
  */
 export function evaluate({ doc, rc }) {
   const errors = [];
@@ -124,13 +143,19 @@ export function evaluate({ doc, rc }) {
     return { ok: false, errors, blocking, below };
   }
 
+  // Every level is array-checked, not null-checked, and the reason is one level
+  // down: `(g?.ids ?? []).includes(id)` on a STRING is a SUBSTRING match. A
+  // group with `ids: "zzAzz"` claimed the finding `A` and lent it its own
+  // `max_severity`, which turned an otherwise UNRESOLVED — blocking — finding
+  // into a non-blocking LOW. That is the one shape measured here that flips
+  // this gate from fail-closed to passing, so `?? []` is not enough anywhere.
   for (const result of doc.results) {
     const source = result?.source?.path ?? '(unknown lockfile)';
-    for (const pkg of result?.packages ?? []) {
+    for (const pkg of asArray(result?.packages, errors, `${source} packages`)) {
       const name = `${pkg?.package?.name ?? '?'}@${pkg?.package?.version ?? '?'}`;
-      const groups = Array.isArray(pkg?.groups) ? pkg.groups : [];
-      for (const vuln of pkg?.vulnerabilities ?? []) {
-        const group = groups.find((g) => (g?.ids ?? []).includes(vuln?.id));
+      const groups = asArray(pkg?.groups, errors, `${name} groups`);
+      for (const vuln of asArray(pkg?.vulnerabilities, errors, `${name} vulnerabilities`)) {
+        const group = groups.find((g) => Array.isArray(g?.ids) && g.ids.includes(vuln?.id));
         const band = resolveSeverity(vuln, group?.max_severity);
         const entry = { id: vuln?.id ?? '(no id)', package: name, source, severity: band };
         if (band === null) {
@@ -157,19 +182,43 @@ export function evaluate({ doc, rc }) {
   return { ok: errors.length === 0 && blocking.length === 0, errors, blocking, below };
 }
 
+/**
+ * Both spellings, `--flag value` and `--flag=value`.
+ *
+ * Not generosity: the first version accepted only the separated form, the
+ * workflow that consumes the JSON verdict passed `--format=json`, and the flag
+ * was silently ignored — the human report went to a file another step then
+ * tried to read as JSON. An option a caller writes and nothing reads is the
+ * same failure as writing nothing, so unknown options are refused too.
+ */
 function parseArgs(argv) {
-  const out = {};
+  const out = { unknown: [] };
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--report') out.report = argv[i + 1];
-    if (argv[i] === '--rc') out.rc = Number.parseInt(argv[i + 1] ?? '', 10);
+    const token = argv[i] ?? '';
+    if (!token.startsWith('--')) continue;
+    const eq = token.indexOf('=');
+    const key = eq === -1 ? token.slice(2) : token.slice(2, eq);
+    const value = eq === -1 ? argv[i + 1] : token.slice(eq + 1);
+    if (key === 'report') out.report = value;
+    else if (key === 'rc') out.rc = Number.parseInt(value ?? '', 10);
+    else if (key === 'format') out.format = value;
+    else out.unknown.push(token);
   }
   return out;
 }
 
-function main(argv) {
-  const { report, rc } = parseArgs(argv);
+export function main(argv) {
+  const { report, rc, format, unknown } = parseArgs(argv);
+  if (unknown.length > 0) {
+    console.error(`osv-report-gate: unknown option(s): ${unknown.join(', ')}`);
+    return 1;
+  }
   if (!report) {
     console.error('osv-report-gate: --report <path> is required');
+    return 1;
+  }
+  if (format !== undefined && format !== 'json') {
+    console.error(`osv-report-gate: --format takes "json", not ${JSON.stringify(format)}`);
     return 1;
   }
 
@@ -185,12 +234,26 @@ function main(argv) {
 
   const { ok, errors, blocking, below } = evaluate({ doc, rc: Number.isNaN(rc) ? undefined : rc });
 
+  // The daily watch needs the same classification as the merge gate but files
+  // an issue instead of failing, so it reads counts rather than an exit code.
+  // One classifier, two consumers — the alternative is a second copy of the
+  // severity rules that drifts the moment either is edited.
+  if (format === 'json') {
+    console.log(JSON.stringify({ ok, blocking, below, errors }));
+    return ok ? 0 : 1;
+  }
+
   for (const e of errors) console.error(`::error::osv-report-gate: ${e}`);
   for (const b of blocking) {
     const label = b.severity === 'UNRESOLVED' ? 'UNRESOLVED SEVERITY' : b.severity;
     console.error(`::error::${b.source}: ${b.package} ${b.id} — ${label}`);
   }
   for (const b of below) console.log(`  below the floor: ${b.package} ${b.id} (${b.severity})`);
+  // An annotation, as the step it replaces emitted: a line in a 3000-line log
+  // that nobody scrolls to is not a report.
+  if (below.length > 0) {
+    console.log(`::warning::${below.length} finding(s) below the floor (not blocking)`);
+  }
 
   console.log(
     `osv-report-gate: ${blocking.length + below.length} finding(s), ${blocking.length} blocking`,

@@ -21,21 +21,20 @@ jobs:
       # job but NOT here, so a release could ship a vulnerable lockfile even while
       # ci.yml is red. Mirror the scan so the release build refuses to publish a
       # HIGH/CRITICAL dep (closes the "vuln creeps into a release" gap, 2026-07-18).
-      - name: Install osv-scanner
-        run: |
-          curl -sSfL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 -o /tmp/osv-scanner
-          chmod +x /tmp/osv-scanner
-          sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
+      - uses: ./.github/actions/install-osv-scanner
+        with:
+          token: ${{ github.token }}
+      # Same gate as ci.yml, same script — the publish path used to carry its
+      # own copy of the severity rules, so a finding this repo refused to merge
+      # could still be shipped by a tag push.
       - name: Scan dependencies (high+critical hard-fail)
         run: |
           set -euo pipefail
-          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output=/tmp/osv.json || true
-          HIGH=$(jq '[.results[]?.packages[]?.vulnerabilities[]? | select((.database_specific.severity // "") | IN("HIGH","CRITICAL"))] | length' /tmp/osv.json)
-          if [ "${HIGH}" -gt 0 ]; then
-            echo "::error::${HIGH} high/critical dependency vulnerability(ies) — refusing to build a release"
-            osv-scanner scan source --lockfile=pnpm-lock.yaml || true
-            exit 1
-          fi
+          set +e
+          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json
+          OSV_RC=$?
+          set -e
+          node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}"
       - run: pnpm run typecheck
       - run: pnpm exec vitest run
 
