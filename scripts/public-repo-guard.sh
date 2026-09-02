@@ -27,7 +27,9 @@
 #                                          # no argument, so the hook does NOT take
 #                                          # this path.
 #
-# Exit 0 = clean, exit 1 = a leak marker was found.
+# Exit 0 = clean, exit 1 = a leak marker was found, exit 2 = the guard could not
+# run (its file listing failed). The third code exists so "the tree is dirty" and
+# "the gate never looked" stop being the same signal — see scripts/lib/guard-file-list.sh.
 #
 # ── Escape hatches (for legitimately public mentions) ──────────────────
 #   1. Whole-file allow: add the path to ALLOW_FILES below (only for docs
@@ -39,6 +41,10 @@
 #      HARD markers are never exempt.
 
 set -euo pipefail
+
+GUARD_NAME='public-repo-guard'
+# shellcheck source=scripts/lib/guard-file-list.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/guard-file-list.sh"
 
 PRAGMA='public-repo-guard:allow'
 
@@ -138,13 +144,33 @@ mode_staged=false
 
 # Candidate files (tracked text files only). Kept as a function + while-read
 # loop rather than `mapfile` so it runs on macOS's stock bash 3.2 too.
-list_files() {
-  if $mode_staged; then
-    git diff --cached --name-only --diff-filter=ACM
-  else
-    git ls-files
-  fi
-}
+#
+# NUL-separated, because the textual default is a silent hole: git QUOTES any
+# path holding a non-ASCII byte (`docs/Übersicht.md` comes out as
+# `"docs/\303\234bersicht.md"`, quotes included). The `[ -f "./$f" ]` test below
+# then fails on that literal, the loop `continue`s, and the file is skipped by
+# EVERY class — including the HARD ones — while the guard reports a clean tree.
+# Measured: a tracked file with an umlaut in its name and `control-staging…` in
+# its body scanned as clean, exit 0.
+#
+# `-z` alone is the fix, and that is worth stating because the first version also
+# passed `-c core.quotePath=false`: a mutation showed the suite green without it,
+# and `git ls-files -z` does emit raw bytes regardless of that setting. The extra
+# option only suggested it was load-bearing. `-z` additionally covers a newline
+# in a filename, which the line-based read could not.
+
+# Materialise the listing ONCE, via the shared helper, which checks the producer's
+# status. The old shape was `done < <(list_files)`, and a process substitution
+# hides its producer's exit status from `set -e` — see scripts/lib/guard-file-list.sh
+# for the full reasoning and for why the assertion is on the STATUS, not on the
+# count. The two scans below then read from a plain file, which cannot swallow one.
+FILE_LIST="$(mktemp)"
+trap 'rm -f "$FILE_LIST"' EXIT
+if $mode_staged; then
+  guard_list_staged_or_die "$FILE_LIST"
+else
+  guard_list_files_or_die "$FILE_LIST"
+fi
 
 is_excluded() {
   local f="$1"
@@ -163,21 +189,82 @@ violations=0
 # PATHS — the content greps below never see file NAMES. A vendored tooling
 # directory could therefore be committed (and enter the Docker build context)
 # while every content scan stays clean. Check the tracked paths themselves.
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
   is_excluded "$f" && continue
-  if printf '%s' "$f" | grep -qEi "$HARD_LOCAL_TOOLING"; then
+  if printf '%s' "$f" | grep -qEi -- "$HARD_LOCAL_TOOLING"; then
     echo "❌ HARD leak marker (operator-local tooling) in PATH: $f"
     violations=$((violations + 1))
   fi
-done < <(list_files)
+done < "$FILE_LIST"
 
-while IFS= read -r f; do
+while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
-  [ -f "$f" ] || continue
+  # SYMLINKS carry their payload in the BLOB, not in the file they point at. git
+  # stores a symlink as a blob whose CONTENT is the target path, so
+  # `ln -s /opt/lynox-managed/secret link.ts` commits that string into this public
+  # repo verbatim. The content scan below never sees it: `[ -f ]` follows the link,
+  # so a live link is scanned for the TARGET's content (the wrong bytes, and the
+  # target is usually outside the repo) and a dangling one fails the test and is
+  # skipped entirely — silently, the same way this guard used to skip quoted and
+  # dash-leading paths. Scan the target STRING against the two HARD classes here;
+  # the SOFT and cross-reference classes are about prose and do not apply to a path.
+  if [ -L "./$f" ]; then
+    is_excluded "$f" && continue
+    # `readlink` is a producer like any other, so its failure is checked rather
+    # than swallowed. An earlier draft of this very branch wrote `|| true`, which
+    # turned an unreadable link into an empty target, no match, and a silent skip
+    # — the exact failure this file exists to remove, reintroduced inside the fix.
+    #
+    # NOT covered by a test, and the reason is worth writing down rather than
+    # leaving as a gap: this branch only runs when `[ -L ]` was already true, and
+    # every state that makes `readlink` fail (not a symlink; parent unreadable)
+    # makes `[ -L ]` false first — measured. What remains is the TOCTOU window
+    # where the link disappears between the two, which no deterministic test can
+    # open. So the check guards a race, cannot be exercised, and must not be
+    # counted as covered.
+    if ! _target="$(readlink -- "./$f")"; then
+      echo "❌ could not read SYMLINK $f — refusing to treat an unreadable link as clean"
+      violations=$((violations + 1))
+      continue
+    fi
+    if printf '%s' "$_target" | grep -qE -- "$HARD"; then
+      echo "❌ HARD leak marker in SYMLINK TARGET of $f -> $_target"
+      violations=$((violations + 1))
+    fi
+    if printf '%s' "$_target" | grep -qEi -- "$HARD_LOCAL_TOOLING"; then
+      echo "❌ HARD leak marker (operator-local tooling) in SYMLINK TARGET of $f -> $_target"
+      violations=$((violations + 1))
+    fi
+    # The whole-file allow applies here exactly as it does below, so a doc that is
+    # permitted to name the managed service keeps that permission if it is a link.
+    is_allow_file "$f" && continue
+    # A first draft asserted that the SOFT and cross-reference classes "do not
+    # apply to a path". Measured false: a link target is an arbitrary committed
+    # byte string, and both a dual-use hostname and a doubled-bracket slug rode
+    # through it at exit 0 while being blocked in every other file. They are
+    # checked here too — as HARD blocks, because the inline pragma has nowhere to
+    # live on a symlink. There are zero such links today; if a legitimate one ever
+    # appears, ALLOW_FILES above is its escape hatch.
+    if printf '%s' "$_target" | grep -qE -- "$INTERNAL_REF"; then
+      echo "❌ internal cross-reference in SYMLINK TARGET of $f -> $_target"
+      violations=$((violations + 1))
+    fi
+    if printf '%s' "$_target" | grep -qE -- "$SOFT"; then
+      echo "⚠️  internal hostname in SYMLINK TARGET of $f -> $_target (no inline pragma is possible on a link; allow-list the path instead)"
+      violations=$((violations + 1))
+    fi
+    continue
+  fi
+  [ -f "./$f" ] || continue
   is_excluded "$f" && continue
-  # Skip binaries.
-  if grep -Iq . "$f" 2>/dev/null; then :; else continue; fi
+  # Skip binaries. Every file operand below is prefixed `./` so a repo-root path
+  # that begins with '-' (or is literally `-`) is an unambiguous filename: not a
+  # grep option, and — the sharper trap — not the stdin `-`, which would make grep
+  # drain THIS loop's own file listing and blind the guard for every later file.
+  # `--` additionally guards the pattern side. Same silent blind-skip class as the
+  # non-ASCII fix; `git ls-files` paths are always repo-relative, so `./` is safe.
+  if grep -Iq -- . "./$f" 2>/dev/null; then :; else continue; fi
 
   # HARD — no exemptions.
   while IFS= read -r line; do
@@ -185,7 +272,7 @@ while IFS= read -r f; do
     echo "❌ HARD leak marker in $f:"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nIE "$HARD" "$f" 2>/dev/null || true)
+  done < <(grep -nIE -- "$HARD" "./$f" 2>/dev/null || true)
 
   # HARD (operator-local tooling) — case-INSENSITIVE (the -i below), so the
   # pattern stays short without spelling out the vendor name it keeps out.
@@ -197,7 +284,7 @@ while IFS= read -r f; do
     echo "❌ HARD leak marker (operator-local tooling) in $f:"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nIEi "$HARD_LOCAL_TOOLING" "$f" 2>/dev/null || true)
+  done < <(grep -nIEi -- "$HARD_LOCAL_TOOLING" "./$f" 2>/dev/null || true)
 
   # Whole-file allow applies from here down. It sits ABOVE the reference loops on
   # purpose: those match a bracket shape that legal content can produce, and an
@@ -217,7 +304,7 @@ while IFS= read -r f; do
     echo "❌ internal cross-reference in $f (state the reason inline instead):"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nIE "$INTERNAL_REF" "$f" 2>/dev/null || true)
+  done < <(grep -nIE -- "$INTERNAL_REF" "./$f" 2>/dev/null || true)
 
   # The opening line of a link split across lines. Reported separately so the
   # message can say why it looks incomplete.
@@ -237,7 +324,7 @@ while IFS= read -r f; do
     echo "❌ internal cross-reference opened in $f and continued on the next line:"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nIE "$REF_OPENER" "$f" 2>/dev/null || true)
+  done < <(grep -nIE -- "$REF_OPENER" "./$f" 2>/dev/null || true)
 
   # SOFT — exempt if the line carries the pragma. Whole-file allow already
   # returned above, so it needs no second check here.
@@ -249,8 +336,8 @@ while IFS= read -r f; do
     echo "⚠️  internal hostname in $f (add '${PRAGMA}' with a reason if intentional):"
     echo "     ${line}"
     violations=$((violations + 1))
-  done < <(grep -nIE "$SOFT" "$f" 2>/dev/null || true)
-done < <(list_files)
+  done < <(grep -nIE -- "$SOFT" "./$f" 2>/dev/null || true)
+done < "$FILE_LIST"
 
 if [ "$violations" -gt 0 ]; then
   echo ""

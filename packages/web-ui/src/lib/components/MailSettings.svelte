@@ -9,6 +9,7 @@
 	import Checkbox from '../primitives/Checkbox.svelte';
 	import { addToast } from '../stores/toast.svelte.js';
 	import { buildMailAccountPayload } from '../api/mail-accounts.js';
+	import { friendlyMailError } from '../api/mail-error-text.js';
 
 	interface ServerConfig {
 		host: string;
@@ -52,6 +53,10 @@
 		ok: boolean;
 		error?: string;
 		code?: string;
+		/** Which leg failed. Absent on success and on pre-connection failures. */
+		stage?: 'imap' | 'smtp';
+		/** Which legs actually ran — smtp is false for receive-only account types. */
+		checked?: { imap: boolean; smtp: boolean };
 	}
 
 	/** Grouping for the type-picker dropdown — semantic ordering. */
@@ -77,13 +82,16 @@
 	let formPersonaPrompt = $state('');
 	let formPassword = $state('');
 
-	// Custom-only fields
+	// Custom-only fields. SMTP defaults to submission (587 + STARTTLS), not
+	// implicit TLS on 465: many hosting providers block outbound 465, so it is
+	// the one suggestion that can be unreachable no matter what the user types.
+	// Both fields stay editable — a self-hoster on their own network can set 465.
 	let customImapHost = $state('');
 	let customImapPort = $state(993);
 	let customImapSecure = $state(true);
 	let customSmtpHost = $state('');
-	let customSmtpPort = $state(465);
-	let customSmtpSecure = $state(true);
+	let customSmtpPort = $state(587);
+	let customSmtpSecure = $state(false);
 
 	let testing = $state(false);
 	let saving = $state(false);
@@ -127,9 +135,11 @@
 		customImapPort = 993;
 		customImapSecure = true;
 		customSmtpHost = '';
-		customSmtpPort = 465;
-		customSmtpSecure = true;
+		customSmtpPort = 587;
+		customSmtpSecure = false;
 		testResult = null;
+		skipConnectionTest = false;
+		testedFingerprint = null;
 	}
 
 	function buildCustomPayload() {
@@ -140,26 +150,15 @@
 	}
 
 	/**
-	 * Translate technical MailError codes to user-friendly messages.
-	 * Keeps the raw error code visible as a small second line for debugging.
+	 * Thin wrapper over the shared copy module — it supplies the form context the
+	 * advice depends on. The texts themselves live in mail-error-text.ts so they
+	 * can be tested by return value instead of by searching this file.
 	 */
-	function friendlyError(code: string | undefined, raw: string | undefined): string {
-		switch (code) {
-			case 'auth_failed':
-				return 'Login failed — check your email address and app-password. If you enabled 2FA, make sure you generated a provider-specific app-password (not your account password).';
-			case 'tls_failed':
-				return "The server's certificate couldn't be verified. If this is a custom server with self-signed TLS, contact your admin.";
-			case 'connection_failed':
-				return "Couldn't reach the mail server. Check the hostname and that the IMAP port is open on your network.";
-			case 'timeout':
-				return 'The server took too long to respond. Try again, or check your network.';
-			case 'not_found':
-				return 'No matching mail server found for that address.';
-			case 'rate_limited':
-				return 'Too many test attempts — wait a minute before retrying.';
-			default:
-				return raw ?? 'Unknown error';
-		}
+	function friendlyError(code: string | undefined, raw: string | undefined, stage?: 'imap' | 'smtp'): string {
+		return friendlyMailError(code, raw, {
+			stage,
+			smtpPort: formPreset === 'custom' ? customSmtpPort : undefined,
+		});
 	}
 
 	let autodiscovering = $state(false);
@@ -201,6 +200,8 @@
 		}
 		testing = true;
 		testResult = null;
+		// A new probe invalidates the decision that was made about the old one.
+		skipConnectionTest = false;
 		try {
 			const payload = buildMailAccountPayload({
 				id: formId || formAddress,
@@ -225,17 +226,60 @@
 			}
 			const data = (await res.json()) as TestResult;
 			testResult = data;
+			// Stamp what this result describes, so editing a field disarms it.
+			testedFingerprint = connectionFingerprint();
 			if (data.ok) {
 				addToast('Connection successful', 'success');
 			} else {
-				addToast(`Connection failed: ${friendlyError(data.code, data.error)}`, 'error');
+				addToast(`Connection failed: ${friendlyError(data.code, data.error, data.stage)}`, 'error');
 			}
 		} catch (err) {
 			testResult = { ok: false, error: err instanceof Error ? err.message : 'Network error', code: 'unknown' };
+			testedFingerprint = connectionFingerprint();
 			addToast('Connection test failed', 'error');
 		}
 		testing = false;
 	}
+
+	/**
+	 * Set once the user has chosen to save past a failed SMTP check. The server
+	 * refuses the save when its own pre-save test fails, and that test now covers
+	 * the send path — so without this, a mailbox that reads fine but cannot be
+	 * verified for sending cannot be added at all, and the read half of the
+	 * product is lost along with it. Reset by resetForm().
+	 */
+	let skipConnectionTest = $state(false);
+
+	/**
+	 * Exactly the inputs the server probe exercises. Anything else on the form —
+	 * display name, account type, persona — cannot change what a probe would find.
+	 */
+	function connectionFingerprint(): string {
+		return JSON.stringify([
+			formAddress,
+			formPassword,
+			formPreset,
+			formPreset === 'custom' ? buildCustomPayload() : null,
+		]);
+	}
+	/** The fingerprint the currently-displayed result was produced from. */
+	let testedFingerprint = $state<string | null>(null);
+
+	/**
+	 * Offer the escape only for the leg that can fail without breaking reading —
+	 * AND only while the form still holds the configuration that was probed.
+	 *
+	 * The fingerprint is what makes this safe. Keying on `testResult` alone was
+	 * not enough: nothing clears a result when a field is edited, so a user could
+	 * fail the SMTP check, tick the box, correct the password, and save — sending
+	 * skipTest, which bypasses the WHOLE probe including IMAP, and storing
+	 * credentials nothing had ever verified. Being `$derived`, this re-evaluates
+	 * on every keystroke, so the box disappears the moment the form diverges from
+	 * what was tested; no manual invalidation to forget.
+	 */
+	const canSaveWithoutSending = $derived(
+		testResult?.ok === false && testResult.stage === 'smtp' && testedFingerprint === connectionFingerprint(),
+	);
 
 	async function saveAccount() {
 		if (!formId || !formDisplayName || !formAddress || !formPassword) {
@@ -253,6 +297,13 @@
 				password: formPassword,
 				personaPrompt: formPersonaPrompt,
 				custom: formPreset === 'custom' ? buildCustomPayload() : undefined,
+				// Tied to the result currently on screen, not to the checkbox
+				// alone. The box unmounts whenever testResult is cleared, and a
+				// bare `skipConnectionTest` stayed true through that — so a user
+				// who ticked it, then edited the password and saved, skipped the
+				// probe ENTIRELY (skipTest bypasses the IMAP leg too) and stored
+				// credentials nothing had ever verified, under "Account saved".
+				skipTest: skipConnectionTest && canSaveWithoutSending,
 			});
 			const res = await fetch(`${getApiBase()}/mail/accounts`, {
 				method: 'POST',
@@ -260,8 +311,34 @@
 				body: JSON.stringify(payload),
 			});
 			if (!res.ok) {
-				const err = (await res.json().catch(() => ({}))) as { error?: string };
-				addToast(err.error ?? 'Save failed', 'error');
+				const err = (await res.json().catch(() => ({}))) as { error?: string; code?: string; stage?: 'imap' | 'smtp' };
+				// The save path is the one that refuses, so it owes the same
+				// translation the test button gives — not the raw engine string.
+				addToast(err.code ? friendlyError(err.code, err.error, err.stage) : (err.error ?? 'Save failed'), 'error');
+				// Show the refusal where the test result goes, so a user who never
+				// pressed Test still gets the explanation AND the way past it.
+				// Before this, the escape existed only on the test-button path —
+				// missing from the one path that actually blocks.
+				if (err.code) {
+					testResult = {
+						ok: false,
+						error: err.error,
+						code: err.code,
+						stage: err.stage,
+						// Only claim a leg ran when the stage says so. `imap: true`
+						// unconditionally would have been a fabrication on a refusal
+						// whose IMAP leg is exactly what failed — harmless today
+						// because nothing renders `checked` on a failed result, and
+						// a lie waiting for the first thing that does.
+						checked: err.stage ? { imap: true, smtp: err.stage === 'smtp' } : undefined,
+					};
+					testedFingerprint = connectionFingerprint();
+					// And the consent goes with it. Without this the flag survived
+					// "tick for config A → edit a field → save (refused, stamps B)",
+					// and the box came back already ticked for a configuration the
+					// user had never agreed to skip.
+					skipConnectionTest = false;
+				}
 				saving = false;
 				return;
 			}
@@ -661,7 +738,7 @@
 						</div>
 						<label class="flex items-center gap-2 text-xs">
 							<Checkbox bind:checked={customSmtpSecure} size="sm" />
-							SMTP implicit TLS (465)
+							SMTP implicit TLS (465) — leave off for submission on 587
 						</label>
 					</div>
 				{/if}
@@ -669,10 +746,28 @@
 				{#if testResult}
 					<div class="rounded-[var(--radius-sm)] border p-2 text-xs {testResult.ok ? 'border-success/30 bg-success/5 text-success' : 'border-danger/30 bg-danger/5 text-danger'}">
 						{#if testResult.ok}
-							✓ Connection successful — IMAP login + mailbox open succeeded.
+							{#if testResult.checked?.smtp}
+								✓ Connection successful — IMAP login + mailbox open succeeded, and the SMTP server accepted the login.
+							{:else if testResult.checked}
+								✓ Connection successful — IMAP login + mailbox open succeeded. This account type is receive-only, so the send path was not tested.
+							{:else}
+								✓ Connection successful — IMAP login + mailbox open succeeded.
+							{/if}
 						{:else}
-							<div class="font-medium">✗ {friendlyError(testResult.code, testResult.error)}</div>
+							<div class="font-medium">✗ {friendlyError(testResult.code, testResult.error, testResult.stage)}</div>
 							<div class="mt-0.5 text-[10px] opacity-60">{testResult.code ?? 'unknown'}</div>
+							{#if canSaveWithoutSending}
+								<!-- Reading works — only sending could not be verified. Refusing the
+								     whole mailbox here would take triage and summaries away too. -->
+								<label class="mt-2 flex items-start gap-2 text-[11px] font-normal">
+									<Checkbox bind:checked={skipConnectionTest} size="sm" />
+									<span>
+										Add it anyway, for receiving only. IMAP worked, so mail will arrive and be
+										read — sending from this account is likely to fail until the SMTP settings
+										are right.
+									</span>
+								</label>
+							{/if}
 						{/if}
 					</div>
 				{/if}

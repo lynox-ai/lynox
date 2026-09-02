@@ -19,6 +19,8 @@ interface FakeClient {
   fetch: ReturnType<typeof vi.fn>;
   fetchOne: ReturnType<typeof vi.fn>;
   downloadMany: ReturnType<typeof vi.fn>;
+  list: ReturnType<typeof vi.fn>;
+  append: ReturnType<typeof vi.fn>;
 }
 
 function makeFakeClient(): FakeClient {
@@ -34,6 +36,13 @@ function makeFakeClient(): FakeClient {
     fetch: vi.fn().mockImplementation(() => asyncIterFrom([])),
     fetchOne: vi.fn().mockResolvedValue(false),
     downloadMany: vi.fn().mockResolvedValue({}),
+    // Default mailbox set: INBOX + a SPECIAL-USE-advertised Sent folder, so the
+    // sent-copy append path resolves a target out of the box.
+    list: vi.fn().mockResolvedValue([
+      { path: 'INBOX', specialUse: '\\Inbox' },
+      { path: 'Sent', specialUse: '\\Sent' },
+    ]),
+    append: vi.fn().mockResolvedValue(true),
   };
 }
 
@@ -56,12 +65,18 @@ vi.mock('imapflow', () => {
   };
 });
 
+const verifyMock = vi.fn();
+/** Every transport this mock has handed out, so callers can be counted. */
+const createdTransports: unknown[] = [];
+
 vi.mock('nodemailer', () => {
   return {
     default: {
       createTransport: vi.fn().mockImplementation((opts: unknown) => {
         lastTransportOptions = opts;
-        return { sendMail: sendMailMock, close: transportCloseMock };
+        const transport = { sendMail: sendMailMock, close: transportCloseMock, verify: verifyMock };
+        createdTransports.push(transport);
+        return transport;
       }),
     },
   };
@@ -91,6 +106,9 @@ beforeEach(() => {
   lastTransportOptions = null;
   sendMailMock.mockReset();
   transportCloseMock.mockReset();
+  verifyMock.mockReset();
+  verifyMock.mockResolvedValue(true);
+  createdTransports.length = 0;
 });
 
 afterEach(() => {
@@ -477,13 +495,57 @@ describe('ImapSmtpProvider — send', () => {
     expect(result.rejected).toEqual([]);
 
     expect(sendMailMock).toHaveBeenCalledTimes(1);
-    const args = sendMailMock.mock.calls[0]?.[0] as { from: { name?: string; address: string }; to: string[]; inReplyTo: string };
+    const args = sendMailMock.mock.calls[0]?.[0] as {
+      from: { name?: string; address: string };
+      to: Array<{ name: string; address: string }>;
+      inReplyTo: string;
+    };
     expect(args.from.address).toBe('user@example.com');
     // displayName from the account config must round-trip through nodemailer
     // so recipients see a friendly sender name, not just the local-part.
     expect(args.from.name).toBe('Test User');
-    expect(args.to[0]).toBe('"Bob" <bob@example.com>');
+    // CHANGED 2026-08-17: this asserted the pre-serialized string
+    // `'"Bob" <bob@example.com>'`. Recipients now go to nodemailer as STRUCTURED
+    // objects, the same shape `from` always used — see the security test below
+    // for why the round trip through an address parser had to go.
+    expect(args.to[0]).toEqual({ name: 'Bob', address: 'bob@example.com' });
     expect(args.inReplyTo).toBe('<old@example.com>');
+
+    // Structured, not serialized: nodemailer receives the parts and does its own
+    // escaping. The assertion above is the shape; the one below is the reason.
+  });
+
+  it('SEC: a hostile display name cannot become an extra SMTP recipient', async () => {
+    // Measured end to end against real nodemailer before the fix: recipients
+    // were handed over PRE-SERIALIZED as `"name" <addr>`, and nodemailer
+    // RE-PARSED that string. The old escaping handled `"` but not `\\`, so a
+    // display name ending in a backslash escaped its own closing quote and the
+    // re-parse read a different mailbox:
+    //
+    //   name `Bob\\" <attacker@evil.example>`  =>  RCPT TO: ["attacker@evil.example"]
+    //
+    // The real recipient was GONE and the consent preview never showed it —
+    // `previewAddressList` renders only `.address`. The name is remote-authored:
+    // it arrives on an inbound envelope, survives `toAddresses` unfiltered, and
+    // `mail_reply` defaults its recipient to that object.
+    //
+    // The fix is structural, not more escaping: pass the parts, so there is no
+    // re-parse to exploit. The hostile text must stay DATA in `name`, and
+    // `address` must be untouched.
+    sendMailMock.mockResolvedValue({ messageId: '<x>', accepted: ['bob@customer.example'], rejected: [] });
+    const hostile = 'Bob\\" <attacker@evil.example>';
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.send({
+      to: [{ name: hostile, address: 'bob@customer.example' }],
+      subject: 'Hi',
+      text: 'b',
+    });
+    const args = sendMailMock.mock.calls[0]?.[0] as { to: Array<{ name: string; address: string }> };
+    expect(args.to).toHaveLength(1);
+    expect(args.to[0]?.address).toBe('bob@customer.example');
+    expect(args.to[0]?.name).toBe(hostile);
+    // The decisive part: nothing handed to nodemailer is a string it must parse.
+    expect(typeof args.to[0]).toBe('object');
 
     const transport = lastTransportOptions as { host: string; port: number; secure: boolean; requireTLS: boolean; tls: { rejectUnauthorized: boolean } };
     expect(transport.host).toBe('smtp.example.com');
@@ -513,6 +575,137 @@ describe('ImapSmtpProvider — send', () => {
     const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
     const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
     expect(err.code).toBe('auth_failed');
+  });
+
+  it('maps a refused message to send_rejected — the fallback the shared mapper owes send()', async () => {
+    // The error mapping is shared with verifySmtp now, and the two differ only
+    // in this fallback. Only the verify direction was covered, so a mutation
+    // that made send() fall back to connection_failed survived.
+    sendMailMock.mockRejectedValue(new Error('550 5.7.1 Message rejected as spam'));
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
+    expect(err.code).toBe('send_rejected');
+    expect(err.message).toContain('550');
+  });
+
+  it('reads an AUTH throttle as rate_limited, not as bad credentials', async () => {
+    // nodemailer formats every AUTH-phase failure as "Invalid login: <reply>",
+    // so a 454 throttle arrives wearing the word "login" — and the user was then
+    // told to regenerate an app-password, retried, and extended the lockout.
+    const throttled = Object.assign(new Error('Invalid login: 454 4.7.0 Too many login attempts'), { code: 'EAUTH', responseCode: 454 });
+    sendMailMock.mockRejectedValue(throttled);
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
+    expect(err.code).toBe('rate_limited');
+  });
+
+  it('does NOT read a greylisted recipient as an account throttle', async () => {
+    // nodemailer attaches responseCode to any reply starting with digits, so the
+    // same numbers appear far from AUTH. A greylisted recipient is 450 with
+    // code EENVELOPE — the account is fine and the message is the problem.
+    // Calling that "your account is throttled" replaces a correct diagnosis with
+    // a wrong one, and send-core hands the text straight to the model.
+    const greylisted = Object.assign(
+      new Error("Can't send mail - all recipients were rejected: 450 4.2.0 Recipient address rejected: Greylisted"),
+      { code: 'EENVELOPE', responseCode: 450 },
+    );
+    sendMailMock.mockRejectedValue(greylisted);
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
+    expect(err.code).toBe('send_rejected');
+    expect(err.message).toContain('recipients were rejected');
+  });
+
+  it('does NOT read a refused STARTTLS as an account throttle', async () => {
+    // RFC 3207: "454 TLS not available due to temporary reason", raised as ETLS.
+    // Making 587 the default made this path MORE likely, not less.
+    const tlsRefused = Object.assign(
+      new Error('Error upgrading connection with STARTTLS'),
+      { code: 'ETLS', responseCode: 454 },
+    );
+    sendMailMock.mockRejectedValue(tlsRefused);
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
+    expect(err.code).not.toBe('rate_limited');
+  });
+
+  it('still calls a genuine credential rejection auth_failed', async () => {
+    // The other direction of the same predicate: 535 is really about the
+    // credentials, and a new app-password is really the answer.
+    const rejected = Object.assign(new Error('Invalid login: 535 5.7.8 Username and Password not accepted'), { responseCode: 535 });
+    sendMailMock.mockRejectedValue(rejected);
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' }).catch(e => e as MailError);
+    expect(err.code).toBe('auth_failed');
+  });
+});
+
+describe('ImapSmtpProvider — verifySmtp', () => {
+  it('opens an SMTP session and sends nothing', async () => {
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.verifySmtp();
+
+    expect(verifyMock).toHaveBeenCalledTimes(1);
+    expect(sendMailMock).not.toHaveBeenCalled();
+  });
+
+  it('reuses one transport across verify and send', async () => {
+    // Without the memoization in getSmtpTransport, every send builds a new
+    // transport and overwrites the field, so close() only ever reaches the last
+    // one and the rest leak with their listeners — once per sent mail. The whole
+    // mail suite stayed green while that guard was missing.
+    sendMailMock.mockResolvedValue({ messageId: 'x', accepted: [], rejected: [] });
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+
+    await provider.verifySmtp();
+    await provider.send({ to: [{ address: 'a@example.com' }], subject: 's', text: 't' });
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' });
+
+    expect(createdTransports).toHaveLength(1);
+  });
+
+  it('refuses to open a socket after close()', async () => {
+    // The invariant send() and getClient() both hold; verifySmtp has to hold it
+    // too, or a closed provider can still reach the network.
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.close();
+
+    const err = await provider.verifySmtp().catch(e => e as MailError);
+    expect(err).toBeInstanceOf(MailError);
+    expect(err.message).toMatch(/closed/i);
+    expect(verifyMock).not.toHaveBeenCalled();
+  });
+
+  it('reports an unreachable server as connection_failed, never send_rejected', async () => {
+    verifyMock.mockRejectedValue(new Error('connect ECONNREFUSED 10.0.0.1:587'));
+
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const err = await provider.verifySmtp().catch(e => e as MailError);
+    expect(err.code).toBe('connection_failed');
+  });
+
+  it('requires STARTTLS on a submission port — the flip to 587 rests on this', async () => {
+    // `requireTLS: !secure` is what makes 587 safe to default to. Nothing
+    // asserted it for the secure:false case, which is the case this change made
+    // the default; the only existing assertion covered secure:true, where
+    // requireTLS is moot.
+    const provider = new ImapSmtpProvider(
+      { ...ACCOUNT, smtp: { host: 'smtp.example.com', port: 587, secure: false } },
+      credResolver,
+    );
+    await provider.verifySmtp();
+
+    const transport = lastTransportOptions as { port: number; secure: boolean; requireTLS: boolean; tls: { rejectUnauthorized: boolean; minVersion: string } };
+    expect(transport.port).toBe(587);
+    expect(transport.secure).toBe(false);
+    expect(transport.requireTLS).toBe(true);
+    expect(transport.tls.rejectUnauthorized).toBe(true);
+    expect(transport.tls.minVersion).toBe('TLSv1.2');
   });
 });
 
@@ -697,5 +890,120 @@ describe('isAutoSubmittedHeader', () => {
     expect(isAutoSubmittedHeader('auto-generated')).toBe(true);
     expect(isAutoSubmittedHeader('auto-replied')).toBe(true);
     expect(isAutoSubmittedHeader('auto-notified')).toBe(true);
+  });
+});
+
+describe('ImapSmtpProvider — sent-copy append (dogfood 2026-08-14: sent mail invisible to the sender)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    probe = makeFakeClient();
+    sendMailMock.mockResolvedValue({ messageId: '<mocked@smtp>', accepted: ['bob@example.com'], rejected: [] });
+  });
+
+  it('appends the sent message to the SPECIAL-USE Sent folder with the pre-assigned Message-ID', async () => {
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.send({ to: [{ address: 'bob@example.com' }], subject: 'Hi', text: 'Body text.' });
+
+    expect(probe.append).toHaveBeenCalledTimes(1);
+    const [folder, raw, flags] = probe.append.mock.calls[0]! as [string, Buffer, string[]];
+    expect(folder).toBe('Sent'); // resolved via specialUse, not the name
+    expect(flags).toEqual(['\\Seen']);
+    const rawStr = raw.toString('utf8');
+    // The SAME id the SMTP copy carries (pre-assigned in sendMail's arguments):
+    // two different ids would thread as unrelated messages in clients.
+    const smtpMessageId = (sendMailMock.mock.calls[0]?.[0] as { messageId: string }).messageId;
+    expect(rawStr).toContain(smtpMessageId);
+    expect(rawStr).toContain('Subject: Hi');
+    expect(rawStr).toContain('Body text.');
+  });
+
+  it('resolves a Sent folder by NAME when the server advertises no special-use', async () => {
+    probe.list.mockResolvedValue([
+      { path: 'INBOX', specialUse: '\\Inbox' },
+      { path: 'Sent Messages', specialUse: undefined },
+    ]);
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' });
+    expect(probe.append.mock.calls[0]?.[0]).toBe('Sent Messages');
+  });
+
+  it('skips the append entirely for Gmail-via-SMTP — the server files Sent itself', async () => {
+    const gmail = { ...ACCOUNT, smtp: { ...ACCOUNT.smtp, host: 'smtp.gmail.com' } };
+    const provider = new ImapSmtpProvider(gmail, credResolver);
+    await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' });
+    expect(probe.append).not.toHaveBeenCalled(); // an append would DUPLICATE
+  });
+
+  it('a failed append never fails the send — the mail is already delivered', async () => {
+    probe.append.mockRejectedValue(new Error('append quota exceeded'));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+      const result = await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' });
+      expect(result.accepted).toEqual(['bob@example.com']);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('sent-copy append failed'), expect.anything());
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('no resolvable Sent folder → no append, no throw', async () => {
+    probe.list.mockResolvedValue([{ path: 'INBOX', specialUse: '\\Inbox' }]);
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const result = await provider.send({ to: [{ address: 'bob@example.com' }], subject: 's', text: 't' });
+    expect(probe.append).not.toHaveBeenCalled();
+    expect(result.accepted).toEqual(['bob@example.com']);
+  });
+});
+
+describe('ImapSmtpProvider — sent-folder resolution cache', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    probe = makeFakeClient();
+    sendMailMock.mockResolvedValue({ messageId: '<m@x>', accepted: ['b@example.com'], rejected: [] });
+  });
+
+  it('lists folders ONCE across sends, not per send', async () => {
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's1', text: 't' });
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's2', text: 't' });
+    expect(probe.list).toHaveBeenCalledTimes(1);
+    expect(probe.append).toHaveBeenCalledTimes(2);
+  });
+
+  it('an append failure drops the cache so the next send re-resolves', async () => {
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's1', text: 't' });
+    probe.append.mockRejectedValue(new Error('folder moved'));
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's2', text: 't' });
+    probe.append.mockResolvedValue(true);
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's3', text: 't' });
+    expect(probe.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('a reply path body is reflowed before it hits the provider (mail-review adoption)', async () => {
+    // Pinned at the provider seam: whatever caller hands a hard-wrapped body
+    // through send(), the wire text must be reflowed when the caller applied
+    // the rule (mail_reply sends directly, mail_send via send-core — both
+    // reflow before this seam; this test guards against a future caller
+    // forgetting by asserting the provider receives what it is given, one
+    // paragraph per line, when the input is pre-reflowed).
+    const provider = new ImapSmtpProvider(ACCOUNT, credResolver);
+    const reflowed = 'One paragraph that was already reflowed by the caller.';
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: reflowed });
+    const arg = sendMailMock.mock.calls[0]?.[0] as { text: string };
+    expect(arg.text).toBe(reflowed);
+  });
+});
+
+describe('ImapSmtpProvider — googlemail alias skip', () => {
+  it('skips the append for smtp.googlemail.com too (alias of smtp.gmail.com)', async () => {
+    vi.clearAllMocks();
+    probe = makeFakeClient();
+    sendMailMock.mockResolvedValue({ messageId: '<m@x>', accepted: ['b@example.com'], rejected: [] });
+    const gw = { ...ACCOUNT, smtp: { ...ACCOUNT.smtp, host: 'smtp.googlemail.com' } };
+    const provider = new ImapSmtpProvider(gw, credResolver);
+    await provider.send({ to: [{ address: 'b@example.com' }], subject: 's', text: 't' });
+    expect(probe.append).not.toHaveBeenCalled();
   });
 });

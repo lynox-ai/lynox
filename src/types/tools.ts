@@ -3,11 +3,42 @@
 import type { BetaTool } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 
 import type { IAgent } from './agent.js';
-import type { CostSnapshot } from './modes.js';
+import type { AutonomyLevel, CostSnapshot } from './modes.js';
+import type { ModelTier } from './models.js';
 import type { UntrustedCause } from '../core/untrusted-signals.js';
 
 export type ToolHandler<TInput = unknown> =
   (input: TInput, agent: IAgent) => Promise<string>;
+
+/**
+ * Structured payload a tool's `destructive.check` may return INSTEAD of a plain
+ * action-label string, when the consent gate carries information beyond "this
+ * mutates data". The spawn-agent deep-tier consent gate is the first user: it
+ * names the tier, the estimated cost, and the provider a deep delegation would
+ * run on, so the user can make an informed call before authorising expensive work.
+ *
+ * The permission guard renders `message` as the GO text verbatim (it IS the whole
+ * warning, not a suffix); the structured fields let a UI render a richer card and,
+ * when `downgradeTo` is set, offer a cheaper alternative.
+ *
+ * `provenance` is OPTIONAL and only set where the engine can PROVE the data path
+ * (e.g. a control-plane provider registry naming the processing region). It is
+ * deliberately left undefined in the public engine rather than guessed — a wrong
+ * region claim is worse than none.
+ */
+export interface WarningPayload {
+  message: string;
+  tier?: ModelTier | undefined;
+  costUsd?: number | undefined;
+  provider?: string | undefined;
+  provenance?: string | undefined;
+  /**
+   * Present => the GO may offer to run on this cheaper tier instead. Reserved for
+   * the spawn-consent deny→balanced path (PR2b): the deep-tier check (PR2a) does
+   * not set it yet, so today no producer populates this field by design.
+   */
+  downgradeTo?: 'balanced' | undefined;
+}
 
 export interface ToolEntry<TInput = unknown> {
   definition: BetaTool;
@@ -42,13 +73,20 @@ export interface ToolEntry<TInput = unknown> {
    * the action label for destructive inputs, or `null` for safe ones. Omit
    * `check` for always-destructive tools.
    *
+   * `check` may instead return a {@link WarningPayload} — used when the gate
+   * carries richer information than an action label (the spawn-agent deep-tier
+   * consent gate names tier + cost + provider). The guard renders the payload's
+   * `message` verbatim. The optional second argument `ctx` carries the run's
+   * `autonomy`, so a check can opt OUT of gating in autonomous mode (spawn does:
+   * the handler clamps deep→balanced headlessly instead of refusing).
+   *
    * Colocating this with the tool registration keeps the write-action
    * set next to the input schema — adding a new write action no longer
    * requires updating a separate enumerated list in the guard.
    */
   destructive?: {
     mode: 'data' | 'external';
-    check?: (input: TInput) => string | null;
+    check?: (input: TInput, ctx?: { autonomy?: AutonomyLevel | undefined }) => string | WarningPayload | null;
   } | undefined;
   /**
    * When true, calling this tool ENDS the agent's turn: after the tool_result
@@ -102,6 +140,16 @@ export interface SpawnedSubAgent {
   role?: string | undefined;
   /** Concrete model this child runs on (sanitized id, not the tier). */
   model?: string | undefined;
+  /** Resolved capability tier this child runs on (fast/balanced/deep). Lets the
+   * spawn panel show what was actually delegated to, separately from the model id. */
+  tier?: ModelTier | undefined;
+  /**
+   * Set when this child was clamped down from deep to balanced because the user
+   * chose "Run on balanced" at the consent gate. Lets the result + spawn panel
+   * label the run honestly (predicate 5: "ran on balanced — you declined deep;
+   * quality may be lower") instead of presenting a silent downgrade.
+   */
+  downgraded?: boolean | undefined;
 }
 
 export type StreamEvent =
@@ -112,7 +160,7 @@ export type StreamEvent =
   | { type: 'tool_progress'; tool: string; phase: string;          agent: string; subAgent?: string | undefined }
   | { type: 'api_cost'; tool: string; profileId: string; profileName: string;
       endpoint: string; costUsd: number;                           agent: string; subAgent?: string | undefined }
-  | { type: 'tool_result'; name: string; result: string;           agent: string; isError?: boolean; subAgent?: string | undefined; subAgentId?: string | undefined }
+  | { type: 'tool_result'; name: string; result: string;           agent: string; isError?: boolean | undefined; subAgent?: string | undefined; subAgentId?: string | undefined }
   | { type: 'spawn';       spawnId: string; subAgents: SpawnedSubAgent[];
       estimatedCostUSD?: number | undefined;                       agent: string }
   // 5s heartbeat for a running batch. `running` and the keys of `lastToolBySub`
@@ -126,7 +174,18 @@ export type StreamEvent =
   | { type: 'spawn_child_done'; spawnId: string; subAgent: string; subAgentId: string;
       ok: boolean; elapsedS: number; costUsd: number;              agent: string }
   | { type: 'turn_end';    stop_reason: string; usage: BetaUsage;  model?: string | undefined; contextWindow?: number | undefined; agent: string }
-  | { type: 'error';       message: string;                        agent: string }
+  // `fatal` separates two meanings this channel used to carry under one name:
+  // `the run is dead` (agent.ts, iteration limit) and `something went wrong and
+  // I am continuing` (stream.ts, unparsable tool input, which substitutes
+  // `input:{}`). No receiver could tell them apart, so the client marked a live,
+  // billing run as `not sent — tap to retry`.
+  //
+  // OPTIONAL here, REQUIRED at the emit boundary — see `EmittedStreamEvent`.
+  // This type is published (`@lynox-ai/core/types`), so a required field would
+  // break every external constructor of an error event for a flag they have no
+  // stake in. The compiler force belongs where the emitters are, not where the
+  // consumers are.
+  | { type: 'error';       message: string; fatal?: boolean | undefined; agent: string }
   | { type: 'warning';     code: string; detail?: string | undefined; agent: string }
   | { type: 'retry';       attempt: number; maxAttempts: number; delayMs: number; reason: string; agent: string }
   | { type: 'cost_warning';  snapshot: CostSnapshot;               agent: string }
@@ -138,7 +197,7 @@ export type StreamEvent =
       detail?: string | undefined; durationMs?: number | undefined; elapsed?: number | undefined;
       summary?: string | undefined; agent: string }
   | { type: 'context_pressure'; droppedMessages: number; usagePercent: number; agent: string }
-  | { type: 'context_budget'; systemTokens?: number; toolTokens?: number; messageTokens?: number;
+  | { type: 'context_budget'; systemTokens?: number | undefined; toolTokens?: number | undefined; messageTokens?: number | undefined;
       totalTokens: number; maxTokens: number; usagePercent: number;
       // Cost-aware budget occupancy (Session._compactionUsagePercent — the SAME
       // figure that drives `_autoCompactIfNeeded`'s offer/auto-compact triggers),
@@ -167,6 +226,55 @@ export type StreamEvent =
       cause?: UntrustedCause | undefined };
 
 export type StreamHandler = (event: StreamEvent) => void | Promise<void>;
+
+/**
+ * What core's OWN emitters must produce — identical to {@link StreamEvent}
+ * except that `fatal` is REQUIRED on the error variant.
+ *
+ * The split exists because the two audiences need opposite things. A consumer
+ * reading events wants an optional flag (it may not be there on an event from
+ * an older producer). An emitter inside core must not be allowed to skip the
+ * decision, because "is this turn over?" has no safe default: absent reads as
+ * falsy, i.e. "keep waiting", on a stream that may already be finished.
+ *
+ * Assigning a plain {@link StreamHandler} here still works — a function that
+ * accepts the wider event type accepts the narrower one — so this constrains
+ * core's emit sites without narrowing what anyone may plug in.
+ */
+export type EmittedStreamEvent =
+  | Exclude<StreamEvent, { type: 'error' }>
+  | { type: 'error'; message: string; fatal: boolean; agent: string };
+
+/** A {@link StreamHandler} as core's own producers must call it. */
+export type EmittingStreamHandler = (event: EmittedStreamEvent) => void | Promise<void>;
+
+/**
+ * Compile guard for the OTHER half of the split, and it has to live in `src/`:
+ * `tsconfig` excludes `*.test.ts`, so a type assertion written in a test file is
+ * compiled by nothing and asserts nothing. `contract/fixtures/mirrors.ts` exists
+ * for the same reason and says so in its own header.
+ *
+ * What it pins: an error event built WITHOUT `fatal` is still a valid
+ * {@link StreamEvent}. That is the published promise — external code (test
+ * doubles, hook implementations) constructs these, and `@lynox-ai/core/types`
+ * is a public entry point, so making the field required there would be a major
+ * break for a flag those callers have no stake in.
+ *
+ * Mutation that must fail this: make `fatal` required on the error variant
+ * above.
+ *
+ * What this does NOT establish, measured 2026-08-24 rather than assumed: that
+ * the published surface is unchanged. It pins one sentence about `StreamEvent`,
+ * and the surface is wider than that sentence. Reading `agent.onStream` back as
+ * a `StreamHandler`, or forwarding a stored `StreamEvent` through it, does NOT
+ * compile any more — the emit sinks hand out the narrower type. Plugging a
+ * handler IN still works. Treat that as the known cost, not as a gap nobody
+ * noticed.
+ */
+type AssertTrue<T extends true> = T;
+type _PublishedErrorEventMayOmitFatal = AssertTrue<
+  { type: 'error'; message: string; agent: string } extends StreamEvent ? true : false
+>;
 
 /**
  * One end-of-turn follow-up chip, as the `suggest_follow_ups` tool takes it and

@@ -5,7 +5,7 @@ import type {
   IMemory,
   IWorkerPool,
   ToolEntry,
-  StreamHandler,
+  EmittingStreamHandler,
   AgentConfig,
   ThinkingMode,
   AgentWarning,
@@ -22,6 +22,7 @@ import type {
   PromptTabsFn,
   PromptSecretFn,
   PromptMailConnectFn,
+  ToolCallRecorder,
   CacheProfile,
 } from '../types/index.js';
 import { getBetasForProvider, CHARS_PER_TOKEN, getCharsPerToken, claudeModelRejectsManualThinking, getDefaultMaxTokens, getMaxContinuations, effectiveContextWindow, AGENT_CACHE_TTL, getCacheProfile } from '../types/index.js';
@@ -29,11 +30,14 @@ import type { ToolContext } from './tool-context.js';
 import { createToolContext } from './tool-context.js';
 import { StreamProcessor } from './stream.js';
 import { CostGuard } from './cost-guard.js';
+import { classifyProviderFailure, type RunFailure } from './provider-failure.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from './untrusted-signals.js';
+import type { UntrustedCause } from './untrusted-signals.js';
 import { appendUntrustedCauseLog } from './untrusted-cause-log.js';
 import { channels, measureTool } from './observability.js';
 import { appendCaptureTelemetry } from './capture-telemetry.js';
-import { isDangerous } from '../tools/permission-guard.js';
+import type { CaptureSuppressedReason } from './capture-telemetry.js';
+import { isDangerousDetailed } from '../tools/permission-guard.js';
 import { renderDiffHunks } from '../cli/diff.js';
 import { createLLMClient, getActiveProvider, clientForTierSnapshot } from './llm-client.js';
 import { resolveTierModel } from './tier-resolver.js';
@@ -48,19 +52,25 @@ import {
   normalizeFollowUpSuggestions,
   lastUserText,
 } from './follow-up-fallback.js';
+import {
+  CAPTURE_FALLBACK_MAX_TOKENS, CAPTURE_SYSTEM, CAPTURE_TIMEOUT_MS, CAPTURE_TOOL,
+  CAPTURE_TOOL_NAME, buildCaptureExcerpt, parseExtractedFacts,
+} from './capture-fallback.js';
 import { randomBytes } from 'node:crypto';
 import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
 import { scanToolResult, RepeatCallGuard } from './output-guard.js';
 import type { ToolCallTracker } from './output-guard.js';
+import { isToolSoftFailure } from './tool-soft-failure.js';
 import { buildWireSnapshot, writeWireSnapshot, captureRawWireBody, extractWireFields, isWireSinkEnabled, isRawWireSinkEnabled } from './wire-capture.js';
 import type { WireSnapshot } from './wire-capture.js';
 import { formatToolCallPreview } from './tool-call-preview.js';
 import { maskSecretPatterns } from './secret-store.js';
 import { sanitizeToolPairs } from './tool-pair-sanitizer.js';
-import { evictSavedArtifactBodies } from './artifact-eviction.js';
+import { evictSavedArtifactBodies, restoreEvictedBodies } from './artifact-eviction.js';
 import { THINKING_ONLY_PLACEHOLDER, TOOL_RESULT_CONTINUATION_HINT, TOOL_GUIDANCE_MARKER } from './render-projection.js';
 import { validateToolInput, formatValidationErrors } from './tool-input-validator.js';
 import { buildResidencyIndex, dedupToolResultBatch } from './tool-result-hygiene.js';
+import { DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS, DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES } from './tool-result-blob-store.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type {
@@ -82,6 +92,8 @@ import { buildPromptCacheKey, shouldSendPromptCacheKey } from './prompt-cache-ke
 import { computeComposition, type CompositionSnapshot } from './context-composition-probe.js';
 import { appendContextCostLog } from './context-cost-log.js';
 import { pv } from './prompt-value.js';
+import { checkKnowledgeText } from './knowledge-store.js';
+import { getErrorMessage } from './utils.js';
 
 /**
  * Per-image token estimate for occupancy accounting. Anthropic bills vision by
@@ -188,6 +200,43 @@ function stableStringify(value: unknown): string {
 }
 
 /**
+ * Why the last `send()` returned. The return STRING alone cannot say: a run that
+ * hits its turn cap while the model is still calling tools used to come back as
+ * `''` — indistinguishable from a model that answered nothing. Measured on a
+ * production thread (2026-08-18): 3 of 8 sub-agents came back empty, and every
+ * one of them had made exactly `max_turns - 1` tool calls — the last turn's
+ * tool_use was dropped on the floor. Reproduced locally 6/6 on
+ * `ministral-14b-2512` with `max_turns: 3`.
+ *
+ *  - `end_turn`       the model finished on its own (or via a terminal tool).
+ *  - `max_tokens`     the output budget ran out and continuations are exhausted.
+ *  - `iteration_cap`  `maxIterations` (spawn: `max_turns`) was consumed while the
+ *                     model was still calling tools — NO final answer exists. A cap
+ *                     that coincides with a turn the model ended itself is NOT this;
+ *                     it is a plain `end_turn`.
+ *  - `budget_cap`     the CostGuard's USD budget was consumed, same shape.
+ *  - `absolute_cap`   `ABSOLUTE_MAX_ITERATIONS` — the runaway backstop.
+ */
+export type SendStopCause = 'end_turn' | 'max_tokens' | 'iteration_cap' | 'budget_cap' | 'absolute_cap';
+
+export interface SendStop {
+  cause: SendStopCause;
+  /** Names of the tool calls whose results no model turn will ever read — on the
+   *  CostGuard exit they were never dispatched, on the iteration exit they ran but
+   *  nobody reads the results. Model-emitted strings, so they are gated to a safe
+   *  charset and capped (`MAX_REPORTED_TOOL_NAMES`) before they are recorded: a
+   *  tool name can be raw model output on the openai wire, and a name with a
+   *  newline or a `## ` in it would forge structure wherever this is rendered.
+   *  Empty on a clean `end_turn`; may be shorter than `pendingToolCount`. */
+  pendingTools: string[];
+  /** How many tool_use blocks were pending, before the charset gate and the cap. */
+  pendingToolCount: number;
+  /** The model's own text of that final response — WITHOUT the engine marker
+   *  `send()` appends on a cap exit, so a caller can render its own notice. */
+  text: string;
+}
+
+/**
  * Thrown by `Agent.send()` when the run is aborted mid-flight (user stop button,
  * the 30-min wall-clock backstop, or a stale-run takeover) instead of failing
  * for a genuine reason. Previously `send()` swallowed an abort and returned `''`,
@@ -205,12 +254,32 @@ export class RunAbortedError extends Error {
   }
 }
 
+export class ToolLoopBreakError extends RunAbortedError {
+  /** The `tool\x00input` key of the call that was repeated past all escalations. */
+  readonly loopKey: string;
+  constructor(loopKey: string) {
+    super('Run stopped: the same tool call was repeated after repeated warnings');
+    this.name = 'ToolLoopBreakError';
+    this.loopKey = loopKey;
+  }
+}
+
+export class ContinuationLoopError extends RunAbortedError {
+  /** The repeated assistant prefix — the loop's fingerprint, for the note. */
+  readonly loopPrefix: string;
+  constructor(loopPrefix: string) {
+    super('Run stopped: truncated-response continuations repeated without progress');
+    this.name = 'ContinuationLoopError';
+    this.loopPrefix = loopPrefix;
+  }
+}
+
 export class Agent implements IAgent {
   readonly name: string;
   readonly model: string;
   readonly memory: IMemory | null;
   readonly tools: ToolEntry[];
-  onStream: StreamHandler | null;
+  onStream: EmittingStreamHandler | null;
   /** See `AgentConfig.onMessageCheckpoint` for contract + rationale. */
   private readonly onMessageCheckpoint?: (() => void | Promise<void>) | undefined;
 
@@ -228,6 +297,8 @@ export class Agent implements IAgent {
   promptMailConnect?: PromptMailConnectFn | undefined;
   currentRunId?: string | undefined;
   currentThreadId?: string | undefined;
+  /** See `AgentConfig.recordToolCall` — the one owner of tool-call persistence. */
+  recordToolCall?: ToolCallRecorder | undefined;
   readonly spawnDepth: number;
 
   /**
@@ -276,6 +347,14 @@ export class Agent implements IAgent {
   private readonly maxTokens: number;
   private readonly workerPool: IWorkerPool | null;
   private readonly maxIterations: number;
+  /** Outcome of the most recent `send()` — see {@link SendStop}. `null` until the
+   *  first send completes; reset at the start of every send and set on every
+   *  return path of `_loop`. */
+  private _lastStop: SendStop | null = null;
+  /** A provider BILLING/quota failure from the last `send()`'s LLM call, or `null`.
+   *  Set only when the retry layer gives up on a classified billing error; read by
+   *  `session.ts` into `RunContext.failure` for the managed hook. Reset per send. */
+  private _lastProviderFailure: RunFailure | null = null;
   private continuationPrompt: string | undefined;
   private readonly excludeTools: string[] | undefined;
   /** Optional user-preferred max context window — clamps the trim budget below the model's native window. */
@@ -332,6 +411,22 @@ export class Agent implements IAgent {
     });
   }
   private briefing: string | undefined;
+  /**
+   * Transient tier downgrade requested at the GO prompt for the NEXT tool call.
+   * Set when the user picks "Run on balanced" on a deep-tier consent gate;
+   * consumed (and cleared) by the spawn handler via {@link consumePendingDowngrade},
+   * which clamps the deep specs to the requested tier.
+   *
+   * Tool dispatch is CONCURRENT (fan-out via Promise.allSettled), so a shared
+   * instance field is not race-free by itself. The invariant that holds it safe:
+   * the GO writes its decision to a per-call LOCAL, and that local is published
+   * to this field SYNCHRONOUSLY immediately before `tool.handler(...)` (see the
+   * call site in `_executeOneInner`); spawn's handler calls `consumePendingDowngrade`
+   * as its first statement, before any `await`. No microtask can run between that
+   * publish and that read, so concurrent calls cannot interleave here. Do NOT
+   * insert an `await` between the publish and the handler call.
+   */
+  private _pendingDowngradeTier: import('../types/models.js').ModelTier | undefined;
   readonly autonomy: AutonomyLevel | undefined;
   private readonly preApproval: PreApprovalSet | undefined;
   private readonly audit: PreApproveAuditLike | undefined;
@@ -379,6 +474,10 @@ export class Agent implements IAgent {
    *  inherits the flag (else a sub-agent on an ON tenant would still run legacy extraction). */
   get durableMemoryEnabled(): boolean { return this._durableMemoryEnabled; }
   private continuationCount = 0;
+  /** Continuation-loop detector state — see the max_tokens branch in _loop. */
+  private _continuationLoopPrefix = '';
+  private _continuationLoopCount = 0;
+  private _continuationToolCount = 0;
   private readonly maxContinuations: number;
   private static readonly MAX_RETRIES = 3;
   private static readonly ABSOLUTE_MAX_ITERATIONS = 500;
@@ -399,11 +498,34 @@ export class Agent implements IAgent {
    *  already-on-disk truncated tail is never re-persisted. See
    *  `getUnpersistedTail`/`markPersisted`. */
   private _persistedMark = 0;
+  /** Original bodies of artifact_save inputs this buffer has evicted, by
+   *  tool_use id — D4's other half. Eviction rewrites the buffer in place
+   *  (that is the cost control), but every persist path appends the buffer
+   *  tail, so the tail must be restored to the ORIGINAL before it reaches the
+   *  ThreadStore (`getUnpersistedTail` does). Without this map a persist retry
+   *  one turn later wrote the marker to disk — measured on prod 2026-08-14:
+   *  five `[evicted after successful save` rows in a single thread, user-
+   *  visible on reload/export. Cleared when the buffer is rebuilt
+   *  (`reset`/`loadMessages`): entries for messages no longer in the buffer
+   *  can never match again, and an entry whose row is already durable sits
+   *  BELOW the mark and is never re-read. A body evicted AND persisted stays
+   *  mapped until then — RAM-cheap relative to the cache-writes it prevents. */
+  private _evictedOriginals = new Map<string, string>();
+  /** The single eviction callback both buffer-entry points (`send`,
+   *  `loadMessages`) pass to `evictSavedArtifactBodies` — one line to mutate,
+   *  one place that can drift. */
+  private readonly _noteEvicted = (id: string, original: string): void => {
+    this._evictedOriginals.set(id, original);
+  };
   private abortController: AbortController | null = null;
   private _msgLenCache = 0;
   private _msgLenVersion = -1;
   private _msgCount = 0;
   private _runningMsgLen = 0;
+  /** How many tool results this agent has collapsed into recall stubs under
+   *  context pressure. Observability for the truncation path: a run with a high
+   *  count did heavy fetching, one with zero never approached the ceiling. */
+  private _collapsedToolResults = 0;
   /** Exact prompt-token count of the most recent API call (input + cache_read
    *  + cache_creation). undefined before the first call of the session. */
   private _lastRealInputTokens: number | undefined;
@@ -537,6 +659,8 @@ export class Agent implements IAgent {
   }
 
   private _loopToolCount = 0;
+  /** Tool calls handed to {@link recordToolCall} — see `getRecordedToolCallCount`. */
+  private _recordedToolCalls = 0;
   /** Run-scoped breaker for identical, output-unchanging tool-call loops. */
   private readonly _repeatGuard = new RepeatCallGuard();
   private _pendingMemory: Promise<void>[] = [];
@@ -551,9 +675,32 @@ export class Agent implements IAgent {
    * measurement in `follow-up-fallback.ts`.
    */
   followUpFallback = false;
+  /**
+   * Whether the turn-end capture pass runs. Opt-in, and for the same two reasons
+   * its sibling is: it must only run where the proposal can actually be SHOWN
+   * (a chip nobody sees is a silent write), and it must be switchable off without
+   * a redeploy. Off by default also excludes spawned children, which inherit the
+   * parent's memory and store but not this override — otherwise a fan-out of three
+   * researchers would run four passes and propose up to sixteen facts for one turn.
+   */
+  captureFallback = false;
   /** Set when this turn produced a `suggest_follow_ups` call — the recovery's
    *  whole point is to stay silent (and free) then. Reset per run. */
   private _sawFollowUpCall = false;
+  /**
+   * Whether the model recorded a fact itself this turn.
+   *
+   * Same role as `_sawFollowUpCall`: the capture pass RECOVERS, it never
+   * duplicates. A model that already did the work is not second-guessed by a
+   * helper that saw a shorter excerpt than it did.
+   *
+   * DERIVED from `_turnToolNames` rather than latched at the two places that
+   * notice a tool call. Two setters is two places to forget: an adversarial round
+   * deleted one of them and every test stayed green, because the tool-loop path
+   * and the end-turn path each set it separately. `_turnToolNames` is the single
+   * point every dispatched call passes through, and it is already cleared per turn.
+   */
+  private get _sawRememberCall(): boolean { return this._turnToolNames.has('remember'); }
   /**
    * Wave 1.2: did any tool result on this run carry the untrusted-data boundary marker?
    * Set in the tool-result dispatcher (content signal, not a tool-name list), reset at
@@ -692,6 +839,57 @@ export class Agent implements IAgent {
     };
   }
 
+  /** Why and how the last `send()` ended — `null` before the first send. */
+  getLastStop(): SendStop | null {
+    return this._lastStop;
+  }
+
+  /** A provider billing/quota stop from the last send's LLM call, or `null`. */
+  getLastProviderFailure(): RunFailure | null {
+    return this._lastProviderFailure;
+  }
+
+  /** The hostname the LLM request targets — a config value, so trustworthy for
+   *  billing-vocabulary classification. Empty string when it cannot be resolved
+   *  (then only status-based signals classify). */
+  private _providerHost(): string {
+    if (this.inheritedApiBaseURL) {
+      try { return new URL(this.inheritedApiBaseURL).hostname.toLowerCase(); } catch { /* fall through */ }
+    }
+    // No base URL → the direct Anthropic API (provider 'anthropic').
+    return this.provider === 'anthropic' ? 'api.anthropic.com' : '';
+  }
+
+  /**
+   * The one exit for "a cap stopped the loop while the model was still calling
+   * tools". Records {@link SendStop} and returns the model's text PLUS an explicit
+   * marker instead of the bare text. Mirrors the `max_tokens` branch in `_loop`,
+   * with one deliberate difference: that branch marks only when the text is empty,
+   * but a cap with a pending tool call is a lie by omission even when text exists
+   * ("here is my plan: <tool call that never ran>" reads as a finished answer), so
+   * the marker is appended whenever a tool_use was dropped. Callers that hit the
+   * cap on a response WITHOUT pending tool calls must not come here — that is a
+   * normal end of turn, whatever the guard says.
+   *
+   * `capture` — whether to run the end-of-turn memory extraction on the text. The
+   * CostGuard exit always did; the iteration exit never did (it returned '' with
+   * no capture), and the text there is the preamble of a tool-call turn, not worth
+   * an extraction call.
+   */
+  private _finishOnCap(text: string, pendingToolsRaw: string[], cause: 'iteration_cap' | 'budget_cap', capture: boolean): string {
+    const pendingTools = safeToolNames(pendingToolsRaw);
+    this._lastStop = { cause, pendingTools, pendingToolCount: pendingToolsRaw.length, text };
+    if (capture) this._captureAtTurnEnd(text);
+    if (pendingToolsRaw.length === 0) return text;
+    const limit = cause === 'iteration_cap' ? 'turn limit' : 'cost budget';
+    const more = pendingToolsRaw.length - pendingTools.length;
+    // `more` counts CALLS the name list does not show — duplicates of a listed
+    // name, names the charset gate rejected, and names past the cap alike.
+    const names = (pendingTools.length > 0 ? pendingTools.join(', ') : 'unnamed tool') + (more > 0 ? ` +${String(more)} more call${more === 1 ? '' : 's'}` : '');
+    const marker = `[Response stopped: the ${limit} was reached while the model was still calling tools (${names}) — no final answer was produced. The task needs more turns or a narrower scope.]`;
+    return text.trim().length > 0 ? `${text}\n\n${marker}` : marker;
+  }
+
   /**
    * Cumulative cost snapshot from the agent's CostGuard, or null if no
    * costGuard was configured. Used by the spawn tool to record the child's
@@ -701,6 +899,18 @@ export class Agent implements IAgent {
    */
   getCostSnapshot(): import('../types/index.js').CostSnapshot | null {
     return this.costGuard ? this.costGuard.snapshot() : null;
+  }
+
+  /**
+   * Return and clear the tier downgrade the user chose at the most recent GO
+   * prompt, if any. The spawn handler calls this to decide whether to clamp deep
+   * specs to a cheaper tier. Reading consumes the request so a later, unrelated
+   * tool call never inherits it.
+   */
+  consumePendingDowngrade(): import('../types/models.js').ModelTier | undefined {
+    const tier = this._pendingDowngradeTier;
+    this._pendingDowngradeTier = undefined;
+    return tier;
   }
 
   /**
@@ -805,6 +1015,7 @@ export class Agent implements IAgent {
     this.maxContextWindowTokens = config.maxContextWindowTokens;
     this.nativeContextWindow = config.nativeContextWindow;
     this.currentRunId = config.currentRunId;
+    this.recordToolCall = config.recordToolCall;
     this.spawnDepth = config.spawnDepth ?? 0;
     this.briefing = config.briefing;
     this.autonomy = config.autonomy;
@@ -856,6 +1067,7 @@ export class Agent implements IAgent {
   reset(): void {
     this.messages = [];
     this._persistedMark = 0;
+    this._evictedOriginals.clear();
     this._lastRealInputTokens = undefined;
     this._lastCacheReadTokens = undefined;
     this._lastRealAtMsgCount = 0;
@@ -927,7 +1139,11 @@ export class Agent implements IAgent {
   /** Count of leading buffer entries already known durable on disk. The
    *  persist delta is everything after this mark. See `_persistedMark`. */
   getUnpersistedTail(): BetaMessageParam[] {
-    return this.messages.slice(this._persistedMark);
+    // D4: the durable transcript keeps ORIGINAL artifact bodies. The buffer is
+    // evicted for the wire; every persist path appends exactly this tail, so
+    // restoring here is the one place that covers run-end, the eager
+    // checkpoint, and a failed persist's retry alike.
+    return restoreEvictedBodies(this.messages.slice(this._persistedMark), this._evictedOriginals);
   }
 
   /** Advance the persisted mark after the caller has durably written the tail.
@@ -940,13 +1156,17 @@ export class Agent implements IAgent {
   }
 
   loadMessages(messages: BetaMessageParam[]): void {
+    // Buffer rebuilt: originals mapped for the PREVIOUS buffer can never match
+    // again (ids are unique per buffer). The eviction below re-fills the map
+    // for any body this reload evicts that has not been persisted yet.
+    this._evictedOriginals.clear();
     // Rehydrated histories can have drifted tool_use/tool_result pairs
     // (partial persist, rolled-back run). Anthropic 400s on unpaired blocks,
     // so normalise at the single entry point for external history.
     // F5: loaded history is by definition past turns — evict successfully
     // saved artifact bodies here too, or a resume would re-send (and
     // cache-write) every body the live session had already evicted.
-    this.messages = evictSavedArtifactBodies(sanitizeToolPairs(messages));
+    this.messages = evictSavedArtifactBodies(sanitizeToolPairs(messages), this._noteEvicted);
     // Everything just loaded is "already accounted for": it is EITHER the
     // post-compaction synthetic summary (the real messages stay on disk and
     // must NOT be re-persisted) OR the summary+recent tail loaded FROM disk on
@@ -1146,8 +1366,301 @@ export class Agent implements IAgent {
     }
   }
 
+  /**
+   * Post-turn fact extraction — the mechanism the durable-knowledge flip removed.
+   *
+   * Shaped after `_recoverFollowUps`, for the reason that method exists: an
+   * end-of-turn duty carried by the prompt alone is measured at ~2-4% compliance,
+   * on every model tried, and more prompt pressure does not move it. A cheap
+   * forced call does.
+   *
+   * Three deliberate bounds, each protecting something measured:
+   *  - **fast tier**, so the recovered facts never cost more than the turn.
+   *  - **capped excerpt**, so a long research turn cannot turn this into a large call.
+   *  - **at most four facts**, because the precision worth keeping is 7 of 10
+   *    proposals confirmed by the user, and a pass that returns fifteen turns an
+   *    approval into a wall. That ceiling is SET, not measured — see the row.
+   *
+   * Silent by design when it finds nothing: most turns hold no durable fact, and
+   * the classifier is told that an empty list is the expected answer.
+   */
+  /**
+   * `turnCause` is PASSED IN, not re-derived. Both taint fields on this pass's lines must come
+   * from one evaluation: the emits below run AFTER `await stream.finalMessage()`, so deriving
+   * the cause here would read the signals at a later moment than the boolean beside it, and the
+   * two could disagree the instant any caller stops being terminal. Not reachable today — every
+   * `_captureAtTurnEnd` site is the end of its turn — and a same-tick test cannot see it, which
+   * is exactly why it is closed by construction instead of by assertion. `knowledge.ts` derives
+   * once for the same reason.
+   */
+  private async _captureFallback(text: string, turnUntrusted: boolean, turnCause: UntrustedCause): Promise<void> {
+    // `_sawRememberCall` — do not second-guess a model that already did the work.
+    // Same shape as the follow-up guard: the fallback recovers, it never duplicates.
+    //
+    // The two are split because only ONE of them is a gap. `captureFallback` is opted into
+    // at a single surface (`http-api.ts`), while `worker-loop.ts` runs scheduled tasks
+    // through a non-internal Session that HAS a `Memory` — so those turns pass every
+    // prologue guard, count toward `capture_eligible`, and then find no mechanism here.
+    // That is a denominator population the pass structurally cannot serve, and until this
+    // emit it was as silent as the exits one level up.
+    //
+    // `_sawRememberCall` gets no line on purpose: it is the healthy outcome, already
+    // visible as `remember_invoked` with `source: 'model'`. It is tested FIRST, and the
+    // order is the whole correctness of this block: on every surface that does not opt in
+    // — worker-loop, telegram, MCP, CLI — `captureFallback` is false on EVERY turn, so
+    // emitting before this check filed each turn where the model DID record a fact as a
+    // suppression. That is verbatim the thing the paragraph above says must not happen,
+    // written directly beneath it. Both exits still just return, so the swap changes what
+    // is REPORTED and nothing else.
+    if (this._sawRememberCall) return;
+    if (!this.captureFallback) {
+      void appendCaptureTelemetry(this._durableMemoryEnabled, {
+        ts: Date.now(),
+        event: 'capture_suppressed',
+        thread: undefined,
+        model: this.model,
+        untrusted: turnUntrusted,
+        reason: 'fallback_off',
+        runId: this.currentRunId,
+      });
+      return;
+    }
+    if (this.isInternalRun || this._suppressTools) return;
+    if (!text.trim()) return;
+    const ks = this.toolContext?.knowledgeStore;
+    if (!ks) return;
+    const question = lastUserText(this.messages);
+    if (!question) return;
+
+    // Masked BEFORE it leaves the process. The legacy extractor eight lines below does
+    // the same (`safeText`), and it matters more here: `resolveTierModel('fast', …)` can
+    // resolve to a DIFFERENT VENDOR than the conversation's model on a hybrid tenant, so
+    // an unmasked excerpt ships a typed-in credential to a provider the user never chose
+    // for this chat.
+    const safeQuestion = this.secretStore ? this.secretStore.maskSecrets(question) : question;
+    const safeAnswer = this.secretStore ? this.secretStore.maskSecrets(text) : text;
+
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), CAPTURE_TIMEOUT_MS);
+    // At-most-once per pass. The write loop below can throw AFTER the announcement —
+    // `ks.write` on a busy database, or `onStream` on an SSE response that already ended,
+    // which this file records as a MEASURED defect elsewhere. Both emits would then fire
+    // and one run would occupy two states the comment declares mutually exclusive, with
+    // the over-count landing precisely on failing runs.
+    let announced = false;
+    try {
+      const provider = getActiveProvider();
+      const fastSnap = resolveTierModel('fast', provider);
+      const client = clientForTierSnapshot(fastSnap, this.client, provider);
+      const stream = client.beta.messages.stream({
+        model: fastSnap.modelId,
+        max_tokens: CAPTURE_FALLBACK_MAX_TOKENS,
+        system: CAPTURE_SYSTEM,
+        messages: [{ role: 'user', content: buildCaptureExcerpt(safeQuestion, safeAnswer) }],
+        tools: [CAPTURE_TOOL],
+        tool_choice: { type: 'tool', name: CAPTURE_TOOL_NAME },
+        ...(fastSnap.betas ? { betas: fastSnap.betas } : {}),
+      }, {
+        signal: AbortSignal.any(
+          [this.abortController?.signal, timeout.signal].filter((s): s is AbortSignal => s !== undefined),
+        ),
+      });
+      const response = await stream.finalMessage();
+
+      // Booked BEFORE the early returns: the tokens were spent whether or not the
+      // extraction turns out usable. Priced on the fast model and charged as a
+      // dollar amount, so an expensive run does not book helper tokens at its own rate.
+      const u = response.usage;
+      if (u) {
+        const usd = calculateCost(fastSnap.modelId, {
+          input_tokens: u.input_tokens,
+          output_tokens: u.output_tokens,
+          cache_creation_input_tokens: u.cache_creation_input_tokens ?? undefined,
+          cache_read_input_tokens: u.cache_read_input_tokens ?? undefined,
+        });
+        this.costGuard?.recordExternalCost(usd);
+        debitInRunHelperCost(this.toolContext.meteredHost, this.sessionCounters, usd, 'fast');
+        this._helperCostUsd += usd;
+      }
+
+      const call = response.content.find(
+        (b): b is BetaToolUseBlock => b.type === 'tool_use' && b.name === CAPTURE_TOOL_NAME,
+      );
+      const parsed = call ? parseExtractedFacts(call.input) : { facts: [], proposed: 0 };
+      const facts = parsed.facts;
+      // The pass RAN. Emitted before the empty-return below, and unconditionally, because
+      // the silent return was the whole defect: on a live staging run a turn where the
+      // model skipped `remember` produced no chip and no event, and nothing in the
+      // telemetry could say whether the classifier had judged the turn or never executed.
+      // `capture_eligible` fires before this method's own guards, so it cannot answer it.
+      announced = true;
+      void appendCaptureTelemetry(this._durableMemoryEnabled, {
+        ts: Date.now(),
+        event: 'capture_ran',
+        thread: this.currentThreadId,
+        model: this.model,
+        untrusted: turnUntrusted,
+        cause: turnCause,
+        runId: this.currentRunId,
+        facts: facts.length,
+        proposed: parsed.proposed,
+        source: 'capture',
+      });
+      if (facts.length === 0) return;
+
+      for (const fact of facts) {
+        // The SAME gate the `remember` tool passes, not just the same write. The
+        // store's own backstop is a size limit; the secret rejection lives one
+        // level up, and inheriting only the store left a clean turn able to record
+        // a typed-in API key as trusted. Measured by an adversarial round.
+        if (!checkKnowledgeText(fact.text, this.secretStore, fact.subject).ok) continue;
+        // The SAME write the `remember` tool uses, with the same untrusted flag —
+        // so a tainted turn routes to review here exactly as it does there. Putting
+        // a second routing decision next to it is how the two drift apart.
+        const result = ks.write({
+          text: fact.text,
+          ...(fact.subject !== undefined ? { subjectName: fact.subject } : {}),
+          sourceChannel: 'agent',
+          sourceUntrusted: turnUntrusted,
+          sourceThreadId: this.currentThreadId,
+          sourceRunId: this.currentRunId,
+        });
+        // The SAME two emits the `remember` tool makes. Without them the fire-rate
+        // report keeps dividing a numerator that only the tool writes by a
+        // denominator this hook writes — so the feature would land and the measured
+        // rate would not move, whether or not it works. `source: 'capture'` is what
+        // lets the report separate a recovered fact from one the model chose.
+        void appendCaptureTelemetry(this._durableMemoryEnabled, {
+          ts: Date.now(),
+          event: 'remember_invoked',
+          thread: this.currentThreadId,
+          model: this.model,
+          untrusted: turnUntrusted,
+          cause: turnCause,
+          outcome: result.deduped === true ? 'deduped' : result.status,
+          runId: this.currentRunId,
+          source: 'capture',
+        });
+        if (result.deduped === true) continue;
+        if (result.status === 'pending_review') {
+          void appendCaptureTelemetry(this._durableMemoryEnabled, {
+            ts: Date.now(),
+            event: 'propose_shown',
+            thread: this.currentThreadId,
+            model: this.model,
+            untrusted: turnUntrusted,
+            entryId: result.id,
+            source: 'capture',
+          });
+        }
+        // Surface it where it happened. A fact the user cannot see is not a
+        // proposal, and a queue elsewhere is what made the old flow feel broken.
+        if (this.onStream) {
+          await this.onStream({
+            type: 'knowledge_write',
+            id: result.id,
+            ...(fact.subject !== undefined ? { subject: fact.subject } : {}),
+            status: result.status === 'pending_review' ? 'pending_review' : 'active',
+            text: fact.text,
+            agent: this.name,
+          });
+        }
+      }
+    } catch (err) {
+      // Never fail a turn over a recovered fact — but never swallow it silently
+      // either. The sibling recovery carries the same line and states why: without
+      // it, "the model found nothing" and "every run in production is throwing"
+      // are the same observation. A wire-client mismatch on a hybrid tenant
+      // (fast-model id sent to a client that does not know it) is a 404 that would
+      // otherwise be invisible.
+      process.stderr.write(`[lynox:capture-fallback] ${getErrorMessage(err)}\n`);
+      // …and the SINK has to hear it too, not only stderr. The emit above sits after
+      // `finalMessage()`, so a timeout, an abort or a provider error produced no line at
+      // all — and "the pass ran and its provider call failed" collapsed onto "the pass
+      // never ran", which is the exact confusion this event was added to end. An expired
+      // fast-tier key would have read as a disabled mechanism. `facts` is left UNSET
+      // here: absent means the pass did not COMPLETE, `0` means it completed and found
+      // nothing. The bucket is deliberately wider than "the provider call failed" — the
+      // try opens before `resolveTierModel`/`clientForTierSnapshot`, so a missing fast-tier
+      // key lands here too, which is the same operator question. stderr is not a sink the
+      // report can read, so this line is what makes the state visible at all.
+      if (!announced) {
+        void appendCaptureTelemetry(this._durableMemoryEnabled, {
+          ts: Date.now(),
+          event: 'capture_ran',
+          thread: this.currentThreadId,
+          model: this.model,
+          untrusted: turnUntrusted,
+          cause: turnCause,
+          runId: this.currentRunId,
+          source: 'capture',
+        });
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Which of `_captureAtTurnEnd`'s preconditions returns first, or a pass carrying the
+   * legacy store. Split out so the reported reason and the control flow cannot drift: the
+   * order below IS the order of the guard it replaced, and reordering it would re-label the
+   * population rather than change it.
+   *
+   * A DISCRIMINATED result rather than a bare reason, and that is substance not taste: the
+   * caller's legacy branch needs a non-null `Memory`, and the two other ways to give it one
+   * are both defects here. A second `if (!this.memory) return` puts an unannounced exit into
+   * the one function whose entire subject is that no exit is unannounced; a `!` assertion
+   * states a guarantee the compiler cannot check. Handing back the value that was already
+   * tested makes it structural, so a later reorder is a TYPE ERROR instead of a silent
+   * behaviour change — which is how this was actually caught.
+   */
+  private _captureGate():
+    | { readonly suppressed: CaptureSuppressedReason }
+    | { readonly suppressed: null; readonly memory: IMemory } {
+    const memory = this.memory;
+    if (!memory) return { suppressed: 'no_memory' };
+    if (this.skipMemoryExtraction) return { suppressed: 'extraction_off' };
+    if (this.isInternalRun) return { suppressed: 'internal_run' };
+    return { suppressed: null, memory };
+  }
+
   private _captureAtTurnEnd(text: string): void {
-    if (!this.memory || this.skipMemoryExtraction || this.isInternalRun) return;
+    // The three preconditions the LEGACY extractor needed. The DK branch below inherited
+    // all three, and two of them carry the same meaning on both paths: an internal run is
+    // not a user turn, and `skipMemoryExtraction` is the ghost/privacy toggle, which the
+    // DK review queue must honour exactly as the legacy extractor did.
+    //
+    // The third does not. `!this.memory` is a null-check on the LEGACY store object, and
+    // `_captureFallback` never reads it — it writes through `toolContext.knowledgeStore`.
+    // A sub-agent spawned with `isolated_memory: true` gets `memory === undefined` while
+    // still inheriting `durableMemoryEnabled` (spawn.ts), so it can emit the fire-rate's
+    // NUMERATOR from the `remember` handler and can never emit the denominator from here.
+    //
+    // That coupling is NOT dissolved here, and the restraint is the point: `capture_eligible`
+    // is the denominator of a before/after comparison, so widening its population mid-window
+    // would corrupt the comparison it exists for. What changes is that the exit stops being
+    // SILENT — until now all three returned with no event at all, which is why the report can
+    // say the two populations are disjoint but not why. Whether the DK path should depend on
+    // the legacy object at all is a separate decision, filed rather than taken here.
+    const gate = this._captureGate();
+    if (gate.suppressed !== null) {
+      void appendCaptureTelemetry(this._durableMemoryEnabled, {
+        ts: Date.now(),
+        event: 'capture_suppressed',
+        // No `thread`, deliberately — see the field's docblock in `capture-telemetry.ts`.
+        // `extraction_off` is the privacy toggle, and nothing reads a thread id here.
+        thread: undefined,
+        model: this.model,
+        // Carried for the same reason every other line carries it: a suppressed turn that
+        // was ALSO untrusted would have routed to review rather than been minted, so the
+        // two questions stay separable in the record instead of collapsing into one.
+        untrusted: deriveTurnUntrusted(this),
+        reason: gate.suppressed,
+        runId: this.currentRunId,
+      });
+      return;
+    }
     // The FULL untrusted union (deriveTurnUntrusted) — marker OR an external-content tool ran
     // this turn OR the conversation ingested untrusted content. The bare `_sawUntrustedData`
     // marker is allowlist-by-omission (`web_research`/`bash`/`read_file` return external content
@@ -1156,6 +1669,9 @@ export class Agent implements IAgent {
     // poison, 2026-07-20). The union closes that: external-content turns are skipped; clean
     // business-conversation turns still auto-capture — no capture gap.
     const turnUntrusted = deriveTurnUntrusted(this);
+    // Derived beside the boolean, from the same signals at the same moment, and handed to the
+    // pass rather than re-read there. See `_captureFallback`.
+    const turnCause = describeTurnUntrusted(this);
     if (this._durableMemoryEnabled) {
       void appendCaptureTelemetry(true, {
         ts: Date.now(),
@@ -1163,7 +1679,39 @@ export class Agent implements IAgent {
         thread: this.currentThreadId,
         model: this.model,
         untrusted: turnUntrusted,
+        // The DENOMINATOR's half of the pair. Missing here, the report would stratify a
+        // numerator by cause against a denominator that is not — which is not a ratio.
+        cause: turnCause,
+        // The join key. This site sits behind the three guards above; the NUMERATOR's
+        // site (`knowledge.ts`) sits behind none of them, so the two ends of the fire
+        // -rate can describe different runs. `runId` is what lets the report SHOW that
+        // instead of dividing regardless (DEF-firerate-mixes-two-populations).
+        runId: this.currentRunId,
       });
+      // The mechanism, restored. Until this line the DK branch logged the
+      // opportunity and returned — the legacy path's mechanical extractor was
+      // switched off by the flip and replaced with a prose duty in the prompt.
+      //
+      // Measured on a real instance: the legacy store took 1020 facts in three
+      // months and stopped on 2026-07-18; the five weeks after the flip produced
+      // 59. A factor of 28. The prose is not weak — the sibling end-of-turn
+      // instruction is phrased UNCONDITIONALLY and reached 2.0% until it got a
+      // mechanism of its own, then 41.6%. Prose does not produce this behaviour,
+      // and three attempts at more prompt pressure measured 0/5, 0/5 and 1/5.
+      //
+      // Deliberately NOT the legacy behaviour: that one minted straight into
+      // memory, including from web and mail, which is the poison the union gate
+      // closed on 2026-07-20. This routes through the same `knowledgeStore.write`
+      // the `remember` tool uses, so an untrusted turn still lands in review.
+      // Tracked, not fired-and-forgotten. `void` here measured as three separate
+      // defects: the `knowledge_write` chip landed on an already-ended SSE response
+      // (so a TRUSTED fact — the one with no review panel to recover it — was
+      // written silently and the user never learned of it); `_helperCostUsd` was
+      // read by the session immediately after `send()` resolved, so the cost
+      // appeared on the NEXT turn's line or nowhere; and `costGuard` never saw the
+      // spend for its own run. The turn already drains this list in its `finally`,
+      // for exactly the reason it exists — an orphaned stream.
+      this._pendingMemory.push(this._captureFallback(text, turnUntrusted, turnCause));
       return;
     }
     // Recorded on BOTH branches, because a numerator without a denominator answers
@@ -1183,7 +1731,7 @@ export class Agent implements IAgent {
     // find afterwards, so without the line above this abstention leaves no trace at all.
     if (turnUntrusted) return;
     const safeText = this.secretStore ? this.secretStore.maskSecrets(text) : text;
-    this._scheduleMemoryExtraction(this.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
+    this._scheduleMemoryExtraction(gate.memory.maybeUpdate(safeText, this._loopToolCount, this.currentThreadId, this.currentRunId));
   }
 
   private _scheduleMemoryExtraction(promise: Promise<void>): void {
@@ -1318,7 +1866,11 @@ export class Agent implements IAgent {
     // confirmed save and the result row names the recoverable file. NOT gated
     // on the mark: for a persistence-less agent (sub-agents, pipeline steps)
     // the mark never advances and the gate would disable eviction entirely.
-    this.messages = evictSavedArtifactBodies(this.messages);
+    // The originals are captured (not dropped) so the persist tail can carry
+    // the ORIGINAL body to the ThreadStore — the narrow exception below (a
+    // failed persist retried after this rewrite) wrote the marker to disk
+    // before `restoreEvictedBodies` existed (measured, prod 2026-08-14).
+    this.messages = evictSavedArtifactBodies(this.messages, this._noteEvicted);
     const snapshot = this.messages.length;
     // Support multimodal content blocks (e.g. vision: image + text)
     const content = Array.isArray(userMessage)
@@ -1333,10 +1885,15 @@ export class Agent implements IAgent {
     }
     this.abortController = new AbortController();
     this.continuationCount = 0;
+    this._continuationLoopPrefix = '';
+    this._continuationLoopCount = 0;
+    this._continuationToolCount = 0;
     this._loopToolCount = 0;
     this._repeatGuard.reset();
     this._sawUntrustedData = false;
     this._sawFollowUpCall = false;
+    this._lastStop = null;
+    this._lastProviderFailure = null;
     // The USER turn can itself carry untrusted content. An uploaded document's extracted
     // text is third-party-authored — the person attached the file, they did not write what
     // is in it — and it arrives as a content block on this message, not as a tool result.
@@ -1421,11 +1978,18 @@ export class Agent implements IAgent {
   }
 
   private async _loop(): Promise<string> {
+    // Names of the tool_use blocks dispatched on the most recent iteration. Read
+    // only when the loop runs out of iterations: those tools DID run, but no
+    // further model call will ever read their results, and the pre-fix exit
+    // returned '' for that — see `_finishOnCap`.
+    let lastToolUseNames: string[] = [];
+    let lastToolUseText = '';
     for (let i = 0; this.maxIterations === 0 || i < this.maxIterations; i++) {
       if (i >= Agent.ABSOLUTE_MAX_ITERATIONS) {
         if (this.onStream) {
-          await this.onStream({ type: 'error', message: `Absolute iteration limit (${Agent.ABSOLUTE_MAX_ITERATIONS}) reached — terminating loop`, agent: this.name });
+          await this.onStream({ type: 'error', message: `Absolute iteration limit (${Agent.ABSOLUTE_MAX_ITERATIONS}) reached — terminating loop`, fatal: true, agent: this.name });
         }
+        this._lastStop = { cause: 'absolute_cap', pendingTools: [], pendingToolCount: 0, text: '' };
         return extractText([]);
       }
       // Stamped BEFORE the call, not after it. The warm-miss detector asks "was
@@ -1582,6 +2146,24 @@ export class Agent implements IAgent {
             await this.onStream({ type: 'cost_warning', snapshot: this.costGuard.snapshot(), agent: this.name });
           }
           const text = extractText(response.content);
+          const pending = response.content.filter((b): b is BetaToolUseBlock => b.type === 'tool_use').map((b) => b.name);
+          if (pending.length > 0) {
+            // Out of turns or out of money while the model was still calling
+            // tools — NOT the model's choice to stop. The pre-fix
+            // `return extractText(...)` handed a tool_use-only final response
+            // back as `''`, which every consumer read as "the model had nothing
+            // to say". See `SendStop` for the measurement behind this.
+            return this._finishOnCap(text, pending, this.costGuard.iterationCapReached() ? 'iteration_cap' : 'budget_cap', true);
+          }
+          // The guard tripped on a turn the model finished by itself — a
+          // legitimate successful shape for a child (N-1 tool calls, then the
+          // answer on the last allowed turn). That is a normal end, not a cut-off.
+          this._lastStop = {
+            cause: response.stop_reason === 'max_tokens' ? 'max_tokens' : 'end_turn',
+            pendingTools: [],
+            pendingToolCount: 0,
+            text,
+          };
           this._captureAtTurnEnd(text);
           return text;
         }
@@ -1589,6 +2171,7 @@ export class Agent implements IAgent {
 
       if (response.stop_reason === 'end_turn') {
         const text = extractText(response.content);
+        this._lastStop = { cause: 'end_turn', pendingTools: [], pendingToolCount: 0, text };
         this._captureAtTurnEnd(text);
         return text;
       }
@@ -1599,6 +2182,34 @@ export class Agent implements IAgent {
         // max_tokens is itself the signal to continue, gated only by the
         // continuation cap. Without this, a turn whose whole output budget
         // went to extended thinking returned an empty assistant message.
+        //
+        // Continuation-loop guard (2026-08-14, thread 8c09e50a): a model that
+        // tries to echo a huge inline upload through a tool input (write_file
+        // with the whole CSV) hits max_tokens MID-tool_use, the truncated
+        // tool_use is discarded (never dispatched), the continuation restarts
+        // the SAME text prefix, and the loop burns all continuations — 5
+        // minutes, no tool call ever lands, RepeatCallGuard never sees a
+        // single record (it counts dispatched calls). Detect THAT shape: N
+        // consecutive continuations with ZERO dispatched tools and an
+        // identical assistant prefix are a stuck loop with certainty —
+        // progress resets the detector (a tool that landed, or a different
+        // continuation).
+        const prefix = extractText(response.content).slice(0, 120);
+        const toolsDelta = this._loopToolCount - this._continuationToolCount;
+        // An EMPTY truncated turn is the thinking-heavy case the continuation
+        // exists for (the whole budget went to extended thinking) — it is NOT
+        // loop evidence and must not count. Only a NON-EMPTY identical prefix
+        // repeating with zero dispatched tools is the stuck shape.
+        if (prefix.trim().length === 0) {
+          this._continuationLoopPrefix = '';
+          this._continuationLoopCount = 0;
+        } else if (toolsDelta > 0 || prefix !== this._continuationLoopPrefix) {
+          this._continuationLoopPrefix = prefix;
+          this._continuationLoopCount = 1;
+        } else if (++this._continuationLoopCount > 3) {
+          throw new ContinuationLoopError(prefix);
+        }
+        this._continuationToolCount = this._loopToolCount;
         if (this.continuationCount < this.maxContinuations) {
           this.continuationCount++;
           if (this.onStream) {
@@ -1610,6 +2221,7 @@ export class Agent implements IAgent {
         // Continuation cap exhausted — surface a clear notice rather than an
         // empty bubble when the truncated turn produced no visible text.
         const text = extractText(response.content);
+        this._lastStop = { cause: 'max_tokens', pendingTools: [], pendingToolCount: 0, text };
         this._captureAtTurnEnd(text);
         return text.trim().length > 0
           ? text
@@ -1627,6 +2239,8 @@ export class Agent implements IAgent {
         // discard the working tool's result unread — so keep looping and let the model
         // read it (it can re-suggest at the real end).
         const toolUses = response.content.filter(b => b.type === 'tool_use');
+        lastToolUseNames = toolUses.map((b) => b.name);
+        lastToolUseText = extractText(response.content);
         const endsTurn = toolUses.length > 0
           && toolUses.every(b => this.tools.find(t => t.definition.name === b.name)?.endsTurn === true);
         // The model did the job itself → the recovery stays silent (and free).
@@ -1663,17 +2277,42 @@ export class Agent implements IAgent {
         this.messages.push({ role: 'user', content: carrier });
         // Same checkpoint after tool_results — see above.
         await this._checkpoint();
+        // Hard loop break (RepeatCallGuard): the model has now been HANDED the
+        // escalated "do not repeat this" result BREAK_AFTER_ESCALATIONS times
+        // and re-issued the identical call anyway. The escalation alone was
+        // measured not to stop weaker models (2026-08-14 prod, thread 861f3e4b:
+        // ~25 identical `api_setup view` calls, every escalation read and
+        // ignored, run burned 50s until the user aborted).
+        // PATH NOTE: this takes send()'s NON-abort branch (the abortController
+        // signal is NOT set), so the whole turn — user message included — rolls
+        // back out of the API context. That is correct here, NOT a bug: Session
+        // has already durably persisted the user message and persistFailedTurnDisplay
+        // flips the run's footprint display-only, then appends the calm
+        // tool_loop_break note naming the stuck call. Do NOT "fix" this into the
+        // abort branch: that path REPLACES the error with a fresh RunAbortedError
+        // (see the abort handler in send()), which would destroy loopKey and
+        // silently downgrade the note to a generic run_interrupted.
+        const breakKey = this._repeatGuard.breakLatched();
+        if (breakKey !== null) throw new ToolLoopBreakError(breakKey);
         if (endsTurn) {
           // Mirror the end_turn path exactly: return this turn's text and run the
           // same memory-extraction gate (skipped for untrusted/internal/durable).
           const text = extractText(response.content);
+          this._lastStop = { cause: 'end_turn', pendingTools: [], pendingToolCount: 0, text };
           this._captureAtTurnEnd(text);
           return text;
         }
         continue;
       }
 
-      return extractText(response.content);
+      {
+        // A stop_reason this loop does not handle (`stop_sequence`, `refusal`,
+        // `pause_turn`, …): returned as-is, recorded as a plain end so
+        // `getLastStop()` is never stale for a completed send.
+        const text = extractText(response.content);
+        this._lastStop = { cause: 'end_turn', pendingTools: [], pendingToolCount: 0, text };
+        return text;
+      }
     }
 
     // Continuation: if configured and under the cap, inject continuation prompt and recurse
@@ -1686,7 +2325,9 @@ export class Agent implements IAgent {
       return this._loop();
     }
 
-    return extractText([]);
+    // Out of iterations with no continuation: the last turn was a tool_use
+    // whose results nobody will read. Say so instead of returning ''.
+    return this._finishOnCap(lastToolUseText, lastToolUseNames, 'iteration_cap', false);
   }
 
   /**
@@ -1696,6 +2337,58 @@ export class Agent implements IAgent {
    * When there are too few messages to drop, truncates oversized content blocks.
    */
   private static readonly MAX_MESSAGE_COUNT = 500;
+
+  /**
+   * How many trailing messages `collapseIn` leaves untouched under context
+   * pressure. Two covers the newest assistant(tool_use) + user(tool_result)
+   * pair, i.e. the exchange the model is actively reasoning about. Collapsing
+   * that would hand it a stub for the very result it just asked for, and it
+   * would recall it again immediately — spending a turn to save nothing.
+   */
+  private static readonly COLLAPSE_SKIP_TAIL_MESSAGES = 2;
+
+  /** Tool results collapsed into recall stubs under context pressure. */
+  getCollapsedToolResultCount(): number {
+    return this._collapsedToolResults;
+  }
+
+  /** How many parked handles the front-drop placeholder names. Enough to stay
+   *  useful, few enough that the note cannot itself become a context problem;
+   *  most-recently-used first, since the store is LRU-ordered. */
+  private static readonly PARKED_HANDLES_IN_NOTE = 12;
+
+  /**
+   * The "…and these results are still recallable" tail of the front-drop
+   * placeholder.
+   *
+   * A collapse replaces a payload with a stub, and that stub is the only place
+   * the id appears. If the front-drop then runs anyway it discards those stubs,
+   * leaving the blobs resident but UNNAMEABLE — the model cannot ask for data
+   * that is sitting right there. `Session.compact` avoids this by listing every
+   * retained handle in the post-compaction seed; the front-drop had no such
+   * list because before the collapse existed there was nothing to lose.
+   *
+   * Empty string when no store is wired or nothing is parked, so the
+   * placeholder is byte-identical to before in the common case.
+   */
+  private _parkedHandleNote(): string {
+    const entries = this.toolResultBlobStore?.entries() ?? [];
+    if (entries.length === 0) return '';
+    const shown = entries.slice(-Agent.PARKED_HANDLES_IN_NOTE).reverse();
+    // Label from `tool` + `ident`, NOT from `descriptor`. The descriptor ends in
+    // an 80-char excerpt of the payload — i.e. bytes an external server chose —
+    // and this note is engine-authored text in a `user` message, so a dozen of
+    // those concatenated would read as instructions the engine appears to be
+    // giving. `ident` is the tool's own call argument and has already been
+    // through `redactIdent`. Dropping the excerpt also keeps the note short,
+    // which matters because it is appended to a context that is already over
+    // the ceiling.
+    const list = shown
+      .map(({ id, blob }) => (blob.ident ? `${id}: ${blob.tool}(${blob.ident})` : `${id}: ${blob.tool}`))
+      .join('; ');
+    const more = entries.length > shown.length ? ` (+${entries.length - shown.length} more)` : '';
+    return `\n[Earlier results are still readable via recall_tool_result — ${list}${more}]`;
+  }
 
   private _truncateHistory(overheadTokens: number): void {
     // Hard message count limit — truncate to 60% keeping head + tail
@@ -1734,6 +2427,82 @@ export class Agent implements IAgent {
     // Budget for messages = total context minus overhead, with 15% safety margin
     if (totalTokens < maxCtx * 0.85) return;
 
+    // Park oversized tool results BEFORE dropping anything. Both this and the
+    // front-drop below invalidate the cached prefix identically — the API
+    // caches by prefix, so any edit at position k re-bills everything from k.
+    // The difference is what the invalidation BUYS: a front-drop frees only the
+    // messages it discards (and loses them), whereas collapsing frees the bulk
+    // of a tool-heavy context in one pass and leaves every payload recallable.
+    //
+    // On a run that fetches repeatedly this is the whole cost story: measured on
+    // a live 17-turn run, tool results were 1.45M chars of a ~490K-token context
+    // and the flat front-drop re-truncated almost every turn, so the prefix was
+    // re-written ~8×. Collapsing turns that into one deep cut.
+    //
+    // NOT a reversal of the "eviction only at compaction" rule in
+    // `Session.compact` — that rule protects a WARM cache between turns, and it
+    // still holds: nothing here runs until the context is already at 85%, i.e.
+    // only where the alternative is a front-drop that costs the same cache.
+    if (this.toolResultBlobStore) {
+      const threshold = this.toolContext.userConfig?.tool_result_blob_threshold_chars
+        ?? DEFAULT_TOOL_RESULT_BLOB_THRESHOLD_CHARS;
+      // Leave the newest turn intact: the model is reasoning on the result it
+      // just received, and stubbing that would only make it re-fetch at once.
+      const { handles, freedChars, freedBeforeAnchor } = this.toolResultBlobStore.collapseIn(
+        this.messages, threshold, Agent.COLLAPSE_SKIP_TAIL_MESSAGES,
+        DEFAULT_BLOB_STORE_MAX_ENTRIES, DEFAULT_BLOB_STORE_MAX_BYTES,
+        this._lastRealAtMsgCount,
+      );
+      if (freedChars > 0) {
+        this._collapsedToolResults += handles.length;
+        // In-place content edits invalidate the incremental length cache.
+        this._msgCount = 0;
+        this._runningMsgLen = 0;
+        // CORRECT the exact-usage anchor by what was freed — do not discard it.
+        //
+        // It must be corrected at all because `_estimateOccupancyTokens` prefers
+        // `_lastRealInputTokens + delta-since-last-call`, and that delta covers
+        // only the newest messages — precisely the ones skipTail protects. Left
+        // untouched, the re-check below cannot see a single freed character, the
+        // early return never fires, and the front-drop runs anyway.
+        //
+        // But CLEARING it (the obvious move, and what `loadMessages` does) is
+        // wrong here: the fallback is `_estimateMsgLen()/cpt + overheadTokens`,
+        // and the session-level entry point `getEstimatedOccupancyTokens()`
+        // passes overhead 0. Every session reader — the compaction trigger, the
+        // UI meter, `checkTierWindowFit` — would then under-report by the whole
+        // system-prompt + tool-schema overhead, which is the DOMINANT term right
+        // after the message half shrank. `checkTierWindowFit` inverts under
+        // that: a downgrade whose window cannot hold the context reads as fitting.
+        // `snapshotComposition()` also returns undefined without the anchor, so
+        // the run would lose its composition record.
+        //
+        // Subtracting keeps the overhead inside the number and stays true to
+        // what the next call will actually bill. `_lastRealAtMsgCount` stays
+        // valid because a collapse never changes `messages.length`.
+        // When there is no anchor yet, nothing needs correcting — the estimate
+        // is already the char-based one, which sees the freed space directly.
+        if (this._lastRealInputTokens !== undefined) {
+          // Only the part before the anchor: the rest lives in the delta window,
+          // which is re-measured from characters and therefore already shrank.
+          // Subtracting everything would double-count it and could clamp the
+          // anchor to zero, discarding the overhead it carries.
+          const freedTokens = freedBeforeAnchor / this._charsPerToken;
+          this._lastRealInputTokens = Math.max(0, this._lastRealInputTokens - freedTokens);
+        }
+        if (this.onStream) {
+          void this.onStream({
+            type: 'context_pressure', droppedMessages: 0, agent: this.name,
+            usagePercent: Math.round(
+              (this._estimateMsgLen() / this._charsPerToken + overheadTokens) / maxCtx * 100,
+            ),
+          });
+        }
+        // Enough headroom recovered — skip the lossy front-drop entirely.
+        if (this._estimateOccupancyTokens(overheadTokens) < maxCtx * 0.85) return;
+      }
+    }
+
     // Try dropping middle messages first (keep first + last N).
     // Adjust boundary so we never split a tool_use/tool_result pair.
     // Reduce keep count dynamically based on overshoot severity.
@@ -1762,7 +2531,8 @@ export class Agent implements IAgent {
         ...head,
         {
           role: 'user' as const,
-          content: `[${dropped} earlier message(s) were removed to stay within the context window]`,
+          content: `[${dropped} earlier message(s) were removed to stay within the context window]`
+            + this._parkedHandleNote(),
         },
         ...tail,
       ];
@@ -1776,15 +2546,71 @@ export class Agent implements IAgent {
 
     // Second pass: truncate large content blocks if still oversized.
     // Keep the last user message intact; trim from oldest to newest.
+    //
+    // This pass USED TO test `typeof msg.content !== 'string'` and skip
+    // everything else — which meant it never touched a tool_result, because
+    // those always arrive as a content ARRAY. The last-resort shrink was blind
+    // to exactly the message kind that overflows the window in practice: on the
+    // measured run, tool results were 1.45M of ~1.55M total chars, all of it in
+    // array content, so this pass ran and freed nothing and the request went
+    // out oversized anyway.
     const afterDrop = this._estimateMsgLen() / this._charsPerToken + overheadTokens;
     if (afterDrop >= maxCtx * 0.85) {
       const TARGET_CHARS_PER_MSG = 8000 * ctxScale;
       for (let i = 0; i < this.messages.length - 1; i++) {
         const msg = this.messages[i]!;
-        if (typeof msg.content !== 'string') continue;
-        if (msg.content.length > TARGET_CHARS_PER_MSG) {
-          msg.content = msg.content.slice(0, TARGET_CHARS_PER_MSG) +
-            '\n[…content truncated to fit context window]';
+        if (typeof msg.content === 'string') {
+          if (msg.content.length > TARGET_CHARS_PER_MSG) {
+            msg.content = msg.content.slice(0, TARGET_CHARS_PER_MSG) +
+              '\n[…content truncated to fit context window]';
+          }
+          continue;
+        }
+        // Array content: trim the two payload-carrying block kinds. `thinking`
+        // and `redacted_thinking` are signature-verified by the API and MUST
+        // stay byte-exact; `tool_use.input` is structured JSON that would stop
+        // parsing if sliced. Neither is touched.
+        for (let b = 0; b < msg.content.length; b++) {
+          const block = msg.content[b]!;
+          if (block.type === 'text') {
+            if (block.text.length > TARGET_CHARS_PER_MSG) {
+              msg.content[b] = {
+                ...block,
+                text: block.text.slice(0, TARGET_CHARS_PER_MSG) +
+                  '\n[…content truncated to fit context window]',
+              };
+            }
+          } else if (block.type === 'tool_result') {
+            const resultBlock = block as BetaToolResultBlockParam;
+            const rc = resultBlock.content;
+            if (typeof rc === 'string') {
+              if (rc.length > TARGET_CHARS_PER_MSG) {
+                msg.content[b] = {
+                  ...resultBlock,
+                  content: rc.slice(0, TARGET_CHARS_PER_MSG) +
+                    '\n[…content truncated to fit context window]',
+                };
+              }
+            } else if (Array.isArray(rc)) {
+              // A tool_result's own content can itself be an array of text/image
+              // blocks. No core tool emits that today (handlers return strings),
+              // but stopping at the string case would leave the same blind spot
+              // one layer down — which is the bug this pass is being fixed for.
+              // Images are left alone: they are already token-counted by pixels,
+              // not by their base64 length (`imageAwareSerializedLen`).
+              msg.content[b] = {
+                ...resultBlock,
+                content: rc.map(inner =>
+                  inner.type === 'text' && inner.text.length > TARGET_CHARS_PER_MSG
+                    ? {
+                      ...inner,
+                      text: inner.text.slice(0, TARGET_CHARS_PER_MSG) +
+                        '\n[…content truncated to fit context window]',
+                    }
+                    : inner),
+              };
+            }
+          }
         }
       }
       // Invalidate cached message length after in-place content truncation
@@ -2080,6 +2906,13 @@ export class Agent implements IAgent {
           await sleep(delay, signal);
           continue;
         }
+        // Terminal LLM failure (not retryable, or retries exhausted). Classify a
+        // provider billing/quota stop so the run's RunContext can carry it to the
+        // managed hook — the failure class that today reaches the customer before
+        // it reaches us. Only set on this give-up path, so a transient that later
+        // succeeds leaves it null; classifyProviderFailure returns null for
+        // everything that is not a billing stop.
+        this._lastProviderFailure = classifyProviderFailure(err, this._providerHost());
         throw err;
       }
     }
@@ -2230,6 +3063,12 @@ export class Agent implements IAgent {
     return out;
   }
 
+  /** Cap on the ledger-facing `reason` of a soft tool failure before it is
+   *  persisted. The field is diagnostic — a short cause, not a payload — and
+   *  `ToolSoftFailure` is exported, so an out-of-tree tool can supply any
+   *  length. Matches the order of magnitude of the audited input cap beside it. */
+  private static readonly MAX_LEDGER_REASON_CHARS = 2000;
+
   private static readonly MAX_PARALLEL_TOOL_CALLS = 10;
 
   /**
@@ -2258,13 +3097,13 @@ export class Agent implements IAgent {
     'ask_user', 'ask_secret',
     'artifact_save', 'artifact_list', 'artifact_delete',
     'task_create', 'task_update', 'task_list',
-    'api_setup',
     'data_store_create', 'data_store_insert', 'data_store_query',
     'data_store_list', 'data_store_delete', 'data_store_drop',
     'plan_task',
   ]);
-  // NOTE: `read_file`, `spawn_agent` and `run_workflow` were removed from this
-  // allowlist (H-001 + H-002 + CORE-9). Their return values now flow through the
+  // NOTE: `read_file`, `spawn_agent`, `run_workflow` and `api_setup` were removed
+  // from this allowlist (H-001 + H-002 + CORE-9 + the 2026-08-23 audit). Their
+  // return values now flow through the
   // full guard chain — `wrapUntrustedData()` at the tool boundary AND
   // `scanToolResult()` here in the dispatcher — because each can carry
   // attacker-controlled content into the parent agent's context (a read file, a
@@ -2273,6 +3112,17 @@ export class Agent implements IAgent {
   // defence-in-depth. `run_workflow` is the identical threat shape to `spawn_agent`
   // — its steps run sub-agents with web/http/read access — so it gets the same
   // treatment its sibling already had.
+  //
+  // `api_setup` was the fourth, and the case for it was already written down HERE:
+  // it is listed under EXTERNAL_CONTENT_TOOLS above as **direct ingest** ("read
+  // attacker-controllable content THIS turn"), whose own comment notes that several
+  // such tools "are also on the scan-exempt INTERNAL_TOOLS allowlist, so they carry
+  // no ⚠ warning either". Two lists in this file disagreed about the same tool. It
+  // returns remote-authored text on several paths — the HTTP reason phrase, the
+  // OpenAPI `openapi` version field (unbounded), the JSON parse error's body prefix,
+  // and the bootstrap DRAFT block built from the remote spec's title/description/
+  // endpoint text (uncapped in endpoint count). Patching those individually is the
+  // wrong cut: the enumeration key would be the phrasing, not the class.
 
   /** Per-tool wall-clock cap. An async tool handler that never settles (a hung
    *  socket, a promise that never resolves) would otherwise hang the WHOLE run
@@ -2399,6 +3249,121 @@ export class Agent implements IAgent {
     return result;
   }
 
+  /**
+   * Hand one finished tool call to the injected sink, stamped with the run this
+   * agent is working under.
+   *
+   * The `??` is what makes a child land on its own run: a spawned Agent is
+   * constructed with its own `currentRunId`, while an ad-hoc Agent has none and
+   * falls through to whatever the sink decides. Reading the id here — at call
+   * time, from the agent that made the call — is the whole point of the sink
+   * over a broadcast channel, where the reader could only ever consult its own
+   * ambient run and guess.
+   *
+   * Swallows sink failures: observability must never break the run it observes.
+   */
+  private _recordToolCall(toolName: string, inputJson: string, outputJson: string, durationMs: number, isError: boolean): void {
+    if (!this.recordToolCall) return;
+    try {
+      this.recordToolCall({
+        runId: this.currentRunId,
+        toolName,
+        inputJson,
+        outputJson,
+        durationMs: Math.round(durationMs),
+        isError,
+      });
+      this._recordedToolCalls++;
+    } catch { /* fire-and-forget */ }
+  }
+
+  /**
+   * How a failure reason becomes a ledger row on the SESSION sink: mask,
+   * flatten, bound.
+   *
+   * `tool_calls.output_json` is written RAW, while the `input_json` beside it in
+   * the same row goes through `JSON.stringify` and therefore escapes control
+   * characters. Every reason here is built from tool input — `read_file`'s
+   * ENOENT text embeds the model-chosen path, `http_request` names a refused
+   * header. Not all of them do — the rate-limit reasons are built from config,
+   * and the empty-reason fallback from the tool name — but enough do that the
+   * writer is where the guarantee belongs. Without this a `\r\n` in a tool
+   * argument writes a forged line
+   * into the ledger, the debug export and the `toolEnd` breadcrumb, all of which
+   * are read line by line. The ledger is what we later use to decide whether
+   * something happened; a model-controlled path into it turns evidence into a
+   * claim.
+   *
+   * ⚠ It exists as a HELPER because two writers reach it, and the first version
+   * of this fix only covered one. The soft-failure path got mask+flatten+bound
+   * while the hard-error path four dozen lines below wrote `cause.message` into
+   * the same column with neither the flatten nor the bound — the narrow door
+   * shut, the wide one open, and the commit claiming the threat closed.
+   *
+   * ⚠⚠ And there is a THIRD writer of that column which this does NOT reach, so
+   * do not read the paragraph above as coverage. Pipeline steps build their
+   * Agent with no `recordToolCall` in its config, so `_recordToolCall` is a
+   * no-op for them and their row is written by `createStepStreamHandler` →
+   * `runner.ts` → `insertToolCall` from the STREAM event:
+   * `boundedJson(event.result)`, a different cap, no masking order, no flatten,
+   * no cut mark. `http_request` is in `INLINE_CORE_TOOLS`, so that path is live
+   * for the very tool this change is about.
+   *
+   * ⚠ And the forged-line threat is LIVE there, not merely a different meaning
+   * for the same field. On a soft failure the pipeline row carries the payload,
+   * which is a semantics problem. On a HARD throw the stream event carries the
+   * error text (`result: message` below), and `boundedJson` passes strings
+   * through verbatim — so `read_file`'s ENOENT with a model-chosen path writes
+   * its CRLF straight into that row. An earlier version of this comment said
+   * the column "carries the RESULT, not a reason" and made a live hole read as
+   * a schema question. It is filed rather than fixed here because the same sink
+   * needs one decision — what that column MEANS on that path — and flattening
+   * it alone would harden a field whose meaning is still wrong.
+   *
+   * The count in this comment was wrong twice (`two writers`, then `a third
+   * would call this`) in the change whose own lesson was to count the writers.
+   *
+   * Order is load-bearing. Mask FIRST: truncating first hands the masker a
+   * fragment its pattern no longer matches, leaving the tail verbatim. Flatten
+   * is length-preserving, so it cannot move the cut. Replace rather than strip:
+   * a reason that silently loses characters is harder to read than one that
+   * shows where they were \u2014 and the cut says so too, for the same reason. The
+   * hard path keeps the FULL message for the model, so without a marker an
+   * operator comparing the two cannot tell a truncated row from a complete one.
+   */
+  private _ledgerReason(raw: string): string {
+    const masked = this.secretStore ? this.secretStore.maskSecrets(raw) : raw;
+    const flat = masked.replace(/[\x00-\x1f\x7f\u0085\u2028\u2029]/g, ' ');
+    if (flat.length <= Agent.MAX_LEDGER_REASON_CHARS) return flat;
+    // The marker lives INSIDE the bound \u2014 the bound is the guarantee, not the
+    // target length, so a row can never exceed it to make room for saying so.
+    // `Math.max(0, …)` because a negative second argument to `slice` counts
+    // from the END — so a future MAX below the marker's own length would
+    // silently return a string LONGER than the bound, which is the one thing
+    // this function guarantees.
+    //
+    // ⚠ Deleting the clamp is an EQUIVALENT mutant today and is declared as one
+    // rather than counted as killed: at MAX = 2000 the expression is 1993 either
+    // way, and MAX is a private static, so no test can drive it below 7 without
+    // editing the constant. The guard is for the edit, not for today's value —
+    // whoever lowers MAX gets the bound honoured instead of inverted.
+    const keep = Math.max(0, Agent.MAX_LEDGER_REASON_CHARS - LEDGER_CUT_MARK.length);
+    return `${flat.slice(0, keep)}${LEDGER_CUT_MARK}`;
+  }
+
+  /**
+   * How many tool calls this agent has handed to the sink — i.e. how many rows
+   * it caused. Read by `spawn_agent` to stamp `runs.tool_call_count` on the
+   * child's own row, so that column agrees with `COUNT(run_tool_calls)` for the
+   * same run instead of being left at 0 while the rows exist.
+   *
+   * Deliberately NOT `_loopToolCount`, which excludes turn-ending tools for the
+   * memory-extraction heuristic and would undercount here.
+   */
+  getRecordedToolCallCount(): number {
+    return this._recordedToolCalls;
+  }
+
   private async _executeOneInner(tc: BetaToolUseBlock): Promise<BetaToolResultBlockParam> {
     // Defense-in-depth: even if a prompt-injected tool_use block names an
     // excluded tool, refuse here. The LLM-facing tool list already strips
@@ -2475,15 +3440,34 @@ export class Agent implements IAgent {
     // — those still get BLOCKED in autonomous mode via isDangerous, but the generic
     // "Allow / Deny" prompt is replaced by the tool's own contextual confirmation.
     const selfConfirming = tool?.requiresConfirmation === true;
-    const danger = (mutatesFile && this.changesetManager?.active)
+    // Tier downgrade chosen at the GO below ("Run on balanced"). Held locally until
+    // the handler is about to run, then published to the instance field synchronously
+    // (see the handler call site) — so concurrent fan-out tool calls can't clobber
+    // each other's decision via the shared field, and a handler that never runs
+    // (validation abort) leaves nothing stale behind.
+    let downgradeDecision: import('../types/models.js').ModelTier | undefined;
+    const signal = (mutatesFile && this.changesetManager?.active)
       ? null
-      : isDangerous(tc.name, tc.input, this.autonomy, this.preApproval, this.audit, tool, this.currentRunId, this.capabilityContract);
+      : isDangerousDetailed(tc.name, tc.input, this.autonomy, this.preApproval, this.audit, tool, this.currentRunId, this.capabilityContract);
     // Self-confirming tools: only honour BLOCKED warnings (autonomous mode), skip generic warnings
-    const effectiveDanger = (selfConfirming && danger && !danger.includes('[BLOCKED')) ? null : danger;
-    if (effectiveDanger) {
+    const effectiveSignal = (selfConfirming && signal && !signal.warning.includes('[BLOCKED')) ? null : signal;
+    if (effectiveSignal) {
       if (this.promptUser) {
-        const answer = await this.promptUser(effectiveDanger, ['Allow', 'Deny', '\x00']);
-        if (!['y', 'yes', 'allow'].includes(answer.toLowerCase())) {
+        // A deep-tier consent gate may offer a cheaper alternative
+        // (payload.downgradeTo). When it does the GO is three-way:
+        // Allow deep / Run on balanced / Cancel. "Run on balanced" stashes the
+        // tier for the upcoming handler (spawn clamps deep→balanced); the spawn
+        // deep check is the only producer of downgradeTo, so only spawn honours
+        // it. Anything outside the allow-set (incl. Cancel) denies, same as the
+        // existing two-way gate.
+        const offersDowngrade = effectiveSignal.payload?.downgradeTo === 'balanced';
+        const answer = offersDowngrade
+          ? await this.promptUser(effectiveSignal.warning, ['Allow deep', 'Run on balanced', 'Cancel', '\x00'])
+          : await this.promptUser(effectiveSignal.warning, ['Allow', 'Deny', '\x00']);
+        const normalized = answer.toLowerCase();
+        if (offersDowngrade && normalized === 'run on balanced') {
+          downgradeDecision = 'balanced';
+        } else if (!(offersDowngrade ? ['y', 'yes', 'allow', 'allow deep'] : ['y', 'yes', 'allow']).includes(normalized)) {
           return {
             type: 'tool_result',
             tool_use_id: tc.id,
@@ -2580,6 +3564,13 @@ export class Agent implements IAgent {
 
     let toolTimer: ReturnType<typeof setTimeout> | undefined;
     try {
+      // Publish the GO's downgrade decision to the instance field synchronously,
+      // immediately before the handler reads it. spawn_agent calls
+      // consumePendingDowngrade() as its first statement — before any await — so
+      // no concurrent fan-out call can interleave between this set and that read.
+      // A non-spawn tool never offers downgrade (downgradeDecision undefined) and
+      // never reads the field, so this is a no-op for it.
+      this._pendingDowngradeTier = downgradeDecision;
       const rawResult = this.workerPool && this.workerPool.isWorkerSafe(tc.name)
         ? this.workerPool.execute(tc.name, processedInput)
         : tool.handler(processedInput, this);
@@ -2589,17 +3580,32 @@ export class Agent implements IAgent {
       // tool_use_id, keeping the tool_use/tool_result pair valid so the loop
       // self-recovers instead of hanging. Exempt tools (see TOOL_TIMEOUT_EXEMPT)
       // block or delegate legitimately and are awaited unbounded.
-      const result = Agent.TOOL_TIMEOUT_EXEMPT.has(tc.name)
-        ? await rawResult
-        : await Promise.race([
-            rawResult,
-            new Promise<never>((_, reject) => {
-              toolTimer = setTimeout(
-                () => reject(new Error(`Tool "${tc.name}" timed out after ${Math.round(Agent.TOOL_TIMEOUT_MS / 1000)}s`)),
-                Agent.TOOL_TIMEOUT_MS,
-              );
-            }),
-          ]);
+      // A `ToolSoftFailure` means "completed, but did not succeed" — the tool
+      // has a result the agent SHOULD read (a 404 body, a non-zero exit's
+      // stderr) but the ledger must not record it as a success. Unwrapped here,
+      // BEFORE the masking/scanning/truncation below, so the payload takes the
+      // ordinary result path and what the model sees is byte-identical to what
+      // the tool used to return. Only `softFailureReason` diverges, and it
+      // reaches nothing but `toolEnd`. See tool-soft-failure.ts.
+      let softFailureReason: string | null = null;
+      let result: string;
+      try {
+        result = Agent.TOOL_TIMEOUT_EXEMPT.has(tc.name)
+          ? await rawResult
+          : await Promise.race([
+              rawResult,
+              new Promise<never>((_, reject) => {
+                toolTimer = setTimeout(
+                  () => reject(new Error(`Tool "${tc.name}" timed out after ${Math.round(Agent.TOOL_TIMEOUT_MS / 1000)}s`)),
+                  Agent.TOOL_TIMEOUT_MS,
+                );
+              }),
+            ]);
+      } catch (err: unknown) {
+        if (!isToolSoftFailure(err)) throw err;
+        result = err.agentVisibleResult;
+        softFailureReason = err.reason;
+      }
 
       let masked = this.secretStore ? this.secretStore.maskSecrets(result) : result;
       // Extra guard: if ask_user response looks like a secret, mask it pattern-based
@@ -2658,7 +3664,42 @@ export class Agent implements IAgent {
       const auditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawInput = JSON.stringify(auditInput).slice(0, 2000);
       const safeInput = this.secretStore ? this.secretStore.maskSecrets(rawInput) : rawInput;
-      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: true, input: safeInput });
+      // Persist through the injected sink, which knows the run because WE tell
+      // it: `currentRunId` is this agent's own run, so a spawned child books
+      // onto its own row instead of its parent's. The channel below stays for
+      // diagnostics only (Bugsink breadcrumbs, the debug subscriber) — it no
+      // longer writes history, so its process-global reach stops being a
+      // correctness problem. `threadId` remains on it for those consumers.
+      //
+      // A soft failure is recorded EXACTLY like a thrown one: reason into
+      // `outputJson`, `isError` true. That is what `run-history-analytics`
+      // counts (`output_json != ''` → `error_count`) and what the debug export
+      // renders — an empty `outputJson` is indistinguishable from a successful
+      // silent call, which is the entire defect.
+      //
+      // ⚠ This sink is the ledger; `toolEnd` is NOT. When this change was first
+      // written (2026-08-02) history came from the channel, and the fix touched
+      // only the channel. The write path moved since. Re-applying the original
+      // patch here would have merged cleanly and recorded nothing — the reason
+      // it targets both, and the reason the mutation below aims at THIS line.
+      // Invariant this row must satisfy: `isError` is true EXACTLY when
+      // `outputJson` is non-empty. `run-history-analytics` derives error_count
+      // from `output_json != ''` alone and never reads the flag, so a row with
+      // the flag set and an empty output claims a failure that nothing counts —
+      // the same silent-success shape, one layer in. `ToolSoftFailure` does not
+      // validate its `reason`, so an empty one is reachable from any tool; the
+      // fallback keeps the two fields in step rather than trusting callers.
+      // (Found in the delta round on this fix, 2026-08-23.)
+      const softRaw = softFailureReason === null
+        ? null
+        : (softFailureReason.trim() === '' ? `${tc.name} reported a failure without a reason` : softFailureReason);
+      const softMasked = softRaw !== null ? this._ledgerReason(softRaw) : null;
+      this._recordToolCall(tc.name, safeInput, softMasked ?? '', duration, softMasked !== null);
+      channels.toolEnd.publish(
+        softMasked === null
+          ? { name: tc.name, agent: this.name, duration, success: true, input: safeInput, threadId: this.currentThreadId }
+          : { name: tc.name, agent: this.name, duration, success: false, error: softMasked, input: safeInput, threadId: this.currentThreadId },
+      );
 
       if (this.onStream) {
         await this.onStream({ type: 'tool_result', name: tc.name, result: sanitizedResult, agent: this.name });
@@ -2673,10 +3714,28 @@ export class Agent implements IAgent {
       const cause = err instanceof Error ? err : new Error(String(err));
       const rawMessage = this.secretStore ? this.secretStore.maskSecrets(cause.message) : cause.message;
       const message = annotateNonRetryable(rawMessage);
+      // The LEDGER copy is a different string from the MODEL copy, deliberately.
+      //
+      // `message` above is what the model reads and what the UI renders red; it
+      // stays exactly as it was — flattening or bounding it would truncate an
+      // error the model needs in full, which is a behaviour change, not an
+      // observability fix.
+      //
+      // `output_json` and the breadcrumb are line-oriented readers and get the
+      // same mask+flatten+bound the soft path gets. This is in fact the WIDER
+      // door: every throwing tool comes through here, and `read_file`'s ENOENT
+      // text carries the model-chosen path verbatim, so a `\r\n` in a tool
+      // argument could write a forged ledger line. The first version of this fix
+      // covered only the soft path and claimed the threat closed — found in the
+      // delta round, 2026-08-24.
+      const ledgerMessage = this._ledgerReason(message);
       const errAuditInput = tool.redactInputForAudit ? tool.redactInputForAudit(tc.input as never) : tc.input;
       const rawErrInput = JSON.stringify(errAuditInput).slice(0, 2000);
       const safeErrInput = this.secretStore ? this.secretStore.maskSecrets(rawErrInput) : rawErrInput;
-      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: message, input: safeErrInput });
+      // A failed call is recorded like a successful one — it consumed the same
+      // budget and counts against the same rate limits.
+      this._recordToolCall(tc.name, safeErrInput, ledgerMessage, duration, true);
+      channels.toolEnd.publish({ name: tc.name, agent: this.name, duration, success: false, error: ledgerMessage, input: safeErrInput, threadId: this.currentThreadId });
 
       if (this.onStream) {
         // Tool-level error: surface inline via tool_result (UI renders it red on
@@ -2703,6 +3762,9 @@ export class Agent implements IAgent {
   }
 
 }
+
+/** Appended when a ledger reason is truncated, so a cut row is visibly a cut row. */
+const LEDGER_CUT_MARK = ' …[cut]';
 
 /**
  * Patterns that indicate a tool failed in a way that retrying with a
@@ -2748,6 +3810,23 @@ function extractText(content: BetaContentBlock[]): string {
     .filter((b): b is BetaTextBlock => b.type === 'text')
     .map(b => b.text)
     .join('');
+}
+
+/** Tool names the engine will repeat in engine-authored text. Registry names are
+ *  identifiers; anything else is model output that must not be rendered as-is. */
+const SAFE_TOOL_NAME_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+/** Upper bound on tool names repeated in one marker — a model can emit many
+ *  tool_use blocks per turn, and the marker is a sentence, not a listing. */
+const MAX_REPORTED_TOOL_NAMES = 8;
+
+/** Keep only names a tool registry could have issued, in order, capped. Exported for tests. */
+export function safeToolNames(names: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const n of names) {
+    if (SAFE_TOOL_NAME_RE.test(n) && !out.includes(n)) out.push(n);
+    if (out.length >= MAX_REPORTED_TOOL_NAMES) break;
+  }
+  return out;
 }
 
 /** Exported for tests. */

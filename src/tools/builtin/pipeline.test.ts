@@ -21,13 +21,17 @@ vi.mock('../../orchestrator/runner.js', async (importActual) => {
   };
 });
 
-// Mock validate — keep MAX_STEPS in sync with the real module (pipeline.ts
-// imports the canonical constant from here).
+// Mock validate — partial mock: spread the real module (so pipeline.ts gets the
+// real maxStepsFor, which it now imports) and override only validateManifest.
 const mockValidateManifest = vi.fn();
-vi.mock('../../orchestrator/validate.js', () => ({
-  validateManifest: (...args: unknown[]) => mockValidateManifest(...args),
-  MAX_STEPS: 20,
-}));
+vi.mock('../../orchestrator/validate.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../orchestrator/validate.js')>();
+  return {
+    ...actual,
+    validateManifest: (...args: unknown[]) => mockValidateManifest(...args),
+    MAX_STEPS: 20,
+  };
+});
 
 // Spy the billing debit so the money-leak fix can be asserted: an in-session
 // run_workflow must report its aggregated step cost (partial mock — keep every
@@ -188,6 +192,21 @@ describe('run_workflow — inline steps', () => {
       agent,
     );
     expect(result).toBe('Error: Workflow exceeds maximum of 20 steps (got 21).');
+  });
+
+  it('honors a config max_workflow_steps override (bulk workflows)', async () => {
+    // config.max_workflow_steps raises the policy cap above the default 20, so a
+    // large bulk workflow (>20 batch steps) isn't rejected. The default-cap test
+    // above still holds; this is the tenant escape hatch for big bulks.
+    const agent = makePipelineAgent({ config: { ...mockConfig, max_workflow_steps: 40 } });
+    const steps = Array.from({ length: 25 }, (_, i) => makeStep(`s${i}`, `task ${i}`));
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    const result = await runWorkflowTool.handler(
+      { name: 'bulk', steps },
+      agent,
+    );
+    expect(result).not.toMatch(/exceeds maximum/); // pipeline.test.ts:<this line> — kills the hardcoded-MAX_STEPS regression
+    expect(mockRunManifest).toHaveBeenCalledTimes(1);
   });
 
   it('returns error for duplicate step IDs', async () => {
@@ -1296,7 +1315,7 @@ describe('run_workflow — H-011: fresh provider config via getProviderConfig()'
 const RUN_CTX_KEYS = [
   'autonomy', 'parentTools', 'parentToolContext', 'parentMemory', 'userTimezone',
   'parentPrompt', 'parentSessionCounters', 'runHistory', 'hooks', 'capabilityContract',
-  'secretStore', 'runTaint',
+  'limits', 'secretStore', 'runTaint',
 ] as const;
 
 /** A pipeline agent with an explicit autonomy posture, for inheritance tests. */
@@ -1362,6 +1381,71 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     expect(opts['parentTools']).toBe(mockTools);
   });
 
+  it('headless run forwards a stored maxParallelSteps (symmetry with in-session)', async () => {
+    // Symmetry fix: resolveHeadlessLimits used to omit maxParallelSteps entirely
+    // — a workflow that stored maxParallelSteps:3 got it in-session but it was
+    // silently dropped on the headless path (the path that arguably needs it
+    // more, being unattended). Now all four WorkflowLimits fields pass through.
+    const id = 'wf-headless-cap';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+      limits: { maxParallelSteps: 3 },
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number; maxIterations?: number; maxWallClockMs?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBe(3); // pipeline.test.ts:<this line> — kills the symmetry regression
+    expect(limits?.maxWallClockMs).toBe(30 * 60_000); // headless default still applies to unset fields
+  });
+
+  it('headless run normalizes a MALFORMED stored maxParallelSteps to the same default as in-session', async () => {
+    // The two resolvers must agree about one stored blob. While this one passed
+    // the value through raw, a stored `null` resolved to 5 in-session but hit the
+    // executor's fallback of 1 — fully SERIAL — headless. That is the worse half:
+    // the headless path always carries a 30-minute wall clock, and
+    // workflowBoundExceeded re-checks it at every phase boundary, so serializing
+    // a multi-phase run can turn a completing run into a wall-clock abort.
+    //
+    // `null`, not NaN, is the value under test on purpose: JSON.stringify writes
+    // both NaN and Infinity as null, so null is the only malformed form a stored
+    // limits blob can actually carry.
+    const id = 'wf-headless-malformed';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+      limits: { maxParallelSteps: null as unknown as number },
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBe(5); // NOT 1 (serial), NOT null
+  });
+
+  it('headless run leaves an UNSET maxParallelSteps unbounded (no default imposed)', async () => {
+    // Counter-direction: normalizing the malformed case must not smuggle a
+    // default onto the absent one. An unattended run defaulting to unbounded
+    // fan-out is a deliberate operator policy choice here, unlike in-session.
+    const id = 'wf-headless-unset';
+    storePipeline(id, {
+      id, name: 'headless', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: true, mode: 'autonomous',
+      parameters: [],
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runSavedWorkflow(id, { getPlannedPipeline: () => undefined } as never, mockConfig, undefined, { tools: mockTools });
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBeUndefined();
+  });
+
   it('in-session inline run inherits the parent agent autonomy + forwards its context', async () => {
     const agent = makeAutonomyAgent('autonomous');
     mockRunManifest.mockResolvedValueOnce(makeRunState());
@@ -1377,6 +1461,66 @@ describe('A1: every entrypoint routes a complete run-context (contract test)', (
     // Value assertion: the agent's tool context + tools actually flow through.
     expect(opts['parentToolContext']).toBe(agent.toolContext);
     expect(opts['parentTools']).toBe(agent.toolContext.tools);
+  });
+
+  it('in-session inline run applies default limits (backpressure + iteration backstop)', async () => {
+    // T4: in-session runs ran with limits===undefined — so the DoS guards
+    // (workflowBoundExceeded) AND the backpressure cap (maxParallelSteps, T2)
+    // never fired for a chat-started workflow. resolveInSessionLimits now
+    // supplies defaults: an iteration backstop + a parallelism cap. Wall-clock
+    // + spend stay opt-in (attended run; Session cost cap + cancel bound them).
+    const agent = makeAutonomyAgent('autonomous');
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler(
+      { name: 'inline', steps: [makeStep('s1', 'do thing')] },
+      agent,
+    );
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxIterations?: number; maxParallelSteps?: number; maxWallClockMs?: number; maxSpendUsd?: number } | undefined;
+    expect(limits).toBeDefined(); // pipeline.test.ts:<this line> — kills the limits-less in-session path
+    expect(limits?.maxIterations).toBe(50);    // backstop
+    expect(limits?.maxParallelSteps).toBe(5);  // backpressure (T2 activator)
+    expect(limits?.maxWallClockMs).toBeUndefined(); // opt-in (attended)
+    expect(limits?.maxSpendUsd).toBeUndefined();    // opt-in (Session cap bounds it)
+  });
+
+  it('in-session run replaces a MALFORMED stored maxParallelSteps with the default', async () => {
+    // `??` is nullish, so a stored 0 / -1 / NaN survived it and reached the
+    // executor, where it failed the old `cap > 0` test and turned backpressure
+    // OFF for that workflow. The executor now clamps a malformed width to 1, but
+    // that would silently SERIALIZE the run; the resolver is what restores the
+    // intended default width, so this assertion is what pins the resolver.
+    const id = 'wf-malformed-cap';
+    storePipeline(id, {
+      id, name: 'malformed', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: false, mode: 'autonomous',
+      parameters: [],
+      limits: { maxParallelSteps: 0 },
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id }, makePipelineAgent());
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBe(5); // NOT 0, and NOT the executor's serial fallback of 1
+  });
+
+  it('in-session run still honours a VALID stored maxParallelSteps', async () => {
+    // Counter-direction: the clamp must not flatten every stored width to the
+    // default — a workflow that deliberately stored 2 keeps 2.
+    const id = 'wf-valid-cap';
+    storePipeline(id, {
+      id, name: 'valid', goal: 'g', steps: [{ id: 's', task: 't' }],
+      reasoning: 'r', estimatedCost: 0, createdAt: new Date().toISOString(),
+      executed: false, executionMode: 'orchestrated', template: false, mode: 'autonomous',
+      parameters: [],
+      limits: { maxParallelSteps: 2 },
+    });
+    mockRunManifest.mockResolvedValueOnce(makeRunState());
+    await runWorkflowTool.handler({ workflow_id: id }, makePipelineAgent());
+    const opts = mockRunManifest.mock.calls[0]![2] as Record<string, unknown>;
+    const limits = opts['limits'] as { maxParallelSteps?: number } | undefined;
+    expect(limits?.maxParallelSteps).toBe(2);
   });
 
   it('threads the parent agent secretStore into the run options (value, not just key)', async () => {

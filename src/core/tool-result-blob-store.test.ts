@@ -559,3 +559,148 @@ describe('recall handle descriptors', () => {
     }
   });
 });
+
+describe('collapseIn — in-place parking under context pressure', () => {
+  /** Read the string payload of the first tool_result block of a message. */
+  function resultTextOf(msg: BetaMessageParam): string {
+    const content = msg.content;
+    if (typeof content === 'string') return content;
+    const block = content.find(b => b.type === 'tool_result');
+    if (!block || block.type !== 'tool_result') return '';
+    return typeof block.content === 'string' ? block.content : '';
+  }
+
+  it('replaces an oversized payload with a stub naming its recall id', () => {
+    const store = new ToolResultBlobStore();
+    const big = 'z'.repeat(50_000);
+    const messages: BetaMessageParam[] = [
+      toolUseMsg('tu-1', 'http_request', { url: 'https://api.example.com/contacts' }),
+      toolResultMsg('tu-1', big),
+      // Tail padding so the collapsed pair is not protected by skipTail.
+      toolUseMsg('tu-2', 'read_file'),
+      toolResultMsg('tu-2', 'small'),
+    ];
+
+    const { handles, freedChars } = store.collapseIn(messages, T, 2);
+
+    expect(handles).toHaveLength(1);
+    const id = handles[0]!.id;
+    const text = resultTextOf(messages[1]!);
+    // The stub is the ONLY place the model learns the handle exists, so the id
+    // must appear in the exact shape recall_tool_result takes.
+    expect(text).toContain(`recall_tool_result`);
+    expect(text).toContain(`"${id}"`);
+    expect(text).not.toContain(big);
+    expect(text.length).toBeLessThan(1_000);
+    expect(freedChars).toBeGreaterThan(49_000);
+    // ...and the payload is still retrievable, i.e. parked, not discarded.
+    expect(store.get(id)!.payload).toBe(big);
+  });
+
+  it('preserves tool_use_id and is_error on the collapsed block', () => {
+    const store = new ToolResultBlobStore();
+    const messages: BetaMessageParam[] = [
+      toolUseMsg('tu-1', 'http_request'),
+      {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'tu-1',
+          content: 'e'.repeat(20_000),
+          is_error: true,
+        }],
+      },
+      toolUseMsg('tu-2', 'read_file'),
+      toolResultMsg('tu-2', 'small'),
+    ];
+
+    store.collapseIn(messages, T, 2);
+
+    const content = messages[1]!.content;
+    expect(Array.isArray(content)).toBe(true);
+    const block = (content as Array<{ type: string; tool_use_id?: string; is_error?: boolean }>)[0]!;
+    // Dropping either field breaks the tool_use↔tool_result pairing the API
+    // validates on every request — a 400 that bricks the whole thread.
+    expect(block.tool_use_id).toBe('tu-1');
+    expect(block.is_error).toBe(true);
+  });
+
+  it('leaves the newest turns untouched so the model does not re-fetch at once', () => {
+    const store = new ToolResultBlobStore();
+    const big = 'q'.repeat(30_000);
+    const messages: BetaMessageParam[] = [
+      toolUseMsg('tu-1', 'http_request'),
+      toolResultMsg('tu-1', big),
+      toolUseMsg('tu-2', 'http_request'),
+      toolResultMsg('tu-2', big + 'tail'),
+    ];
+
+    const { handles } = store.collapseIn(messages, T, 2);
+
+    expect(handles).toHaveLength(1);
+    expect(resultTextOf(messages[1]!)).not.toContain(big);
+    // The last pair is the exchange the model is reasoning about right now.
+    expect(resultTextOf(messages[3]!)).toBe(big + 'tail');
+  });
+
+  it('leaves payloads at or below the threshold alone', () => {
+    const store = new ToolResultBlobStore();
+    const messages: BetaMessageParam[] = [
+      toolUseMsg('tu-1', 'read_file'),
+      toolResultMsg('tu-1', 'y'.repeat(1_000)),
+      toolUseMsg('tu-2', 'read_file'),
+      toolResultMsg('tu-2', 'small'),
+    ];
+
+    const { handles, freedChars } = store.collapseIn(messages, T, 2);
+
+    expect(handles).toHaveLength(0);
+    expect(freedChars).toBe(0);
+    expect(resultTextOf(messages[1]!)).toBe('y'.repeat(1_000));
+  });
+
+  it('collapses BOTH copies of a duplicate payload onto one blob', () => {
+    const store = new ToolResultBlobStore();
+    const big = 'd'.repeat(40_000);
+    const messages: BetaMessageParam[] = [
+      toolUseMsg('tu-1', 'http_request', { url: 'https://a.example/x' }),
+      toolResultMsg('tu-1', big),
+      toolUseMsg('tu-2', 'http_request', { url: 'https://b.example/x' }),
+      toolResultMsg('tu-2', big),
+      toolUseMsg('tu-3', 'read_file'),
+      toolResultMsg('tu-3', 'small'),
+    ];
+
+    const { handles } = store.collapseIn(messages, T, 2);
+
+    // One stored blob, but BOTH resident copies must shrink — freeing only the
+    // first would leave the duplicate bytes riding every subsequent turn.
+    expect(store.size).toBe(1);
+    expect(handles).toHaveLength(2);
+    expect(resultTextOf(messages[1]!)).not.toContain(big);
+    expect(resultTextOf(messages[3]!)).not.toContain(big);
+  });
+
+  it('mints handles through the same path as evictFrom (shared dedup index)', () => {
+    const store = new ToolResultBlobStore();
+    const big = 's'.repeat(30_000);
+    const collapsed: BetaMessageParam[] = [
+      toolUseMsg('tu-1', 'http_request'),
+      toolResultMsg('tu-1', big),
+      toolUseMsg('tu-2', 'read_file'),
+      toolResultMsg('tu-2', 'small'),
+    ];
+    const { handles: first } = store.collapseIn(collapsed, T, 2);
+
+    // The same payload arriving again at compaction time must reuse the blob
+    // rather than mint a second one — the two entry points share `park`.
+    const later: BetaMessageParam[] = [
+      toolUseMsg('tu-9', 'http_request'),
+      toolResultMsg('tu-9', big),
+    ];
+    const second = store.evictFrom(later, T);
+
+    expect(second[0]!.id).toBe(first[0]!.id);
+    expect(store.size).toBe(1);
+  });
+});

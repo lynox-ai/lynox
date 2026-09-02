@@ -30,6 +30,11 @@ const MODELS=[
 ];
 // Jede Zelle bekaeme sonst einen Fakt, den eine fruehere Zelle schon gespeichert hat —
 // dann misst man Deduplizierung statt Capture. Pro (Modell, Sonde) ein EIGENER frischer Fakt.
+import {runToken,freshName,freshUid,sawDedup} from './probe-freshness.mjs';
+// Fresh PER RUN as well as per cell. Per-cell freshness (below) stops model 1 poisoning
+// model 2 inside one sweep; it does nothing about the previous sweep, whose rows are still
+// active on the tenant and are dedup candidates for the same subject. The name carries the
+// freshness because the store selects candidates by SUBJECT (probe-freshness.mjs).
 const FIRMEN=[['Falkenstein','CHE-118.204.551','04.09.2017','Luzern','85 000'],
               ['Rietberg','CHE-330.771.902','19.01.2021','Aarau','120 000'],
               ['Talgarten','CHE-472.019.338','27.06.2015','Chur','200 000'],
@@ -37,8 +42,15 @@ const FIRMEN=[['Falkenstein','CHE-118.204.551','04.09.2017','Luzern','85 000'],
               ['Moosbrugg','CHE-509.412.776','02.02.2022','Sitten','95 000'],
               ['Weidmatt','CHE-183.657.024','30.05.2018','Baden','140 000']];
 let CELL=0;
-const nextFact=()=>{const [n,uid,d,ort,kap]=FIRMEN[CELL++];
-  return `Die ${n} Immobilien AG hat die UID ${uid} und ist seit dem ${d} im Handelsregister ${ort} eingetragen, Aktienkapital CHF ${kap}.`;};
+const nextFact=()=>{const row=FIRMEN[CELL];
+  // The header promises "if you add cells, add facts" and nothing enforced it. Today the fit
+  // is exact (3 models x 2 probes = 6 facts), so this path is unreachable — it is the LATENT
+  // fault the promise leaves open, not something that has happened: add a model and the next
+  // cell would destructure `undefined` and throw mid-sweep, after the config was swapped.
+  // Fail with the arithmetic instead of a TypeError.
+  if(!row) throw new Error(`nextFact: cell ${CELL+1} has no fact — FIRMEN holds ${FIRMEN.length}, the sweep needs MODELS*PROBES`);
+  const [n,uid,d,ort,kap]=row; CELL++;
+  return `Die ${freshName(n)} Immobilien AG hat die UID ${freshUid(CELL)} und ist seit dem ${d} im Handelsregister ${ort} eingetragen, Aktienkapital CHF ${kap}.`;};
 const PROBES=[
   {key:'A-plain',    build:(f)=>`Zur Info: ${f}`},
   {key:'C-research', build:(f)=>`Recherchier bitte kurz im Web, was eine UID im Schweizer Handelsregister ist. Und zur Info: ${f}`},
@@ -68,7 +80,7 @@ async function swap(m,orig){
         const tools=(e.messages??[]).flatMap(x=>(x.toolCalls??[]).map(t=>t.name));
         const rem=tools.filter(t=>t==='remember').length;
         const res=(e.messages??[]).flatMap(x=>(x.toolCalls??[]).filter(t=>t.name==='remember').map(t=>String(t.result??'').slice(0,80)));
-        const row={model:m.name, probe:p.key, timedOut, served:served.split('/').pop(), servedOk:served===m.id, remember:rem, web:tools.includes('web_research'), result:res};
+        const row={model:m.name, probe:p.key, run:runToken(), timedOut, served:served.split('/').pop(), servedOk:served===m.id, remember:rem, web:tools.includes('web_research'), ...(res.some(sawDedup)?{DEDUPED:true}:{}), result:res};
         out.push(row); console.log(JSON.stringify(row));
       }
     }
@@ -81,6 +93,6 @@ async function swap(m,orig){
       console.error('restore this tier_set by hand:', JSON.stringify(orig.tier_set??{}));
       process.exitCode=1;
     } else { console.log('--- config restored ---'); }
-    console.log('MATRIX:'); for(const r of out) console.log(`  ${r.model.padEnd(15)} ${r.probe.padEnd(11)} remember=${r.remember}${r.timedOut?' (TIMEOUT — Zelle ungültig)':''} web=${r.web?'ja':'nein'} served=${r.servedOk?'ok':'MISMATCH:'+r.served}`);
+    console.log(`MATRIX (run ${runToken()}):`); for(const r of out) console.log(`  ${r.model.padEnd(15)} ${r.probe.padEnd(11)} remember=${r.remember}${r.timedOut?' (TIMEOUT — Zelle ungültig)':''}${r.DEDUPED?' (DEDUPED — Zelle ungültig, Frische hat versagt)':''} web=${r.web?'ja':'nein'} served=${r.servedOk?'ok':'MISMATCH:'+r.served}`);
   }
 })();

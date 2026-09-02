@@ -1,8 +1,9 @@
 /**
  * Managed hosting usage hook — reports AI cost (USD cents) to the control plane.
  *
- * Only active when LYNOX_MANAGED_MODE is set (EU instances provisioned by
- * the managed hosting control plane). BYOK instances never load this.
+ * Active whenever LYNOX_BILLING_TIER (legacy alias LYNOX_MANAGED_MODE) is set,
+ * i.e. on every control-plane-provisioned instance. Hosted/BYOK instances run
+ * it too and receive `spend_gate: 'unfunded'`; their mirror stays inert.
  *
  * - onBeforeRun: blocks if cached `allowed` flag is false (hard cap) OR if
  *   the cached state is too stale to trust (fail-closed under CP outage)
@@ -25,12 +26,23 @@ import type {
   UsageFlushRequest,
   UsageFlushResponse,
   UsageStatusResponse,
+  ProviderIncidentRequest,
 } from '../contract/http.js';
+import type { ProviderBillingFailure } from './provider-failure.js';
 
 const DEFAULT_FLUSH_INTERVAL_MS = 30_000;
 const FLUSH_BATCH_SIZE = 10;
 const MAX_PENDING = 500;
 const FLUSH_TIMEOUT_MS = 15_000;
+// Coalesce provider-incident reports per host: every tenant on a down provider
+// fails at once, so a burst of runs must not storm the CP — one POST per host per
+// window (the CP dedups again on its side).
+const PROVIDER_INCIDENT_COALESCE_MS = 10 * 60_000;
+// Cap on distinct hosts tracked for incident coalescing. Bounded in practice (a
+// funded instance talks to ~1 pooled provider), the cap just stops a misconfigured
+// or hostile host-cycling proxy from growing the map without bound — same shape as
+// SEEN_RUN_IDS_CAP.
+const INCIDENT_HOSTS_CAP = 100;
 const SYNC_TIMEOUT_MS = 5_000;
 // Stale threshold: how long we trust the cached `allowed` flag when the
 // control plane is unreachable. After this, fail-closed on new runs.
@@ -77,6 +89,9 @@ export function createManagedHook(): LynoxHooks {
   // Previously this was `true`, so a fresh-boot CP outage left the engine
   // burning credit indefinitely until the first successful flush.
   let allowed = false;
+  // Set from /status: does the CP fund this instance's LLM spend (a pooled key)?
+  // Gates provider-incident emission — see reportProviderIncident.
+  let cpFunded = false;
   let lastSyncedAtMs = 0;
   const flushIntervalMs = parsePositiveIntEnv(
     'LYNOX_MANAGED_FLUSH_INTERVAL_MS',
@@ -234,11 +249,17 @@ export function createManagedHook(): LynoxHooks {
         signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
       });
       if (res.ok) {
-        // Parse-tolerant: only `allowed` + `balance_cents` are dereferenced —
-        // the contract type documents the full emitted shape.
+        // Parse-tolerant: only `allowed`, `balance_cents` and `spend_gate` are
+        // dereferenced — the contract type documents the full emitted shape.
         const data = (await res.json()) as UsageStatusResponse;
         allowed = data.allowed;
         lastSyncedAtMs = Date.now();
+        // Whether the control plane FUNDS this instance's LLM spend (a pooled
+        // key). Only a CP-funded instance's provider failure is the CP's account
+        // to alert on; a BYOK/hosted instance (`spend_gate: 'unfunded'`) runs on
+        // the tenant's own key, so its billing failure is the tenant's problem and
+        // must NOT raise a pooled-provider incident. Gates reportProviderIncident.
+        cpFunded = data.spend_gate === 'balance' || data.spend_gate === 'none';
         // Re-anchor the mirror off the AUTHORITATIVE /status balance (flush's
         // balance is unreliable — an all-skipped/dedup batch returns 0). The
         // mirror is that balance minus the two LOCAL in-flight buckets the CP
@@ -248,39 +269,25 @@ export function createManagedHook(): LynoxHooks {
         // running increment (so a /status straddling a concurrent flush's debit —
         // re-anchoring high by up to one batch — is absorbed by the next CP debit
         // rather than stacking).
-        if (typeof data.balance_cents === 'number') {
-          mirror = data.balance_cents - sumReportCents(pending) - inflightCents;
-        } else if (data.balance_cents === null) {
-          // An EXPLICIT null means "this account is not balance-gated" — BYOK and
-          // hosted today, and a comp account once the CP says so. Clear the mirror.
-          //
-          // The comment here used to claim a null balance "leaves the mirror a
-          // no-op". That is true only from a cold start. Once the mirror has been
-          // anchored from a number it can only ever go DOWN — `onAfterRun`
-          // decrements under `mirror !== undefined`, `onBeforeRun` refuses under
-          // `mirror <= 0`, and this branch was the ONLY thing that could raise
-          // it. (Named, not line-numbered: the two references that used to sit
-          // here pointed at `:370`/`:313` and the real sites had moved to
-          // `:396`/`:339` by the time anyone read them.) So skipping
-          // the write did not neutralise the mirror, it FROZE it: an account whose
-          // balance later went null was gated forever by a stale number, and an
-          // admin credit grant could not rescue it, because the grant reaches the
-          // engine only through the re-anchor this branch performs.
-          //
-          // Note the asymmetry with the `else` below, and it is deliberate.
-          mirror = undefined;
-        }
-        // Anything else — key absent, or a non-null non-number — is a MALFORMED
-        // response, not a signal. Keep the current mirror, exactly as a failed
-        // sync does. Treating "no usable value" as "not balance-gated" would let
-        // a degraded CP response switch the local spend guard off.
         //
-        // "A degraded response", not "any degraded response", because ONE shape
-        // gets through and it is worth naming: `JSON.stringify(NaN)` emits
-        // `null`, so a CP that computes a NaN balance sends a value this code
-        // reads as the deliberate "not balance-gated" signal and clears on. No
-        // check here can tell those apart — they arrive byte-identical. The CP
-        // is the place that has to not do that.
+        // Decision order is load-bearing: the gate statement first, then a
+        // numeric balance, then keep.
+        if (data.spend_gate === 'none') {
+          // The CP states this account is funded but not balance-gated (a comp:
+          // its balance is a real, often negative, number — anchoring on it
+          // would be the refusal). Clear: once anchored the mirror only goes
+          // DOWN, and this re-anchor is the only thing that can lift it.
+          mirror = undefined;
+        } else if (typeof data.balance_cents === 'number') {
+          mirror = data.balance_cents - sumReportCents(pending) - inflightCents;
+        }
+        // Anything else keeps the current mirror, exactly as a failed sync does:
+        // `'unfunded'`, an absent or unrecognised token (`'NONE'`, `'none '` —
+        // strict equality is what makes that true), and a bare `null`. The
+        // null case reverses #1102, which cleared on it: a null says only that
+        // the CP has nothing to report, not that the account is ungated, and a
+        // `JSON.stringify(NaN)` emits exactly that null. Keeping the mirror is
+        // bounded and a restart clears it; clearing it was unbounded.
       }
     } catch {
       // Sync failed — keep current state. The staleness check in
@@ -295,6 +302,55 @@ export function createManagedHook(): LynoxHooks {
     // a real sync having happened.
     if (lastSyncedAtMs === 0) return true;
     return Date.now() - lastSyncedAtMs > staleThresholdMs;
+  }
+
+  // ── Provider-incident reporting (DEF-provider-billing-alert) ────────────────
+  // A provider billing/quota stop (a suspended or credit-exhausted pooled account)
+  // is a full outage for every tenant on that provider, and it surfaces only as a
+  // per-request error the CP never sees. Report it so the CP can alert the operator
+  // naming the provider — but ONLY for a CP-funded instance (see below).
+  const lastIncidentAtMsByHost = new Map<string, number>();
+
+  function reportProviderIncident(failure: ProviderBillingFailure): void {
+    // SOURCE-SIDE gate, not a reliance on the CP filtering it (DEF-provider-billing-alert
+    // security review): only a CP-funded instance's provider failure is the CP's
+    // account to alert on. A BYOK/hosted instance runs on the tenant's own key, so
+    // its 402/credit-balance is the tenant's problem — and a tenant who controls
+    // their endpoint could otherwise forge an incident with an arbitrary host/status.
+    if (!cpFunded) return;
+
+    const host = failure.providerHost || 'unknown';
+    const now = Date.now();
+    const last = lastIncidentAtMsByHost.get(host);
+    if (last !== undefined && now - last < PROVIDER_INCIDENT_COALESCE_MS) return;
+    lastIncidentAtMsByHost.set(host, now);
+    // Bound the map (host is normally a single pooled provider; the cap only stops
+    // a host-cycling proxy from growing it). FIFO evict, like seenRunIds.
+    if (lastIncidentAtMsByHost.size > INCIDENT_HOSTS_CAP) {
+      const oldest = lastIncidentAtMsByHost.keys().next().value;
+      if (oldest !== undefined) lastIncidentAtMsByHost.delete(oldest);
+    }
+
+    const url = `${controlPlaneUrl}/internal/usage/${instanceId}/incident`;
+    const body: ProviderIncidentRequest = {
+      kind: 'provider_billing',
+      provider_host: host,
+      status: failure.status,
+    };
+    // Fire-and-forget and NEVER requeued: unlike a usage report, an incident is
+    // not money owed — it is a liveness signal that repeats on the next failing
+    // run. On a FAILED post (network error OR a non-2xx from the CP) clear the
+    // coalesce stamp so the next failing run retries immediately instead of waiting
+    // out the window; on success the stamp holds for the window. Its failure must
+    // never surface into the caller's run-failure path.
+    void fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-instance-secret': secret },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(FLUSH_TIMEOUT_MS),
+    })
+      .then((res) => { if (!res.ok) lastIncidentAtMsByHost.delete(host); })
+      .catch(() => { lastIncidentAtMsByHost.delete(host); });
   }
 
   return {
@@ -361,6 +417,13 @@ export function createManagedHook(): LynoxHooks {
     },
 
     onAfterRun(runId: string, costUsd: number, context: RunContext) {
+      // A provider billing/quota stop is reported BEFORE the cost skip below: a
+      // billing failure spent 0 tokens, so gating this on cost would drop exactly
+      // the signal that matters. Independent of the usage-report path.
+      if (context.failure?.kind === 'provider_billing') {
+        reportProviderIncident(context.failure);
+      }
+
       if (!Number.isFinite(costUsd) || costUsd <= 0) return; // Skip zero/negative/NaN
 
       // Idempotency: a re-fire of the same run (the failed-run double-fire window)

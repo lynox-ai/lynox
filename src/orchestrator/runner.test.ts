@@ -375,6 +375,105 @@ describe('runManifest — v1.1 parallel execution', () => {
     expect(Math.max(...startIndices)).toBeLessThan(Math.min(...completeIndices));
   });
 
+  it('limits concurrency to limits.maxParallelSteps within a phase (backpressure)', async () => {
+    const manifest: Manifest = {
+      manifest_version: '1.1',
+      name: 'backpressure',
+      triggered_by: 'test',
+      context: {},
+      agents: Array.from({ length: 8 }, (_, i) => ({
+        id: `s${i}`, agent: `agent-${i}`, runtime: 'mock' as const,
+      })),
+      gate_points: [],
+      on_failure: 'stop',
+    };
+    // 8 independent steps land in a single phase. onStepStart fires synchronously
+    // before the first await in executeStep, so maxActive is a faithful measure of
+    // simultaneous execution. Bare `Promise.allSettled(map)` starts all 8 at once;
+    // the worker pool must hold it to the cap.
+    let active = 0;
+    let maxActive = 0;
+    const hooks: RunHooks = {
+      onStepStart: () => { active++; maxActive = Math.max(maxActive, active); },
+      onStepComplete: () => { active--; },
+    };
+    const mockResponses = new Map(manifest.agents.map((a) => [a.agent, 'r']));
+    const state = await runManifest(manifest, CONFIG, {
+      mockResponses,
+      hooks,
+      limits: { maxParallelSteps: 3 },
+    });
+    expect(state.status).toBe('completed');
+    expect(state.outputs.size).toBe(8);
+    expect(maxActive).toBeLessThanOrEqual(3); // backpressure — kills bare allSettled
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -1],
+    ['NaN', NaN],
+  ])('a %s maxParallelSteps does NOT fall through to full fan-out', async (_label, bad) => {
+    // The fail-open this closes: the executor used to test `cap !== undefined &&
+    // cap > 0`, and every one of these values fails `> 0`, so a caller who ASKED
+    // for a bound and supplied nonsense got the unbounded branch — the one
+    // outcome a limiter must never produce. Present-but-malformed now resolves to
+    // the tightest bound (1), so the phase runs serially instead of all at once.
+    const manifest: Manifest = {
+      manifest_version: '1.1',
+      name: 'malformed-cap',
+      triggered_by: 'test',
+      context: {},
+      agents: Array.from({ length: 8 }, (_, i) => ({
+        id: `s${i}`, agent: `agent-${i}`, runtime: 'mock' as const,
+      })),
+      gate_points: [],
+      on_failure: 'stop',
+    };
+    let active = 0;
+    let maxActive = 0;
+    const hooks: RunHooks = {
+      onStepStart: () => { active++; maxActive = Math.max(maxActive, active); },
+      onStepComplete: () => { active--; },
+    };
+    const mockResponses = new Map(manifest.agents.map((a) => [a.agent, 'r']));
+    const state = await runManifest(manifest, CONFIG, {
+      mockResponses,
+      hooks,
+      limits: { maxParallelSteps: bad },
+    });
+    // Still a correct run — the clamp bounds width, it never drops work.
+    expect(state.status).toBe('completed');
+    expect(state.outputs.size).toBe(8);
+    expect(maxActive).toBe(1);
+  });
+
+  it('an ABSENT maxParallelSteps still means unbounded (the v1.1 contract)', async () => {
+    // The counter-direction of the test above: the clamp must not turn "no
+    // limits declared" into a bound. Without this, tightening the malformed case
+    // could silently serialize every existing limit-less workflow.
+    const manifest: Manifest = {
+      manifest_version: '1.1',
+      name: 'no-cap',
+      triggered_by: 'test',
+      context: {},
+      agents: Array.from({ length: 8 }, (_, i) => ({
+        id: `s${i}`, agent: `agent-${i}`, runtime: 'mock' as const,
+      })),
+      gate_points: [],
+      on_failure: 'stop',
+    };
+    let active = 0;
+    let maxActive = 0;
+    const hooks: RunHooks = {
+      onStepStart: () => { active++; maxActive = Math.max(maxActive, active); },
+      onStepComplete: () => { active--; },
+    };
+    const mockResponses = new Map(manifest.agents.map((a) => [a.agent, 'r']));
+    const state = await runManifest(manifest, CONFIG, { mockResponses, hooks });
+    expect(state.status).toBe('completed');
+    expect(maxActive).toBe(8);
+  });
+
   it('diamond dependency: D receives both B and C outputs', async () => {
     const manifest: Manifest = {
       manifest_version: '1.1',
@@ -980,6 +1079,71 @@ describe('runManifest — A2 step-recording (pipeline_step rows + billing isolat
         { step_id: 'declared', model_tier: 'balanced' },
         { step_id: 'undeclared', model_tier: 'fast' },
       ]);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('records the CLAMPED band, not the declaration, when a deep step runs headless', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // The headless deep-consent clamp (#1215) rewrites a `deep` REQUEST to
+      // `balanced` before resolution, so the step runs and is billed at balanced.
+      // The row has to say what ran: it feeds getAvgStepCostByModelTier, whose
+      // average is the cost shown in the plan_task consent dialog. Stamping
+      // `step.model` filed balanced-priced spend under `deep` and dragged the
+      // deep average down — measured live 2026-08-18 (factor 4.5 on one step).
+      //
+      // No mockResponses → the real inline branch runs, so a model is actually
+      // resolved (the mock path resolves none and keeps the legacy fallback).
+      const manifest: Manifest = {
+        manifest_version: '1.0',
+        name: 'clamp-record',
+        triggered_by: 'test',
+        context: {},
+        agents: [{ id: 'wants-deep', agent: 'x', runtime: 'inline', task: 'think hard', model: 'deep' }],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      const state = await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [], autonomy: 'autonomous' });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare(
+        `SELECT step_id, model_tier FROM pipeline_step_results WHERE pipeline_run_id = ?`,
+      ).all(state.runId) as Array<{ step_id: string; model_tier: string }>;
+
+      expect(rows).toEqual([{ step_id: 'wants-deep', model_tier: 'balanced' }]);
+    } finally {
+      h.close();
+      cleanup();
+    }
+  });
+
+  it('records `deep` for the SAME step when it is NOT headless (the clamp is what moves it)', async () => {
+    const { h, cleanup } = tmpHistory();
+    try {
+      // Counter-direction, and it is what makes the assert above mean something:
+      // without it, hard-coding `modelTier: 'balanced'` would pass. Interactive
+      // (autonomy undefined) applies no clamp, so deep IS what resolves and runs,
+      // and the row must say so.
+      const manifest: Manifest = {
+        manifest_version: '1.0',
+        name: 'clamp-record-interactive',
+        triggered_by: 'test',
+        context: {},
+        agents: [{ id: 'wants-deep', agent: 'x', runtime: 'inline', task: 'think hard', model: 'deep' }],
+        gate_points: [],
+        on_failure: 'stop',
+      };
+      const state = await runManifest(manifest, CONFIG, { runHistory: h, parentTools: [] });
+
+      const db = (h as unknown as { db: import('better-sqlite3').Database }).db;
+      const rows = db.prepare(
+        `SELECT step_id, model_tier FROM pipeline_step_results WHERE pipeline_run_id = ?`,
+      ).all(state.runId) as Array<{ step_id: string; model_tier: string }>;
+
+      expect(rows).toEqual([{ step_id: 'wants-deep', model_tier: 'deep' }]);
     } finally {
       h.close();
       cleanup();

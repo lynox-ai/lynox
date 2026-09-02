@@ -4,8 +4,20 @@
 // All preset providers (gmail, icloud, fastmail, yahoo, outlook, custom) build
 // on top of this — they only differ in the host/port/TLS configuration.
 
+import { randomUUID } from 'node:crypto';
 import { ImapFlow, type FetchMessageObject, type MessageStructureObject, type SearchObject } from 'imapflow';
 import nodemailer, { type Transporter } from 'nodemailer';
+// nodemailer ships no typings for its internal composer (the same code path
+// `sendMail` uses to serialize a message); this narrows it to the only two
+// members the Sent-append path touches.
+import MailComposerUntyped from 'nodemailer/lib/mail-composer/index.js';
+interface MailComposerInstance {
+  compile(): { build(cb: (err: Error | null, buf: Buffer) => void): void };
+}
+interface MailComposerCtor {
+  new (mail: Record<string, unknown>): MailComposerInstance;
+}
+const MailComposer = MailComposerUntyped as unknown as MailComposerCtor;
 
 import {
   MailError,
@@ -73,6 +85,10 @@ function insecureTlsFromEnv(): boolean {
 const CONNECT_TIMEOUT_MS = 10_000;
 const GREETING_TIMEOUT_MS = 10_000;
 const SOCKET_TIMEOUT_MS = 60_000;
+/** Hard ceiling for the best-effort Sent-copy APPEND — below the SMTP socket
+ *  timeout on purpose: the copy is optional and must never hold a delivered
+ *  send hostage to IMAP reconnect backoff. */
+const SENT_APPEND_TIMEOUT_MS = 5_000;
 const RECONNECT_BACKOFF_INITIAL_MS = 1_000;
 const RECONNECT_BACKOFF_MAX_MS = 30_000;
 const RECONNECT_MAX_ATTEMPTS = 5;
@@ -334,6 +350,57 @@ function wrapImapError(err: unknown, fallback: string): MailError {
   return new MailError('connection_failed', `${fallback}: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
 }
 
+/**
+ * SMTP reply codes that mean "not now", not "not you" — but ONLY when they came
+ * out of the AUTH phase. nodemailer formats every failure there as
+ * `Invalid login: <server reply>`, so a throttle arrives wearing the word
+ * "login" and `isAuthError` — which matches on that word — reads it as bad
+ * credentials. The user is then told to regenerate an app-password, retries,
+ * and extends the very lockout that caused it.
+ *
+ * 421 service unavailable / closing · 454 temporary authentication failure,
+ * which is what Gmail and Yahoo send for "too many login attempts".
+ *
+ * The phase check is not decoration. nodemailer attaches `responseCode` to any
+ * reply that starts with digits, so the same numbers turn up far from AUTH:
+ * a greylisted recipient is `450 … Recipient address rejected` (EENVELOPE), and
+ * a server refusing STARTTLS answers `454 TLS not available` (ETLS). Reading
+ * either as "your account is throttled" would replace a correct diagnosis with
+ * a wrong one — and the STARTTLS case got MORE likely with this change, which
+ * makes 587 the default.
+ */
+const SMTP_AUTH_THROTTLE_CODES = new Set([421, 454]);
+
+/** True only for a throttle reply raised while authenticating. */
+function isSmtpAuthThrottle(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const { code, responseCode } = err as { code?: unknown; responseCode?: unknown };
+  return code === 'EAUTH' && typeof responseCode === 'number' && SMTP_AUTH_THROTTLE_CODES.has(responseCode);
+}
+
+/**
+ * Shared SMTP error mapping for send() and verifySmtp(). The two differ only
+ * in the fallback: a send that reaches the server and is refused is
+ * `send_rejected`, while a verify that gets that far has nothing to reject —
+ * anything left over is a connection problem.
+ */
+function wrapSmtpError(err: unknown, op: 'send' | 'verify'): MailError {
+  if (err instanceof MailError) return err;
+  // Before isAuthError, which would otherwise swallow these — see above.
+  if (isSmtpAuthThrottle(err)) {
+    const { responseCode } = err as { responseCode: number };
+    return new MailError('rate_limited', `SMTP server is throttling this account (${String(responseCode)}) — wait before retrying`, { cause: err });
+  }
+  if (isAuthError(err)) return new MailError('auth_failed', 'SMTP authentication failed', { cause: err });
+  const message = err instanceof Error ? err.message : String(err);
+  const lower = message.toLowerCase();
+  if (lower.includes('timeout')) return new MailError('timeout', 'SMTP timeout', { cause: err });
+  if (lower.includes('certificate')) return new MailError('tls_failed', 'SMTP TLS verification failed', { cause: err });
+  return op === 'send'
+    ? new MailError('send_rejected', `SMTP send failed: ${message}`, { cause: err })
+    : new MailError('connection_failed', `SMTP connection failed: ${message}`, { cause: err });
+}
+
 // ── Provider ───────────────────────────────────────────────────────────────
 
 export class ImapSmtpProvider implements MailProvider {
@@ -345,6 +412,11 @@ export class ImapSmtpProvider implements MailProvider {
   private readonly tlsRejectUnauthorized: boolean;
 
   private client: ImapFlow | null = null;
+  /** Resolved Sent-folder path, cached after the first successful lookup —
+   *  the review found appendSentCopy paid a full `client.list()` roundtrip on
+   *  EVERY send. Mailbox layout does not change mid-session; the cache is
+   *  dropped on an append failure (folder may have been removed). */
+  private sentFolderPath: string | null | undefined = undefined;
   private connecting: Promise<ImapFlow> | null = null;
   private smtpTransport: Transporter | null = null;
   private closed = false;
@@ -435,6 +507,30 @@ export class ImapSmtpProvider implements MailProvider {
       socketTimeout: SOCKET_TIMEOUT_MS,
     });
     return this.smtpTransport;
+  }
+
+  /**
+   * Open an SMTP session — connect, STARTTLS/implicit TLS, AUTH — and send
+   * nothing. This is what a pre-save connection test needs: `list()` proves
+   * IMAP works and says nothing about the send path, so an account whose
+   * outbound SMTP port is blocked shows no symptom until the first send, hours
+   * or days after setup.
+   *
+   * Resolves on success; throws a MailError otherwise.
+   */
+  async verifySmtp(): Promise<void> {
+    if (this.closed) throw new MailError('connection_failed', 'Provider closed');
+    let creds: MailCredentials;
+    try {
+      creds = await this.resolveCredentials();
+    } catch (err) {
+      throw new MailError('auth_failed', 'Could not resolve mail credentials', { cause: err });
+    }
+    try {
+      await this.getSmtpTransport(creds).verify();
+    } catch (err) {
+      throw wrapSmtpError(err, 'verify');
+    }
   }
 
   // ── list ────────────────────────────────────────────────────────────────
@@ -658,19 +754,26 @@ export class ImapSmtpProvider implements MailProvider {
     }
 
     const transport = this.getSmtpTransport(creds);
+    // Pre-assign the Message-ID so the SMTP copy and the Sent-APPEND copy are
+    // thread-identical — two independently generated ids would show up as
+    // unrelated messages in clients that display both. (dogfood 2026-08-14:
+    // sent mail was invisible to the sender because nothing appends to Sent;
+    // this is the append half.)
+    const messageId = `<${randomUUID()}@${this.account.address.split('@')[1] ?? 'localhost'}>`;
 
     try {
       const result = await transport.sendMail({
         from: { name: this.account.displayName, address: this.account.address },
-        to: input.to.map(addressToString),
-        cc: input.cc?.map(addressToString),
-        bcc: input.bcc?.map(addressToString),
-        replyTo: input.replyTo ? addressToString(input.replyTo) : undefined,
+        to: input.to.map(toNodemailerAddress),
+        cc: input.cc?.map(toNodemailerAddress),
+        bcc: input.bcc?.map(toNodemailerAddress),
+        replyTo: input.replyTo ? toNodemailerAddress(input.replyTo) : undefined,
         subject: input.subject,
         text: input.text,
         html: input.html,
         inReplyTo: input.inReplyTo,
         references: input.references,
+        messageId,
         attachments: input.attachments?.map(a => ({
           filename: a.filename,
           content: Buffer.from(a.content),
@@ -678,17 +781,88 @@ export class ImapSmtpProvider implements MailProvider {
         })),
       });
 
+      // Sent-folder APPEND, best-effort. A failure here must NOT fail a send
+      // that is already on the wire — the mail exists; only the sender's own
+      // "Gesendete" view would miss it (logged, not thrown). Bounded by a race
+      // timeout: IMAP connection problems retry with backoff, and the caller
+      // must not wait out that backoff for a copy that is optional. Skipped
+      // entirely for Gmail-via-SMTP: smtp.gmail.com files SMTP sends into Sent
+      // server-side, an append would duplicate.
+      const smtpHost = this.account.smtp.host.toLowerCase();
+      // googlemail.com is Google's documented alias endpoint for smtp.gmail.com
+      // (same submission service, same server-side Sent filing) — the review
+      // caught the alias slipping past the skip and duplicating Sent.
+      const googleFilesSentItself = smtpHost.includes('gmail') || smtpHost.includes('googlemail');
+      if (!googleFilesSentItself) {
+        try {
+          await Promise.race([
+            this.appendSentCopy(input, messageId),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error('sent-copy append timed out')), SENT_APPEND_TIMEOUT_MS).unref()),
+          ]);
+        } catch (err) {
+          console.warn('[mail] sent-copy append failed (mail is delivered):', err instanceof Error ? err.message : String(err));
+        }
+      }
+
       return {
-        messageId: result.messageId ?? '',
+        messageId: result.messageId ?? messageId,
         accepted: (result.accepted ?? []).map(addrToPlain),
         rejected: (result.rejected ?? []).map(addrToPlain),
       };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (isAuthError(err)) throw new MailError('auth_failed', 'SMTP authentication failed', { cause: err });
-      if (message.toLowerCase().includes('timeout')) throw new MailError('timeout', 'SMTP timeout', { cause: err });
-      if (message.toLowerCase().includes('certificate')) throw new MailError('tls_failed', 'SMTP TLS verification failed', { cause: err });
-      throw new MailError('send_rejected', `SMTP send failed: ${message}`, { cause: err });
+      throw wrapSmtpError(err, 'send');
+    }
+  }
+
+  /** Re-serialize the sent message with the SAME Message-ID and APPEND it to
+   *  the account's Sent folder (SPECIAL-USE `\Sent`, name fallbacks for servers
+   *  that don't advertise special-use). Returns silently when no Sent folder
+   *  resolves — nothing sensible to append to. Throws on transport failure;
+   *  the caller decides fatality (never fatal post-SMTP). */
+  private async appendSentCopy(input: MailSendInput, messageId: string): Promise<void> {
+    const composer = new MailComposer({
+      from: { name: this.account.displayName, address: this.account.address },
+      to: input.to.map(toNodemailerAddress),
+      cc: input.cc?.map(toNodemailerAddress),
+      bcc: input.bcc?.map(toNodemailerAddress),
+      replyTo: input.replyTo ? toNodemailerAddress(input.replyTo) : undefined,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+      inReplyTo: input.inReplyTo,
+      references: input.references,
+      messageId,
+      date: new Date(),
+      attachments: input.attachments?.map(a => ({
+        filename: a.filename,
+        content: Buffer.from(a.content),
+        contentType: a.contentType,
+      })),
+    });
+    const raw = await new Promise<Buffer>((resolve, reject) => {
+      composer.compile().build((err, buf) => (err ? reject(err) : resolve(buf)));
+    });
+
+    const client = await this.getClient();
+    let sentPath = this.sentFolderPath;
+    if (sentPath === undefined) {
+      const folders = await client.list();
+      const sent =
+        folders.find(f => f.specialUse === '\\Sent')
+        ?? folders.find(f => /^(INBOX\.)?Sent( Messages| Items)?$/i.test(f.path));
+      if (!sent) {
+        this.sentFolderPath = null; // nothing sensible — remember, don't re-list every send
+        return;
+      }
+      sentPath = this.sentFolderPath = sent.path;
+    }
+    if (sentPath === null) return;
+    try {
+      await client.append(sentPath, raw, ['\\Seen'], new Date());
+    } catch (err) {
+      this.sentFolderPath = undefined; // folder may be gone — re-resolve next time
+      throw err;
     }
   }
 
@@ -817,11 +991,34 @@ export class ImapSmtpProvider implements MailProvider {
 
 // ── small utils kept private to this file ─────────────────────────────────
 
-function addressToString(a: MailAddress): string {
-  // Strip CRLF from both fields — defense-in-depth against header injection
-  const name = a.name?.replace(/[\r\n]/g, '') ?? '';
-  const addr = a.address.replace(/[\r\n]/g, '');
-  return name ? `"${name.replace(/"/g, '\\"')}" <${addr}>` : addr;
+/**
+ * Hand nodemailer a STRUCTURED address, never a pre-serialized string.
+ *
+ * This used to build `"name" <addr>` by hand and let nodemailer re-parse it —
+ * which is a round trip through an address parser with attacker-influenceable
+ * input in the middle. The name is remote-authored: it arrives on an inbound
+ * message's envelope (imapflow decodes the RFC 2047 phrase to arbitrary bytes),
+ * survives `toAddresses` unfiltered, and `mail_reply` defaults its recipient to
+ * exactly that object. The old escaping handled `"` but not `\`, so a display
+ * name ending in a backslash escaped its own closing quote and the re-parse read
+ * a DIFFERENT mailbox — measured end to end against real nodemailer:
+ *
+ *   name `Bob\" <attacker@evil.example>`  →  RCPT TO: ["attacker@evil.example"]
+ *
+ * The real recipient was gone, the attacker was the sole one, and the consent
+ * preview never showed it because `previewAddressList` renders only `.address`.
+ *
+ * Passing the object removes the re-parse instead of trying to out-escape it —
+ * the same shape `from:` has always used, which is why `from:` was never
+ * affected. Escaping is nodemailer's job once it owns the parts.
+ */
+function toNodemailerAddress(a: MailAddress): { name: string; address: string } {
+  // CRLF still stripped here as defence in depth: it keeps a newline out of the
+  // parts even if a future nodemailer path folds them differently.
+  return {
+    name: a.name?.replace(/[\r\n]/g, '') ?? '',
+    address: a.address.replace(/[\r\n]/g, ''),
+  };
 }
 
 function addrToPlain(a: string | { address?: string }): string {

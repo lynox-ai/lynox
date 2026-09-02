@@ -46,13 +46,62 @@ export interface UsageFlushResponse {
   allowed: boolean;
 }
 
+// === Provider incident — POST /internal/usage/:instanceId/incident (engine → CP) ===
+
+/**
+ * The engine reports a PROVIDER-LEVEL failure the control plane cannot see any
+ * other way: on managed hosting the CP pays the LLM bill, so a suspended or
+ * credit-exhausted provider account is a full chat outage for every tenant on
+ * that provider — and it surfaces only as a per-request error while `/api/health`
+ * stays green. The CP raises an operator alert naming the provider on the FIRST
+ * such report, not a fleet-wide pattern.
+ *
+ * `kind` is the literal `'provider_billing'` — the only kind the engine emits
+ * today. The CP parses it tolerantly (an unrecognised future kind is ignored, not
+ * an error), which is why a widened union here would stay backward-compatible.
+ * `provider_host` is the host the failing call targeted (e.g. `api.fireworks.ai`),
+ * which the CP maps to a display label. `status` is the HTTP status that carried
+ * the signal. No secrets, no run content — a class signal, not a payload.
+ */
+export interface ProviderIncidentRequest {
+  kind: 'provider_billing';
+  provider_host: string;
+  status: number;
+}
+
 // === Usage status — GET /internal/usage/:instanceId/status (engine ← CP) ===
 
 /**
- * High-frequency liveness/credit poll. `balance_cents` is `null` for
- * non-managed providers (BYOK/hosted — no CP entitlement to report).
- * Both branches have always emitted every non-optional field below; the
- * engine still dereferences only `allowed` + `balance_cents` (parse-tolerant).
+ * What the control plane states about this account's spend gate. The engine's
+ * local balance mirror acts on this token and never on `balance_cents` alone.
+ *
+ *  - `'balance'`  — the control plane funds this instance and gates it by
+ *    balance: `balance_cents` is a number, the engine anchors its mirror on it.
+ *  - `'none'`     — the control plane funds this instance and states that it is
+ *    NOT balance-gated (a comp account: metered, never refused for money). The
+ *    engine clears its mirror. The control plane must emit this only where it
+ *    is the key supplier — never for an instance it merely does not fund.
+ *  - `'unfunded'` — the control plane does not fund this instance's spend
+ *    (BYOK/hosted) and makes no statement about a gate. The engine reads it
+ *    exactly like an absent or unrecognised value: a numeric `balance_cents`
+ *    beside it would still anchor (the CP never sends that pair), a `null`
+ *    leaves the mirror as it was.
+ *
+ * Why a token and not the absence of a number: `balance_cents: null` only says
+ * there is nothing to report on this branch; it says nothing about the gate,
+ * and a `null` can arise by accident (`JSON.stringify(NaN)` emits it) where a
+ * token cannot.
+ */
+export type SpendGate = 'balance' | 'none' | 'unfunded';
+
+/**
+ * High-frequency liveness/credit poll. `balance_cents` is `null` when the
+ * control plane has no balance to report on this branch (BYOK/hosted); the
+ * gate is stated by `spend_gate`, never inferred from that null. The engine
+ * dereferences `allowed`, `balance_cents` and `spend_gate`, parse-tolerant: a
+ * response without `spend_gate` comes from an older control plane and is read
+ * as if no statement were made — a numeric `balance_cents` still anchors the
+ * mirror, a `null` leaves it as it was.
  */
 export interface UsageStatusResponse {
   allowed: boolean;
@@ -65,6 +114,11 @@ export interface UsageStatusResponse {
    * values are legal on the wire.
    */
   tier: string;
+  /**
+   * The control plane must state it on every branch. The engine treats an
+   * absent or unrecognised value as no statement and keeps its current mirror.
+   */
+  spend_gate: SpendGate;
 }
 
 // === Usage summary — GET /internal/usage/:instanceId/summary (engine ← CP) ===
@@ -201,8 +255,71 @@ export interface OAuthClaimRequest {
  */
 export interface OAuthClaimResponse {
   access_token: string;
+  /**
+   * The raw Google refresh token.
+   *
+   * ⚠ BEING RETIRED. It is here for engines that predate `refresh_handle` and
+   * still refresh against Google themselves. Once the fleet is past the release
+   * that uses the handle, this field goes — DEF-retire-raw-refresh-token.
+   *
+   * Handing it down is what the CP-exchange decision (2026-08-26) removes: an
+   * engine holding it needs lynox's client secret to use it, which is why the
+   * secret was going to be emitted to every tenant in the first place.
+   */
   refresh_token: string;
+  /**
+   * The same refresh token, sealed to THIS instance by the control plane.
+   *
+   * Optional so an older engine is unaffected — it simply keeps using
+   * `refresh_token`. A newer engine prefers this and never learns the raw
+   * value: it presents the handle to `POST /internal/oauth/google/refresh`,
+   * which unseals it with the instance's own key and does the Google call
+   * control-plane-side. A handle lifted from one tenant is inert at another,
+   * because unsealing uses the key of the instance that authenticated.
+   *
+   * Opaque by contract. Its format is the control plane's business and may
+   * change without a wire change; nothing outside the CP may parse it.
+   */
+  refresh_handle?: string;
   /** Absolute expiry, epoch milliseconds (not a TTL, not seconds). */
   expires_at: number;
   scopes: string[];
+}
+
+// === OAuth refresh — POST /internal/oauth/google/refresh (engine → CP) ===
+
+/**
+ * Refresh on behalf of an instance, so lynox's client secret never leaves the
+ * control plane.
+ *
+ * Authenticated exactly like the claim: `x-instance-secret`, matched against
+ * `instances.instanceSecret` in constant time. The handle is bound on top of
+ * that — presenting someone else's handle fails at the unseal, not at a lookup,
+ * so this endpoint cannot be used as an oracle that redeems arbitrary refresh
+ * tokens.
+ */
+export interface OAuthRefreshRequest {
+  instance_id: string;
+  /** The `refresh_handle` from the claim, or from a previous refresh. */
+  refresh_handle: string;
+}
+
+/**
+ * A fresh access token, and nothing the caller did not already have.
+ *
+ * ⚠ The engine MUST cache `access_token` until `expires_at`. That is not an
+ * optimisation: with the refresh path routed through the control plane, an
+ * uncached engine reaches for the CP on every expiry and the CP becomes a
+ * runtime dependency of every Google call rather than of the refresh.
+ */
+export interface OAuthRefreshResponse {
+  access_token: string;
+  /** Absolute expiry, epoch milliseconds (not a TTL, not seconds). */
+  expires_at: number;
+  /**
+   * Present only when Google rotated the refresh token, which it may do on any
+   * refresh. The engine must replace its stored handle when this appears, or
+   * the next refresh presents a handle Google has already invalidated.
+   */
+  refresh_handle?: string;
 }

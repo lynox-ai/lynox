@@ -19,7 +19,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, mkdtempSync, rmSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,10 +48,14 @@ const SOFT_HOST = ['engine', 'lynox', 'cloud'].join('.');
 
 let dir: string;
 
+// Pin git config to /dev/null so a developer's global core.quotePath / hooksPath
+// cannot make a case vacuous or run foreign hooks on the fixture commits.
+const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+
 /** Run the guard in --staged mode inside `dir`; return the exit code. */
 function runStaged(): number {
   try {
-    execFileSync('bash', [SCRIPT, '--staged'], { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+    execFileSync('bash', [SCRIPT, '--staged'], { cwd: dir, env: GIT_ENV, encoding: 'utf8', stdio: 'pipe' });
     return 0;
   } catch (err) {
     return (err as { status?: number }).status ?? -1;
@@ -61,7 +65,7 @@ function runStaged(): number {
 /** Run the guard inside `dir`; return the exit code (0 = clean). */
 function runGuard(): number {
   try {
-    execFileSync('bash', [SCRIPT], { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+    execFileSync('bash', [SCRIPT], { cwd: dir, env: GIT_ENV, encoding: 'utf8', stdio: 'pipe' });
     return 0;
   } catch (err) {
     return (err as { status?: number }).status ?? -1;
@@ -72,12 +76,14 @@ function commitFile(relPath: string, content: string): void {
   const abs = join(dir, relPath);
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, content);
-  execFileSync('git', ['add', relPath], { cwd: dir });
+  // `--` so a path beginning with '-' (the dash-name case below) is a pathspec,
+  // not a `git add` option.
+  execFileSync('git', ['add', '--', relPath], { cwd: dir, env: GIT_ENV });
 }
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'prg-'));
-  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['init', '-q'], { cwd: dir, env: GIT_ENV });
 });
 
 afterEach(() => {
@@ -131,6 +137,87 @@ describe('public-repo-guard — fires on planted leaks', () => {
     expect(runGuard()).not.toBe(0);
   });
 
+  it('scans a file whose NAME contains non-ASCII bytes', () => {
+    // git quotes such a path (`"Gr\303\274\303\237e.md"`), the `[ -f ]` test
+    // failed on that literal, and the loop skipped the file — silently, for EVERY
+    // class including the HARD ones, while the run reported a clean tree. One
+    // `docs/Übersicht.md` was enough to blind a required check.
+    commitFile('Grüße.md', `const h = '${INFRA_HOST}';\n`);
+    expect(runGuard()).not.toBe(0);
+  });
+
+  it('scans a non-ASCII path in --staged mode too', () => {
+    // Same defect, second entry point: the staged listing quotes identically.
+    commitFile('Über.md', `const h = '${INFRA_HOST}';\n`);
+    expect(runStaged()).not.toBe(0);
+  });
+
+  it('scans a file whose NAME begins with a dash', () => {
+    // The twin of the non-ASCII case: a repo-root path like `-x.ts` reached the
+    // class greps as a leading-dash operand, which grep read as an option →
+    // error → `2>/dev/null` swallowed it → the loop `continue`d, skipping a HARD
+    // marker silently. The `./$f` prefix makes it an unambiguous filename. Only a
+    // repo-root name is dangerous (a nested `sub/-y.ts` carries a slash).
+    commitFile('-x.ts', `const h = '${INFRA_HOST}';\n`);
+    expect(runGuard()).not.toBe(0);
+  });
+
+  it('scans a SYMLINK by its target string, not the file it points at', () => {
+    // git stores a symlink as a blob whose CONTENT is the target path, so the
+    // path itself is committed into this public repo verbatim. The content scan
+    // never saw it: `[ -f ]` follows the link, so a live link was scanned for the
+    // TARGET's bytes and a dangling one was skipped outright — silently, like
+    // every other blind-skip this guard has had to learn about. Measured before
+    // the fix: this exact tree returned `clean ✓`, exit 0.
+    const abs = join(dir, 'link.ts');
+    symlinkSync(`/opt/lynox-${['man', 'aged'].join('')}/secret`, abs);
+    execFileSync('git', ['add', '--', 'link.ts'], { cwd: dir, env: GIT_ENV });
+    expect(runGuard()).not.toBe(0);
+  });
+
+  it('catches an internal cross-reference slug in a SYMLINK TARGET', () => {
+    // The first draft asserted in a code comment that the reference and hostname
+    // classes "do not apply to a path". Measured false: a link target is an
+    // arbitrary committed byte string, and this rode through at exit 0 while the
+    // same slug is blocked in every other file.
+    const abs = join(dir, 'link.ts');
+    symlinkSync(`/tmp/${internalRef('project_some_private_note')}/x`, abs);
+    execFileSync('git', ['add', '--', 'link.ts'], { cwd: dir, env: GIT_ENV });
+    expect(runGuard()).not.toBe(0);
+  });
+
+  it('catches a SOFT internal hostname in a SYMLINK TARGET', () => {
+    const abs = join(dir, 'link.ts');
+    symlinkSync(`/mnt/${SOFT_HOST}/share`, abs);
+    execFileSync('git', ['add', '--', 'link.ts'], { cwd: dir, env: GIT_ENV });
+    expect(runGuard()).not.toBe(0);
+  });
+
+  it('does not flag a symlink whose target is innocuous', () => {
+    // The counter-direction: without it, flagging every symlink would pass the
+    // case above just as happily.
+    const abs = join(dir, 'link.ts');
+    symlinkSync('../src/ok.ts', abs);
+    execFileSync('git', ['add', '--', 'link.ts'], { cwd: dir, env: GIT_ENV });
+    expect(runGuard()).toBe(0);
+  });
+
+  it('scans a dash-named path in --staged mode too', () => {
+    commitFile('-y.ts', `const h = '${INFRA_HOST}';\n`);
+    expect(runStaged()).not.toBe(0);
+  });
+
+  it('still scans later files when a path is literally "-" (no stdin drain)', () => {
+    // The sharpest edge, and why `--` alone was not enough: a file named exactly
+    // `-` is still STDIN to grep even after `--`, and inside the loop stdin is the
+    // NUL file listing — grep drains it and every later file is skipped, so the
+    // guard reports a clean tree. `./-` is a real path, not stdin. `zz-` sorts
+    // after `-`, so the marker only surfaces if the loop survived the `-` entry.
+    commitFile('-', 'nothing suspicious\n');
+    commitFile('zz-leak.ts', `const h = '${INFRA_HOST}';\n`);
+    expect(runGuard()).not.toBe(0);
+  });
+
   it('--staged scans only what is staged, not the committed tree', () => {
     // NOTE: --staged is currently unreachable from lefthook.yml, which runs the
     // guard over the whole tree. Covered anyway because the mode exists and is
@@ -141,7 +228,7 @@ describe('public-repo-guard — fires on planted leaks', () => {
     // test stayed green even with --staged patched into a no-op. Committing a
     // baseline first is what makes the two views differ.
     commitFile('src/leak.ts', `// uses the local ${VENDOR} endpoint\n`);
-    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'baseline'], { cwd: dir });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'baseline'], { cwd: dir, env: GIT_ENV });
 
     // Nothing staged now: the leak is committed, so --staged must be CLEAN
     // while a full-tree run still fires. This is the assertion a no-op --staged

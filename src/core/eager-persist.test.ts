@@ -201,6 +201,34 @@ describe('persistFailedTurnDisplay (B-full)', () => {
     expect(note._lynox_note.detail).toBeUndefined();
   });
 
+  it('a continuation loop (continuation_loop) names the repeated truncated prefix', () => {
+    const m = makeFailMockStore({ hadUserMessage: true, marked: 1, total: 3 });
+    const err = Object.assign(new Error('Run stopped: truncated continuations repeated'), {
+      loopPrefix: 'Ich speichere die CSV-Datei und analysiere sie strukturiert mit Python.',
+    });
+    persistFailedTurnDisplay({ threadStore: m.store, sessionId: 's1', startSeq: 2, task: 'q', error: err, noteCode: 'continuation_loop' });
+    const notes = m.appendDisplayNotes.mock.calls[0]![1] as DisplayNoteInput[];
+    const note = notes.find(n => n.role === 'assistant')!.content as { _lynox_note: { code: string; detail?: string } };
+    expect(note._lynox_note.code).toBe('continuation_loop');
+    expect(note._lynox_note.detail).toContain('repeated truncated response');
+    expect(note._lynox_note.detail).toContain('Ich speichere die CSV-Datei');
+  });
+
+  it('a hard loop break (tool_loop_break) names the repeated call in the note detail', () => {
+    const m = makeFailMockStore({ hadUserMessage: true, marked: 1, total: 3 });
+    // ToolLoopBreakError shape, duck-typed (loopKey carries `tool\x00input`) so
+    // this module test needs no agent import.
+    const loopErr = Object.assign(new Error('Run stopped: repeated tool call'), {
+      loopKey: 'api_setup\x00{"action":"view","id":"zai"}',
+    });
+    persistFailedTurnDisplay({ threadStore: m.store, sessionId: 's1', startSeq: 2, task: 'q', error: loopErr, noteCode: 'tool_loop_break' });
+    const notes = m.appendDisplayNotes.mock.calls[0]![1] as DisplayNoteInput[];
+    const note = notes.find(n => n.role === 'assistant')!.content as { _lynox_note: { code: string; detail?: string } };
+    expect(note._lynox_note.code).toBe('tool_loop_break');
+    expect(note._lynox_note.detail).toContain('api_setup');
+    expect(note._lynox_note.detail).toContain('view');
+  });
+
   it('a failed INTERNAL (compaction) run flips its footprint but appends NO visible note', () => {
     // The task here is the internal compaction prompt — synthesizing it as a
     // user note would leak a system prompt into the user's thread. hadUserMessage

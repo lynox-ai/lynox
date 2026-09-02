@@ -248,7 +248,21 @@ describe('buildCaptureReport', () => {
       await seed([JSON.stringify({ ts: 1, event: 'capture_eligible', model: ['X'.repeat(500), 'i'], untrusted: false })]);
       const r = await buildCaptureReport();
       expect(r.byModel).toEqual([]);
-      expect(JSON.stringify(r).length).toBeLessThan(1000);
+      // The bound is on the ATTACKER-controlled part, so it has to be stated relative to
+      // the fixed part rather than as a bare constant. An empty report is the whole schema
+      // with zeros in it, and that grows every time a counter is added — this assertion
+      // went red on a 4-field addition for two characters, which is the assertion catching
+      // schema growth, not poison. Measuring the DELTA keeps it pinned on the 500-char
+      // payload: it must not survive anywhere in the output.
+      // No size assertion. It was a PROXY for "did the payload survive into the output",
+      // and a proxy on total length breaks whenever the schema grows — it went red on a
+      // four-counter addition, by two characters, in a test about poison. Worse, the
+      // obvious repair compared against a clean-model baseline that carries a `byModel`
+      // entry the poisoned report does not, so the delta ran NEGATIVE and the stated
+      // headroom was not the bound it read as. The two assertions below say the thing
+      // directly instead, and both die when the clamp is removed.
+      const poisoned = JSON.stringify(r);
+      expect(poisoned).not.toContain('X'.repeat(50));
     });
 
     it('clamps an over-long STRING model rather than dropping it', async () => {
@@ -350,5 +364,603 @@ describe('buildCaptureReport', () => {
     const serialized = JSON.stringify(await buildCaptureReport());
     expect(serialized).not.toContain('ke_secret_handle');
     expect(serialized).not.toContain('thread_abc');
+  });
+});
+
+describe('populations — the two ends of fireRate, counted separately', () => {
+  /**
+   * One fixture, built so that every wrong ASSIGNMENT produces a different number than
+   * every other. It deliberately separates the two things a naive implementation
+   * conflates:
+   *  - run `r-both` ends TWO eligible turns AND fires TWO remember events, so "distinct
+   *    runs" and "event count" differ on BOTH sides. The second remember is what makes
+   *    `overlapRuns` load-bearing: with only one, mutating `overlapRuns++` into
+   *    `overlapRuns += count` is equivalent and survives the whole file (measured);
+   *  - run `r-elig` is denominator-only, `r-rem` is numerator-only, so swapping the two
+   *    sets moves `rememberOutsideEligible` from 3 to 1;
+   *  - `r-rem` carries THREE remember events, so the outside-count is a count of EVENTS
+   *    and not of runs (a run-count would say 1);
+   *  - one remember line carries no run at all, so it must land in `eventsWithoutRun` and
+   *    in neither population.
+   */
+  async function seedPopulations(): Promise<void> {
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r-both' }),
+      entry({ event: 'remember_invoked', runId: 'r-both', outcome: 'active' }),
+      entry({ event: 'remember_invoked', runId: 'r-both', outcome: 'active' }),
+      entry({ event: 'capture_eligible', runId: 'r-both' }),
+      entry({ event: 'capture_eligible', runId: 'r-elig' }),
+      entry({ event: 'remember_invoked', runId: 'r-rem', outcome: 'active' }),
+      entry({ event: 'remember_invoked', runId: 'r-rem', outcome: 'pending_review' }),
+      entry({ event: 'remember_invoked', runId: 'r-rem', outcome: 'active' }),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+    ]);
+  }
+
+  it('counts distinct RUNS per population, not events', async () => {
+    await seedPopulations();
+    const { populations } = await buildCaptureReport();
+    // 4 eligible events across 2 runs, 6 remember events across 2 runs + 1 unattributed.
+    expect(populations.eligibleRuns).toBe(2);
+    expect(populations.rememberRuns).toBe(2);
+  });
+
+  it('reports the overlap — the only runs the quotient is actually about', async () => {
+    await seedPopulations();
+    const { populations } = await buildCaptureReport();
+    expect(populations.overlapRuns).toBe(1);
+  });
+
+  it('counts numerator EVENTS the denominator cannot account for', async () => {
+    await seedPopulations();
+    const { populations } = await buildCaptureReport();
+    // `r-rem` fired three times and never ended an eligible turn: 3 events, not 1 run.
+    expect(populations.rememberOutsideEligible).toBe(3);
+  });
+
+  it('parks an event with no run id instead of joining it to nothing', async () => {
+    await seedPopulations();
+    const { populations } = await buildCaptureReport();
+    expect(populations.eventsWithoutRun).toBe(1);
+    // It must not have invented a run: 2 remember runs, not 3.
+    expect(populations.rememberRuns).toBe(2);
+  });
+
+  it('carries the caveat IN THE RESPONSE whenever the populations differ', async () => {
+    await seedPopulations();
+    const { populations } = await buildCaptureReport();
+    expect(populations.gapNote).toBe(
+      'numerator and denominator do not cover the same runs; this report measures THAT, not why',
+    );
+  });
+
+  it('says nothing when every remember run also ended an eligible turn', async () => {
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r-1' }),
+      entry({ event: 'remember_invoked', runId: 'r-1', outcome: 'active' }),
+    ]);
+    const { populations } = await buildCaptureReport();
+    expect(populations).toMatchObject({
+      eligibleRuns: 1, rememberRuns: 1, overlapRuns: 1, rememberOutsideEligible: 0, gapNote: null,
+    });
+  });
+
+  it('flags a numerator population over an EMPTY denominator', async () => {
+    // A numerator population over an EMPTY denominator: every remember run is outside, so
+    // `rememberOutsideEligible` carries it and no separate clause is needed. This is NOT
+    // the shape of the real 910-to-0 sink — that one predates `runId` entirely and lands
+    // in the blind-window case below, which is a different failure with a different note.
+    await seed([
+      entry({ event: 'remember_invoked', runId: 'r-1', outcome: 'active' }),
+      entry({ event: 'remember_invoked', runId: 'r-1', outcome: 'active' }),
+    ]);
+    const { populations, fireRate } = await buildCaptureReport();
+    expect(populations).toMatchObject({ eligibleRuns: 0, rememberRuns: 1, overlapRuns: 0 });
+    expect(populations.gapNote).not.toBeNull();
+    // The headline itself stays null (nothing to divide by) — the split is what carries
+    // the story that the numerator was nevertheless busy.
+    expect(fireRate).toBeNull();
+  });
+
+  it('ignores funnel events — they belong to neither end of the quotient', async () => {
+    await seed([
+      entry({ event: 'propose_shown', runId: 'r-x' }),
+      entry({ event: 'propose_confirmed', runId: 'r-x' }),
+      entry({ event: 'onboarding_started', runId: 'r-x' }),
+    ]);
+    const { populations } = await buildCaptureReport();
+    expect(populations).toMatchObject({
+      eligibleRuns: 0, rememberRuns: 0, overlapRuns: 0, eventsWithoutRun: 0, gapNote: null,
+    });
+  });
+
+  it('treats a non-string run id as no run at all', async () => {
+    await seed([
+      JSON.stringify({ ts: 1000, event: 'remember_invoked', outcome: 'active', runId: 42 }),
+      JSON.stringify({ ts: 1000, event: 'capture_eligible', runId: '' }),
+    ]);
+    const { populations } = await buildCaptureReport();
+    expect(populations).toMatchObject({ eligibleRuns: 0, rememberRuns: 0, eventsWithoutRun: 2 });
+  });
+  it('says "could not look" when NO event carries a run — the 910-to-0 sink itself', async () => {
+    // The window this whole split exists for predates `runId`, so every count is zero and
+    // `gapNote` is null. Without `blindNote` that output is byte-identical to a healthy
+    // instance, and the one sink we built this for would have been the one to stay silent.
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+    ]);
+    const { populations } = await buildCaptureReport();
+    expect(populations).toMatchObject({
+      eligibleRuns: 0, rememberRuns: 0, overlapRuns: 0, rememberOutsideEligible: 0,
+      eventsWithoutRun: 3, gapNote: null,
+    });
+    expect(populations.blindNote).toBe(
+      'some events could not be joined to a run; the split above covers only part of the window',
+    );
+  });
+
+  it('stays silent on BOTH notes only when the window is fully joinable and agrees', async () => {
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r-1' }),
+      entry({ event: 'remember_invoked', runId: 'r-1', outcome: 'active' }),
+    ]);
+    const { populations } = await buildCaptureReport();
+    expect(populations.gapNote).toBeNull();
+    expect(populations.blindNote).toBeNull();
+  });
+
+  it('clamps an oversized run key instead of retaining it for the whole scan', async () => {
+    const huge = 'r'.repeat(500);
+    await seed([
+      entry({ event: 'capture_eligible', runId: huge }),
+      entry({ event: 'remember_invoked', runId: huge.slice(0, 128), outcome: 'active' }),
+    ]);
+    const { populations } = await buildCaptureReport();
+    // Both sides clamp to the same 128 chars, so they still join — the clamp bounds the
+    // key without inventing or destroying an overlap.
+    expect(populations).toMatchObject({ eligibleRuns: 1, rememberRuns: 1, overlapRuns: 1 });
+  });
+
+  it('stops tracking runs at the cap and says so instead of growing without bound', async () => {
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r-1' }),
+      entry({ event: 'capture_eligible', runId: 'r-2' }),
+      entry({ event: 'remember_invoked', runId: 'r-3', outcome: 'active' }),
+      entry({ event: 'capture_eligible', runId: 'r-1' }),
+    ]);
+    const { populations } = await buildCaptureReport({ maxTrackedEntries: 2 });
+    // r-1 and r-2 fit; r-3 is over the cap. The repeat of r-1 is already tracked and must
+    // NOT count as an overflow — a cap that punished repeat events would report a window
+    // as truncated the moment a busy run came back.
+    expect(populations).toMatchObject({ eligibleRuns: 2, rememberRuns: 0, eventsOverRunCap: 1 });
+    expect(populations.blindNote).not.toBeNull();
+  });
+
+  it('counts an ELIGIBLE run over the cap too, and bounds on tracked ENTRIES not runs', async () => {
+    // Two things at once, because they share one arithmetic. `r-1` occupies a slot in
+    // BOTH collections, so with a cap of 2 the third line overflows even though only two
+    // distinct runs exist — the cap bounds tracked entries, which is what bounds memory.
+    // And the overflowing line is a `capture_eligible`: without this case, deleting the
+    // overflow counter from the eligible branch left the suite green and produced
+    // `eventsOverRunCap: 0` with `blindNote: null` — a dropped window reported as a clean
+    // one, which is the exact silence this split exists to break.
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r-1' }),
+      entry({ event: 'remember_invoked', runId: 'r-1', outcome: 'active' }),
+      entry({ event: 'capture_eligible', runId: 'r-2' }),
+    ]);
+    const { populations } = await buildCaptureReport({ maxTrackedEntries: 2 });
+    expect(populations).toMatchObject({
+      eligibleRuns: 1, rememberRuns: 1, overlapRuns: 1, eventsOverRunCap: 1,
+    });
+    expect(populations.blindNote).not.toBeNull();
+  });
+});
+
+describe('rememberBySource — mechanism vs. model compliance', () => {
+  /**
+   * The field exists so a lifted `fireRate` can be attributed. Carrying it through the
+   * validator is NOT enough: a field nothing reports is inert, and the mutation that
+   * drops it at the boundary survived every test in the capture suite until this block
+   * existed. The three counts are deliberately DISTINCT so a swapped assignment shows.
+   */
+  it('splits remember_invoked three ways and folds nothing', async () => {
+    await seed([
+      entry({ event: 'remember_invoked', outcome: 'active', source: 'capture' }),
+      entry({ event: 'remember_invoked', outcome: 'active', source: 'capture' }),
+      entry({ event: 'remember_invoked', outcome: 'active', source: 'capture' }),
+      entry({ event: 'remember_invoked', outcome: 'active', source: 'model' }),
+      entry({ event: 'remember_invoked', outcome: 'active', source: 'model' }),
+      // No `source` — a line from before the field existed.
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+      // Not a remember event: must not be counted at all.
+      entry({ event: 'propose_shown', source: 'capture' }),
+    ]);
+    const report = await buildCaptureReport();
+    expect(report.rememberBySource).toEqual({ capture: 3, model: 2, unknown: 1 });
+    // The sum is the headline numerator — if the split drifts from it, one of the two
+    // is wrong and the report would show a rate it cannot attribute.
+    const s = report.rememberBySource;
+    expect(s.capture + s.model + s.unknown).toBe(report.events.remember_invoked);
+  });
+
+  it('an out-of-enum source counts as unknown rather than being invented', async () => {
+    await seed([
+      entry({ event: 'remember_invoked', outcome: 'active', source: 'telepathy' as unknown as 'model' }),
+    ]);
+    const report = await buildCaptureReport();
+    expect(report.rememberBySource).toEqual({ capture: 0, model: 0, unknown: 1 });
+  });
+});
+
+describe('capture_ran — the pass announcing that it executed', () => {
+  it('is COUNTED, so an empty run is visible in the report and not just in the sink', async () => {
+    // Dropping `capture_ran` from ALL_EVENTS left every other test green: the line lands
+    // in the file, the validator accepts it, and the report silently omits it. A sink
+    // entry nobody aggregates answers no question — which is the same defect the event
+    // was added to fix, one layer up.
+    await seed([
+      entry({ event: 'capture_ran' }),
+      entry({ event: 'capture_ran' }),
+      entry({ event: 'capture_eligible' }),
+    ]);
+    const report = await buildCaptureReport();
+    expect(report.events['capture_ran']).toBe(2);
+    // And it must be a FULL record: a report that omits an event key entirely reads as
+    // "this never happened" rather than "this build does not know the key".
+    expect(Object.keys(report.events)).toContain('capture_ran');
+  });
+
+  it('breaks the passes into the four states the event exists to separate', async () => {
+    // The previous version of this test seeded ONLY the dead window and asserted zeros —
+    // which follow from EVENT_ZEROES alone, so deleting the entire emit left it green. It
+    // described a two-window comparison it never performed. This one seeds all four states
+    // at once, with DISTINCT counts so a swapped bucket shows.
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_ran' }),                    // facts absent → the pass failed
+      entry({ event: 'capture_ran', facts: 0 }),          // completed, nothing found
+      entry({ event: 'capture_ran', facts: 0 }),
+      entry({ event: 'capture_ran', facts: 3 }),          // completed, proposed 3
+      entry({ event: 'capture_ran', facts: 2 }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.capturePasses).toEqual({ failed: 1, empty: 2, produced: 2, factsProposed: 5 });
+    // …and the one integer that used to be the only answer still agrees with the parts.
+    const p = r.capturePasses;
+    expect(p.failed + p.empty + p.produced).toBe(r.events['capture_ran']);
+  });
+
+  it('a dead mechanism and a working one that finds nothing are DIFFERENT reports', async () => {
+    // Stated as the two windows, and actually compared — the distinction is the feature.
+    await seed([entry({ event: 'capture_eligible' }), entry({ event: 'capture_eligible' })]);
+    const dead = await buildCaptureReport();
+    expect(dead.capturePasses).toEqual({ failed: 0, empty: 0, produced: 0, factsProposed: 0 });
+
+    await seed([
+      entry({ event: 'capture_eligible' }), entry({ event: 'capture_ran', facts: 0 }),
+      entry({ event: 'capture_eligible' }), entry({ event: 'capture_ran', facts: 0 }),
+    ]);
+    const quiet = await buildCaptureReport();
+    expect(quiet.capturePasses.empty).toBe(2);
+    expect(quiet.capturePasses, 'a working-but-quiet pass reads as a dead one').not.toEqual(dead.capturePasses);
+  });
+
+  it('refuses a nonsense fact count instead of inventing a bucket for it', async () => {
+    await seed([
+      entry({ event: 'capture_ran', facts: -1 as unknown as number }),
+      entry({ event: 'capture_ran', facts: 'drei' as unknown as number }),
+    ]);
+    const r = await buildCaptureReport();
+    // Both fall back to `null`, i.e. "did not complete" — the conservative read. A negative
+    // is stopped by `>= 0`, a string by `typeof`; neither touches the finiteness clause,
+    // which is why the overflow case below is a SEPARATE test and not a third seed here.
+    expect(r.capturePasses.factsProposed).toBe(0);
+    expect(r.capturePasses.failed).toBe(2);
+  });
+
+  it('does not let an overflowing count turn the total into null', async () => {
+    // Written RAW, not via `entry()`: `JSON.stringify` emits Infinity as `null`, so a
+    // hostile value can never reach the parser through the helper and the test would prove
+    // nothing. The same technique is used for `ts` above, for the same reason — and this
+    // field was added WITHOUT the clamp its neighbours carry, so two 1e308 lines summed to
+    // Infinity and serialised back as `null`: "the sink is empty" while the counts say
+    // otherwise. That exact defect is one of the three this module's docblock lists.
+    await seed([
+      '{"event":"capture_ran","ts":1,"untrusted":false,"facts":1e999,"proposed":1e999}',
+      '{"event":"capture_ran","ts":2,"untrusted":false,"facts":1e308,"proposed":1e308}',
+      '{"event":"capture_ran","ts":3,"untrusted":false,"facts":1e308,"proposed":1e308}',
+    ]);
+    const r = await buildCaptureReport();
+    expect(Number.isFinite(r.capturePasses.factsProposed)).toBe(true);
+    expect(JSON.parse(JSON.stringify(r)).capturePasses.factsProposed).not.toBeNull();
+    // The 1e999 line is unusable and reads as "did not complete"; the two 1e308 lines are
+    // clamped rather than dropped, because a huge count is still evidence of a pass.
+    expect(r.capturePasses.failed).toBe(1);
+    expect(r.capturePasses.produced).toBe(2);
+  });
+
+  it('measures what the CEILING costs, not merely what got written', async () => {
+    // `facts` is post-ceiling by construction — the cap is applied inside the parser. A
+    // report built on it alone cannot tell a turn that offered nine facts from one that
+    // offered four, which is precisely how the legacy corpus lost its own distribution to
+    // its schema. `proposed` is the pre-ceiling count; the gap is the cost.
+    await seed([
+      entry({ event: 'capture_ran', facts: 4, proposed: 9 }),
+      entry({ event: 'capture_ran', facts: 2, proposed: 2 }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.capturePasses.factsProposed).toBe(11);
+    expect(r.capturePasses.produced).toBe(2);
+  });
+
+  it('falls back to the capped count on a line written before `proposed` existed', async () => {
+    await seed(['{"event":"capture_ran","ts":1,"untrusted":false,"facts":3}']);
+    const r = await buildCaptureReport();
+    // Not zero, and not dropped: an older line still carries a real lower bound.
+    expect(r.capturePasses.factsProposed).toBe(3);
+  });
+});
+
+describe('capture_suppressed — the turns where NOTHING ran', () => {
+  it('breaks the hook\'s early exits into the causes the report used to call unmeasured', async () => {
+    // Distinct counts per bucket on purpose: equal ones would survive a swapped bucket.
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
+      entry({ event: 'capture_suppressed', reason: 'extraction_off' }),
+      entry({ event: 'capture_suppressed', reason: 'extraction_off' }),
+      entry({ event: 'capture_suppressed', reason: 'internal_run' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.suppressed).toEqual({ no_memory: 3, extraction_off: 2, internal_run: 1, fallback_off: 0, unknown: 0 });
+    // The parts must agree with the one integer, or one of the two is lying.
+    const s = r.suppressed;
+    expect(s.no_memory + s.extraction_off + s.internal_run + s.fallback_off + s.unknown).toBe(r.events['capture_suppressed']);
+  });
+
+  it('is in ALL_EVENTS — an event nobody aggregates answers nothing', async () => {
+    // The mutation that motivates this: dropping the key from ALL_EVENTS leaves the line in
+    // the sink, the validator accepting it, and the report silently omitting it. That exact
+    // survivor was found one layer down on `capture_ran`.
+    await seed([entry({ event: 'capture_suppressed', reason: 'internal_run' })]);
+    const r = await buildCaptureReport();
+    expect(Object.keys(r.events)).toContain('capture_suppressed');
+    expect(r.events['capture_suppressed']).toBe(1);
+  });
+
+  it('keeps an unrecognised reason as UNKNOWN rather than dropping the line', async () => {
+    // A newer writer against an older reader must read as "cannot tell", never as
+    // "did not happen" — the same rule `source` already follows.
+    await seed([
+      entry({ event: 'capture_suppressed', reason: 'a_future_cause' as never }),
+      entry({ event: 'capture_suppressed' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.suppressed.unknown).toBe(2);
+    expect(r.events['capture_suppressed']).toBe(2);
+  });
+
+  it('does NOT feed the denominator — fireRate is untouched by suppressed turns', async () => {
+    // The property the whole change rests on: widening `capture_eligible` mid-window would
+    // corrupt the before/after comparison this telemetry exists to serve.
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+    ]);
+    const without = await buildCaptureReport();
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'remember_invoked', outcome: 'active' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
+      entry({ event: 'capture_suppressed', reason: 'internal_run' }),
+    ]);
+    const with_ = await buildCaptureReport();
+    expect(with_.fireRate).toBe(without.fireRate);
+    expect(with_.events['capture_eligible']).toBe(without.events['capture_eligible']);
+  });
+
+  it('a reason on a NON-suppressed event is ignored, not counted', async () => {
+    // Otherwise a stray field on an unrelated line inflates the breakdown, and the number
+    // that is supposed to explain a gap becomes another source of one.
+    await seed([entry({ event: 'capture_eligible', reason: 'no_memory' })]);
+    const r = await buildCaptureReport();
+    expect(r.suppressed).toEqual({ no_memory: 0, extraction_off: 0, internal_run: 0, fallback_off: 0, unknown: 0 });
+  });
+});
+
+describe('capture_suppressed — the JOIN that makes its runId worth carrying', () => {
+  it('names the runs that are in the numerator and not the denominator', async () => {
+    // The gap's SHAPE, not just its size: a run that was suppressed and still wrote a
+    // `remember_invoked` is exactly the isolated-memory child the `no_memory` counter is
+    // about. Without this the emitted `runId` was inert — read by the validator, used by
+    // nothing, which this file warns about twice for other fields.
+    await seed([
+      entry({ event: 'capture_suppressed', reason: 'no_memory', runId: 'r1' }),
+      entry({ event: 'remember_invoked', outcome: 'active', runId: 'r1' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory', runId: 'r2' }),
+      entry({ event: 'remember_invoked', outcome: 'active', runId: 'r3' }),
+      entry({ event: 'capture_eligible', runId: 'r3' }),
+    ]);
+    const r = await buildCaptureReport();
+    // r1 only: suppressed AND remembered. r2 suppressed but never remembered; r3 remembered
+    // but was eligible, so it is not a gap at all.
+    expect(r.populations.suppressedRunsAlsoRemembering).toBe(1);
+  });
+
+  it('EXCLUDES fallback_off — those runs did reach the denominator', async () => {
+    // `fallback_off` shares its run with the `capture_eligible` emitted moments before it,
+    // so counting it would fill a number defined as "never reached the denominator" with
+    // runs that did. Seeded as the realistic shape: eligible + suppressed + remembered, all
+    // one run — a fully healthy turn on an unarmed surface.
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r1' }),
+      entry({ event: 'capture_suppressed', reason: 'fallback_off', runId: 'r1' }),
+      entry({ event: 'remember_invoked', outcome: 'active', runId: 'r1' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.populations.suppressedRunsAlsoRemembering).toBe(0);
+    expect(r.suppressed.fallback_off).toBe(1);
+  });
+
+  it('is zero when no suppressed run ever remembered — not merely absent', async () => {
+    await seed([
+      entry({ event: 'capture_suppressed', reason: 'internal_run', runId: 'r9' }),
+      entry({ event: 'capture_eligible', runId: 'r8' }),
+      entry({ event: 'remember_invoked', outcome: 'active', runId: 'r8' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.populations.suppressedRunsAlsoRemembering).toBe(0);
+    // …and the sibling numbers still read as before, so the join did not disturb them.
+    expect(r.populations.overlapRuns).toBe(1);
+    expect(r.populations.rememberOutsideEligible).toBe(0);
+  });
+
+  it('counts fallback_off, the reason that IS in the denominator', async () => {
+    // The partition readers must not lose: three reasons fire INSTEAD of `capture_eligible`,
+    // `fallback_off` fires after it. Seeded together so a report cannot merge them.
+    await seed([
+      entry({ event: 'capture_eligible', runId: 'r1' }),
+      entry({ event: 'capture_suppressed', reason: 'fallback_off', runId: 'r1' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory', runId: 'r2' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.suppressed.fallback_off).toBe(1);
+    expect(r.suppressed.no_memory).toBe(1);
+    expect(r.events['capture_eligible']).toBe(1);
+  });
+
+  it('a thread-less suppressed line is NOT counted as lost attribution', async () => {
+    // The writer omits `thread` on purpose, so counting it as blindness would make that
+    // counter grow with suppression volume and stop meaning "attribution was lost".
+    await seed([
+      entry({ event: 'capture_suppressed', reason: 'no_memory', thread: undefined }),
+      entry({ event: 'capture_eligible', thread: undefined }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.blindness.eventsWithoutThread).toBe(1);
+  });
+});
+
+describe('eligibleByCause — the substrate for part (b)', () => {
+  it('computes the conversation-only share over ATTRIBUTED eligible turns', async () => {
+    // Distinct counts per bucket so a swapped bucket shows. 2 of 8 attributed are
+    // conversation-only → 0.25, the upper bound on what data-scoped taint could flip.
+    await seed([
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'marker' }),
+      entry({ event: 'capture_eligible', cause: 'external-tool' }),
+      entry({ event: 'capture_eligible', cause: 'external-tool' }),
+      entry({ event: 'capture_eligible', cause: 'conversation' }),
+      entry({ event: 'capture_eligible', cause: 'conversation' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.eligibleByCause).toEqual({
+      none: 3, marker: 1, 'external-tool': 2, conversation: 2,
+      unattributed: 0, conversationOnlyShare: 0.25,
+    });
+  });
+
+  it('keeps a pre-field line as UNATTRIBUTED and out of the denominator', async () => {
+    // The share must not be dragged toward zero by lines that cannot carry the answer — that
+    // would read as a measurement of the taint rule when it measures the sink's age.
+    await seed([
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_eligible' }),
+      entry({ event: 'capture_eligible', cause: 'conversation' }),
+      entry({ event: 'capture_eligible', cause: 'none' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.eligibleByCause.unattributed).toBe(2);
+    // 1 of 2 ATTRIBUTED, not 1 of 4.
+    expect(r.eligibleByCause.conversationOnlyShare).toBe(0.5);
+  });
+
+  it('refuses to divide when nothing is attributed — null, not zero', async () => {
+    await seed([entry({ event: 'capture_eligible' }), entry({ event: 'capture_eligible' })]);
+    const r = await buildCaptureReport();
+    expect(r.eligibleByCause.unattributed).toBe(2);
+    expect(r.eligibleByCause.conversationOnlyShare, 'zero would read as "no turns would flip"').toBeNull();
+  });
+
+  it('counts ONLY the denominator event — a numerator line must not enter the histogram', async () => {
+    // Mixing the two ends into one histogram would keep the field name and silently change
+    // what the share is a share OF. Seeded so a leak is visible as a wrong bucket count.
+    await seed([
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'remember_invoked', outcome: 'active', cause: 'conversation' }),
+      entry({ event: 'capture_ran', facts: 1, cause: 'conversation' }),
+      entry({ event: 'capture_suppressed', reason: 'no_memory' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.eligibleByCause.conversation, 'a numerator line leaked into the denominator histogram').toBe(0);
+    expect(r.eligibleByCause.none).toBe(1);
+    expect(r.eligibleByCause.conversationOnlyShare).toBe(0);
+    // A suppressed line is seeded because widening the guard to `capture_eligible ||
+    // capture_suppressed` passed every other test here — no suppressed line was ever present,
+    // so the leak had nothing to leak. It would land in `unattributed` (suppressed lines carry
+    // no cause by design), which is why that bucket is asserted rather than the total.
+    expect(r.eligibleByCause.unattributed, 'a suppressed line leaked into the denominator').toBe(0);
+  });
+
+  it('treats an out-of-enum cause as unattributed rather than inventing a bucket', async () => {
+    await seed([
+      entry({ event: 'capture_eligible', cause: 'a-future-rule' as never }),
+      entry({ event: 'capture_eligible', cause: 'conversation' }),
+    ]);
+    const r = await buildCaptureReport();
+    expect(r.eligibleByCause.unattributed).toBe(1);
+    expect(r.eligibleByCause.conversationOnlyShare).toBe(1);
+  });
+});
+
+describe('rateByCause — the capture rate held constant for turn type', () => {
+  it('forms a rate per cause from BOTH histograms, not from one', async () => {
+    // The quantity part (b) asks for: the row's 08-03 block demands the turn TYPE be held
+    // constant, and a single boolean cannot do it. Distinct numbers per stratum so a swapped
+    // bucket or a shared histogram shows.
+    await seed([
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'remember_invoked', outcome: 'active', cause: 'none' }),
+      entry({ event: 'capture_eligible', cause: 'conversation' }),
+      entry({ event: 'capture_eligible', cause: 'conversation' }),
+      entry({ event: 'remember_invoked', outcome: 'pending_review', cause: 'conversation' }),
+    ]);
+    const r = await buildCaptureReport();
+    const byName = Object.fromEntries(r.rateByCause.map((x) => [x.cause, x]));
+    expect(byName['none']).toMatchObject({ eligible: 4, remembered: 1, rate: 0.25 });
+    expect(byName['conversation']).toMatchObject({ eligible: 2, remembered: 1, rate: 0.5 });
+  });
+
+  it('a stratum with no eligible turns reports null, never zero', async () => {
+    // Zero would read as "capture never fires on marker turns"; null reads as "no such turns".
+    await seed([entry({ event: 'capture_eligible', cause: 'none' })]);
+    const r = await buildCaptureReport();
+    const marker = r.rateByCause.find((x) => x.cause === 'marker')!;
+    expect(marker).toMatchObject({ eligible: 0, remembered: 0, rate: null });
+  });
+
+  it('counts the numerator SEPARATELY — a remember line is not an eligible turn', async () => {
+    // Kills the mutation that feeds one histogram from both events.
+    await seed([
+      entry({ event: 'capture_eligible', cause: 'none' }),
+      entry({ event: 'remember_invoked', outcome: 'active', cause: 'conversation' }),
+    ]);
+    const r = await buildCaptureReport();
+    const conv = r.rateByCause.find((x) => x.cause === 'conversation')!;
+    expect(conv.eligible, 'a numerator line was counted as an eligible turn').toBe(0);
+    expect(conv.remembered).toBe(1);
+    expect(conv.rate, 'a numerator with no denominator is not a rate').toBeNull();
   });
 });

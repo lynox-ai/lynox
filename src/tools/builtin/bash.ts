@@ -3,6 +3,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { IsolationConfig } from '../../types/security.js';
 import { getWorkspaceCwd } from '../../core/workspace.js';
 import { MAX_BUFFER_BYTES, DEFAULT_BASH_TIMEOUT_MS } from '../../core/constants.js';
+import { ToolSoftFailure } from '../../core/tool-soft-failure.js';
 
 interface BashInput {
   command: string;
@@ -131,7 +132,29 @@ export function buildSafeEnv(isolation?: IsolationConfig): NodeJS.ProcessEnv {
 export const bashTool: ToolEntry<BashInput> = {
   definition: {
     name: 'bash',
-    description: 'Execute a shell command for system operations, package management, git, or process control. NEVER use for file reads/writes (use read_file/write_file) or web searches (use web_research).',
+    // "package management" used to sit in this list, and it was an advertisement
+    // for something the runtime does not offer: the managed container runs
+    // read-only, as a non-root user, with no package manager configured. A model
+    // reading this description took it as a capability and spent 41 bash calls in
+    // one thread on `apt-get install`, `npm install` and five hand-written
+    // extractors before giving up — every one of them costing tokens and time to
+    // rediscover a constraint the description had implied away.
+    //
+    // What replaces it is a POLICY, not a claim about the environment: a local
+    // `npx lynox` run may well have a working apt or npm, so "you cannot install"
+    // would be false there. "Do not install" is true everywhere.
+    //
+    // It has to be SELF-CONTAINED. A first draft ended "(see the tools section of
+    // your instructions)" and that pointer dangles for most holders of this tool:
+    // a spawned child gets GROUNDING_PROMPT_BLOCK and its own role prompt, never
+    // SYSTEM_PROMPT (spawn.ts), while inheriting the parent's tool list — bash
+    // included. Same for a workflow step declaring `tools:['bash']` and for any
+    // deployment that sets its own `config.systemPrompt`. Pointing at a document
+    // the reader does not have is the same failure as advertising a capability the
+    // runtime does not have, one step along. The system prompt keeps the REASON
+    // and the alternatives, for the agent that has it; the rule travels with the
+    // tool, for everyone.
+    description: 'Execute a shell command for system operations, git, or process control. NEVER use for file reads/writes (use read_file/write_file), web searches (use web_research), or installing packages — report the missing capability instead.',
     eager_input_streaming: true,
     input_schema: {
       type: 'object' as const,
@@ -162,7 +185,31 @@ export const bashTool: ToolEntry<BashInput> = {
         const stderr = String((err as { stderr: unknown }).stderr);
         const stdout = String((err as { stdout: unknown }).stdout || '');
         const combined = [stdout, stderr].filter(Boolean).join('\n');
-        return combined || `Command failed: ${input.command}`;
+        // The agent still reads the output verbatim and adapts — that behaviour
+        // is deliberate and unchanged. But a non-zero exit is a FAILURE, and
+        // returning it plainly recorded it in the run ledger as a success:
+        // `toolEnd` publishes `success: true` for anything a handler returns.
+        // One real thread logged 123 tool calls and exactly 1 error while a long
+        // run of `wget` calls was failing. `status` is the exit code when
+        // execSync provides it.
+        // A TIMEOUT is not an exit code. `execSync` kills the child on timeout,
+        // leaving `status: null` and `signal: 'SIGTERM'` — the old text then read
+        // "bash exited non-zero", which is the one reason a reader would rule OUT
+        // a timeout. The ledger reason is the only trace of why a call failed, so
+        // it has to name the actual cause. (Residuum 2 of four, closing comment
+        // 2026-08-02.)
+        const status = (err as { status?: unknown }).status;
+        const signal = (err as { signal?: unknown }).signal;
+        const limitMs = input.timeout_ms ?? DEFAULT_BASH_TIMEOUT_MS;
+        const reason = typeof status === 'number'
+          ? `bash exited ${String(status)}`
+          : typeof signal === 'string' && signal.length > 0
+            ? `bash killed by ${signal} after ${String(limitMs)}ms`
+            : 'bash failed without an exit code';
+        throw new ToolSoftFailure(
+          combined || `Command failed: ${input.command}`,
+          reason,
+        );
       }
       const cause = err instanceof Error ? err : new Error(String(err));
       throw new Error(`bash: ${cause.message}`, { cause });

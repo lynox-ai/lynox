@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -514,8 +516,8 @@ describe('AgentMemoryDb', () => {
     });
 
     it('keeps an entity that never had a mention — a DataStore collection is not an orphan', () => {
-      // `DataStoreBridge.registerCollection` creates one entity per collection and
-      // `indexRecords` one per person/organization it extracts from a record; neither calls
+      // A structured-data ingest creates one entity per collection and one per
+      // person/organization it extracts from a record; neither calls
       // `createMention`, because these are derived from structured rows rather than from a
       // memory. `entityIsDormant` already draws that line — "only an entity that HAD mentions
       // and has lost them all is dormant" — and gc did not, so it deleted every one of them,
@@ -667,6 +669,28 @@ describe('AgentMemoryDb', () => {
     });
   });
 
+  /**
+   * DEF-debug-export-blind-to-dk, third clause. The doc on `listAllActiveMemories` called the
+   * legacy store "write-authoritative and complete regardless of the read-cutover flag" — true
+   * in 2026-07, false since durable knowledge went default-on. The CLAIM did more damage than
+   * the gap: it told the next reader not to look, so a debug export showing a memory store
+   * frozen weeks in the past still read as healthy.
+   *
+   * This guard is deliberately WEAK and named as such: it pins a sentence, and a sentence can
+   * be reworded around it. It exists only to stop the specific retired claim from returning.
+   * The behavioural guards in `http-api.test.ts` cover what the export actually DOES — they are
+   * stronger, but not beyond wording either, so the honest claim is "different failure modes",
+   * not "cannot be talked around".
+   */
+  it('the doc no longer claims the legacy store is complete (weak guard; the behavioural one is in http-api.test.ts)', () => {
+    const src = readFileSync(fileURLToPath(new URL('./agent-memory-db.ts', import.meta.url)), 'utf-8');
+    const idx = src.indexOf('listAllActiveMemories(limit');
+    expect(idx, 'listAllActiveMemories not found — this guard is pinned to the wrong symbol').toBeGreaterThan(0);
+    const doc = src.slice(Math.max(0, idx - 1800), idx);
+    expect(doc, 'the retired completeness claim is back on the legacy reader').not.toMatch(/complete regardless of the read-cutover flag/i);
+    expect(doc, 'the doc must point at the second substrate, not just drop the claim').toMatch(/knowledge_entries/);
+  });
+
   // The debug-export memory snapshot (scope-independent, active-only, newest-first, capped).
   describe('listAllActiveMemories', () => {
     it('returns active memories only, newest first, across scopes, honouring the limit clamp', () => {
@@ -734,7 +758,7 @@ describe('AgentMemoryDb', () => {
     });
 
     it('an entity that NEVER had a mention is NOT dormant — DataStore collections are exactly that', () => {
-      // The regression this guards: `DataStoreBridge.registerCollection` creates one entity
+      // The regression this guards: a structured-data ingest creates one entity
       // per collection and never calls createMention. Treating mention-less as dead would
       // silently drop every DataStore hint from the context graph.
       const collection = db.createEntity({

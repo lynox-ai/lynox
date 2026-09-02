@@ -7,13 +7,74 @@ import { findAutonomousViolations } from './human-in-the-loop.js';
 import { INLINE_CORE_TOOLS } from './runtime-adapter.js';
 
 /**
- * Hard ceiling on workflow steps — single source of truth.
- * Lives here (the lower-level validation module) rather than in
- * `pipeline.ts` so the declarative `.max()` on the manifest schema and the
- * imperative checks in `pipeline.ts` share one constant without an
- * import cycle (`pipeline.ts` already depends on this module).
+ * Default policy ceiling on workflow steps. The run-path enforcement points in
+ * `pipeline.ts` read this via {@link maxStepsFor}, which lets a config override
+ * (`max_workflow_steps`) raise it for a tenant that runs large bulk workflows
+ * (e.g. a 2000-contact triage needing >20 batch steps).
+ *
+ * Lives here (the lower-level validation module) so the manifest schema and the
+ * imperative checks in `pipeline.ts` share one constant without an import cycle.
  */
 export const MAX_STEPS = 20;
+
+/**
+ * Absolute schema-level sanity ceiling. The `.max()` on the manifest schema
+ * guards against pathological/accidental manifests (a generated workflow with
+ * thousands of steps) regardless of config. The *policy* cap (config-overridable,
+ * default {@link MAX_STEPS}) is enforced imperatively in `pipeline.ts`, which is
+ * the only place a run can see the resolved config.
+ */
+export const ABSOLUTE_MAX_STEPS = 1000;
+
+/**
+ * Resolve the per-run step cap from config, defaulting to {@link MAX_STEPS}.
+ * Structural on the config so this low-level module need not depend on the full
+ * LynoxUserConfig type. Used by the run-path enforcement in `pipeline.ts`.
+ */
+export function maxStepsFor(config?: { max_workflow_steps?: number | undefined } | undefined): number {
+  const requested = config?.max_workflow_steps;
+  // Graceful: a malformed value (0, negative, NaN, non-finite) falls back to the
+  // default rather than rejecting every workflow (0) or silently disabling the
+  // cap (NaN -> comparisons always false). Clamped to the absolute ceiling.
+  if (requested === undefined || !Number.isFinite(requested) || requested < 1) {
+    return MAX_STEPS;
+  }
+  return Math.min(Math.trunc(requested), ABSOLUTE_MAX_STEPS);
+}
+
+/**
+ * Normalize a `WorkflowLimits.maxParallelSteps` request into either a positive
+ * integer bound or `undefined` (= unbounded).
+ *
+ * ABSENT means unbounded: that is the documented v1.1 phase behaviour, and the
+ * limit-less parallel test pins it. A value that IS present, however, is a
+ * request for a bound — so a malformed one (0, negative, NaN, Infinity, a
+ * fraction below 1) must never resolve to "no bound at all". That is the
+ * fail-open shape {@link maxStepsFor} already avoids one screen above, and it
+ * is worth avoiding twice: a limiter that silently disables itself on a bad
+ * value is more dangerous than no limiter, because callers believe it is there.
+ *
+ * Malformed input therefore falls back to `fallback`, which each call site
+ * picks for its own layer: the resolvers pass the default width, the executor
+ * passes `1` (the tightest bound — a caller who asked for a limit and supplied
+ * nonsense gets the safe direction, never full fan-out).
+ *
+ * `Infinity` is NOT malformed. It is the idiomatic JS way to say "no limit",
+ * and the pre-clamp executor honoured it exactly (`Math.min(Infinity, N)` = N =
+ * full fan-out). Folding it into the malformed branch would hand the caller who
+ * asked MOST explicitly for no bound the TIGHTEST one — the safe-direction rule
+ * pointing exactly backwards. `-Infinity` is nonsense, not a sentinel, and
+ * still takes the fallback.
+ */
+export function parallelStepCapFor(
+  requested: number | undefined,
+  fallback: number,
+): number | undefined {
+  if (requested === undefined) return undefined;
+  if (requested === Infinity) return undefined;
+  if (!Number.isFinite(requested) || requested < 1) return fallback;
+  return Math.trunc(requested);
+}
 
 const ConditionOperators = ['lt', 'gt', 'eq', 'neq', 'gte', 'lte', 'exists', 'not_exists', 'contains'] as const;
 
@@ -62,7 +123,7 @@ const ManifestSchema_1_0 = z.object({
   name: z.string().min(1),
   triggered_by: z.string(),
   context: z.record(z.string(), z.unknown()).default({}),
-  agents: z.array(ManifestStepSchema).min(1).max(MAX_STEPS),
+  agents: z.array(ManifestStepSchema).min(1).max(ABSOLUTE_MAX_STEPS),
   gate_points: z.array(z.string()).default([]),
   on_failure: z.enum(['stop', 'continue', 'notify']).default('stop'),
 });
@@ -72,7 +133,7 @@ const ManifestSchema_1_1 = z.object({
   name: z.string().min(1),
   triggered_by: z.string(),
   context: z.record(z.string(), z.unknown()).default({}),
-  agents: z.array(ManifestStepSchema).min(1).max(MAX_STEPS),
+  agents: z.array(ManifestStepSchema).min(1).max(ABSOLUTE_MAX_STEPS),
   gate_points: z.array(z.string()).default([]),
   on_failure: z.enum(['stop', 'continue', 'notify']).default('stop'),
   execution: z.enum(['sequential', 'parallel']).default('parallel'),

@@ -9,11 +9,16 @@ import { toolResultText } from './tool-result-hygiene.js';
  * bodies re-read as cache writes on every subsequent run, 19.1% of the
  * thread's total cost.
  *
- * This is a WIRE-side transform: the persisted thread history (debug-export,
- * reload, UI rendering) keeps the original bodies (D4). It runs at the two
- * places conversation history enters a turn — `Agent.send` (turn start, so the
- * turn that PRODUCED the save keeps its body until the next one: the model may
- * still be composing follow-up edits against it) and `Agent.loadMessages`
+ * This is a WIRE-side transform: the model context carries the reference, the
+ * persisted thread history keeps the original bodies (D4). That split is not
+ * free — eviction rewrites the buffer in place, and every persist path appends
+ * the buffer tail, so a persist retry on a later turn would write the marker
+ * to disk (measured on prod 2026-08-14: five marker rows in one thread). The
+ * agent therefore captures each original via `onEvict` and the persist delta
+ * restores it via `restoreEvictedBodies` before it is appended. It runs at the
+ * two places conversation history enters a turn — `Agent.send` (turn start, so
+ * the turn that PRODUCED the save keeps its body until the next one: the model
+ * may still be composing follow-up edits against it) and `Agent.loadMessages`
  * (resume hydration, where everything loaded is by definition a past turn).
  *
  * Byte-stability: evicting rewrites one position in the history, which costs
@@ -79,8 +84,17 @@ function collectResults(messages: BetaMessageParam[]): Map<string, string> {
  * Replace the `content` of every SUCCESSFULLY saved artifact_save input with a
  * short reference. Returns the same array (identity) when nothing changes;
  * otherwise a new array sharing every unchanged message object.
+ *
+ * `onEvict` (optional) receives the tool_use id and the ORIGINAL body of every
+ * eviction performed in this pass — the caller that persists the buffer needs
+ * it to undo the rewrite on the persist path (`restoreEvictedBodies`), because
+ * the durable transcript must keep the original bodies (D4). Without the
+ * callback the original is simply dropped, as before.
  */
-export function evictSavedArtifactBodies(messages: BetaMessageParam[]): BetaMessageParam[] {
+export function evictSavedArtifactBodies(
+  messages: BetaMessageParam[],
+  onEvict?: (toolUseId: string, originalContent: string) => void,
+): BetaMessageParam[] {
   const results = collectResults(messages);
   let out: BetaMessageParam[] | null = null;
 
@@ -103,11 +117,56 @@ export function evictSavedArtifactBodies(messages: BetaMessageParam[]): BetaMess
       const result = results.get(block.id);
       if (result === undefined || !isSuccessfulSaveResult(result)) continue;
 
+      onEvict?.(block.id, content);
       const replacement = `${EVICTED_PREFIX} — ${String(content.length)} chars. ` +
         'The artifact is persisted; its id and file path are in the tool result below. ' +
         'read_file that path if you need the content again.]';
       newContent ??= [...msg.content];
       newContent[j] = { ...block, input: { ...(input as Record<string, unknown>), content: replacement } };
+    }
+
+    if (newContent) {
+      out ??= [...messages];
+      out[i] = { ...msg, content: newContent } as BetaMessageParam;
+    }
+  }
+
+  return out ?? messages;
+}
+
+/**
+ * The inverse of eviction, for the PERSIST path only: the durable transcript
+ * keeps the original bodies (D4), so the persist delta restores every evicted
+ * body the caller still holds the original of (the map `onEvict` filled).
+ * Entries whose id no longer appears — body already durable on disk, buffer
+ * front-dropped it — are simply never matched, which is the correct outcome:
+ * what is on disk stays untouched and the marker never advances. Returns the
+ * input array identity when nothing is restored.
+ */
+export function restoreEvictedBodies(
+  messages: BetaMessageParam[],
+  originals: ReadonlyMap<string, string>,
+): BetaMessageParam[] {
+  if (originals.size === 0) return messages;
+  let out: BetaMessageParam[] | null = null;
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
+    if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
+
+    let newContent: unknown[] | null = null;
+    for (let j = 0; j < msg.content.length; j++) {
+      const block = msg.content[j]!;
+      if (!isToolUse(block)) continue;
+      const original = originals.get(block.id);
+      if (original === undefined) continue;
+      const input = block.input;
+      if (typeof input !== 'object' || input === null) continue;
+      const content = (input as { content?: unknown }).content;
+      if (typeof content !== 'string' || !content.startsWith(EVICTED_PREFIX)) continue;
+
+      newContent ??= [...msg.content];
+      newContent[j] = { ...block, input: { ...(input as Record<string, unknown>), content: original } };
     }
 
     if (newContent) {

@@ -3,7 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { EngineDb } from './engine-db.js';
-import { SubjectStore, makeSubjectColumnBridge, NAME_DEDUPED_SUBJECT_KINDS, normalizeSubjectName } from './subject-store.js';
+import { SubjectStore, makeSubjectColumnBridge, NAME_DEDUPED_SUBJECT_KINDS, normalizeSubjectName, subjectReferenceCoverage } from './subject-store.js';
+import type { SubjectExternalRefs } from './subject-store.js';
+import { MemoryGraphStore } from './memory-graph-store.js';
+import { RelationshipStore } from './relationship-store.js';
 import { DataStore } from './data-store.js';
 import type { DataStoreSubjectKind } from '../types/index.js';
 
@@ -668,4 +671,280 @@ describe('findByNameAnyKind — one name, any kind', () => {
     s.findOrCreate({ kind: 'product', name: 'Vireo' });
     expect(s.findByNameAnyKind('Vireo', { kinds: ['organization'] })).toEqual({ ambiguous: false, row: null });
   });
+});
+
+// ── DEF-0015: the reference oracle + the orphan reap ──────────────────────────
+//
+// After a GDPR erase the legacy orphan-entity delete reaped the entity; engine.db's cascade
+// runs memory→junction only, so the minted `subjects` row survived with its plaintext name.
+// `referenceReason` is the ONE oracle that decides whether anything still holds a subject;
+// `reapOrphans` deletes what nothing holds. Every reference kind below is a row that MUST keep
+// a subject alive — and the cooccurrence case is the one that must NOT (derived data; counting
+// it would make the reap a no-op on every real corpus).
+describe('SubjectStore.referenceReason + reapOrphans (DEF-0015 orphan-subject reap)', () => {
+  const tmpDirs: string[] = [];
+  const NONE: SubjectExternalRefs = { isThreadAnchor: () => false, hasRecords: () => false };
+
+  function make(): { store: SubjectStore; engine: EngineDb; mem: MemoryGraphStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-subj-reap-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    return { store: new SubjectStore(engine), engine, mem: new MemoryGraphStore(engine) };
+  }
+  function stub(mem: MemoryGraphStore, id: string, subjectId?: string): void {
+    mem.upsertStub({ id, text: `t-${id}`, namespace: 'knowledge', scopeType: 'context', scopeId: 'c', subjectId: subjectId ?? null });
+  }
+
+  afterEach(() => {
+    for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  it('an unreferenced subject has no reason — archived or not; a missing id says so', () => {
+    const { store, engine } = make();
+    const id = store.createSubject({ kind: 'organization', name: 'Ghost GmbH' });
+    expect(store.referenceReason(id, NONE)).toBeNull();
+    store.archiveSubject(id);
+    // An archived row still carries the plaintext name → still reapable.
+    expect(store.referenceReason(id, NONE)).toBeNull();
+    expect(store.referenceReason('no-such-id', NONE)).toBe('missing');
+    engine.close();
+  });
+
+  // One case per holder so a failing holder names itself instead of masking the ones after it.
+  const HOLDERS: Array<[string, (s: SubjectStore, db: import('better-sqlite3').Database, mem: MemoryGraphStore, engine: EngineDb) => string, string | null]> = [
+    ['memory_subjects junction', (s, _db, mem) => { const a = s.createSubject({ kind: 'organization', name: 'A' }); stub(mem, 'm-a'); mem.linkSubjects('m-a', [a]); return a; }, 'referenced-by-memory_subjects'],
+    ['memories.subject_id (primary, no junction row)', (s, _db, mem) => { const b = s.createSubject({ kind: 'organization', name: 'B' }); stub(mem, 'm-b', b); return b; }, 'referenced-by-memories.subject_id'],
+    ['knowledge_entries.subject_id', (s, db) => { const c = s.createSubject({ kind: 'organization', name: 'C' }); db.prepare("INSERT INTO knowledge_entries (id, subject_id, text) VALUES ('k1', ?, 'x')").run(c); return c; }, 'referenced-by-knowledge_entries.subject_id'],
+    ['tasks.subject_id', (s, db) => { const d = s.createSubject({ kind: 'organization', name: 'D' }); db.prepare("INSERT INTO tasks (id, title, subject_id) VALUES ('t1', 'x', ?)").run(d); return d; }, 'referenced-by-tasks.subject_id'],
+    ['tasks.assignee_subject_id', (s, db) => { const d = s.createSubject({ kind: 'person', name: 'Dana' }); db.prepare("INSERT INTO tasks (id, title, assignee_subject_id) VALUES ('t2', 'x', ?)").run(d); return d; }, 'referenced-by-tasks.assignee_subject_id'],
+    ['triggers.subject_id', (s, db) => { const e = s.createSubject({ kind: 'organization', name: 'E' }); db.prepare("INSERT INTO triggers (id, title, subject_id) VALUES ('tr1', 'x', ?)").run(e); return e; }, 'referenced-by-triggers.subject_id'],
+    ['connections.subject_id', (s, db) => { const f = s.createSubject({ kind: 'organization', name: 'F' }); db.prepare("INSERT INTO connections (id, kind, name, subject_id) VALUES ('cn1', 'api', 'x', ?)").run(f); return f; }, 'referenced-by-connections.subject_id'],
+    ['artifacts.subject_id', (s, db) => { const g = s.createSubject({ kind: 'organization', name: 'G' }); db.prepare("INSERT INTO artifacts (id, type, subject_id) VALUES ('ar1', 'doc', ?)").run(g); return g; }, 'referenced-by-artifacts.subject_id'],
+    ['threads.primary_subject_id (engine.db mirror)', (s, db) => { const h = s.createSubject({ kind: 'organization', name: 'H' }); db.prepare("INSERT INTO threads (id, primary_subject_id) VALUES ('th1', ?)").run(h); return h; }, 'referenced-by-threads.primary_subject_id'],
+    ['relationships.from_subject_id', (s, _db, _mem, engine) => { const i = s.createSubject({ kind: 'organization', name: 'I' }); const j = s.createSubject({ kind: 'organization', name: 'J' }); new RelationshipStore(engine).createRelationship({ fromSubjectId: i, toSubjectId: j, kind: 'partner_of' }); return i; }, 'referenced-by-relationships.from_subject_id'],
+    ['relationships.to_subject_id', (s, _db, _mem, engine) => { const i = s.createSubject({ kind: 'organization', name: 'I' }); const j = s.createSubject({ kind: 'organization', name: 'J' }); new RelationshipStore(engine).createRelationship({ fromSubjectId: i, toSubjectId: j, kind: 'partner_of' }); return j; }, 'referenced-by-relationships.to_subject_id'],
+    ['engagements.client_subject_id', (s, db) => { const k = s.createSubject({ kind: 'organization', name: 'K' }); const eng = s.createSubject({ kind: 'engagement', name: 'Projekt K' }); db.prepare('INSERT INTO engagements (subject_id, client_subject_id) VALUES (?, ?)').run(eng, k); return k; }, 'referenced-by-engagements.client_subject_id'],
+    ['subjects.parent_id (a child keeps its parent)', (s) => { const parent = s.createSubject({ kind: 'organization', name: 'Parent' }); s.createSubject({ kind: 'engagement', name: 'Child', parentId: parent }); return parent; }, 'referenced-by-subjects.parent_id'],
+    ['merged_into (a dup shell keeps its canonical)', (s, db) => { const canon = s.createSubject({ kind: 'organization', name: 'Canon' }); const dup = s.createSubject({ kind: 'organization', name: 'Dup' }); db.prepare('UPDATE subjects SET merged_into = ? WHERE id = ?').run(canon, dup); return canon; }, 'merge-target'],
+    ['people detail WITH data', (s) => { const p = s.createSubject({ kind: 'person', name: 'Petra' }); s.setPersonDetail(p, { email: 'p@example.com' }); return p; }, 'has-detail'],
+    ['people detail of all NULLs (default type only)', (s) => { const p = s.createSubject({ kind: 'person', name: 'Paul' }); s.setPersonDetail(p, {}); return p; }, null],
+    ['engagement detail row (client pointer set)', (s, db) => { const k = s.createSubject({ kind: 'organization', name: 'K' }); const eng = s.createSubject({ kind: 'engagement', name: 'Projekt K' }); db.prepare('INSERT INTO engagements (subject_id, client_subject_id) VALUES (?, ?)').run(eng, k); return eng; }, 'has-detail'],
+    ['the operator self', (s) => s.createSubject({ kind: 'organization', name: 'My Firm', isSelf: true }), 'is_self'],
+  ];
+
+  it.each(HOLDERS)('holder: %s', (_name, setup, expected) => {
+    const { store, engine, mem } = make();
+    const id = setup(store, engine.getDb(), mem, engine);
+    expect(store.referenceReason(id, NONE)).toBe(expected);
+    engine.close();
+  });
+
+  it('the cross-DB anchors keep a subject: a history.db thread anchor, a datastore.db record', () => {
+    const { store, engine } = make();
+    const x = store.createSubject({ kind: 'organization', name: 'X' });
+    expect(store.referenceReason(x, { isThreadAnchor: id => id === x, hasRecords: () => false })).toBe('thread-anchor');
+    expect(store.referenceReason(x, { isThreadAnchor: () => false, hasRecords: id => id === x })).toBe('record');
+    engine.close();
+  });
+
+  it('a cooccurrence row is DERIVED and does NOT keep a subject — both ends stay reapable', () => {
+    const { store, engine, mem } = make();
+    const a = store.createSubject({ kind: 'organization', name: 'A' });
+    const b = store.createSubject({ kind: 'organization', name: 'B' });
+    mem.bumpCooccurrences([a, b]);
+    expect(engine.getDb().prepare('SELECT count(*) c FROM subject_cooccurrences').get()).toEqual({ c: 1 });
+    expect(store.referenceReason(a, NONE)).toBeNull();
+    expect(store.referenceReason(b, NONE)).toBeNull();
+    // and the reap takes the derived rows with it (cascade)
+    expect(store.reapOrphans([a, b], NONE).sort()).toEqual([a, b].sort());
+    expect(engine.getDb().prepare('SELECT count(*) c FROM subject_cooccurrences').get()).toEqual({ c: 0 });
+    engine.close();
+  });
+
+  it('reapOrphans runs to a fixpoint — a parent released by its reaped child goes too, in either order', () => {
+    for (const order of ['parent-first', 'child-first'] as const) {
+      const { store, engine } = make();
+      const parent = store.createSubject({ kind: 'organization', name: 'Kunde' });
+      const child = store.createSubject({ kind: 'engagement', name: 'Projekt', parentId: parent });
+      const ids = order === 'parent-first' ? [parent, child] : [child, parent];
+      expect(store.reapOrphans(ids, NONE).sort()).toEqual([parent, child].sort());
+      expect(store.getSubject(parent)).toBeNull();
+      expect(store.getSubject(child)).toBeNull();
+      engine.close();
+    }
+  });
+
+  it('reapOrphans keeps a parent whose child is still held, skips missing ids, never touches self', () => {
+    const { store, engine, mem } = make();
+    const parent = store.createSubject({ kind: 'organization', name: 'Kunde' });
+    const child = store.createSubject({ kind: 'engagement', name: 'Projekt', parentId: parent });
+    stub(mem, 'm1'); mem.linkSubjects('m1', [child]);
+    const self = store.createSubject({ kind: 'person', name: 'Me', isSelf: true });
+    expect(store.reapOrphans([parent, child, self, 'gone'], NONE)).toEqual([]);
+    expect(store.getSubject(parent)).not.toBeNull();
+    expect(store.getSubject(child)).not.toBeNull();
+    expect(store.getSubject(self)).not.toBeNull();
+    engine.close();
+  });
+
+  it('hasRecordsForSubject — the datastore.db half of the oracle — sees a subject-typed cell and nothing else', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-subj-reap-ds-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const store = new SubjectStore(engine);
+    const ds = new DataStore(join(dir, 'datastore.db'));
+    ds.setSubjectBridge(makeSubjectColumnBridge(store));
+    ds.createCollection({
+      name: 'appointments',
+      scope: { type: 'context', id: '' },
+      columns: [{ name: 'note', type: 'string' }, { name: 'patient', type: 'subject', subjectKind: 'person' }],
+    });
+    ds.insertRecords({ collection: 'appointments', records: [{ note: 'first', patient: 'Anna Meier' }] });
+    const anna = store.findCanonical('Anna Meier', 'person')!.id;
+    const other = store.createSubject({ kind: 'person', name: 'Nobody' });
+    expect(ds.hasRecordsForSubject(anna)).toBe(true);
+    expect(ds.hasRecordsForSubject(other)).toBe(false);
+    // a collection without a subject column is skipped, not scanned
+    ds.createCollection({ name: 'plain', scope: { type: 'context', id: '' }, columns: [{ name: 'x', type: 'string' }] });
+    ds.insertRecords({ collection: 'plain', records: [{ x: anna }] });
+    expect(ds.hasRecordsForSubject(other)).toBe(false);
+    ds.close();
+    engine.close();
+  });
+});
+
+describe('SubjectStore.referenceReason — detail-row defaults (DEF-0015)', () => {
+  const tmpDirs: string[] = [];
+  const NONE: SubjectExternalRefs = { isThreadAnchor: () => false, hasRecords: () => false };
+  afterEach(() => { for (const d of tmpDirs) rmSync(d, { recursive: true, force: true }); tmpDirs.length = 0; });
+
+  it('a bare detail row (only the NOT NULL default classifier) is no reference; a deliberate non-default type is', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-subj-detail-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    const store = new SubjectStore(engine);
+    const p = store.createSubject({ kind: 'person', name: 'Plain' });
+    store.setPersonDetail(p, {});                                  // type = DEFAULT 'contact'
+    expect(store.referenceReason(p, NONE)).toBeNull();
+    store.setPersonDetail(p, { type: 'customer' });                // a deliberate classification
+    expect(store.referenceReason(p, NONE)).toBe('has-detail');
+    const o = store.createSubject({ kind: 'organization', name: 'Org' });
+    store.setOrganizationDetail(o, {});                            // type = DEFAULT 'other'
+    expect(store.referenceReason(o, NONE)).toBeNull();
+    store.setOrganizationDetail(o, { country: 'CH' });
+    expect(store.referenceReason(o, NONE)).toBe('has-detail');
+    engine.close();
+  });
+});
+
+describe('SubjectStore reference oracle — schema sweep + merge closure (DEF-0015)', () => {
+  const tmpDirs: string[] = [];
+  const NONE: SubjectExternalRefs = { isThreadAnchor: () => false, hasRecords: () => false };
+  function make(): { store: SubjectStore; engine: EngineDb; mem: MemoryGraphStore } {
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-subj-sweep-'));
+    tmpDirs.push(dir);
+    const engine = new EngineDb(join(dir, 'engine.db'), '');
+    return { store: new SubjectStore(engine), engine, mem: new MemoryGraphStore(engine) };
+  }
+  afterEach(() => { for (const d of tmpDirs) rmSync(d, { recursive: true, force: true }); tmpDirs.length = 0; });
+
+  it('every FK column onto subjects(id) in the live schema is known to the oracle (counted, detail or derived)', () => {
+    const { engine } = make();
+    const db = engine.getDb();
+    const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string }>).map(r => r.name);
+    const fkCols = new Set<string>();
+    for (const t of tables) {
+      for (const fk of db.prepare(`PRAGMA foreign_key_list("${t}")`).all() as Array<{ table: string; from: string }>) {
+        if (fk.table === 'subjects') fkCols.add(`${t}.${fk.from}`);
+      }
+    }
+    const cov = subjectReferenceCoverage();
+    const known = new Set([...cov.counted, ...cov.detail, ...cov.derived]);
+    const unknown = [...fkCols].filter(c => !known.has(c)).sort();
+    expect(fkCols.size).toBeGreaterThanOrEqual(20); // the sweep really enumerated the schema
+    expect(unknown).toEqual([]);                     // a new subject FK column must be classified here first
+    // and the lists do not name phantom columns either
+    expect([...known].filter(c => !fkCols.has(c)).sort()).toEqual([]);
+    engine.close();
+  });
+
+  it('a once-merged canonical goes TOGETHER with its archived dup shells when nothing else holds any of them', () => {
+    const { store, engine, mem } = make();
+    const canon = store.createSubject({ kind: 'organization', name: 'Schmidt GmbH' });
+    const dup = store.createSubject({ kind: 'organization', name: 'Schmidt' });
+    const dup2 = store.createSubject({ kind: 'organization', name: 'Schmidt AG' });
+    engine.getDb().prepare("UPDATE subjects SET merged_into = ?, archived_at = datetime('now') WHERE id = ?").run(canon, dup);
+    engine.getDb().prepare("UPDATE subjects SET merged_into = ?, archived_at = datetime('now') WHERE id = ?").run(dup, dup2); // a chain: dup2 → dup → canon
+    stub(mem, 'm1'); mem.linkSubjects('m1', [canon]);
+    expect(store.referenceReason(canon, NONE)).toBe('referenced-by-memory_subjects');
+    mem.purgeMemories(['m1']); // no reaper installed here — just drop the holder
+    expect(store.referenceReason(canon, NONE)).toBe('merge-target');
+    expect(store.reapOrphans([canon], NONE).sort()).toEqual([canon, dup, dup2].sort());
+    expect(store.getSubject(canon)).toBeNull();
+    expect(store.getSubject(dup)).toBeNull();
+    expect(store.getSubject(dup2)).toBeNull();
+    engine.close();
+  });
+
+  it('a dup shell something else still holds (a thread anchor a failed repoint left) keeps the canonical', () => {
+    const { store, engine } = make();
+    const canon = store.createSubject({ kind: 'organization', name: 'Schmidt GmbH' });
+    const dup = store.createSubject({ kind: 'organization', name: 'Schmidt' });
+    engine.getDb().prepare("UPDATE subjects SET merged_into = ?, archived_at = datetime('now') WHERE id = ?").run(canon, dup);
+    const anchorOnDup: SubjectExternalRefs = { isThreadAnchor: id => id === dup, hasRecords: () => false };
+    expect(store.reapOrphans([canon], anchorOnDup)).toEqual([]);
+    expect(store.getSubject(canon)).not.toBeNull();
+    expect(store.getSubject(dup)).not.toBeNull();
+    engine.close();
+  });
+
+  // The over-erase the delta round caught: a merge MOVES detail/anchor/record onto the canonical
+  // and leaves empty shells behind. `merge-target` must therefore be the LAST reason — returned
+  // early it hid every real holder on the canonical and the closure branch (which inspects only
+  // the shells) reaped a CRM contact / an anchored subject / a record subject.
+  it.each([
+    ['a CRM detail row (email)', (s: SubjectStore, canon: string): SubjectExternalRefs => { s.setPersonDetail(canon, { email: 'c@example.com' }); return NONE; }, 'has-detail'],
+    ['a history.db thread anchor', (_s: SubjectStore, canon: string): SubjectExternalRefs => ({ isThreadAnchor: id => id === canon, hasRecords: () => false }), 'thread-anchor'],
+    ['a datastore.db record', (_s: SubjectStore, canon: string): SubjectExternalRefs => ({ isThreadAnchor: () => false, hasRecords: id => id === canon }), 'record'],
+  ])('a once-merged canonical that %s still holds is KEPT, shells included', (_what, hold, expectedReason) => {
+    const { store, engine } = make();
+    const canon = store.createSubject({ kind: 'person', name: 'Petra Muster' });
+    const dup = store.createSubject({ kind: 'person', name: 'P. Muster' });
+    engine.getDb().prepare("UPDATE subjects SET merged_into = ?, archived_at = datetime('now') WHERE id = ?").run(canon, dup);
+    const external = hold(store, canon);
+    expect(store.referenceReason(canon, external)).toBe(expectedReason); // not 'merge-target'
+    expect(store.reapOrphans([canon], external)).toEqual([]);
+    expect(store.getSubject(canon)).not.toBeNull();
+    expect(store.getSubject(dup)).not.toBeNull();
+    engine.close();
+  });
+
+  it('a self-loop relationship (the residue of merging two related subjects) is not a holder; a real edge is', () => {
+    const { store, engine } = make();
+    const canon = store.createSubject({ kind: 'organization', name: 'Loop AG' });
+    const rel = new RelationshipStore(engine);
+    rel.createRelationship({ fromSubjectId: canon, toSubjectId: canon, kind: 'partner_of' });
+    expect(store.referenceReason(canon, NONE)).toBeNull();
+    const other = store.createSubject({ kind: 'organization', name: 'Other AG' });
+    rel.createRelationship({ fromSubjectId: canon, toSubjectId: other, kind: 'partner_of' });
+    expect(store.referenceReason(canon, NONE)).toBe('referenced-by-relationships.from_subject_id');
+    engine.close();
+  });
+
+  it('a prototype-key kind written straight into the DB neither throws nor counts as detail', () => {
+    const { store, engine } = make();
+    engine.getDb().prepare("INSERT INTO subjects (id, kind, name) VALUES ('proto', 'constructor', 'Proto')").run();
+    expect(store.referenceReason('proto', NONE)).toBeNull();
+    expect(store.reapOrphans(['proto'], NONE)).toEqual(['proto']);
+    engine.close();
+  });
+
+  it('every detail kind has a substantive predicate (the row-exists fallback never fires on today\'s schema)', () => {
+    expect(subjectReferenceCoverage().detailKindsMissingPredicate).toEqual([]);
+  });
+
+  function stub(mem: MemoryGraphStore, id: string): void {
+    mem.upsertStub({ id, text: `t-${id}`, namespace: 'knowledge', scopeType: 'context', scopeId: 'c' });
+  }
 });

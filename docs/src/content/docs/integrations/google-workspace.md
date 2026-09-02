@@ -60,9 +60,35 @@ You can copy each API name and paste it directly into the Library search bar.
 | User type | Pick when… | Tradeoffs |
 |---|---|---|
 | **Internal** *(recommended if available)* | You have a **Google Workspace** account and only Workspace users will connect | No Google verification ever, refresh tokens never expire, no test-user list |
-| **External** | You use a **personal `@gmail.com`** account, or want non-Workspace users to connect | App starts in "Testing" mode: max 100 test users, **refresh tokens expire after 7 days** until you go through Google verification (CASA for Gmail/Drive scopes) |
+| **External** | You use a **personal `@gmail.com`** account, or want non-Workspace users to connect | App starts in "Testing" mode: max 100 test users, and **refresh tokens expire after 7 days**. That expiry is tied to the *publishing status*, not to verification — see the note below |
 
 "Internal" only appears if your account belongs to a Workspace organization. If you don't see it, pick "External".
+
+:::caution
+**The 7-day refresh-token expiry is tied to the publishing status, not to verification.** Google's wording:
+a project *"configured for an external user type and a publishing status of `Testing` is issued a refresh
+token expiring in 7 days"* (OAuth 2.0 guide, read 2026-08-27). Switching the publishing status from
+**Testing** to **In production** therefore ends the 7-day expiry on its own — you do **not** have to
+complete verification first. The trade-off is that an app requesting sensitive or restricted scopes shows
+an unverified-app warning screen until verification is granted, and Google's OAuth quota table caps such an
+app at *"100 new users in total, after the app presents the unverified app screen"*.
+
+**Verification and CASA are two different bars.** Verification is free — Google says sensitive-scope
+verification *"typically takes 3-5 business days"* (read 2026-08-27) — and applies to *sensitive* scopes. The annual CASA security assessment applies only to *restricted*
+scopes — for Google Workspace that means full-mailbox and full-Drive access such as `gmail.readonly`,
+`gmail.modify`, `drive` and `drive.readonly`. Narrower scopes often cost less — `calendar.events` and
+`documents.readonly` are sensitive (verification, no CASA), and `drive.file` — files the app creates or the
+user explicitly picks — is not even sensitive.
+
+**But "narrower" does not help for Gmail, and that is the case most people look up.** Every OAuth path to
+mailbox content is restricted, including the narrow-looking ones: `gmail.readonly`, `gmail.modify`,
+`gmail.compose`, `gmail.metadata` (headers only) and the IMAP scope `https://mail.google.com/` are all on
+Google's restricted list. The axis is *how much data the scope exposes*, not read-versus-write — which is
+why full calendar access including deletion is only sensitive, while a metadata-only mailbox scope is not.
+If you want mailbox access without a CASA assessment, an OAuth scope is not the route; lynox also supports
+plain IMAP/SMTP with an app password. Google publishes no per-scope list; the authoritative
+classification is shown in the Cloud Console under **Google Auth Platform → Data access**.
+:::
 
 :::note
 **External only** — your app starts in "Testing" mode. Add yourself as a test user: **OAuth consent screen** → **Test users** → **Add users** → enter your Google email. Internal apps skip this step.

@@ -52,8 +52,19 @@ export const BUILTIN_ROLES: Record<string, RoleConfig> = {
     // Superset: the legacy memory_store/recall AND the DK.1 remember/recall — allowTools is a
     // whitelist, so listing the not-registered pair for the current flag state is a harmless
     // no-op, and the collector role works under both flag states (H9 — no partial swap).
-    allowTools: ['ask_user', 'memory_store', 'memory_recall', 'remember', 'recall', 'archive_search'],
-    description: 'Structured Q&A with user. Minimal tools.',
+    //
+    // read_file + http_request + web_research are here because the engine ACTIVELY
+    // recommends role='collector' to work a payload too large for the main context in
+    // isolation: read_file for large files (the fs.ts soft/hard-cap hints name collector
+    // to "summarize the full file" the parent could only partly read), http_request for
+    // large API responses (http.ts truncation hints), web_research for large web fetches.
+    // allowTools is hard-enforced as a whitelist (resolve-tools.ts), so omitting the tool
+    // a hint recommends left the collector unable to do the one job it was spawned for
+    // (DEF-0112) — the model would spawn a collector, the collector would lack the tool,
+    // and the fetch/read silently never happened. The role stays read-only: no write_file,
+    // no edit_file, no bash.
+    allowTools: ['ask_user', 'memory_store', 'memory_recall', 'remember', 'recall', 'archive_search', 'read_file', 'http_request', 'web_research'],
+    description: 'Work large payloads (files, API responses, web) in an isolated context; structured Q&A with user. Read-only.',
   },
 };
 

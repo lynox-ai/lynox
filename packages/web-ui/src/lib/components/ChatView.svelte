@@ -82,6 +82,7 @@
 	import { stripNowMarker, stripLoadedContext } from '../utils/now-marker.js';
 	import { getToolIcon } from '../utils/tool-icons.js';
 	import { isIosSafari } from '../utils/ios-safari.js';
+	import { sanitizeFramingField } from '../utils/chat-framing.js';
 	import { formatCountdown } from '../utils/time.js';
 	import { toolCallLabel as resolveToolCallLabel, HIDDEN_TOOLS } from '../utils/tool-call-label.js';
 	import { isArtifactContentInline, parseArtifactIdFromResult, artifactFenceHeader } from '../utils/artifact-inline.js';
@@ -1641,6 +1642,19 @@
 	const pendingPermission = $derived(getPendingPermission());
 	const pendingTabsPrompt = $derived(getPendingTabsPrompt());
 	const pendingSecret = $derived(getPendingSecretPrompt());
+
+	/**
+	 * Cleaned once, so the `{#if}` guard and the render agree — guarding on the
+	 * raw string opens a labelled box containing nothing for a zero-width prompt.
+	 *
+	 * 1200 is a backstop, not a bound: the tool caps the AGENT's span at 300
+	 * server-side, and everything past that is the engine's own "already in the
+	 * vault" hint. A cap near 300 would truncate the one line here the agent does
+	 * not author.
+	 */
+	const secretAgentText = $derived(
+		pendingSecret ? sanitizeFramingField(pendingSecret.prompt, 1200) : '',
+	);
 	const pendingMailConnect = $derived(getPendingMailConnect());
 	const chatError = $derived(getChatError());
 	const chatErrorDetail = $derived(getChatErrorDetail());
@@ -1699,7 +1713,16 @@
 		setPromptAttention(key, {
 			badge: t('attention.badge'),
 			notifyTitle: t('attention.notify_title'),
-			notifyBody: head?.question || t('attention.notify_body'),
+			// A credential prompt's `question` is written by the AGENT, and this body
+			// goes into an OS notification titled with product copy — outside the
+			// page, outside the frame the dialog now puts around that text, and with
+			// more authority than either. It is also delivered exactly when the tab
+			// is hidden, i.e. when the user has the least context. The notification's
+			// job is to get attention; the wording belongs in the dialog, where it is
+			// labelled as the assistant's.
+			notifyBody: head?.kind === 'secret'
+				? t('attention.notify_body')
+				: head?.question || t('attention.notify_body'),
 		});
 	});
 	// Clear the signal on unmount (navigating away mid-prompt must not strand a badge).
@@ -2110,6 +2133,13 @@
 							<span class="text-text-subtle/50" aria-hidden="true">·</span>
 							<span class="text-text-subtle/60 truncate min-w-0 max-w-[12rem]" title={child.model}>{child.model}</span>
 						{/if}
+						{#if child.tier}
+							<span class="text-text-subtle/50" aria-hidden="true">·</span>
+							<span class="uppercase tracking-wide text-[9px] {child.downgraded ? 'text-warning/80' : 'text-text-subtle/50'}">{child.tier}</span>
+						{/if}
+						{#if child.downgraded}
+							<span class="text-warning/80">{t('spawn.downgraded_note')}</span>
+						{/if}
 						<!-- Kept together and unshrinkable: elapsed and cost are the two
 						     numbers the row exists for, so the model id yields space first. -->
 						{#if child.elapsedS !== undefined || child.costUsd !== undefined}
@@ -2156,7 +2186,7 @@
      the main agent has its cause in the message directly above, and a redundant
      "asked by" line there would be noise. -->
 {#snippet promptOrigin(origin: PromptOrigin | undefined)}
-	{#if origin && (origin.workflowName || origin.stepId)}
+	{#if origin && (origin.workflowName || origin.stepId || origin.subagent)}
 		<!-- Workflow and step are SEPARATE elements with a real separator element
 		     between them, not one joined string. Both names come from a manifest
 		     a model may have written; a joined string lets a name containing the
@@ -2164,20 +2194,51 @@
 		     asked. Structure it cannot reach beats punctuation it can imitate.
 		     `toPromptOrigin` bounds the length and strips control/bidi chars. -->
 		<div class="text-[11px] text-text-subtle">
-			<div class="flex items-start gap-1.5">
-				<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
-					<path stroke-linecap="round" stroke-linejoin="round" d="M4 6h6a2 2 0 012 2v8a2 2 0 002 2h4m0 0l-3-3m3 3l-3 3M4 6V4m0 2v2" />
-				</svg>
-				<span class="min-w-0 [overflow-wrap:anywhere]">
-					{#if origin.workflowName}<span>{tf('chat.prompt_origin_workflow', { name: origin.workflowName })}</span>{/if}
-					{#if origin.workflowName && origin.stepId}<span class="mx-1" aria-hidden="true">·</span>{/if}
-					{#if origin.stepId}<span>{tf('chat.prompt_origin_step', { id: origin.stepId })}</span>{/if}
-				</span>
-			</div>
-			{#if origin.stepTask}
-				<!-- The readable half. It was hover-only `title` first, which is
-				     invisible on touch — where most of these prompts are answered. -->
-				<p class="mt-0.5 ml-5 text-text-subtle/80 [overflow-wrap:anywhere]">{origin.stepTask}</p>
+			{#if origin.subagent}
+				<!-- The sub-agent row comes FIRST: in a step that spawned, the child
+				     is the immediate asker and the step is the context around it.
+
+				     Keyed on `origin.subagent`, a flag the ENGINE sets — never on the
+				     name. The first version keyed it on the name, and a name of one
+				     zero-width space passes the engine's validation and cleans away
+				     to nothing here, so the parent could delete the line warning
+				     about it simply by choosing what to call its child.
+
+				     The frame also takes NO interpolation, unlike the workflow row
+				     below. A sub-agent's name is chosen by the parent model — the
+				     one an injected instruction is steering when this line matters —
+				     so a parent free to name its child names it "Main assistant".
+				     Claim and name in separate strings means the claim stays true
+				     whatever the name says, and renders with no name at all. -->
+				<div class="flex items-start gap-1.5">
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M12 4a4 4 0 100 8 4 4 0 000-8zM4 20a8 8 0 0116 0" />
+					</svg>
+					<span class="min-w-0 [overflow-wrap:anywhere]">
+						<span>{t('chat.prompt_origin_subagent')}</span>
+						{#if origin.subagentName}<span class="mx-1" aria-hidden="true">·</span><span>{origin.subagentName}</span>{/if}
+					</span>
+				</div>
+				{#if origin.subagentTask}
+					<p class="mt-0.5 ml-5 text-text-subtle/80 [overflow-wrap:anywhere]">{origin.subagentTask}</p>
+				{/if}
+			{/if}
+			{#if origin.workflowName || origin.stepId}
+				<div class="flex items-start gap-1.5" class:mt-0.5={origin.subagent}>
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 shrink-0 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true">
+						<path stroke-linecap="round" stroke-linejoin="round" d="M4 6h6a2 2 0 012 2v8a2 2 0 002 2h4m0 0l-3-3m3 3l-3 3M4 6V4m0 2v2" />
+					</svg>
+					<span class="min-w-0 [overflow-wrap:anywhere]">
+						{#if origin.workflowName}<span>{tf('chat.prompt_origin_workflow', { name: origin.workflowName })}</span>{/if}
+						{#if origin.workflowName && origin.stepId}<span class="mx-1" aria-hidden="true">·</span>{/if}
+						{#if origin.stepId}<span>{tf('chat.prompt_origin_step', { id: origin.stepId })}</span>{/if}
+					</span>
+				</div>
+				{#if origin.stepTask}
+					<!-- The readable half. It was hover-only `title` first, which is
+					     invisible on touch — where most of these prompts are answered. -->
+					<p class="mt-0.5 ml-5 text-text-subtle/80 [overflow-wrap:anywhere]">{origin.stepTask}</p>
+				{/if}
 			{/if}
 		</div>
 	{/if}
@@ -2608,7 +2669,7 @@
 					{@const noteBody = t(noteKey) === noteKey ? t('chat.note.generic') : t(noteKey)}
 					{@const titleKey = `chat.note.${msg.note.code}.title`}
 					{@const noteTitle = t(titleKey) === titleKey ? t('chat.note.title') : t(titleKey)}
-					{@const isInfoNote = msg.note.code === 'context_compacted' || msg.note.code === 'run_interrupted'}
+					{@const isInfoNote = msg.note.code === 'context_compacted' || msg.note.code === 'run_interrupted' || msg.note.code === 'tool_loop_break' || msg.note.code === 'continuation_loop'}
 					<div class="flex items-start gap-2 text-[13px] md:text-[12px] border-l-2 {isInfoNote ? 'border-border' : 'border-danger/40'} pl-3 py-1 my-1" role="status">
 						{#if isInfoNote}
 							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 md:h-3.5 md:w-3.5 shrink-0 text-text-subtle mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" /></svg>
@@ -2834,11 +2895,39 @@
 												<!-- WHY it is here. The generic "from external content" is true of every
 												     queued write, so it gives the person nothing to judge. The sticky case
 												     matters most: nothing external happened on THIS turn, and without
-												     saying so the chip looks like a bug. -->
-												<span class="text-text-subtle">{t(knowledgeCauseKey(kw.cause))}</span>
+												     saying so the chip looks like a bug.
+												     ONLY while the decision is open. It explains a pending question, and
+												     once answered it stops being one — see the outcome branch below for
+												     the second, load-bearing reason it must go. -->
+												{#if !kw.resolved}<span class="text-text-subtle">{t(knowledgeCauseKey(kw.cause))}</span>{/if}
 											</div>
 											{#if kw.resolved}
-												<p class="text-text-subtle">{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}</p>
+												<!-- The cause line is GONE above (`{#if !kw.resolved}`), and that is
+												     structural, not tidying. Stacked under a cause in the same weight, the
+												     outcome read as its tail — one fluent sentence about the AGENT, where
+												     the line reports what the PERSON decided:
+
+												       prüfen → lynox GmbH  …hatte Inhalte von ausserhalb
+												       übernommen
+
+												     Observed 2026-08-19; reported as a chip whose buttons had vanished.
+												     Re-wording the causes cannot fix this. There are THREE of them (incl.
+												     `knowledgeCauseKey`'s default) across two locales, each has to survive
+												     both outcome participles, and German ("aus externem Inhalt" +
+												     "übernommen") and English (the causative, and a reduced relative:
+												     "content from outside discarded") re-open the slot by different
+												     grammar. Twelve pairs to re-check on every copy edit is not a rule
+												     anyone keeps, so the SENTENCE-FRAGMENT neighbour goes instead.
+												     Not "the neighbour is gone" — the header line above still is one,
+												     and `→ lynox GmbH` over `übernommen` can still be read as a phrase.
+												     What changed is that it no longer READS as one: the header is 10px
+												     mono muted against full-strength body text, a name is not a clause
+												     left hanging mid-bracket, and the glyph opens the line as a status.
+												     A wording that trails off into a verb slot cannot end up here now. -->
+												<p class="flex items-center gap-1.5 text-text">
+													<span aria-hidden="true" class={kw.resolved === 'discarded' ? 'text-danger' : 'text-success'}>{kw.resolved === 'discarded' ? '✗' : '✓'}</span>
+													{kw.resolved === 'discarded' ? t('chat.knowledge.review_discarded') : t('chat.knowledge.review_kept')}
+												</p>
 											{:else if editingKnowledgeId === kw.id}
 												<textarea
 													aria-label={t('chat.knowledge.review_edit_aria')}
@@ -3227,12 +3316,13 @@
 	{#if pendingPermission && !inBatchMode}
 		{@const opts = pendingPermission.options ?? []}
 		{@const isPermissionGuard = opts.includes('Allow') && opts.includes('Deny')}
-		{@const visibleOptions = isPermissionGuard ? [] : opts.filter(o => o !== '\x00')}
+		{@const isDeepConsent = opts.includes('Run on balanced')}
+		{@const visibleOptions = (isPermissionGuard || isDeepConsent) ? [] : opts.filter(o => o !== '\x00')}
 		<div data-pending-prompt data-prompt-kind="permission" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-2">
 				{@render promptOrigin(pendingPermission.origin)}
 				<div class="flex items-start gap-2">
-					{#if isPermissionGuard}
+					{#if isPermissionGuard || isDeepConsent}
 						<pre class="flex-1 text-sm text-text-muted whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto scrollbar-thin">{pendingPermission.question}</pre>
 					{:else}
 						<!-- renderPromptMarkdown, NOT MarkdownRenderer: the chat renderer
@@ -3254,7 +3344,7 @@
 						{#if promptSecondsLeft != null}
 							<span class="text-[11px] font-mono tabular-nums {promptSecondsLeft < 60 ? 'text-warning' : 'text-text-subtle'}" title={t('chat.prompt_timeout_left')}>{formatCountdown(promptSecondsLeft)}</span>
 						{/if}
-						{#if !isPermissionGuard}
+						{#if !isPermissionGuard && !isDeepConsent}
 							<button onclick={() => answerPrompt('__dismissed__')} class="p-1.5 rounded text-text-subtle hover:text-text hover:bg-bg-muted transition-colors" aria-label={t('chat.dismiss')}>
 								<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
 							</button>
@@ -3262,7 +3352,13 @@
 					</div>
 				</div>
 
-				{#if isPermissionGuard}
+				{#if isDeepConsent}
+					<div class="flex flex-wrap gap-2">
+						<button onclick={() => answerPrompt('allow deep')} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.consent_allow_deep')}</button>
+						<button onclick={() => answerPrompt('run on balanced')} class="rounded-[var(--radius-sm)] bg-accent/15 border border-accent/30 px-3 py-1.5 text-sm text-accent-text hover:bg-accent/25 transition-opacity">{t('chat.consent_run_balanced')}</button>
+						<button onclick={() => answerPrompt('n')} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.consent_cancel')}</button>
+					</div>
+				{:else if isPermissionGuard}
 					<div class="flex flex-wrap gap-2">
 						<button onclick={() => answerPrompt('y')} class="rounded-[var(--radius-sm)] bg-success/15 border border-success/30 px-3 py-1.5 text-sm text-success hover:bg-success/25 transition-opacity">{t('chat.allow')}</button>
 						<button onclick={() => answerPrompt('n')} class="rounded-[var(--radius-sm)] bg-danger/15 border border-danger/30 px-3 py-1.5 text-sm text-danger hover:bg-danger/25 transition-opacity">{t('chat.deny')}</button>
@@ -3310,9 +3406,32 @@
 		<div data-pending-prompt data-prompt-kind="secret" tabindex="-1" class="border-t border-border bg-bg-subtle px-4 py-3">
 			<div class="max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-auto space-y-3">
 				{@render promptOrigin(pendingSecret.origin)}
+				<!-- Product copy: the agent must never own this slot. -->
 				<div class="flex items-center gap-2">
 					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-warning shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
-					<span class="text-sm font-medium text-text">{pendingSecret.prompt}</span>
+					<span class="text-sm font-medium text-text">{t('chat.secret_title')}</span>
+				</div>
+
+				<!-- Attributed, not demoted. Taking the title back is the security fix;
+				     burying the reason with it would break the ordinary case, where this
+				     sentence is the ONLY thing saying why a credential is wanted. It keeps
+				     body weight and sits directly under the title, quoted by the same
+				     left rule this file uses elsewhere for words that are not ours. -->
+				{#if secretAgentText}
+					<div class="border-l-2 border-border pl-3 space-y-0.5">
+						<div class="text-xs text-text-muted">{t('chat.secret_agent_said')}</div>
+						<div class="text-sm text-text-subtle max-h-32 overflow-y-auto [overflow-wrap:anywhere]">{secretAgentText}</div>
+					</div>
+				{/if}
+
+				<!-- Machine metadata, which is what this muted box is for in the
+				     mail-connect dialog below. The key name is also the input's
+				     placeholder, so it is the redundant element here, not the reason. -->
+				<div class="rounded-[var(--radius-sm)] bg-bg-muted px-3 py-2 text-xs text-text-subtle">
+					<div class="flex justify-between gap-2">
+						<span class="text-text-muted">{t('chat.secret_key_label')}</span>
+						<span class="font-mono [overflow-wrap:anywhere]">{pendingSecret.name}</span>
+					</div>
 				</div>
 
 				{#if !secretConsented}
@@ -3325,6 +3444,8 @@
 						<button onclick={handleSecretCancel} class="rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text-subtle hover:text-text transition-all">{t('chat.secret_cancel')}</button>
 					</div>
 				{:else}
+					<!-- Product copy only: the agent's sentence as this field's accessible
+					     name is the same slot confusion, in audio. -->
 					<div class="flex gap-2">
 						<input
 							type="password"
@@ -3332,7 +3453,7 @@
 							bind:this={secretInputEl}
 							onkeydown={(e) => { if (e.key === 'Enter') handleSecretSave(); }}
 							class="flex-1 rounded-[var(--radius-sm)] border border-border bg-bg px-3 py-1.5 text-sm text-text focus:border-accent focus:outline-none font-mono"
-							aria-label={pendingSecret.prompt || pendingSecret.name}
+							aria-label={t('chat.secret_title')}
 							placeholder={pendingSecret.name}
 							autocomplete="off"
 							data-1p-ignore

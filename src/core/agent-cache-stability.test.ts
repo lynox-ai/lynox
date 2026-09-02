@@ -25,7 +25,7 @@ vi.mock('@anthropic-ai/sdk', () => {
   return { default: MockAnthropic, APIError };
 });
 vi.mock('./stream.js', () => ({ StreamProcessor: vi.fn() }));
-vi.mock('../tools/permission-guard.js', () => ({ isDangerous: vi.fn().mockReturnValue(null) }));
+vi.mock('../tools/permission-guard.js', () => ({ isDangerous: vi.fn().mockReturnValue(null), isDangerousDetailed: vi.fn().mockReturnValue(null) }));
 vi.mock('./observability.js', () => ({
   channels: { cacheHealth: { publish: vi.fn() }, contentTruncation: { hasSubscribers: false, publish: vi.fn() } },
   measureTool: vi.fn().mockReturnValue({ end: () => 0 }),

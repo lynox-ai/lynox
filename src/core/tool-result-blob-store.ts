@@ -5,6 +5,7 @@ import type {
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.js';
 import { contentKey, toolResultText, toolCallsById } from './tool-result-hygiene.js';
 import { maskSecretPatterns } from './secret-store.js';
+import { containsUntrustedMarker, wrapUntrustedData } from './data-boundary.js';
 
 /**
  * Phase 2 — Context Hygiene. Default blob threshold in characters.
@@ -365,47 +366,190 @@ export class ToolResultBlobStore {
       if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
       for (const block of msg.content) {
         if (block.type !== 'tool_result') continue;
-        const resultBlock = block as BetaToolResultBlockParam;
-        const payload = toolResultText(resultBlock.content);
-        if (payload.length <= thresholdChars) continue;
-        const call = toolCalls.get(resultBlock.tool_use_id);
-        const tool = call?.name ?? 'tool';
-        // Dedup: an identical payload already resident reuses its handle instead
-        // of minting a second blob. This is what breaks the cross-compaction
-        // amplifier — the same file dump re-parked at each compaction now maps
-        // to ONE id. `this.get()` promotes the reused blob to most-recently-used
-        // (it is being referenced again). The `payload ===` guard makes a hash
-        // clash cost only a missed dedup, never a wrong reuse.
-        const ident = identifyingArg(call?.input);
-        const key = contentKey(payload);
-        const existingId = this.idByContent.get(key);
-        if (existingId !== undefined) {
-          const existing = this.get(existingId);
-          if (existing !== undefined && existing.payload === payload) {
-            // ONE blob now stands for TWO different calls (a mirror page, two
-            // URLs answering the same 404). Keeping the first call's argument
-            // would label this handle with a URL it did not come from — a
-            // confidently WRONG label is worse than none, so drop the argument
-            // and fall back to the bare tool label when they disagree.
-            const descriptor = ident === existing.ident
-              ? existing.descriptor
-              : buildDescriptor(existing.tool, existing.payload, '');
-            handles.push({ id: existingId, descriptor });
-            continue;
-          }
-        }
-        const id = this.nextId();
-        const descriptor = buildDescriptor(tool, payload, ident);
-        this.blobs.set(id, { tool, descriptor, payload, ident });
-        this.totalBytes += payload.length;
-        this.idByContent.set(key, id);
-        this.contentById.set(id, key);
-        handles.push({ id, descriptor });
+        const parked = this.park(block as BetaToolResultBlockParam, toolCalls, thresholdChars);
+        if (parked) handles.push({ id: parked.id, descriptor: parked.descriptor });
       }
     }
     return handles;
   }
+
+  /**
+   * Park one oversized tool_result into the store and return its handle, or
+   * undefined when the payload is under `thresholdChars`.
+   *
+   * Extracted so `evictFrom` (read-only, compaction) and `collapseIn`
+   * (rewrites in place, mid-run) mint handles through ONE code path — the
+   * dedup index and the byte accounting must not diverge between them.
+   */
+  private park(
+    resultBlock: BetaToolResultBlockParam,
+    toolCalls: ReturnType<typeof toolCallsById>,
+    thresholdChars: number,
+    capacity?: { maxEntries: number; maxBytes: number },
+  ): { id: string; descriptor: string; payloadChars: number } | undefined {
+    const payload = toolResultText(resultBlock.content);
+    if (payload.length <= thresholdChars) return undefined;
+    const call = toolCalls.get(resultBlock.tool_use_id);
+    const tool = call?.name ?? 'tool';
+    // Dedup: an identical payload already resident reuses its handle instead
+    // of minting a second blob. This is what breaks the cross-compaction
+    // amplifier — the same file dump re-parked at each compaction now maps
+    // to ONE id. `this.get()` promotes the reused blob to most-recently-used
+    // (it is being referenced again). The `payload ===` guard makes a hash
+    // clash cost only a missed dedup, never a wrong reuse.
+    const ident = identifyingArg(call?.input);
+    const key = contentKey(payload);
+    const existingId = this.idByContent.get(key);
+    if (existingId !== undefined) {
+      const existing = this.get(existingId);
+      if (existing !== undefined && existing.payload === payload) {
+        // ONE blob now stands for TWO different calls (a mirror page, two
+        // URLs answering the same 404). Keeping the first call's argument
+        // would label this handle with a URL it did not come from — a
+        // confidently WRONG label is worse than none, so drop the argument
+        // and fall back to the bare tool label when they disagree.
+        const descriptor = ident === existing.ident
+          ? existing.descriptor
+          : buildDescriptor(existing.tool, existing.payload, '');
+        return { id: existingId, descriptor, payloadChars: payload.length };
+      }
+    }
+    // Refuse a mint the store cannot keep. Only reached for a genuinely NEW
+    // blob — a dedup hit above needs no room. The caller that passes `capacity`
+    // is rewriting the context to point AT these ids, so minting one that the
+    // next prune would drop hands the model a handle it can see and cannot
+    // fetch. Better to leave the payload resident and free less.
+    if (capacity !== undefined
+      && (this.blobs.size + 1 > capacity.maxEntries
+        || this.totalBytes + payload.length > capacity.maxBytes)) {
+      return undefined;
+    }
+    const id = this.nextId();
+    const descriptor = buildDescriptor(tool, payload, ident);
+    this.blobs.set(id, { tool, descriptor, payload, ident });
+    this.totalBytes += payload.length;
+    this.idByContent.set(key, id);
+    this.contentById.set(id, key);
+    return { id, descriptor, payloadChars: payload.length };
+  }
+
+  /**
+   * Park oversized tool results AND replace them in place with a one-line
+   * recall stub. Unlike `evictFrom` this MUTATES `messages`, because the caller
+   * keeps running on the same array instead of resetting it.
+   *
+   * Why this exists as a distinct entry point: compaction evicts and then wipes
+   * the history, so it never needed to rewrite blocks. A run that is about to
+   * overflow mid-turn has no such reset — without an in-place rewrite the only
+   * remaining lever is `_truncateHistory`'s front-drop, which discards the data
+   * outright AND invalidates the cached prefix just the same. Collapsing keeps
+   * the payload recallable and frees far more context per prefix invalidation.
+   *
+   * `skipTailMessages` leaves the newest N messages untouched — the model is
+   * mid-reasoning on those, and stubbing the result it just received would make
+   * it re-fetch immediately.
+   *
+   * @returns handles minted plus how many characters were freed.
+   */
+  collapseIn(
+    messages: BetaMessageParam[],
+    thresholdChars: number,
+    skipTailMessages = 0,
+    maxEntries: number = DEFAULT_BLOB_STORE_MAX_ENTRIES,
+    maxBytes: number = DEFAULT_BLOB_STORE_MAX_BYTES,
+    anchorIndex = 0,
+  ): {
+    handles: Array<{ id: string; descriptor: string }>;
+    freedChars: number;
+    /**
+     * Of `freedChars`, the part that came from messages BEFORE `anchorIndex`.
+     *
+     * The caller's exact-usage anchor covers `[0, anchorIndex)` as one measured
+     * number and re-measures `[anchorIndex, end)` from characters every time. So
+     * freeing space in the tail already shows up on its own, and only this
+     * figure may be subtracted from the anchor — subtracting all of `freedChars`
+     * double-counts the tail and can drive the anchor to zero, which throws away
+     * the system-prompt overhead baked into it.
+     */
+    freedBeforeAnchor: number;
+  } {
+    // Make room BEFORE minting, never after. `Session.compact` can prune after
+    // evicting because it then lists the survivors; here the stubs are written
+    // into the context as we go, so a prune afterwards would delete blobs the
+    // context already names. With the room made up front and `park` refusing a
+    // mint that does not fit, every id written below stays resolvable.
+    this.pruneToCap(maxEntries, maxBytes);
+    const capacity = { maxEntries, maxBytes };
+
+    const toolCalls = toolCallsById(messages);
+    const handles: Array<{ id: string; descriptor: string }> = [];
+    let freedChars = 0;
+    let freedBeforeAnchor = 0;
+
+    const limit = Math.max(0, messages.length - skipTailMessages);
+    for (let m = 0; m < limit; m++) {
+      const msg = messages[m]!;
+      if (msg.role !== 'user' || !Array.isArray(msg.content)) continue;
+      const content = msg.content;
+      for (let i = 0; i < content.length; i++) {
+        const block = content[i]!;
+        if (block.type !== 'tool_result') continue;
+        const resultBlock = block as BetaToolResultBlockParam;
+        const parked = this.park(resultBlock, toolCalls, thresholdChars, capacity);
+        if (!parked) continue;
+        const payloadWasUntrusted = containsUntrustedMarker(toolResultText(resultBlock.content));
+        const stub = recallStub(parked.id, parked.descriptor, payloadWasUntrusted);
+        // `park` stores `toolResultText`, i.e. the TEXT only. So replace only
+        // what was stored and keep every other block byte-identical — an image
+        // here is in no blob and in no `evictImagesFrom` sweep (that one scans
+        // top-level user images and never descends into a tool_result), so
+        // overwriting it would delete it outright. Skipping the whole block
+        // instead is no better: it was measured to turn a partial loss into a
+        // total one, because freeing nothing lets the front-drop take the text
+        // AND the image.
+        // `tool_use_id` / `is_error` are preserved — dropping either breaks the
+        // tool_use↔tool_result pairing the API validates on every request.
+        const rc = resultBlock.content;
+        content[i] = Array.isArray(rc)
+          ? {
+            ...resultBlock,
+            content: [
+              { type: 'text' as const, text: stub },
+              ...rc.filter(inner => inner.type !== 'text'),
+            ],
+          }
+          : { ...resultBlock, content: stub };
+        const freed = Math.max(0, parked.payloadChars - stub.length);
+        freedChars += freed;
+        if (m < anchorIndex) freedBeforeAnchor += freed;
+        handles.push({ id: parked.id, descriptor: parked.descriptor });
+      }
+    }
+    return { handles, freedChars, freedBeforeAnchor };
+  }
 }
+
+/**
+ * The text left behind where a collapsed payload was. It must state the id in
+ * the exact shape `recall_tool_result` expects, because this stub is the ONLY
+ * place the model learns the handle exists — unlike the compaction path, there
+ * is no synthetic seed listing every handle.
+ */
+export function recallStub(id: string, descriptor: string, wasUntrusted = false): string {
+  const stub = `[Full result set aside to free context — ${descriptor}. `
+    + `Call recall_tool_result with id "${id}" to read it again.]`;
+  // Carry the trust boundary into the replacement. The descriptor happens to
+  // start with the payload's first 80 chars, so a wrap that sits at offset 0
+  // would survive by accident — but several producers put engine framing first
+  // (`mail_read`'s Date/UID/Folder header, `web_research`'s title block), which
+  // pushes the marker out of the excerpt. Re-deriving the taint from context
+  // (`loadMessages`, reached mid-thread via `setModel`) would then read a
+  // collapsed history as clean and disarm the durable-write gate.
+  return wasUntrusted && !containsUntrustedMarker(stub)
+    ? wrapUntrustedData(stub, 'parked-tool-result')
+    : stub;
+}
+
 
 /**
  * Collect the most-recent user `image` blocks so they can be re-attached inline

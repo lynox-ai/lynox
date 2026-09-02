@@ -373,7 +373,7 @@ describe('mail_reply tool', () => {
     await tool.handler({ uid: 77, body }, agent);
     const flatLen = body.replace(/\s+/g, ' ').trim().length;
     expect(prompt).toContain(`Body is ${String(flatLen)} chars`);
-    expect(prompt).toContain('only the first 199 are shown');
+    expect(prompt).toContain('only the first 3999 are shown');
   });
 
   // The reply confirmation renders the REMOTE sender's subject, and the prompt
@@ -394,8 +394,8 @@ describe('mail_reply tool', () => {
     const tool = createMailReplyTool(registry);
     let prompt = '';
     const agent: IAgent = { promptUser: async (q: string | PromptText) => { prompt = flattenPrompt(q); return 'Yes'; } } as unknown as IAgent;
-    await tool.handler({ uid: 78, body: 'q'.repeat(400) }, agent);
-    expect(prompt).toContain('Body is 400 chars');
+    await tool.handler({ uid: 78, body: 'q'.repeat(5000) }, agent);
+    expect(prompt).toContain('Body is 5000 chars');
     expect(prompt.split('\n').some((l) => l.trimStart().startsWith('<!--'))).toBe(false);
   });
 

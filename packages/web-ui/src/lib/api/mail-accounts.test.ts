@@ -103,4 +103,19 @@ describe('buildMailAccountPayload', () => {
 	it('puts the address in credentials.user', () => {
 		expect(buildMailAccountPayload(FIELDS)['credentials']).toEqual({ user: 'roland@example.com', pass: 'pw' });
 	});
+
+	it('forwards skipTest, which is the only way past a failed SMTP check', () => {
+		// The pre-save test now covers the send path, and the server refuses the
+		// save when it fails. Without this flag reaching the wire, a mailbox that
+		// reads perfectly but cannot verify SMTP — an alias with no send rights, a
+		// smarthost wanting different credentials, a provider throttling AUTH —
+		// cannot be added at all, and the read half of the product goes with it.
+		expect(buildMailAccountPayload({ ...FIELDS, skipTest: true })['skipTest']).toBe(true);
+	});
+
+	it('omits skipTest unless it was asked for, so the test stays on by default', () => {
+		for (const f of [FIELDS, { ...FIELDS, skipTest: false }, { ...FIELDS, skipTest: undefined }]) {
+			expect('skipTest' in buildMailAccountPayload(f)).toBe(false);
+		}
+	});
 });

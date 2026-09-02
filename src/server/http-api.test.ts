@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { maskSecretPatterns, maskSecretsAndPatterns } from '../core/secret-store.js';
 import type { Server } from 'node:http';
 import { createHmac, randomBytes } from 'node:crypto';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, symlinkSync, realpathSync, readdirSync } from 'node:fs';
+import { setTenantWorkspace, clearTenantWorkspace } from '../core/workspace.js';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +13,7 @@ import type { LynoxHooks } from '../core/engine.js';
 import { loadConfig } from '../core/config.js';
 import { buildPdf } from '../../tests/fixtures/minimal-documents.js';
 import { containsUntrustedMarker } from '../core/data-boundary.js';
+import { readDurableKnowledgeForDebug } from './http-api.js';
 
 // === Mock dependencies ===
 
@@ -47,6 +50,14 @@ const mockSecretDelete = vi.fn().mockReturnValue(true);
 // Memory routes reject content containing a secret (parity with the memory_store
 // tool). Default: no secret detected; a case can flip it to assert the 400 guard.
 const mockSecretContains = vi.fn().mockReturnValue(false);
+// Value-based masking. The mock delegates to the REAL combined masker with a
+// mutable value list, rather than passing through: a mock that is less capable
+// than the thing it stands for silently removes the pattern half, and five
+// unrelated tests measured exactly that. Tests that care add a value.
+const mockStoreValues: string[] = [];
+const mockSecretMask = vi.fn(
+  (t: string, opts?: { includeGeneric?: boolean }) => maskSecretsAndPatterns(t, mockStoreValues, opts),
+);
 // Hoisted so /api/secrets/status regression tests can swap userConfig per-case
 // (the bug = "userConfig.api_key empty for non-Anthropic providers" needs the
 // returned config to vary without re-instantiating the Engine mock).
@@ -158,6 +169,8 @@ vi.mock('../core/engine.js', () => ({
       deleteSecret: mockSecretDelete,
       resolve: mockSecretResolve,
       containsSecret: mockSecretContains,
+      maskSecrets: mockSecretMask,
+      maskAll: mockSecretMask,
     });
     this.getRunHistory = vi.fn().mockReturnValue({
       getRecentRuns: mockHistoryGetRecentRuns,
@@ -227,6 +240,11 @@ vi.mock('../core/engine.js', () => ({
       delete: vi.fn().mockReturnValue(false),
     });
     this.getGoogleAuth = vi.fn().mockReturnValue(mockGoogleAuth);
+    // The pair resolver is the truth for "is Google configured": the secret NAMES
+    // can both be present while no single source holds a pair (env id + vault
+    // secret), and the engine then builds nothing. Routes read the resolved source.
+    this.getGoogleClientSource = vi.fn().mockReturnValue('env');
+    this.isGoogleManagedBroker = vi.fn().mockReturnValue(false);
     this.reloadGoogle = vi.fn().mockResolvedValue(true);
     this.reloadUserConfig = mockReloadUserConfig;
     this.reloadCredentials = mockReloadCredentials;
@@ -250,6 +268,14 @@ vi.mock('../core/session-store.js', () => ({
 
 vi.mock('../core/config.js', () => ({
   loadConfig: vi.fn().mockReturnValue({ default_tier: 'deep' }),
+  // Not a stub: the REAL escaper, so this suite tests the same rendering the
+  // engine ships. A stub here would let the two sinks drift, which is the exact
+  // failure this helper exists to prevent.
+  describePinForDisplay: (v: string): string =>
+    [...[...v].map((ch) => {
+      const cp = ch.codePointAt(0) ?? 0;
+      return cp >= 0x20 && cp <= 0x7e ? ch : `\\u${cp.toString(16).padStart(4, '0')}`;
+    }).join('')].slice(0, 64).join(''),
   readUserConfig: vi.fn().mockReturnValue({
     default_tier: 'deep', thinking_mode: 'adaptive',
     api_key: 'sk-ant-secret-key',
@@ -1136,6 +1162,145 @@ describe('LynoxHTTPApi', () => {
       expect(text).toContain('event: done');
     });
 
+    it('carries fatal through to the wire on an ENGINE error, not just the catch', async () => {
+      // The other test covers http-api's own catch. This covers the path every
+      // engine event takes: session.onStream -> JSON.stringify -> res.write.
+      // Typing that closure narrowly does NOT protect it — the payload goes into
+      // JSON.stringify, not into a typed sink, so an explicit field projection
+      // there drops `fatal` from every engine error and still typechecks
+      // (measured). A test on the rendered stream is the only thing that fails.
+      mockSessionRun.mockImplementationOnce(async () => {
+        const onStream = mockSessionInstance.onStream as ((e: unknown) => Promise<void>) | null;
+        if (onStream) {
+          await onStream({ type: 'error', message: 'tool input unparsable', fatal: false, agent: 'lynox' });
+        }
+        return 'partial';
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'emit an engine error' }),
+      });
+
+      const text = await res.text();
+      expect(text).toContain('event: error');
+      expect(text).toContain('"fatal":false');
+    });
+
+    it('masks a store VALUE that no pattern can match — and this is the boot wiring', async () => {
+      // Two claims in one test, on purpose.
+      //
+      // The product claim: a credential with no distinguishing shape is masked.
+      // 11 of the 13 patterns are prefix-bound and the other two need either a
+      // `user:pass@` shape or 40+ characters, so a Mistral key — 32 bare
+      // alphanumerics — cannot be caught by any of them. Only the store knows it.
+      //
+      // The wiring claim, which is the one that decays silently: the store is a
+      // module-scoped reference set ONCE after engine.init(). Delete that line
+      // and every unit test that hands a store in itself still passes, while
+      // production masks nothing. So this test asserts through the real boot
+      // path and NEVER calls setClientErrorSecretStore itself — deleting the
+      // wiring line has to be what makes it fail.
+      const mistralKey = 'a'.repeat(32);
+      mockStoreValues.push(mistralKey);
+      try {
+      mockSessionRun.mockImplementationOnce(async () => {
+        throw new Error(`provider rejected ${mistralKey}`);
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'boom' }),
+      });
+
+      const text = await res.text();
+      expect(text).not.toContain(mistralKey);
+      // and the pattern masker demonstrably could NOT have done it
+      expect(maskSecretPatterns(`provider rejected ${mistralKey}`, { includeGeneric: true }))
+        .toContain(mistralKey);
+      } finally { mockStoreValues.length = 0; }
+    });
+
+    it('masks BEFORE it caps — a secret straddling the cut must not survive in pieces', async () => {
+      // The order is the whole control, and nothing pinned it: a delta round put
+      // the wrong order back at two sites and 550 tests stayed green.
+      //
+      // Cutting first can slice a secret below a rule's minimum length — or, for
+      // the URL rule, before the `@` it needs — so the rule stops matching and
+      // the REMAINDER ships in cleartext. Measured across 15 shapes and 700
+      // offsets: masking first leaks nothing; cutting first leaked up to 38 of
+      // 39 characters of a Google key. The padding here puts the password across
+      // the cut on purpose (offset found by sweep, not guessed).
+      const pw = 'Xk4vQ9wTz2mLp7bNr5dHs8g';
+      mockSessionRun.mockImplementationOnce(async () => {
+        throw new Error(`${'x'.repeat(555)} postgres://lynox_app:${pw}@db-primary.internal:5432/lynox`);
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'boom' }),
+      });
+
+      const text = await res.text();
+      expect(text).not.toContain(pw);
+    });
+
+    it('masks a credential shape out of the error it streams, and caps the length', async () => {
+      // The message on this path is whatever the runtime or the provider said.
+      // It renders into the tenant's error banner, an 8s toast and a one-click
+      // copy button — and in the managed tiers the LLM key it may quote is ours,
+      // not theirs. Two asserts on purpose: the register row for this warned
+      // that a test which only checks the LENGTH measures the wrong half, since
+      // truncation hides a key by accident rather than removing it.
+      const key = `sk-ant-${'a'.repeat(60)}`;
+      mockSessionRun.mockImplementationOnce(async () => {
+        // Filler with SPACES on purpose: an unbroken 900-char run is itself a
+        // generic-secret shape, so the masker would collapse it and satisfy the
+        // length assert without the cap ever running. Measured — that survivor
+        // is how this line got written.
+        throw new Error(`provider rejected request with ${key} while calling ${'lorem ipsum dolor '.repeat(60)}`);
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'boom' }),
+      });
+
+      const text = await res.text();
+      const frame = text.split('\n').find(l => l.startsWith('data: ') && l.includes('"error"')) ?? '';
+      // 1) the credential shape is gone — not merely pushed past the cut
+      expect(frame).not.toContain(key);
+      // 2) and the payload is bounded, independently of the masking
+      const payload = JSON.parse(frame.slice(6)) as { error: string };
+      expect(payload.error.length).toBeLessThanOrEqual(601);
+    });
+
+    it('marks the server-side terminal error fatal on the wire', async () => {
+      // The run stream carries `event: error` for two different things. This is
+      // the server-SIDE terminal case — the catch around session.run(), with
+      // res.end() right after; agent.ts's iteration cap is the other fatal one.
+      // Nothing reads `fatal` yet. The field is pinned here anyway because this
+      // payload has a different SHAPE from the engine's, so it is the one a
+      // future consumer would silently read as `undefined` — falsy, i.e. "keep
+      // waiting" — on the one path where the turn really is over.
+      // `Once`, not a standing implementation: a throwing mock that outlives its
+      // test is only caught by the blanket mockResolvedValue in the file's
+      // beforeEach, which makes that line silently load-bearing for this test
+      // alone. Scoping it here keeps the coupling from existing at all.
+      mockSessionRun.mockImplementationOnce(async () => {
+        throw new Error('provider exploded');
+      });
+
+      const res = await jsonFetch('/api/sessions/test/run', {
+        method: 'POST',
+        body: JSON.stringify({ task: 'boom' }),
+      });
+
+      const text = await res.text();
+      expect(text).toContain('event: error');
+      expect(text).toContain('"fatal":true');
+    });
+
     it('echoes the run usage in the done event', async () => {
       // The done event carries getLastRunUsage() so the per-message footer
       // survives a lost turn_end frame (PR #518).
@@ -1572,6 +1737,215 @@ describe('LynoxHTTPApi', () => {
       }
     });
 
+    // ── A run parked on a pending prompt (dogfood 2026-08-24, rafael's prod) ──
+    // Reported: the stop button returned 200 while the run stayed parked, and
+    // every later message came back 409 "a run is already in progress" — the
+    // thread was unusable for 15 h until the container was restarted.
+    //
+    // Measured on the instance: the run sat on an ask_user prompt, `last_activity`
+    // was seconds fresh (the SSE keepalive was still writing, so the socket was
+    // NEVER observed closed), and the slot in `runningSessions` was therefore
+    // never reclaimed by any path:
+    //   - the wall-clock is PAUSED while parked, by design (#77, test above);
+    //   - the orphan watchdog + the stale-run takeover both require
+    //     `streamAlive === false`, which only `req.on('close')` ever sets;
+    //   - PROMPT_TTL (24 h) was the sole remaining bound.
+    // Every teardown route did `session.abort()` (or, for DELETE /threads/:id,
+    // nothing) — but a parked run is not waiting on the session, it is waiting on
+    // `waitForSettled(promptId, sessionAbortController.signal)`. Only the slot's
+    // `takeover` unwinds that, which is why the stale-run reclaim uses it.
+    //
+    // The four tests below assert the OUTCOME a user cares about — after this
+    // route, the session accepts a new message — for each way into the state.
+    async function withParkedRun(
+      sid: string,
+      body: (ctx: {
+        prompts: { getPending: (s: string) => unknown };
+        slots: Map<string, unknown>;
+        runRes: Response;
+      }) => Promise<void>,
+    ): Promise<void> {
+      const Database = (await import('better-sqlite3')).default;
+      const db = new Database(':memory:');
+      db.prepare(`CREATE TABLE pending_prompts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        prompt_type TEXT NOT NULL CHECK(prompt_type IN ('ask_user','ask_secret','connect_mail')),
+        question TEXT NOT NULL,
+        options_json TEXT,
+        questions_json TEXT,
+        segments_json TEXT,
+        partial_answers_json TEXT,
+        secret_name TEXT,
+        secret_key_type TEXT,
+        answer TEXT,
+        answer_saved INTEGER,
+        answer_error TEXT,
+        multi_select INTEGER,
+        payload_json TEXT,
+        origin_json TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        answered_at TEXT,
+        expires_at TEXT NOT NULL
+      )`).run();
+      db.prepare(`CREATE INDEX idx_pending_prompts_session ON pending_prompts(session_id, status)`).run();
+      db.prepare(`CREATE UNIQUE INDEX idx_pending_prompts_session_unique ON pending_prompts(session_id) WHERE status = 'pending'`).run();
+      const { PromptStore } = await import('../core/prompt-store.js');
+      const realPromptStore = new PromptStore(db);
+
+      const engineRef = (api as unknown as { engine: { getPromptStore: () => unknown } }).engine;
+      const originalGetPromptStore = engineRef.getPromptStore;
+      engineRef.getPromptStore = (): unknown => realPromptStore;
+      const slots = (api as unknown as { runningSessions: Map<string, unknown> }).runningSessions;
+
+      try {
+        // The mocked agent loop parks on the handler-wired ask_user callback,
+        // exactly as the real one does.
+        mockSessionRun.mockImplementationOnce(async () => {
+          const promptUser = mockSessionInstance.promptUser as
+            (q: string, o?: string[]) => Promise<string>;
+          const answer = await promptUser('Which repo did you mean?', ['lynox', 'lynox-pro']);
+          return `settled:${answer}`;
+        });
+        const runRes = await jsonFetch(`/api/sessions/${sid}/run`, {
+          method: 'POST',
+          body: JSON.stringify({ task: 'find the repo', protocol: 1 }),
+        });
+        expect(runRes.status).toBe(200);
+
+        // Wait until the run has ACTUALLY parked — the target situation. Without
+        // this the tests would pass against a run that simply finished.
+        let pending = realPromptStore.getPending(sid);
+        for (let i = 0; i < 200 && !pending; i++) {
+          await new Promise<void>((r) => setTimeout(r, 5));
+          pending = realPromptStore.getPending(sid);
+        }
+        expect(pending).toBeDefined();
+        // Precondition: parked means the slot IS held. That is correct — the 409
+        // only becomes a defect once teardown cannot clear it.
+        expect(slots.has(sid)).toBe(true);
+
+        await body({ prompts: realPromptStore, slots, runRes });
+        await runRes.text();
+      } finally {
+        engineRef.getPromptStore = originalGetPromptStore;
+        db.close();
+      }
+    }
+
+    /** Bounded wait for the run's `finally` to drain the slot. The unwind is
+     *  asynchronous — a probe showed it completing inside the teardown request's
+     *  own round trip, but that is timing, not a guarantee, so the tests wait
+     *  rather than assert on the scheduler. */
+    async function expectSlotReclaimed(slots: Map<string, unknown>, sid: string): Promise<void> {
+      for (let i = 0; i < 200 && slots.has(sid); i++) {
+        await new Promise<void>((r) => setTimeout(r, 10));
+      }
+      expect(slots.has(sid)).toBe(false);
+    }
+
+    it('POST /abort on a parked run frees the slot — the next message is not 409', async () => {
+      await withParkedRun('abort-parked-1', async ({ prompts, slots }) => {
+        const abortRes = await jsonFetch('/api/sessions/abort-parked-1/abort', { method: 'POST' });
+        expect(abortRes.status).toBe(200);
+
+        await expectSlotReclaimed(slots, 'abort-parked-1');
+        // Settled, not left pending for the 24 h TTL.
+        expect(prompts.getPending('abort-parked-1')).toBeUndefined();
+
+        // The reported symptom: the user can send the next message.
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const next = await jsonFetch('/api/sessions/abort-parked-1/run', {
+          method: 'POST',
+          body: JSON.stringify({ task: 'never mind, do this instead', protocol: 1 }),
+        });
+        expect(next.status).not.toBe(409);
+        expect(next.status).toBe(200);
+        await next.text();
+      });
+    });
+
+    // The reclaim must NOT sit behind the route's 404 guard. The slot does not
+    // live on the Session, and the case that needs reclaiming most is the one
+    // where the Session is already gone — a thread deleted while its run was
+    // parked. Behind the guard, the backstop would be unreachable exactly there.
+    it('POST /abort reclaims a parked run even when the Session is already gone', async () => {
+      await withParkedRun('abort-parked-2', async ({ prompts, slots }) => {
+        mockSessionGet.mockReturnValueOnce(undefined);
+        const abortRes = await jsonFetch('/api/sessions/abort-parked-2/abort', { method: 'POST' });
+        // Still 404 — there is no Session to abort, and saying so is honest. The
+        // reclaim simply is not conditional on it.
+        expect(abortRes.status).toBe(404);
+
+        await expectSlotReclaimed(slots, 'abort-parked-2');
+        expect(prompts.getPending('abort-parked-2')).toBeUndefined();
+      });
+    });
+
+    // DELETE /api/sessions/:id calls session.abort() and then drops the Session.
+    // A parked run ignores the abort, so without the reclaim the slot — and the
+    // run-executor reservation it holds — would outlive the only handle to it.
+    it('DELETE /api/sessions/:id reclaims a parked run instead of stranding its slot', async () => {
+      await withParkedRun('abort-parked-3', async ({ prompts, slots }) => {
+        const delRes = await jsonFetch('/api/sessions/abort-parked-3', { method: 'DELETE' });
+        expect(delRes.status).toBe(200);
+
+        await expectSlotReclaimed(slots, 'abort-parked-3');
+        expect(prompts.getPending('abort-parked-3')).toBeUndefined();
+      });
+    });
+
+    // DELETE /api/threads/:id is the worse of the two: it drops the Session with
+    // no abort at all. The UI offers it from the sidebar with no isStreaming
+    // check, so this is a click away while a run is parked. Five stranded
+    // reservations exhaust the run executor (capacity 5) and 429 every thread.
+    it('DELETE /api/threads/:id reclaims a parked run instead of stranding its slot', async () => {
+      await withParkedRun('abort-parked-4', async ({ prompts, slots }) => {
+        const engineRef = (api as unknown as { engine: { getThreadStore: () => unknown } }).engine;
+        const origGetThreadStore = engineRef.getThreadStore;
+        engineRef.getThreadStore = (): unknown => ({
+          getThread: () => ({ id: 'abort-parked-4' }),
+          deleteThread: vi.fn(),
+        });
+        try {
+          const delRes = await jsonFetch('/api/threads/abort-parked-4', { method: 'DELETE' });
+          expect(delRes.status).toBe(200);
+
+          await expectSlotReclaimed(slots, 'abort-parked-4');
+          expect(prompts.getPending('abort-parked-4')).toBeUndefined();
+        } finally {
+          engineRef.getThreadStore = origGetThreadStore;
+        }
+      });
+    });
+    // Two robustness properties of the reclaim, in one target situation: the
+    // prompt store fails while the run is parked (closed db, SQLITE_BUSY).
+    //   (a) `takeover` unwinds BEFORE it does bookkeeping — `waitForSettled`
+    //       resolves on the signal alone, so a throwing store must not be able to
+    //       leave the run parked, which is the very state this fix exists to end.
+    //   (b) the reclaim is best-effort, mirroring RunExecutor.abort: a teardown
+    //       must not turn into a 500 for the caller who asked for it.
+    it('a failing prompt store neither strands the parked run nor 500s the abort', async () => {
+      await withParkedRun('abort-parked-5', async ({ prompts, slots }) => {
+        (prompts as { expirePrompt: (id: string) => boolean }).expirePrompt = (): boolean => {
+          throw new Error('SQLITE_BUSY: database is locked');
+        };
+
+        const abortRes = await jsonFetch('/api/sessions/abort-parked-5/abort', { method: 'POST' });
+        expect(abortRes.status).toBe(200);
+
+        await expectSlotReclaimed(slots, 'abort-parked-5');
+
+        // And the cost of that ordering, pinned so it cannot change silently:
+        // the expire never ran, so the row stays `pending` until its 24 h TTL and
+        // the next insertAskUser on this session hits the unique index. That is
+        // strictly better than a wedged slot — the thread stays usable for chat —
+        // but it is a trade, not a free win, and the other four tests assert the
+        // opposite (`getPending` undefined) precisely because they can.
+        expect(prompts.getPending('abort-parked-5')).toBeDefined();
+      });
+    });
     // Companion test: verify the slot remembers stream death so a later
     // /run can detect the stale state. Exercises the req.on('close') path
     // by going through the public /run endpoint and checking the internal
@@ -1682,6 +2056,10 @@ describe('LynoxHTTPApi', () => {
       const buf = mgr.create('stream-run');
       buf.append({ type: 'text', text: 'hello', agent: 'main' });            // seq 1
       buf.append({ type: 'tool_call', name: 'x', input: {}, agent: 'main' }); // seq 2
+      // seq 3: an error, because the re-attach path is exactly where a client
+      // decides whether its turn is dead. Replaying it without `fatal` is how a
+      // reload in mid-run learned nothing about a run that was still alive.
+      buf.append({ type: 'error', message: 'unparsable tool input', fatal: false, agent: 'main' });
 
       try {
         const res = await fetch(`${baseUrl}/api/runs/stream-run/stream?since=1`, { headers: authHeaders() });
@@ -1691,7 +2069,7 @@ describe('LynoxHTTPApi', () => {
 
         // Schedule a live append, then run completion, WHILE we read
         // continuously — avoids a read() that blocks past a fixed time budget.
-        setTimeout(() => buf.append({ type: 'text', text: 'more', agent: 'main' }), 150); // seq 3
+        setTimeout(() => buf.append({ type: 'text', text: 'more', agent: 'main' }), 150); // seq 4
         setTimeout(() => mgr.remove('stream-run'), 400); // ends buffer → terminal done
 
         let sse = '';
@@ -1708,7 +2086,14 @@ describe('LynoxHTTPApi', () => {
         expect(sse).toContain('id: 2');
         expect(sse).toContain('tool_call');
         expect(sse).not.toContain('id: 1');
+        // The replayed error must arrive with its discriminator. A projection in
+        // the replay writer drops it while typechecking clean (measured), so this
+        // assert is the only thing standing between a re-attaching client and a
+        // guess about whether its turn is dead.
+        expect(sse).toContain('event: error');
+        expect(sse).toContain('"fatal":false');
         expect(sse).toContain('id: 3');
+        expect(sse).toContain('id: 4');
         expect(sse).toContain('event: done');
       } finally {
         engineRef.getRunBufferManager = orig;
@@ -2518,7 +2903,7 @@ describe('LynoxHTTPApi', () => {
       // Per-tier enrichment is server-side (web-ui has no @lynox-ai/core import):
       // the ⚡ efficient deep slot resolves to the CN-via-Fireworks model + its host disclosure.
       const efficientDeep = presets!['efficient']!.tiers.find((t) => t['tier'] === 'deep')!;
-      expect(efficientDeep['model_id']).toBe('accounts/fireworks/models/glm-5p2');
+      expect(efficientDeep['model_id']).toBe('accounts/fireworks/models/kimi-k3');
       expect(efficientDeep['provenance']).toBe('CN');
       expect(efficientDeep['residency']).toBe('US');
     });
@@ -2530,9 +2915,15 @@ describe('LynoxHTTPApi', () => {
       // Anthropic default map (Sonnet/Opus) while the preset routes mistral-medium —
       // the exact stale-label class the composer picker hit. Real expandTierPreset +
       // catalog run here (not mocked).
-      const { readUserConfig } = await import('../core/config.js');
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      const { expandTierPreset } = await import('../core/tier-presets.js');
       (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
         .mockReturnValueOnce({ tier_preset: 'balanced', provider: 'anthropic', default_tier: 'balanced' });
+      // The handler reads the LOADER's output, not the raw file: a tier_preset is
+      // sugar the loader materialises (config.ts:476-486), and the CP can pin it by
+      // env entirely outside config.json. So the fixture is what the loader yields.
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ ...expandTierPreset('balanced') });
       const res = await jsonFetch('/api/config');
       expect(res.status).toBe(200);
       const body = await res.json() as Record<string, unknown>;
@@ -2543,7 +2934,7 @@ describe('LynoxHTTPApi', () => {
       // match 'Mistral Medium 3.1' (128k, below the context floor) and 'Mistral Medium
       // (latest)' (the forbidden -latest tag). Labels carry the registry context
       // window since 2026-08-09 ("· 256k").
-      expect(tiers!['balanced']).toBe('Mistral Medium 3.5 · 256k');
+      expect(tiers!['balanced']).toBe('GLM 5.2 · 1M');
       expect(tiers!['balanced']).not.toContain('Sonnet');
     });
 
@@ -2572,6 +2963,240 @@ describe('LynoxHTTPApi', () => {
       // silently drop it.
       expect(features['pdfInput']).toBe(true);
     });
+
+    it('GET active_model names the tier_set slot, not the base provider map', async () => {
+      // Measured on staging 2026-08-11 (build b3b6727c): `active_model` reported
+      // `claude-sonnet-5` / provider `anthropic` with Sonnet's FEATURE MATRIX,
+      // while `main_chat_tiers` in the SAME response body correctly said "GLM 5.2"
+      // and the run actually executed `accounts/fireworks/models/glm-5p2`. Two
+      // fields of one response disagreeing is worse than either being wrong alone:
+      // a reader cannot tell which is true.
+      //
+      // (The context window was NOT part of the observed defect — both models are
+      // registered at 1M, models.ts:670 and :1001. An earlier version of this
+      // comment claimed a 1M-vs-500k mismatch; the 500k was the session's user cap,
+      // a different field. The real drift was id / provider / uiLabel / features.)
+      //
+      // The features assertion is the severity: the response shipped
+      // `extendedThinking`/`vision`/`pdfInput` = true for a model that has none of
+      // them, so any consumer gating on capability read a model that wasn't running.
+      //
+      // The raw file deliberately carries NO tier_set here — only the loader does.
+      // That is the CP-pinned channel (`LYNOX_TIER_PRESET`/`LYNOX_TIER_SET_JSON`,
+      // config.ts:464/504), and reading `readUserConfig()` instead of the loader
+      // would report the base provider's model on every such tenant.
+      //
+      // NOTE the neighbouring 'under Mistral tier-set' case does NOT cover this: it
+      // flips the BASE provider + its model map (setOpenAIModelResolver), never a
+      // hybrid tier_set. That naming is why this path went uncovered.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      const hybrid = {
+        routing_mode: 'hybrid' as const,
+        tier_set: {
+          balanced: {
+            provider: 'openai',
+            model_id: 'accounts/fireworks/models/glm-5p2',
+            api_base_url: 'https://api.fireworks.ai/inference/v1',
+          },
+        },
+      };
+      // File: no tier_set at all — the CP pinned it by env, which is the channel
+      // `readUserConfig()` cannot see.
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      // Loader: the resolved set the engine actually routes on.
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce(hybrid);
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown> | undefined;
+      expect(am).toBeDefined();
+      expect(am!['id']).toBe('accounts/fireworks/models/glm-5p2');
+      expect(am!['provider']).toBe('openai');
+      expect(am!['uiLabel']).toBe('GLM 5.2');
+      const slotFeatures = am!['features'] as Record<string, boolean>;
+      expect(slotFeatures['extendedThinking']).toBe(false);
+      expect(slotFeatures['vision']).toBe(false);
+      expect(slotFeatures['pdfInput']).toBe(false);
+      // Same body, same model — the invariant the shared derivation buys.
+      const tiers = body['main_chat_tiers'] as Record<string, string> | undefined;
+      expect(tiers!['balanced']).toContain('GLM 5.2');
+      // ...and the STRATEGY fields have to come from the same place. The raw file
+      // above says nothing about routing, so reporting the file made this
+      // `standard` right next to a hybrid `active_model` — the picker then drew
+      // "Standard" while the engine routed GLM.
+      expect(body['routing_mode']).toBe('hybrid');
+    });
+
+    it('GET /api/config reports the LOADER preset, not the raw file (CP-pin visibility)', async () => {
+      // The channel a pin travels: `LYNOX_TIER_PRESET` never touches config.json, so
+      // the raw file carries no `tier_preset` at all. While GET reported the file,
+      // an operator checking whether a pin took effect saw "no preset" on an
+      // instance that was routing one — and this is the surface used to check.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({
+          provider: 'anthropic',
+          default_tier: 'balanced',
+          tier_preset: 'efficient',
+          routing_mode: 'hybrid' as const,
+          tier_set: {
+            balanced: {
+              provider: 'openai',
+              model_id: 'accounts/fireworks/models/minimax-m3',
+              api_base_url: 'https://api.fireworks.ai/inference/v1',
+            },
+          },
+        });
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['tier_preset']).toBe('efficient');
+      expect(body['routing_mode']).toBe('hybrid');
+    });
+
+    it('GET /api/config says null for no preset — not merely absent', async () => {
+      // Counter-direction. An overlay that only ever WROTE a name would satisfy the
+      // case above while leaving "the engine runs no preset" indistinguishable from
+      // "nobody asked", which is the ambiguity that started this.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      const res = await jsonFetch('/api/config');
+      const body = await res.json() as Record<string, unknown>;
+      expect(body).toHaveProperty('tier_preset');
+      expect(body['tier_preset']).toBeNull();
+      expect(body['routing_mode']).toBe('standard');
+    });
+
+    it('no value from the LOADER reaches the body except the declared vocabulary', async () => {
+      // A tripwire on the OUTPUT, added because the two assignments above
+      // establish a pattern: copy a field out of `effectiveConfig` into the
+      // response AFTER the redaction pass. That is safe for a preset name and a
+      // routing mode, and unsafe in general — the loader is a SECRET-BEARING
+      // object. `applyManagedTierSetConstraints` writes live control-plane
+      // provider keys into its `tier_set` slots, and on managed those are the
+      // OPERATOR's credentials, not the tenant's.
+      //
+      // The existing fail-closed guard cannot see this: it constrains the INPUT
+      // of `redactConfigForResponse`, and an assignment after that call is
+      // structurally invisible to it. So the next person to extend this block —
+      // the surrounding comments already reason about "the tier_set the ENGINE
+      // routes on" — would ship those keys with a green suite. This test is what
+      // goes red instead.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({
+          provider: 'anthropic',
+          default_tier: 'balanced',
+          api_key: 'LOADER-TOP-LEVEL-SECRET',
+          tier_preset: 'efficient',
+          routing_mode: 'hybrid' as const,
+          tier_set: {
+            balanced: {
+              provider: 'openai',
+              model_id: 'accounts/fireworks/models/minimax-m3',
+              api_base_url: 'https://api.fireworks.ai/inference/v1',
+              api_key: 'LOADER-SLOT-SECRET',
+            },
+          },
+        });
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      // Serialized, not key-by-key: a future assignment could place a secret
+      // under any name, and this has to fail for all of them, not for the ones
+      // someone remembered to enumerate.
+      const raw = JSON.stringify(await res.json());
+      expect(raw).not.toContain('LOADER-TOP-LEVEL-SECRET');
+      expect(raw).not.toContain('LOADER-SLOT-SECRET');
+    });
+
+    it('GET active_model resolves a `custom` slot to the Anthropic wire', async () => {
+      // `custom` is registered `wireClient: 'anthropic'` (models.ts:340) — an
+      // Anthropic-compatible proxy. It and an unregistered key are the ONLY inputs
+      // where the registry lookup and a hand-rolled
+      // "anything-but-anthropic/vertex is openai" disagree, so this is the case
+      // that has to exist: without it, reverting to the hand-rolled narrowing
+      // survives the whole suite.
+      //
+      // The window assert is the second-order consequence, not decoration: reading
+      // the slot as `openai` trips the Anthropic-fallback trap in
+      // `resolveNativeContextWindow` (models.ts:1204-1207), which caps a registered
+      // Claude model at the 200k fallback. That trap exists for a tier RESOLVER
+      // that fell back to a Claude id; a slot `model_id` is an explicit pin, so it
+      // must not fire here.
+      const { readUserConfig, loadConfig } = await import('../core/config.js');
+      const hybrid = {
+        routing_mode: 'hybrid' as const,
+        tier_set: {
+          balanced: {
+            // Deliberately NOT a MODEL_MAP tier default. With `claude-opus-4-6`
+            // here every assert was also satisfied by the default fixture
+            // (`default_tier: 'deep'` + `MODEL_MAP.deep === 'claude-opus-4-6'`),
+            // so the case passed with both mocks removed — green without ever
+            // resolving a slot. `claude-fable-5` is 1M / anthropic like Opus 4.6
+            // but belongs to no tier map, which makes the `id` assert a real
+            // guard that the fixture actually arrived.
+            provider: 'custom',
+            model_id: 'claude-fable-5',
+            api_base_url: 'https://proxy.internal/v1',
+          },
+        },
+      };
+      (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce({ provider: 'anthropic', default_tier: 'balanced' });
+      (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+        .mockReturnValueOnce(hybrid);
+      const res = await jsonFetch('/api/config');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      const am = body['active_model'] as Record<string, unknown> | undefined;
+      expect(am).toBeDefined();
+      expect(am!['id']).toBe('claude-fable-5');
+      expect(am!['provider']).toBe('anthropic');
+      expect(am!['contextWindow']).toBe(1_000_000);
+    });
+
+    it('GET active_model reports an Anthropic slot on a non-Anthropic base honestly', async () => {
+      // Two regressions in one case, both found by mutating the changed lines:
+      //  · collapsing the slot-provider narrowing to a blanket 'openai' would
+      //    mislabel every max-quality slot running on a Mistral/Fireworks base;
+      //  · `resolveNativeContextWindow` refuses a Claude window when the provider
+      //    reads openai/custom (models.ts:1207 — the Anthropic-fallback trap).
+      //    Handing it the BASE provider caps a genuine Sonnet slot at the 200k
+      //    fallback instead of its real 1M, which is the window the UI filters on.
+      const llmClient = await import('../core/llm-client.js');
+      const providerSpy = vi.spyOn(llmClient, 'getActiveProvider').mockReturnValue('openai');
+      try {
+        const { readUserConfig, loadConfig } = await import('../core/config.js');
+        const hybrid = {
+          routing_mode: 'hybrid' as const,
+          tier_set: { balanced: { provider: 'anthropic', model_id: 'claude-sonnet-5' } },
+        };
+        (readUserConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+          .mockReturnValueOnce({ provider: 'openai', default_tier: 'balanced', ...hybrid });
+        (loadConfig as unknown as { mockReturnValueOnce: (v: unknown) => void })
+          .mockReturnValueOnce(hybrid);
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        const am = body['active_model'] as Record<string, unknown> | undefined;
+        expect(am).toBeDefined();
+        expect(am!['id']).toBe('claude-sonnet-5');
+        expect(am!['provider']).toBe('anthropic');
+        expect(am!['contextWindow']).toBe(1_000_000);
+      } finally {
+        providerSpy.mockRestore();
+      }
+    });
+
 
     it('capabilities.durable_memory_capture_degraded is TRUE for DK-on + Mistral balanced (the wiring)', async () => {
       // The WIRING test (DEF-dk-capture-tool-dependence): the pure couple is
@@ -2759,6 +3384,82 @@ describe('LynoxHTTPApi', () => {
       expect((body['env_overrides'] as Record<string, unknown>)['provider']).toBe(false);
     });
 
+    it('GET names an IGNORED tier-preset pin — silence would read as applied', async () => {
+      // An unknown CP pin no longer takes the container down. That keeps the
+      // instance up, but it also removes the failure that USED to be the operator
+      // signal (an unreachable engine escalates on its own), so the ignore has to
+      // be observable somewhere. `env_overrides` is where this surface already
+      // says "the environment is overriding your setting".
+      //
+      // Asserts the NAME, not a boolean: an operator needs to tell a version skew
+      // from a typo, and only the name distinguishes them.
+      const prev = process.env['LYNOX_TIER_PRESET'];
+      process.env['LYNOX_TIER_PRESET'] = 'ultra-cheap';
+      try {
+        const res = await jsonFetch('/api/config');
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        expect((body['env_overrides'] as Record<string, unknown>)['tier_preset_ignored']).toBe('ultra-cheap');
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_TIER_PRESET']; else process.env['LYNOX_TIER_PRESET'] = prev;
+      }
+    });
+
+    it('GET reports an ignored pin even when sanitising WOULD have resolved it', async () => {
+      // Order matters: the loader validates the raw value, so a control character
+      // inside the name makes it unknown and the pin is dropped. A marker that
+      // sanitised first would strip the character, resolve the name, and stay
+      // silent — the "silence reads as applied" case this field exists to stop.
+      const prev = process.env['LYNOX_TIER_PRESET'];
+      process.env['LYNOX_TIER_PRESET'] = 'effici\u0001ent';
+      try {
+        const body = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+        // NOT 'efficient'. Stripping the byte would rename an unresolvable pin
+        // into a preset this engine knows, so the field would name a valid preset
+        // while reporting it as unknown — and an operator would read "version
+        // skew" where the truth is an invisible character. Escaping keeps the
+        // evidence, which is the whole reason the field carries a name at all.
+        expect((body['env_overrides'] as Record<string, unknown>)['tier_preset_ignored']).toBe('effici\\u0001ent');
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_TIER_PRESET']; else process.env['LYNOX_TIER_PRESET'] = prev;
+      }
+    });
+
+    it('GET bounds the echoed pin — it is arbitrary env text by definition', async () => {
+      // The marker fires exactly when the value is NOT a known preset, i.e.
+      // exactly when it is arbitrary. Operator-set and behind auth, so this is
+      // hygiene — but a response field must not be an unbounded passthrough of
+      // an environment variable.
+      const prev = process.env['LYNOX_TIER_PRESET'];
+      process.env['LYNOX_TIER_PRESET'] = 'bad name\u001B[31m' + 'x'.repeat(200);
+      try {
+        const body = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+        const echoed = (body['env_overrides'] as Record<string, unknown>)['tier_preset_ignored'] as string;
+        expect(echoed).toBeDefined();
+        expect(echoed.length).toBeLessThanOrEqual(64);
+        expect(echoed).not.toMatch(/[\u0000-\u001F\u007F]/);
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_TIER_PRESET']; else process.env['LYNOX_TIER_PRESET'] = prev;
+      }
+    });
+
+    it('GET stays silent about a pin that RESOLVES, and about no pin at all', async () => {
+      // Counter-direction. A marker that is always present says nothing, and one
+      // that fires on a working pin would train operators to ignore it.
+      const prev = process.env['LYNOX_TIER_PRESET'];
+      process.env['LYNOX_TIER_PRESET'] = 'efficient';
+      try {
+        const body = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+        expect((body['env_overrides'] as Record<string, unknown>)['tier_preset_ignored']).toBeUndefined();
+      } finally {
+        if (prev === undefined) delete process.env['LYNOX_TIER_PRESET']; else process.env['LYNOX_TIER_PRESET'] = prev;
+      }
+      delete process.env['LYNOX_TIER_PRESET'];
+      const body2 = await (await jsonFetch('/api/config')).json() as Record<string, unknown>;
+      expect((body2['env_overrides'] as Record<string, unknown>)['tier_preset_ignored']).toBeUndefined();
+      if (prev !== undefined) process.env['LYNOX_TIER_PRESET'] = prev;
+    });
+
     it('GET reports debug_wire_capture env-pinned + the EFFECTIVE value over a stale disk value', async () => {
       // The env var wins over config.json at load, so the raw disk value (false)
       // must be overwritten in the response and the pin reported — otherwise the
@@ -2936,9 +3637,10 @@ describe('LynoxHTTPApi', () => {
         expect(res.status).toBe(200);
         const body = await res.json() as Record<string, unknown>;
         const presets = body['available_tier_presets'] as Record<string, { available: boolean }>;
-        expect(presets['efficient']!.available).toBe(false); // Fireworks deep dropped
-        expect(presets['balanced']!.available).toBe(true);
-        expect(presets['max-quality']!.available).toBe(true);
+        expect(presets['efficient']!.available).toBe(false); // all slots Fireworks
+        expect(presets['balanced']!.available).toBe(false);   // Fireworks main since 2026-08-10
+        expect(presets['max-quality']!.available).toBe(true);  // all-Anthropic — the ONLY one left
+        expect(Object.values(presets).filter((p) => p.available)).toHaveLength(1);
         // The lock mirrors the disabled card + the write-gate 403.
         const locks = body['locks'] as Record<string, Record<string, unknown>>;
         expect(locks['tier_preset']?.['reason']).toBe('managed-tier');
@@ -3909,10 +4611,16 @@ describe('LynoxHTTPApi', () => {
       },
     ] as const;
 
+    // A step that SPAWNED, so one frame carries both halves — that is the shape
+    // a real nested run produces, and it keeps the sub-agent fields under the
+    // same per-kind parametrisation rather than proving them on one arm.
     const ORIGIN_META = {
       workflowName: 'bexio Triage Phase 1-3',
       stepId: 'load_contacts',
       stepTask: 'Paginate GET /2.0/contact',
+      subagent: true,
+      subagentName: 'inbox-triage',
+      subagentTask: 'Fold duplicate contacts',
     };
 
     it.each(SSE_PROMPT_KINDS)('the live $label frame names the workflow, not just the step', async ({ raise }) => {
@@ -3944,6 +4652,11 @@ describe('LynoxHTTPApi', () => {
         const payload = JSON.parse(frame!.slice('data:'.length)) as Record<string, unknown>;
         expect(payload['workflow_name']).toBe('bexio Triage Phase 1-3');
         expect(payload['step_id']).toBe('load_contacts');
+        // The sub-agent half of the same frame. Without these, re-inlining the
+        // old three-field spread at any one of the four emit sites passes: the
+        // wire-field helper is unit-tested, but nothing proved the emits use it.
+        expect(payload['subagent']).toBe(true);
+        expect(payload['subagent_name']).toBe('inbox-triage');
 
         // Settle the parked prompt so its expiry interval is cleared before the
         // db closes. Without this the timer fires ~30s later against a closed
@@ -4361,6 +5074,296 @@ describe('LynoxHTTPApi', () => {
       });
     });
 
+    /**
+     * DEF-debug-export-blind-to-dk. The export read only `memories`; durable knowledge writes to
+     * `knowledge_entries`, so on a DK tenant the snapshot showed a memory store frozen weeks in
+     * the past and looked healthy. These pin the second substrate, its labelling, and — the part
+     * that makes it a diagnostic rather than a guess — that an unreadable block SAYS so.
+     */
+    function dkEngine(store: unknown): Record<string, () => unknown> {
+      return {
+        getThreadStore: () => ({ getThread: () => ({ id: 't1', title: 'T' }), getMessages: () => [] }),
+        getRunHistory: () => ({ getRunsBySession: () => [], getRunToolCalls: () => [], getPromptSnapshot: () => null, getCompactionEventsBySession: () => [], getWireSnapshotsForRun: () => [] }),
+        getKnowledgeLayer: () => ({
+          stats: async () => ({ memoryCount: 1, entityCount: 0, relationCount: 0, communityCount: 0 }),
+          getDb: () => ({ listAllActiveMemories: () => [{ text: 'a legacy fact', namespace: 'knowledge', scope_type: 'context', scope_id: 'c', source_type: 'agent_inferred', source_tool_name: null, confidence: 0.75, confirmation_count: 1, created_at: '2026-07-18T08:43:54.907Z' }] }),
+        }),
+        getKnowledgeStore: () => store,
+      };
+    }
+
+    it('carries durable-knowledge entries, labelled as their own substrate', async () => {
+      const store = {
+        listActive: () => [{ id: 'k1', text: 'the durable fact', sourceType: 'user_asserted', status: 'active', subjectName: 'Meridian AG', createdAt: '2026-08-19T12:32:10Z' }],
+        listPendingForThreadMasked: () => [],
+      };
+      await swapEngine(dkEngine(store), async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { memory: {
+          active_memories_substrate: string; active_memories: Array<{ text: string }>;
+          durable_knowledge: { substrate: string; available: boolean; entries_shown: number; entries: Array<{ text: string }>; may_be_incomplete: boolean };
+        } };
+        // The fact that was invisible before this change.
+        expect(body.memory.durable_knowledge.entries_shown).toBe(1);
+        expect(body.memory.durable_knowledge.entries[0]!.text).toBe('the durable fact');
+        // Two substrates, each named — not one merged list in which the legacy rows (an order of
+        // magnitude more numerous on a real instance) would drown the live ones.
+        expect(body.memory.active_memories_substrate).toContain('legacy');
+        expect(body.memory.durable_knowledge.substrate).toContain('knowledge_entries');
+        expect(body.memory.active_memories.map(m => m.text)).toEqual(['a legacy fact']);
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(false);
+        // The legacy flag must be FALSE here too — asserting only the true case lets a
+        // hardcoded `true` (or a `>= 199` boundary) survive.
+        expect((body as unknown as { memory: { active_memories_may_be_incomplete: boolean } }).memory.active_memories_may_be_incomplete).toBe(false);
+      });
+    });
+
+    it('shows the pending-review queue — "captured but waiting" is the likeliest answer to "nothing was saved"', async () => {
+      const store = {
+        listActive: () => [],
+        listPendingForThreadMasked: () => [{ id: 'p1', text: 'a queued fact', sourceType: 'external_unverified', status: 'pending_review', createdAt: '2026-08-19T12:00:00Z' }],
+      };
+      await swapEngine(dkEngine(store), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { pending_shown: number; pending_entries: Array<{ text: string }> } } };
+        expect(body.memory.durable_knowledge.pending_shown).toBe(1);
+        expect(body.memory.durable_knowledge.pending_entries[0]!.text).toBe('a queued fact');
+      });
+    });
+
+    it('an UNREADABLE durable-knowledge block says so instead of vanishing', async () => {
+      const store = { listActive: () => { throw new Error('decrypt failed'); }, listPendingForThreadMasked: () => [] };
+      await swapEngine(dkEngine(store), async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);   // a broken section is a gap; a 500 is no answer at all
+        const body = await res.json() as { memory: { durable_knowledge: { may_be_incomplete: boolean; entries: unknown[] }; active_memories: unknown[] } };
+        // "I could not read this" must not look like "there is nothing here" to someone
+        // diagnosing a missing memory — and it must not take the legacy half down with it.
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(true);
+        expect(body.memory.durable_knowledge.entries).toEqual([]);
+        expect(body.memory.active_memories).toHaveLength(1);
+      });
+    });
+
+    it('flags a TRUNCATED legacy snapshot — a capped list that stays silent reads as the whole picture', async () => {
+      const many = Array.from({ length: 200 }, (_, i) => ({ text: `fact ${i}`, namespace: 'knowledge', scope_type: 'context', scope_id: 'c', source_type: 'agent_inferred', source_tool_name: null, confidence: 0.7, confirmation_count: 1, created_at: '2026-07-18T00:00:00Z' }));
+      const eng = dkEngine({ listActive: () => [], listPendingForThreadMasked: () => [] });
+      eng['getKnowledgeLayer'] = () => ({
+        stats: async () => ({ memoryCount: 200, entityCount: 0, relationCount: 0, communityCount: 0 }),
+        getDb: () => ({ listAllActiveMemories: () => many }),
+      });
+      await swapEngine(eng, async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { active_memories_shown: number; active_memories_may_be_incomplete: boolean } };
+        expect(body.memory.active_memories_shown).toBe(200);
+        expect(body.memory.active_memories_may_be_incomplete).toBe(true);
+      });
+    });
+
+    it('reports available:false when the instance has no durable-knowledge store at all', async () => {
+      await swapEngine(dkEngine(null), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { available: boolean; may_be_incomplete: boolean } } };
+        expect(body.memory.durable_knowledge.available).toBe(false);
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(false);  // absent ≠ unreadable
+      });
+    });
+
+    /**
+     * THE case this whole change exists for, and the one the first version got wrong: the
+     * KnowledgeLayer is null when the knowledge GRAPH is off or the embedding provider failed,
+     * while durable knowledge depends only on `durable_memory_enabled`. Gating the DK block on
+     * the layer left a DK-tenant-without-a-graph exactly as blind as before — and every test
+     * passed, because they all supplied a layer.
+     */
+    /**
+     * The whole precondition matrix, not just the one combination that was broken. The legacy
+     * half needs a KnowledgeLayer, the durable half needs a KnowledgeStore, and those are
+     * independent — so all four states are reachable in production and each must report its own
+     * availability instead of the pair collapsing to `memory: null`. Fixing only the observed
+     * case would leave the next combination to be found the same way this one was.
+     */
+    const DK_ENTRY = { id: 'k1', text: 'a durable fact', kind: 'fact', status: 'active', sourceType: 'user_asserted', sourceChannel: null, sourceUntrusted: false, pinned: false, importance: 1, subjectHint: null, subjectName: null, sourceThreadId: 't1', createdAt: '2026-08-19T00:00:00Z' };
+    it.each([
+      ['layer ✓ / DK ✓', true, true, true, true],
+      ['layer ✓ / DK ✗', true, false, true, false],
+      ['layer ✗ / DK ✓', false, true, false, true],
+      ['layer ✗ / DK ✗', false, false, false, false],
+    ])('%s — each half reports its own availability, and memory is never null', async (_name, hasLayer, hasDk, wantLegacy, wantDk) => {
+      const eng = dkEngine(hasDk ? { listActive: () => [DK_ENTRY], listPendingForThreadMasked: () => [] } : null);
+      if (!hasLayer) eng['getKnowledgeLayer'] = () => null;
+      await swapEngine(eng, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { memory: { legacy_available: boolean; durable_knowledge: { available: boolean } } | null };
+        expect(body.memory, 'memory collapsed to null — the state is unreadable, not absent').not.toBeNull();
+        expect(body.memory!.legacy_available).toBe(wantLegacy);
+        expect(body.memory!.durable_knowledge.available).toBe(wantDk);
+      });
+    });
+
+    it('carries durable knowledge even when there is NO KnowledgeLayer (DK on, graph off)', async () => {
+      const eng = dkEngine({ listActive: () => [{ id: 'k1', text: 'the durable fact', kind: 'fact', status: 'active', sourceType: 'user_asserted', sourceChannel: null, sourceUntrusted: false, pinned: false, importance: 1, subjectHint: null, subjectName: 'Meridian AG', sourceThreadId: 't1', createdAt: '2026-08-19T12:32:10Z' }], listPendingForThreadMasked: () => [] });
+      eng['getKnowledgeLayer'] = () => null;
+      await swapEngine(eng, async () => {
+        const res = await jsonFetch('/api/threads/t1/debug-export');
+        expect(res.status).toBe(200);
+        const body = await res.json() as { memory: { legacy_available: boolean; active_memories: unknown[]; durable_knowledge: { entries_shown: number; entries: Array<{ text: string }> } } };
+        expect(body.memory.durable_knowledge.entries_shown).toBe(1);
+        expect(body.memory.durable_knowledge.entries[0]!.text).toBe('the durable fact');
+        expect(body.memory.legacy_available).toBe(false);   // named, not silently absent
+        expect(body.memory.active_memories).toEqual([]);
+      });
+    });
+
+    it('a failing LEGACY half keeps the durable block — the forbidden shape from the other side', async () => {
+      const eng = dkEngine({ listActive: () => [{ id: 'k1', text: 'still readable', kind: 'fact', status: 'active', sourceType: 'user_asserted', sourceChannel: null, sourceUntrusted: false, pinned: false, importance: 1, subjectHint: null, subjectName: null, sourceThreadId: 't1', createdAt: '2026-08-19T00:00:00Z' }], listPendingForThreadMasked: () => [] });
+      eng['getKnowledgeLayer'] = () => ({ stats: async () => { throw new Error('kg down'); }, getDb: () => ({ listAllActiveMemories: () => [] }) });
+      await swapEngine(eng, async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { legacy_error: string; durable_knowledge: { entries_shown: number } } };
+        expect(body.memory.legacy_error).toBeTruthy();
+        expect(body.memory.durable_knowledge.entries_shown, 'a readable durable block vanished with the legacy failure').toBe(1);
+      });
+    });
+
+    it('a failing ACTIVE half keeps the readable pending queue (the other direction)', async () => {
+      // The mirror of the test below. Testing only one direction let a shared try/catch survive
+      // mutation: with both calls under one guard, an active failure silently takes the queue —
+      // and the queue is the half that answers "was it captured at all?".
+      const eng = dkEngine({
+        listActive: () => { throw new Error('one bad active row'); },
+        listPendingForThreadMasked: () => [{ id: 'p1', text: 'a queued fact', kind: 'fact', status: 'pending_review', sourceType: 'external_unverified', sourceChannel: null, sourceUntrusted: true, pinned: false, importance: 1, subjectHint: null, subjectName: null, sourceThreadId: 't1', createdAt: '2026-08-19T00:00:00Z' }],
+      });
+      await swapEngine(eng, async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { entries_shown: number; pending_shown: number; may_be_incomplete: boolean; error: string } } };
+        expect(body.memory.durable_knowledge.pending_shown, 'a readable pending queue was discarded with the active failure').toBe(1);
+        expect(body.memory.durable_knowledge.entries_shown).toBe(0);
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(true);
+        expect(body.memory.durable_knowledge.error).toContain('active');
+      });
+    });
+
+    it('one unreadable HALF does not discard the other (separate try per call)', async () => {
+      const eng = dkEngine({
+        listActive: () => [{ id: 'k1', text: 'readable active', kind: 'fact', status: 'active', sourceType: 'user_asserted', sourceChannel: null, sourceUntrusted: false, pinned: false, importance: 1, subjectHint: null, subjectName: null, sourceThreadId: 't1', createdAt: '2026-08-19T00:00:00Z' }],
+        listPendingForThreadMasked: () => { throw new Error('one bad pending row'); },
+      });
+      await swapEngine(eng, async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { entries_shown: number; pending_shown: number; may_be_incomplete: boolean; error: string } } };
+        expect(body.memory.durable_knowledge.entries_shown).toBe(1);   // kept
+        expect(body.memory.durable_knowledge.pending_shown).toBe(0);
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(true);
+        expect(body.memory.durable_knowledge.error).toContain('pending');
+      });
+    });
+
+    it('flags a truncated DURABLE list, and does not flag a short one', async () => {
+      const entry = (i: number): unknown => ({ id: `k${i}`, text: `f${i}`, kind: 'fact', status: 'active', sourceType: 'agent_inferred', sourceChannel: null, sourceUntrusted: false, pinned: false, importance: 1, subjectHint: null, subjectName: null, sourceThreadId: 't1', createdAt: '2026-08-19T00:00:00Z' });
+      const many = Array.from({ length: 200 }, (_, i) => entry(i));
+      await swapEngine(dkEngine({ listActive: () => many, listPendingForThreadMasked: () => [] }), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { may_be_incomplete: boolean } } };
+        expect(body.memory.durable_knowledge.may_be_incomplete).toBe(true);
+      });
+      await swapEngine(dkEngine({ listActive: () => [entry(0)], listPendingForThreadMasked: () => [] }), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { may_be_incomplete: boolean } } };
+        expect(body.memory.durable_knowledge.may_be_incomplete, 'a one-entry list must not claim truncation').toBe(false);
+      });
+    });
+
+    /**
+     * The export must call the MASKED reader. `_maskText` removes tenant vault values on top of
+     * the bundle's own secret-pattern scrub, so swapping to raw `listPending` would ship vault
+     * contents that the pattern scrub does not catch — and no assertion here would have noticed.
+     */
+    /**
+     * The queue reader must have BOTH properties, and neither sibling has both: unscoped-masked
+     * would carry other threads' queues into a single-thread export, unmasked-scoped would carry
+     * vault values into a forwardable file. This pins that the export reaches for the one that
+     * has both — and passes the thread it is exporting.
+     */
+    it('reads the pending queue through the masked, THREAD-SCOPED reader — and passes the thread', async () => {
+      const calls: string[] = [];
+      let gotThreadId: string | null = null;
+      const store = {
+        listActive: () => [],
+        listPending: () => { calls.push('listPending'); return []; },
+        listPendingMasked: () => { calls.push('listPendingMasked'); return []; },
+        listPendingForThread: () => { calls.push('listPendingForThread'); return []; },
+        listPendingForThreadMasked: (tid: string) => { calls.push('listPendingForThreadMasked'); gotThreadId = tid; return []; },
+      };
+      await swapEngine(dkEngine(store), async () => {
+        await jsonFetch('/api/threads/t1/debug-export');
+        expect(calls, 'the export used a reader that is not both masked and thread-scoped').toEqual(['listPendingForThreadMasked']);
+        expect(gotThreadId, 'the exported thread was not passed to the scoped reader').toBe('t1');
+      });
+    });
+
+    /**
+     * The trust labels must survive the projection: without them a reader cannot tell an approved
+     * fact from a queued one, or a first-party statement from external content — which is the
+     * whole reason the queue is worth exporting at all.
+     *
+     * The fixture deliberately uses the NON-default value of every label (`pending_review`,
+     * `external_unverified`, untrusted `true`). An earlier version asserted the same fields on an
+     * `active` / `user_asserted` / `false` fixture, and mutations that hardcoded exactly those
+     * values survived it — the fixture mirrored the constant, so the assertion could not fail.
+     */
+    it('keeps the trust labels through the projection, at their non-default values', async () => {
+      const store = {
+        listActive: () => [],
+        listPendingForThreadMasked: () => [{ id: 'p1', text: 'a queued fact', kind: 'fact', status: 'pending_review', sourceType: 'external_unverified', sourceChannel: 'web', sourceUntrusted: true, pinned: false, importance: 1, subjectHint: null, subjectName: null, sourceThreadId: 't1', createdAt: '2026-08-19T00:00:00Z' }],
+      };
+      await swapEngine(dkEngine(store), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { pending_entries: Array<Record<string, unknown>> } } };
+        const e = body.memory.durable_knowledge.pending_entries[0]!;
+        expect(e['status'], 'a queued entry was reported as active').toBe('pending_review');
+        expect(e['source_type']).toBe('external_unverified');
+        expect(e['source_untrusted'], 'external content lost its untrusted flag').toBe(true);
+        expect(e['source_channel']).toBe('web');
+      });
+    });
+
+    it('names the unapproved review queue in the sharing notice', async () => {
+      // The user consents on this sentence. It described "stored memories" while the export also
+      // carried entries they had explicitly NOT approved — a consent describing something other
+      // than what ships.
+      await swapEngine(dkEngine({ listActive: () => [], listPendingForThreadMasked: () => [] }), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { sharing_notice: string };
+        expect(body.sharing_notice).toMatch(/awaiting your review/i);
+      });
+    });
+
+    it('does not share array instances between exports (no cross-request state)', async () => {
+      // `{ ...EMPTY_DK }` shallow-copied a module constant, so every store-less export handed
+      // back the SAME arrays. Harmless while nothing mutates them — which is how latent shared
+      // state survives until it is not harmless.
+      // Called directly: JSON round-tripping mints fresh arrays, so the sharing is invisible
+      // through HTTP no matter whether it exists.
+      const noStore = { getKnowledgeStore: () => null } as unknown as Parameters<typeof readDurableKnowledgeForDebug>[0];
+      const a = readDurableKnowledgeForDebug(noStore, 't1');
+      const b = readDurableKnowledgeForDebug(noStore, 't1');
+      expect(a.entries).toEqual([]);
+      expect(a.entries === b.entries, 'two calls returned the SAME entries array').toBe(false);
+      expect(a.pending_entries === b.pending_entries, 'two calls returned the SAME pending array').toBe(false);
+    });
+
+    it('projects entries — internal ids and foreign thread pointers stay out of the file', async () => {
+      const store = {
+        listActive: () => [{ id: 'k-internal', text: 'a fact', kind: 'fact', status: 'active', sourceType: 'user_asserted', sourceChannel: null, sourceUntrusted: false, pinned: false, importance: 1, subjectId: 'subj-internal', subjectHint: null, subjectName: 'Meridian AG', sourceThreadId: 'ANOTHER-THREAD', sourceRunId: 'run-internal', supersededBy: null, reviewAction: null, createdAt: '2026-08-19T00:00:00Z' }],
+        listPendingForThreadMasked: () => [],
+      };
+      await swapEngine(dkEngine(store), async () => {
+        const body = await (await jsonFetch('/api/threads/t1/debug-export')).json() as { memory: { durable_knowledge: { entries: Array<Record<string, unknown>> } } };
+        const e = body.memory.durable_knowledge.entries[0]!;
+        expect(e['text']).toBe('a fact');
+        expect(e['subject_name']).toBe('Meridian AG');
+        // The diagnostic question survives; the foreign thread id does not.
+        expect(e['from_this_thread']).toBe(false);
+        for (const leaked of ['id', 'subjectId', 'sourceThreadId', 'sourceRunId', 'reviewAction']) {
+          expect(e[leaked], `${leaked} leaked into a forwardable file`).toBeUndefined();
+        }
+        expect(JSON.stringify(body)).not.toContain('ANOTHER-THREAD');
+      });
+    });
+
     it('bundles wire snapshots + the typed-vs-assembled diff + at-a-glance summary (extended debug capture)', async () => {
       const typed = 'summarise Q3 revenue';
       // What the model actually saw: a [Now:] prefix + the typed task + the injected
@@ -4634,6 +5637,37 @@ describe('LynoxHTTPApi', () => {
       expect(body.workflows).toEqual([]);
     });
 
+    it('POST /api/workflows/:id/run masks credentials out of the run error AND the step errors', async () => {
+      // Two sites, one test, because they are the same claim on the same object.
+      // The stepErrors half was a bit-identical no-op in its first version — it
+      // tested `typeof e === 'string'` on elements that are always objects, and
+      // tsc could not see the dead branch because `never` is assignable to
+      // `string`. Nothing caught that but a mutation, so this is the test that
+      // would have.
+      const key = `sk-ant-${'d'.repeat(60)}`;
+      const shapeless = 'd'.repeat(32);
+      mockStoreValues.push(shapeless);
+      mockRunSavedWorkflow.mockResolvedValue({
+        ok: true,
+        runId: 'run-e',
+        status: 'failed',
+        error: `workflow aborted: ${key} / ${shapeless}`,
+        stepErrors: [{ stepId: 'step-2', error: `step refused ${key} / ${shapeless}`, costUsd: 0 }],
+      });
+
+      const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
+      const raw = await res.text();
+      expect(raw).not.toContain(key);
+      expect(raw).not.toContain(shapeless);
+      mockStoreValues.length = 0;
+      const body = JSON.parse(raw) as { error: string; stepErrors: Array<{ stepId: string; error: string }> };
+      // masking, not blanket redaction — both diagnoses survive
+      expect(body.error).toContain('workflow aborted');
+      expect(body.stepErrors[0]!.error).toContain('step refused');
+      // and the object shape is untouched
+      expect(body.stepErrors[0]!.stepId).toBe('step-2');
+    });
+
     it('POST /api/workflows/:id/run executes a saved workflow', async () => {
       mockRunSavedWorkflow.mockResolvedValue({ ok: true, runId: 'run-xyz', status: 'completed' });
       const res = await jsonFetch('/api/workflows/wf-1/run', { method: 'POST' });
@@ -4737,6 +5771,24 @@ describe('LynoxHTTPApi', () => {
   });
 
   describe('secrets/status', () => {
+    it('configured.google is FALSE when no source holds a complete pair', async () => {
+      // The expression changed from `names.has(ID) || names.has(SECRET)` to the
+      // resolved source, and shipped with no coverage. The `||` reported configured
+      // on a half-filled vault while the engine built nothing; `&&` would have lied
+      // in the other direction, since env-id + vault-secret puts BOTH names in the
+      // store while no single source holds a pair.
+      const engineRef = (api as unknown as { engine: { getGoogleClientSource: ReturnType<typeof vi.fn> } }).engine;
+      const orig = engineRef.getGoogleClientSource;
+      engineRef.getGoogleClientSource = vi.fn().mockReturnValue(null);
+      try {
+        const res = await jsonFetch('/api/secrets/status');
+        const body = await res.json() as { configured: { google: boolean } };
+        expect(body.configured.google).toBe(false);
+      } finally {
+        engineRef.getGoogleClientSource = orig;
+      }
+    });
+
     it('GET /api/secrets/status returns category booleans', async () => {
       mockSecretListNames.mockReturnValue(['ANTHROPIC_API_KEY']);
       // Post-fix the handler uses resolveProviderApiKey() which consults
@@ -5014,6 +6066,86 @@ describe('LynoxHTTPApi', () => {
         },
       );
 
+      // ── The GOOGLE_CLIENT_* split ──────────────────────────────────────────
+      // Managed BYO is a supported state, so the CUSTOMER must be able to save and
+      // remove their own Google Cloud client pair. The AGENT must still not be able
+      // to raise a prompt for it: `ask_secret` takes both the name and the prompt
+      // text from the model and renders them as product-native UI, so an open
+      // prompt path is a phishing primitive inside the product.
+      //
+      // These four tests are the split. Widening the carve-out to cover the agent
+      // path — the implementation this spec is most likely to get wrong — turns the
+      // third one red, and it is the only thing that would.
+      it.each(['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'])(
+        'PUT /api/secrets/%s ACCEPTS user-scope on managed (customer writes their own pair)',
+        async (name) => {
+          vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+          vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+          try {
+            const res = await jsonFetch(`/api/secrets/${name}`, {
+              method: 'PUT',
+              body: JSON.stringify({ value: 'customer-supplied-value' }),
+            });
+            expect(res.status).toBe(200);
+            expect(mockSecretSet).toHaveBeenCalledWith(name, 'customer-supplied-value');
+          } finally {
+            vi.unstubAllEnvs();
+            vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          }
+        },
+      );
+
+      it('DELETE /api/secrets/GOOGLE_CLIENT_SECRET ACCEPTS user-scope on managed', async () => {
+        // The switch-back path (PRD D12) deletes the pair. Before the split this
+        // answered 403, which made the feature impossible on the tier it exists for.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/secrets/GOOGLE_CLIENT_SECRET', { method: 'DELETE' });
+          expect(res.status).toBe(200);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
+      // Driven from the exported list, not a hand-written pair: a second entry added
+      // to CUSTOMER_WRITABLE_INFRA_PATTERNS would otherwise be carved out of the
+      // customer path with nothing checking that the agent path still refuses it.
+      it.each(['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_CLIENT_ANYTHING_FUTURE'])(
+        'the AGENT prompt path still refuses %s on managed (the split, not a loosening)',
+        async (name) => {
+          vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+          try {
+            const { predictManagedBlocked } = await import('./http-api.js');
+            expect(predictManagedBlocked(name)).toBe(true);
+          } finally {
+            vi.unstubAllEnvs();
+            vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+          }
+        },
+      );
+
+      it('PUT /api/secrets/GOOGLE_OAUTH_CLIENT_ID still rejects (the carve-out is CLIENT_, not GOOGLE_)', async () => {
+        // Near-miss guard. `GOOGLE_OAUTH_*` holds the OAuth *tokens* (see
+        // INFRA_SECRET_PATTERNS) — a live grant, not a client registration, and never
+        // something the customer hand-writes. A carve-out written `/^GOOGLE_/` instead
+        // of `/^GOOGLE_CLIENT_/` would read as the same fix and expose the token names
+        // to a customer PUT. Nothing else in this file would notice.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const res = await jsonFetch('/api/secrets/GOOGLE_OAUTH_CLIENT_ID', {
+            method: 'PUT',
+            body: JSON.stringify({ value: 'should-not-land' }),
+          });
+          expect(res.status).toBe(403);
+        } finally {
+          vi.unstubAllEnvs();
+          vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+        }
+      });
+
       it.each(['managed', 'managed_pro', 'eu', 'starter'])(
         'PUT /api/secrets/SMTP_PASSWORD rejects user-scope in mode=%s (admin-only infra)',
         async (mode) => {
@@ -5068,6 +6200,34 @@ describe('LynoxHTTPApi', () => {
         expect(body.error).toContain('Missing value');
       });
 
+      it('PUT /api/secrets/:name masks a credential shape out of the thrown message', async () => {
+        // The JSON half: every API error goes through `errorResponse`, and
+        // roughly two dozen call sites hand it an uncontrolled err.message.
+        // Masking there covers them and the next one written, instead of the
+        // set known today. (Exact counts are deliberately not restated — two
+        // independent counts disagreed on whether a template literal counts as
+        // deliberate, and a number that does not reproduce is not a measurement.)
+        const key = `sk-ant-${'c'.repeat(60)}`;
+        // A SHAPELESS value too: `errorResponse` is the choke point, so it has to
+        // carry the value pass as well as the pattern pass. Without it the site
+        // could be reverted to pattern-only and nothing would notice.
+        const shapeless = 'c'.repeat(32);
+        mockStoreValues.push(shapeless);
+        mockSecretSet.mockImplementationOnce(() => {
+          throw new Error(`store refused ${key} and ${shapeless}`);
+        });
+        const res = await jsonFetch('/api/secrets/ANTHROPIC_API_KEY', {
+          method: 'PUT',
+          body: JSON.stringify({ value: 'sk-ant-x' }),
+        });
+        const body = await res.json() as { error: string };
+        expect(body.error).not.toContain(key);
+        expect(body.error).not.toContain(shapeless);
+        // masking, not blanket redaction — the diagnosis survives
+        expect(body.error).toContain('store refused');
+        mockStoreValues.length = 0;
+      });
+
       it('PUT /api/secrets/:name returns 503 when the secret store throws', async () => {
         mockSecretSet.mockImplementationOnce(() => {
           throw new Error('disk full');
@@ -5096,6 +6256,56 @@ describe('LynoxHTTPApi', () => {
       });
 
       // --- PUT /api/config ----------------------------------------------------
+
+      it('GET /api/voice/info reports the picker as locked exactly when the write gate would 403', async () => {
+        // The UI used to decide this itself and got it wrong: on managed the STT
+        // picker rendered enabled and every save 403'd — a control that looks live
+        // and is not. `locked` must therefore be derived from the SAME set the gate
+        // enforces, so the two cannot drift. Asserted as the EQUIVALENCE, not as a
+        // literal true: the day a second voice provider makes the field writable,
+        // this test follows instead of having to be edited.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
+        try {
+          const info = await (await jsonFetch('/api/voice/info')).json() as {
+            stt: { locked?: boolean }; tts: { locked?: boolean };
+          };
+          for (const [field, locked, probe] of [
+            ['transcription_provider', info.stt.locked, 'whisper'],
+            ['tts_provider', info.tts.locked, 'mistral'],
+          ] as const) {
+            // What the gate actually does with that field, measured rather than assumed.
+            const put = await jsonFetch('/api/config', {
+              method: 'PUT',
+              body: JSON.stringify({ [field]: probe }),
+            });
+            // Guard the instrument: a 400 means the probe value is not schema-valid
+            // for this field, so the request never reached the gate and the
+            // comparison below would be measuring the validator instead. Caught
+            // exactly that on the first run — 'whisper' is not a TTS provider.
+            expect(put.status, `${field}: probe "${probe}" was rejected by the schema, not the gate`)
+              .not.toBe(400);
+            const gateRefuses = put.status === 403;
+            expect(locked, `${field}: picker says locked=${String(locked)}, gate returned ${String(put.status)}`)
+              .toBe(gateRefuses);
+          }
+        } finally {
+          vi.unstubAllEnvs();
+        }
+
+        // …and the SELF-HOST side, without which "locked: true" hardcoded would pass:
+        // the assertion has to meet both states or it only pins today's tier.
+        vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
+        try {
+          const info = await (await jsonFetch('/api/voice/info')).json() as {
+            stt: { locked?: boolean }; tts: { locked?: boolean };
+          };
+          expect(info.stt.locked, 'self-host must never lock the STT picker').toBe(false);
+          expect(info.tts.locked, 'self-host must never lock the TTS picker').toBe(false);
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      });
 
       it('PUT /api/config accepts user-scope in managed mode for allowlisted fields', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
@@ -5429,12 +6639,15 @@ describe('LynoxHTTPApi', () => {
       it('PUT /api/config REJECTS a tier_preset whose expanded slot uses a blocked model', async () => {
         vi.stubEnv('LYNOX_HTTP_ADMIN_SECRET', 'admin-secret-token-99999');
         vi.stubEnv('LYNOX_MANAGED_MODE', 'managed');
-        // ⚖️ balanced preset expands to a claude-sonnet-5 deep slot → blocked.
+        // 💎 max-quality expands to a claude-sonnet-5 MAIN slot → blocked. (This used
+        // to drive ⚖️ balanced, whose deep slot was Sonnet; balanced now pins a
+        // Fireworks main, so the write-gate would refuse it for the wrong reason and
+        // the assertion would pass without exercising the blocklist path at all.)
         vi.mocked(loadConfig).mockReturnValue({ default_tier: 'deep', blocked_model_ids: ['claude-sonnet-'] });
         try {
           const res = await jsonFetch('/api/config', {
             method: 'PUT',
-            body: JSON.stringify({ tier_preset: 'balanced' }),
+            body: JSON.stringify({ tier_preset: 'max-quality' }),
           });
           expect(res.status).toBe(403);
           const body = await res.json() as { error: string };
@@ -6075,6 +7288,34 @@ describe('LynoxHTTPApi', () => {
       const body = await cbRes.text();
       expect(body).toContain('token endpoint unreachable');
       expect(mockGoogleExchangeRedirectCode).toHaveBeenCalledTimes(1);
+    });
+
+    it('masks a credential shape out of the OAuth failure PAGE', async () => {
+      // This surface renders HTML directly and never touches `errorResponse` —
+      // found by writing this test against the choke point and watching it fail
+      // on a raw key. Escaping made the string safe to RENDER, which reads like
+      // safety and is not: the credential was intact inside the escaped page.
+      const startRes = await jsonFetch('/api/google/auth', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      const oauthCookie = extractFirstCookiePair(startRes, 'lynox_oauth_state');
+
+      const key = `sk-ant-${'b'.repeat(60)}`;
+      const shapeless = 'b'.repeat(32);
+      mockStoreValues.push(shapeless);
+      mockGoogleExchangeRedirectCode.mockRejectedValueOnce(new Error(`refused: ${key} ${shapeless}`));
+
+      const cbRes = await fetch(`${baseUrl}/api/google/callback?code=valid&state=test-state`, {
+        headers: { cookie: oauthCookie! },
+      });
+      expect(cbRes.status).toBe(500);
+      const body = await cbRes.text();
+      expect(body).not.toContain(key);
+      expect(body).not.toContain(shapeless);
+      // and the surrounding message survives — masking, not blanket redaction
+      expect(body).toContain('refused');
+      mockStoreValues.length = 0;
     });
   });
 
@@ -6918,13 +8159,20 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
 
   it('blocks deleting infra/CP secrets on managed but allows a customer tool secret', async () => {
     vi.stubEnv('LYNOX_BILLING_TIER', 'managed');
-    for (const name of ['LYNOX_VAULT_KEY', 'GOOGLE_CLIENT_SECRET', 'MANAGED_TOKEN']) {
+    // GOOGLE_CLIENT_SECRET used to sit in this list. It moved to the allowed half
+    // when managed BYO became a supported state: the pair belongs to the customer's
+    // own Google Cloud project, and the switch-back flow has to be able to remove it.
+    // GOOGLE_OAUTH_* — the control plane's own broker pair — stays blocked, which is
+    // the line the carve-out had to be drawn on.
+    for (const name of ['LYNOX_VAULT_KEY', 'GOOGLE_OAUTH_CLIENT_SECRET', 'MANAGED_TOKEN']) {
       const res = await jsonFetch(`/api/secrets/${name}`, { method: 'DELETE' });
       expect(res.status, name).toBe(403);
       expect((await res.json() as { error: string }).error).toContain('admin-managed');
     }
-    const tool = await jsonFetch('/api/secrets/SHOPIFY_TOKEN', { method: 'DELETE' });
-    expect(tool.status).not.toBe(403);
+    for (const name of ['SHOPIFY_TOKEN', 'GOOGLE_CLIENT_SECRET']) {
+      const res = await jsonFetch(`/api/secrets/${name}`, { method: 'DELETE' });
+      expect(res.status, name).not.toBe(403);
+    }
   });
 
   describe('GDPR export + erasure — engine.db coverage (Foundation Rework v2 — S2-pre0)', () => {
@@ -7153,4 +8401,365 @@ describe('managed instance: data-lifecycle admin routes are system-controlled', 
       });
     });
   });
+
 });
+
+// The two routes that accept a custom IMAP/SMTP block parsed it independently.
+// That is how one of them could be corrected and the other silently left on
+// 465 — a connection test that passes against different defaults than the save
+// uses is worth nothing. These drive BOTH routes with the SAME body and compare
+// what each one actually built, which a source-text guard cannot do: a re-inlined
+// default under a different variable name reads as clean and behaves as broken.
+describe('mail custom-server defaults are the same on both routes', () => {
+  function swapEngine(overrides: Record<string, (...args: unknown[]) => unknown>, test: () => Promise<void>): Promise<void> {
+    const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+    const origs: Record<string, unknown> = {};
+    for (const k of Object.keys(overrides)) { origs[k] = engineRef[k]; engineRef[k] = overrides[k]; }
+    return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
+  }
+
+  interface Seen { smtp: { host: string; port: number; secure: boolean }; imap: { host: string; port: number; secure: boolean } }
+
+  /**
+   * Run one request body through one route and return the server config the
+   * engine was handed. Both routes reach the mail context — `/test` through
+   * testAccount, the save route through addAccount after its own probe — so
+   * recording in both places catches either.
+   */
+  async function serverSaw(path: string, body: Record<string, unknown>): Promise<Seen> {
+    let seen: Seen | undefined;
+    const record = (input: { config: Seen }): void => { seen = { smtp: input.config.smtp, imap: input.config.imap }; };
+    await swapEngine({
+      getMailContext: () => ({
+        testAccount: (input: { config: Seen }) => { record(input); return Promise.resolve({ ok: true }); },
+        addAccount: (input: { config: Seen }) => { record(input); return Promise.resolve(undefined); },
+        listAccounts: () => [],
+      }),
+    }, async () => {
+      const res = await jsonFetch(path, { method: 'POST', body: JSON.stringify(body) });
+      expect(res.status).toBe(200);
+    });
+    expect(seen, `no config reached the mail context for ${path}`).toBeDefined();
+    return seen!;
+  }
+
+  const BASE = {
+    id: 'drift', displayName: 'Drift', address: 'drift@example.com',
+    preset: 'custom', type: 'personal',
+    credentials: { user: 'drift@example.com', pass: 'pw' },
+  };
+  const ROUTES = ['/api/mail/accounts', '/api/mail/accounts/test'];
+
+  /**
+   * Sequential on purpose. swapEngine mutates shared engine state, so two
+   * concurrent swaps restore each other's original mid-request — which showed
+   * up as a 500 rather than a wrong value, i.e. loudly, which is the only
+   * reason it did not become a false green.
+   */
+  async function bothRoutes(body: Record<string, unknown>): Promise<Seen[]> {
+    const out: Seen[] = [];
+    for (const route of ROUTES) out.push(await serverSaw(route, body));
+    return out;
+  }
+
+  it('fills in submission on 587 on both routes when the client omits the port', async () => {
+    const results = await bothRoutes({
+      ...BASE, custom: { imap: { host: 'imap.example.com' }, smtp: { host: 'smtp.example.com' } },
+    });
+    for (const [i, seen] of results.entries()) {
+      expect(seen.smtp, `route ${ROUTES[i]!}`).toEqual({ host: 'smtp.example.com', port: 587, secure: false });
+    }
+    expect(results[0]!.smtp).toEqual(results[1]!.smtp);
+  });
+
+  it('agrees where port and TLS are defaulted from each other', async () => {
+    // Deliberately a SUBSET. The full matrix belongs to the parser's own unit
+    // test (custom-server-input.test.ts) — what only a route test can show is
+    // that both routes reach the same parser, so these are the cases where the
+    // two halves of the decision interact. /api/mail/accounts/test is rate
+    // limited to 10 probes a minute, which this file shares; adding cases here
+    // costs one of those and buys nothing the unit test does not already cover.
+    const cases: ReadonlyArray<{ smtp: Record<string, unknown>; port: number; secure: boolean }> = [
+      // secure given, port not: the PORT follows, or we hand the user an
+      // implicit-TLS handshake against a STARTTLS port, which hangs.
+      { smtp: { host: 'h', secure: true }, port: 465, secure: true },
+      { smtp: { host: 'h', port: 465 }, port: 465, secure: true },
+      { smtp: { host: 'h', port: 587 }, port: 587, secure: false },
+      // Explicit both ways survives — the default is a suggestion, not a ban.
+      { smtp: { host: 'h', port: 2525, secure: true }, port: 2525, secure: true },
+    ];
+    for (const c of cases) {
+      const label = JSON.stringify(c.smtp);
+      const seen = await bothRoutes({ ...BASE, custom: { imap: { host: 'imap.example.com' }, smtp: c.smtp } });
+      expect({ label, ...seen[0]!.smtp }).toEqual({ label, host: 'h', port: c.port, secure: c.secure });
+      expect(seen[0]!.smtp, `routes disagree for ${label}`).toEqual(seen[1]!.smtp);
+    }
+  });
+
+  it('keeps IMAP on implicit TLS 993 on both routes', async () => {
+    const results = await bothRoutes({
+      ...BASE, custom: { imap: { host: 'imap.example.com' }, smtp: { host: 'smtp.example.com' } },
+    });
+    for (const seen of results) {
+      expect(seen.imap).toEqual({ host: 'imap.example.com', port: 993, secure: true });
+    }
+    // The SMTP suggestion moving must not have dragged IMAP with it.
+    expect(results[0]!.imap).toEqual(results[1]!.imap);
+  });
+
+  it('refuses a private SMTP host on both routes, before touching the network', async () => {
+    // The guard that carries the whole outbound-connection surface. It has to
+    // hold for the SMTP host, not only the IMAP one, and it has to run before
+    // the probe — so the mail context must never be reached at all.
+    for (const path of ROUTES) {
+      let reached = false;
+      await swapEngine({
+        getMailContext: () => ({
+          testAccount: () => { reached = true; return Promise.resolve({ ok: true }); },
+          addAccount: () => { reached = true; return Promise.resolve(undefined); },
+          listAccounts: () => [],
+        }),
+      }, async () => {
+        const res = await jsonFetch(path, {
+          method: 'POST',
+          body: JSON.stringify({
+            ...BASE,
+            custom: { imap: { host: 'imap.example.com' }, smtp: { host: '127.0.0.1' } },
+          }),
+        });
+        expect(res.status, `route ${path}`).toBe(400);
+        expect((await res.json() as { error?: string }).error).toMatch(/private IP/i);
+      });
+      expect(reached, `route ${path} probed a private host`).toBe(false);
+    }
+  });
+
+  it('names the failing leg in the save refusal, not just a raw string', async () => {
+    // The save route is the one that BLOCKS. Before it carried code+stage the
+    // client could only print the engine's own sentence, while the test button
+    // beside it gave real advice.
+    await swapEngine({
+      getMailContext: () => ({
+        testAccount: () => Promise.resolve({ ok: false, error: 'SMTP timeout', code: 'timeout', stage: 'smtp' }),
+        addAccount: () => Promise.resolve(undefined),
+        listAccounts: () => [],
+      }),
+    }, async () => {
+      const res = await jsonFetch('/api/mail/accounts', {
+        method: 'POST',
+        body: JSON.stringify({ ...BASE, custom: { imap: { host: 'imap.example.com' }, smtp: { host: 'smtp.example.com' } } }),
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ code: 'timeout', stage: 'smtp' });
+    });
+  });
+
+  it('lets skipTest save a mailbox whose send path cannot be verified', async () => {
+    // Reading still works; refusing the whole mailbox would take triage and
+    // summaries with it. The probe must not run at all.
+    let probed = false;
+    let added = false;
+    await swapEngine({
+      getMailContext: () => ({
+        testAccount: () => { probed = true; return Promise.resolve({ ok: false, code: 'timeout', stage: 'smtp' }); },
+        addAccount: () => { added = true; return Promise.resolve(undefined); },
+        listAccounts: () => [],
+      }),
+    }, async () => {
+      const res = await jsonFetch('/api/mail/accounts', {
+        method: 'POST',
+        body: JSON.stringify({ ...BASE, skipTest: true, custom: { imap: { host: 'imap.example.com' }, smtp: { host: 'smtp.example.com' } } }),
+      });
+      expect(res.status).toBe(200);
+    });
+    expect(probed).toBe(false);
+    expect(added).toBe(true);
+  });
+});
+
+    describe('GET /api/knowledge/queue?threadId= (chip re-hydration)', () => {
+      // Local twin of the swapEngine helper above (it is describe-scoped there).
+      function swapEngineQ(overrides: Record<string, (...args: unknown[]) => unknown>, test: () => Promise<void>): Promise<void> {
+        const engineRef = (api as unknown as { engine: Record<string, unknown> }).engine;
+        const origs: Record<string, unknown> = {};
+        for (const k of Object.keys(overrides)) { origs[k] = engineRef[k]; engineRef[k] = overrides[k]; }
+        return (async () => { try { await test(); } finally { for (const k of Object.keys(origs)) engineRef[k] = origs[k]; } })();
+      }
+      // DEF-dk-review-chip-resume-invisible: the resume path asks for ONE
+      // conversation's queue. The filter branch is the whole point — without a
+      // test a mutation on it survives silently and every thread re-hydrates
+      // every other thread's pending wording into its chips.
+      function fakeQueueStore(): {
+        pendingCount: ReturnType<typeof vi.fn>;
+        listPending: ReturnType<typeof vi.fn>;
+        listPendingForThread: ReturnType<typeof vi.fn>;
+        withHintTargets: ReturnType<typeof vi.fn>;
+      } {
+        return {
+          // DEF-review-approve-target-opaque: the real store resolves each hint here.
+          // Stamped rather than re-implemented — the CORRECTNESS of the resolution is
+          // pinned against the real `reviewEntry` in knowledge-store.test.ts; what this
+          // double is for is whether the ROUTE can serve the queue without going
+          // through the mapper at all.
+          withHintTargets: vi.fn().mockImplementation((entries: Array<Record<string, unknown>>) =>
+            entries.map(e => ({ ...e, subjectTarget: e['subjectHint'] === null || e['subjectHint'] === undefined
+              ? null
+              : { resolution: 'existing', id: 'sub_1', name: String(e['subjectHint']), kind: 'organization' } }))),
+          pendingCount: vi.fn().mockReturnValue(2),
+          listPending: vi.fn().mockReturnValue([
+            { id: 'ke_a', subjectHint: 'SVA', text: 'fact of thread one', sourceThreadId: 't-1' },
+            { id: 'ke_b', subjectHint: 'X', text: 'fact of thread two', sourceThreadId: 't-2' },
+            // A hintless entry: the wire must carry an explicit `null`, because "binds
+            // nothing" and "this engine computes no targets" must not look alike to a UI
+            // that renders them differently.
+            { id: 'ke_c', subjectHint: null, text: 'a fact about nobody', sourceThreadId: 't-1' },
+          ]),
+          // Mirrors the real store: an EMPTY thread id is a question about no
+          // thread — trim-guard answers [] (see listPendingForThread).
+          listPendingForThread: vi.fn().mockImplementation((id: string) =>
+            id === '' ? [] : [{ id: 'ke_a', subjectHint: 'SVA', text: 'fact of thread one', sourceThreadId: 't-1' }]),
+        };
+      }
+
+      it('filters entries to the named thread', async () => {
+        const store = fakeQueueStore();
+        await swapEngineQ({ getKnowledgeStore: () => store }, async () => {
+          const res = await jsonFetch('/api/knowledge/queue?threadId=t-1');
+          const body = await res.json() as { entries: Array<{ id: string }>; pendingCount: number };
+          expect(body.entries.map((e) => e.id)).toEqual(['ke_a']);
+          expect(body.pendingCount).toBe(2); // global count, unchanged semantics
+          // SQL-side filter, not a post-filter (review F2): the thread store
+          // method is what ran, so 100+ foreign rows cannot crowd this
+          // thread's entries out of the window.
+          expect(store.listPendingForThread).toHaveBeenCalledWith('t-1', 100);
+          expect(store.listPending).not.toHaveBeenCalled();
+        });
+      });
+
+      it('returns ALL entries when no thread is named (hub view)', async () => {
+        const store = fakeQueueStore();
+        await swapEngineQ({ getKnowledgeStore: () => store }, async () => {
+          const res = await jsonFetch('/api/knowledge/queue');
+          const body = await res.json() as { entries: Array<{ id: string }> };
+          expect(body.entries).toHaveLength(3);
+        });
+      });
+
+      /**
+       * DEF-review-approve-target-opaque. `reviewEntry` resolves a pending entry's hint
+       * AFTER the human decides, so the approve surface used to show a NAME and hide the
+       * subject it binds to — including the case where approving MINTS a new one. The
+       * predicate is served-shape, not store-shape: drop `withHintTargets` from the route
+       * and the resolution still happens on approval, invisibly. This is the test that
+       * fails then.
+       */
+      it('every served entry carries the subject its hint would bind to on approval', async () => {
+        const store = fakeQueueStore();
+        await swapEngineQ({ getKnowledgeStore: () => store }, async () => {
+          const res = await jsonFetch('/api/knowledge/queue');
+          const body = await res.json() as { entries: Array<{ id: string; subjectTarget?: unknown }> };
+          expect(store.withHintTargets).toHaveBeenCalledTimes(1);
+          expect(body.entries.map(e => e.subjectTarget)).toEqual([
+            { resolution: 'existing', id: 'sub_1', name: 'SVA', kind: 'organization' },
+            { resolution: 'existing', id: 'sub_1', name: 'X', kind: 'organization' },
+            null,
+          ]);
+        });
+      });
+
+      it('the thread-scoped read is served through the same mapper', async () => {
+        const store = fakeQueueStore();
+        await swapEngineQ({ getKnowledgeStore: () => store }, async () => {
+          const res = await jsonFetch('/api/knowledge/queue?threadId=t-1');
+          const body = await res.json() as { entries: Array<{ id: string; subjectTarget?: unknown }> };
+          // Ids AND length, not `entries[0]`: a mapper handed the UNFILTERED list would
+          // still put the right target first, and the assertion would not notice.
+          expect(body.entries.map(e => e.id)).toEqual(['ke_a']);
+          expect(body.entries[0]?.subjectTarget).toEqual({ resolution: 'existing', id: 'sub_1', name: 'SVA', kind: 'organization' });
+        });
+      });
+
+      it('an EMPTY ?threadId= filters to nothing (presence, not truthiness — same rule as the count route)', async () => {
+        const store = fakeQueueStore();
+        await swapEngineQ({ getKnowledgeStore: () => store }, async () => {
+          const res = await jsonFetch('/api/knowledge/queue?threadId=');
+          const body = await res.json() as { entries: Array<{ id: string }> };
+          expect(body.entries).toHaveLength(0);
+          expect(store.listPendingForThread).toHaveBeenCalledWith('', 100);
+        });
+      });
+    });
+
+    describe('large uploads become files-area files (DEF-chat-upload-inline-only-no-file)', () => {
+      // The 8c09e50a shape: a 90 KB inline CSV made the model echo the whole
+      // file through a write_file tool input → max_tokens mid-tool_use →
+      // identical continuation loop. Above the threshold the upload must
+      // become a REAL file the agent works on, with reference + preview in
+      // the message — and the turn must STILL count as untrusted.
+      let tmpArea: string;
+
+      beforeEach(() => {
+        // Same fake-key default the 'runs' describe sets — this block sits at
+        // file scope, outside its beforeEach.
+        mockSecretResolve.mockImplementation((name: string) =>
+          name === 'ANTHROPIC_API_KEY' ? 'sk-ant-test' : null,
+        );
+        tmpArea = mkdtempSync(join(tmpdir(), 'lynox-upload-area-'));
+        setTenantWorkspace(tmpArea);
+      });
+      afterEach(() => {
+        clearTenantWorkspace();
+        rmSync(tmpArea, { recursive: true, force: true });
+      });
+
+      it('a text upload past the threshold is persisted to uploads/ and only referenced inline', async () => {
+        const big = `id,amount\n${'1,42.00\n'.repeat(3_000)}`; // ~24k chars > 20k
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const res = await jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({
+            task: 'sum the amounts',
+            files: [{ name: 'buchungen.csv', type: 'text/csv', data: Buffer.from(big).toString('base64') }],
+          }),
+        });
+        expect(res.status).toBe(200);
+        const taskArg = mockSessionRun.mock.calls.at(-1)?.[0] as Array<{ type: string; text?: string }> | undefined;
+        const fileBlock = taskArg?.find(b => b.type === 'text' && b.text?.includes('buchungen.csv'));
+        expect(fileBlock).toBeDefined();
+        // The user's own message must survive alongside the file block.
+        expect(taskArg?.some(b => b.type === 'text' && b.text?.includes('sum the amounts'))).toBe(true);
+        // Reference, not content: the full CSV must NOT ride the message.
+        expect(fileBlock!.text).toContain('files area');
+        // ABSOLUTE path in the instruction — read_file resolves relatives
+        // against cwd, not the file area (review D1 pinned here).
+        expect(fileBlock!.text).toMatch(/read_file\('\/[^']*\/uploads\/[^']+\.csv'\)/);
+        expect(fileBlock!.text).toMatch(/bash\/python on 'uploads\//);
+        // Preview only: the message stays far smaller than the file (the
+        // preview shows the head, never all 24k chars).
+        expect(fileBlock!.text!.length).toBeLessThan(6_000);
+        // …and the wrapper stays — a large upload is still untrusted content.
+        expect(containsUntrustedMarker(fileBlock!.text!)).toBe(true);
+        // The file really exists in the tenant area with the full content.
+        const uploadsDir = join(tmpArea, 'uploads');
+        const written = readdirSync(uploadsDir).filter(f => f.endsWith('buchungen.csv'));
+        expect(written).toHaveLength(1);
+        expect(readFileSync(join(uploadsDir, written[0]!), 'utf-8')).toBe(big);
+      });
+
+      it('a small upload still rides inline unchanged', async () => {
+        mockSessionRun.mockResolvedValueOnce('ok');
+        const res = await jsonFetch('/api/sessions/test/run', {
+          method: 'POST',
+          body: JSON.stringify({
+            task: 'check',
+            files: [{ name: 'klein.csv', type: 'text/csv', data: Buffer.from('a,b\n1,2').toString('base64') }],
+          }),
+        });
+        expect(res.status).toBe(200);
+        const taskArg = mockSessionRun.mock.calls.at(-1)?.[0] as Array<{ type: string; text?: string }> | undefined;
+        const fileBlock = taskArg?.find(b => b.type === 'text' && b.text?.includes('klein.csv'));
+        expect(fileBlock!.text).toContain('a,b\n1,2');
+        expect(fileBlock!.text).not.toContain('files area');
+        expect(existsSync(join(tmpArea, 'uploads'))).toBe(false);
+      });
+    });
