@@ -303,7 +303,9 @@ describe('the contract CI actually depends on', () => {
     // `blocking: []` and `below: []` exactly like a clean tree, so a consumer
     // checking only that those keys EXIST reads "nothing found" and closes its
     // tracking issue. It happened in this PR. `errors` is the field that
-    // separates the two, and this pins that it is populated.
+    // separates the two — for THIS shape, a `results` that is not a list, which
+    // is refused before any count is taken and therefore carries no rc
+    // disagreement to fall back on.
     const r = run({ results: null }, '0', ['--format=json']);
     const v = JSON.parse(r.stdout);
     expect(v.blocking).toEqual([]);

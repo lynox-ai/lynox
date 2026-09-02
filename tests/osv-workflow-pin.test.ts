@@ -93,14 +93,17 @@ const INSTALLS = /(curl|wget|gh\s+release\s+download)[^|]*osv-scanner/;
 /**
  * Exit codes discarded by shell.
  *
- * A SECONDARY check now — the pin above is what makes the set closed. Kept
- * because it names the failure in the message when it fires, and because it
- * covers jobs that are not pinned line-for-line.
+ * A SECONDARY check now: `PINNED` below is what makes the set closed. Kept
+ * because it names the failure in its message when it fires, and because it
+ * still reads steps the line-pins do not cover — anything after the scan step,
+ * and any osv job added later before someone extends the pin.
  *
- * `\b` may not follow `:`; both it and the next character are non-word, so the
- * boundary can never hold and `|| :` matched NOTHING for one commit while the
- * comment beside it still claimed otherwise. The alternation is ordered so each
- * branch carries its own boundary, and `|| true_flag` stays safe.
+ * `\b` after `:` holds only when the NEXT character is a word character, so the
+ * previous version matched the nonsense `|| :y` and missed `|| :`, `|| : ` and
+ * `||:` — every spelling that actually occurs. Measured, after the first
+ * version of this very comment claimed the boundary "can never hold", which is
+ * false. Each branch now carries its own boundary, and `|| true_flag` and
+ * `|| truely` stay safe.
  */
 const SWALLOWS = /\|\|\s*(?::|true\b|exit\s+0\b)/;
 
@@ -329,6 +332,100 @@ function pinnedSlice(where: string): string[] {
   return commands((scan[0] as Step).run);
 }
 
+/**
+ * The surroundings, because pinning the shell moved the class rather than
+ * closing it — measured in the fourth review round, each of these green:
+ *
+ *  · a step inserted BEFORE the pinned one that truncates `pnpm-lock.yaml`, or
+ *    drops a stub `osv-scanner` onto PATH: the pinned commands then run
+ *    faithfully against nothing;
+ *  · `release:` swapped for `workflow_dispatch:`, or the daily `schedule:`
+ *    deleted: the gate is intact and never runs;
+ *  · a call-site `with: version/sha256` that installs a different scanner,
+ *    since only the action's DEFAULTS were asserted.
+ *
+ * Three distinct surfaces, each closable by naming what belongs there rather
+ * than by pattern-matching what does not. Steps are pinned only up to and
+ * including the scan, so adding a lint or a test step downstream stays free.
+ */
+const PINNED_STEPS: Readonly<Record<string, readonly string[]>> = {
+  'ci.yml:test': [
+    'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5',
+    'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+    'pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271',
+    'run:pnpm install --frozen-lockfile',
+    './.github/actions/install-osv-scanner',
+    'Scan dependencies (high+critical hard-fail)',
+  ],
+  'release.yml:test': [
+    'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5',
+    'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+    'pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271',
+    'run:pnpm install --frozen-lockfile',
+    './.github/actions/install-osv-scanner',
+    'Scan dependencies (high+critical hard-fail)',
+  ],
+  'dep-scan-daily.yml:dep-scan': [
+    'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5',
+    'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020',
+    './.github/actions/install-osv-scanner',
+    'Scan dependencies and sync tracking issue',
+  ],
+};
+
+/** What must fire the workflow. A gate that cannot run is not a gate. */
+const REQUIRED_TRIGGERS: Readonly<Record<string, readonly string[]>> = {
+  'ci.yml': ['push', 'pull_request'],
+  'release.yml': ['release'],
+  'dep-scan-daily.yml': ['schedule'],
+};
+
+function stepIdentity(s: Step): string {
+  return s.uses ?? s.name ?? `run:${(s.run ?? '').trim().split('\n')[0]?.slice(0, 30)}`;
+}
+
+function triggersOf(file: string): string[] {
+  const doc = parseYaml(readFileSync(WORKFLOW_DIR + file, 'utf8')) as Record<string, unknown>;
+  // `on` is the YAML 1.1 boolean `true` once parsed, which is why reading it
+  // as a string key silently returns nothing.
+  const on = (doc as { on?: unknown; true?: unknown }).on ?? (doc as { true?: unknown }).true;
+  expect(on, `${file}: no triggers parsed — the reader, not the file`).toBeDefined();
+  return Object.keys(on as Record<string, unknown>);
+}
+
+describe('the surroundings of the pinned shell', () => {
+  for (const where of Object.keys(PINNED_STEPS)) {
+    it(`${where} runs nothing before the gate that could hollow it out`, () => {
+      const job = allJobs().find((j) => j.where === where);
+      expect(job, `${where} no longer exists`).toBeDefined();
+      const expected = PINNED_STEPS[where] as readonly string[];
+      const actual = (job as Job).steps.map(stepIdentity).slice(0, expected.length);
+      expect(actual).toEqual([...expected]);
+      // …and the last of them really is the scan, so the slice cannot be
+      // satisfied by a prefix that stops short of it.
+      expect(actual[actual.length - 1]).toBe(expected[expected.length - 1]);
+    });
+  }
+
+  for (const [file, needed] of Object.entries(REQUIRED_TRIGGERS)) {
+    it(`${file} still has the trigger that makes its gate run`, () => {
+      const have = triggersOf(file);
+      for (const n of needed) expect(have, `${file}: \`${n}:\` is gone`).toContain(n);
+    });
+  }
+
+  it('installs the scanner the action pins, with no call-site override', () => {
+    for (const j of allJobs()) {
+      for (const s of j.steps) {
+        if (s.uses !== ACTION_REF) continue;
+        // Only `token` may be passed. `version`/`sha256` here would install a
+        // different binary while every assertion about the action stays green.
+        expect(Object.keys(s.with ?? {}).sort(), `${j.where}: overrides the pinned scanner`).toEqual(['token']);
+      }
+    }
+  });
+});
+
 describe('the shell that runs the gate is pinned, not pattern-matched', () => {
   for (const where of Object.keys(PINNED)) {
     it(`${where} runs exactly the reviewed commands`, () => {
@@ -343,8 +440,9 @@ describe('every job that touches osv-scanner', () => {
   // first matched the RAW run text: a comment saying "this used to curl
   // osv-scanner_linux_amd64" then made a correct workflow look like an
   // unsanctioned installer. The failure the layer exists to prevent, in the
-  // code documenting it — caught by a mutation that had to stay green, which
-  // lives in the batteries this PR records rather than in this file.
+  // code documenting it. It was caught by a mutation that had to stay green,
+  // run against this branch and reported in the pull request — not by anything
+  // that runs from this file.
   const touchesOsv = (s: Step): boolean =>
     commands(s.run).some((l) => INSTALLS.test(l) || /osv-scanner|osv-report-gate/.test(l)) || s.uses === ACTION_REF;
 
