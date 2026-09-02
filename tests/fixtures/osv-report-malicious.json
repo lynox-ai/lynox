@@ -1,0 +1,47 @@
+{
+  "results": [
+    {
+      "source": {
+        "path": "pnpm-lock.yaml",
+        "type": "lockfile"
+      },
+      "packages": [
+        {
+          "package": {
+            "name": "@ledgerhq/connect-kit",
+            "version": "1.1.7",
+            "ecosystem": "npm"
+          },
+          "vulnerabilities": [
+            {
+              "id": "MAL-2023-8697",
+              "summary": "Malicious code in @ledgerhq/connect-kit (npm)",
+              "aliases": [
+                "GHSA-g9hp-hq3h-h6hx"
+              ],
+              "severity": null,
+              "database_specific": {
+                "malicious-packages-origins": [
+                  {
+                    "id": "GHSA-g9hp-hq3h-h6hx"
+                  }
+                ]
+              }
+            }
+          ],
+          "groups": [
+            {
+              "ids": [
+                "MAL-2023-8697"
+              ],
+              "aliases": [
+                "GHSA-g9hp-hq3h-h6hx"
+              ],
+              "max_severity": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -45,29 +45,73 @@ jobs:
       # because it shells out to `pnpm audit`, and pnpm audit still hits the
       # retired npm legacy advisory endpoint (HTTP 410). osv-scanner reads
       # pnpm-lock.yaml natively and queries OSV.dev (aggregates GHSA + npm
-      # advisories + more). High/critical fail the job; moderate/low are
-      # reported as warnings to match the prior Phase 1 policy.
+      # advisories + more). High/critical fail the job; moderate/low are listed
+      # and do not block, which keeps the prior Phase 1 policy — and a finding
+      # whose severity the report does not state now fails too, which is the
+      # change, not a detail. See scripts/osv-report-gate.mjs for the
+      # measurement: the whole `MAL-` feed carries no severity, so "unclassified
+      # means not blocking" made OSV's malicious-package data decorative.
+      #
+      # PINNED AND CHECKSUMMED. `releases/latest` fetched a different executable
+      # on every run, `sudo mv`'d it onto PATH, and ran it over the checkout —
+      # and it is the binary that decides whether an advisory blocks a merge.
+      # The hash lives in this file rather than beside the artefact on purpose:
+      # the release publishes `osv-scanner_SHA256SUMS`, but fetching the
+      # expectation from the same place as the bytes only proves the transfer.
+      # Written here it is under review like an action SHA. Taken from that
+      # published file AND recomputed from the downloaded binary, 2026-09-02.
+      #
+      # ⚠ Bounded: the attestation refuses bytes that no google/osv-scanner
+      # release attested. It does NOT bind them to this tag, so a downgrade to a
+      # genuinely published older release passes the checksum only because the
+      # checksum moves with the pin — the provenance check alone would not catch
+      # it. Downgrade-to-a-real-vulnerable-version is covered by nothing here.
+      #
+      # This mirrors lynox-pro's audit job (pro#813). The two are separate files
+      # with no mechanism keeping them honest, which is its own recorded gap.
       - name: Install osv-scanner
+        env:
+          OSV_SCANNER_VERSION: '2.5.1'
+          OSV_SCANNER_SHA256: 'f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be'
+          # Bundle verification reads a signature, not the API, so it needs no
+          # token. The line is here so a future `gh` that reinstates auth turns
+          # into nothing rather than a permanently red required check — which is
+          # the state that earns a `|| true`. Read-only scope.
+          GH_TOKEN: ${{ github.token }}
         run: |
-          curl -sSfL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 -o /tmp/osv-scanner
+          set -euo pipefail
+          curl -sSfL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64" -o /tmp/osv-scanner
+          echo "${OSV_SCANNER_SHA256}  /tmp/osv-scanner" | sha256sum -c -
+          # After the checksum because that one is local and free, before the
+          # `sudo mv` because neither control is worth anything once the file is
+          # on PATH. Both flags below are load-bearing: without `--bundle` this
+          # queries the attestations API and 404s on a SLSA-generator artefact.
+          curl -sSfL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/multiple.intoto.jsonl" -o /tmp/osv-provenance.jsonl
+          gh attestation verify /tmp/osv-scanner \
+            --bundle /tmp/osv-provenance.jsonl \
+            --repo google/osv-scanner \
+            --predicate-type https://slsa.dev/provenance/v0.2 \
+            --signer-repo slsa-framework/slsa-github-generator
           chmod +x /tmp/osv-scanner
           sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
-          osv-scanner --version
+          # Diagnostic, not the control — the checksum already fixes the bytes.
+          # It catches a hand-edit that moves the pin without moving the hash.
+          osv-scanner --version | tee /tmp/osv-version
+          grep -qx "osv-scanner version: ${OSV_SCANNER_VERSION}" /tmp/osv-version
+
+      # The exit code is CAPTURED and handed to the gate rather than discarded.
+      # Measured on 2.5.1: an unreadable lockfile exits 127 and a lockfile that
+      # yields no packages exits 128, and neither writes the report. Under the
+      # old `|| true` that was survivable only by accident — the missing file
+      # broke the jq that followed. The accident is what is being removed.
       - name: Scan dependencies (high+critical hard-fail)
         run: |
           set -euo pipefail
-          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output=/tmp/osv.json || true
-          osv-scanner scan source --lockfile=pnpm-lock.yaml || true
-          HIGH=$(jq '[.results[]?.packages[]?.vulnerabilities[]? | select((.database_specific.severity // "") | IN("HIGH","CRITICAL"))] | length' /tmp/osv.json)
-          TOTAL=$(jq '[.results[]?.packages[]?.vulnerabilities[]?] | length' /tmp/osv.json)
-          echo "total=${TOTAL} high_or_critical=${HIGH}"
-          if [ "${HIGH}" -gt 0 ]; then
-            echo "::error::${HIGH} high/critical vulnerability(ies) — failing CI"
-            exit 1
-          fi
-          if [ "${TOTAL}" -gt 0 ]; then
-            echo "::warning::${TOTAL} moderate/low vulnerability(ies) reported (not blocking)"
-          fi
+          set +e
+          osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json
+          OSV_RC=$?
+          set -e
+          node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}"
 
       - run: pnpm run lint
       - run: pnpm run typecheck
