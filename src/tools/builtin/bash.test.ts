@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { execSync } from 'node:child_process';
 import { bashTool, buildSafeEnv } from './bash.js';
+import { isToolSoftFailure } from '../../core/tool-soft-failure.js';
 
 vi.mock('node:child_process', () => ({
   execSync: vi.fn(),
@@ -40,34 +41,99 @@ describe('bashTool', () => {
     }));
   });
 
-  it('returns combined stdout+stderr on failure with both', async () => {
+  // A non-zero exit now leaves as a `ToolSoftFailure` rather than a plain
+  // return, so the run ledger stops counting it as a success. The payload the
+  // AGENT reads is unchanged — that is what these still assert, via
+  // `agentVisibleResult`. `agentSeesOnFailure` fails loudly if the handler ever
+  // goes back to returning, so this cannot silently regress into a no-op.
+  /** The ledger `reason` of a soft failure — the only trace of WHY a call failed. */
+  async function ledgerReason(command: string, timeoutMs?: number): Promise<string> {
+    try {
+      const r = await bashTool.handler(
+        timeoutMs === undefined ? { command } : { command, timeout_ms: timeoutMs },
+        {} as never,
+      );
+      throw new Error(`expected a ToolSoftFailure, got a plain return: ${r}`);
+    } catch (err: unknown) {
+      if (!isToolSoftFailure(err)) throw err;
+      return err.reason;
+    }
+  }
+
+  it('names a TIMEOUT as a timeout, not as an exit code', async () => {
+    // Residuum 2 of four (closing comment 2026-08-02). `execSync` kills the
+    // child on timeout: `status` is null, `signal` is SIGTERM. The old text read
+    // "bash exited non-zero" — the single reason a reader would rule OUT a
+    // timeout, on the one field that records why the call failed.
+    const err = Object.assign(new Error('timed out'), {
+      status: null, signal: 'SIGTERM', stdout: '', stderr: '',
+    });
+    mockedExecSync.mockImplementation(() => { throw err; });
+    const reason = await ledgerReason('sleep 999', 1500);
+    expect(reason).toContain('SIGTERM');
+    expect(reason).toContain('1500');
+    expect(reason, 'a killed child never "exited"').not.toContain('exited');
+  });
+
+  it('still names a real exit code when there is one', async () => {
+    // Counter-direction: naming timeouts must not swallow the ordinary case.
+    const err = Object.assign(new Error('failed'), {
+      status: 2, signal: null, stdout: '', stderr: 'boom',
+    });
+    mockedExecSync.mockImplementation(() => { throw err; });
+    expect(await ledgerReason('false')).toBe('bash exited 2');
+  });
+
+  async function agentSeesOnFailure(command: string): Promise<string> {
+    try {
+      const returned = await bashTool.handler({ command }, {} as never);
+      throw new Error(`expected a ToolSoftFailure, got a plain return: ${returned}`);
+    } catch (err: unknown) {
+      if (!isToolSoftFailure(err)) throw err;
+      return err.agentVisibleResult;
+    }
+  }
+
+  it('gives the agent combined stdout+stderr on failure with both', async () => {
     const err = Object.assign(new Error('cmd failed'), {
       stdout: 'partial output',
       stderr: 'error details',
     });
     mockedExecSync.mockImplementation(() => { throw err; });
-    const result = await bashTool.handler({ command: 'bad-cmd' }, {} as never);
-    expect(result).toBe('partial output\nerror details');
+    expect(await agentSeesOnFailure('bad-cmd')).toBe('partial output\nerror details');
   });
 
-  it('returns only stderr on failure when stdout is empty', async () => {
+  it('gives the agent only stderr on failure when stdout is empty', async () => {
     const err = Object.assign(new Error('cmd failed'), {
       stdout: '',
       stderr: 'only error',
     });
     mockedExecSync.mockImplementation(() => { throw err; });
-    const result = await bashTool.handler({ command: 'fail' }, {} as never);
-    expect(result).toBe('only error');
+    expect(await agentSeesOnFailure('fail')).toBe('only error');
   });
 
-  it('returns "Command failed" when both stdout and stderr are empty', async () => {
+  it('gives the agent "Command failed" when both stdout and stderr are empty', async () => {
     const err = Object.assign(new Error('cmd failed'), {
       stdout: '',
       stderr: '',
     });
     mockedExecSync.mockImplementation(() => { throw err; });
-    const result = await bashTool.handler({ command: 'empty-fail' }, {} as never);
-    expect(result).toBe('Command failed: empty-fail');
+    expect(await agentSeesOnFailure('empty-fail')).toBe('Command failed: empty-fail');
+  });
+
+  it('reports the exit code to the ledger, not to the agent', async () => {
+    const err = Object.assign(new Error('cmd failed'), {
+      stdout: '', stderr: 'boom', status: 127,
+    });
+    mockedExecSync.mockImplementation(() => { throw err; });
+    try {
+      await bashTool.handler({ command: 'missing-binary' }, {} as never);
+      expect.unreachable('should have thrown');
+    } catch (e: unknown) {
+      if (!isToolSoftFailure(e)) throw e;
+      expect(e.reason).toBe('bash exited 127');
+      expect(e.agentVisibleResult).toBe('boom');
+    }
   });
 
   it('wraps non-standard error with cause', async () => {
@@ -332,4 +398,43 @@ describe('buildSafeEnv', () => {
       expect(env['SSH_AUTH_SOCK']).toBe('/tmp/explicit-agent.sock');
     });
   });
+});
+
+describe('bash tool description (DEF-bash-install-workaround)', () => {
+  const description = bashTool.definition.description;
+
+  it('no longer advertises package management', () => {
+    // It used to. A model reads the description as a statement of capability,
+    // and this one named a capability the managed runtime does not have —
+    // read-only root, non-root user, no package manager. The measured cost was
+    // 41 bash calls in a single thread rediscovering that.
+    expect(description).not.toMatch(/package management/i);
+  });
+
+  it('states the prohibition as a POLICY, not as a claim about the environment', () => {
+    // Deliberate: a local `npx lynox` run may well have a working apt or npm, so
+    // "you cannot install" would be false there and would teach the model to
+    // distrust the description. "Do not install" is true in every deployment.
+    expect(description).toMatch(/installing packages/i);
+    expect(description).not.toMatch(/no package manager|cannot install|not available/i);
+  });
+
+  it('stands alone — it does not defer to text the holder may not have', () => {
+    // The first draft of this description ended "(see the tools section of your
+    // instructions)". That pointer is dead for most holders of the tool: a
+    // spawned child is given GROUNDING_PROMPT_BLOCK plus its own role prompt and
+    // never SYSTEM_PROMPT (spawn.ts), and so is a workflow step
+    // (runtime-adapter.ts), while both inherit the parent's tool list including
+    // bash. Pointing at a document the reader does not have is the same class of
+    // defect as advertising a capability the runtime does not have.
+    // Forbid the DEIXIS, not the one string that was deleted. The earlier form
+    // of this test matched `see the … section|your instructions|the system
+    // prompt`, which catches the exact phrase already gone and none of the
+    // seven plausible ways to write it back: "see your system instructions",
+    // "refer to the Tools section of your prompt", "(see above)",
+    // "(per your guidelines)". A short tool description has no legitimate use
+    // for a pointer, so the verb is the invariant.
+    expect(description).not.toMatch(/\b(see|refer(s|ring)? to|as (described|noted|documented)|per your)\b/i);
+  });
+
 });

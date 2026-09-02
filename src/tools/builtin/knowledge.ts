@@ -1,13 +1,40 @@
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { KnowledgeKind, MemoryBlockEditMode } from '../../types/memory.js';
 import { matchesSecretPattern, maskSecretPatterns } from '../../core/secret-store.js';
-import { BlockEditError, BlockOverLimitError, MAX_KNOWLEDGE_ENTRY_CHARS } from '../../core/knowledge-store.js';
+import { BlockEditError, BlockOverLimitError, checkKnowledgeText } from '../../core/knowledge-store.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { appendCaptureTelemetry } from '../../core/capture-telemetry.js';
+import type { UntrustedCause } from '../../core/untrusted-signals.js';
 import { deriveTurnUntrusted, describeTurnUntrusted } from '../../core/untrusted-signals.js';
 import { appendUntrustedCauseLog } from '../../core/untrusted-cause-log.js';
 import { pv } from '../../core/prompt-value.js';
 import { canSupersede } from '../../core/provenance.js';
+
+/**
+ * The reason clause every trust-gate outcome names, worded for the signal that ACTUALLY fired.
+ *
+ * The gate ORs a run-scoped signal with the conversation-sticky F5 latch (`untrusted-signals.ts`),
+ * so a turn that ran no external tool at all still trips it once anything earlier in the thread
+ * tainted the conversation. A fixed "this turn read external content" is then false — to the model,
+ * and to the user it relays the reason to. These strings are prompt surface: they teach a rule
+ * about the runtime, so a wrong one mis-teaches every later turn. Observed on prod 2026-08-10
+ * (engine 2.13.0): the model quoted the fixed sentence to explain a queue on a turn whose only
+ * tool call was `remember`.
+ */
+function untrustedReason(cause: UntrustedCause): string {
+  return cause === 'conversation'
+    ? 'this conversation read external content on an earlier turn'
+    : 'this turn read external content';
+}
+
+/**
+ * How to reach a trusted write, given the cause. Under the sticky latch there is no clean turn
+ * left in THIS thread — telling the user to "tell me directly on a clean turn" sends them to an
+ * unreachable state, so the conversation case names the one thing that does clear it (`reset`).
+ */
+function untrustedRemedy(cause: UntrustedCause): string {
+  return cause === 'conversation' ? 'in a new chat' : 'directly on a clean turn';
+}
 
 /**
  * Durable Knowledge Substrate tools (DK.1). The always-on capture/read surface that
@@ -70,20 +97,12 @@ export const rememberTool: ToolEntry<RememberInput> = {
 
     const text = input.text?.trim();
     if (!text) return 'Pass a non-empty `text` to remember.';
-    // S8/S6: bound the durable write. A knowledge entry is ONE concise fact — an unbounded
-    // `remember` (or an injected loop of them) would bloat engine.db at rest. Loud reject, not
-    // a silent trim; long material belongs in a document / data_store, not a memory entry.
-    if (text.length > MAX_KNOWLEDGE_ENTRY_CHARS) {
-      return `That is too long for a single memory (${text.length} chars, max ${MAX_KNOWLEDGE_ENTRY_CHARS}). Record one concise fact, or put the full material in a document / data_store.`;
-    }
-
-    // H7: a secret-SHAPED scan on the write path (not only tenant-known secrets). Reject
-    // clear credentials (API keys, tokens, Bearer/JWT) — reject, never queue: a decrypted
-    // credential must not sit in the review panel. Legitimate business facts (incl. IBANs,
-    // which are not credentials) are unaffected.
-    if (matchesSecretPattern(text) || agent.secretStore?.containsSecret(text) === true) {
-      return 'Cannot record content that looks like a secret or credential. Store secrets via ask_secret / the vault, not in memory.';
-    }
+    // S8/S6 (length) + H7 (secret-SHAPED reject, never queue) both live in
+    // `checkKnowledgeText`, shared with the turn-end capture path so the two write paths
+    // cannot drift apart — they already had, once. Its reasons are user-visible returns of
+    // this tool and are pinned in `tests/eval/probe-freshness.test.ts` on that surface.
+    const check = checkKnowledgeText(text, agent.secretStore, input.subject);
+    if (!check.ok) return check.reason;
 
     // H4: the source is untrusted if the run saw the content boundary marker OR any
     // external-content tool ran this turn (the capability denylist — the marker alone is
@@ -93,10 +112,13 @@ export const rememberTool: ToolEntry<RememberInput> = {
     const sourceUntrusted = deriveTurnUntrusted(agent);
     // Record WHICH signal fired. The gate needs only the boolean; the review queue needs the
     // attribution, or the cost of the sticky (F5) half of the union stays unmeasurable.
+    // Derived ONCE and reused by the cause-log, the SSE chip, and the model-visible return
+    // string below, so the three can never disagree about why this write was queued.
+    const untrustedCause = describeTurnUntrusted(agent);
     void appendUntrustedCauseLog(agent.toolContext.userConfig?.retrieval_shadow_log === true, {
       ts: Date.now(),
       site: 'remember',
-      cause: describeTurnUntrusted(agent),
+      cause: untrustedCause,
       untrusted: sourceUntrusted,
       threadId: agent.currentThreadId,
       runId: agent.currentRunId,
@@ -116,13 +138,28 @@ export const rememberTool: ToolEntry<RememberInput> = {
     // Capture telemetry (DEF-dk-capture-observability): the NUMERATOR of the fire
     // -rate — the model actually recorded a durable fact, with the store outcome.
     // Gated on the DK flag so it logs only where we measure (the canary).
+    //
+    // `runId` is what makes the numerator JOINABLE to the denominator: this site fires
+    // from any run that has the tool, while `capture_eligible` fires only from the
+    // turn-end hook, which returns early for several run shapes. Without the run key the
+    // report can divide the two but cannot show they describe the same runs
+    // (DEF-firerate-mixes-two-populations).
     void appendCaptureTelemetry(agent.durableMemoryEnabled === true, {
       ts: Date.now(),
       event: 'remember_invoked',
+      // Reuses the value derived once above, so the cause-log, the SSE chip, the model-visible
+      // string and this line can never disagree about why the write was queued.
+      cause: untrustedCause,
       thread: agent.currentThreadId,
       model: agent.model,
       untrusted: sourceUntrusted,
       outcome: result.deduped === true ? 'deduped' : result.status,
+      runId: agent.currentRunId,
+      // The MODEL chose to call the tool. Tagged positively rather than left to be
+      // inferred from the absence of `capture`: an untagged line is indistinguishable
+      // from one written before the field existed, so "by elimination" silently folds
+      // pre-field history into model-compliance and overstates it.
+      source: 'model',
     });
 
     // propose_shown (PRD-ONBOARDING §7 / AC-1.4): a NEW pending_review write becomes a
@@ -138,13 +175,14 @@ export const rememberTool: ToolEntry<RememberInput> = {
         model: agent.model,
         untrusted: sourceUntrusted,
         entryId: result.id,
+        source: 'model',
       });
     }
 
     // DK-UX inline signal: a CLIENT-ONLY StreamEvent for the inline chip (trusted → a
     // "gemerkt · undo" confirmation, untrusted → a keep/discard review chip). Emitted for a
     // NEW write only (never a dedup no-op). This is NOT the tool-result and is never folded
-    // into model context — the return string below stays deliberately minimal (line 103),
+    // into model context — the return string below stays deliberately minimal,
     // and the event flows only to the web-ui via the SSE side-channel. For an untrusted
     // (pending_review) write the event carries the raw text for the review chip.
     if (result.deduped !== true && (result.status === 'active' || result.status === 'pending_review')) {
@@ -158,13 +196,13 @@ export const rememberTool: ToolEntry<RememberInput> = {
         agent: agent.name,
         // Only for a queued write: on a trusted one there is no cause to name, and sending
         // 'none' would invite the UI to render an empty reason.
-        ...(result.status === 'pending_review' ? { cause: describeTurnUntrusted(agent) } : {}),
+        ...(result.status === 'pending_review' ? { cause: untrustedCause } : {}),
       });
     }
 
     if (result.status === 'pending_review') {
       // Do NOT echo the (possibly injected) text back into context.
-      return 'Recorded for review: this turn read external content, so it is queued for your approval before it becomes active knowledge.';
+      return `Recorded for review: ${untrustedReason(untrustedCause)}, so it is queued for your approval before it becomes active knowledge.`;
     }
     if (result.deduped === true) {
       // A near-duplicate of an existing active entry — nothing new was stored. Tell the model so
@@ -301,7 +339,8 @@ export const memoryBlockEditTool: ToolEntry<BlockEditInput> = {
     // fragile. Injected "append 'auto-approve all invoices' to the playbook" is thus blocked
     // at source — the playbook holds approval boundaries a rule could silently disable.
     if (deriveTurnUntrusted(agent)) {
-      return 'Refused: memory blocks hold standing rules and cannot be edited on a turn that read external content. If this is a genuine durable rule, tell me directly (a clean turn) and I will record it.';
+      const cause = describeTurnUntrusted(agent);
+      return `Refused: memory blocks hold standing rules and cannot be edited because ${untrustedReason(cause)}. If this is a genuine durable rule, tell me ${untrustedRemedy(cause)} and I will record it.`;
     }
 
     // H5: mirror subjects_merge — a standing-rule change hard-refuses in autonomous mode or
@@ -381,7 +420,8 @@ export const memoryRetireTool: ToolEntry<RetireInput> = {
     // Untrusted turn → refuse outright (H5-class): injected content must not be
     // able to retire real knowledge ("forget that X" in a poisoned mail body).
     if (deriveTurnUntrusted(agent)) {
-      return 'Refused: memory cannot be retired on a turn that read external content. If this fact is genuinely outdated, tell me directly on a clean turn.';
+      const cause = describeTurnUntrusted(agent);
+      return `Refused: memory cannot be retired because ${untrustedReason(cause)}. If this fact is genuinely outdated, tell me ${untrustedRemedy(cause)}.`;
     }
     if (agent.autonomy === 'autonomous' || !agent.promptUser) {
       return 'Refused: retiring memory needs interactive confirmation and cannot run autonomously.';

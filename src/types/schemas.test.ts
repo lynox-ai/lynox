@@ -94,6 +94,17 @@ describe('LynoxUserConfigSchema — default_tier back-compat (2026-05-29 rename)
   });
 });
 
+describe('LynoxUserConfigSchema — max_workflow_steps (bulk cap override)', () => {
+  it('preserves a persisted max_workflow_steps through the .strict() schema (not stripped/nulled)', () => {
+    // The language bug (2026-08-07): a config field absent from the .strict()
+    // schema nulls the WHOLE config on load. max_workflow_steps must be declared
+    // here or a tenant setting it in config.json loses their entire user config.
+    const result = LynoxUserConfigSchema.safeParse({ api_key: 'sk-x', max_workflow_steps: 40 });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.max_workflow_steps).toBe(40);
+  });
+});
+
 describe('LynoxUserConfigSchema — balanced_model (Sonnet variant selection)', () => {
   it('preserves a persisted balanced_model through the .strict() schema (not stripped)', () => {
     // Config-field 3-place contract: a value absent from the schema is dropped

@@ -59,6 +59,19 @@ export interface ResolvedRunModel {
   readonly tier: ModelTier;
   /** The concrete model id to send to the provider. */
   readonly modelId: string;
+  /**
+   * Was `modelId` PINNED by the caller (a raw model id) rather than derived from
+   * the tier?
+   *
+   * The distinction only matters to callers that PRICE the run. A pinned id is
+   * the model that executes, so it is what to charge. A derived one is the BASE
+   * provider's model for that tier — under hybrid routing the tier's slot is
+   * what actually executes, and pricing the derived id charges the wrong model
+   * (Anthropic rates for a Fireworks run). Such a caller must map the tier
+   * through {@link effectiveTierModelId} instead, which this flag lets it do
+   * without re-deriving which branch it took.
+   */
+  readonly pinned: boolean;
 }
 
 /**
@@ -103,7 +116,7 @@ export function resolveRunModel(req: RunModelRequest): ResolvedRunModel {
         `Model "${shownId}" is not permitted on this instance: it is blocked by the operator model blocklist. A specific model id cannot be substituted, so it is refused — request a tier (fast/balanced/deep) instead, which resolves to a permitted model.`,
       );
     }
-    return { tier: clampTier(req.defaultTier, req.maxTier), modelId: requested };
+    return { tier: clampTier(req.defaultTier, req.maxTier), modelId: requested, pinned: true };
   }
 
   // `applyTierGate` is now a pass-through (D8 — no tier-band capability gate;
@@ -125,14 +138,14 @@ export function resolveRunModel(req: RunModelRequest): ResolvedRunModel {
   if (req.blockedModelIds && req.blockedModelIds.length > 0) {
     if (isBlockedModelId(effectiveTierModelId(tier, req.provider), req.blockedModelIds)) {
       if (tier !== 'fast' && !isBlockedModelId(effectiveTierModelId('fast', req.provider), req.blockedModelIds)) {
-        return { tier: 'fast', modelId: getModelId('fast', req.provider) };
+        return { tier: 'fast', modelId: getModelId('fast', req.provider), pinned: false };
       }
       throw new Error(
         `No permitted model for tier "${tier}" on this instance: the tier's model and the fast-tier fallback are both blocked by the operator model blocklist.`,
       );
     }
   }
-  return { tier, modelId: getModelId(tier, req.provider) };
+  return { tier, modelId: getModelId(tier, req.provider), pinned: false };
 }
 
 /**

@@ -49,6 +49,10 @@ function rig(c: InjectionCase, interactive: boolean): Rig {
     () => { state.toolCalls += 1; },
     () => { state.delivered = true; },
     interactive,
+    // No agent loop here — the handlers are called directly, so the throw from
+    // probeHostPolicy already escapes. Nothing to stash; rethrowing keeps the
+    // two paths behaving alike rather than silently diverging.
+    (e) => { throw e; },
   );
   const call = (t: number) => (input: unknown) => tools[t]!.handler(input, AGENT_STUB);
   return {

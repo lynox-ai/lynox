@@ -119,7 +119,7 @@ The Docker Compose file includes production-ready hardening:
 - **`tmpfs`** — Temporary storage in memory, not on disk
 - **Non-root user** — Runs as `lynox` (UID 1001), not root
 - **Log rotation** — `max-size: 20m` prevents disk filling
-- **Network isolation** — Internal Docker network between services
+- **No published side services** — SearXNG publishes no host port, so nothing off the machine can reach it. On a Linux host, processes on the host itself and containers you attach to the same Compose network still can. This is not an egress boundary: outbound traffic from the containers is unrestricted at the network layer.
 
 The Docker image goes further: no shell (`bash` removed), no package manager (`apt` removed), no SUID binaries. See [Security](/features/security/) for what you need to handle yourself (TLS, firewall, backups).
 

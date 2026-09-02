@@ -1717,7 +1717,17 @@ export class RunHistory {
         -- A2 capture-pollution guard: never re-surface a workflow step's
         -- REPLAYED tool calls to save_workflow / pattern analysis.
         AND r.run_type != 'pipeline_step'
-      ORDER BY r.created_at, r.rowid, tc.sequence_order
+      -- Insertion order IS execution order: rows are written as each call
+      -- finishes. Ordering by the RUN first (created_at, rowid) breaks as soon
+      -- as one turn's calls live on more than one run -- a spawned child's run
+      -- is always younger than its parent's, so every child call sorted AFTER
+      -- every call the parent made that turn, however early the child ran.
+      --
+      -- The only consumer is save_workflow, which turns this list into the
+      -- steps of a saved pipeline, so a call landing at the wrong point is a
+      -- wrong pipeline. sequence_order cannot fix it either: it is per-run, so
+      -- two runs both start at 0.
+      ORDER BY tc.rowid
     `).all(sessionId) as ToolCallRecord[];
     return rows.map(tc => this._decToolCall(tc));
   }
@@ -2208,16 +2218,34 @@ export class RunHistory {
     };
   }
 
-  /** Count tool calls of a specific type within the last N hours (via run timestamps). */
+  /**
+   * Count tool calls of a specific type within the last N hours (via run
+   * timestamps). This ENFORCES the http_request and mail-send rate limits — it
+   * is not a metric, so a row that stops being visible here is a limit that
+   * stops being enforced.
+   *
+   * Every recorded call counts, `pipeline_step` runs included.
+   *
+   * This used to exclude `pipeline_step`, on the stated grounds that a workflow
+   * step's calls were "unrecorded, so uncounted here" and that counting them
+   * would retroactively tighten the limit. The first half was wrong: the calls
+   * WERE recorded, a second time, by the process-global `lynox:tool:end`
+   * subscriber, which booked them onto whatever run the listening Session had
+   * open. So the exclusion was not keeping a step's calls out of the count — it
+   * was cancelling a DOUBLE count, and the two defects held each other up.
+   *
+   * Removing the duplicate write without removing this exclusion would have
+   * silently un-enforced the limit for every workflow step. They fall together.
+   *
+   * One behaviour does change: a workflow run with no chat Session open had no
+   * second row to be counted by, so its steps were never counted at all. Those
+   * now count, which is the limit doing what it says.
+   */
   getToolCallCountSince(toolName: string, hours: number): number {
     const row = this.db.prepare(`
       SELECT COUNT(*) as cnt FROM run_tool_calls tc
       JOIN runs r ON tc.run_id = r.id
       WHERE tc.tool_name = ? AND r.created_at >= datetime('now', ?)
-        -- A2: the step recorder is observability-only — it must not retroactively
-        -- change tool rate-limiting. Excluding pipeline_step preserves the exact
-        -- pre-A2 count (workflow step calls were unrecorded, so uncounted here).
-        AND r.run_type != 'pipeline_step'
     `).get(toolName, `-${hours} hours`) as { cnt: number };
     return row.cnt;
   }

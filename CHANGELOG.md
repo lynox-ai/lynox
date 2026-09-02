@@ -1,5 +1,231 @@
 # Changelog
 
+## Unreleased
+
+### Changed — BREAKING (library consumers)
+- **`createGoogleTools` no longer builds the credential, and its signature changed.**
+  It was `createGoogleTools(options) → { tools, auth }`; it is now
+  `createGoogleTools(resolveAuth: () => GoogleAuth | null) → { tools }`, and the
+  credential half moved to the new `createGoogleAuth(options) → GoogleAuth`. Both
+  are exported from the package barrel, as is the new `GOOGLE_NOT_CONNECTED`
+  constant.
+
+  The reason is not tidiness: the four Google tools are now registered from boot
+  whether or not Google is connected, so a model that can see the tool can tell
+  the user the feature exists and how to switch it on. A tool that must exist
+  before its credential does cannot close over that credential — hence the
+  resolver. Each tool answers `GOOGLE_NOT_CONNECTED` until there is something to
+  resolve, and the resolver is re-read per call so a reconnect takes effect
+  without a process restart.
+
+  **Migration:** `const { tools, auth } = createGoogleTools(opts)` becomes
+  `const auth = createGoogleAuth(opts); const { tools } = createGoogleTools(() => auth);`
+
+## 2.14.2 — 2026-08-18
+
+A second repair, on the slot 2.14.1 brought back to life. Pointing the `fast`
+slot at an id the provider still serves was necessary and not sufficient: the
+model in it thinks before it answers, and its thinking floor is larger than the
+output budget most of its callers give it. So it answered — with an empty
+string, HTTP 200, `finish_reason: 'length'`, no error anywhere.
+
+### Fixed
+- **The `fast` slot returns output to the callers whose budgets are too tight to
+  afford its thinking.** Measured against the live provider at each caller's real
+  `max_tokens`: 4 of 6 came back empty — thread titles (64), retrieval HyDE
+  (256), entity extraction (512), search reranking (512) — each having spent its
+  whole budget on reasoning tokens. Nothing surfaced it: every one of those
+  callers treats an empty result as "nothing to do". A model may now declare
+  `defaultReasoningEffort: 'none'`, which the openai adapter applies at or below
+  a budget bound. With it, all four answer, in roughly half the tokens and half
+  the latency, and quality did not drop where the caller already worked — memory
+  extraction stopped translating its output to English and stopped inventing
+  three "durable facts" from a note that says nothing was discussed. (#1235)
+
+  Two narrowings are deliberate and both came out of review. The declaration
+  **wins** over the existing `features.reasoningEffort` ladder rather than
+  yielding to it, because `features` is a shared object across six models — so
+  flagging any one of them would otherwise silently un-suppress this one, and the
+  ladder's lowest rung was measured not to suppress the floor at all. And it
+  applies only at or below 1024 output tokens, the largest budget any of those
+  callers passes, so a `spawn_agent` on the fast tier keeps its thinking.
+
+### Known limits
+The bench that put this model in the fast slot measured it WITH thinking, so
+below the bound the shipped configuration is no longer the benched one. That is
+not new with this release — today's shipped configuration is not the benched one
+either, it is one that returns an empty string — but nothing re-benches the
+suppressed slot yet.
+
+The failure mode itself stays silent: an HTTP 200 with `finish_reason: 'length'`
+and no content assembles into an ordinary empty message, so a future model in
+this slot could reproduce the bug with no error anywhere. A detector for that
+shape is owed, not shipped here.
+
+### Upgrade and rollback
+No schema migration, engine or control plane. Rolling back to 2.14.1 restores the
+empty responses on the four tight callers.
+
+## 2.14.1 — 2026-08-18
+
+A repair release. The `fast` slot had been naming a Fireworks model id the
+provider stopped serving on 2026-08-14, and every caller that routes to that
+band — compaction, memory and knowledge extraction, a workflow step that
+declares no model — had been failing daily since, on all four production
+instances, without surfacing anything: each of those callers catches. The other
+two entries are the same shape of quiet wrongness. A number that was right
+about the wrong thing. A limit the agent could hit but not see.
+
+### Fixed
+- **The `fast` slot names a DeepSeek id Fireworks still serves.**
+  `accounts/fireworks/models/deepseek-v4-flash` was withdrawn in favour of
+  `…-flash-0731`. Nothing made the failure visible: compaction leaves the
+  summary empty and its guard deliberately suppresses the reset, so the thread
+  survives and no one looks; extraction skips; an undeclared workflow step dies
+  at step 0 with an empty `stepErrors`, which reads like a cap. A new online
+  test inverts the usual skip rule for this class — with a provider credential
+  present, a slot a preset pins that answers anything but 200 now FAILS instead
+  of skipping. Without a credential it still skips, because then we genuinely
+  did not test it. The next withdrawal is caught by the suite rather than by a
+  customer four days later. (#1232)
+- **A workflow step is recorded against the model that ran it, not the one it
+  requested.** The row stored the DECLARED tier, so any step whose request was
+  clamped — the headless `deep` → `balanced` rewrite, an account-tier ceiling,
+  a blocked model id — was filed and priced as the tier it had asked for. That
+  row is what the consent dialog estimates a run's cost from, so a clamped step
+  made the estimate read high against a run that would have been cheap. Price
+  and label now read one resolver call. (#1231)
+
+### Changed
+- **The agent can see the per-conversation request cap and plan around it.**
+  `http_request` is capped at 100 calls per conversation, and that budget is
+  SHARED with sub-agents — so splitting a bulk job into children buys nothing.
+  Neither fact was stated anywhere the model could read it, so a job larger
+  than the cap walked into the wall blind. Both are now in the tool
+  description, together with the escape that does work: a stored workflow fired
+  once per batch, where each firing gets its own budget. `task_create`
+  therefore accepts `params` to re-target a stored workflow per firing —
+  rejected without a `workflow_id`, scanned for injection like every other
+  free-text field it carries, and counted as a firing by the confirmation gate,
+  which had not been counting `workflow_id` at all. (#1233)
+
+### Upgrade and rollback
+No schema migration, engine or control plane. Rolling back to 2.14.0 restores
+the dead `fast` slot, so an instance that rolls back should carry an explicit
+`compaction_model` until it rolls forward again.
+
+## 2.14.0 — 2026-08-18
+
+A routing release. The control plane can now decide which model sits behind
+each band of an instance, which is what makes a customer's bill movable
+without asking them to change how they work. Everything else in here is what
+that turned out to require: the pin has to be honest about whether it took
+effect, it must never cost the instance its boot, and the money it moves has
+to be metered against the model that actually ran.
+
+### Changed
+- **The control plane can pin a routing preset per instance, and a tenant's own
+  choice still wins.** `LYNOX_TIER_PRESET` names one of the shared presets; the
+  engine expands it to the same `{routing_mode, tier_set}` the settings picker
+  produces. It is a SEED, not a lock: it fills an empty selection and never
+  overwrites one the tenant made. That is a reversal from how it shipped
+  mid-cycle, and the reason is measured rather than argued — as a lock it bound
+  only the picker (a tenant writing explicit slots already beat it) and there it
+  failed silently: the write was accepted, persisted, reported back, and then
+  discarded at load. (#1217, #1220)
+- **An unknown pin is ignored, not fatal.** The name is validated before it is
+  adopted. Previously an unrecognised value reached a fail-closed expander that
+  throws, and `loadConfig()` in the engine constructor has no catch — so a pin
+  the running image did not know took the container down, with the settings UI
+  needed to clear it served by that container. The same now holds for an
+  unresolvable name in the instance's own config: it is dropped with a warning
+  and the instance keeps its default routing. The fail-closed guard that
+  protects money — a preset that resolves but names an unregistered model — is
+  unchanged. (#1223)
+- **The preset ladder is one axis: the main slot.** Two Fireworks sets that
+  differ in exactly that slot, plus an all-Anthropic set. `efficient` →
+  `balanced` buys a stronger main for 3.7× the output price, and the main is
+  the slot that runs every turn, which is why it is the only axis worth a
+  separate preset. A preset name and its table are now two halves the compiler
+  joins, so neither can exist without the other. (#1185, #1187)
+- **A workflow step is priced against the model that ran it.** Step cost, the
+  budget reservation and the persisted `model_id` resolved through the base
+  provider's tier map, so on a hybrid instance they named a model that never
+  ran — roughly a tenfold over-charge against the tenant's included budget
+  under the cheap presets. The comment above the call already claimed this
+  property; the base-provider half had been fixed and the hybrid-slot half
+  missed. (#1221)
+- **The workflow step cap is config-overridable, and in-session runs inherit
+  the same limits as saved ones.** Parallel phase concurrency is bounded, and
+  two fail-open gaps in the spend guards are closed — a malformed width no
+  longer switches backpressure off entirely. (#1204, #1205, #1206, #1216)
+- **`spawn_agent` asks before it spends a deep tier**, with a
+  deny→balanced downgrade instead of an all-or-nothing refusal, and headless
+  runs clamp rather than prompt. The proactive-deep guidance offers the deep
+  tier instead of spawning one. (#1200, #1201, #1202, #1215)
+- **Large chat uploads are stored as files instead of inlined.** A 200k-character
+  paste used to enter the conversation whole and be re-read as a cache write on
+  every subsequent turn. Oversized tool results are parked and recallable rather
+  than dropped. (#1190, #1212)
+- **Model picker labels state the context window**, and `active_model` resolves
+  through the tier_set rather than the base provider map — on a hybrid instance
+  the two used to disagree, and the capability flags beside them inherited the
+  wrong answer. (#1165, #1194)
+- **`GET /api/config` reports the routing strategy the engine runs**, not the
+  raw config file. A pinned instance carries no preset in its file at all, so
+  the response said "no preset" about an engine that was routing one — which is
+  also the surface an operator uses to check that a pin took effect. (#1224)
+
+### Fixed
+- **A display name can no longer add a mail recipient.** A non-ASCII name went
+  out as an RFC-2047 atom in a context whose grammar forbids it, so a name written by
+  someone else could inject an address the consent preview never showed.
+  Found and fixed on the Gmail path, then found again on IMAP/SMTP, where it
+  was worse: recipients went pre-serialised to nodemailer, which re-parses them,
+  and the injected address became the sole envelope recipient. Fixed
+  structurally — addresses are passed as objects — rather than with more
+  escaping. (#1219)
+- **Encoded-words are split at the 75-character limit**, and a From-persona no
+  longer breaks subject encoding. (#1197, #1199)
+- **The engine's own secret files are guarded against agent reads — the ones it
+  actually writes.** The list had been written from the filenames the engine's
+  code creates, which is not the set a deployment ends up with: the container
+  entrypoint writes two of them elsewhere, the conversation store was on no
+  list, and the backup directory holds copies of all of them. Self-host only;
+  managed receives these values as container environment and never materialises
+  the files. (#1164, #1222)
+- **The client does not re-POST a run after an SSE transport failure.** A
+  stream that died with no applied events was treated as "never started" and
+  re-fired, which minted duplicate billed runs out of a transport hiccup. The
+  server is now the authority on whether the run is alive. (#1213)
+- **Durable knowledge is judged by ownership, not by whether a tool ran**, and
+  review chips survive transcript adoption, late arrival and thread resume.
+  A warning fires when durable knowledge is enabled but the model is barely
+  capturing. (#1167, #1169, #1171, #1175, #1179, #1211)
+- **Tool-call recording has one owner** instead of N listeners, records on the
+  failed-run path, and no longer attributes another conversation's calls to
+  this run. (#1180, #1183, #1188)
+- **Files whose name holds a non-ASCII byte are no longer skipped.** (#1184)
+
+### Upgrade and rollback
+No engine-schema migration. Four control-plane migrations from this cycle
+(0050–0053), all additive and idempotent; the vendored wire contract moves with
+this release and its control-plane sync must land before the control-plane
+deploy.
+
+Rolling back to 2.13.0 is safe for the engine: the new config fields are
+optional everywhere, and an older image simply ignores `LYNOX_TIER_PRESET`
+rather than failing on it — that is the pre-change behaviour, not a new one.
+An instance that was pinned keeps routing on its own configuration.
+
+Two known limits are stated rather than left to be discovered. A mail body's
+signature block still collapses onto one line when the model hard-wraps it;
+three separate attempts at a rule that could tell an author's line break from a
+machine wrap were measured wrong in both directions, and shipping any of them
+would have reintroduced mid-sentence breaks. And an ignored pin is reported in
+the API response but no interface renders it yet — the operator-facing signal
+today is a log line.
+
 ## 2.13.0 — 2026-08-09
 
 A cost release. Its origin is one afternoon of real usage: a customer's

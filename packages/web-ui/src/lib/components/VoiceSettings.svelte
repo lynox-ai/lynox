@@ -16,6 +16,10 @@
 			providers: Array<{ id: string; name: string; available: boolean }>;
 			config_value: string | null;
 			env_override: string | null;
+			/** Managed instance: this field is outside the tenant-writable set, so the
+			 *  picker must not look live. Decided server-side by the same set the write
+			 *  gate enforces — see GET /api/voice/info. */
+			locked?: boolean;
 		};
 		tts: {
 			available: boolean;
@@ -25,6 +29,10 @@
 			config_value: string | null;
 			config_voice: string | null;
 			env_override: string | null;
+			/** Managed instance: this field is outside the tenant-writable set, so the
+			 *  picker must not look live. Decided server-side by the same set the write
+			 *  gate enforces — see GET /api/voice/info. */
+			locked?: boolean;
 		};
 	}
 	interface Config {
@@ -96,6 +104,11 @@
 				<select disabled class="w-full px-2 py-1 border border-border rounded bg-bg opacity-60">
 					<option>{info.stt.provider ?? '—'}</option>
 				</select>
+			{:else if info.stt.locked}
+				<p class="text-xs text-text-muted">{t('voice.managed_locked')}</p>
+				<select disabled class="w-full px-2 py-1 border border-border rounded bg-bg opacity-60">
+					<option>{info.stt.provider ?? '—'}</option>
+				</select>
 			{:else}
 				<select disabled={!loaded} bind:value={config.transcription_provider}
 					class="w-full px-2 py-1 border border-border rounded bg-bg disabled:opacity-50">
@@ -112,6 +125,11 @@
 			<p class="text-xs text-text-muted">{t('voice.tts_privacy')}</p>
 			{#if info.tts.env_override}
 				<p class="text-xs text-warning">{t('voice.env_override')} <code class="font-mono">{info.tts.env_override}</code></p>
+				<select disabled class="w-full px-2 py-1 border border-border rounded bg-bg opacity-60">
+					<option>{info.tts.provider ?? '—'}</option>
+				</select>
+			{:else if info.tts.locked}
+				<p class="text-xs text-text-muted">{t('voice.managed_locked')}</p>
 				<select disabled class="w-full px-2 py-1 border border-border rounded bg-bg opacity-60">
 					<option>{info.tts.provider ?? '—'}</option>
 				</select>

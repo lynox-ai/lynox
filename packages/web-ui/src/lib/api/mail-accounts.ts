@@ -25,6 +25,14 @@ export interface MailAccountFormFields {
 	password: string;
 	personaPrompt: string;
 	custom?: unknown;
+	/**
+	 * Save without the server's pre-save connection test. The escape hatch for a
+	 * mailbox whose SMTP leg cannot be verified but whose IMAP leg is fine — an
+	 * alias with no send rights, a smarthost wanting different credentials, a
+	 * provider throttling AUTH. Without it, such a mailbox cannot be added at
+	 * all, and the read half of the product goes with it.
+	 */
+	skipTest?: boolean;
 }
 
 /**
@@ -53,6 +61,10 @@ export function buildMailAccountPayload(f: MailAccountFormFields): Record<string
 	};
 	if (f.personaPrompt.trim()) payload['personaPrompt'] = f.personaPrompt.trim();
 	if (f.preset === 'custom' && f.custom !== undefined) payload['custom'] = f.custom;
+	// Only ever sent as `true`, and only when the caller asked for it — an
+	// explicit `false` would be indistinguishable from the default and invites
+	// a caller to pass a variable that is accidentally false-y.
+	if (f.skipTest === true) payload['skipTest'] = true;
 	return payload;
 }
 

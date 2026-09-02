@@ -251,11 +251,13 @@ describe('RetrievalEngine — deleted memories must not keep surfacing their ent
     expect(after.map(e => e.id)).not.toContain(entityId);
   });
 
-  it('still resolves an entity that never had a mention — DataStore collections are exactly that', async () => {
-    // The regression the first cut of this filter would have shipped: `registerCollection`
-    // creates one entity per DataStore collection and never calls `createMention`, so a
-    // "has no active mentions" test would have silently dropped every collection hint out
-    // of the context graph. Dormant means HAD mentions and lost them all — not never had any.
+  it('still resolves an entity that never had a mention', async () => {
+    // The regression the first cut of this filter would have shipped: a bulk ingest that mints
+    // one entity per collection without ever calling `createMention` would have been silently
+    // dropped by a "has no active mentions" test. The producer that motivated this (the
+    // DataStore→KG bridge) was removed 2026-08-24, so the case is currently unreachable in
+    // production — the filter keeps the distinction as a fail-safe. Dormant means HAD mentions
+    // and lost them all, not never had any.
     const collectionId = db.createEntity({
       canonicalName: 'invoices', entityType: 'collection', scopeType: 'global', scopeId: 'global',
       description: 'Data table: invoices — columns: id (text), total (number)',

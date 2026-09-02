@@ -18,7 +18,6 @@ import type {
   MemoryScopeRef,
   MemoryNamespace,
   MemoryScopeType,
-  DataStoreColumnDef,
 } from '../types/index.js';
 import type { RunHistory } from './run-history.js';
 import { Memory } from './memory.js';
@@ -36,7 +35,6 @@ import { createEmbeddingProvider } from './embedding.js';
 import type { EmbeddingProvider, OnnxModelId } from './embedding.js';
 import { KnowledgeLayer } from './knowledge-layer.js';
 import type { EngineDb } from './engine-db.js';
-import { DataStoreBridge } from './datastore-bridge.js';
 import { getLynoxDir } from './config.js';
 import { FILE_MODE_PRIVATE } from './constants.js';
 import {
@@ -114,35 +112,24 @@ export function configureBudgetAndRateLimits(
   process.stderr.write(`${guardedCapableBootLine(resolvedPolicy)}\n`);
 }
 
+/**
+ * Genealogy recording for a Session.
+ *
+ * Tool calls used to be recorded here too, from a `lynox:tool:end` subscriber.
+ * They are not any more: that channel is process-global, so every Session's
+ * callback ran for every tool call in the process and each booked what arrived
+ * onto its own open run. A thread-id filter narrowed it to one conversation but
+ * could not separate a spawned child from its parent — they share a thread by
+ * design — so a child's calls landed on the parent's run. Persistence now goes
+ * through a sink the agent is given (`AgentConfig.recordToolCall`), which
+ * receives the caller's own run id instead of inferring one.
+ *
+ * `spawn:end` stays on the channel because its payload already names both runs
+ * it is relating, so a listener needs nothing from its own ambient state.
+ */
 export function setupHistorySubscriptions(
   history: RunHistory,
-  getCurrentRunId: () => string | null,
-  getAndIncrementSeq: () => number,
-  addUserWaitMs?: (ms: number) => void,
 ): void {
-  // tool:end → fire-and-forget tool call recording
-  channels.toolEnd.subscribe((msg: unknown) => {
-    const runId = getCurrentRunId();
-    if (!runId) return;
-    const data = msg as { name: string; duration: number; success: boolean; error?: string | undefined; input?: string | undefined };
-    // Track user wait time from interactive tools
-    if (data.name === 'ask_user' && addUserWaitMs) {
-      addUserWaitMs(Math.round(data.duration));
-    }
-    try {
-      history.insertToolCall({
-        runId,
-        toolName: data.name,
-        inputJson: data.input ?? '{}',
-        outputJson: data.success ? '' : (data.error ?? 'unknown error'),
-        durationMs: Math.round(data.duration),
-        sequenceOrder: getAndIncrementSeq(),
-      });
-    } catch {
-      // Fire-and-forget
-    }
-  });
-
   // spawn:end → genealogy tracking
   channels.spawnEnd.subscribe((msg: unknown) => {
     const data = msg as {
@@ -437,10 +424,11 @@ export function initSecrets(userConfig: LynoxUserConfig): SecretResult {
         process.stderr.write('[lynox] ANTHROPIC_API_KEY env var overrides vault value\n');
       }
 
-      const vaultGoogleSecret = vault.get('GOOGLE_CLIENT_SECRET');
-      if (vaultGoogleSecret && !process.env['GOOGLE_CLIENT_SECRET']) {
-        userConfig.google_client_secret = vaultGoogleSecret;
-      }
+      // The vault→userConfig copy for GOOGLE_CLIENT_SECRET was removed with the pair
+      // resolver: it put a vault secret next to an env id in userConfig and produced
+      // a 'config' tier holding a pair neither source ever had. The resolver reads the
+      // vault directly, and the migration below now carries the ID too, so the vault
+      // holds a COMPLETE pair rather than half of one.
 
       // Tavily backend removed 2026-05-24 — `SEARCH_API_KEY` / `TAVILY_API_KEY`
       // vault entries left behind by older installs are ignored on read. They
@@ -521,7 +509,9 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
     envVar: string;
   }> = [
     { vaultName: 'ANTHROPIC_API_KEY', configField: 'api_key', envVar: 'ANTHROPIC_API_KEY' },
-    { vaultName: 'GOOGLE_CLIENT_SECRET', configField: 'google_client_secret', envVar: 'GOOGLE_CLIENT_SECRET' },
+    // The Google pair is NOT in this list — see the paired migration below. The loop
+    // is per-field and this value is a pair, and mixing those two shapes is exactly
+    // the defect google-client-pair.ts exists to prevent.
     // SEARCH_API_KEY / TAVILY_API_KEY migration entry removed 2026-05-24
     // when the Tavily backend was retired.
   ];
@@ -535,6 +525,43 @@ function _migrateConfigSecretsToVault(vault: SecretVault, userConfig: LynoxUserC
     if (process.env[m.envVar]) continue; // Don't store env-sourced keys
     vault.set(m.vaultName, value, 'any');
     fieldsToRemove.push(m.configField);
+  }
+
+  // ── The Google client pair migrates atomically or not at all ────────────────
+  //
+  // The loop above decides per FIELD: it skips a name the vault already holds and
+  // migrates the rest. For a pair that is wrong in a way that destroys data. With
+  // an old secret in the vault and the operator's current pair in config.json, the
+  // secret entry is skipped, the id is moved in beside the OLD secret, and the id
+  // is then deleted from config.json — leaving a vault pair assembled from two
+  // eras (PROJECT-B id with PROJECT-A secret, i.e. invalid_client) and no way back,
+  // because the correct id is gone from disk.
+  //
+  // So: migrate both only when the vault holds NEITHER and config.json holds BOTH.
+  // In every other shape, migrate neither and delete neither — a half-migrated pair
+  // is worse than an unmigrated one, and config.json is the only remaining copy.
+  const gId = userConfig.google_client_id;
+  const gSecret = userConfig.google_client_secret;
+  const vaultHasNeither = !vault.has('GOOGLE_CLIENT_ID') && !vault.has('GOOGLE_CLIENT_SECRET');
+  const configHasBoth = typeof gId === 'string' && !!gId && typeof gSecret === 'string' && !!gSecret;
+  const envHasNeither = !process.env['GOOGLE_CLIENT_ID'] && !process.env['GOOGLE_CLIENT_SECRET'];
+  if (vaultHasNeither && configHasBoth && envHasNeither) {
+    // Two writes, and a half-completed pair is the thing to avoid: a lone vault
+    // half is inert today (the resolver needs both), but a later half stored
+    // through the UI would complete it ACROSS ERAS — the exact two-era pair this
+    // change exists to prevent. If the second write throws, undo the first and
+    // leave config.json untouched, so the operator's pair stays in one piece.
+    // A hard kill between the two is not reachable from here and is carried as
+    // DEF-vault-pair-write-not-atomic.
+    try {
+      vault.set('GOOGLE_CLIENT_ID', gId, 'any');
+      vault.set('GOOGLE_CLIENT_SECRET', gSecret, 'any');
+      fieldsToRemove.push('google_client_id', 'google_client_secret');
+    } catch (err) {
+      try { vault.delete('GOOGLE_CLIENT_ID'); } catch { /* nothing to undo */ }
+      try { vault.delete('GOOGLE_CLIENT_SECRET'); } catch { /* nothing to undo */ }
+      throw err;
+    }
   }
 
   if (fieldsToRemove.length === 0) return;
@@ -728,42 +755,6 @@ export async function initKnowledgeLayer(
     process.stderr.write(`[lynox:knowledge] Agent memory init failed: ${getErrorMessage(err)}\n`);
     return null;
   }
-}
-
-export function initDataStoreBridge(
-  knowledgeLayer: KnowledgeLayer,
-  dataStore: import('./data-store.js').DataStore,
-): DataStoreBridge {
-  const bridge = new DataStoreBridge(
-    knowledgeLayer.getDb(),
-    knowledgeLayer.getEntityResolver(),
-    dataStore,
-  );
-  knowledgeLayer.setDataStoreBridge(bridge);
-
-  // Subscribe to dataStoreInsert for async entity indexing
-  channels.dataStoreInsert.subscribe((msg: unknown) => {
-    const data = msg as {
-      event: string;
-      collection: string;
-      columns?: DataStoreColumnDef[];
-      records?: Record<string, unknown>[];
-      scopeType?: string;
-      scopeId?: string;
-    };
-    const scope: MemoryScopeRef = {
-      type: (data.scopeType as MemoryScopeRef['type']) ?? 'context',
-      id: data.scopeId ?? '',
-    };
-
-    if (data.event === 'collection_created' && data.columns) {
-      void bridge.registerCollection(data.collection, data.columns, scope).catch(() => {});
-    } else if (data.event === 'records_inserted' && data.records) {
-      void bridge.indexRecords(data.collection, data.records, scope).catch(() => {});
-    }
-  });
-
-  return bridge;
 }
 
 // ── Memory Store Subscription ───────────────────────────────────

@@ -350,6 +350,107 @@ const DETAIL_MONEY_PAIRS: Record<string, { amount: string; currency: string }> =
 };
 
 /**
+ * When does a 1:1 detail row carry SUBSTANTIVE data — data that makes the subject a record
+ * in its own right, so the orphan reap (DEF-0015) must keep it even with no memory left?
+ * Not every non-NULL column qualifies: `people.type` / `organizations.type` are NOT NULL
+ * with a default ('contact' / 'other'), so a bare row minted by an ingest has them set
+ * without anyone having said anything; they count only when set to a NON-default value (a
+ * deliberate classification). `currency` pairs with its amount and says nothing alone.
+ * Static SQL fragments over static column names (never input) — same injection argument as
+ * REPOINT_TARGETS. `src/scripts/subject-sweep.ts` `blockReason` carries a narrower hand copy
+ * of this idea (email/phone/domain/vat_id/sku/price/rate); folding it onto this predicate is a
+ * registered follow-up, not done here.
+ */
+const DETAIL_SUBSTANTIVE_PREDICATE: Record<string, string> = {
+  person:       "email IS NOT NULL OR phone IS NOT NULL OR role IS NOT NULL OR type <> 'contact'",
+  organization: "domain IS NOT NULL OR vat_id IS NOT NULL OR country IS NOT NULL OR type <> 'other'",
+  engagement:   'provider_subject_id IS NOT NULL OR client_subject_id IS NOT NULL OR started_at IS NOT NULL OR ended_at IS NOT NULL OR budget_cents IS NOT NULL OR billing_model IS NOT NULL',
+  product:      'sku IS NOT NULL OR price_cents IS NOT NULL',
+  service:      'hourly_rate_cents IS NOT NULL',
+};
+
+/**
+ * Every engine.db column that points at `subjects(id)`, partitioned by how the orphan reap
+ * treats it — exported so a schema sweep (`PRAGMA foreign_key_list` over every table) can
+ * fail the build the day a new FK column onto `subjects(id)` appears that none of the three
+ * lists knows. Without that guard the next such column would be invisible to the reap and the
+ * subject it holds would be over-erased. (A soft pointer declared WITHOUT `REFERENCES` is
+ * outside what `PRAGMA foreign_key_list` can see — those are the cross-DB seams in
+ * {@link SubjectExternalRefs}, kept by hand.)
+ *  - `counted`: a row here is a reference ({@link SubjectStore.referenceReason} keeps the subject).
+ *  - `detail`:  the 1:1 kind-detail rows (PK = subject_id) — part of the subject itself; a
+ *               reference when they carry substantive data (`DETAIL_SUBSTANTIVE_PREDICATE`),
+ *               or — for a kind the predicate map does not know — whenever a row exists.
+ *  - `derived`: recomputable materializations that must NOT count (cooccurrences).
+ *  - `detailKindsMissingPredicate`: detail kinds that would fall back to row-exists; the
+ *               sweep asserts this is empty so the fallback never fires on today's schema.
+ */
+export function subjectReferenceCoverage(): {
+  counted: string[]; detail: string[]; derived: string[]; detailKindsMissingPredicate: string[];
+} {
+  return {
+    counted: [
+      ...REPOINT_TARGETS.map(t => `${t.table}.${t.column}`),
+      'memory_subjects.subject_id',
+      'subjects.merged_into',
+    ],
+    detail: Object.values(DETAIL_TABLE).map(d => `${d.table}.subject_id`),
+    derived: ['subject_cooccurrences.subject_a_id', 'subject_cooccurrences.subject_b_id'],
+    detailKindsMissingPredicate: Object.keys(DETAIL_TABLE).filter(k => !Object.hasOwn(DETAIL_SUBSTANTIVE_PREDICATE, k)),
+  };
+}
+
+/**
+ * Cross-database soft references to a subject that engine.db's own FKs cannot see — both
+ * are LIVE user data outside engine.db: the history.db thread anchor
+ * (`threads.primary_subject_id`; engine.db's `threads` mirror is empty pre-S2) and
+ * datastore.db `subject`-typed cells (record-on-spine). The orphan reap consults them
+ * through this seam so a subject a thread or a table still points at is never erased out
+ * from under its owner. An implementation that cannot answer MUST say `true` (referenced):
+ * keeping a name is today's state, erasing a live anchor would be new damage.
+ */
+export interface SubjectExternalRefs {
+  /** Is `subjectId` the `primary_subject_id` of ANY history.db thread? */
+  isThreadAnchor(subjectId: string): boolean;
+  /** Does ANY datastore.db record link `subjectId` through a `subject`-typed column? */
+  hasRecords(subjectId: string): boolean;
+}
+
+/** The one method {@link makeSubjectExternalRefs} needs from a history.db thread store. */
+export interface ThreadAnchorProbe { listBySubjectId(subjectId: string, limit?: number): readonly unknown[] }
+/** The one method {@link makeSubjectExternalRefs} needs from a datastore.db record store. */
+export interface RecordProbe { hasRecordsForSubject(subjectId: string): boolean }
+
+/**
+ * Build the cross-DB half of the reference oracle from the two live stores, or `null` when
+ * either is missing — `null` means the caller must NOT reap (fail-closed: a missing probe is
+ * not an absent reference). Structural parameter types on purpose: `SubjectStore` sits BELOW
+ * `ThreadStore`/`DataStore`, so naming those classes here would invert the layering. The engine
+ * erase path (`src/core/knowledge-layer.ts`) and the operator sweep's orphan report
+ * (`src/scripts/subject-sweep.ts --orphans`) both build their oracle HERE — the fail-closed rule
+ * below is security logic, and a second copy of it is exactly the drift this factory exists to
+ * prevent. The sweep's ARCHIVE phase deliberately does not: it asks a different question and
+ * keeps its own guardrail list, partitioned against this oracle by `SWEEP_REFERENCE_PARTITION`.
+ *
+ * A probe that THROWS answers `true` (referenced) and reports once via `onProbeFailure`: a
+ * permanently failing probe (a pre-v46 history.db without the anchor column, a locked
+ * datastore) keeps every subject forever, which is indistinguishable from a real holder unless
+ * it is said out loud. Keeping a name is today's state; erasing a live anchor is new damage.
+ */
+export function makeSubjectExternalRefs(
+  threads: ThreadAnchorProbe | null,
+  records: RecordProbe | null,
+  onProbeFailure?: (probe: string, err: unknown) => void,
+): SubjectExternalRefs | null {
+  if (!threads || !records) return null;
+  const keptOnFailure = (probe: string, err: unknown): true => { onProbeFailure?.(probe, err); return true; };
+  return {
+    isThreadAnchor: (id) => { try { return threads.listBySubjectId(id, 1).length > 0; } catch (err: unknown) { return keptOnFailure('thread-anchor', err); } },
+    hasRecords: (id) => { try { return records.hasRecordsForSubject(id); } catch (err: unknown) { return keptOnFailure('record', err); } },
+  };
+}
+
+/**
  * The complete before-image of ONE merge — enough to reverse it byte-for-byte.
  * Captured read-only by {@link SubjectStore.planMerge} BEFORE any mutation, so the
  * caller can persist it FIRST (same crash-safety discipline as the archive sweep:
@@ -453,37 +554,60 @@ export class SubjectStore {
     status?: string | undefined;
     embedding?: Buffer | undefined;
   }): SubjectResolution {
-    const owner = params.ownerUserId ?? DEFAULT_OWNER;
-    if (NAME_DEDUP_KINDS.has(params.kind)) {
-      // Exact canonical/alias hit first; then a normalized fallback so a punctuated /
-      // doubled-whitespace variant converges onto an already-stored CLEAN name (e.g.
-      // "Meridian AG." finds a prior "Meridian AG"). One-directional: it matches the
-      // normalized query against stored raw names, so the clean form must have been
-      // stored first — full symmetry would need a stored normalized-name column.
-      const normalized = normalizeSubjectName(params.kind, params.name);
-      const canonical = this.findCanonical(params.name, params.kind, owner);
-      const aliasHit = canonical ? null : this.findByAliasResolved(params.name, params.kind, owner);
-      // AMBIGUOUS → hand the question back, and stop looking. Two subjects already carry
-      // this name, so there is no right answer to fold into, and every step below is a
-      // wider matcher than the one that just declined. This store does NOT invent an
-      // identity here: it once returned whichever row SQLite yielded first (a silent
-      // wrong bind), and a later attempt collected such mentions on a row named after the
-      // name itself — which then won `findCanonical` and could only ever be un-done by a
-      // BULK repoint that reassigns every collected fact to ONE of the candidates,
-      // reproducing the original defect later and in bulk. Both invented an answer to a
-      // question the store cannot answer. The caller gets the candidates instead.
-      if (aliasHit?.ambiguous) return { ambiguous: true, candidateIds: aliasHit.ids };
-      const existing = canonical
-        ?? aliasHit?.row
-        ?? (normalized !== params.name ? this.findCanonical(normalized, params.kind, owner) : null);
-      if (existing) {
-        // Fold the caller's surface forms into the existing subject's aliases
-        // (case-insensitive — case-variants of an existing alias are no-ops).
-        this._mergeAliases(existing, [params.name, ...(params.aliases ?? [])]);
-        return { ambiguous: false, id: existing.id, created: false };
-      }
+    const found = this.resolveForCreate(params);
+    if (found.ambiguous) return { ambiguous: true, candidateIds: found.candidateIds };
+    if (found.row) {
+      // Fold the caller's surface forms into the existing subject's aliases
+      // (case-insensitive — case-variants of an existing alias are no-ops).
+      this._mergeAliases(found.row, [params.name, ...(params.aliases ?? [])]);
+      return { ambiguous: false, id: found.row.id, created: false };
     }
     return { ambiguous: false, id: this.createSubject(params), created: true };
+  }
+
+  /**
+   * The READ half of {@link findOrCreate}: WHICH existing subject a create-call would
+   * fold into, or `null` when it would insert. Side-effect free — no alias merge, no
+   * insert.
+   *
+   * Extracted so a caller that needs to know the OUTCOME without causing it resolves
+   * through the same code instead of a second, slightly-different copy of the rule. That
+   * second copy is not hypothetical: the review queue's approve preview first reproduced
+   * the lookup with `findByNameAnyKind`, which has no normalized fallback, so a hint of
+   * `"Meridian AG."` previewed as "will be created" while the approval quietly folded it
+   * into the existing `Meridian AG`. The preview was a wrong promise on a consent
+   * surface, and nothing could catch it while the rule lived in two places.
+   *
+   * Non-deduped kinds (`engagement`, `other`) resolve to `null` — a create-call there
+   * always inserts, which is the correct answer to "what would this fold into".
+   */
+  resolveForCreate(params: { kind: SubjectKind; name: string; ownerUserId?: string | undefined }):
+    | { ambiguous: false; row: SubjectRow | null }
+    | { ambiguous: true; candidateIds: readonly string[] } {
+    const owner = params.ownerUserId ?? DEFAULT_OWNER;
+    if (!NAME_DEDUP_KINDS.has(params.kind)) return { ambiguous: false, row: null };
+    // Exact canonical/alias hit first; then a normalized fallback so a punctuated /
+    // doubled-whitespace variant converges onto an already-stored CLEAN name (e.g.
+    // "Meridian AG." finds a prior "Meridian AG"). One-directional: it matches the
+    // normalized query against stored raw names, so the clean form must have been
+    // stored first — full symmetry would need a stored normalized-name column.
+    const normalized = normalizeSubjectName(params.kind, params.name);
+    const canonical = this.findCanonical(params.name, params.kind, owner);
+    const aliasHit = canonical ? null : this.findByAliasResolved(params.name, params.kind, owner);
+    // AMBIGUOUS → hand the question back, and stop looking. Two subjects already carry
+    // this name, so there is no right answer to fold into, and every step below is a
+    // wider matcher than the one that just declined. This store does NOT invent an
+    // identity here: it once returned whichever row SQLite yielded first (a silent
+    // wrong bind), and a later attempt collected such mentions on a row named after the
+    // name itself — which then won `findCanonical` and could only ever be un-done by a
+    // BULK repoint that reassigns every collected fact to ONE of the candidates,
+    // reproducing the original defect later and in bulk. Both invented an answer to a
+    // question the store cannot answer. The caller gets the candidates instead.
+    if (aliasHit?.ambiguous) return { ambiguous: true, candidateIds: aliasHit.ids };
+    const existing = canonical
+      ?? aliasHit?.row
+      ?? (normalized !== params.name ? this.findCanonical(normalized, params.kind, owner) : null);
+    return { ambiguous: false, row: existing ?? null };
   }
 
   /**
@@ -834,6 +958,166 @@ export class SubjectStore {
     ).all(...subjectIds) as { id: string; n: number }[];
     for (const r of rows) counts.set(r.id, r.n);
     return counts;
+  }
+
+  // ── Orphan-subject reap (DEF-0015) ────────────────────────────
+
+  /**
+   * Why (if at all) a subject is still REFERENCED — the single reference oracle behind the
+   * orphan-subject reap. Returns a short reason, `'missing'` for an unknown id, or `null`
+   * when NOTHING holds the row: then its only content is its plaintext `name`, and an
+   * erasure that just deleted the memories which minted it may delete the subject too.
+   *
+   * What counts as a reference — every column {@link REPOINT_TARGETS} lists (the same list
+   * a merge repoints, so the two never drift apart), the `memory_subjects` junction, a
+   * `merged_into` redirect onto it, the operator self, the cross-DB anchors the caller
+   * supplies via {@link SubjectExternalRefs}, and a 1:1 detail row carrying substantive data
+   * (a CRM contact with an email is a record in its own right, memory or not).
+   *
+   * What deliberately does NOT count: `subject_cooccurrences`. It is a DERIVED
+   * materialization of the junction ({@link MemoryGraphStore.rebuildCooccurrences}
+   * recomputes it from scratch); counting it would keep every once-co-mentioned subject
+   * alive forever, and on a real corpus the reap would never fire (rafael's engine.db:
+   * 1171 cooccurrence rows over 574 subjects). `archived_at` is not a reference either —
+   * an archived row still carries the name.
+   */
+  referenceReason(subjectId: string, external: SubjectExternalRefs): string | null {
+    const row = this.getSubject(subjectId);
+    if (!row) return 'missing';
+    if (row.is_self === 1) return 'is_self';
+    // engine.db probes first — all indexed, same connection, and the junction alone settles
+    // the common case; the two cross-DB probes (separate handles, a schema scan on the
+    // datastore side) come last so they run only for a subject nothing local holds.
+    if (this.db.prepare('SELECT 1 FROM memory_subjects WHERE subject_id = ? LIMIT 1').get(subjectId)) {
+      return 'referenced-by-memory_subjects';
+    }
+    for (const t of REPOINT_TARGETS) {
+      // Table/column names are the STATIC literals above, never input — same injection
+      // argument as the merge repoint. A relationship whose two ends are the SAME subject
+      // is the self-loop `executeMerge` leaves when two directly related subjects are
+      // folded (A→B becomes canon→canon): it describes nothing but the subject itself, so
+      // it is not a holder — counting it would make every such canonical unreapable.
+      const selfLoop = t.table === 'relationships' ? ' AND from_subject_id <> to_subject_id' : '';
+      if (this.db.prepare(`SELECT 1 FROM "${t.table}" WHERE "${t.column}" = ?${selfLoop} LIMIT 1`).get(subjectId)) {
+        return `referenced-by-${t.table}.${t.column}`;
+      }
+    }
+    // `Object.hasOwn`: `kind` is a checked enum on every write path, but a row written
+    // straight into the DB with a prototype key (`constructor`) would otherwise make the
+    // lookup truthy and the SQL below unparseable — which aborts the erase.
+    const detail = Object.hasOwn(DETAIL_TABLE, row.kind) ? DETAIL_TABLE[row.kind] : undefined;
+    if (detail) {
+      // A detail kind WITHOUT a substantive predicate is treated as held by any row at all:
+      // fail-closed, so forgetting the predicate for a new kind keeps subjects rather than
+      // reaping CRM data. The coverage sweep asserts the map is complete for today's kinds.
+      const substantive = Object.hasOwn(DETAIL_SUBSTANTIVE_PREDICATE, row.kind) ? DETAIL_SUBSTANTIVE_PREDICATE[row.kind] : undefined;
+      const where = substantive ? `subject_id = ? AND (${substantive})` : 'subject_id = ?';
+      if (this.db.prepare(`SELECT 1 FROM "${detail.table}" WHERE ${where} LIMIT 1`).get(subjectId)) {
+        return 'has-detail';
+      }
+    }
+    if (external.isThreadAnchor(subjectId)) return 'thread-anchor';
+    if (external.hasRecords(subjectId)) return 'record';
+    // LAST, deliberately: `merge-target` must mean "nothing else holds this canonical —
+    // only the archived shells of the duplicates it absorbed still point at it". Returned
+    // earlier, it would hide a CRM detail row, a thread anchor or a record on the canonical
+    // (a merge moves all of those onto it), and `reapOrphans`' closure branch — which only
+    // inspects the shells — would reap a canonical something real still holds.
+    if (this.db.prepare('SELECT 1 FROM subjects WHERE merged_into = ? LIMIT 1').get(subjectId)) return 'merge-target';
+    return null;
+  }
+
+  /**
+   * The transitive set of merged-away duplicates redirecting (via `merged_into`) onto
+   * `canonicalId` — the archived shells {@link executeMerge} leaves behind, whose own
+   * links were all repointed onto the canonical. A BFS so a chain (A→B→C) is one closure.
+   */
+  private _mergeDupClosure(canonicalId: string): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>([canonicalId]);
+    const queue = [canonicalId];
+    const dupsOf = this.db.prepare('SELECT id FROM subjects WHERE merged_into = ?');
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      for (const { id } of dupsOf.all(cur) as Array<{ id: string }>) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        out.push(id);
+        queue.push(id);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * For a canonical whose {@link referenceReason} is `merge-target`: the archived shell closure
+   * that would be reaped TOGETHER with it, or `null` when a shell is still held by something
+   * real (a thread anchor a failed repoint left on a dup id keeps the canonical too).
+   *
+   * Extracted so the decision has ONE home: {@link reapOrphans} executes it, and the operator
+   * report (`src/scripts/subject-sweep.ts --orphans`) shows the same unit. A report that listed
+   * the shell alone, or hid the canonical behind its own redirect, would not describe what an
+   * apply actually takes — and that report is what the operator decides on.
+   */
+  mergeTargetClosure(canonicalId: string, external: SubjectExternalRefs): string[] | null {
+    const closure = this._mergeDupClosure(canonicalId);
+    const shellHeld = closure.some(dup => {
+      const r = this.referenceReason(dup, external);
+      return r !== null && r !== 'merge-target';
+    });
+    return shellHeld ? null : closure;
+  }
+
+  /**
+   * Hard-delete every candidate {@link referenceReason} finds unreferenced — the
+   * orphan-subject reap an erasure owes (DEF-0015: after a GDPR erase the `subjects` row
+   * survived with its plaintext name). Runs to a FIXPOINT: deleting one candidate can
+   * release another (a parent whose only child was itself a candidate), and the outcome
+   * must not depend on iteration order. Bounded by the candidate count per pass.
+   *
+   * The CALLER owns the transaction — `purgeMemories` runs this INSIDE the memory delete, so
+   * a failure there rolls the whole erase back (and the erase's re-throw contract makes it
+   * retryable); `gcInactiveStubs` opens one around the reap alone, so a mid-closure failure
+   * leaves no half-reaped shells either way. The DELETE
+   * cascades through the schema (detail row, junction, cooccurrences, relationships) and
+   * SET-NULLs the soft pointers — by construction none of those exist for an unreferenced
+   * subject except the derived cooccurrence rows, which is exactly the residue that should
+   * go with it. Returns the ids actually deleted.
+   */
+  reapOrphans(candidateIds: Iterable<string>, external: SubjectExternalRefs): string[] {
+    const pending = new Set(candidateIds);
+    const reaped: string[] = [];
+    const del = this.db.prepare('DELETE FROM subjects WHERE id = ?');
+    let progressed = true;
+    while (progressed && pending.size > 0) {
+      progressed = false;
+      for (const id of [...pending]) {
+        const reason = this.referenceReason(id, external);
+        if (reason === 'missing') { pending.delete(id); continue; }
+        if (reason === 'merge-target') {
+          // A canonical that absorbed duplicates is pointed at by their archived shells
+          // (`merged_into`) forever — the shells' own links were all repointed onto it, so
+          // they never become candidates themselves. Read literally, `merge-target` would
+          // make every once-merged subject unreapable and keep BOTH plaintext names. So a
+          // canonical goes together with its whole shell closure when nothing but that
+          // closure holds any of them; a shell something else still holds (a thread anchor
+          // a failed repoint left on the dup id) keeps the canonical too. Rolling the merge
+          // back is moot once the canonical itself is erased.
+          const closure = this.mergeTargetClosure(id, external);
+          if (closure === null) continue;
+          for (const dup of closure) if (del.run(dup).changes > 0) reaped.push(dup);
+          if (del.run(id).changes > 0) reaped.push(id);
+          pending.delete(id);
+          progressed = true;
+          continue;
+        }
+        if (reason !== null) continue;
+        if (del.run(id).changes > 0) reaped.push(id);
+        pending.delete(id);
+        progressed = true;
+      }
+    }
+    return reaped;
   }
 
   /** Soft-archive (queries default to active; cascades remain via FK ON DELETE on hard purge). */
@@ -1253,6 +1537,55 @@ export class SubjectStore {
     const { dupId, canonicalId } = entry;
     try {
       db.transaction(() => {
+      // Every reversal step below is an `UPDATE … WHERE id = ?` or an `INSERT OR IGNORE`,
+      // and SQLite reports "0 rows changed" for those exactly as it reports success. So a
+      // ledger this database cannot actually reverse used to walk the whole reversal,
+      // touch nothing (or the WRONG thing), commit, and return {ok:true} — while the tool
+      // told the user the merge had been undone.
+      //
+      // The predicate is "is this merge in effect", not "do these rows exist". Presence
+      // alone is too weak, and the gap is not academic: merge A→B, roll it back, merge
+      // A→C, then replay the FIRST ledger. Both rows are present, so a presence check
+      // passes — and the reversal then un-archives A while C still carries A's aliases,
+      // i.e. it CORRUPTS the graph and reports success. Replaying one ledger twice has the
+      // same shape. `merged_into === canonicalId` is strictly stronger and subsumes the
+      // absent-row case, because an absent row cannot satisfy it.
+      //
+      // Absence is not a hypothetical cross-machine case either: `restoreBackup` is
+      // ADDITIVE — it renames the files the manifest names and removes nothing else — so a
+      // ledger written AFTER a backup survives the restore of the older engine.db and then
+      // points at ids that database never had.
+      //
+      // Checked INSIDE the transaction so nothing can change these rows between the check
+      // and the writes; `.immediate()` below takes the write lock up front, so opening
+      // with a read no longer risks an unretryable SQLITE_BUSY_SNAPSHOT.
+      if (dupId === canonicalId) {
+        // `planMerge` refuses a self-merge, but this function consumes an operator-supplied
+        // ledger file, so the normal path is not the only path.
+        throw new Error('this merge ledger names the same entry on both sides — it cannot be a real merge');
+      }
+      const dupRow = db.prepare('SELECT merged_into FROM subjects WHERE id = ?').get(dupId) as { merged_into: string | null } | undefined;
+      const canonPresent = db.prepare('SELECT 1 AS ok FROM subjects WHERE id = ?').get(canonicalId) as { ok: number } | undefined;
+      const missing = [
+        ...(dupRow ? [] : ['the merged-away entry']),
+        ...(canonPresent ? [] : ['the entry it was merged into']),
+      ];
+      if (missing.length > 0) {
+        // Says what is TRUE (the rows are not here) rather than guessing WHY: "belongs to
+        // another instance" would be wrong for this instance after a hard delete — and this
+        // whole change exists because a message claimed more than it knew.
+        throw new Error(
+          `cannot reverse this merge here — ${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} not in this subject graph (a ledger from another instance, or an entry deleted since)`,
+        );
+      }
+      if (dupRow!.merged_into !== canonicalId) {
+        throw new Error(
+          dupRow!.merged_into === null
+            ? 'this merge is not in effect — it has already been reversed. If an earlier rollback reported a PARTIAL failure, the engine side is already undone and only the datastore/thread side still needs attention; re-running the whole reversal is not the repair.'
+            : `this merge is not in effect — the entry is currently merged into ${dupRow!.merged_into}, not into the entry this ledger names. Reversing it from here would un-archive the entry while the other merge still holds its aliases.`,
+        );
+      }
+
       // 1. restore dup archive/redirect state. A UNIQUE-index collision here THROWS →
       //    the transaction rolls back atomically (no partial reversal).
       db.prepare("UPDATE subjects SET merged_into = ?, archived_at = ?, updated_at = datetime('now') WHERE id = ?")
@@ -1300,7 +1633,13 @@ export class SubjectStore {
         const stmt = db.prepare(`UPDATE "${t.table}" SET "${t.column}" = ? WHERE "${t.pkCol}" = ? AND "${t.column}" = ?`);
         for (const pk of t.pks) stmt.run(dupId, pk, canonicalId);
       }
-      })();
+      // `.immediate()` — the transaction now OPENS with a read (the guard above), and a
+      // deferred BEGIN would upgrade to a write lock only at the first UPDATE. Under the
+      // documented contention (the operator sweep against a live engine) that upgrade
+      // raises SQLITE_BUSY_SNAPSHOT, which `busy_timeout` cannot absorb because it is not
+      // retryable. Taking the write lock up front keeps the guard's atomicity and restores
+      // the plain-BUSY behaviour the timeout does handle.
+      }).immediate();
     } catch (err) {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }

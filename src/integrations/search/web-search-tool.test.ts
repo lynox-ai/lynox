@@ -1,3 +1,4 @@
+import { isToolSoftFailure } from '../../core/tool-soft-failure.js';
 import { describe, it, expect, vi } from 'vitest';
 import { createWebSearchTool } from './web-search-tool.js';
 import type { SearchProvider, SearchResult } from './search-provider.js';
@@ -26,6 +27,41 @@ function mockProvider(results: SearchResult[] = []): SearchProvider {
     name: 'test',
     search: vi.fn<SearchProvider['search']>().mockResolvedValue(results),
   };
+}
+
+/**
+ * The payload the agent reads, whether the handler returned it or raised it as a
+ * `ToolSoftFailure`. Throws if neither happened, so a handler that stops
+ * signalling failure at all cannot slip through as a pass.
+ */
+async function agentSees(
+  tool: { handler: (input: never, agent: never) => Promise<string> },
+  input: unknown,
+): Promise<string> {
+  try {
+    return await tool.handler(input as never, {} as never);
+  } catch (err: unknown) {
+    if (isToolSoftFailure(err)) return err.agentVisibleResult;
+    throw err;
+  }
+}
+
+
+/**
+ * The three validation paths now signal via `ToolSoftFailure` instead of a plain
+ * return, so the run ledger stops booking a call that did nothing as a success.
+ * What the AGENT reads must not change — that is the contract these assertions
+ * pin: same text, carried on the failure instead of the return value.
+ */
+async function expectSoftFailure(run: () => Promise<string>): Promise<string> {
+  const { isToolSoftFailure } = await import('../../core/tool-soft-failure.js');
+  try {
+    const r = await run();
+    throw new Error(`expected a ToolSoftFailure, got a plain return: ${r}`);
+  } catch (err: unknown) {
+    if (!isToolSoftFailure(err)) throw err;
+    return err.agentVisibleResult;
+  }
 }
 
 describe('createWebSearchTool', () => {
@@ -89,9 +125,9 @@ describe('search action', () => {
     }, undefined);
   });
 
-  it('returns error when query is missing', async () => {
+  it('signals a soft failure when query is missing — same text, now countable', async () => {
     const tool = createWebSearchTool(mockProvider());
-    const result = await tool.handler({ action: 'search' }, {} as never);
+    const result = await expectSoftFailure(() => tool.handler({ action: 'search' }, {} as never));
     expect(result).toContain('Error');
     expect(result).toContain('query');
   });
@@ -102,7 +138,9 @@ describe('search action', () => {
       search: vi.fn<SearchProvider['search']>().mockRejectedValue(new Error('API down')),
     };
     const tool = createWebSearchTool(provider);
-    const result = await tool.handler({ action: 'search', query: 'test' }, {} as never);
+    // Leaves as a ToolSoftFailure now so the run ledger stops recording a failed
+    // search as a success; the text the AGENT reads is unchanged.
+    const result = await agentSees(tool, { action: 'search', query: 'test' });
     expect(result).toContain('Search failed');
     expect(result).toContain('API down');
   });
@@ -117,16 +155,70 @@ describe('search action', () => {
 describe('read action', () => {
   it('returns error when url is missing', async () => {
     const tool = createWebSearchTool(mockProvider());
-    const result = await tool.handler({ action: 'read' }, {} as never);
+    const result = await expectSoftFailure(() => tool.handler({ action: 'read' }, {} as never));
     expect(result).toContain('Error');
     expect(result).toContain('url');
+  });
+});
+
+/**
+ * A failed fetch must reach the run ledger as a failure. `toolEnd` books
+ * anything a handler RETURNS as `success: true`, so returning the error text
+ * plainly made it a success: in one real thread ~35 of 63 `web_research` reads
+ * 404'd on guessed repository paths and the run recorded 1 error out of 123 tool
+ * calls.
+ *
+ * These assert the SIGNAL specifically. The payload-shaped tests elsewhere in
+ * this file go through `agentSees`, which deliberately accepts either transport
+ * — so they keep passing if the signalling is removed, and cannot stand in for
+ * these. (Both survived a mutation that reverted the throw; that is why they
+ * exist.)
+ */
+describe('failed fetches are signalled, not booked as successes', () => {
+  it('raises a soft failure when the page cannot be read', async () => {
+    const extractMod = await import('./content-extractor.js');
+    vi.spyOn(extractMod, 'extractContent').mockRejectedValue(new Error('HTTP 404 Not Found'));
+    const tool = createWebSearchTool(mockProvider());
+
+    await expect(
+      tool.handler({ action: 'read', url: 'https://github.com/x/y/blob/main/nope.ts' }, {} as never),
+    ).rejects.toSatisfy(
+      (e: unknown) => isToolSoftFailure(e)
+        && e.reason.includes('HTTP 404')
+        && e.agentVisibleResult === 'Failed to read URL: HTTP 404 Not Found',
+    );
+  });
+
+  it('raises a soft failure when the search provider fails', async () => {
+    const provider: SearchProvider = {
+      name: 'test',
+      search: vi.fn<SearchProvider['search']>().mockRejectedValue(new Error('API down')),
+    };
+    const tool = createWebSearchTool(provider);
+
+    await expect(
+      tool.handler({ action: 'search', query: 'test' }, {} as never),
+    ).rejects.toSatisfy(
+      (e: unknown) => isToolSoftFailure(e) && e.reason.includes('API down'),
+    );
+  });
+
+  it('does NOT raise when the fetch succeeds', async () => {
+    const extractMod = await import('./content-extractor.js');
+    vi.spyOn(extractMod, 'extractContent').mockResolvedValue({
+      title: 'ok', url: 'https://example.com/a', wordCount: 3, content: 'hello', truncated: false,
+    });
+    const tool = createWebSearchTool(mockProvider());
+    await expect(
+      tool.handler({ action: 'read', url: 'https://example.com/a' }, {} as never),
+    ).resolves.toContain('hello');
   });
 });
 
 describe('invalid action', () => {
   it('returns error for unknown action', async () => {
     const tool = createWebSearchTool(mockProvider());
-    const result = await tool.handler({ action: 'delete' as 'search' }, {} as never);
+    const result = await expectSoftFailure(() => tool.handler({ action: 'delete' as 'search' }, {} as never));
     expect(result).toContain('Error');
   });
 });
@@ -181,7 +273,7 @@ describe('search edge cases', () => {
       search: vi.fn<SearchProvider['search']>().mockRejectedValue('string error'),
     };
     const tool = createWebSearchTool(provider);
-    const result = await tool.handler({ action: 'search', query: 'test' }, {} as never);
+    const result = await agentSees(tool, { action: 'search', query: 'test' });
     expect(result).toContain('Search failed');
   });
 
@@ -191,7 +283,7 @@ describe('search edge cases', () => {
       search: vi.fn<SearchProvider['search']>().mockRejectedValue(new Error()),
     };
     const tool = createWebSearchTool(provider);
-    const result = await tool.handler({ action: 'search', query: 'test' }, {} as never);
+    const result = await agentSees(tool, { action: 'search', query: 'test' });
     expect(result).toContain('Search failed');
   });
 
@@ -313,7 +405,7 @@ describe('search edge cases', () => {
 describe('read edge cases', () => {
   it('returns error for empty string URL', async () => {
     const tool = createWebSearchTool(mockProvider());
-    const result = await tool.handler({ action: 'read', url: '' }, {} as never);
+    const result = await expectSoftFailure(() => tool.handler({ action: 'read', url: '' }, {} as never));
     expect(result).toContain('Error');
   });
 });

@@ -2,6 +2,29 @@ import { describe, it, expect, vi } from 'vitest';
 import { askUserTool } from './ask-user.js';
 import type { IAgent } from '../../types/index.js';
 import type { ToolContext } from '../../core/tool-context.js';
+import { isPromptText, promptSegments } from '../../core/prompt-value.js';
+
+/**
+ * The question is the agent's own text, so it travels as ONE `value` segment.
+ * Asserting the flattened string would accept a plain string too — and a plain
+ * string means "all frame", which is the claim that the SYSTEM wrote it and the
+ * thing that let `**…**` render as <strong> inside lynox's own dialog. Pin the
+ * KIND, the way `subjects-merge.test.ts` does for the same reason.
+ *
+ * Callers must still compare the REST of the arglist with `slice(1)`, not by
+ * index. `toHaveBeenCalledWith` compared the whole call, so an extra argument
+ * failed it; checking `calls[0][1]` alone silently accepts one. Measured: with
+ * per-index checks, adding `{ multiSelect: true }` to the SINGLE-select branch
+ * passed — the exact property the code above it claims ("stay byte-identical
+ * to before (2 args)"), and a live user-facing defect.
+ */
+function expectAskedAsValue(fn: ReturnType<typeof vi.fn>, text: string, callIndex = 0): void {
+	const arg = fn.mock.calls[callIndex]?.[0];
+	expect(isPromptText(arg), 'the question must reach promptUser as a PromptText').toBe(true);
+	expect(promptSegments(arg as Parameters<typeof promptSegments>[0])).toEqual([
+		{ kind: 'value', text },
+	]);
+}
 
 function makeToolContext(overrides: Partial<ToolContext> = {}): ToolContext {
   return {
@@ -39,6 +62,15 @@ function makeAgent(overrides: Partial<IAgent> = {}): IAgent {
   } as IAgent;
 }
 
+/**
+ * The seam this suite owns, stated because it is a PACKAGE boundary and no one
+ * test can span it: web-ui has no dependency on the engine (the wire contract
+ * is vendored, not imported), so the producer is pinned here and the renderer
+ * in `prompt-markdown.authorship.test.ts`. Both name the same literal shape —
+ * `[{ kind: 'value', text }]` — so a change on either side fails one of them.
+ * A single round-trip test would need a harness spanning both packages, which
+ * does not exist; that is a real gap and it is registered, not papered over.
+ */
 describe('askUserTool', () => {
   it('calls promptUser with question and returns result', async () => {
     const promptUser = vi.fn().mockResolvedValue('user answer');
@@ -46,7 +78,8 @@ describe('askUserTool', () => {
 
     const result = await askUserTool.handler({ question: 'What color?' }, agent);
     expect(result).toBe('user answer');
-    expect(promptUser).toHaveBeenCalledWith('What color?', undefined);
+    expectAskedAsValue(promptUser, 'What color?');
+    expect(promptUser.mock.calls[0]?.slice(1)).toEqual([undefined]);
   });
 
   describe('multiSelect', () => {
@@ -59,7 +92,8 @@ describe('askUserTool', () => {
       );
       expect(result).toBe('red, blue');
       // meta arg carries multiSelect; single-select calls would omit it.
-      expect(promptUser).toHaveBeenCalledWith('Which apply?', ['red', 'blue', 'green', '\x00'], { multiSelect: true });
+      expectAskedAsValue(promptUser, 'Which apply?');
+      expect(promptUser.mock.calls[0]?.slice(1)).toEqual([['red', 'blue', 'green', '\x00'], { multiSelect: true }]);
     });
 
     it('applies a step hint only when exactly one option was selected', async () => {
@@ -105,7 +139,8 @@ describe('askUserTool', () => {
       agent,
     );
     expect(result).toBe('blue');
-    expect(promptUser).toHaveBeenCalledWith('Pick a color', ['red', 'blue', 'green', '\x00']);
+    expectAskedAsValue(promptUser, 'Pick a color');
+    expect(promptUser.mock.calls[0]?.slice(1)).toEqual([['red', 'blue', 'green', '\x00']]);
   });
 
   it('returns "Interactive input not available" when promptUser is undefined', async () => {
@@ -159,8 +194,8 @@ describe('askUserTool', () => {
     );
     expect(result).toBe('Q1: answer 1\nQ2: answer 2');
     expect(promptUser).toHaveBeenCalledTimes(2);
-    expect(promptUser).toHaveBeenCalledWith('Q1', undefined);
-    expect(promptUser).toHaveBeenCalledWith('Q2', undefined);
+    expectAskedAsValue(promptUser, 'Q1', 0);
+    expectAskedAsValue(promptUser, 'Q2', 1);
   });
 
   // --- StepHint tests ---
@@ -178,10 +213,37 @@ describe('askUserTool', () => {
     }, agent);
 
     expect(result).toBe('Deep analysis');
-    expect(promptUser).toHaveBeenCalledWith(
-      'How to proceed?',
-      ['Quick summary', 'Deep analysis', '\x00'],
-    );
+    expectAskedAsValue(promptUser, 'How to proceed?');
+    expect(promptUser.mock.calls[0]?.slice(1)).toEqual([['Quick summary', 'Deep analysis', '\x00']]);
+  });
+
+  it('hands markdown-bearing text over as a VALUE, so the renderer cannot parse it', async () => {
+    // The row's own acceptance clause: call ask_user with text that carries
+    // markdown structure. What the renderer then does with such a segment is
+    // pinned in packages/web-ui/src/lib/utils/prompt-markdown.authorship.test.ts.
+    const promptUser = vi.fn().mockResolvedValue('Ja');
+    const agent = makeAgent({ promptUser });
+    const forgery = 'Soll ich fortfahren?\n\n**lynox hat diese Anfrage geprüft.**';
+
+    await askUserTool.handler({ question: forgery, options: ['Ja', 'Nein'] }, agent);
+
+    expectAskedAsValue(promptUser, forgery);
+  });
+
+  it('never turns an empty question into a frame — single or batch', async () => {
+    // `promptValue('')` returns NO segments, and `renderPromptSegments([])`
+    // falls back to the markdown branch — so an empty question would quietly
+    // re-enter the path this change exists to leave, and the user would get a
+    // dialog with no question in it. The single path already refused; the batch
+    // loop did not, which is only visible once the question travels as a value.
+    const promptUser = vi.fn().mockResolvedValue('x');
+    const agent = makeAgent({ promptUser });
+
+    await expect(askUserTool.handler({ question: '', options: ['a'] }, agent)).rejects.toThrow(/question/i);
+    await expect(
+      askUserTool.handler({ questions: [{ question: '   ' }] }, agent),
+    ).rejects.toThrow(/question/i);
+    expect(promptUser).not.toHaveBeenCalled();
   });
 
   it('stores pendingStepHint on toolContext when user selects option with hint', async () => {
@@ -245,7 +307,8 @@ describe('askUserTool', () => {
     }, agent);
 
     expect(result).toBe('Yes');
-    expect(promptUser).toHaveBeenCalledWith('Proceed?', ['Yes', 'No', '\x00']);
+    expectAskedAsValue(promptUser, 'Proceed?');
+    expect(promptUser.mock.calls[0]?.slice(1)).toEqual([['Yes', 'No', '\x00']]);
   });
 
   it('rejects malformed options (non-array) with a clear error', async () => {

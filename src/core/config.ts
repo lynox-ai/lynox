@@ -138,6 +138,42 @@ function readConfigFile(filePath: string): LynoxUserConfig | null {
 let _cachedConfig: LynoxUserConfig | null = null;
 
 /**
+ * Render an environment-supplied preset name for a log line or an API field.
+ *
+ * ESCAPES rather than strips, and that distinction is the point. Stripping a
+ * stray byte out of `efficient\u0001` yields `efficient` — a preset this engine
+ * DOES know — so both signals would name a valid preset while reporting that it
+ * is unknown, and an operator would read "version skew" where the truth is an
+ * invisible character. The escape keeps the evidence legible.
+ *
+ * Everything outside printable ASCII becomes `\uXXXX`. Preset names are ASCII by
+ * contract, so nothing legitimate is escaped — while C0, DEL, C1 (U+009B is an
+ * 8-bit escape introducer some terminals honour), the JS line terminators
+ * U+2028/U+2029, NEL U+0085 and the bidi overrides all lose their power to forge
+ * a log line or spoof the rendered name. A control-character CLASS would have
+ * missed every one of those but C0.
+ *
+ * The cap can be a plain code-unit slice, and that is worth saying because the
+ * obvious worry does not apply: escaping has already reduced the string to
+ * printable ASCII, so a code unit IS a code point here and no surrogate pair can
+ * be split. A code-point cap would be an equivalent mutation — measured, and the
+ * test that "pinned" it was removed rather than kept as decoration.
+ *
+ * One helper for both sinks on purpose: the previous version bounded the API
+ * field and left the log line raw, while its own comment justified the bound by
+ * the log line.
+ */
+export function describePinForDisplay(value: string): string {
+  const escaped = [...value]
+    .map((ch) => {
+      const cp = ch.codePointAt(0) ?? 0;
+      return cp >= 0x20 && cp <= 0x7e ? ch : `\\u${cp.toString(16).padStart(4, '0')}`;
+    })
+    .join('');
+  return escaped.slice(0, 64);
+}
+
+/**
  * Merge configs: env > project > user.
  * Result is cached after first call. Use reloadConfig() to refresh.
  */
@@ -449,6 +485,159 @@ export function loadConfig(): LynoxUserConfig {
   // key-custody flag (managed/managed_pro) so the managed tier_set allowlist can
   // gate on it. Canonical LYNOX_BILLING_TIER, legacy LYNOX_MANAGED_MODE alias.
   if (cpSuppliesLLMKey(readEnvAlias('LYNOX_BILLING_TIER'))) merged.cp_supplied = true;
+  // CP-pinned preset (`LYNOX_TIER_PRESET`) — a SEED, not a lock: it fills an
+  // EMPTY `tier_preset` and never overwrites one the tenant chose.
+  //
+  // Close to `default_tier` above but NOT the same predicate, and the difference
+  // is deliberate: `default_tier` has no null state, while `tier_preset` is
+  // `.nullable()` so the picker can CLEAR it. `!merged.tier_preset` would
+  // conflate that clear with "never chose" and re-seed over it, so absence and
+  // an explicit null are handled separately below. The seed also RESCUES an
+  // unresolvable persisted name, which `default_tier` never has to.
+  //
+  // It used to overwrite, argued as "the preset picks the PROVIDER, and on the
+  // CP-keyed tiers that set is DPA-disclosed and CP-paid, so it is an operator
+  // decision". Two things broke that argument, both measured on staging
+  // 2026-08-17 against a live CP pin:
+  //  1. It was never a lock in the direction that mattered. A tenant writing
+  //     explicit `tier_set` slots already beat the pin, because the expansion
+  //     below spreads config.json slots OVER the preset's. So the "operator
+  //     decision" was enforced against the settings picker and nothing else.
+  //  2. Against the picker it did not fail loudly, it failed SILENTLY. The write
+  //     gate accepted the tenant's preset (200), it persisted, `/api/config`
+  //     reported it as their setting — and the loader discarded it. The settings
+  //     surface showed a selection that did nothing, next to an `active_model`
+  //     that disagreed with it, with `locks.tier_preset` unset because that
+  //     channel only ever described preset AVAILABILITY.
+  // Seeding removes both: the tenant's choice takes effect, so the surface stops
+  // lying, and the pin still decides for every tenant who has not chosen — which
+  // is the case it was actually built for (an instance sitting on default
+  // Anthropic routing while a paid-for provider went unused).
+  //
+  // Placed BEFORE the expansion below so a seeded name goes through the same
+  // fail-closed validation as a config.json one — an unknown preset must throw
+  // for the CP too, not resolve to something else.
+  //
+  // A blank tenant value is not a choice. Left as-is it would suppress the seed
+  // AND reach the fail-closed expander below, which THROWS — and the engine
+  // ctor's loadConfig() has no catch, so an effectively empty field would
+  // crash-loop the container. Normalized away before anything reads it.
+  if (typeof merged.tier_preset === 'string' && merged.tier_preset.trim() === '') {
+    delete merged.tier_preset;
+  }
+  const envPreset = process.env['LYNOX_TIER_PRESET']?.trim();
+  if (envPreset !== undefined && envPreset !== '') {
+    const chosen = merged.tier_preset;
+    // A PERSISTED `routing_mode` is the tenant saying "I picked a routing
+    // strategy", and it is the only signal that survives the write path.
+    //
+    // The picker sends `tier_preset: null` for both Standard and Custom, and the
+    // PUT merge loop DELETES a null key — so by the time the loader runs, "chose
+    // Standard" and "never chose anything" are the same `undefined`, and the
+    // seed silently reverted the tenant to hybrid on the very reload their own
+    // save triggered. `routing_mode` is not null in either message, so it
+    // persists: `'standard'` for Standard, `'hybrid'` for Custom. A tenant who
+    // picks a PRESET sends no `routing_mode` at all — so its presence means
+    // exactly "Standard or Custom was chosen", which is what has to block the
+    // seed. Absent means never chosen, which is the case the pin was built for.
+    //
+    // Read BEFORE the expander below: that sets `merged.routing_mode` itself, so
+    // afterwards this would be reading its own output.
+    const choseOwnRouting = merged.routing_mode !== undefined;
+    if (chosen === null || choseOwnRouting) {
+      // An explicit `null` is the picker's CLEAR — the schema is `.nullable()`
+      // precisely so it can express "no preset". That IS a choice, so the seed
+      // must not overwrite it. (Distinct from absent: `!chosen` would conflate
+      // the two, which is why this is not the `!merged.tier_preset` shorthand.)
+      // Reachable by hand-edit only, since the writer deletes the key —
+      // `choseOwnRouting` is what covers the case the product can actually
+      // produce, and it also stops a PARTIAL custom tier_set from being quietly
+      // completed out of the pin by the spread below.
+    } else if (chosen === undefined || !expandTierPreset(chosen)) {
+      // Absent → seed, the normal case. Present but UNRESOLVABLE → the pin also
+      // RESCUES, and that half is load-bearing: while the pin overwrote, it
+      // masked any stale name in config.json. Without the rescue, retiring a
+      // preset from TIER_PRESETS would crash-loop every tenant who had it
+      // persisted, with no way back — the settings UI needed to clear it is
+      // served by the container that will not boot.
+      //
+      // The pin's OWN name is validated here, and only here. Nothing downstream
+      // does it: the CP checks the name once at write time against its vendored
+      // vocabulary and then emits it raw forever, so a name the CP knows and the
+      // RUNNING engine image does not walks straight into the fail-closed
+      // expander below and takes the container down on the next sync-env. That
+      // skew is structural rather than hypothetical — the CP redeploys on release
+      // dispatch while the fleet rolls out manually, and a pinned instance is
+      // skipped by rollouts indefinitely, so it can widen without bound.
+      //
+      // Ignoring is the right failure here, and the fail-closed argument does not
+      // carry across: the expander throws on a TENANT-chosen name because that
+      // means the tenant's persisted state is corrupt, whereas an unknown pin
+      // degrades to exactly the documented meaning of an unset one — "the engine
+      // keeps its own default routing". That is standard routing on the base
+      // provider: no tier_set, no unregistered model, hence none of the
+      // FALLBACK_CAPABILITY misbilling that justifies the throw. The operator can
+      // also see and undo a pin; the tenant cannot restart their own container.
+      //
+      // The persisted name goes WITH it. An unresolvable pin cannot rescue an
+      // unresolvable `chosen`, and those two fail together in exactly the skew
+      // this guard exists for — pin an instance to an older image and both the
+      // tenant's name and the CP's are drawn from a vocabulary that engine does
+      // not have. Leaving `chosen` standing there would fall straight into the
+      // expander and crash-loop the container, with the settings UI needed to
+      // clear it served by the container that will not boot. Dropping it means
+      // the instance boots on its own default routing, which is what an absent
+      // preset has always meant, and the surface to fix it is reachable.
+      if (expandTierPreset(envPreset)) merged.tier_preset = envPreset;
+      // The unresolvable-`chosen` case is NOT handled here — see the block below.
+      // Putting it here was a real bug: this arm is unreachable whenever the first
+      // arm short-circuits, i.e. for every tenant carrying a persisted
+      // `routing_mode`, which the settings writer plants permanently after any
+      // Standard/Custom pick. The rescue was off for exactly the tenants who use
+      // the picker most, and off entirely for every instance with no pin at all —
+      // which is the majority, since the pin is emitted only when set.
+    }
+  }
+  // Warn whether or not the seed branch was entered. Scoping this to the branch
+  // meant a fleet-wide bad pin logged only on the subset that would have adopted
+  // it — the instances with a tenant preset stayed silent, so the lines could not
+  // even be counted. This is the operator's only stdout signal; the machine-
+  // readable one is `env_overrides.tier_preset_ignored` on GET /api/config.
+  if (envPreset !== undefined && envPreset !== '' && !expandTierPreset(envPreset)) {
+    const shown = describePinForDisplay(envPreset);
+    console.warn(
+      `[lynox] Ignoring LYNOX_TIER_PRESET="${shown}": this engine does not know that preset. ` +
+      `Known: ${Object.keys(TIER_PRESETS).join(', ')}. Routing falls back to the instance default — ` +
+      `re-pin once the engine is on a version that carries the name.`,
+    );
+  }
+  // An unresolvable PERSISTED name never costs the boot — independent of the pin
+  // and of `routing_mode`.
+  //
+  // This sat inside the seed's `else if` and was therefore unreachable in most of
+  // the cases it was written for: the arm above short-circuits on
+  // `choseOwnRouting`, which the settings writer plants permanently in config.json
+  // after any Standard/Custom pick, and the whole block only runs when a pin is
+  // set at all — while the pin is emit-when-set, so most instances have none. The
+  // motivating scenario ("retiring a preset would crash-loop every tenant who had
+  // it persisted, with no way back") is precisely the no-pin case, and it was the
+  // one case the guard could not reach.
+  //
+  // The throw it replaces bought nothing: an absent preset means the instance's
+  // own default routing, so there is no tier_set, no unregistered model, and none
+  // of the misbilling that justifies failing closed. It cost a container that will
+  // not start, with the settings UI needed to clear the value served BY that
+  // container. The fail-closed guard that does guard money — a preset that
+  // RESOLVES but names a model absent from MODEL_CAPABILITIES — is untouched below.
+  if (typeof merged.tier_preset === 'string' && !expandTierPreset(merged.tier_preset)) {
+    const shown = describePinForDisplay(merged.tier_preset);
+    merged.tier_preset = undefined;
+    console.warn(
+      `[lynox] Ignoring tier_preset "${shown}" from config.json: this engine does not know it. ` +
+      `Known: ${Object.keys(TIER_PRESETS).join(', ')}. The instance keeps its own default routing; ` +
+      `pick a strategy again in Settings to replace it.`,
+    );
+  }
   // Named hybrid strategy (model-presets, W2): a `tier_preset` from config.json
   // materializes to {routing_mode:'hybrid', tier_set} from the shared TIER_PRESETS
   // SoT. This is the config.json SOURCE path — placed BEFORE the LYNOX_TIER_SET_JSON
@@ -511,6 +700,33 @@ export function loadConfig(): LynoxUserConfig {
     if (Object.keys(merged.tier_set).length === 0) {
       merged.tier_set = undefined;
       merged.routing_mode = 'standard';
+      // The NAME has to go with the slots. Both all-Fireworks presets lose every
+      // slot here when the credential is not provisioned, and leaving the name
+      // behind made `/api/config` — and therefore the strategy picker — report a
+      // preset as in effect while `routing_mode` said `standard` and every band
+      // ran on the base provider. That is the silent-degradation shape the engine
+      // already refuses on the tenant write path, arriving through the operator
+      // path instead, and it costs real money: two of three presets exist to route
+      // AWAY from the expensive base model.
+      //
+      // Provenance-independent on purpose. Whether the name came from the tenant's
+      // config.json or a CP pin, no surface may claim a routing that is not
+      // running — and the two are indistinguishable by this point anyway.
+      const dropped = merged.tier_preset;
+      merged.tier_preset = undefined;
+      // And SAY so. This is the expensive case, not the unknown-name one: the
+      // name resolves fine, so the ignore-warning above never fires, while every
+      // band quietly moves to the base model. On the two Fireworks presets that
+      // is roughly a tenfold price increase on the slot that runs every turn —
+      // correctly metered, and therefore invisible until the invoice.
+      if (dropped) {
+        console.warn(
+          `[lynox] tier_preset "${dropped}" resolved but none of its slots could be backed ` +
+          `(missing provider credential or operator opt-in). Routing falls back to the base ` +
+          `model for every band, which is materially more expensive. Provision the credential ` +
+          `or pin a preset this instance can serve.`,
+        );
+      }
     }
   }
   // GCP config for Vertex AI
@@ -520,12 +736,13 @@ export function loadConfig(): LynoxUserConfig {
   if (process.env['CLOUD_ML_REGION']) {
     merged.gcp_region = process.env['CLOUD_ML_REGION'];
   }
-  if (process.env['GOOGLE_CLIENT_ID']) {
-    merged.google_client_id = process.env['GOOGLE_CLIENT_ID'];
-  }
-  if (process.env['GOOGLE_CLIENT_SECRET']) {
-    merged.google_client_secret = process.env['GOOGLE_CLIENT_SECRET'];
-  }
+  // The GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET env copies were removed with the
+  // pair resolver (google-client-pair.ts). Nothing reads these config fields as a
+  // credential source any more — the resolver reads env and vault directly — and
+  // mirroring env into userConfig could only ever MANUFACTURE a mixed pair: an env
+  // id landing here beside a vault secret copied in by engine-init produced a
+  // 'config' tier that had never held a pair. Copying a value into a place its only
+  // reader no longer looks is how that invariant got broken.
   // TAVILY_API_KEY env wiring removed 2026-05-24 — backend retired in favour
   // of SearXNG (full quality) + DuckDuckGo HTML-scrape fallback (no-config
   // honesty path). Setting TAVILY_API_KEY now has no effect.

@@ -153,11 +153,34 @@ function projectAt(value: unknown, paths: PathSegment[][], depth: number): unkno
     return value;
   }
 
-  // Array traversal: any path expecting `[]` at this depth applies to every item.
+  // Array traversal.
   if (Array.isArray(value)) {
+    if (value.length === 0) return [];
+    // Explicit `[]`: a path segment at this depth expects an array — apply the
+    // post-`[]` tail (depth+1) to every item.
     const arrayPaths = paths.filter(p => p[depth]?.kind === 'array');
-    if (arrayPaths.length === 0) return undefined;
-    return value.map(item => projectAt(item, arrayPaths, depth + 1));
+    if (arrayPaths.length > 0) {
+      return value.map(item => projectAt(item, arrayPaths, depth + 1));
+    }
+    // Implicit traversal: a path names a FIELD at this depth (`data.id`) but the
+    // value is an array (`data: [{id,…}]`). Apply the field segment to every item
+    // (depth held — the segment names the item's field, not a container above the
+    // array). Without this, api_setup-generated includes that omit `[]` silently
+    // erase JSON:API-style `data` arrays: another path (e.g. `meta.total_count`)
+    // still matches, so the result is non-empty, the loud-empty guard does NOT
+    // fire, and the agent sees a 200 carrying only `meta` — concluding the API
+    // returned nothing and looping on the same call.
+    const fieldPaths = paths.filter(p => p[depth]?.kind === 'field');
+    if (fieldPaths.length > 0) {
+      const mapped = value.map(item => projectAt(item, fieldPaths, depth));
+      // If EVERY item projected to nothing, the field does not exist on the items
+      // (e.g. `results[].name` against `[{id:1}]`): return undefined so the caller's
+      // loud-empty guard fires with the real top-level shape, instead of silently
+      // returning an array of empty objects (which would defeat that guard).
+      if (mapped.every(m => isEmptyResult(m))) return undefined;
+      return mapped;
+    }
+    return undefined;
   }
 
   // Object field traversal: group remaining paths by the field they require.

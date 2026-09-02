@@ -1,7 +1,7 @@
-import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, StreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier, IAgent } from '../../types/index.js';
+import type { ToolEntry, LynoxUserConfig, InlinePipelineStep, PipelineResult, PipelineStepResult, PlannedPipeline, EmittingStreamHandler, AutonomyLevel, WorkflowLimits, SecretStoreLike, ModelTier, IAgent } from '../../types/index.js';
 import { reportMeteredCost } from '../../core/metered-request.js';
 import { randomUUID } from 'node:crypto';
-import { validateManifest, MAX_STEPS } from '../../orchestrator/validate.js';
+import { validateManifest, maxStepsFor, parallelStepCapFor } from '../../orchestrator/validate.js';
 import { runManifest, retryManifest, buildRunCtx } from '../../orchestrator/runner.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from '../../orchestrator/result-truncate.js';
 import { estimatePipelineCost } from '../../core/dag-planner.js';
@@ -209,7 +209,7 @@ export function _summarizeStepOutput(result: string): string {
   return `${collapsed.slice(0, STEP_SUMMARY_MAX - 1)}…`;
 }
 
-function buildProgressHooks(pipelineStreamHandler: StreamHandler | null, manifest?: Manifest): RunHooks {
+function buildProgressHooks(pipelineStreamHandler: EmittingStreamHandler | null, manifest?: Manifest): RunHooks {
   const handler = pipelineStreamHandler;
   if (!handler) return {};
 
@@ -381,8 +381,9 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
   if (steps.length === 0) {
     return 'Error: Workflow must have at least one step.';
   }
-  if (steps.length > MAX_STEPS) {
-    return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps (got ${steps.length}).`;
+  const maxSteps = maxStepsFor(deps.config);
+  if (steps.length > maxSteps) {
+    return `Error: Workflow exceeds maximum of ${maxSteps} steps (got ${steps.length}).`;
   }
 
   // Validate unique IDs
@@ -437,6 +438,7 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
       secretStore: deps.secretStore,
+      limits: resolveInSessionLimits(undefined),
       runTaint,
     }));
 
@@ -450,7 +452,8 @@ async function executeInlineSteps(input: RunPipelineInput, deps: PipelineDeps): 
 export interface PipelineDeps {
   config: LynoxUserConfig;
   tools: ToolEntry[];
-  streamHandler: StreamHandler | null;
+  // Emitting: pipeline steps run core agents that write into this.
+  streamHandler: EmittingStreamHandler | null;
   runHistory: RunHistory | null;
   toolContext?: ToolContext | undefined;
   parentPrompt?: SubAgentPromptHandles | undefined;
@@ -547,13 +550,66 @@ export interface RunSavedWorkflowResult {
  */
 const DEFAULT_HEADLESS_WALL_CLOCK_MS = 30 * 60_000; // 30 minutes
 const DEFAULT_HEADLESS_MAX_ITERATIONS = 50;          // backstop above MAX_STEPS
+/** Width a MALFORMED stored `maxParallelSteps` falls back to, on both the
+ *  headless and the in-session resolver. Shared so the two cannot drift into
+ *  disagreeing about the same stored blob. */
+const DEFAULT_MAX_PARALLEL_STEPS = 5; // backpressure — bounds per-phase fan-out
 
 /** Merge a workflow's stored limits with the headless defaults (unset → default;
- *  `maxSpendUsd` stays opt-in). */
+ *  `maxSpendUsd` stays opt-in; an UNSET `maxParallelSteps` still passes through
+ *  as unbounded — an unattended run defaulting to unbounded fan-out is an
+ *  operator policy choice, not a bug, so no default is imposed on absence).
+ *
+ *  A MALFORMED stored width is a different thing from an absent one and gets the
+ *  same normalization as the in-session path. Without it this resolver handed
+ *  the raw value to the executor, whose fallback is `1` — so the identical
+ *  stored blob ran at width 5 in-session and fully SERIAL headless. That is not
+ *  academic here: the headless path always carries a 30-minute wall clock
+ *  (above) and `workflowBoundExceeded` re-checks it at every phase boundary, so
+ *  serializing a multi-phase run can turn a completing run into a wall-clock
+ *  ABORT. Note also that `null` — not `NaN` — is the malformed form that can
+ *  actually reach here: `JSON.stringify` writes both NaN and Infinity as null. */
 function resolveHeadlessLimits(stored: WorkflowLimits | undefined): WorkflowLimits {
   return {
     maxWallClockMs: stored?.maxWallClockMs ?? DEFAULT_HEADLESS_WALL_CLOCK_MS,
     maxIterations: stored?.maxIterations ?? DEFAULT_HEADLESS_MAX_ITERATIONS,
+    maxParallelSteps: parallelStepCapFor(stored?.maxParallelSteps, DEFAULT_MAX_PARALLEL_STEPS),
+    maxSpendUsd: stored?.maxSpendUsd,
+  };
+}
+
+/**
+ * In-session default limits — the bounds an *attended* (chat-started) pipeline
+ * runs under when it declares none. Unlike {@link resolveHeadlessLimits}
+ * (unattended: a 30-min wall-clock backstop), an in-session run is attended —
+ * the user can cancel — so wall-clock stays opt-in and the Session-level cost
+ * cap ($50 default, tenant-tunable) already bounds spend. The two defaults that
+ * DO apply:
+ *  - `maxParallelSteps` — backpressure. `runParallel`'s bare `Promise.allSettled`
+ *    launches every step of a phase at once; a phase with a handful of
+ *    independent steps spawns that many concurrent sub-agents (each a live LLM
+ *    run). Capping at 5 bounds instance load + memory without serialising small
+ *    phases. (Workflows validate to ≤ MAX_STEPS=20 steps total, so this bounds
+ *    fan-out *within* a phase, not the run.)
+ *  - `maxIterations` — defense-in-depth above MAX_STEPS (=20). Not reachable
+ *    today (a workflow can't exceed 20 steps); binds only if MAX_STEPS rises
+ *    or a future path spawns steps past validation.
+ *
+ * Both default-merge with any the workflow explicitly stored; `maxWallClockMs`
+ * and `maxSpendUsd` pass through only when set.
+ */
+const DEFAULT_INSESSION_MAX_ITERATIONS = 50; // defense-in-depth above MAX_STEPS=20
+
+function resolveInSessionLimits(stored: WorkflowLimits | undefined): WorkflowLimits {
+  return {
+    maxIterations: stored?.maxIterations ?? DEFAULT_INSESSION_MAX_ITERATIONS,
+    // `??` alone was not enough: it is NULLISH, so a stored `0`, `-1` or `null`
+    // survived it and then failed the executor's `> 0` test, silently turning
+    // the backpressure limit OFF for that workflow. An in-session run always
+    // wants a bound, so both an absent and a malformed width land on the default.
+    maxParallelSteps: parallelStepCapFor(stored?.maxParallelSteps, DEFAULT_MAX_PARALLEL_STEPS)
+      ?? DEFAULT_MAX_PARALLEL_STEPS,
+    maxWallClockMs: stored?.maxWallClockMs,
     maxSpendUsd: stored?.maxSpendUsd,
   };
 }
@@ -616,8 +672,9 @@ export async function runSavedWorkflow(
   if (steps.length === 0) {
     return { ok: false, error: 'Workflow has no steps to execute.' };
   }
-  if (steps.length > MAX_STEPS) {
-    return { ok: false, error: `Workflow exceeds maximum of ${MAX_STEPS} steps.` };
+  const maxSteps = maxStepsFor(config);
+  if (steps.length > maxSteps) {
+    return { ok: false, error: `Workflow exceeds maximum of ${maxSteps} steps.` };
   }
 
   try {
@@ -751,6 +808,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
         userTimezone: deps.userTimezone,
         parentSessionCounters: deps.sessionCounters,
         parentMemory: deps.memory ?? null,
+        limits: resolveInSessionLimits(planned.limits),
         workflowId: planned.id,
         runTaint: retryTaint,
       }));
@@ -797,8 +855,9 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
     return 'Error: All steps were removed. Nothing to execute.';
   }
 
-  if (steps.length > MAX_STEPS) {
-    return `Error: Workflow exceeds maximum of ${MAX_STEPS} steps.`;
+  const maxSteps = maxStepsFor(deps.config);
+  if (steps.length > maxSteps) {
+    return `Error: Workflow exceeds maximum of ${maxSteps} steps.`;
   }
 
   try {
@@ -831,6 +890,7 @@ async function executePipelineById(input: RunPipelineInput, deps: PipelineDeps):
       parentSessionCounters: deps.sessionCounters,
       parentMemory: deps.memory ?? null,
       secretStore: deps.secretStore,
+      limits: resolveInSessionLimits(planned.limits),
       workflowId: planned.id,
       runTaint,
     }));

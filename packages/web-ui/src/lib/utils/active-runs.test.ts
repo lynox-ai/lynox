@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { parseActiveRuns, countLiveRuns, selectReattachTarget } from './active-runs.js';
+import { parseActiveRuns, countLiveRuns, selectReattachTarget, shouldRefireOfflineTurn, shouldProbeServerAfterStream } from './active-runs.js';
 
 /**
  * Locks the GET /api/runs/active wire contract shared by the thread-history nav
@@ -113,5 +113,117 @@ describe('selectReattachTarget', () => {
 			.toEqual({ runId: 'r1', lastPersistedSeq: 0 });
 		expect(selectReattachTarget({ runs: [{ threadId: 't1', runId: 'r1', status: 'running', lastPersistedSeq: 'x' }] }, 't1'))
 			.toEqual({ runId: 'r1', lastPersistedSeq: 0 });
+	});
+});
+
+describe('shouldRefireOfflineTurn', () => {
+	// The turn under discussion was marked failed WITHOUT server confirmation:
+	// both probes were blind, which is the ordinary shape of "the network went
+	// away" — and that is also the commonest reason the SSE stream dropped. So
+	// "failed" was a guess, and acting on it costs a second billed run.
+
+	it('declines when the thread already ends on an assistant message', () => {
+		// The run finished inside the drop window and is persisted and billed.
+		// Re-sending it IS the duplicate.
+		expect(shouldRefireOfflineTurn({ reached: true, lastRole: 'assistant', activeRun: false })).toBe(false);
+	});
+
+	it('allows the refire when the server confirms no live run AND a thread still ending on the user', () => {
+		expect(shouldRefireOfflineTurn({ reached: true, lastRole: 'user', activeRun: false })).toBe(true);
+	});
+
+	it('declines while a run for this thread is still LIVE — the transcript points the wrong way here', () => {
+		// The case the transcript alone cannot decide: a run that is still
+		// executing has not persisted its assistant message, so the thread
+		// legitimately ends on the user turn — identical, by role, to "never
+		// started". Acting on that reading re-POSTs into a live run, earns a 409
+		// and sends the queue poller round for minutes duplicating the very run
+		// it is waiting for. The live-run answer therefore wins over every
+		// transcript reading, including the empty one.
+		expect(shouldRefireOfflineTurn({ reached: true, lastRole: 'user', activeRun: true })).toBe(false);
+		expect(shouldRefireOfflineTurn({ reached: true, lastRole: undefined, activeRun: true })).toBe(false);
+	});
+
+	it('declines when the live-run question was never answered', () => {
+		// `/runs/active` unreachable → we lack the one fact that can make the
+		// transcript misleading. Same asymmetry as an unreachable transcript:
+		// declining costs a tap, refiring costs a run.
+		expect(shouldRefireOfflineTurn({ reached: true, lastRole: 'user', activeRun: undefined })).toBe(false);
+	});
+
+	it('declines while the server is still unreachable — even though nothing contradicts a refire', () => {
+		// The asymmetry is the whole point: declining leaves the user's own
+		// tap-to-retry on the failed bubble, while refiring on a second guess
+		// spends money. `lastRole` is deliberately varied to show the outcome
+		// does not depend on it once the probe failed.
+		expect(shouldRefireOfflineTurn({ reached: false, lastRole: undefined, activeRun: false })).toBe(false);
+		expect(shouldRefireOfflineTurn({ reached: false, lastRole: 'user', activeRun: false })).toBe(false);
+		expect(shouldRefireOfflineTurn({ reached: false, lastRole: 'assistant', activeRun: false })).toBe(false);
+	});
+
+	it('treats an empty transcript as refireable once the server answered on BOTH probes', () => {
+		// A reachable server with no messages at all and no live run means the
+		// turn genuinely never landed — the one case the original auto-refire got
+		// right, and the one this must keep working. Without it the fix would
+		// have swapped "always refires" for "never refires".
+		expect(shouldRefireOfflineTurn({ reached: true, lastRole: undefined, activeRun: false })).toBe(true);
+	});
+});
+
+describe('shouldProbeServerAfterStream', () => {
+	// The condition that decides whether a finished SSE read loop asks the server
+	// what became of the turn. Everything downstream — the re-attach, the
+	// transcript check, `failedOffline`, the failed bubble's tap-to-retry — sits
+	// behind it, so when this returns false none of that guard runs at all.
+
+	it('probes when an `error` arrived and nothing else established an end', () => {
+		// THE regression. The engine emits `type:'error'` both for a dead turn and
+		// for an incident it recovers from (`stream.ts` unparsable tool input →
+		// `input:{}` → the turn CONTINUES). Counting `error` as terminal skipped
+		// this probe, so a run measured at 152 s with four spawned sub-agents
+		// rendered as "not sent — tap to retry": the only offered action was
+		// buying a second copy of a turn already being billed.
+		// `isStreaming` is false because the error handler clears it to stop the
+		// spinner — which is exactly why `sawErrorEvent` has to be its own input.
+		expect(shouldProbeServerAfterStream({
+			sawDone: false, sawErrorEvent: true, isStreaming: false, userStopped: false,
+		})).toBe(true);
+	});
+
+	it('probes on a bare transport drop (no terminal event at all)', () => {
+		expect(shouldProbeServerAfterStream({
+			sawDone: false, sawErrorEvent: false, isStreaming: true, userStopped: false,
+		})).toBe(true);
+	});
+
+	it('does NOT probe once `done` established a real end', () => {
+		// The counter-direction: a fix against "asks too rarely" must not become
+		// "asks always". A completed turn costs a needless /runs/active round trip
+		// per run, and `done` is the one event that genuinely settles the question.
+		expect(shouldProbeServerAfterStream({
+			sawDone: true, sawErrorEvent: false, isStreaming: true, userStopped: false,
+		})).toBe(false);
+		// `done` wins even when an error was also seen earlier in the stream.
+		expect(shouldProbeServerAfterStream({
+			sawDone: true, sawErrorEvent: true, isStreaming: true, userStopped: false,
+		})).toBe(false);
+	});
+
+	it('does NOT probe after a deliberate stop', () => {
+		// A user stop ends a stream terminal-less, i.e. looks exactly like a drop.
+		// Probing would resurrect the turn the user just cancelled.
+		expect(shouldProbeServerAfterStream({
+			sawDone: false, sawErrorEvent: true, isStreaming: true, userStopped: true,
+		})).toBe(false);
+		expect(shouldProbeServerAfterStream({
+			sawDone: false, sawErrorEvent: false, isStreaming: true, userStopped: true,
+		})).toBe(false);
+	});
+
+	it('does NOT probe when the loop ended outside a run', () => {
+		// Neither streaming nor an error: nothing happened that needs asking about.
+		expect(shouldProbeServerAfterStream({
+			sawDone: false, sawErrorEvent: false, isStreaming: false, userStopped: false,
+		})).toBe(false);
 	});
 });

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type { ModelTier, LynoxUserConfig, PreApprovalPattern, PreApprovalSet, ToolEntry, CapabilityContract, WorkflowLimits, SecretStoreLike } from '../types/index.js';
 import { getActiveProvider } from '../core/llm-client.js';
-import { resolveRunModel } from '../core/tier-resolver.js';
+import { resolveRunModel, effectiveTierModelId } from '../core/tier-resolver.js';
 import { calculateCost } from '../core/pricing.js';
 import { checkSessionBudget, adjustSessionCost } from '../core/session-budget.js';
 import type { SessionCounters } from '../types/agent.js';
@@ -11,7 +11,7 @@ import { buildApprovalSet } from '../core/pre-approve.js';
 import { loadAgentDef } from './agent-registry.js';
 import { buildStepContext, resolveTaskTemplate, resolveInputTemplate } from './context.js';
 import { shouldRunStep, buildConditionContext } from './conditions.js';
-import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint } from './runtime-adapter.js';
+import { spawnViaAgent, spawnMock, spawnInline, spawnPipeline, undeclaredInlineStepTier, headlessStepModelOverride, type SubAgentPromptHandles, type StepToolRecorder, type RunTaint } from './runtime-adapter.js';
 import { computePhases } from './graph.js';
 import { channels } from '../core/observability.js';
 import type { Manifest, RunState, RunHooks, GateAdapter, AgentOutput, ManifestStep } from '../types/orchestration.js';
@@ -19,6 +19,7 @@ import { GateRejectedError, GateExpiredError } from '../types/orchestration.js';
 import type { RunHistory } from '../core/run-history.js';
 import { PromptBudget, DEFAULT_PROMPT_BUDGET } from './prompt-budget.js';
 import { DEFAULT_RESULT_BYTES, truncateResult } from './result-truncate.js';
+import { parallelStepCapFor } from './validate.js';
 
 export { loadManifestFile, validateManifest } from './validate.js';
 
@@ -469,6 +470,44 @@ async function runSequential(
 
 // --- Parallel phase-based execution (v1.1) ---
 
+/**
+ * Run `fn` over `items` with at most `concurrency` in flight at once, returning
+ * `PromiseSettledResult`s in INPUT order — a drop-in for
+ * `Promise.allSettled(items.map(fn))` that bounds simultaneous execution.
+ *
+ * This is the backpressure seam for `runParallel`: a phase with N steps and
+ * `limits.maxParallelSteps = K` launches at most K step agents at a time.
+ *
+ * Mirrors `Promise.allSettled` semantics exactly: every item runs to
+ * completion (no fast-fail), rejections land as `{status:'rejected'}`, and the
+ * caller evaluates halts AFTER the full set settles — so a gate-rejected
+ * step's siblings still finish + record (the existing runParallel contract).
+ */
+async function mapAllSettledWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let cursor = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const index = cursor++; // microtask-safe handout: JS is single-threaded,
+      // so read+inc happens atomically between awaits — no two workers take the
+      // same index.
+      if (index >= items.length) return;
+      try {
+        results[index] = { status: 'fulfilled', value: await fn(items[index]!, index) };
+      } catch (err) {
+        results[index] = { status: 'rejected', reason: err };
+      }
+    }
+  }
+  const pool = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: pool }, () => worker()));
+  return results;
+}
+
 async function runParallel(
   manifest: Manifest,
   state: RunState,
@@ -494,12 +533,24 @@ async function runParallel(
     iterations += phase.stepIds.length;
     options.hooks?.onPhaseStart?.(phase.phaseIndex, phase.stepIds);
 
-    const promises = phase.stepIds.map(async (stepId) => {
+    const runStep = (stepId: string): Promise<StepResult> => {
       const step = stepsById.get(stepId)!;
       return executeStep(step, manifest, state, config, agentsDir, options, stepCounters, stepRows);
-    });
-
-    const settled = await Promise.allSettled(promises);
+    };
+    // UNSET = unbounded: every step of the phase launches at once (the existing
+    // v1.1 behaviour — the limit-less parallel test pins it). SET → bound
+    // simultaneous execution via a worker pool.
+    //
+    // The normalization matters. This used to read `cap !== undefined && cap > 0`,
+    // which lumped a MALFORMED value in with an absent one: `0`, `-1` and `NaN`
+    // all failed `> 0` and fell through to the unbounded branch. A caller who
+    // asks for a bound and supplies nonsense would then get FULL fan-out — the
+    // one outcome a limiter must never produce. `parallelStepCapFor` maps a
+    // present-but-malformed value to the tightest bound (1) instead.
+    const cap = parallelStepCapFor(options.limits?.maxParallelSteps, 1);
+    const settled = cap !== undefined
+      ? await mapAllSettledWithConcurrency(phase.stepIds, cap, runStep)
+      : await Promise.allSettled(phase.stepIds.map(runStep));
 
     options.hooks?.onPhaseComplete?.(phase.phaseIndex);
 
@@ -555,6 +606,11 @@ function recordStepRow(
   step: ManifestStep,
   output: AgentOutput,
   acc: StepRowAccumulator,
+  /** The band the step was RESOLVED to and charged at (`resolveRunModel().tier`).
+   *  Undefined only where no model was ever resolved — a retry-cached step (its
+   *  original row already carries the truth) and a condition-skipped one, neither
+   *  of which ran. Those keep the declaration-based fallback below. */
+  resolvedTier?: ModelTier | undefined,
 ): void {
   const status = output.skipped ? 'skipped' : output.error ? 'failed' : 'completed';
   try {
@@ -568,11 +624,23 @@ function recordStepRow(
       tokensIn: output.tokensIn,
       tokensOut: output.tokensOut,
       costUsd: output.costUsd,
-      // F1: record the tier an undeclared step actually RAN on. This row feeds
+      // F1: record the tier the step actually RAN on. This row feeds
       // getAvgStepCostByModelTier — a wrong tier here poisons the per-tier cost
-      // estimate the plan preview shows. Agent/mock runtimes keep the legacy
-      // fallback (their tier lives in the AgentDef, which this record can't see).
-      modelTier: step.model ?? (step.runtime === 'inline' ? undeclaredInlineStepTier(step) : 'balanced'),
+      // estimate the plan preview shows, which is the number a user APPROVES in
+      // the plan_task consent dialog (plan-task.ts). Also read by pipeline.ts and
+      // process.ts for the same estimate.
+      //
+      // `resolvedTier` is preferred because `step.model` is the DECLARATION, and
+      // under the headless deep-consent clamp the two differ by construction: an
+      // autonomous run rewrites a `deep` request to `balanced` BEFORE resolution,
+      // so the step runs and is billed at balanced while the declaration still
+      // says deep. Stamping the declaration filed balanced-priced rows in the deep
+      // bucket and dragged the deep average down — measured 2026-08-18 on a live
+      // headless run, where a `deep` step cost $0.0002643 (minimax-m3, the
+      // balanced slot) against $0.0011938 had it truly run deep, a factor of 4.5.
+      // Agent/mock runtimes with no resolution keep the legacy fallback (their
+      // tier lives in the AgentDef, which this record cannot see).
+      modelTier: resolvedTier ?? step.model ?? (step.runtime === 'inline' ? undeclaredInlineStepTier(step) : 'balanced'),
     });
     acc.push({
       rowId, result: output.result,
@@ -611,6 +679,10 @@ async function executeStep(
   // on (becomes `model_id`, '' for mock/pipeline steps that resolve no model).
   let toolSeq = 0;
   let stepModelId = '';
+  // The resolved BAND for the same step, hoisted alongside `stepModelId` and for
+  // the same reason: both finalizers (success + catch) must stamp what RAN, and
+  // the catch is the only place a gate-rejected step gets recorded at all.
+  let stepModelTier: ModelTier | undefined;
   // Also hoisted: a step's real spend. A GATE-REJECTED step has already RUN and
   // cost money (the gate check happens AFTER the step completes) — but it throws
   // before `state.outputs.set`, so the catch is the only place that can record
@@ -711,8 +783,10 @@ async function executeStep(
           : step;
       // Check session budget before spawning step agent — same undeclared-tier
       // default as the spawn (F1), so the budget prices the model that runs.
-      const stepModel = resolveModelForCost(step, undeclaredInlineStepTier(step), config);
+      const stepModel = resolveModelForCost(step, undeclaredInlineStepTier(step), config, options.autonomy);
       stepModelId = stepModel; // A2: stamp the resolved model on the step run at finalize
+      stepModelTier = resolveTierForCost(step, undeclaredInlineStepTier(step), config, options.autonomy); // …and its band
+
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
       r = await spawnInline(resolvedStep, stepContext, config, options.parentTools, stepPreApproval, options.autonomy, options.parentToolContext, options.parentPrompt, options.userTimezone, options.parentMemory ?? null, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint);
@@ -721,8 +795,10 @@ async function executeStep(
     } else {
       const agentDef = await loadAgentDef(step.agent, agentsDir);
       // Check session budget before spawning step agent
-      const stepModel = resolveModelForCost(step, agentDef.defaultTier, config);
+      const stepModel = resolveModelForCost(step, agentDef.defaultTier, config, options.autonomy);
       stepModelId = stepModel; // A2: stamp the resolved model on the step run at finalize
+      stepModelTier = resolveTierForCost(step, agentDef.defaultTier, config, options.autonomy); // …and its band
+
       const stepEstimate = calculateCost(stepModel, { input_tokens: 40_000, output_tokens: 16_000 });
       checkSessionBudget(stepCounters, stepEstimate);
       r = await spawnViaAgent(step, agentDef, stepContext, config, options.gateAdapter, state.runId, stepPreApproval, options.autonomy, options.parentPrompt, options.userTimezone, options.capabilityContract, stepRunId, recordToolCall, options.secretStore, options.runTaint);
@@ -787,7 +863,7 @@ async function executeStep(
     }
     // 2a/B3: durable pipeline_step_results row, written as-completed with its
     // result-text DEFERRED to run-finalize (invariant I4).
-    if (stepRows && options.runHistory) recordStepRow(options.runHistory, state.runId, step, output, stepRows);
+    if (stepRows && options.runHistory) recordStepRow(options.runHistory, state.runId, step, output, stepRows, stepModelTier);
     return 'ok';
 
   } catch (err: unknown) {
@@ -815,7 +891,7 @@ async function executeStep(
         stepId: step.id, result: '', startedAt: stepStart, completedAt: new Date().toISOString(),
         durationMs: stepDurationMs, tokensIn: stepTokensIn, tokensOut: stepTokensOut, costUsd,
         skipped: false, error: error.message,
-      }, stepRows);
+      }, stepRows, stepModelTier);
     }
 
     if (err instanceof GateRejectedError || err instanceof GateExpiredError) {
@@ -867,16 +943,83 @@ function makeSkipped(stepId: string, reason: string): AgentOutput {
   };
 }
 
-function resolveModelForCost(step: ManifestStep, defaultTier: ModelTier, config: LynoxUserConfig): string {
+/** Exported ONLY so a test can pin that the budget precheck + step-row stamp
+ * price the model the run actually uses — including the headless deep-consent
+ * rewrite. A ledger that names a different tier than the run is exactly the
+ * announce≠run gap the shared-resolution work closed; no compiler check ties
+ * this wiring, so a test has to. */
+export function resolveModelForCost(step: ManifestStep, defaultTier: ModelTier, config: LynoxUserConfig, autonomy?: import('../types/index.js').AutonomyLevel | undefined): string {
   // Price the step against the SAME model the runtime-adapter ran it on — gate +
   // clamp + the ACTIVE provider — not an Anthropic-only tier map. A Mistral tenant
   // was previously billed at Claude prices (and a clamped deep step at deep prices).
+  // The headless deep-consent override is applied here too, so the budget precheck
+  // and the step-row stamp name the CLAMPED model, not the refused/announced deep
+  // one (the run itself runs the clamped tier — the ledger must not disagree).
+  //
+  // That property was only half true until 2026-08-17, and the comment above
+  // asserted it anyway. `resolveRunModel`'s tier branch answers with the BASE
+  // provider's model for the tier — but under HYBRID routing the tier's slot is
+  // what executes, and the two are different models at very different prices.
+  // A tenant on the `efficient` preset ran Fireworks (minimax-m3, $0.30/$1.20)
+  // and was priced at the base provider's balanced model (sonnet-5, $3/$15) —
+  // a ~10x over-debit against their included budget, so they hit cost ceilings
+  // they had not actually reached. Pre-existing, but this release made presets
+  // CP-pinnable, which is what turns it from a corner case into the norm.
+  //
+  // A PINNED raw id is exempt: that id is the model that runs, so it is already
+  // the right thing to charge. Only a tier has to be mapped through the active
+  // routing — hence the `pinned` flag rather than re-deriving the branch here.
+  const resolved = resolveStepRunModel(step, defaultTier, config, autonomy);
+  return resolved.pinned ? resolved.modelId : effectiveTierModelId(resolved.tier, getActiveProvider());
+}
+
+/**
+ * The BAND {@link resolveModelForCost} priced the step at, for the durable step
+ * row. Both read {@link resolveStepRunModel} with the same inputs, so they cannot
+ * disagree — the resolution is pure config math, so calling it twice costs
+ * nothing and keeps each function answering exactly one question.
+ *
+ * Split out on 2026-08-18: `recordStepRow` had no resolved value to stamp and
+ * fell back to `step.model`, the DECLARED tier. Under the headless clamp those
+ * differ by construction, and the row fed a cost average shown in a consent
+ * dialog. See the note at the `modelTier` assignment.
+ */
+export function resolveTierForCost(
+  step: ManifestStep,
+  defaultTier: ModelTier,
+  config: LynoxUserConfig,
+  autonomy?: import('../types/index.js').AutonomyLevel | undefined,
+): ModelTier {
+  return resolveStepRunModel(step, defaultTier, config, autonomy).tier;
+}
+
+/**
+ * The one resolution both the PRICE and the recorded TIER read from, so they can
+ * never name different bands for the same step. Split out of
+ * {@link resolveModelForCost} on 2026-08-18: that function returned only the model
+ * id, so `recordStepRow` had nothing to stamp and fell back to `step.model` — the
+ * DECLARED tier. Under the headless clamp those differ by construction: a step
+ * declaring `deep` runs on `balanced`, and the row said `deep`.
+ *
+ * Deriving the tier from the resolved MODEL ID instead would reintroduce the bug
+ * with the opposite sign. Under a hybrid tier_set a slot holds whatever model the
+ * set names, and the registry tier of that model need not equal the slot it fills:
+ * in the `balanced` preset the balanced slot holds `glm-5p2`, which the registry
+ * bands as `deep`. `resolveRunModel().tier` is the band that was actually charged
+ * and clamped against `max_tier`; the model id is one mapping further downstream.
+ */
+function resolveStepRunModel(
+  step: ManifestStep,
+  defaultTier: ModelTier,
+  config: LynoxUserConfig,
+  autonomy?: import('../types/index.js').AutonomyLevel | undefined,
+): ReturnType<typeof resolveRunModel> {
   return resolveRunModel({
-    requested: step.model,
+    requested: headlessStepModelOverride(step.model, defaultTier, autonomy),
     defaultTier,
     accountTier: config.account_tier,
     maxTier: config.max_tier,
     blockedModelIds: config.blocked_model_ids,
     provider: getActiveProvider(),
-  }).modelId;
+  });
 }

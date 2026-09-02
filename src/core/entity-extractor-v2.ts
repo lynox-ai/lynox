@@ -51,7 +51,9 @@ export type RelationPredicate = (typeof RELATION_PREDICATES)[number];
 
 /**
  * Entity types exposed to the LLM.
- * Note: 'collection' is internal (datastore-bridge only) and intentionally omitted.
+ * Note: 'collection' stays out of the extractable set. It was minted only by the DataStore→KG
+ * bridge, which was removed 2026-08-24 as never-attached — so the type currently has no producer
+ * at all. The exclusion is kept rather than the type dropped: retiring it is a schema change.
  */
 const EXTRACTABLE_TYPES = [
   'person', 'organization', 'project', 'product', 'concept', 'location',

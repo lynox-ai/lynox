@@ -1,6 +1,6 @@
 import { realpathSync, existsSync } from 'node:fs';
 import { resolve, dirname, basename, join, relative, isAbsolute } from 'node:path';
-import type { AutonomyLevel, PreApprovalSet, PreApproveAuditLike, ToolEntry } from '../types/index.js';
+import type { AutonomyLevel, PreApprovalSet, PreApproveAuditLike, ToolEntry, WarningPayload } from '../types/index.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import { isWorkspaceActive } from '../core/workspace.js';
 import { channels } from '../core/observability.js';
@@ -16,7 +16,32 @@ import { detectInjectionAttempt } from '../core/data-boundary.js';
 // files. Prefix is fuzzy (matches macOS /Users/foo AND Linux /home/foo paths).
 // Shared between the file-tool path guard and both bash scan lists so they cannot
 // drift apart. H-003 / L1-011.
-const LYNOX_SECRET_FILES = /\.lynox\/(vault|agent-memory|runs|migration-export|http-secret)/i;
+//
+// The later entries were derived from the paths this codebase actually creates,
+// after the original list turned out to have been written from memory rather than
+// from the writers. Keep it that way: when adding a name, find the code that writes
+// it. (`runs`, kept above, matches nothing that is ever created — left in place
+// because removing an entry is a different decision from adding one.)
+//
+//  - `history`, `secrets.json` — durable stores under this directory that hold
+//    conversation content and, in the legacy case, credentials.
+//  - `.access-token` — a credential file the container entrypoint creates. The
+//    neighbouring `/\.token$/` further down does NOT cover it: the character before
+//    `token` is a hyphen, not a dot.
+//  - `.env` — the entrypoint may create one here. `read_file` was already covered by
+//    the `/\.(env|pem|…)$/` rule below; membership HERE is what also puts it on the
+//    bash lists. `\b` keeps it off a `.environment/` directory.
+//  - `backups/` — the backup manager copies the SQLite stores, vault included, into
+//    a timestamped directory here. The rest of this pattern anchors a name directly
+//    after `.lynox/`, so those copies sat outside it while the originals did not.
+//    Covers the default location only; `backup_dir` can point elsewhere, and a
+//    relocated backup directory is not covered by this list.
+//
+// Self-host only — managed instances receive these values as container environment
+// and never materialize the files. Path matching stays a bar, not a boundary (see
+// below); the boundary-level work is tracked separately.
+const LYNOX_SECRET_FILES =
+  /\.lynox\/(vault|agent-memory|history|runs|migration-export|http-secret|\.access-token|\.env\b|secrets\.json|backups\/)/i;
 
 // Bash spellings of the same read that do not name the full path: a glob into the
 // lynox dir (`cat ~/.lynox/http-*`) and the bare filename after a cd
@@ -28,6 +53,15 @@ const LYNOX_SECRET_FILES = /\.lynox\/(vault|agent-memory|runs|migration-export|h
 const LYNOX_SECRET_BASH: Array<{ pattern: RegExp; label: string }> = [
   { pattern: LYNOX_SECRET_FILES,   label: 'access lynox secret store (secrets)' },
   { pattern: /\bhttp-secret\b/i,   label: 'access lynox secret store (secrets)' },
+  // Bare-name twin, so the `cd` spelling is covered like `http-secret`'s. Anchored
+  // on the leading DOT on purpose: `access-token` unanchored is generic OAuth
+  // vocabulary and would fire on ordinary `api_setup` work. The cost of a bare rule
+  // is that it has no directory to key on, so it matches that exact filename
+  // anywhere — the same trade the entry above already makes, more broadly.
+  //
+  // `.env` deliberately gets NO bare-name twin: a bare rule here lands in
+  // CRITICAL_BASH, which would hard-block reading any project's own env file.
+  { pattern: /\.access-token\b/i, label: 'access lynox secret store (secrets)' },
   { pattern: /\.lynox\/(?!workspace\/)\S*[*?[]/i, label: 'glob into lynox data dir (secrets)' },
   // The workspace carve-out above is lexical, so `~/.lynox/workspace/../vault.db`
   // would launder a secret path through it — any dot-dot inside a .lynox path is
@@ -310,7 +344,47 @@ function isPathWithin(childPath: string, parentPath: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
-export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): string | null {
+/**
+ * The structured danger signal. `warning` is the GO text (identical to what
+ * {@link isDangerous} returns); `payload` is present ONLY when the danger came
+ * from a declarative `ToolEntry.destructive` check that returned a
+ * {@link WarningPayload} (the spawn-agent deep-tier gate), letting the caller
+ * (agent.ts) offer a downgrade. Dangers from `_detectDanger`'s hardcoded
+ * branches (bash / read / write / mail / http / …) carry no payload — only a
+ * declarative `destructive` check returning a WarningPayload sets it.
+ */
+export interface DangerSignal {
+  warning: string;
+  payload?: WarningPayload | undefined;
+}
+
+/**
+ * Re-read the declarative destructive `check` to recover the structured
+ * {@link WarningPayload}, if any. The check is PURE (reads config, no side
+ * effects), so calling it a second time here — only for tools that HAVE a
+ * destructive check — avoids threading a payload through `_detectDanger`'s many
+ * string-return paths. A non-destructive tool, or a check that returned a plain
+ * action-label string, yields null: those dangers offer no downgrade.
+ * Consistent with `_detectDanger` by construction: both call the same
+ * `check(input, { autonomy })`.
+ */
+function extractDangerPayload(toolName: string, input: unknown, autonomy: AutonomyLevel | undefined, entry: ToolEntry | undefined): WarningPayload | null {
+  const check = entry?.destructive?.check;
+  if (!check) return null;
+  const detail = check(input, { autonomy });
+  if (detail !== null && typeof detail !== 'string') return detail;
+  return null;
+}
+
+/**
+ * The full danger signal with pre-approval / capability-contract overrides and
+ * the observability publish applied — the single place that logic lives.
+ * {@link isDangerous} is a thin `?.warning` wrapper over this for the many
+ * callers (and the test suite) that only want the warning string; agent.ts calls
+ * this directly to also receive `payload`, so the GO can offer a cheaper tier
+ * when `payload.downgradeTo` is set.
+ */
+export function isDangerousDetailed(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): DangerSignal | null {
   const warning = _detectDanger(toolName, input, autonomy, entry);
   if (!warning) return null;
 
@@ -344,7 +418,12 @@ export function isDangerous(toolName: string, input: unknown, autonomy?: Autonom
     channels.guardBlock.publish({ toolName, warning, autonomy, runId, contractVersion: contract?.version });
   }
 
-  return warning;
+  const payload = extractDangerPayload(toolName, input, autonomy, entry);
+  return { warning, ...(payload ? { payload } : {}) };
+}
+
+export function isDangerous(toolName: string, input: unknown, autonomy?: AutonomyLevel, preApproval?: PreApprovalSet, audit?: PreApproveAuditLike, entry?: ToolEntry, runId?: string, contract?: CapabilityContract): string | null {
+  return isDangerousDetailed(toolName, input, autonomy, preApproval, audit, entry, runId, contract)?.warning ?? null;
 }
 
 /** A value matches if any glob pattern in the list matches it (empty list = no match). */
@@ -736,8 +815,19 @@ function _detectDanger(toolName: string, input: unknown, autonomy?: AutonomyLeve
   // Workspace write actions.
   if (entry?.destructive) {
     const { mode, check } = entry.destructive;
-    const detail = check ? check(input) : '';
+    const detail = check ? check(input, { autonomy }) : '';
     if (detail !== null) {
+      // A WarningPayload carries its OWN fully-formed GO message (spawn-agent
+      // deep-tier consent: tier + cost + provider). Render it verbatim — the
+      // generic "modifies external data" label is the wrong framing for a
+      // cost-consent gate. Plain-string checks (the action-label suffix used by
+      // google_drive etc.) keep their existing wrapped form below. A payload
+      // returned in autonomous mode is also rendered verbatim; in practice the
+      // spawn check returns null in autonomous (the handler clamps instead), so
+      // this branch is reached only interactively.
+      if (typeof detail !== 'string') {
+        return detail.message;
+      }
       const suffix = detail ? `: ${detail}` : '';
       if (autonomy === 'autonomous') {
         const blockReason = mode === 'data'

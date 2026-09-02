@@ -19,6 +19,43 @@ import {
   FOCUS_BLOCK_CHAR_LIMIT,
 } from '../types/memory.js';
 
+/**
+ * What approving a queued entry WOULD bind its `subject_hint` to, resolved WITHOUT
+ * performing it (DEF-review-approve-target-opaque). The reviewer decides first and
+ * {@link KnowledgeStore.reviewEntry} resolves after, so until this shape existed the
+ * approval bound a subject nobody had been shown.
+ *
+ * Three arms because {@link SubjectStore.findByNameAnyKind} has three outcomes, and the
+ * approval path branches on the same three. `new` is the one worth naming out loud: an
+ * unknown name is not a dead end, it MINTS an organization — a consequence of pressing
+ * approve that the hint alone does not reveal.
+ */
+export type KnowledgeSubjectTarget =
+  /** The name identifies exactly one subject; approval links the entry to it. */
+  | { resolution: 'existing'; id: string; name: string; kind: string }
+  /** The graph does not know the name; approval creates an `organization` under it. */
+  | { resolution: 'new'; name: string; kind: SubjectKind }
+  /** Several subjects carry the name; approval links to NONE of them. */
+  | { resolution: 'ambiguous'; name: string; candidates: number };
+
+/**
+ * How many DISTINCT hints one {@link KnowledgeStore.withHintTargets} batch resolves.
+ *
+ * Not a performance nicety — a bound on attacker-influenced work. A pending entry's hint
+ * is authored on an UNTRUSTED turn, so the number of distinct names in the queue is not
+ * the operator's choice, and a MISS is the most expensive path through
+ * `findByNameAnyKind` (it exhausts every kind, then scans the engagement table and
+ * JSON-parses each row's aliases). At the route's 500-entry cap and a five-figure subject
+ * graph that reached seconds of blocked event loop, measured on this branch.
+ *
+ * 50 because the entries beyond it are not lost — they render as the bare hint, exactly
+ * as they do against an engine that predates the field — and a review queue holding more
+ * than 50 DIFFERENT subjects is already past what one sitting works through. Repeats are
+ * free: the cache counts distinct names, so 500 entries about three clients cost three
+ * lookups.
+ */
+export const MAX_HINT_LOOKUPS_PER_BATCH = 50;
+
 /** Max chars for a single durable knowledge entry — one concise fact. Bounds the at-rest
  *  write against a pathological / injected multi-KB `remember`. Long material belongs in a
  *  document / data_store. Enforced at the tool (friendly reject) AND the store (backstop). */
@@ -72,6 +109,70 @@ const DEDUP_FUNCTION_WORDS: ReadonlySet<string> = new Set([
  *    `getAncestors` walk-up), then ranked WITHIN by Unicode-aware token overlap — no cosine,
  *    no embedding index (`text` is enc()'d at rest; the measured 0.83 band adds noise).
  */
+/**
+ * The three checks a durable write must pass, in ONE place.
+ *
+ * They lived only in the `remember` tool handler. When the turn-end capture pass
+ * started writing through the same store, it inherited the store's own size
+ * backstop and NOTHING else — so a user typing an API key in a clean turn would
+ * have had it stored active and agent-readable, which `remember` rejects
+ * outright. An adversarial round measured that gap; this function is why it
+ * cannot open a third time.
+ *
+ * `write()` itself deliberately does not scan — it is the low-level insert.
+ *
+ * WHAT THIS DOES NOT COVER, counted rather than assumed. There are three `write()`
+ * callers; this gate holds two of them:
+ *   - `tools/builtin/knowledge.ts` (`remember`)            — through here
+ *   - `core/agent.ts` (turn-end capture)                   — through here
+ *   - `core/onboarding-promotion.ts` — NOT through here. It runs `looksLikeSecret`,
+ *     which is `matchesSecretPatternStrict`, plus its own length bound. That is a
+ *     DIFFERENT and tighter predicate, deliberately so; folding it in here would
+ *     loosen onboarding, not tighten it. Left alone on purpose, named so the next
+ *     reader counts three and not two.
+ * `memory_block_edit` in the same tool file keeps a hand-copied secret check because
+ * blocks carry their own `char_limit` and their own refusal text; only the length
+ * half differs, so the two cannot share this function as written.
+ */
+export function checkKnowledgeText(
+  text: string,
+  secretStore: { containsSecret(text: string): boolean } | null | undefined,
+  subject?: string | undefined,
+): { ok: true } | { ok: false; reason: string } {
+  // The SUBJECT is checked too, and it is the more dangerous of the two: `text` is
+  // enc()'d at rest, `subject_hint` is stored PLAINTEXT next to it (see the INSERT)
+  // and a minted subject name renders into the always-loaded focus block. A gate that
+  // read only `text` let a credential through in the column beside it.
+  for (const field of subject === undefined ? [text] : [text, subject]) {
+    const bad = checkOneField(field, secretStore);
+    if (bad) return bad;
+  }
+  return { ok: true };
+}
+
+function checkOneField(
+  text: string,
+  secretStore: { containsSecret(text: string): boolean } | null | undefined,
+): { ok: false; reason: string } | null {
+  if (text.length > MAX_KNOWLEDGE_ENTRY_CHARS) {
+    return {
+      ok: false as const,
+      reason: `That is too long for a single memory (${text.length} chars, max ${MAX_KNOWLEDGE_ENTRY_CHARS}). `
+        + 'Record one concise fact, or put the full material in a document / data_store.',
+    };
+  }
+  // H7: secret-SHAPED, not only tenant-known. REJECT, never queue — a decrypted
+  // credential must not sit in a review panel waiting to be approved.
+  if (matchesSecretPattern(text) || secretStore?.containsSecret(text) === true) {
+    return {
+      ok: false as const,
+      reason: 'Cannot record content that looks like a secret or credential. '
+        + 'Store secrets via ask_secret / the vault, not in memory.',
+    };
+  }
+  return null;
+}
+
 export class KnowledgeStore {
   private readonly db: Database.Database;
 
@@ -130,6 +231,68 @@ export class KnowledgeStore {
     if (existing.row) return { ambiguous: false, id: existing.row.id };
     const minted = this.subjects.findOrCreate({ kind: 'organization', name });
     return minted.ambiguous ? { ambiguous: true } : { ambiguous: false, id: minted.id };
+  }
+
+  /**
+   * The SAME resolution {@link reviewEntry} performs on approval, run as a pure lookup so
+   * the reviewer sees the target BEFORE deciding (DEF-review-approve-target-opaque).
+   *
+   * It deliberately does NOT call {@link _resolveWriteSubject}, and that is the whole
+   * point rather than a style preference: that method MINTS an organization for a name
+   * the graph does not know, so previewing THROUGH it would create the subject as a side
+   * effect of LOOKING — precisely the leftover the queue exists to avoid ("a rejected
+   * queue entry never leaves an empty minted subject behind"). The mint is REPORTED here
+   * and performed only by an approval.
+   *
+   * It mirrors {@link _resolveWriteSubject} step for step, and BOTH steps matter. The
+   * first version stopped after `findByNameAnyKind` and was wrong for a whole class of
+   * hints: the approval does not stop there either — it hands the name to
+   * `findOrCreate({kind:'organization'})`, whose read half applies a NORMALIZED fallback
+   * the any-kind lookup does not have. With `Meridian AG` in the graph, a hint of
+   * `"Meridian AG."` previewed as "will be created" while the approval folded it into the
+   * existing subject: a warning about a mint that never happens, and no mention of the
+   * subject that actually receives the fact. `resolveForCreate` is that same read half,
+   * extracted, so the two cannot drift again.
+   */
+  previewHintTarget(name: string): KnowledgeSubjectTarget | null {
+    const hint = name.trim();
+    if (!hint) return null;
+    const found = this.subjects.findByNameAnyKind(hint);
+    if (found.ambiguous) return { resolution: 'ambiguous', name: hint, candidates: found.candidateIds.length };
+    if (found.row) return { resolution: 'existing', id: found.row.id, name: found.row.name, kind: found.row.kind };
+    const asOrg = this.subjects.resolveForCreate({ kind: 'organization', name: hint });
+    if (asOrg.ambiguous) return { resolution: 'ambiguous', name: hint, candidates: asOrg.candidateIds.length };
+    if (asOrg.row) return { resolution: 'existing', id: asOrg.row.id, name: asOrg.row.name, kind: asOrg.row.kind };
+    return { resolution: 'new', name: hint, kind: 'organization' };
+  }
+
+  /**
+   * Pair queued entries with the subject each hint would resolve to — the shape the review
+   * surface is served. One lookup per DISTINCT name rather than per entry: a queue is
+   * usually several facts about the same client, and `findByNameAnyKind` scans the
+   * engagement table on every call.
+   *
+   * A hintless entry gets `null`, not an omitted key: "this entry binds nothing" and "this
+   * engine does not compute targets" are different answers, and a UI that has to tell them
+   * apart cannot do it from an absent field.
+   */
+  withHintTargets(
+    entries: readonly KnowledgeEntry[],
+  ): Array<KnowledgeEntry & { subjectTarget?: KnowledgeSubjectTarget | null }> {
+    const byName = new Map<string, KnowledgeSubjectTarget | null>();
+    return entries.map(e => {
+      const hint = e.subjectHint?.trim();
+      if (!hint) return { ...e, subjectTarget: null };
+      if (!byName.has(hint)) {
+        // Past the cap the field is OMITTED, not nulled — `null` is this store's answer
+        // for "binds nothing", and saying that about an unresolved hint would be a
+        // different wrong promise. An absent field is the shape an older engine sends,
+        // which the review surface already renders as the bare hint.
+        if (byName.size >= MAX_HINT_LOOKUPS_PER_BATCH) return { ...e };
+        byName.set(hint, this.previewHintTarget(hint));
+      }
+      return { ...e, subjectTarget: byName.get(hint) ?? null };
+    });
   }
 
   /**
@@ -511,6 +674,21 @@ export class KnowledgeStore {
     return rows.map(r => this._rowToEntry(r));
   }
 
+  /** Thread-scoped queue read (DEF-dk-review-chip-resume-invisible). Filters
+   *  in SQL BEFORE the limit: a limit-then-filter made a thread's entries
+   *  invisible once 100+ pending rows of OTHER threads crowded the window,
+   *  while the unbounded thread COUNT still counted them — pill and chips
+   *  disagreed past queue depth 100 (review F2). */
+  listPendingForThread(threadId: string, limit = 100): KnowledgeEntry[] {
+    const id = threadId.trim();
+    if (!id) return [];
+    const capped = Math.max(1, Math.min(limit, 500));
+    const rows = this.db.prepare(
+      "SELECT * FROM knowledge_entries WHERE status = 'pending_review' AND source_thread_id = ? ORDER BY created_at ASC LIMIT ?",
+    ).all(id, capped) as KnowledgeRow[];
+    return rows.map(r => this._rowToEntry(r));
+  }
+
   /**
    * Active knowledge for the read-surface (the "Wissen" browse tab, DK-UX). Unlike
    * {@link recall} this is NOT query-ranked — a stable browse list: pinned first, then
@@ -530,6 +708,17 @@ export class KnowledgeStore {
    */
   listPendingMasked(limit = 100): KnowledgeEntry[] {
     return this.listPending(limit).map(e => ({ ...e, text: this._maskText(e.text) }));
+  }
+
+  /**
+   * The thread-scoped queue read, MASKED — {@link listPendingForThread} for a consumer that
+   * writes to a file rather than to a reviewer's screen. Exists because the two properties are
+   * needed together and neither sibling has both: the unscoped `listPendingMasked` would carry
+   * every other thread's queue into a single-thread export, and the unmasked
+   * `listPendingForThread` would carry vault values into a file that gets forwarded.
+   */
+  listPendingForThreadMasked(threadId: string, limit = 100): KnowledgeEntry[] {
+    return this.listPendingForThread(threadId, limit).map(e => ({ ...e, text: this._maskText(e.text) }));
   }
 
   listActive(limit = 200): Array<KnowledgeEntry & { subjectName: string | null }> {

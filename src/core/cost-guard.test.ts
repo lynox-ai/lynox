@@ -39,6 +39,23 @@ describe('CostGuard', () => {
     });
   });
 
+  describe('iterationCapReached', () => {
+    it('tells "out of turns" apart from "out of money"', () => {
+      const byTurns = new CostGuard({ maxBudgetUSD: 100, maxIterations: 2 }, 'claude-sonnet-4-6');
+      byTurns.recordTurn({ input_tokens: 10, output_tokens: 10 } as never);
+      expect(byTurns.isExceeded()).toBe(false);
+      expect(byTurns.iterationCapReached()).toBe(false);
+      byTurns.recordTurn({ input_tokens: 10, output_tokens: 10 } as never);
+      expect(byTurns.isExceeded()).toBe(true);
+      expect(byTurns.iterationCapReached()).toBe(true);
+
+      const byMoney = new CostGuard({ maxBudgetUSD: 0.0000001, maxIterations: 50 }, 'claude-sonnet-4-6');
+      byMoney.recordTurn({ input_tokens: 1000, output_tokens: 1000 } as never);
+      expect(byMoney.isExceeded()).toBe(true);
+      expect(byMoney.iterationCapReached()).toBe(false);
+    });
+  });
+
   describe('recordTurn', () => {
     it('accumulates tokens across multiple turns', () => {
       const cg = new CostGuard({}, 'claude-opus-4-6');
