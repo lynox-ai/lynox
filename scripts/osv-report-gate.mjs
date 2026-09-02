@@ -107,7 +107,11 @@ export function resolveSeverity(vuln, groupMaxSeverity) {
  */
 function asArray(value, errors, what) {
   if (Array.isArray(value)) return value;
-  if (value !== undefined && value !== null) {
+  // `null` is NOT waved through as "absent". It reads as zero findings while
+  // the consumer that only sees counts — the daily watch — reports all-clear,
+  // which is the same swallow one level down from `results: null`. An absent
+  // key is the only silence this accepts.
+  if (value !== undefined) {
     errors.push(`${what} is ${JSON.stringify(value)} where a list belongs — the report shape drifted`);
   }
   return [];

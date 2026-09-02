@@ -91,14 +91,18 @@ const SANCTIONED_INSTALLER = 'actions/install-osv-scanner';
 /** Anything that runs the binary or installs it, wherever it lives. */
 const INSTALLS = /(curl|wget|gh\s+release\s+download)[^|]*osv-scanner/;
 /**
- * Exit codes discarded by shell, in the spellings that all mean the same.
+ * Exit codes discarded by shell.
  *
- * NOT anchored to end-of-line, and that is the point: `gh attestation verify x
- * || true \` with the flags on continuation lines is a working defang whose
- * `|| true` sits in the middle of the line. An end-anchored version of this
- * survived exactly that mutation.
+ * A SECONDARY check now — the pin above is what makes the set closed. Kept
+ * because it names the failure in the message when it fires, and because it
+ * covers jobs that are not pinned line-for-line.
+ *
+ * `\b` may not follow `:`; both it and the next character are non-word, so the
+ * boundary can never hold and `|| :` matched NOTHING for one commit while the
+ * comment beside it still claimed otherwise. The alternation is ordered so each
+ * branch carries its own boundary, and `|| true_flag` stays safe.
  */
-const SWALLOWS = /\|\|\s*(true|:|exit\s+0)\b/;
+const SWALLOWS = /\|\|\s*(?::|true\b|exit\s+0\b)/;
 
 /** Drop a trailing `#` comment, respecting quotes so a `#` inside a string survives. */
 function stripComment(line: string): string {
@@ -116,6 +120,23 @@ function stripComment(line: string): string {
 /** The executable lines of a run block: no comments, no blanks. */
 function commands(run: string | undefined): string[] {
   return (run ?? '').split('\n').map(stripComment).map((l) => l.trim()).filter((l) => l.length > 0);
+}
+
+/**
+ * The same lines with `\`-continuations spliced into one logical command.
+ *
+ * A per-line keyword filter cannot see `--signer-repo … || true`: that line is
+ * part of the `gh attestation verify` command and carries no keyword of its own.
+ * Splicing first makes the filter select the whole command.
+ */
+function logicalCommands(run: string | undefined): string[] {
+  const out: string[] = [];
+  for (const line of commands(run)) {
+    const previous = out[out.length - 1];
+    if (previous !== undefined && previous.endsWith('\\')) out[out.length - 1] = `${previous.slice(0, -1).trimEnd()} ${line}`;
+    else out.push(line);
+  }
+  return out;
 }
 
 const actionStep = (): Step => {
@@ -209,13 +230,121 @@ describe('the install action, which is the only place the pin lives', () => {
   });
 });
 
+/**
+ * THE CLOSED CHECK, and the reason it exists instead of a better pattern.
+ *
+ * Three review rounds each found another way to defang this without touching
+ * anything the previous round's matcher looked at: `|| true` at end of line,
+ * then `|| :` and `|| exit 0`, then `continue-on-error:` and `if:` at STEP
+ * level, then the same two at JOB level, then `|| true` mid-line before a
+ * backslash continuation, then on a continuation line carrying no keyword at
+ * all. Every round produced a wider blocklist, and the next round beat it.
+ *
+ * A blocklist over shell is open by construction and cannot be finished. What
+ * IS finishable: these commands are ours, they are few, and they should
+ * essentially never change. So they are pinned EXACTLY. Any edit — a swallowed
+ * exit code in any spelling, a swapped tool, a redirected path, a reordered
+ * check — turns this red and has to be made deliberately, the way an action SHA
+ * is. The semantic assertions below stay because they say WHY each line is what
+ * it is; this one is what makes the set closed.
+ *
+ * If you changed one of these lines on purpose: update the expectation here in
+ * the same commit and say in the PR body what moved. That friction is the point.
+ */
+const PINNED: Readonly<Record<string, readonly string[]>> = {
+  'actions/install-osv-scanner': [
+    'set -euo pipefail',
+    'curl -sSfL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64" -o /tmp/osv-scanner',
+    'echo "${OSV_SCANNER_SHA256}  /tmp/osv-scanner" | sha256sum -c -',
+    'curl -sSfL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/multiple.intoto.jsonl" -o /tmp/osv-provenance.jsonl',
+    'GH_TOKEN="${OSV_GH_TOKEN}" gh attestation verify /tmp/osv-scanner \\',
+    '--bundle /tmp/osv-provenance.jsonl \\',
+    '--repo google/osv-scanner \\',
+    '--predicate-type https://slsa.dev/provenance/v0.2 \\',
+    '--signer-repo slsa-framework/slsa-github-generator',
+    'chmod +x /tmp/osv-scanner',
+    'sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner',
+    'osv-scanner --version | tee /tmp/osv-version',
+    'grep -qx "osv-scanner version: ${OSV_SCANNER_VERSION}" /tmp/osv-version',
+  ],
+  'ci.yml:test': [
+    'set -euo pipefail',
+    'set +e',
+    'osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json',
+    'OSV_RC=$?',
+    'set -e',
+    'node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}"',
+  ],
+  'release.yml:test': [
+    'set -euo pipefail',
+    'set +e',
+    'osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json',
+    'OSV_RC=$?',
+    'set -e',
+    'node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}"',
+  ],
+  // Only the osv slice of a longer step: the issue bookkeeping around it is
+  // allowed to change without a ceremony, the scanning is not.
+  'dep-scan-daily.yml:dep-scan': [
+    'set +e',
+    'osv-scanner scan source --lockfile=pnpm-lock.yaml --format=json --output-file=/tmp/osv.json',
+    'OSV_RC=$?',
+    'osv-scanner scan source --lockfile=pnpm-lock.yaml > /tmp/osv-table.txt 2>&1',
+    'set -e',
+    'set +e',
+    'node scripts/osv-report-gate.mjs --report /tmp/osv.json --rc "${OSV_RC}" --format=json > /tmp/osv-verdict.json',
+    'set -e',
+    `jq -e 'has("blocking") and has("below") and ((.errors // ["no verdict"]) | length == 0)' /tmp/osv-verdict.json > /dev/null`,
+    `HIGH=$(jq '.blocking | length' /tmp/osv-verdict.json)`,
+    `TOTAL=$(jq '(.blocking | length) + (.below | length)' /tmp/osv-verdict.json)`,
+  ],
+};
+
+/**
+ * The pinned slice of a unit.
+ *
+ * Selected by STEP NAME where the job also does unrelated work, and by an
+ * explicit first/last line where the osv work sits inside a longer step. Both
+ * selectors fail loudly rather than returning a shorter list: a pin that
+ * silently narrows is a pin that stops covering.
+ */
+function pinnedSlice(where: string): string[] {
+  const job = allJobs().find((j) => j.where === where);
+  expect(job, `${where} no longer exists; the pin is now blind`).toBeDefined();
+  const steps = (job as Job).steps;
+
+  if (where === 'actions/install-osv-scanner') return steps.flatMap((s) => commands(s.run));
+
+  if (where === 'dep-scan-daily.yml:dep-scan') {
+    const lines = steps.flatMap((s) => commands(s.run));
+    const lo = lines.findIndex((l) => l === 'set +e');
+    const hi = lines.findIndex((l) => l.startsWith('TOTAL=$(jq'));
+    expect(lo, 'the osv slice no longer starts where the pin expects').toBeGreaterThan(-1);
+    expect(hi, 'the osv slice no longer ends where the pin expects').toBeGreaterThan(lo);
+    return lines.slice(lo, hi + 1);
+  }
+
+  const scan = steps.filter((s) => (s.name ?? '').startsWith('Scan dependencies'));
+  expect(scan, `${where}: expected exactly one \`Scan dependencies\` step`).toHaveLength(1);
+  return commands((scan[0] as Step).run);
+}
+
+describe('the shell that runs the gate is pinned, not pattern-matched', () => {
+  for (const where of Object.keys(PINNED)) {
+    it(`${where} runs exactly the reviewed commands`, () => {
+      expect(pinnedSlice(where)).toEqual([...(PINNED[where] as readonly string[])]);
+    });
+  }
+});
+
 describe('every job that touches osv-scanner', () => {
   // Through the stripping layer, like everything else here. Both of these two
   // helpers were written in the same change that added this comment, and both
   // first matched the RAW run text: a comment saying "this used to curl
   // osv-scanner_linux_amd64" then made a correct workflow look like an
   // unsanctioned installer. The failure the layer exists to prevent, in the
-  // code documenting it. A control mutation that must stay green pins it.
+  // code documenting it — caught by a mutation that had to stay green, which
+  // lives in the batteries this PR records rather than in this file.
   const touchesOsv = (s: Step): boolean =>
     commands(s.run).some((l) => INSTALLS.test(l) || /osv-scanner|osv-report-gate/.test(l)) || s.uses === ACTION_REF;
 
@@ -230,14 +359,11 @@ describe('every job that touches osv-scanner', () => {
   });
 
   it('is exactly the jobs that are supposed to have it', () => {
-    // Anchored to NAMES, not to a filter over the same text the assertions
-    // read. Measured on the real file: deleting the gate block from ci.yml's
-    // required `test` job left ZERO occurrences of `osv-scanner` in that file,
-    // so the file left the derived set and the remaining assertions passed on
-    // the two survivors — 13/13 green with the gate gone. A guard that protects
-    // the SHAPE of a gate but not its EXISTENCE is the more dangerous half
-    // missing. (Deleting only the steps and keeping the prose does NOT
-    // reproduce it; the comment is what keeps the file in a text-derived set.)
+    // Anchored to NAMES, not to a filter over the audited text. Measured on the
+    // real file at the time: deleting the gate block from ci.yml's required
+    // `test` job left the whole suite green, because the file dropped out of a
+    // membership derived from that same text. A guard that protects the SHAPE
+    // of a gate but not its EXISTENCE is the more dangerous half missing.
     expect(touching().map((j) => j.where).sort()).toEqual([...REQUIRED_GATE_JOBS].sort());
   });
 
@@ -332,7 +458,7 @@ describe('every job that touches osv-scanner', () => {
         if (!osv) continue;
         expect(s['continue-on-error'], `${j.where}: continue-on-error on an osv step`).toBeUndefined();
         expect(s.if, `${j.where}: a condition on an osv step`).toBeUndefined();
-        for (const line of commands(s.run)) {
+        for (const line of logicalCommands(s.run)) {
           if (!/osv-scanner|osv-report-gate|sha256sum|gh attestation/.test(line)) continue;
           expect(line, `${j.where}: a discarded exit code on ${line.slice(0, 40)}`).not.toMatch(SWALLOWS);
         }

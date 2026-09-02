@@ -209,6 +209,24 @@ describe('the shape the gate refuses to guess at', () => {
       expect(r.errors.join(' ')).toContain('where a list belongs');
     }
   });
+
+  it('treats a NULL list as drift, not as an empty one', () => {
+    // `?? []` and a null-tolerant guard both read `null` as "nothing here",
+    // which under-counts while the json verdict still shows empty errors — and
+    // the daily watch, which reads only counts, then reports all-clear. Same
+    // swallow as `results: null`, one level down.
+    for (const doc of [
+      { results: [{ source: { path: 'p' }, packages: null }] },
+      { results: [{ source: { path: 'p' }, packages: [{ package: { name: 'x', version: '1' }, vulnerabilities: null }] }] },
+    ]) {
+      const r = evaluate({ doc, rc: 0 });
+      expect(r.ok, JSON.stringify(doc)).toBe(false);
+      expect(r.errors.join(' ')).toContain('where a list belongs');
+    }
+    // An ABSENT key stays silent — that is the one shape the scanner really
+    // emits, and reading it as drift would red every clean run.
+    expect(evaluate({ doc: { results: [{ source: { path: 'p' }, packages: [] }] }, rc: 0 }).ok).toBe(true);
+  });
 });
 
 describe('the contract CI actually depends on', () => {
