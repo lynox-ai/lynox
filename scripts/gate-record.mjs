@@ -197,18 +197,64 @@ export function evaluate({ body, head, files, author }) {
     return { ok: true, notes: [`author ${author} is a bot — dependency PRs merge through their own workflow`] };
   }
 
-  const required = requiredGates(files);
+  let required = requiredGates(files);
   if (required === 'empty') {
     return {
       ok: false,
       errors: ['no changed files were reported — refusing to pass on a diff this check could not see'],
     };
   }
-  if (required === null) {
-    return { ok: true, notes: ['diff touches documentation only'] };
-  }
 
   const rec = extractRecord(body ?? '');
+
+  // ── docs-only: nothing is OWED, which is not the same as nothing being READ ──
+  //
+  // This used to `return { ok: true }` right here, BEFORE `extractRecord` — so on a
+  // documentation diff the check reported success without reading the block at all.
+  // Two questions had been collapsed into one: "which gates does this diff owe?" and
+  // "is the record the author wrote well-formed?". Only the first depends on what the
+  // diff touches.
+  //
+  // Why that was expensive, in the words this file already uses about `'empty'`: the
+  // output could not tell "checked and clean" from "never looked". Both printed the
+  // same tick. Measured 2026-09-02: a session judged three docs-only PRs by their
+  // `gate-record` block and, on one, re-pinned `head:` after an `update-branch` and
+  // read the green check as confirmation. It had never been read.
+  //
+  // And it does not stay quiet. A malformed record on a docs PR is INVISIBLE until
+  // someone adds one source file to the same branch — then every field is read at
+  // once, on a record that has been "passing" for weeks. Live instance at the time of
+  // writing: pro#685 wrote `gates:` as a bullet list, so the two gate attestations
+  // under it are read by nothing at all.
+  //
+  // The fix is an EMPTY requirement set, not a demand for gates a docs diff does not
+  // owe: `for (const g of required)` iterates nothing and `required.has('delta')` is
+  // false, while the head pin, the gate NAMES, and the shape of every field that IS
+  // written are held to exactly what they will be held to the day a source file joins
+  // the branch.
+  //
+  // Two things stay exempt, and both are measured rather than assumed:
+  //   1. A docs PR with NO record still passes. Of the 5 open docs-only PRs across
+  //      both repos, 4 carry no block; demanding one would turn a fix for a silent
+  //      check into a wave of red on work that never claimed anything.
+  //   2. `closes:` is not demanded here. `docsOnlyRecord` carries that, and the
+  //      exemption is older than this change — a test asserts it directly ("does not
+  //      demand it where no record is demanded at all"), and it was deliberately
+  //      strengthened to use a record that IS present with `closes:` absent, i.e. it
+  //      argues for exactly this case rather than passing by accident.
+  //
+  // The residue, stated rather than glossed: a docs PR whose record omits `closes:`
+  // still turns red the day a source file lands. That path is narrower than it was —
+  // it can no longer carry a false CLAIM, only a missing field — but it is not zero.
+  const docsOnlyRecord = required === null;
+  if (docsOnlyRecord) {
+    if (rec === null) {
+      return { ok: true, notes: ['diff touches documentation only — no gate record required'] };
+    }
+    required = new Set();
+    notes.push('diff touches documentation only — no gates required; the record is still read');
+  }
+
   if (rec === null) {
     return {
       ok: false,
@@ -283,7 +329,10 @@ export function evaluate({ body, head, files, author }) {
   // and fails in the other teaches people to leave the field out.
   const closes = f.closes;
   if (closes === undefined) {
-    errors.push(
+    // Nested rather than `&& !docsOnlyRecord` on the `if`: that form skipped the
+    // error and then fell into the `else if`, which dereferences `closes`. The
+    // existing test caught the crash on the first run.
+    if (!docsOnlyRecord) errors.push(
       '`closes:` is missing — name the register rows this PR settles, or `closes: none`. ' +
       'It is required WITH `none` allowed on purpose: an optional field is absent both when ' +
       'nothing is closed and when someone forgot, and then nobody can tell those apart.',
