@@ -185,6 +185,44 @@ preflight_names_re() {
     return 1
   fi
 
+  # CASE-FOLDING, which is locale-dependent for everything outside ASCII and is
+  # the fourth direction this pattern can be wrong in. `grep -i` folds `Ö` to `ö`
+  # only when the locale has a character map that knows they are the same letter.
+  # Measured on a commit whose subject read `Fix for ZÖRBLATT Industries` against
+  # the pattern `Zörblatt`:
+  #
+  #     LC_ALL=en_US.UTF-8   exit 1   caught
+  #     LC_ALL=C             exit 0   clean ✓
+  #     LC_ALL / LANG unset  exit 0   clean ✓
+  #
+  # An unset locale is not exotic: a hook launched from a GUI git client, or any
+  # `env -i` context, has none. So an ASCII locale plus a non-ASCII name is a
+  # scan that cannot match, and it says `clean ✓` while it happens. Refuse
+  # instead — the same direction as every other check in this function.
+  #
+  # Only when the pattern actually contains a non-ASCII byte: an ASCII-only list
+  # folds identically everywhere, and a guard that refuses correct input is a
+  # guard that gets bypassed.
+  # NOTE: `rc` above is NOT reset at this point and carries the validity probe's
+  # leftover, so this check returns directly rather than going through it.
+  # `LC_ALL=C` on the probe itself, so `[^ -~]` is a plain BYTE range (outside
+  # 0x20..0x7e) rather than something the ambient locale gets to reinterpret —
+  # the detector for a locale problem must not depend on the locale.
+  if printf '%s' "$PRIVATE_NAMES_RE" | LC_ALL=C grep -q '[^ -~]'; then
+      case "$(locale charmap 2>/dev/null || echo unknown)" in
+        UTF-8|utf-8|UTF8|utf8) : ;;
+        *)
+          echo "❌ public-repo-guard: the private-name pattern contains non-ASCII" >&2
+          echo "   characters, but this shell's locale charmap is" >&2
+          echo "   '$(locale charmap 2>/dev/null || echo unknown)' — grep -i cannot fold" >&2
+          echo "   them there, so the scan would silently under-match." >&2
+          echo "   Run with a UTF-8 locale (e.g. LC_ALL=en_US.UTF-8), or keep the" >&2
+          echo "   list ASCII-only." >&2
+          return 1
+          ;;
+      esac
+  fi
+
   # UNDER-matching, which is the direction that fails silently and was missed by
   # three review rounds. Every check before this one asked "does the pattern match
   # too much?". None asked "does it match anything at all?".
@@ -362,18 +400,33 @@ if $mode_meta; then
       # an unwalked range visible, attesting a walk that found nothing because
       # it was killed. Small messages were unaffected, which is what makes this
       # the kind of bug that ships.
-      # `-c i18n.logOutputEncoding=UTF-8`, for the same reason guard-file-list.sh
-      # pins core.quotePath on `ls-files`: this runs at pre-push with the
-      # DEVELOPER's ~/.gitconfig, and that file can re-encode git's output.
-      # Measured: with `i18n.logOutputEncoding = UTF-16` set globally, a commit
-      # whose subject plainly carries a name produced
-      # `clean ✓ (1 commit(s) scanned)` and exit 0 — the counter added to make an
-      # unwalked range visible instead attesting a walk that could not match.
-      # ISO-8859-1 does the same to an umlaut. A guard that a config line can
-      # blind is worse than none on the one surface that cannot be repaired.
-      msg="$(git -c i18n.logOutputEncoding=UTF-8 show -s --format='%B' "$sha")"
+      # RAW OBJECT, not `git show --format=%B`. This runs at pre-push with the
+      # DEVELOPER's ~/.gitconfig, and every rendering path git offers goes through
+      # a re-encoding layer that config can steer. Measured, all four producing
+      # `clean ✓ (1 commit(s) scanned)` and exit 0 on a commit whose subject
+      # plainly carried the name:
+      #
+      #   · `i18n.logOutputEncoding = UTF-16` — output re-encoded, grep matches
+      #     nothing. ISO-8859-1 does the same to an umlaut.
+      #   · `i18n.commitEncoding = ISO-8859-1` — WORSE, because it needs no
+      #     hostile config at SCAN time: it writes an `encoding ISO-8859-1`
+      #     header into the object while the bytes are UTF-8, so every later
+      #     read re-encodes from a declared encoding that was never true. The
+      #     lie is baked into the object and survives rebase, cherry-pick and
+      #     clone. Pinning the OUTPUT encoding does not touch it — that was the
+      #     first version of this fix, and a delta round measured it still open.
+      #
+      # `--encoding=none` and `i18n.logOutputEncoding=none` were both tried and
+      # mangle identically. `cat-file` is the only read that hands back the bytes
+      # that are actually stored.
+      #
+      # The `sed` is load-bearing, not cosmetic: it drops the object header, so
+      # the scan reads the MESSAGE and not the `author`/`committer` lines. Without
+      # it a pattern that ever contains the operator's own name would fire on
+      # every commit they wrote.
+      msg="$(git cat-file commit "$sha" | sed '1,/^$/d')"
       if grep -qEi "$PRIVATE_NAMES_RE" <<<"$msg"; then
-        echo "❌ private name in the message of commit $(git -c i18n.logOutputEncoding=UTF-8 show -s --format='%h' "$sha")"
+        echo "❌ private name in the message of commit ${sha:0:9}"
         meta_hits=$((meta_hits + 1))
       fi
     done

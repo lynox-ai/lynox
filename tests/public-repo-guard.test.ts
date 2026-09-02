@@ -441,17 +441,21 @@ describe('public-repo-guard — does NOT fire on benign lines', () => {
  */
 describe('public-repo-guard — private-name class', () => {
   /** Commit `subject` (optional `body`) and return the new HEAD sha. */
-  function commit(subject: string, body?: string): string {
+  function commit(subject: string, body?: string, gitConfigGlobal?: string): string {
     const args = ['commit', '-q', '--allow-empty', '-m', subject];
     if (body !== undefined) args.push('-m', body);
     execFileSync('git', args, {
       cwd: dir,
       env: {
         // GIT_ENV, not process.env: without the pins a developer's global
-        // core.hooksPath runs foreign hooks on these fixture commits, and a
-        // global i18n setting re-encodes what git hands back. Measured: 21 of
-        // 55 cases fail under a hostile global config without this.
+        // core.hooksPath runs foreign hooks on these fixture commits. Measured
+        // by running this file under a hostile ambient `core.hooksPath` with
+        // this one spread reverted: 13 of 56 cases fail. With the pins: 56/56.
         ...GIT_ENV,
+        // One case needs the fixture COMMIT written under a hostile config — the
+        // lying `encoding` header is baked in at commit time, not at scan time —
+        // so this single pin is overridable while the rest stay fixed.
+        ...(gitConfigGlobal !== undefined ? { GIT_CONFIG_GLOBAL: gitConfigGlobal } : {}),
         GIT_AUTHOR_NAME: 't',
         GIT_AUTHOR_EMAIL: 't@t.t',
         GIT_COMMITTER_NAME: 't',
@@ -527,6 +531,57 @@ describe('public-repo-guard — private-name class', () => {
     const head = commit('A clean follow-up');
 
     expect(runMeta(base, head).code).toBe(0);
+  });
+
+  it('refuses a non-ASCII pattern under a locale that cannot fold it', () => {
+    // `grep -i` folds `\u00d6` to `\u00f6` only where the charmap knows they are one
+    // letter. Measured on `Fix for Z\u00d6RBLATT Industries` against the pattern
+    // `Z\u00f6rblatt`: LC_ALL=en_US.UTF-8 -> exit 1 (caught); LC_ALL=C and an unset
+    // locale -> exit 0 and `clean`. An unset locale is not exotic — a hook
+    // launched from a GUI client or any `env -i` context has none. Refusing is
+    // the only honest answer: the scan cannot match, and saying so beats saying
+    // it is clean.
+    const base = commit('baseline');
+    const head = commit('Fix for Z\u00d6RBLATT Industries');
+    const r = runMeta(base, head, { __PATTERN__: 'Z\u00f6rblatt', LC_ALL: 'C' });
+    expect(r.code, 'an unfoldable pattern must refuse, not report clean').toBe(1);
+    expect(r.out).toMatch(/cannot fold/);
+    expect(head).not.toBe(base);
+  });
+
+  it('still runs an ASCII pattern under an ASCII locale', () => {
+    // The counter-direction, because a guard that refuses correct input gets
+    // bypassed: an ASCII-only list folds identically everywhere, so LC_ALL=C
+    // must stay a working configuration for it.
+    const base = commit('baseline');
+    const head = commit(`Fix for ${FICTIONAL_NAME}`);
+    const r = runMeta(base, head, { LC_ALL: 'C' });
+    expect(r.code, 'an ASCII pattern must still be scanned under LC_ALL=C').toBe(1);
+    // The exit code alone cannot tell these apart — a refusal returns 1 as well
+    // as a hit does, and a mutation that refused UNCONDITIONALLY survived an
+    // earlier version of this case for exactly that reason. So assert on which
+    // of the two it was.
+    expect(r.out, 'this must be a HIT, not the locale refusal').toMatch(/private name in the message of commit/);
+    expect(r.out).not.toMatch(/cannot fold/);
+    expect(head).not.toBe(base);
+  });
+
+  it('reads the raw commit object, so a lying encoding header cannot hide a name', () => {
+    // `i18n.commitEncoding` writes an `encoding` header into the OBJECT while the
+    // bytes stay whatever the terminal produced. Every rendering read
+    // (`git show --format=%B`) then re-encodes from an encoding that was never
+    // true, and the lie survives rebase, cherry-pick and clone — no hostile
+    // config is needed at scan time. `git cat-file` hands back the stored bytes.
+    const cfg = join(dir, 'commitenc.gitconfig');
+    writeFileSync(cfg, '[i18n]\n\tcommitEncoding = ISO-8859-1\n');
+    const base = commit('baseline');
+    const head = commit('Fix for Z\u00f6rblatt', undefined, cfg);
+    expect(
+      execFileSync('git', ['cat-file', 'commit', head], { cwd: dir, env: GIT_ENV, encoding: 'utf8' }),
+      'the fixture must carry the lying header, or this case proves nothing',
+    ).toMatch(/^encoding ISO-8859-1$/m);
+    const r = runMeta(base, head, { __PATTERN__: 'Z\u00f6rblatt' });
+    expect(r.code, 'a lying encoding header must not hide a name').toBe(1);
   });
 
   it('is not blinded by a global i18n.logOutputEncoding', () => {
