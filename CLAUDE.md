@@ -115,11 +115,20 @@ pre-push for what actually runs at pre-commit):
 - **pre-commit**: gitleaks, pattern-scan, typecheck, hex-guard, token-contract, shape-contract.
   gitleaks/pattern-scan belong here, not pre-push: they read the *index*, which is empty at
   push time — at pre-push they were no-ops.
-- **pre-push**: security-scan, public-repo-guard (internal-infra leaks), drift-guard (doc/code
-  drift), positioning-guard (copy vs POSITIONING.md).
+- **pre-push**: security-scan, public-repo-guard (internal-infra leaks), public-repo-guard-meta
+  (customer names in commit messages), drift-guard (doc/code drift), positioning-guard.
+  The customer-name class scans **commit messages only** — not the tree, and not PR text. A
+  merged commit message on a public repo is the one surface that cannot be repaired afterwards;
+  a PR body can be edited, and in the incident that prompted this class it was. Its pattern
+  deliberately does NOT live in this repo: one regex per line in `~/.lynox/private-names.re`.
+  Word boundaries belong in the pattern — a bare surname matches inside unrelated words.
+  **Enforced at pre-push only, and it has no CI twin** (a GitHub secret is a textarea, and a
+  pasted list arrives with line breaks that GNU and BSD grep read differently). Without the file
+  the class prints a warning and stands down.
 
-Every hook above re-runs as a **required CI check**, so `git commit/push --no-verify` cannot
-bypass any of them — that is what makes them gates rather than suggestions. (`security-scan` and
+Every hook above re-runs as a **required CI check** — except `public-repo-guard-meta`, whose
+class is pre-push-only by design (see above) — so `git commit/push --no-verify` cannot bypass
+them; that is what makes them gates rather than suggestions. (`security-scan` and
 `hex-guard` got theirs on 2026-07-14, in `hook-guards.yml`; before that they were hook-only, so
 `--no-verify` removed them entirely. The same workflow adds `web-ui-typecheck`, because the root
 `pnpm typecheck` is `tsc --noEmit` over `src` and never touched the SvelteKit package — 1038 files
