@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import type { ToolEntry, IAgent } from '../../types/index.js';
 import { getLynoxDir } from '../../core/config.js';
 import type { ApiProfile, ResponseShape, ApiAuth, ApiEndpoint } from '../../core/api-store.js';
+import { accessTokenKey, refreshTokenKey } from '../../core/api-store.js';
 import { fetchWithValidatedRedirects, readBodyLimited, MAX_REQUESTS_PER_SESSION } from './http.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { callForStructuredJson, BudgetError, type ExtractSchema } from '../../core/llm-helper.js';
@@ -1361,9 +1362,15 @@ Next steps before calling create:
       const missing: string[] = [];
       if (clientId === null) missing.push(clientIdKey);
       if (clientSecret === null) missing.push(clientSecretKey);
-      if (grantType === 'refresh_token' && oauth.refresh_token_key) {
-        const rt = resolveOne(oauth.refresh_token_key);
-        if (rt === null) missing.push(oauth.refresh_token_key);
+      // The profile drives the slot, exactly as the attach does (`http.ts`,
+      // `accessTokenKey`): an explicit `refresh_token_key` wins, otherwise the
+      // derived name — the same one `fetch_token` writes. Without the fallback
+      // the token was stored under a name nothing read, because no engine path
+      // ever set the field and only a model-authored profile edit could.
+      const refreshKey = oauth.refresh_token_key ?? refreshTokenKey(input.id);
+      if (grantType === 'refresh_token') {
+        const rt = resolveOne(refreshKey);
+        if (rt === null) missing.push(refreshKey);
       }
       if (missing.length > 0) {
         return `Error: vault is missing the OAuth credentials for profile "${input.id}": ${missing.map((n) => `"${n}"`).join(', ')}. Call \`ask_secret\` for each missing name first, then retry fetch_token.`;
@@ -1393,8 +1400,8 @@ Next steps before calling create:
       };
       if (oauth.scope) params['scope'] = oauth.scope;
       if (oauth.audience) params['audience'] = oauth.audience;
-      if (grantType === 'refresh_token' && oauth.refresh_token_key) {
-        const rt = resolveOne(oauth.refresh_token_key);
+      if (grantType === 'refresh_token') {
+        const rt = resolveOne(refreshKey);
         if (rt !== null) params['refresh_token'] = rt;
       }
       const headers: Record<string, string> = { 'Accept': 'application/json' };
@@ -1474,7 +1481,7 @@ Next steps before calling create:
       if (!accessToken || typeof accessToken !== 'string') {
         return `Token exchange returned HTTP ${response.status} but no \`access_token\` in the response. Parsed body: ${JSON.stringify(parsed).slice(0, 300)}.`;
       }
-      const outputName = input.output_secret_name ?? `${input.id.toUpperCase().replace(/-/g, '_')}_ACCESS_TOKEN`;
+      const outputName = input.output_secret_name ?? accessTokenKey(input.id);
       if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(outputName)) {
         return `Error: output_secret_name "${outputName}" is not valid UPPER_SNAKE_CASE.`;
       }
@@ -1499,14 +1506,31 @@ Next steps before calling create:
         // `google-oauth` or `mail-account-x`, so the derived name lands inside a protected
         // prefix just as easily as a chosen one. Guarding only the caller-supplied name would
         // close the door and leave the window.
-        const refreshName = `${input.id.toUpperCase().replace(/-/g, '_')}_REFRESH_TOKEN`;
+        const refreshName = refreshTokenKey(input.id);
         if (isProtectedSecretWrite(refreshName)) {
           return `Token exchange OK, but the refresh token was NOT stored: "${refreshName}" would overwrite a credential the tenant cannot recover. Rename the api_profile so its derived key does not collide.`;
         }
         secretStore.set(refreshName, parsed.refresh_token);
       }
+      // Persist the expiry, absolute and in milliseconds. Until now `expires_in`
+      // was formatted into the reply below and then dropped, so nothing on this
+      // path could know when a token died — which is why neither a lazy refresh
+      // nor a scheduled one was buildable: both need something to plan against.
+      //
+      // On the profile rather than in the vault deliberately. A vault write would
+      // put a non-secret timestamp into a store whose NAMES are enumerated into
+      // the model's briefing (`engine-init.ts`), and the value is not a
+      // credential. The failure mode of the extra write is also mild here: if the
+      // save does not happen, the state is what it is today — no expiry known —
+      // whereas the same second write for the refresh key would have reproduced
+      // the very orphan this change removes, which is why THAT one is derived at
+      // read time instead.
+      if (typeof parsed.expires_in === 'number' && parsed.expires_in > 0 && apiStore) {
+        const oauthWithExpiry = { ...oauth, token_expires_at: Date.now() + parsed.expires_in * 1000 };
+        apiStore.save({ ...profile, auth: { ...profile.auth, oauth: oauthWithExpiry } }, apisDir);
+      }
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
-      return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as \`Authorization: Bearer …\` for any http_request that maps to api_profile "${input.id}" — do NOT pass an Authorization header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${parsed.refresh_token ? `Refresh token stored as \`${input.id.toUpperCase().replace(/-/g, '_')}_REFRESH_TOKEN\`.` : ''}`;
+      return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as \`Authorization: Bearer …\` for any http_request that maps to api_profile "${input.id}" — do NOT pass an Authorization header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${parsed.refresh_token ? `Refresh token stored as \`${refreshTokenKey(input.id)}\`.` : ''}`;
     }
 
     return 'Unknown action. Use "list", "view", "bootstrap", "create", "update", "refine", "delete", or "fetch_token".';

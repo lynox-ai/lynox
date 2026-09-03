@@ -96,6 +96,16 @@ export interface ApiAuth {
      *  (application/x-www-form-urlencoded). Shopify wants `json` since 2026.
      *  Default: `form`. */
     body_format?: 'form' | 'json' | undefined;
+    /**
+     * Absolute expiry of the stored access token, epoch **milliseconds** — not a
+     * TTL and not seconds, matching the vocabulary the vendored contract already
+     * fixes for the Google path. Written by `fetch_token` from the `expires_in`
+     * the token endpoint returned; before this existed the value was formatted
+     * into the model's reply and then dropped, so nothing could know when a
+     * token died and neither a lazy nor a scheduled refresh had anything to plan
+     * against.
+     */
+    token_expires_at?: number | undefined;
   } | undefined;
   /**
    * For 'basic': how the credential is stored.
@@ -386,6 +396,35 @@ class PerApiRateLimiter {
 
 // ── Store ──
 
+/**
+ * The single derivation from a profile id to its vault slot names.
+ *
+ * It exists as one function because the expression was duplicated at four sites
+ * (two mints, the success message, and the attach) and the attach is the one
+ * that decides whether a request carries a credential — three of four agreeing
+ * is worse than none, because the disagreement is silent.
+ *
+ * ⚠ The mapping is NOT injective: `ID_PATTERN` admits both `-` and `_`, and this
+ * collapses `-` onto `_`, so `x-y` and `x_y` derive the same slot. That is not
+ * fixed by changing the derivation — a different encoding would rename the slots
+ * of every already-stored profile whose id contains `_`, i.e. move live
+ * credentials. It is fixed at the gate instead: {@link ApiStore.register}
+ * refuses a second profile that derives onto a slot another id already holds.
+ */
+export function vaultSlotBase(id: string): string {
+  return id.toUpperCase().replace(/-/g, '_');
+}
+
+/** Vault key holding the current access token for this profile. */
+export function accessTokenKey(id: string): string {
+  return `${vaultSlotBase(id)}_ACCESS_TOKEN`;
+}
+
+/** Vault key holding the refresh token for this profile. */
+export function refreshTokenKey(id: string): string {
+  return `${vaultSlotBase(id)}_REFRESH_TOKEN`;
+}
+
 export class ApiStore {
   private readonly profiles = new Map<string, ApiProfile>();
   private readonly hostToProfile = new Map<string, string>(); // hostname → profile id
@@ -587,6 +626,20 @@ export class ApiStore {
       // hand the id directly to `join(apisDir, …)` without a second check.
       process.stderr.write(`[lynox:api-store] Skipping profile with invalid id "${profile.id}" (must match ${PROFILE_ID_PATTERN.source})\n`);
       return;
+    }
+    // Two ids may not share a vault slot. `vaultSlotBase` collapses `-` onto
+    // `_`, and `ID_PATTERN` admits both, so `x-y` and `x_y` derive the same
+    // `_ACCESS_TOKEN` name — the later mint would overwrite the earlier
+    // profile's token and the attach would hand it to BOTH hosts. Refused here
+    // rather than at `save`, because `save` is not the only entry: profiles also
+    // arrive through the boot load, and a collision that only a save can catch
+    // is one a restart re-admits.
+    const slot = vaultSlotBase(profile.id);
+    for (const [otherId] of this.profiles) {
+      if (otherId !== profile.id && vaultSlotBase(otherId) === slot) {
+        process.stderr.write(`[lynox:api-store] Skipping profile "${profile.id}": its vault slot (${slot}) is already held by profile "${otherId}" — the two ids differ only in \`-\` vs \`_\`. Rename one.\n`);
+        return;
+      }
     }
     this.profiles.set(profile.id, profile);
 

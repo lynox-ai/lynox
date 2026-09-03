@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, rmSync, readFileSync, mkdtempSync, existsSync
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { ApiStore } from './api-store.js';
+import { ApiStore, vaultSlotBase, accessTokenKey, refreshTokenKey } from './api-store.js';
 import type { ApiProfile } from './api-store.js';
 
 function createTmpDir(): string {
@@ -604,5 +604,62 @@ describe('ApiStore', () => {
         ids.add(api.id);
       }
     });
+  });
+});
+
+describe('vault slot derivation — one function, and it must stay injective at the gate', () => {
+  function profile(id: string): ApiProfile {
+    return {
+      id,
+      name: id,
+      base_url: `https://${id.replace(/[_-]/g, '')}.example.com`,
+      description: 'fixture',
+      auth: { type: 'oauth2', vault_keys: [], oauth: { token_url: 'https://t.example.com/tok' } },
+      endpoints: [{ method: 'GET', path: '/x', description: 'x' }],
+    } as unknown as ApiProfile;
+  }
+
+  it('derives the same slot for ids that differ only in - vs _', () => {
+    // Not a defect in itself — it is the PREMISE of the guard below, asserted so
+    // that a future change to the derivation makes the guard's reason visible
+    // instead of leaving a test that guards nothing.
+    expect(vaultSlotBase('x-y')).toBe('X_Y');
+    expect(vaultSlotBase('x_y')).toBe('X_Y');
+    expect(accessTokenKey('x-y')).toBe(accessTokenKey('x_y'));
+    expect(refreshTokenKey('x-y')).toBe(refreshTokenKey('x_y'));
+  });
+
+  it('refuses to register a second profile that lands on a slot another id holds', () => {
+    const store = new ApiStore();
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    store.register(profile('x-y'));
+    store.register(profile('x_y'));
+
+    // The first keeps the slot; the second is refused rather than admitted next
+    // to it. Admitting both is the defect: the later mint overwrites the earlier
+    // profile's token and the attach then hands ONE credential to TWO hosts.
+    expect(store.get('x-y')).toBeDefined();
+    expect(store.get('x_y')).toBeUndefined();
+    expect(warn.mock.calls.map((c) => String(c[0])).join('')).toMatch(/vault slot/i);
+    warn.mockRestore();
+  });
+
+  it('still allows re-registering the SAME id — the guard is about neighbours, not updates', () => {
+    const store = new ApiStore();
+    store.register(profile('x-y'));
+    const updated = { ...profile('x-y'), description: 'second write' };
+    store.register(updated);
+
+    expect(store.get('x-y')?.description).toBe('second write');
+  });
+
+  it('leaves non-colliding ids alone', () => {
+    const store = new ApiStore();
+    store.register(profile('alpha'));
+    store.register(profile('beta'));
+
+    expect(store.get('alpha')).toBeDefined();
+    expect(store.get('beta')).toBeDefined();
   });
 });

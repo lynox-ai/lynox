@@ -1,6 +1,7 @@
 import type { ToolEntry } from '../../types/index.js';
 import { applyShape } from '../../core/api-shape.js';
 import type { ResponseShape } from '../../core/api-store.js';
+import { accessTokenKey } from '../../core/api-store.js';
 import { channels } from '../../core/observability.js';
 import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
@@ -504,7 +505,7 @@ async function attachEngineManagedAuth(
     // written SHOPIFY_SEO_ACCESS_TOKEN, the agent kept reaching for
     // SHOPIFY_ACCESS_TOKEN → 401 forever), and rotation, where every later request
     // should pick up a freshly minted token automatically.
-    const tokenKey = `${profile.id.toUpperCase().replace(/-/g, '_')}_ACCESS_TOKEN`;
+    const tokenKey = accessTokenKey(profile.id);
     const resolved = secretStore.resolve(tokenKey);
     if (!resolved) {
       return { refusal: `Error: api_profile "${profile.id}" is oauth2 but the vault has no access_token under "${tokenKey}". Mint one first with: api_setup({ action: "fetch_token", id: "${profile.id}" }). Requires client_id + client_secret already stored under the keys configured in auth.oauth.` };
