@@ -2280,6 +2280,100 @@ describe('api_setup tool', () => {
       fetchSpy.mockRestore();
     });
 
+    // The tokens are in the vault and the HTTP budget is charged BEFORE the
+    // profile write. If that write throws, reporting failure makes the model
+    // retry and mint again — so the exchange must still be reported as done.
+    it('still reports a completed exchange when persisting the expiry throws', async () => {
+      const store = new ApiStore();
+      const vaultMock = makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'client-id-xyz',
+        SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
+      });
+      const agent = createMockAgent(store, vaultMock);
+      store.register({
+        ...SHOPIFY_PROFILE,
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+      });
+      const saveSpy = vi.spyOn(store, 'save').mockImplementation(() => {
+        throw new Error('ENOSPC: no space left on device');
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ access_token: 'at-ok', expires_in: 3600 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        }),
+      );
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+
+      expect(saveSpy).toHaveBeenCalled();
+      expect(result).toMatch(/Token exchange OK/i);
+      // And the token really is usable — losing the expiry is the whole cost.
+      expect((vaultMock as { _peek: (n: string) => string | undefined })._peek('SHOPIFY_SEO_ACCESS_TOKEN')).toBe('at-ok');
+      saveSpy.mockRestore();
+      fetchSpy.mockRestore();
+    });
+
+    // `expires_in` comes from the token endpoint. `1e308 * 1000` is Infinity,
+    // which JSON.stringify writes as `null` into both backing stores — a null in
+    // a `number | undefined` field that a scheduler would read as "expired".
+    it('refuses to persist an absurd expires_in rather than writing Infinity', async () => {
+      const store = new ApiStore();
+      const vaultMock = makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'client-id-xyz',
+        SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
+      });
+      const agent = createMockAgent(store, vaultMock);
+      store.register({
+        ...SHOPIFY_PROFILE,
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ access_token: 'at-ok', expires_in: 1e308 }), {
+          status: 200, headers: { 'content-type': 'application/json' },
+        }),
+      );
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+
+      // The exchange still succeeds — the token is real, only the lifetime claim
+      // is not — but nothing unusable is written.
+      expect(result).toMatch(/Token exchange OK/i);
+      expect(store.get('shopify_seo')?.auth?.oauth?.token_expires_at).toBeUndefined();
+      fetchSpy.mockRestore();
+    });
+
+    // The profile is model-authorable and this value is POSTed to token_url, so
+    // the read goes through the same guard as the write and as the attach.
+    it('refuses to POST a refresh token read from a protected credential slot', async () => {
+      const store = new ApiStore();
+      const vaultMock = makeMockSecretStore({
+        SHOPIFY_CLIENT_ID: 'client-id-xyz',
+        SHOPIFY_CLIENT_SECRET: 'shpss_secret_xyz',
+        ANTHROPIC_API_KEY: 'sk-ant-the-tenants-own-provider-key',
+      });
+      const agent = createMockAgent(store, vaultMock);
+      store.register({
+        ...SHOPIFY_PROFILE,
+        auth: {
+          ...SHOPIFY_PROFILE.auth,
+          oauth: {
+            ...SHOPIFY_PROFILE.auth.oauth,
+            grant_type: 'refresh_token' as const,
+            refresh_token_key: 'ANTHROPIC_API_KEY',
+          },
+        },
+        custom_endpoint_ack: { accepted: true, hosts: ['shop.myshopify.com'], accepted_at: '2026-07-02T10:00:00Z' },
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      const result = await apiSetupTool.handler({ action: 'fetch_token', id: 'shopify_seo' }, agent);
+
+      expect(result).toMatch(/protected credential slot/i);
+      // Nothing left the process — the refusal is before any request, not after.
+      expect(fetchSpy).not.toHaveBeenCalled();
+      fetchSpy.mockRestore();
+    });
+
     // `expires_in` used to be formatted into the reply and dropped. Nothing knew
     // when a token died, so neither a lazy nor a scheduled refresh had anything
     // to plan against. Delete the persist block and this fails.

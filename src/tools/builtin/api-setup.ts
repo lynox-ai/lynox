@@ -1140,7 +1140,8 @@ Next steps before calling create:
       if (err) return `Validation error after refine: ${err}`;
 
       // Persist + register (S4b: engine.db `connections` when wired, else flat JSON).
-      apiStore.save(merged, apisDir);
+      const mergedSave = apiStore.save(merged, apisDir);
+      if (!mergedSave.ok) return `Error: ${mergedSave.reason}`;
 
       const changed: string[] = [];
       if (input.refine.addGuidelines?.length) changed.push(`+${String(input.refine.addGuidelines.length)} guidelines`);
@@ -1260,7 +1261,13 @@ Next steps before calling create:
       if (!apiStore) {
         return 'Error: API store unavailable — cannot persist the profile. Restart the engine and retry.';
       }
-      const isUpdate = !apiStore.save(profile, apisDir);
+      const saved = apiStore.save(profile, apisDir);
+      // A refusal used to arrive here as `isNew`, so the tool answered "Created
+      // … saved and activated immediately" for a profile that was never stored.
+      // Fail-closed in effect, false-confident in report — and the only trace was
+      // a stderr line no model ever reads.
+      if (!saved.ok) return `Error: ${saved.reason}`;
+      const isUpdate = !saved.isNew;
 
       const verb = isUpdate ? 'Updated' : 'Created';
       const parts: string[] = [
@@ -1368,6 +1375,13 @@ Next steps before calling create:
       // the token was stored under a name nothing read, because no engine path
       // ever set the field and only a model-authored profile edit could.
       const refreshKey = oauth.refresh_token_key ?? refreshTokenKey(input.id);
+      // The same guard the attach applies to its derived key (`http.ts`) and the
+      // write applies below. It covers BOTH shapes: a derived name that lands in a
+      // protected prefix, and an explicit `refresh_token_key` naming one — the
+      // profile is model-authorable, and this value is POSTed to `token_url`.
+      if (grantType === 'refresh_token' && isProtectedSecretWrite(refreshKey)) {
+        return `Error: profile "${input.id}" resolves its refresh token from "${refreshKey}", which is a protected credential slot — refusing to send it to ${new URL(oauth.token_url).hostname}. Point auth.oauth.refresh_token_key at a slot that belongs to this API.`;
+      }
       if (grantType === 'refresh_token') {
         const rt = resolveOne(refreshKey);
         if (rt === null) missing.push(refreshKey);
@@ -1525,9 +1539,27 @@ Next steps before calling create:
       // whereas the same second write for the refresh key would have reproduced
       // the very orphan this change removes, which is why THAT one is derived at
       // read time instead.
-      if (typeof parsed.expires_in === 'number' && parsed.expires_in > 0 && apiStore) {
-        const oauthWithExpiry = { ...oauth, token_expires_at: Date.now() + parsed.expires_in * 1000 };
-        apiStore.save({ ...profile, auth: { ...profile.auth, oauth: oauthWithExpiry } }, apisDir);
+      // Bounded: `expires_in` comes from the token endpoint, and an absurd value
+      // is not merely wrong — `1e308 * 1000` is `Infinity`, which `JSON.stringify`
+      // writes as `null` into both backing stores, i.e. a null in a `number |
+      // undefined` field that a future scheduler would read as "already expired".
+      // One year is far past any real token and still a finite integer.
+      const MAX_TOKEN_LIFETIME_S = 366 * 24 * 60 * 60;
+      const lifetimeS = parsed.expires_in;
+      if (apiStore && typeof lifetimeS === 'number' && Number.isSafeInteger(lifetimeS)
+          && lifetimeS > 0 && lifetimeS <= MAX_TOKEN_LIFETIME_S) {
+        // Re-read: `profile` was fetched before a multi-second exchange, and
+        // saving the stale copy would roll back a concurrent update.
+        const fresh = apiStore.get(input.id) ?? profile;
+        const oauthWithExpiry = { ...fresh.auth?.oauth, token_expires_at: Date.now() + lifetimeS * 1000 };
+        try {
+          apiStore.save({ ...fresh, auth: { ...fresh.auth, oauth: oauthWithExpiry } } as typeof fresh, apisDir);
+        } catch {
+          // The tokens are already in the vault and the request budget is already
+          // charged. Turning a completed exchange into a reported failure would
+          // make the model retry and mint again; losing the expiry only returns
+          // this path to the state it was in before it was persisted at all.
+        }
       }
       const expiresIn = typeof parsed.expires_in === 'number' ? `${parsed.expires_in}s` : 'unknown';
       return `Token exchange OK. access_token stored as \`${outputName}\` (expires_in: ${expiresIn}). The engine will auto-attach this as \`Authorization: Bearer …\` for any http_request that maps to api_profile "${input.id}" — do NOT pass an Authorization header yourself, and do NOT reference \`secret:${outputName}\` manually. Just call http_request with the URL + body; auth is handled. ${parsed.refresh_token ? `Refresh token stored as \`${refreshTokenKey(input.id)}\`.` : ''}`;

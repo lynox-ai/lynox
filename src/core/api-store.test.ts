@@ -654,6 +654,43 @@ describe('vault slot derivation — one function, and it must stay injective at 
     expect(store.get('x-y')?.description).toBe('second write');
   });
 
+  it('save reports the refusal instead of reporting a create', () => {
+    const store = new ApiStore();
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    store.save(profile('x-y'));
+
+    const second = store.save(profile('x_y'));
+
+    // The refusal used to arrive as `isNew: true` — indistinguishable from a
+    // successful create, so the caller reported one. Fail-closed in effect,
+    // false-confident in report.
+    expect(second.ok).toBe(false);
+    expect(second.ok === false && second.reason).toMatch(/already holds|derives the vault slot/i);
+    expect(store.get('x_y')).toBeUndefined();
+    warn.mockRestore();
+  });
+
+  it('loadFromDirectory counts registrations, not files, and admits the pair deterministically', () => {
+    const dir = createTmpDir();
+    const warn = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    // Written in the order that would let an unsorted read pick either one.
+    writeFileSync(join(dir, 'zz.json'), JSON.stringify(profile('x_y')));
+    writeFileSync(join(dir, 'aa.json'), JSON.stringify(profile('x-y')));
+
+    const store = new ApiStore();
+    const loaded = store.loadFromDirectory(dir);
+
+    // One landed, so one is counted — a count of 2 would report a profile that
+    // is not in the store.
+    expect(loaded).toBe(1);
+    // And it is always the same one: file order is sorted, so `aa.json` wins on
+    // every boot instead of whichever the filesystem happened to hand back.
+    expect(store.get('x-y')).toBeDefined();
+    expect(store.get('x_y')).toBeUndefined();
+    warn.mockRestore();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('leaves non-colliding ids alone', () => {
     const store = new ApiStore();
     store.register(profile('alpha'));

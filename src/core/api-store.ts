@@ -448,7 +448,10 @@ export class ApiStore {
   loadFromDirectory(dir: string): number {
     if (!existsSync(dir)) return 0;
 
-    const files = readdirSync(dir).filter(f => f.endsWith('.json'));
+    // Sorted: the slot guard is order-dependent (first id keeps the slot), so an
+    // unsorted read would let a restart hand a live token to the other profile of
+    // a colliding pair. The connections path is already ordered by created_at, id.
+    const files = readdirSync(dir).filter(f => f.endsWith('.json')).sort();
     let loaded = 0;
 
     for (const file of files) {
@@ -460,8 +463,10 @@ export class ApiStore {
           continue;
         }
         const migrated = migrateV1Profile(profile);
-        this.register(migrated);
-        loaded++;
+        // Count registrations, not files: a refused profile is not in the store,
+        // and reporting it as loaded is the same false confidence the save path
+        // had.
+        if (this.register(migrated)) loaded++;
       } catch (err: unknown) {
         process.stderr.write(`[lynox:api-store] Failed to load ${file}: ${err instanceof Error ? err.message : String(err)}\n`);
       }
@@ -557,7 +562,10 @@ export class ApiStore {
     const sentinel = join(dir, IMPORT_SENTINEL);
     if (existsSync(sentinel)) return 0;
     if (!existsSync(dir)) return 0; // fresh install — no legacy profiles ever existed
-    const files = readdirSync(dir).filter(f => f.endsWith('.json'));
+    // Sorted for the same reason as the load above, but it matters once rather
+    // than every boot: this import runs a single time, and whichever of a
+    // colliding pair it admits is the one that keeps the slot from then on.
+    const files = readdirSync(dir).filter(f => f.endsWith('.json')).sort();
     if (files.length === 0) return 0; // nothing to import; re-checked cheaply next boot
     // Files exist but connections already has api rows → those are authoritative;
     // mark imported (stop re-scanning) without clobbering them.
@@ -618,14 +626,22 @@ export class ApiStore {
     }
   }
 
-  /** Register a single profile. Skips silently if the id is malformed. */
-  register(profile: ApiProfile): void {
+  /**
+   * Register a single profile. Returns whether it landed — a refusal is NOT an
+   * exception, but it must not be silent either: the caller has to be able to
+   * tell the actor, or the tool reports success for a profile that does not
+   * exist. Before the slot guard below, the only refusal was a malformed id,
+   * which `validateProfile` already rejects upstream, so no caller had ever
+   * needed the answer.
+   */
+  register(profile: ApiProfile): boolean {
     if (!PROFILE_ID_PATTERN.test(profile.id)) {
       // Refuse the id at the gate so the in-memory Map's invariant holds
       // — every key is a safe filename component. `unregister` can then
       // hand the id directly to `join(apisDir, …)` without a second check.
+      // eslint-disable-next-line no-console
       process.stderr.write(`[lynox:api-store] Skipping profile with invalid id "${profile.id}" (must match ${PROFILE_ID_PATTERN.source})\n`);
-      return;
+      return false;
     }
     // Two ids may not share a vault slot. `vaultSlotBase` collapses `-` onto
     // `_`, and `ID_PATTERN` admits both, so `x-y` and `x_y` derive the same
@@ -638,7 +654,7 @@ export class ApiStore {
     for (const [otherId] of this.profiles) {
       if (otherId !== profile.id && vaultSlotBase(otherId) === slot) {
         process.stderr.write(`[lynox:api-store] Skipping profile "${profile.id}": its vault slot (${slot}) is already held by profile "${otherId}" — the two ids differ only in \`-\` vs \`_\`. Rename one.\n`);
-        return;
+        return false;
       }
     }
     this.profiles.set(profile.id, profile);
@@ -653,6 +669,7 @@ export class ApiStore {
     } catch {
       // Invalid URL — skip hostname mapping
     }
+    return true;
   }
 
   /**
@@ -717,16 +734,23 @@ export class ApiStore {
    * single-authority); otherwise falls back to the flat-JSON directory (the
    * degraded no-engine.db path — behaviour-identical to the pre-S4b writes).
    *
-   * Returns `true` when this created a NEW profile, `false` when it updated an
-   * existing one — the caller uses it for the "Created/Updated" verb, replacing
-   * the old `existsSync(file)` probe.
+   * Returns `{ok:true, isNew}` — `isNew` drives the "Created/Updated" verb — or
+   * `{ok:false, reason}` when `register` refused. The refusal used to be reported
+   * as `isNew`, i.e. as a successful create, because the only way to reach it was
+   * a malformed id that `validateProfile` had already rejected. The slot guard
+   * makes it reachable, so it has to be a value the caller can see.
    */
-  save(profile: ApiProfile, apisDir?: string): boolean {
+  save(profile: ApiProfile, apisDir?: string): { ok: true; isNew: boolean } | { ok: false; reason: string } {
     const isNew = !this.profiles.has(profile.id);
-    this.register(profile); // in-memory (guards the id — a malformed id is refused)
-    if (!this.profiles.has(profile.id)) {
-      // register() refused the id; do not persist a bad row.
-      return isNew;
+    if (!this.register(profile)) {
+      const slot = vaultSlotBase(profile.id);
+      const holder = [...this.profiles.keys()].find((o) => o !== profile.id && vaultSlotBase(o) === slot);
+      return {
+        ok: false,
+        reason: holder
+          ? `profile "${profile.id}" derives the vault slot ${slot}, which api_profile "${holder}" already holds — the two ids differ only in \`-\` versus \`_\`, and the derivation collapses them onto one slot. Nothing was saved. Rename one of them.`
+          : `profile id "${profile.id}" was refused by the store.`,
+      };
     }
     if (this.connStore) {
       this.connStore.upsert(profileToConnectionRow(profile));
@@ -734,7 +758,7 @@ export class ApiStore {
       mkdirSync(apisDir, { recursive: true, mode: 0o700 });
       writeFileSync(join(apisDir, `${profile.id}.json`), JSON.stringify(profile, null, 2), { mode: 0o600 });
     }
-    return isNew;
+    return { ok: true, isNew };
   }
 
   /**
