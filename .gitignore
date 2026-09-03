@@ -37,9 +37,19 @@ test-results/
 audits/
 
 # Real thread content, kept out of a public repo by a mechanism rather than a
-# comment. `scripts/gold-propose-sonnet.mjs` writes `<draft>.sonnet.jsonl` and
-# warns twice in its own source that input and output hold real conversations —
-# but a warning does not survive `git add -A`.
+# comment. Defence in depth, and it is worth being exact about what it is second
+# to: `scripts/knowledge-gold-gen.ts` writes the gold DRAFT and REFUSES to write
+# anywhere inside a git repo at all (`assertOutsideGitRepo`, defaulting to
+# ~/.lynox/knowledge-gold/). That is the primary control and it is a refusal, not
+# a warning. These rules cover what a refusal cannot: a file copied in by hand, an
+# editor's autosave, an export dropped in the tree by a script that has no such
+# check — none of which survive `git add -A` on their own.
+#
+# ⚠ An earlier version of this comment credited `scripts/gold-propose-sonnet.mjs`
+# with the warnings it said a `git add -A` would defeat. That file has never been
+# on main; it exists only on `wip/model-fitness-dk-scripts`, and the justification
+# was read out of a branch this repo does not ship. Corrected 2026-09-03 — the
+# rules below are unchanged and were always right; only the reason was borrowed.
 #
 # The gold format is DUAL: `tests/eval/knowledge-substrate-score.ts` loads
 # `.jsonl` line-by-line and parses anything else as a `.json` GoldCorpus, and the
