@@ -1,5 +1,5 @@
 import { scanBoundedJsonl } from './bounded-jsonl-log.js';
-import { CAPTURE_TELEMETRY_LOG_FILE, PRE_ELIGIBLE_SUPPRESSED_REASONS, type CaptureEvent, type CaptureOutcome, type CaptureSuppressedReason } from './capture-telemetry.js';
+import { CAPTURE_TELEMETRY_LOG_FILE, PRE_ELIGIBLE_SUPPRESSED_REASONS, type CaptureEvent, type CaptureOutcome, type CaptureRouting, type CaptureSuppressedReason } from './capture-telemetry.js';
 import type { UntrustedCause } from './untrusted-signals.js';
 
 /**
@@ -381,6 +381,28 @@ export interface CaptureReport {
     readonly rate: number | null;
   }>;
 
+  /**
+   * How the recovery pass routed each fact it wrote, and what came of it.
+   *
+   * The pair is the point: `written` alone cannot separate "the narrowing works" from
+   * "the narrowing leaks". `fact_user_stated` is the only rule that writes without a
+   * human check, so its `written` count is the volume this change newly releases — and a
+   * later rejection of one of those entries is the precision cost, visible nowhere else
+   * (a rejected entry looks identical to a rejected queued one once it has a status).
+   *
+   * Counted only over `source: 'capture'` lines; the `remember` tool routes turn-wide and
+   * emits no `routing`, so folding it in would average two different rules.
+   */
+  readonly routing: ReadonlyArray<{
+    readonly rule: CaptureRouting;
+    /** Facts this rule decided. */
+    readonly facts: number;
+    /** Of those, the ones that went straight to `active` (no review). */
+    readonly written: number;
+    /** Of those, the ones that were queued for review. */
+    readonly queued: number;
+  }>;
+
   readonly suppressed: Readonly<{ no_memory: number; extraction_off: number; internal_run: number; fallback_off: number; unknown: number }>;
 
   readonly blindness: CaptureReportBlindness;
@@ -401,6 +423,12 @@ const KNOWN_OUTCOMES: ReadonlySet<string> = new Set<CaptureOutcome>(['active', '
 
 /** Untrusted causes this build knows. Guards the breakdown against an out-of-enum sink value. */
 const KNOWN_CAUSES: ReadonlySet<string> = new Set<UntrustedCause>(['none', 'marker', 'external-tool', 'conversation']);
+
+/** Routing rules this build knows. Same guard, same reason: an out-of-enum value from a
+ *  NEWER writer must read as "cannot tell" (null, uncounted) and never be trusted into a
+ *  bucket whose meaning this build cannot know. */
+const KNOWN_ROUTINGS: ReadonlySet<string> =
+  new Set<CaptureRouting>(['turn_trusted', 'excerpt_external', 'injection_suspected', 'fact_external', 'fact_user_stated']);
 
 /** Suppression reasons this build knows. Guards the breakdown against an out-of-enum value. */
 const KNOWN_SUPPRESSED_REASONS: ReadonlySet<string> =
@@ -473,6 +501,13 @@ interface ValidatedEntry {
    * reader reads as "cannot tell", never as "did not happen".
    */
   readonly reason: CaptureSuppressedReason | null;
+  /**
+   * Which per-fact rule routed a recovered write. `null` on a `remember` TOOL line (that
+   * writer routes turn-wide and has no per-fact rule to report), on any line predating the
+   * field, and on an unknown value — the breakdown therefore counts only what it can
+   * attribute, and a rule it does not recognise is silently absent rather than miscounted.
+   */
+  readonly routing: CaptureRouting | null;
 }
 
 /**
@@ -566,6 +601,12 @@ function validateEntry(raw: unknown): ValidatedEntry | null {
     reason: typeof r['reason'] === 'string' && KNOWN_SUPPRESSED_REASONS.has(r['reason'])
       ? r['reason'] as CaptureSuppressedReason
       : null,
+    // Read for the same reason `cause` is: the per-fact split is only interpretable if the
+    // rule that produced each side is on the line, and an unrecognised rule must not land
+    // in a known bucket.
+    routing: typeof r['routing'] === 'string' && KNOWN_ROUTINGS.has(r['routing'])
+      ? r['routing'] as CaptureRouting
+      : null,
   };
 }
 
@@ -597,6 +638,12 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   const rememberByCause = { none: 0, marker: 0, 'external-tool': 0, conversation: 0, unattributed: 0 };
   const passCompletedByCause = { none: 0, marker: 0, 'external-tool': 0, conversation: 0, unattributed: 0 };
   const passFactsByCause = { none: 0, marker: 0, 'external-tool': 0, conversation: 0, unattributed: 0 };
+  // Per-fact routing of the recovery pass. Counters, not a collected array: this report
+  // STREAMS the sink (`scanBoundedJsonl`) precisely so a 32 MiB log cannot be held in
+  // memory, and materialising the lines to filter them afterwards would quietly undo that.
+  const routingFacts = { turn_trusted: 0, excerpt_external: 0, injection_suspected: 0, fact_external: 0, fact_user_stated: 0 };
+  const routingWritten = { turn_trusted: 0, excerpt_external: 0, injection_suspected: 0, fact_external: 0, fact_user_stated: 0 };
+  const routingQueued = { turn_trusted: 0, excerpt_external: 0, injection_suspected: 0, fact_external: 0, fact_user_stated: 0 };
   // The population split. Sets, not counters: a run that ends two eligible turns is ONE
   // run in the denominator's population, and counting events here would make the overlap
   // look larger than the number of runs that actually exist.
@@ -658,6 +705,18 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     if (event === 'capture_eligible') byCause[entry.cause ?? 'unattributed']++;
     if (event === 'remember_invoked') rememberByCause[entry.cause ?? 'unattributed']++;
     if (event === 'remember_invoked') rememberBySource[entry.source ?? 'unknown']++;
+    // `source === 'capture'` is required, not incidental: the `remember` TOOL routes
+    // turn-wide and emits no `routing`, so an unfiltered read would bucket its facts as
+    // an absent rule and understate nothing while overstating the pass's population.
+    if (event === 'remember_invoked' && entry.source === 'capture' && entry.routing !== null) {
+      const rule = entry.routing;
+      if (rule in routingFacts) {
+        const key = rule as keyof typeof routingFacts;
+        routingFacts[key]++;
+        if (entry.outcome === 'active') routingWritten[key]++;
+        else if (entry.outcome === 'pending_review') routingQueued[key]++;
+      }
+    }
     if (event === 'capture_ran') {
       if (entry.facts === null) capturePasses.failed++;
       else if (entry.facts === 0) capturePasses.empty++;
@@ -737,6 +796,17 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
   const rateByCause = (['none', 'marker', 'external-tool', 'conversation', 'unattributed'] as const)
     .map((c) => ({ cause: c, eligible: byCause[c], remembered: rememberByCause[c], rate: rate(rememberByCause[c], byCause[c]) }));
   const attributedEligible = byCause.none + byCause.marker + byCause['external-tool'] + byCause.conversation;
+  // Every rule gets a row even at zero. A rule that stops firing is a signal — a sudden
+  // empty `fact_user_stated` means the extractor stopped attributing, which reads as
+  // "nothing to release" instead of "the instrument broke" when the row is simply absent.
+  const routing = (['turn_trusted', 'excerpt_external', 'injection_suspected', 'fact_external', 'fact_user_stated'] as const)
+    .map(rule => ({
+      rule,
+      facts: routingFacts[rule],
+      written: routingWritten[rule],
+      queued: routingQueued[rule],
+    }));
+
   const eligibleByCause = {
     ...byCause,
     conversationOnlyShare: attributedEligible > 0 ? byCause.conversation / attributedEligible : null,
@@ -770,6 +840,7 @@ export async function buildCaptureReport(opts?: { readonly maxTrackedEntries?: n
     eligibleByCause,
     passesByCause,
     rateByCause,
+    routing,
     suppressed,
     blindness: {
       unparsableLines: scan.unparsableLines,

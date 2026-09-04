@@ -86,6 +86,41 @@ export type CaptureEvent =
   | 'onboarding_abandoned';
 
 /**
+ * WHY a recovered fact was queued or written, on `remember_invoked` lines with
+ * `source: 'capture'`.
+ *
+ * The turn-level `untrusted` boolean stopped being able to answer this once the recovery
+ * pass began routing PER FACT: on an untrusted turn two facts of the same turn can now
+ * take different exits, so a reader holding only `untrusted` sees one flag and two
+ * outcomes and cannot tell which rule produced which. `outcome` says WHAT happened
+ * (`pending_review` / `active`); this says which of the three rules decided it.
+ *
+ * - `turn_trusted`     — the turn ingested nothing external; no gate applied.
+ * - `excerpt_external` — the excerpt itself embeds wrapped third-party text, so the
+ *                        extractor's own attribution was NOT consulted (it is written by
+ *                        a model reading attacker-reachable content).
+ * - `injection_suspected` — the attribution was overridden for the OTHER structural reason:
+ *                        the injection detector fired on the excerpt. Its own value rather
+ *                        than a second meaning for `excerpt_external`, because a label
+ *                        covering two populations cannot say which one moved — the defect
+ *                        `cause` exists to prevent, reproduced one level down.
+ * - `fact_external`    — attribution consulted, and it said the fact came from quoted
+ *                        material. Also the value for a malformed or absent attribution:
+ *                        `parseExtractedFacts` resolves anything but a literal
+ *                        `'user_stated'` to external, and this label follows it.
+ * - `fact_user_stated` — attribution consulted and clean; the fact was written without a
+ *                        human check. THE value to watch: it is the only one this change
+ *                        newly lets past the queue, so its share IS the narrowing, and a
+ *                        precision drop would show up here first.
+ */
+export type CaptureRouting =
+  | 'turn_trusted'
+  | 'excerpt_external'
+  | 'injection_suspected'
+  | 'fact_external'
+  | 'fact_user_stated';
+
+/**
  * Which precondition of the turn-end hook returned first, when the event is
  * `capture_suppressed`.
  *
@@ -280,6 +315,13 @@ export interface CaptureTelemetryEntry {
    * fire-rate gap, and it is an opaque handle rather than a conversation pointer.
    */
   readonly reason?: CaptureSuppressedReason | undefined;
+  /**
+   * Which routing rule decided this fact's status. Present only on `remember_invoked`
+   * lines written by the recovery pass (`source: 'capture'`) — the `remember` TOOL still
+   * routes turn-wide, and giving its lines a per-fact label would claim a distinction its
+   * writer does not make. Absent is therefore meaningful, not missing.
+   */
+  readonly routing?: CaptureRouting | undefined;
 }
 
 /**

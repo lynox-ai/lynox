@@ -5,6 +5,7 @@ import type { SubjectStore, SubjectKind, SubjectRow } from './subject-store.js';
 import { canSupersede, deriveProvenanceTier, provenanceRank } from './provenance.js';
 import type { ProvenanceEvidence } from './provenance.js';
 import { subjectsDisagree } from './contradiction-detector.js';
+import { isTopicShapedName } from './kg-stopwords.js';
 import { maskSecretPatterns, matchesSecretPattern, matchesSecretPatternStrict } from './secret-store.js';
 import type { ProvenanceKind } from '../types/memory.js';
 import { collapseToSingleLine } from './sanitize.js';
@@ -229,6 +230,15 @@ export class KnowledgeStore {
     const existing = this.subjects.findByNameAnyKind(name);
     if (existing.ambiguous) return { ambiguous: true };
     if (existing.row) return { ambiguous: false, id: existing.row.id };
+    // Last lookup before minting: the same entity written another way. Exact paths have
+    // already missed, so this can only ever REPLACE a mint, never outrank a real match.
+    // What it catches, measured on the canary: 15 groups / 32 subjects, all one class —
+    // "n8n" beside "n8n.io", "lynox" beside "lynox.ai", "Notion" beside "notion.com".
+    // Several of those pairs also straddle KINDS (`n8n`/product vs `n8n.io`/organization),
+    // which is why it runs kind-agnostically like the lookup above it.
+    const folded = this.subjects.findByBrandKey(name);
+    if (folded.ambiguous) return { ambiguous: true };
+    if (folded.row) return { ambiguous: false, id: folded.row.id };
     const minted = this.subjects.findOrCreate({ kind: 'organization', name });
     return minted.ambiguous ? { ambiguous: true } : { ambiguous: false, id: minted.id };
   }
@@ -331,10 +341,38 @@ export class KnowledgeStore {
         // An unidentifying name routes to the SAME place a pending entry does: keep the
         // text as a hint and leave the link unmade. The write is not lost and nothing is
         // bound to a guess; whoever resolves the hint later has the full name to work with.
+        // A TOPIC is not a subject. The paragraph above already names the right exit for an
+        // unidentifying name — keep the hint, leave the link unmade — and this routes a
+        // second population into it: names like "Client's compliance risk" or "Compliance
+        // and regulatory risks", which the automatic capture pass produces and which the
+        // resolver below would otherwise MINT, since no existing subject bears them.
+        //
+        // That mint is the measured defect, not a theoretical one: on the canary instance
+        // 17 of 18 subjects created in a fortnight came from this line, every one an
+        // `organization`, and 442 of 592 subjects had no fact attached at all.
+        //
+        // Deliberately NOT `subjectAmbiguous`: that flag means "several subjects bear this
+        // name, say which", a question with an answer. This is "that is not a name" — a
+        // different condition, and telling the model its topic was ambiguous would invite
+        // it to disambiguate a thing that cannot be.
+        //
+        // Covers BOTH write arms — the kind-agnostic resolve AND an explicit `subjectKind`
+        // from the `remember` tool. The test is on the NAME, so a caller naming a kind for
+        // a topic is making the same mistake with more confidence, not less.
+        //
+        // What it deliberately does NOT cover is `reviewEntry` (approval), which still
+        // mints from a hint a HUMAN released: there a person has read the entry and chosen,
+        // and overriding that would make the queue's own approve button lie.
+        // (An earlier version of this comment said "only the automatic path" while the gate
+        // already wrapped both arms — the code was right and the comment was not.)
+        if (isTopicShapedName(name)) {
+          subjectHint = name;
+        } else {
         const r = params.subjectKind !== undefined
           ? this.subjects.findOrCreate({ kind: params.subjectKind, name })
           : this._resolveWriteSubject(name);
         if (r.ambiguous) { subjectId = null; subjectHint = name; subjectAmbiguous = true; } else { subjectId = r.id; }
+        }
       } else {
         // Pending-entry hygiene (acceptance §2): link by hint; findOrCreate on approval only,
         // so a rejected queue entry never leaves an empty minted subject behind.
@@ -358,7 +396,17 @@ export class KnowledgeStore {
     // An earlier version of this fix did exactly that, and worse: it also cleared the hint, so
     // the name was gone, `subjectAmbiguous` was suppressed by the now-set id, and the model was
     // told "Remembered and linked to the named subject". Wrong client, no signal, unrecoverable.
-    if (status === 'active' && !subjectId && !subjectAmbiguous) {
+    // `!subjectHint` closes a hole this diff opened. The paragraph above refuses to derive
+    // a subject from the text when the caller NAMED one that came back ambiguous — "not a
+    // better guess, a different one". The topic branch creates a SECOND way to arrive here
+    // with a caller-named subject: it sets the hint and leaves both `subjectId` and
+    // `subjectAmbiguous` untouched, so a write naming "Client's payment details" fell
+    // through to the inference and bound to whatever single subject the TEXT mentions.
+    // Measured by an adversarial pass: text naming a real client, subject a topic → the
+    // fact was filed against that client. Same wrong outcome the ambiguity clause exists to
+    // prevent, reached by a route that did not exist before, and flatly against this
+    // branch's own promise to "leave the link unmade".
+    if (status === 'active' && !subjectId && !subjectAmbiguous && !subjectHint) {
       const mentioned = this._deriveFocusSubjects(params.text, null, null);
       if (mentioned.length === 1) subjectId = mentioned[0]!;
     }
@@ -665,11 +713,20 @@ export class KnowledgeStore {
     return row.n;
   }
 
-  /** The review queue (DK.2 UI): queued entries oldest-first, decrypted. */
+  /** The review queue (DK.2 UI): queued entries NEWEST-first, decrypted.
+   *  `rowid` breaks the tie, and it is not a formality: the recovery pass writes up to
+   *  four facts in ONE turn, so same-second groups are the COMMON case here, not an edge
+   *  (a production queue showed three entries sharing `07:25:45`). On `created_at` alone
+   *  the order inside such a group is whatever the scan returns — which under a LIMIT
+   *  decides which of them a reviewer ever sees.
+   *  Newest-first because the queue is read as an inbox: a user who reviews the
+   *  top N sees what the assistant just proposed, while oldest-first buried
+   *  today's entries under every one deferred since. The LIMIT makes the order
+   *  load-bearing rather than cosmetic — it decides WHICH entries are visible. */
   listPending(limit = 100): KnowledgeEntry[] {
     const capped = Math.max(1, Math.min(limit, 500));
     const rows = this.db.prepare(
-      "SELECT * FROM knowledge_entries WHERE status = 'pending_review' ORDER BY created_at ASC LIMIT ?",
+      "SELECT * FROM knowledge_entries WHERE status = 'pending_review' ORDER BY created_at DESC, rowid DESC LIMIT ?",
     ).all(capped) as KnowledgeRow[];
     return rows.map(r => this._rowToEntry(r));
   }
@@ -684,7 +741,7 @@ export class KnowledgeStore {
     if (!id) return [];
     const capped = Math.max(1, Math.min(limit, 500));
     const rows = this.db.prepare(
-      "SELECT * FROM knowledge_entries WHERE status = 'pending_review' AND source_thread_id = ? ORDER BY created_at ASC LIMIT ?",
+      "SELECT * FROM knowledge_entries WHERE status = 'pending_review' AND source_thread_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
     ).all(id, capped) as KnowledgeRow[];
     return rows.map(r => this._rowToEntry(r));
   }

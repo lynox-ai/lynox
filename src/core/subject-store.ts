@@ -842,6 +842,98 @@ export class SubjectStore {
     return { ambiguous: false, row: only !== undefined ? this.getSubject(only) : null };
   }
 
+  /**
+   * Fold a surface form to the key two spellings of the SAME entity share.
+   *
+   * Strips a public domain suffix and all non-alphanumerics, then lowercases — so
+   * "n8n"/"n8n.io", "Smart Bidding"/"Smart-Bidding" and "claude-opus-4-8"/"Claude Opus 4.8"
+   * each collapse to one key.
+   *
+   * IT DOES NOT FOLD A SUFFIX WRITTEN AS A WORD: "mistral.ai" → `mistral` but "Mistral AI"
+   * → `mistralai`, so those two do NOT match. (An earlier version of this comment used
+   * that very pair as its example; a review caught that the example was false.) The fix
+   * would be to strip a trailing `ai`/`io`/`cloud` TOKEN as well, and it is deliberately
+   * not made: that also turns "Google Cloud" into `google`, folding a product into its
+   * vendor. A missed fold costs a duplicate a human can merge; a wrong fold attributes
+   * facts to the wrong entity, so the rule stays on the side that under-matches.
+   *
+   * DIGITS ARE KEPT, and that is the whole reason this is a normalisation and not a
+   * similarity score. The duplicates measured on the canary instance sit next to a class
+   * that must NOT merge — "Opus 4.6"/"Opus 4.7", "GPT-4.1"/"GPT-5", "Sonnet 4.6"/"Sonnet 5"
+   * are seven pairs of genuinely different things whose names differ only in a number.
+   * Any embedding or edit-distance measure scores those as near-identical; keeping the
+   * digits in the key separates them exactly, with no threshold to tune.
+   */
+  static brandKey(name: string): string {
+    return name
+      .trim()
+      .toLowerCase()
+      .replace(/^www\./, '')
+      .replace(/\.(ch|com|io|ai|de|net|org|app|co|eu|dev|cloud)$/, '')
+      .replace(/[^\p{L}\p{N}]/gu, '');
+  }
+
+  /**
+   * Resolve a name to an existing subject that differs only in domain suffix, case or
+   * punctuation. The last lookup before a mint, never the first: it is strictly weaker
+   * than the canonical and alias paths, and running it earlier would let a loose match
+   * outrank an exact one.
+   *
+   * Returns `ambiguous` on several hits rather than picking — the same contract as
+   * {@link findByNameAnyKind}, and for the same reason: two subjects sharing a brand key
+   * is a question, not a licence to choose. Short keys are refused outright, where a
+   * collision between unrelated entities stops being unlikely.
+   */
+  findByBrandKey(
+    name: string,
+    opts?: { kinds?: readonly SubjectKind[] | undefined; ownerUserId?: string | undefined },
+  ): { ambiguous: false; row: SubjectRow | null } | { ambiguous: true; candidateIds: readonly string[] } {
+    const key = SubjectStore.brandKey(name);
+    if (key.length < 3) return { ambiguous: false, row: null };
+    const owner = opts?.ownerUserId ?? DEFAULT_OWNER;
+    const kinds = opts?.kinds ?? ANY_KIND_RESOLUTION_KINDS;
+    // Folded in JS, not SQL: SQLite's `lower()` is ASCII-only, so an SQL-side comparison
+    // would silently miss every non-ASCII pair — the trap `findByAliasResolved` documents.
+    const rows = this.db.prepare(
+      `SELECT id, name, kind FROM subjects WHERE owner_user_id = ? AND archived_at IS NULL AND merged_into IS NULL`,
+    ).all(owner) as Array<{ id: string; name: string; kind: SubjectKind }>;
+    const ids = new Set<string>();
+    let personShares = false;
+    for (const r of rows) {
+      if (SubjectStore.brandKey(r.name) !== key) continue;
+      // The kind filter selects BINDING TARGETS. It deliberately runs after the person
+      // check below, because a person's role here is to VOTE, and a vote must not depend on
+      // whether the caller happened to ask about people: today the sole caller takes the
+      // default set (which includes `person`), but a caller passing
+      // `kinds: ['organization']` would otherwise lose the ambiguity signal precisely where
+      // a person/org name collision is the thing to catch.
+      if (r.kind === 'person') { personShares = true; continue; }
+      if (!kinds.includes(r.kind)) continue;
+      ids.add(r.id);
+    }
+    // A PERSON is never a fold TARGET — person identity has its own rule (`personTokenKey`:
+    // title-stripping, token-order-insensitive), because names vary in ways brands do not,
+    // and a fact about a company filed against a person is worse than a duplicate.
+    //
+    // But it VOTES. Skipping people outright — the first cut of this fix — was
+    // one-directional while its own comment claimed "in both directions", and dropping
+    // people from the scan also removed them from the AMBIGUITY signal, so the one safe
+    // answer became unreachable exactly where it was most needed. A person sharing the key
+    // now forces `ambiguous`: the name is a question, and this store's contract is to ask
+    // it, not to pick.
+    //
+    // The reachable case is a name that canonically matches NEITHER subject — "peterhuber"
+    // or "Peter-Huber" against a person "Peter Huber" and an org "peterhuber.ch". An
+    // earlier version of this comment used "Peter Huber" itself as the example and was
+    // measurably wrong: that name hits the canonical person lookup first and never reaches
+    // this function at all. The fix is real; the example was not, and it came in from a
+    // reviewer's reproduction that I adopted without re-running it.
+    if (personShares && ids.size > 0) return { ambiguous: true, candidateIds: [...ids] };
+    if (ids.size > 1) return { ambiguous: true, candidateIds: [...ids] };
+    const only = [...ids][0];
+    return { ambiguous: false, row: only !== undefined ? this.getSubject(only) : null };
+  }
+
   // ── Self-person + assignee resolution (S4a task-cutover) ──────
 
   /**

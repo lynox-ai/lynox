@@ -308,13 +308,22 @@ describe('KnowledgeStore review queue (DK.2)', () => {
     expect(ks.pendingCountForSubjectHint('ACME')).toBe(1);
   });
 
-  it('listPending returns queued entries oldest-first, decrypted', () => {
+  it('listPending returns queued entries NEWEST-first, decrypted', () => {
+    // Flipped 2026-09-04, and the direction is the point rather than a preference: the
+    // queue is served under a LIMIT and read as an inbox, so oldest-first meant a reviewer
+    // scrolling past every deferred entry to reach what the assistant proposed today — and
+    // past the cap, never reaching it at all.
+    //
+    // The two entries here share a `created_at` to the second (same-millisecond writes are
+    // the COMMON case: the recovery pass writes up to four facts per turn), so this also
+    // pins the `rowid` tiebreaker. Without it the assertion is a coin flip that happens to
+    // land right, which is what an order test must never be.
     const { ks } = make();
     const a = queueOne(ks, 'first fact');
     const b = queueOne(ks, 'second fact');
     const pending = ks.listPending();
-    expect(pending.map(e => e.id)).toEqual([a, b]);
-    expect(pending[0]?.text).toBe('first fact');
+    expect(pending.map(e => e.id)).toEqual([b, a]);
+    expect(pending[0]?.text).toBe('second fact');
     expect(pending[0]?.subjectHint).toBe('ACME');
   });
 
