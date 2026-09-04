@@ -19,7 +19,17 @@ import { fileURLToPath } from 'node:url';
  */
 describe('i18n — retired disclosure claims stay retired', () => {
 	const src = readFileSync(fileURLToPath(new URL('./i18n.svelte.ts', import.meta.url)), 'utf8');
+	// The model catalog renders its own residency notes (LLMSettings.svelte) and is not on
+	// the pro guard's watch list, so it is pinned here as well.
+	const catalog = readFileSync(
+		fileURLToPath(new URL('../../../../src/core/llm/catalog.ts', import.meta.url)),
+		'utf8',
+	);
 	const line = src.split('\n').find((l) => l.includes("'config.voice_stt_privacy'"));
+	// The key the settings screen actually renders (VoiceSettings.svelte); the config.* twin
+	// above is the unwired phase-0 block. Both are pinned, and the whole file is checked, so
+	// a duplicate key further down cannot bring the wording back unnoticed.
+	const rendered = src.split('\n').find((l) => l.includes("'voice.stt_privacy'"));
 
 	it('has the voice STT privacy key', () => {
 		expect(line).toBeDefined();
@@ -32,5 +42,21 @@ describe('i18n — retired disclosure claims stay retired', () => {
 
 	it('keeps the German twin scoped to the audio', () => {
 		expect(line).toContain('verlässt kein Audio dein System');
+	});
+
+	it('scopes the rendered voice settings sentence to the audio, in both languages', () => {
+		expect(rendered).toBeDefined();
+		expect(rendered).toContain('the audio stays on your machine');
+		expect(rendered).toContain('bleibt das Audio auf deinem System');
+		expect(rendered).not.toContain('runs everything locally');
+		expect(rendered).not.toContain('läuft alles lokal');
+	});
+
+	it('carries the retired sentence nowhere in the i18n table or the model catalog', () => {
+		for (const text of [src, catalog]) {
+			expect(text).not.toContain('nothing leaves your machine');
+			expect(text).not.toContain('nothing leaves the host');
+			expect(text).not.toContain('runs everything locally');
+		}
 	});
 });

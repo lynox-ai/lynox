@@ -170,7 +170,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'voice.title':         { de: 'Sprache',                                                          en: 'Voice' },
 	'voice.subtitle':      { de: 'Spracheingabe (STT) und -ausgabe (TTS) konfigurieren.',            en: 'Configure speech input (STT) and output (TTS).' },
 	'voice.stt_heading':   { de: 'Eingabe (Speech-to-Text)',                                         en: 'Input (Speech-to-Text)' },
-	'voice.stt_privacy':   { de: 'Audiodaten gehen an Mistral (Paris, EU): kein Training, 30 rollende Tage zur Missbrauchsüberwachung. Mit whisper.cpp läuft alles lokal.', en: 'Audio goes to Mistral (Paris, EU): no training, kept 30 rolling days to monitor abuse. whisper.cpp runs everything locally.' },
+	'voice.stt_privacy':   { de: 'Audiodaten gehen an Mistral (Paris, EU): kein Training, 30 rollende Tage zur Missbrauchsüberwachung. Mit whisper.cpp bleibt das Audio auf deinem System; das Transkript geht danach an das Modell, das du gewählt hast.', en: 'Audio goes to Mistral (Paris, EU): no training, kept 30 rolling days to monitor abuse. With whisper.cpp the audio stays on your machine; the transcript then goes to the model you chose.' },
 	'voice.tts_heading':   { de: 'Ausgabe (Text-to-Speech)',                                         en: 'Output (Text-to-Speech)' },
 	'voice.tts_privacy':   { de: 'Text geht an Mistral (Paris, EU) zur Synthese: kein Training, 30 rollende Tage zur Missbrauchsüberwachung.', en: 'Text goes to Mistral (Paris, EU) for synthesis: no training, kept 30 rolling days to monitor abuse.' },
 	'voice.tts_voice':     { de: 'Stimme',                                                           en: 'Voice' },

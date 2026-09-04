@@ -399,13 +399,13 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     requires_base_url: false,
     requires_region: false,
     base_url_default: 'http://localhost:11434/v1',
-    default_residency: 'Your machine — nothing leaves the host',
+    default_residency: 'Your machine — the model call stays on the host',
     // Promoted 2026-07-13: `tests/online/provider-preset-reachability.test.ts`
     // drove a full tool_use → tool_result → answer round-trip through Ollama on
     // qwen2.5:7b, and a mutation run confirmed the assertion can actually fail.
     // The WIRE is proven; the model is still the user's choice, hence the note.
     verification: 'verified',
-    notes: 'Local models via Ollama — nothing leaves your machine. Pick a tool-capable model (qwen2.5, llama3.1, mistral-nemo): lynox is an agent, and a model without tool support cannot drive it.',
+    notes: 'Local models via Ollama — the model call stays on your machine. Pick a tool-capable model (qwen2.5, llama3.1, mistral-nemo): lynox is an agent, and a model without tool support cannot drive it.',
   },
   {
     provider: 'openai',
@@ -418,7 +418,7 @@ const OPENAI_COMPAT_PRESETS: ReadonlyArray<CatalogProviderEntry> = [
     requires_base_url: false,
     requires_region: false,
     base_url_default: 'http://localhost:1234/v1',
-    default_residency: 'Your machine — nothing leaves the host',
+    default_residency: 'Your machine — the model call stays on the host',
     verification: 'experimental',
     notes: 'Local models via LM Studio\'s OpenAI-compatible server. Requires a tool-capable model.',
   },
