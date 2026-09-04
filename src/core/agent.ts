@@ -54,7 +54,8 @@ import {
 } from './follow-up-fallback.js';
 import {
   CAPTURE_FALLBACK_MAX_TOKENS, CAPTURE_SYSTEM, CAPTURE_TIMEOUT_MS, CAPTURE_TOOL,
-  CAPTURE_TOOL_NAME, buildCaptureExcerpt, parseExtractedFacts,
+  CAPTURE_TOOL_NAME, buildCaptureExcerpt, excerptOverridesAttribution, parseExtractedFacts,
+  routeCapturedFact,
 } from './capture-fallback.js';
 import { randomBytes } from 'node:crypto';
 import { detectInjectionAttempt, containsUntrustedMarker } from './data-boundary.js';
@@ -1439,6 +1440,12 @@ export class Agent implements IAgent {
     // for this chat.
     const safeQuestion = this.secretStore ? this.secretStore.maskSecrets(question) : question;
     const safeAnswer = this.secretStore ? this.secretStore.maskSecrets(text) : text;
+    // Read on the UNWRAPPED halves — `buildCaptureExcerpt` wraps the whole excerpt, so
+    // asking the built string would fire for every turn and silently restore the turn-wide
+    // routing this per-fact split exists to narrow. Returns WHICH structural reason fired
+    // (wrapped text / suspected injection) or null, so the routing label keeps one cause
+    // per value.
+    const attributionOverride = excerptOverridesAttribution(safeQuestion, safeAnswer);
 
     const timeout = new AbortController();
     const timer = setTimeout(() => timeout.abort(), CAPTURE_TIMEOUT_MS);
@@ -1517,11 +1524,40 @@ export class Agent implements IAgent {
         // The SAME write the `remember` tool uses, with the same untrusted flag —
         // so a tainted turn routes to review here exactly as it does there. Putting
         // a second routing decision next to it is how the two drift apart.
+        // PER-FACT routing, narrowing the turn-wide gate the `remember` tool still uses.
+        // A turn is untrusted as soon as any tool read outside content, and that verdict is
+        // right for a tool call the main model makes having SEEN that content. It is too
+        // coarse here: this pass reads only the user question and the assistant answer, so
+        // a fact the operator stated about their own business was queued because an
+        // unrelated web search ran in the same turn. Measured on the canary: 77% of turns
+        // untrusted, every queued entry `channel=agent`.
+        //
+        // Three conditions. A trusted turn is unaffected; an excerpt that embeds wrapped
+        // text ignores the attribution; otherwise the extractor's answer decides, and
+        // `parseExtractedFacts` resolves anything but a literal `'user_stated'` to
+        // `'external'`, so the gate is kept by default.
+        //
+        // ⚠ THE MIDDLE CONDITION IS NARROW — see `excerptOverridesAttribution`. Its
+        // wrapped-text half covers uploads, NOT the mail-in-chat case, where no marker
+        // survives into either half; its injection half is a pattern floor, not a boundary.
+        // So on a mail turn the attribution is largely what stands, which is why its
+        // question had to be "which half of the excerpt is this from". A mail turn on which
+        // no external-content tool ran is covered by neither half of this expression, and
+        // that predates per-fact routing.
+        // An adversarial review found the earlier phrasing —
+        // "the operator OR THE ASSISTANT stated it" — satisfied by an assistant summarising
+        // an attacker's email, i.e. by precisely the case this routing exists to catch.
+        // ONE function returns both, so the label and the gate cannot disagree — see
+        // `routeCapturedFact`. Written as two side-by-side expressions they could, and a
+        // reviewer produced the divergence: a new override member type-checked clean and
+        // yielded a fact gated for review while labelled as released.
+        const { routing, untrusted: factUntrusted } =
+          routeCapturedFact(turnUntrusted, attributionOverride, fact.source);
         const result = ks.write({
           text: fact.text,
           ...(fact.subject !== undefined ? { subjectName: fact.subject } : {}),
           sourceChannel: 'agent',
-          sourceUntrusted: turnUntrusted,
+          sourceUntrusted: factUntrusted,
           sourceThreadId: this.currentThreadId,
           sourceRunId: this.currentRunId,
         });
@@ -1537,6 +1573,7 @@ export class Agent implements IAgent {
           model: this.model,
           untrusted: turnUntrusted,
           cause: turnCause,
+          routing,
           outcome: result.deduped === true ? 'deduped' : result.status,
           runId: this.currentRunId,
           source: 'capture',

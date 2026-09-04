@@ -1358,7 +1358,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.residency_storage_local': { de: 'Auf deinem System', en: 'On your machine' },
 	'config.voice_title': { de: 'Sprache', en: 'Voice' },
 	'config.voice_stt_label': { de: 'Spracheingabe-Anbieter (STT)', en: 'Speech-to-text provider' },
-	'config.voice_stt_privacy': { de: 'Bei Mistral Voxtral geht die Audiospur an Mistral (Paris, EU): kein Training, 30 rollende Tage zur Missbrauchsüberwachung. Lokal via whisper.cpp verlässt kein Audio dein System.', en: 'With Mistral Voxtral the audio goes to Mistral (Paris, EU): no training, kept 30 rolling days to monitor abuse. With whisper.cpp the audio stays on your machine.' },
+	'config.voice_stt_privacy': { de: 'Bei Mistral Voxtral geht die Audiospur an Mistral (Paris, EU): kein Training, 30 rollende Tage zur Missbrauchsüberwachung. Lokal via whisper.cpp verlässt kein Audio dein System.', en: 'With Mistral Voxtral the audio goes to Mistral (Paris, EU): no training, kept 30 rolling days to monitor abuse. With whisper.cpp nothing leaves your machine.' },
 	'config.voice_tts_provider_label': { de: 'Sprachausgabe-Anbieter (TTS)', en: 'Text-to-speech provider' },
 	'config.voice_tts_privacy': { de: 'Bei Mistral Voxtral TTS geht der Text zur Synthese an Mistral (Paris, EU): kein Training, 30 rollende Tage zur Missbrauchsüberwachung.', en: 'With Mistral Voxtral TTS the text goes to Mistral (Paris, EU) for synthesis: no training, kept 30 rolling days to monitor abuse.' },
 	'config.voice_tts_voice_label': { de: 'Stimme', en: 'Voice' },

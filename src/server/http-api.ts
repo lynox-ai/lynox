@@ -634,12 +634,17 @@ export function readDurableKnowledgeForDebug(engine: Engine, threadId: string): 
     if (active.length >= ENTRY_CAP) incomplete = true;
   } catch { failed = 'active entries unreadable'; incomplete = true; }
   try {
-    // THREAD-SCOPED and masked. Scoped because `listPending` orders `created_at ASC` and caps:
-    // with a full queue of OLDER entries from other threads, this thread's freshly captured one
-    // falls outside the window — i.e. the export added to answer "was anything captured here?"
-    // would be missing exactly that entry. `listPendingForThread` filters in SQL BEFORE the
-    // limit and its docstring records that same trap from an earlier review. Masked because this
-    // is a file that gets stored and forwarded.
+    // THREAD-SCOPED and masked. Scoped because `listPending` caps: with a full queue from
+    // OTHER threads, this thread's entry can fall outside the window — i.e. the export added
+    // to answer "was anything captured here?" would be missing exactly that entry.
+    // `listPendingForThread` filters in SQL BEFORE the limit and its docstring records that
+    // same trap from an earlier review.
+    //
+    // The ORDER is no longer part of the reason: the queue was flipped to `created_at DESC`
+    // on 2026-09-04, so the entry at risk is now the OLDEST rather than the newest. The
+    // scoping argument survives the flip untouched — which is the point of restating it
+    // rather than deleting the line — but the direction it named had inverted.
+    // Masked because this is a file that gets stored and forwarded.
     const raw = store.listPendingForThreadMasked(threadId, ENTRY_CAP);
     pending = raw.map(e => projectKnowledgeEntry(e, threadId));
     if (raw.length >= ENTRY_CAP) incomplete = true;

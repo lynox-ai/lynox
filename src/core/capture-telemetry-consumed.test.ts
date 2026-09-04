@@ -85,6 +85,11 @@ const PROBES: ReadonlyArray<readonly [string, string, unknown, unknown]> = [
   ['cause', 'remember_invoked', 'none', 'conversation'],
   ['cause', 'capture_ran', 'none', 'conversation'],
   ['reason', 'capture_suppressed', 'no_memory', 'internal_run'],
+  // Per-fact routing. Only the recovery pass writes it, so the probe has to carry
+  // `source: 'capture'` to reach the branch at all (see REACH) — without it the line is
+  // counted as a tool write, the routing breakdown stays all-zero for both values, and the
+  // probe reports consumption that is really its own blindness.
+  ['routing', 'remember_invoked', 'fact_user_stated', 'fact_external'],
 ];
 
 /**
@@ -97,6 +102,7 @@ const REACH: Readonly<Record<string, Record<string, unknown>>> = {
   'proposed|capture_ran': { facts: 2 },
   'runId|capture_suppressed': { reason: 'no_memory' },
   'cause|capture_ran': { facts: 1 },
+  'routing|remember_invoked': { source: 'capture', outcome: 'active' },
 };
 
 /**
@@ -131,6 +137,32 @@ describe('capture telemetry — every written field reaches the report', () => {
         .not.toBe(right);
     });
   }
+
+  it('every CaptureRouting value reaches the report — a new one cannot be dropped', () => {
+    // The sibling of the field guard below, for the ENUM. `routing` is enumerated in five
+    // places (the type, KNOWN_ROUTINGS, three accumulator objects, the emitted list), and
+    // adding a value while missing one of them drops it into no bucket at all — counted
+    // nowhere, reported as absent, indistinguishable from "never happened".
+    //
+    // Behavioural, not a source scan: each value is WRITTEN to a sink and the report must
+    // come back carrying it. A grep would pass on a value that is listed and then filtered
+    // out downstream, which is the exact shape of the defect it would be guarding against.
+    const src = readFileSync(path.join(__dirname, 'capture-telemetry.ts'), 'utf8');
+    const decl = src.slice(src.indexOf('export type CaptureRouting'));
+    const values = [...decl.slice(0, decl.indexOf(';')).matchAll(/'([a-z_]+)'/g)].map((m) => m[1]!);
+    expect(values.length, 'the type was not parsed — the guard would pass vacuously').toBeGreaterThan(3);
+    return (async () => {
+      for (const v of values) {
+        const line = { ts: 1000, event: 'remember_invoked', thread: 't1', model: 'm',
+          untrusted: true, runId: 'r1', source: 'capture', outcome: 'active', routing: v };
+        await writeFile(path.join(dir, CAPTURE_TELEMETRY_LOG_FILE), JSON.stringify(line) + '\n', 'utf8');
+        const report = await buildCaptureReport() as unknown as { routing?: Array<{ rule: string; facts: number }> };
+        const row = report.routing?.find((r) => r.rule === v);
+        expect(row, `routing value \`${v}\` reaches no row in the report`).toBeDefined();
+        expect(row!.facts, `routing value \`${v}\` is listed but counts nothing`).toBe(1);
+      }
+    })();
+  });
 
   it('the probe list covers every declared field — a new field cannot slip in unprobed', () => {
     // The half that makes the tests above complete rather than merely present. Without it,
