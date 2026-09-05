@@ -97,12 +97,12 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
   it.each([
     ['zwei Adressen', `${CHEF}, evil@angreifer.example`],
     ['Adresse ohne @', 'chef'],
-    // Pins EXACT membership, and each line names the mutant it kills — the
-    // three are not interchangeable:
-    //   look-alike domain  → kills `some(a => x.includes(a))`, which was a live
-    //                        mutant and really delivers to this address
-    //   sub-address        → kills the same, from the left
-    //   longer local part  → kills a domain-only comparison
+    // Pins EXACT membership against the neighbourhood forms a loosened check
+    // would admit: extra label on the right, extra label on the left, longer
+    // local part. Which mutant each line kills is deliberately NOT written
+    // here — that mapping was wrong twice, because it shifts with every fix to
+    // the code it describes. The mutation run is where it belongs; a comment
+    // is the one place a measurement never gets re-checked.
     ['eine Look-alike-Domain', 'chef@betrieb.example.angreifer.example'],
     ['eine Sub-Adresse des Eintrags', 'x.chef@betrieb.example'],
     ['einen laengeren local part', 'chef2@betrieb.example'],
@@ -131,6 +131,24 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
     expect(sendMail).not.toHaveBeenCalled();
   });
 
+  it('reports entries it had to drop, even when others are usable', async () => {
+    // A partly unusable list is the likelier one: a single good entry makes the
+    // channel look like it works, while the dropped lines silently permit
+    // nobody.
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    });
+    try {
+      new EscalationMailChannel({ registry, allowedRecipients: [CHEF, 'x@b.example, y@c.example', 'kaputt'] });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines.filter((l) => l.includes('unusable and ignored'))).toHaveLength(1);
+    expect(lines.join('')).toContain('2 of 3');
+  });
+
   it('says so once when a configured list yields no usable entry', async () => {
     // A configured-but-unusable list otherwise refuses every message with
     // "not in the allowlist", which reads like a rejected recipient.
@@ -144,7 +162,8 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
     } finally {
       spy.mockRestore();
     }
-    expect(lines.filter((l) => l.includes('none usable'))).toHaveLength(1);
+    expect(lines.filter((l) => l.includes('unusable and ignored'))).toHaveLength(1);
+    expect(lines.join('')).toContain('2 of 2');
   });
 
   it('stays quiet when the list is simply empty', async () => {
@@ -227,10 +246,12 @@ describe('EscalationMailChannel — through the real router', () => {
       // Filtered on the router's own prefix: asserting the whole stderr stream
       // would go red on any unrelated node warning inside the spy's window.
       const routerLines = (): string[] => warnings.filter((w) => w.includes('[notification-router]'));
+      const channelLines = (): string[] => warnings.filter((w) => w.includes('[escalation-mail]'));
 
       await router.notify(msg());
       expect(sendMail).not.toHaveBeenCalled();
       expect(routerLines()).toEqual([]);
+      expect(channelLines()).toEqual([]);
 
       await router.notify(msg({ recipient: CHEF }));
       expect(sendMail).toHaveBeenCalledTimes(1);

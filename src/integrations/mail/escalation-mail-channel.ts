@@ -82,6 +82,7 @@ export class EscalationMailChannel implements NotificationChannel {
     this.registry = opts.registry;
     const allowed = new Map<string, string>();
     const configured = opts.allowedRecipients ?? [];
+    let dropped = 0;
     for (const entry of configured) {
       // Parse the ENTRIES too, so `Chef <chef@betrieb.example>` in the config
       // matches a plain `chef@betrieb.example` in a message.
@@ -91,18 +92,24 @@ export class EscalationMailChannel implements NotificationChannel {
       // permitted recipients while the identical string is refused on the way
       // in — one direction of the same config being stricter than the other.
       const parsed = parseAddressList(entry);
-      if (parsed.length !== 1) continue;
+      if (parsed.length !== 1) {
+        dropped += 1;
+        continue;
+      }
       allowed.set(normaliseAddress(parsed[0]!.address), parsed[0]!.address);
     }
-    // A configured-but-unusable list is the failure that hides: every send is
+    // Report DROPPED entries, not just an empty result. An entry that parses to
+    // nothing is invisible otherwise: every send it should have permitted is
     // refused with "not in the allowlist", which reads like a rejected
-    // recipient rather than a list that never had entries. Say it once, here,
-    // where the cause is. (Same shape as the present-but-unreadable file list
-    // in the public-repo guard — an empty result and an unusable input must not
-    // look alike.)
-    if (configured.length > 0 && allowed.size === 0) {
+    // recipient rather than a line of config that never took effect. Counting
+    // only the empty case would leave the partial one silent — and a partly
+    // unusable list is the likelier one, because a single good entry makes the
+    // channel look like it works. (Same shape as the present-but-unreadable
+    // file list in the public-repo guard: an unusable input and an empty result
+    // must not look alike.)
+    if (dropped > 0) {
       process.stderr.write(
-        `[escalation-mail] ${String(configured.length)} configured recipient(s), none usable — every message will be refused\n`,
+        `[escalation-mail] ${String(dropped)} of ${String(configured.length)} configured recipient(s) unusable and ignored\n`,
       );
     }
     this.allowed = allowed;
