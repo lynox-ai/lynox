@@ -120,7 +120,11 @@ HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0
 # doing in practice.
 PRIVATE_NAMES_FILE="${LYNOX_PRIVATE_NAMES_RE_FILE:-${HOME:-}/.lynox/private-names.re}"
 PRIVATE_NAMES_RE=""
+# Whether the operator ever SET THIS UP, which is a different question from whether
+# it currently works — and the two used to give the same answer.
+PRIVATE_NAMES_FILE_PRESENT=false
 if [ -r "$PRIVATE_NAMES_FILE" ]; then
+  PRIVATE_NAMES_FILE_PRESENT=true
   # `#` comments and blanks dropped, surrounding whitespace and a stray CR
   # trimmed, the rest joined into one alternation.
   #
@@ -365,6 +369,29 @@ if $mode_meta; then
     # alone — which let a mutation survive a case that asserted only the code.
     preflight_names_re || exit 2
     names_active=true
+  elif $PRIVATE_NAMES_FILE_PRESENT; then
+    # THE FILE IS THERE AND YIELDS NOTHING. That is not "never set up", it is
+    # "set up and broken", and until now the two printed the same line and both
+    # exited 0 — so a list that had been commented out, indented, or emptied read
+    # exactly like a machine that had never been armed.
+    #
+    # It is not hypothetical: on 2026-09-04 this file held 34 lines of which 33
+    # were comments, the alternation came out 0 characters long, and the class had
+    # been reporting a green tick on every push for as long as that was true. The
+    # runtime told the story to anyone who looked at it — 0.03s against 23s for
+    # the sibling class — but the tick did not, and a tick is what people read.
+    #
+    # exit 2, the preflight code: "the gate never looked", distinct from 1 = "the
+    # gate found something". A missing file still exits 0 below, because standing
+    # down for someone who never configured the class is the documented behaviour
+    # and blocking their push would only teach --no-verify.
+    echo "❌ public-repo-guard: private-name list is CONFIGURED BUT EMPTY." >&2
+    echo "   ${PRIVATE_NAMES_FILE} exists and yields no usable pattern — every" >&2
+    echo "   line is a comment, blank, or whitespace-only. The class would report" >&2
+    echo "   a clean scan on every commit while checking nothing." >&2
+    echo "   Put one regex per line, or delete the file to stand the class down" >&2
+    echo "   deliberately." >&2
+    exit 2
   else
     echo "⚠️  public-repo-guard: private-name class SKIPPED — no pattern configured."
     echo "    To arm it, put one regex per line in ${PRIVATE_NAMES_FILE}."
