@@ -55,6 +55,43 @@ describe('resolveChatContext (Slice C context-injection seam)', () => {
     expect(resolveChatContext(history, { kind: 'workflow', id: 'wf-1' })).toContain('contract-governed');
   });
 
+  // The reader that makes the origin field more than a stored value. Without it
+  // the provenance is written and never surfaced — the shape `inquiry` has had
+  // for a while: one writer, no reader. Mutation: hard-code the origin to
+  // 'reviewed' in mintContractFromSteps → the first of these fails.
+  it('tells the model an authorship-derived grant was NOT reviewed', () => {
+    const contract: CapabilityContract = {
+      version: 1, origin: 'authorship', grantedTools: ['http_request'], httpMethods: ['POST'],
+      hostPatterns: ['h.example.com'], pathPatterns: ['/x'], paramConstraints: {},
+    };
+    history.insertPlannedPipeline(makePlanned({ capabilityContract: contract }));
+    const out = resolveChatContext(history, { kind: 'workflow', id: 'wf-1' });
+    expect(out).toContain('confirmed by authorship, not reviewed');
+  });
+
+  it('says reviewed only when the grant actually records a review', () => {
+    const contract: CapabilityContract = {
+      version: 1, origin: 'reviewed', grantedTools: ['http_request'], httpMethods: ['POST'],
+      hostPatterns: ['h.example.com'], pathPatterns: ['/x'], paramConstraints: {},
+    };
+    history.insertPlannedPipeline(makePlanned({ capabilityContract: contract }));
+    const out = resolveChatContext(history, { kind: 'workflow', id: 'wf-1' });
+    expect(out).toContain('contract-governed (reviewed)');
+    expect(out).not.toContain('not reviewed');
+  });
+
+  it('claims neither provenance for a contract that records none', () => {
+    const contract: CapabilityContract = {
+      version: 1, grantedTools: ['http_request'], httpMethods: ['POST'],
+      hostPatterns: ['h.example.com'], pathPatterns: ['/x'], paramConstraints: {},
+    };
+    history.insertPlannedPipeline(makePlanned({ capabilityContract: contract }));
+    const out = resolveChatContext(history, { kind: 'workflow', id: 'wf-1' });
+    expect(out).toContain('contract-governed');
+    expect(out).not.toContain('reviewed');
+    expect(out).not.toContain('authorship');
+  });
+
   it('returns null for a one-shot (non-template) run', () => {
     history.insertPlannedPipeline(makePlanned({ template: false }));
     expect(resolveChatContext(history, { kind: 'workflow', id: 'wf-1' })).toBeNull();

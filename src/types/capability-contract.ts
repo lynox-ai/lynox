@@ -51,9 +51,32 @@ export interface ParamConstraint {
  * host/path/method is NOT granted → stays denied (the S1 fix the host-only
  * `assertHostPolicy` misses).
  */
+/**
+ * How a contract came to exist. It is NOT a permission level — enforcement reads
+ * the grant tuple, never this — it is the answer to "did a human look at it?",
+ * which the grant alone cannot express.
+ *
+ *  - `authorship`: derived automatically at save time from a workflow the user
+ *    built in their own session. The engine treats authorship as authorisation
+ *    (`process.ts` stamps `confirmedAt` on the same grounds). Defensible for an
+ *    instance someone builds for themselves; NOT the same as a review.
+ *  - `reviewed`: a human was shown what the grant permits and accepted it. No
+ *    product path produces this yet; the field exists so the difference is
+ *    visible rather than implied, and so the day it appears nothing has to be
+ *    back-filled.
+ *
+ * Absent on contracts that predate the field and on imported ones (an import
+ * deliberately arrives without a grant at all). Absent means "not recorded" —
+ * never "reviewed".
+ */
+export type ContractOrigin = 'authorship' | 'reviewed';
+
 export interface CapabilityContract {
   /** Contract schema version, stamped into each audit decision (PRD §4.3 S5). */
   version: number;
+  /** How this grant came to be — see `ContractOrigin`. Optional: legacy and
+   *  imported contracts carry none, and absent must not read as reviewed. */
+  origin?: ContractOrigin | undefined;
   /**
    * Tools the contract grants warn-level autonomous writes for (e.g.
    * `['http_request']`). B1 knows how to grant `http_request` (the documented

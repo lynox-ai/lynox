@@ -1,4 +1,4 @@
-import type { CapabilityContract, ParamConstraint } from '../types/capability-contract.js';
+import type { CapabilityContract, ParamConstraint, HttpMethod } from '../types/capability-contract.js';
 import type { InlinePipelineStep } from '../types/pipeline.js';
 import { isOverbroadHostPattern } from '../core/pre-approve.js';
 
@@ -104,4 +104,81 @@ export function validateContractAgainstSteps(planned: {
     );
   }
   return null;
+}
+
+/** The methods the default autonomous posture denies, i.e. the only ones a
+ *  contract has any reason to grant. Mirrors `WRITE_METHODS` in `http.ts`. */
+const MINTABLE_WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH']);
+
+/**
+ * Derive a capability contract from a workflow's steps — the producer Slice B1
+ * left out ("no product path writes a contract onto a saved workflow yet").
+ *
+ * It mints for exactly one shape and refuses every other, and the refusal is the
+ * interesting half: **a contract can only be derived when the outbound write is
+ * fully literal.** The moment a `{{ params.x }}` reaches a step's tool call, the
+ * grant would have to state WHICH values are admissible — and that is a human
+ * judgement the template does not carry. `validateContractAgainstSteps` already
+ * refuses a contract that leaves such a parameter unconstrained, and it refuses
+ * a vacuous constraint too, so a minter that guessed would either wedge saving
+ * or fail open. Returning `undefined` keeps the workflow exactly as it is today:
+ * unattended writes stay denied until a human declares the constraints.
+ *
+ * That boundary is not a limitation of this function. It is where authorship
+ * stops being sufficient — the same line the product draws between "the user
+ * built this themselves" and "someone accepted what it may do".
+ *
+ * Returns `undefined` when there is nothing to grant, when any step's call is
+ * parameterised, or when a write target is not a literal absolute URL.
+ */
+export function mintContractFromSteps(steps: InlinePipelineStep[] | undefined): CapabilityContract | undefined {
+  if (!steps || steps.length === 0) return undefined;
+
+  // Parameterised anywhere → not derivable. Checked across ALL steps, not just
+  // the writing one: a param that reaches any tool call is the case the grant
+  // cannot describe, and scoping this to http steps would mint a contract whose
+  // own save validator then rejects it.
+  for (const step of steps) {
+    if (paramsReferencedInTemplate(step.input_template).size > 0) return undefined;
+  }
+
+  const methods = new Set<HttpMethod>();
+  const hosts = new Set<string>();
+  const paths = new Set<string>();
+
+  for (const step of steps) {
+    if (step.tool !== 'http_request') continue;
+    const template = step.input_template;
+    if (!template) continue;
+    const rawMethod = typeof template['method'] === 'string' ? template['method'].toUpperCase() : 'GET';
+    if (!MINTABLE_WRITE_METHODS.has(rawMethod)) continue;
+    const rawUrl = template['url'];
+    // A non-literal target cannot be pinned, and an unpinned host is exactly the
+    // fleet-wide grant the validator rejects — refuse the whole contract rather
+    // than mint a partial one that silently omits a write the workflow performs.
+    if (typeof rawUrl !== 'string') return undefined;
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      return undefined;
+    }
+    methods.add(rawMethod as HttpMethod);
+    hosts.add(parsed.hostname);
+    paths.add(parsed.pathname);
+  }
+
+  if (methods.size === 0) return undefined; // read-only workflow — nothing to grant
+
+  return {
+    version: 1,
+    origin: 'authorship',
+    grantedTools: ['http_request'],
+    httpMethods: [...methods],
+    hostPatterns: [...hosts],
+    pathPatterns: [...paths],
+    // Empty by construction: the parameter check above guarantees no
+    // re-targetable parameter exists, which is the only thing constraints bind.
+    paramConstraints: {},
+  };
 }

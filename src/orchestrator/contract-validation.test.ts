@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateContractAgainstSteps } from './contract-validation.js';
+import { validateContractAgainstSteps, mintContractFromSteps } from './contract-validation.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { InlinePipelineStep } from '../types/pipeline.js';
 
@@ -128,5 +128,76 @@ describe('validateContractAgainstSteps', () => {
       steps: [step({ url: 'https://api.acme.test/v1/{{params.target-host}}' })],
     });
     expect(err).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mintContractFromSteps — the producer Slice B1 left out.
+//
+// The refusals matter more than the mint: each one is a shape where a derived
+// grant would be a guess, and the validator would reject or fail open on it.
+// ---------------------------------------------------------------------------
+
+describe('mintContractFromSteps', () => {
+  const httpStep = (id: string, template: Record<string, unknown>): InlinePipelineStep =>
+    ({ id, task: 'call it', tool: 'http_request', input_template: template });
+
+  it('mints a pinned grant for a fully literal write', () => {
+    const c = mintContractFromSteps([httpStep('s1', { url: 'https://api.example.com/orders', method: 'POST' })]);
+    expect(c).toBeDefined();
+    expect(c!.grantedTools).toEqual(['http_request']);
+    expect(c!.httpMethods).toEqual(['POST']);
+    expect(c!.hostPatterns).toEqual(['api.example.com']);
+    expect(c!.pathPatterns).toEqual(['/orders']);
+    expect(c!.paramConstraints).toEqual({});
+  });
+
+  it('records that the grant came from authorship, not review', () => {
+    const c = mintContractFromSteps([httpStep('s1', { url: 'https://api.example.com/orders', method: 'POST' })]);
+    expect(c!.origin).toBe('authorship');
+  });
+
+  // THE boundary. A parameter reaching any tool call means the grant would have
+  // to say which values are admissible, and nothing in the template says so.
+  it('refuses when a parameter reaches the writing call', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://api.example.com/{{ params.target }}', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
+  // Checked across ALL steps, not just the writing one: a contract minted while
+  // another step is parameterised is rejected by its own save validator.
+  it('refuses when a parameter reaches a DIFFERENT step', () => {
+    expect(mintContractFromSteps([
+      { id: 's0', task: 'read', tool: 'read_file', input_template: { path: '{{ params.path }}' } },
+      httpStep('s1', { url: 'https://api.example.com/orders', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
+  it('mints nothing for a read-only workflow', () => {
+    expect(mintContractFromSteps([httpStep('s1', { url: 'https://api.example.com/x', method: 'GET' })])).toBeUndefined();
+    expect(mintContractFromSteps([{ id: 's1', task: 'think' }])).toBeUndefined();
+  });
+
+  it('refuses a write whose target is not a literal absolute URL', () => {
+    expect(mintContractFromSteps([httpStep('s1', { url: 42, method: 'POST' })])).toBeUndefined();
+    expect(mintContractFromSteps([httpStep('s1', { url: '/relative/only', method: 'POST' })])).toBeUndefined();
+  });
+
+  it('covers every write method and host the workflow actually uses', () => {
+    const c = mintContractFromSteps([
+      httpStep('s1', { url: 'https://a.example.com/one', method: 'POST' }),
+      httpStep('s2', { url: 'https://b.example.com/two', method: 'PATCH' }),
+    ]);
+    expect(c!.httpMethods.sort()).toEqual(['PATCH', 'POST']);
+    expect(c!.hostPatterns.sort()).toEqual(['a.example.com', 'b.example.com']);
+  });
+
+  // The mint and the save gate must agree: a contract this produces has to
+  // survive the validator that runs on every save, or minting wedges saving.
+  it('produces a contract its own save validator accepts', () => {
+    const steps = [httpStep('s1', { url: 'https://api.example.com/orders', method: 'POST' })];
+    const capabilityContract = mintContractFromSteps(steps);
+    expect(validateContractAgainstSteps({ capabilityContract, steps })).toBeNull();
   });
 });

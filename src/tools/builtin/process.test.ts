@@ -126,6 +126,40 @@ describe('save_workflow — session source', () => {
     expect(pipeline?.confirmedAt).toBeTruthy();
   });
 
+  // Wiring, not unit: the minter is exercised through the real save path, because
+  // a green unit test on mintContractFromSteps says nothing about whether the
+  // confirm site calls it.
+  it('mints no grant for a workflow whose write target is not literal', async () => {
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    await saveWorkflowTool.handler({ name: 'Test' }, agent);
+    const pipeline = mockHistory.insertPlannedPipeline.mock.calls[0]?.[0] as PlannedPipeline | undefined;
+    // The sample's only http step is a read against a templated URL. Nothing to
+    // grant, nothing pinnable — and the workflow saves normally either way.
+    expect(pipeline?.confirmedAt).toBeTruthy();
+    expect(pipeline?.capabilityContract).toBeUndefined();
+  });
+
+  it('mints an authorship-derived grant when the write IS literal', async () => {
+    const record = structuredClone(SAMPLE_RECORD);
+    record.steps = [
+      { order: 0, tool: 'http_request', description: 'Post the order', inputTemplate: { url: 'https://api.example.com/orders', method: 'POST' }, dependsOn: [] },
+    ];
+    record.parameters = [];
+    captureProcessMock.mockResolvedValue(record);
+
+    const agent = makeAgent({ currentThreadId: 'thread-1' }, mockHistory);
+    await saveWorkflowTool.handler({ name: 'Literal write' }, agent);
+    const pipeline = mockHistory.insertPlannedPipeline.mock.calls[0]?.[0] as PlannedPipeline | undefined;
+
+    expect(pipeline?.capabilityContract).toBeDefined();
+    expect(pipeline!.capabilityContract!.origin).toBe('authorship');
+    expect(pipeline!.capabilityContract!.hostPatterns).toEqual(['api.example.com']);
+    expect(pipeline!.capabilityContract!.httpMethods).toEqual(['POST']);
+    // The grant rests on the SAME grounds as the stamp beside it — if the confirm
+    // is authorship, so is the contract, and the pair must never diverge.
+    expect(pipeline?.confirmedAt).toBeTruthy();
+  });
+
   it('resolves input_from by step order even when order != array index', async () => {
     // Regression: processToSteps builds step IDs as `step-<order>`. Deriving
     // `input_from` from the array index instead of the order value left a

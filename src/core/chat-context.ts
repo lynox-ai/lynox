@@ -121,6 +121,24 @@ function oneLine(s: string, max: number): string {
  * stale/foreign id degrades to a plain chat rather than an error. Single-tenant
  * container ⇒ every id resolved here is the tenant's own.
  */
+/**
+ * How the loaded workflow's grant came to be, rendered into the text the MODEL
+ * reads before editing it. The grant tuple alone cannot say whether a human ever
+ * looked at it, and an agent about to change a contract-governed workflow is
+ * exactly who needs to know that: `authorship` means the engine inferred consent
+ * from the fact that the user built the steps, not that anyone reviewed what the
+ * workflow may reach.
+ *
+ * An absent origin renders as `contract-governed` alone — it is a legacy or
+ * imported contract, and claiming either provenance for it would be a guess.
+ */
+function contractNote(contract: { origin?: string | undefined } | undefined): string {
+  if (!contract) return '';
+  if (contract.origin === 'authorship') return ' · contract-governed (confirmed by authorship, not reviewed)';
+  if (contract.origin === 'reviewed') return ' · contract-governed (reviewed)';
+  return ' · contract-governed';
+}
+
 export function resolveChatContext(
   runHistory: RunHistory | null,
   ref: ChatContextRef,
@@ -226,12 +244,13 @@ export function resolveChatContext(
     return (
       `[Loaded saved workflow for editing — id: ${wf.id}]\n` +
       `Name: "${oneLine(wf.name, MAX_NAME_CHARS)}"\n` +
-      `Mode: ${wf.mode ?? 'autonomous'}${wf.capabilityContract ? ' · contract-governed' : ''}\n` +
+      `Mode: ${wf.mode ?? 'autonomous'}${contractNote(wf.capabilityContract)}\n` +
       `Steps:\n${steps}\n\n` +
       `To change it, call update_workflow_steps with workflow_id "${wf.id}". ` +
       `Confirm destructive edits with the user first.`
     );
   }
+
 
   // ref.kind === 'run' — a (failed) workflow run to diagnose + fix in chat.
   const run = runHistory.getPipelineRun(ref.id);
