@@ -201,6 +201,10 @@ function parseTokenData(raw: string): TokenData | null {
     if (typeof data['refresh_token'] !== 'string') return null;
     if (typeof data['expires_at'] !== 'number' || !Number.isFinite(data['expires_at'])) return null;
     if (!Array.isArray(data['scopes']) || !data['scopes'].every((s: unknown) => typeof s === 'string')) return null;
+    // Checked like every other field rather than trusted through the cast: a
+    // non-string here compares unequal to any real client id, which would pin
+    // the token as permanently foreign and keep a revoked grant for good.
+    if (data['client_id'] !== undefined && typeof data['client_id'] !== 'string') return null;
     return parsed as TokenData;
   } catch {
     return null;
@@ -344,6 +348,25 @@ const CP_CLIENT_MISCONFIGURED_REMEDY =
   ' Your Google connection is intact — lynox could not complete the refresh.';
 
 /**
+ * The third audience, for the same reason the second one exists.
+ *
+ * A foreign grant is not a bad credential: the configured client is perfectly
+ * valid, it is simply not the one this token was issued to. So the generic
+ * `client-misconfigured` text — "credentials are not valid … until an operator
+ * corrects them" — points the wrong way for the case that reaches here after a
+ * DELIBERATE client change, where nothing needs correcting and the connection
+ * has to be made again instead. Both routes are named because this code cannot
+ * tell a typo from a rotation, and guessing wrong strands the user either way.
+ *
+ * Names no credential, like its neighbours: this string is returned inside tool
+ * results, so the model reads it (`google-drive.ts`, `google-sheets.ts`).
+ */
+const FOREIGN_GRANT_REMEDY =
+  ' Your Google connection is intact, but this instance now uses a different'
+  + ' Google client than the one the account was connected with. Restore the'
+  + ' previous client to resume, or reconnect the account under the current one.';
+
+/**
  * How long a `client-misconfigured` verdict suppresses further token POSTs.
  *
  * Longer than the 120 s mail-watch tick (`providers/oauth-gmail.ts`), on
@@ -444,7 +467,10 @@ function reclassifyForeignGrant(
   presentedBy: string | undefined,
 ): RefreshFailureKind {
   if (failure !== 'grant-revoked') return failure;
-  if (mintedBy === undefined || presentedBy === undefined) return failure;
+  // Falsy, not `!== undefined`: every writer gates its stamp on truthiness, so
+  // an empty string never means "minted by the empty client" — it means the
+  // same as absent, and reading it as a mismatch would keep a dead token.
+  if (!mintedBy || !presentedBy) return failure;
   return mintedBy === presentedBy ? failure : 'client-misconfigured';
 }
 
@@ -641,6 +667,27 @@ export class GoogleAuth {
   }
 
   /**
+   * Accept tokens this process just minted itself, from any of the three OAuth
+   * entry points.
+   *
+   * One method rather than the same three lines at each entry, because the
+   * three had already drifted: `setTokens` above ends the suppression window on
+   * a fresh grant and the minting flows did not, so a self-host operator who
+   * corrected a client id and re-consented was still refused for up to five
+   * minutes by a cool-down their reconnect had already resolved. That is the
+   * same reasoning the comment above states — it just never reached here.
+   *
+   * `mintedBy` stays a parameter so each caller passes the id IT presented;
+   * reading `this.clientId` in here would look identical and quietly assert a
+   * provenance the caller had not established.
+   */
+  private _acceptMintedTokens(json: unknown, mintedBy: string): void {
+    this.tokenData = validateTokenResponse(json, mintedBy);
+    this._clientMisconfigured = null;
+    saveTokenData(this.tokenData, this.vault);
+  }
+
+  /**
    * Get a valid access token, refreshing if needed.
    * For service accounts, generates a new JWT token.
    */
@@ -712,8 +759,7 @@ export class GoogleAuth {
           throw new Error(`Token exchange failed: ${response.status} ${text}`);
         }
 
-        this.tokenData = validateTokenResponse(await response.json(), clientId);
-        saveTokenData(this.tokenData, this.vault);
+        this._acceptMintedTokens(await response.json(), clientId);
       } finally {
         close();
       }
@@ -770,8 +816,7 @@ export class GoogleAuth {
       throw new Error(`Token exchange failed: ${response.status} ${text}`);
     }
 
-    this.tokenData = validateTokenResponse(await response.json(), clientId);
-    saveTokenData(this.tokenData, this.vault);
+    this._acceptMintedTokens(await response.json(), clientId);
   }
 
   /**
@@ -827,8 +872,7 @@ export class GoogleAuth {
         });
 
         if (tokenRes.ok) {
-          this.tokenData = validateTokenResponse(await tokenRes.json(), clientId);
-          saveTokenData(this.tokenData, this.vault);
+          this._acceptMintedTokens(await tokenRes.json(), clientId);
           return;
         }
 
@@ -1090,23 +1134,37 @@ export class GoogleAuth {
       //
       // The second step is the one the response cannot decide: an `invalid_grant`
       // from a client that did not mint this token is OUR misconfiguration, not
-      // a revocation. `this.clientId` is the id we just presented on the direct
-      // path; on the control-plane path it is `undefined` here anyway, and a
-      // CP-minted token records no minting id, so that path is left untouched.
-      const failure = reclassifyForeignGrant(
-        classifyRefreshFailure(response.status, text),
-        this.tokenData.client_id,
-        this.clientId,
-      );
+      // a revocation.
+      //
+      // Only the DIRECT path presented `this.clientId`; on the control-plane
+      // path lynox's broker client did, and comparing the token against ours
+      // there would answer a question nobody asked. An earlier version of this
+      // comment claimed `this.clientId` is undefined on that path — it is not:
+      // `cp` hangs on the refresh handle and the env identity, not on whether a
+      // pair is configured, and a managed BYO tenant has one (`GOOGLE_CLIENT_*`
+      // is customer-writable, `http-api.ts › CUSTOMER_WRITABLE_INFRA_PATTERNS`).
+      // Passing `undefined` makes that true instead of asserting it.
+      const presentedBy = cp && handle ? undefined : this.clientId;
+      const classified = classifyRefreshFailure(response.status, text);
+      const failure = reclassifyForeignGrant(classified, this.tokenData.client_id, presentedBy);
+      // Kept as its own boolean rather than re-derived from `failure`: after the
+      // reclassification the two causes are the same KIND, and only the step
+      // that changed it knows which text belongs to the user.
+      const foreignGrant = classified === 'grant-revoked' && failure === 'client-misconfigured';
       // Chosen ONCE, here, where `cp` says which client is actually invalid.
       // Not a new failure KIND, so not a new `REFRESH_FAILURE_REMEDY` entry:
       // the same classification with a different audience. On the direct path
       // the invalid client is this instance's own and an operator can fix it;
       // on the CP path it is lynox's, and naming the instance would send the
-      // user after something they do not control.
-      const remedy = cp && failure === 'client-misconfigured'
-        ? CP_CLIENT_MISCONFIGURED_REMEDY
-        : REFRESH_FAILURE_REMEDY[failure];
+      // user after something they do not control. A foreign grant is a third
+      // audience again: the credentials are valid, they are just not the ones
+      // this token belongs to. It is tested first because it is the narrower
+      // case — it can only arise on the direct path, where `cp` is null.
+      const remedy = foreignGrant
+        ? FOREIGN_GRANT_REMEDY
+        : cp && failure === 'client-misconfigured'
+          ? CP_CLIENT_MISCONFIGURED_REMEDY
+          : REFRESH_FAILURE_REMEDY[failure];
       if (failure === 'grant-revoked') {
         this.tokenData = null;
         deleteTokenData(this.vault);
