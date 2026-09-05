@@ -1,0 +1,40 @@
+{
+  "schema": "fast-bench-transcript/v1",
+  "id": "t05-inbox-triage",
+  "title": "Morgendliche Inbox-Triage (DE+EN, Mail-Listen, Einzel-Entscheide pro Mail)",
+  "targetTokens": 21000,
+  "messages": [
+    { "role": "user", "content": [ { "type": "text", "text": "Guten Morgen. Geh bitte meine Inbox durch und sag mir, was heute wirklich meine Aufmerksamkeit braucht. Alles andere kannst du vorsortieren." } ] },
+    { "role": "assistant", "content": [ { "type": "tool_use", "id": "tu_t05_01", "name": "list_inbox", "input": { "account": "mara@steinbach-consulting.example", "unread_only": true } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t05_01", "content": [ { "type": "text", "text": "31 unread. Highlights:\n1. Von: anwalt@keller-partner.example — \"Mandatsvereinbarung: Rueckfrage zu Ziffer 4\" (gestern 17:40)\n2. Von: billing@cloudmetrics.example — \"Invoice CM-88213 overdue: payment due 26.09.2026\" \n3. Von: jonas.wehrli@steinbach-consulting.example — \"Kandidatin fuer die PM-Stelle — Feedback bis Donnerstag?\"\n4. Von: petra@vinothek-morgenrot.example — \"Workshop-Termin verschieben?\"\n5. Von: no-reply@konferenz-digitalforum.example — \"Ihr Speaker-Slot am 22.10: Technik-Check\"\n\nRemaining 26 unread (newsletters, receipts, notifications):" }, { "type": "pad", "generator": "maillist", "lines": 780, "seed": 51 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Triage:\n\nBraucht dich heute:\n1. Keller & Partner, Rueckfrage zu Ziffer 4 der Mandatsvereinbarung — inhaltliche Entscheidung, kann ich nicht fuer dich treffen. Deadline implizit: die warten seit gestern.\n2. Jonas' Bitte um Feedback zur PM-Kandidatin — er braucht es bis Donnerstag fuer die zweite Runde.\n\nKann ich uebernehmen, brauche nur dein Go:\n3. cloudmetrics Rechnung CM-88213, USD 940, faellig 26.09.2026 — noch nicht ueberfaellig-kritisch, aber die Mail ist als overdue-Mahnung formuliert. Zahlungsfreigabe?\n4. Petra (Vinothek Morgenrot) will den Workshop vom 15.09. verschieben — dein Kalender hat am 18.09. und 19.09. Luecken, ich wuerde beide anbieten.\n5. Digitalforum Technik-Check fuer deinen Speaker-Slot am 22.10 — reines Formular (Aufloesung, Mikrofon-Typ), fuelle ich aus.\n\nDer Rest: 22 Newsletter/Receipts habe ich archiviert, 4 Tool-Notifications als gelesen markiert." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Zu 3: zahlen, aber prueof vorher ob wir cloudmetrics nicht sowieso kuendigen wollten — ich meine da war was. Zu 4: ja, beide Termine anbieten. Zu 5: mach. Keller & Partner und Jonas nehme ich selber." } ] },
+    { "role": "assistant", "content": [ { "type": "tool_use", "id": "tu_t05_02", "name": "search_notes", "input": { "query": "cloudmetrics kuendigen OR cancel OR migration" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t05_02", "content": [ { "type": "text", "text": "Note found (2026-07-02, project infra): \"Entscheid: cloudmetrics per Jahresende kuendigen, Migration zu selbst-gehostetem Monitoring bis November. Kuendigungsfrist: 60 Tage vor Verlaengerung am 31.12. → Kuendigung muss bis 01.11.2026 raus.\"\n\nOther matches:" }, { "type": "pad", "generator": "maillist", "lines": 240, "seed": 52 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Gut dass wir geschaut haben: Es gibt einen Entscheid vom 02.07., cloudmetrics per Jahresende zu kuendigen — Kuendigung muss bis 01.11.2026 raus (60 Tage Frist vor Verlaengerung). Die Rechnung CM-88213 betrifft aber den laufenden Vertrag, die muessen wir so oder so zahlen. Ich habe sie zur Zahlung freigegeben (USD 940, Valuta heute).\n\nErledigt ausserdem:\n- Petra: Mail raus mit den Alternativterminen 18.09. und 19.09., jeweils 14-17 Uhr.\n- Digitalforum: Technik-Formular ausgefuellt (1080p, Lavalier), bestaetigt fuer den Slot am 22.10.\n\nNeu als Aufgabe angelegt: \"cloudmetrics-Kuendigung versenden\" mit Faelligkeit 15.10.2026 — zwei Wochen Puffer vor der Frist am 01.11. Die Migrations-Aufgabe (Monitoring bis November) haengt als Blocker dran.\n\nBei dir verbleiben: Keller & Partner (Ziffer 4) und Jonas' Kandidatinnen-Feedback bis Donnerstag." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Perfekt. Erinner mich morgen frueh an Jonas, falls ich es heute nicht schaffe." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Eingerichtet: Erinnerung morgen 08:00 an Jonas' Feedback zur PM-Kandidatin (Deadline Donnerstag). Zusammenfassung des Vormittags: 2 Mails bei dir (Keller & Partner Ziffer 4, Jonas), 3 von mir erledigt (Zahlung CM-88213 freigegeben, Petra-Terminvorschlaege 18./19.09., Digitalforum-Formular), 26 vorsortiert, plus die neue Kuendigungs-Aufgabe cloudmetrics mit Faelligkeit 15.10.2026." } ] }
+  ],
+  "checklist": {
+    "literals": [
+      "CM-88213",
+      "26.09.2026",
+      "Ziffer 4",
+      "01.11.2026",
+      "15.10.2026",
+      "18.09",
+      "22.10",
+      "Keller & Partner"
+    ],
+    "rubric": [
+      "Preserves the two items left with the user: the Keller & Partner clause-4 question and Jonas' candidate feedback (due Thursday).",
+      "Records that invoice CM-88213 (USD 940) was checked against the cancellation note and then approved for payment because it covers the current contract.",
+      "Preserves the recalled decision context: cloudmetrics is to be cancelled by year-end, notice must be sent by 01.11.2026 (60-day period).",
+      "Records the newly created task: send the cloudmetrics cancellation, due 15.10.2026.",
+      "Records that Petra was offered the alternative workshop dates 18.09 and 19.09.",
+      "Records that the Digitalforum tech-check form for the 22.10 speaker slot was completed.",
+      "Preserves the bulk-triage outcome: the remaining ~26 mails were archived/marked, none need the user.",
+      "Keeps the reminder set for tomorrow 08:00 about Jonas' feedback."
+    ]
+  }
+}

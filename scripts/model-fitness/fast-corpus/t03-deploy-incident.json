@@ -1,0 +1,43 @@
+{
+  "schema": "fast-bench-transcript/v1",
+  "id": "t03-deploy-incident",
+  "title": "Failed release deploy + rollback (EN, build logs, node version root cause)",
+  "targetTokens": 27000,
+  "messages": [
+    { "role": "user", "content": [ { "type": "text", "text": "The v3.8.2 release deploy to production failed twenty minutes ago and the API pods are crash-looping. Can you dig in? We rolled the frontend already but the API is still on the broken image." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Pulling the deploy pipeline log for the v3.8.2 API image first." }, { "type": "tool_use", "id": "tu_t03_01", "name": "read_pipeline", "input": { "pipeline": "api-release", "ref": "v3.8.2" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t03_01", "content": [ { "type": "text", "text": "Job build-api #1874: SUCCESS (image sha256:9f31c2 pushed). Job deploy-prod #1875: pods enter CrashLoopBackOff. Container log tail:\n\n  node: --experimental-require-module is not allowed in NODE_OPTIONS\n  error: exit 9\n\nBase image in Dockerfile: node:22.7.0-alpine (bumped in commit 41ac9de \"chore: bump base images\"). Previous release v3.8.1 used node:22.5.1-alpine.\n\nFull build log:" }, { "type": "pad", "generator": "buildlog", "lines": 750, "seed": 31 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Root cause found: commit 41ac9de bumped the base image to node:22.7.0-alpine, and 22.7.0 removed --experimental-require-module from the allowed NODE_OPTIONS list. Our production manifest still injects that flag via NODE_OPTIONS (it was needed for 22.5), so every pod exits with code 9 before the app even starts. The build succeeded because the flag is only applied at runtime.\n\nImmediate mitigation: roll the API back to v3.8.1. Then we fix forward by dropping the flag from the manifest instead of pinning the old node." }, { "type": "tool_use", "id": "tu_t03_02", "name": "run_deploy", "input": { "target": "prod-api", "action": "rollback", "to": "v3.8.1" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t03_02", "content": [ { "type": "text", "text": "Rollback executed: prod-api now serving v3.8.1 (image sha256:77aa10). 12/12 pods Ready in 94s. Health endpoint /api/health returns 200. Error rate back to baseline 0.02%.\n\nRollout events:" }, { "type": "pad", "generator": "httplog", "lines": 420, "seed": 32 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Production is stable again on v3.8.1 — 12/12 pods ready, health green, error rate at baseline. Now the forward fix. The clean solution is removing --experimental-require-module from NODE_OPTIONS in the prod manifest (deploy/manifests/prod-api.yaml line 47): since node 22.6 the require(esm) path is enabled by default, so the flag is dead weight and now actively fatal. I will also add a boot smoke test to the pipeline so a runtime-only failure like this fails the PIPELINE, not production." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Agreed on both. One more thing — was ist eigentlich mit dem Cronjob fuer die Report-Generierung? Der lief auch auf dem neuen Image, hat der auch gecrasht?" } ] },
+    { "role": "assistant", "content": [ { "type": "tool_use", "id": "tu_t03_03", "name": "read_pipeline", "input": { "pipeline": "report-cron", "window": "24h" } } ] },
+    { "role": "user", "content": [ { "type": "tool_result", "tool_use_id": "tu_t03_03", "content": [ { "type": "text", "text": "report-cron runs: 02:00 UTC run on v3.8.1 image = SUCCESS (before the deploy). 08:00 UTC run scheduled AFTER the v3.8.2 deploy = FAILED with the same exit 9. 3 retries, all failed. The 08:00 daily revenue report was NOT generated or sent.\n\nCron history:" }, { "type": "pad", "generator": "buildlog", "lines": 400, "seed": 33 } ] } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Ja — der 08:00-UTC-Lauf des report-cron ist mit demselben exit 9 gescheitert, drei Retries erfolglos. Der Tagesumsatz-Report von heute wurde also nicht erzeugt und nicht versendet. Nach dem Rollback laeuft der Cron wieder auf v3.8.1; ich habe den 08:00-Lauf manuell nachgeholt — Report ist raus, Empfaenger wie immer.\n\nSummary of the incident and the plan:\n- Root cause: node:22.7.0 bump (commit 41ac9de) + stale NODE_OPTIONS flag --experimental-require-module → exit 9 crash loop.\n- Mitigation done: API rolled back to v3.8.1, 08:00 report re-run manually.\n- Fix forward (owner: me): PR removing the flag from deploy/manifests/prod-api.yaml line 47, plus a pipeline boot smoke test that starts the container with prod NODE_OPTIONS before any deploy.\n- Release v3.8.3 will carry the fix; v3.8.2 is abandoned, do not redeploy it.\n- Post-incident note goes into the runbook at /opt/acme/runbooks/deploy.md." } ] },
+    { "role": "user", "content": [ { "type": "text", "text": "Good. Get the PR up today please, and put the incident timeline in the runbook before you forget the details. Ping me when the smoke test is green so I can approve the release." } ] },
+    { "role": "assistant", "content": [ { "type": "text", "text": "Will do. Next steps in order: (1) PR with the manifest fix and the boot smoke test — today; (2) incident timeline into /opt/acme/runbooks/deploy.md; (3) ping you for approval once the smoke test is green, then cut v3.8.3. v3.8.2 stays quarantined." } ] }
+  ],
+  "checklist": {
+    "literals": [
+      "v3.8.2",
+      "v3.8.1",
+      "41ac9de",
+      "--experimental-require-module",
+      "exit 9",
+      "node:22.7.0",
+      "deploy/manifests/prod-api.yaml",
+      "/opt/acme/runbooks/deploy.md",
+      "v3.8.3"
+    ],
+    "rubric": [
+      "States the root cause precisely: the node:22.7.0 base-image bump (commit 41ac9de) made the stale NODE_OPTIONS flag --experimental-require-module fatal (exit 9 crash loop).",
+      "Records that production was mitigated by rolling the API back to v3.8.1 and is stable.",
+      "Records the forward-fix decision: remove the flag from deploy/manifests/prod-api.yaml (not pin the old node) plus add a pipeline boot smoke test.",
+      "Preserves that the 08:00 UTC report-cron run failed with the same error and the daily revenue report was manually re-run afterwards.",
+      "Preserves that v3.8.2 is abandoned/quarantined and the fix ships as v3.8.3.",
+      "Keeps the open task: raise the fix PR today.",
+      "Keeps the open task: write the incident timeline into /opt/acme/runbooks/deploy.md.",
+      "Keeps the follow-up owed: ping the user for approval once the smoke test is green, before cutting v3.8.3."
+    ]
+  }
+}
