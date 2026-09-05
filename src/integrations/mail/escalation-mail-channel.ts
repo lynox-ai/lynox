@@ -92,11 +92,18 @@ export class EscalationMailChannel implements NotificationChannel {
       // permitted recipients while the identical string is refused on the way
       // in — one direction of the same config being stricter than the other.
       const parsed = parseAddressList(entry);
-      if (parsed.length !== 1) {
+      // `parseAddressList` splits on commas, so a semicolon-separated entry —
+      // the separator several mail clients show — comes back as ONE address
+      // containing a separator and a space. It would then sit in the map
+      // permitting nobody, and, being one address, would not be counted as
+      // dropped either: the same silent hole one layer over. Refuse anything
+      // whose parsed address still carries a separator or whitespace.
+      const address = parsed.length === 1 ? parsed[0]!.address : undefined;
+      if (address === undefined || /[\s;,<>]/.test(address)) {
         dropped += 1;
         continue;
       }
-      allowed.set(normaliseAddress(parsed[0]!.address), parsed[0]!.address);
+      allowed.set(normaliseAddress(address), address);
     }
     // Report DROPPED entries, not just an empty result. An entry that parses to
     // nothing is invisible otherwise: every send it should have permitted is

@@ -104,6 +104,7 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
     // the code it describes. The mutation run is where it belongs; a comment
     // is the one place a measurement never gets re-checked.
     ['eine Look-alike-Domain', 'chef@betrieb.example.angreifer.example'],
+    ['eine Subdomain des Eintrags', 'chef@sub.betrieb.example'],
     ['eine Sub-Adresse des Eintrags', 'x.chef@betrieb.example'],
     ['einen laengeren local part', 'chef2@betrieb.example'],
   ])('refuses %s', async (_label, recipient) => {
@@ -147,6 +148,26 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
     }
     expect(lines.filter((l) => l.includes('unusable and ignored'))).toHaveLength(1);
     expect(lines.join('')).toContain('2 of 3');
+  });
+
+  it('drops a semicolon-separated entry instead of storing one unmatchable address', async () => {
+    // `parseAddressList` splits on commas only, so this comes back as ONE
+    // address carrying a separator — it would permit nobody and would not be
+    // counted as dropped either.
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    });
+    let ch: InstanceType<typeof EscalationMailChannel>;
+    try {
+      ch = new EscalationMailChannel({ registry, allowedRecipients: [`${CHEF}; zweit@betrieb.example`] });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines.filter((l) => l.includes('unusable and ignored'))).toHaveLength(1);
+    expect(await ch.send(msg({ recipient: CHEF }))).toBe(false);
+    expect(sendMail).not.toHaveBeenCalled();
   });
 
   it('says so once when a configured list yields no usable entry', async () => {
