@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { validateContractAgainstSteps } from './contract-validation.js';
+import { validateContractAgainstSteps, mintContractFromSteps } from './contract-validation.js';
 import type { CapabilityContract } from '../types/capability-contract.js';
 import type { InlinePipelineStep } from '../types/pipeline.js';
 
@@ -128,5 +128,163 @@ describe('validateContractAgainstSteps', () => {
       steps: [step({ url: 'https://api.acme.test/v1/{{params.target-host}}' })],
     });
     expect(err).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mintContractFromSteps — the producer Slice B1 left out.
+//
+// The refusals matter more than the mint: each one is a shape where a derived
+// grant would be a guess, and the validator would reject or fail open on it.
+// ---------------------------------------------------------------------------
+
+describe('mintContractFromSteps', () => {
+  const httpStep = (id: string, template: Record<string, unknown>): InlinePipelineStep =>
+    ({ id, task: 'call it', tool: 'http_request', input_template: template });
+
+  it('mints a pinned grant for a fully literal write', () => {
+    const c = mintContractFromSteps([httpStep('s1', { url: 'https://api.example.com/orders', method: 'POST' })]);
+    expect(c).toBeDefined();
+    expect(c!.grantedTools).toEqual(['http_request']);
+    expect(c!.httpMethods).toEqual(['POST']);
+    expect(c!.hostPatterns).toEqual(['api.example.com']);
+    expect(c!.pathPatterns).toEqual(['/orders']);
+    expect(c!.paramConstraints).toEqual({});
+  });
+
+  it('records that the grant came from authorship, not review', () => {
+    const c = mintContractFromSteps([httpStep('s1', { url: 'https://api.example.com/orders', method: 'POST' })]);
+    expect(c!.origin).toBe('authorship');
+  });
+
+  // THE boundary. A parameter reaching any tool call means the grant would have
+  // to say which values are admissible, and nothing in the template says so.
+  it('refuses when a parameter reaches the writing call', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://api.example.com/{{ params.target }}', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
+  // Checked across ALL steps, not just the writing one: a contract minted while
+  // another step is parameterised is rejected by its own save validator.
+  it('refuses when a parameter reaches a DIFFERENT step', () => {
+    expect(mintContractFromSteps([
+      { id: 's0', task: 'read', tool: 'read_file', input_template: { path: '{{ params.path }}' } },
+      httpStep('s1', { url: 'https://api.example.com/orders', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
+  it('mints nothing for a read-only workflow', () => {
+    expect(mintContractFromSteps([httpStep('s1', { url: 'https://api.example.com/x', method: 'GET' })])).toBeUndefined();
+    expect(mintContractFromSteps([{ id: 's1', task: 'think' }])).toBeUndefined();
+  });
+
+  it('refuses a write whose target is not a literal absolute URL', () => {
+    expect(mintContractFromSteps([httpStep('s1', { url: 42, method: 'POST' })])).toBeUndefined();
+    expect(mintContractFromSteps([httpStep('s1', { url: '/relative/only', method: 'POST' })])).toBeUndefined();
+  });
+
+  it('covers several writes while the grant still denotes exactly them', () => {
+    // Two methods on ONE endpoint: the cross product is 1 × 1 × 2 = 2, which is
+    // exactly what the steps do, so the grant is exact and gets minted.
+    const c = mintContractFromSteps([
+      httpStep('s1', { url: 'https://api.example.com/orders', method: 'POST' }),
+      httpStep('s2', { url: 'https://api.example.com/orders', method: 'PATCH' }),
+    ]);
+    expect(c!.httpMethods.sort()).toEqual(['PATCH', 'POST']);
+    expect(c!.hostPatterns).toEqual(['api.example.com']);
+  });
+
+  // The contract holds methods/hosts/paths as INDEPENDENT lists and the guard
+  // matches each separately, so the grant is their cross product. Two hosts and
+  // two paths is four combinations for two steps — and the two the workflow
+  // never performs would be granted. Mutation: drop the exactness check → this
+  // mints and the widening ships.
+  it('refuses when the cross product would grant a combination no step performs', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://a.example.com/one', method: 'POST' }),
+      httpStep('s2', { url: 'https://b.example.com/two', method: 'PATCH' }),
+    ])).toBeUndefined();
+  });
+
+  // The case above varies the method, the host AND the path at once, so it
+  // refuses whichever factor you delete from the product — no single one is
+  // attributable to it. This holds the method fixed so the HOST factor has a
+  // witness of its own: without `hosts.size` the product is 1 x 2 = 2, which
+  // equals the two performed calls, and the widening `POST b.example.com/one`
+  // would mint.
+  it('refuses when two hosts and two paths span more than the steps perform', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://a.example.com/one', method: 'POST' }),
+      httpStep('s2', { url: 'https://b.example.com/two', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
+  // `contractGrants` matches hostname and pathname only, so a minted contract
+  // says nothing about the scheme or the port. These two refusals are what keep
+  // "the pattern denotes exactly the literal it came from" true rather than
+  // merely intended: without the first, a contract derived from an https step
+  // also grants the cleartext downgrade; without the second, one derived from
+  // :8443 also grants :9999 — a different service on the same host.
+  it('refuses a write to a cleartext URL, which the grant could not distinguish', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'http://api.example.com/orders', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
+  it('refuses a write to an explicit port, which the grant does not carry', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://api.example.com:8443/orders', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
+  // The parameter check sees `{{ params.x }}` and nothing else. A step-output
+  // reference names no parameter, so without its own refusal the template text
+  // itself becomes the path pattern.
+  it('refuses a URL templated from an earlier step, which names no parameter', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://api.example.com/{{ s0.result }}', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
+  it('still mints for several paths on one host, where the product IS the steps', () => {
+    const c = mintContractFromSteps([
+      httpStep('s1', { url: 'https://api.example.com/one', method: 'POST' }),
+      httpStep('s2', { url: 'https://api.example.com/two', method: 'POST' }),
+    ]);
+    expect(c!.pathPatterns.sort()).toEqual(['/one', '/two']);
+    expect(c!.hostPatterns).toEqual(['api.example.com']);
+  });
+
+  // The mint and the save gate must agree: a contract this produces has to
+  // survive the validator that runs on every save, or minting wedges saving.
+  it('produces a contract its own save validator accepts', () => {
+    const steps = [httpStep('s1', { url: 'https://api.example.com/orders', method: 'POST' })];
+    const capabilityContract = mintContractFromSteps(steps);
+    expect(validateContractAgainstSteps({ capabilityContract, steps })).toBeNull();
+  });
+});
+
+describe('mintContractFromSteps — glob metacharacters in a literal URL', () => {
+  const httpStep = (id: string, template: Record<string, unknown>): InlinePipelineStep =>
+    ({ id, task: 'call it', tool: 'http_request', input_template: template });
+
+  // The patterns this function writes are read back as GLOBS. A literal URL may
+  // legally contain `*`, so a derived pattern could match a wider set than the
+  // step it came from — which destroys the only property that makes deriving
+  // from steps sound. Mutation: drop the GLOB_META check → both of these fail.
+  it('refuses a host carrying a glob metacharacter', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://a*b.example.com/orders', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
+  it('refuses a path carrying a glob metacharacter', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://api.example.com/a*b', method: 'POST' }),
+    ])).toBeUndefined();
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://api.example.com/x[1]', method: 'POST' }),
+    ])).toBeUndefined();
   });
 });

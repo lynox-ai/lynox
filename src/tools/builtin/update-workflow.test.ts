@@ -226,6 +226,12 @@ describe('update_workflow_steps (Slice C edit-via-chat tool)', () => {
     );
     expect(out).toContain('first-run-confirm was reset');
     expect(getPipeline('wf-1', history)!.confirmedAt).toBeUndefined();
+    // The grant must not outlive the confirm it rests on. It fails closed either
+    // way — a pinned grant can never be broader than what it pinned — but a
+    // contract describing the PRE-edit steps is a state nobody should have to
+    // reason about. Asserted separately from confirmedAt on purpose: dropping
+    // the contract reset leaves the line above green and only this one red.
+    expect(getPipeline('wf-1', history)!.capabilityContract).toBeUndefined();
   });
 
   it('clears stale confirmedAt for an UNGOVERNED scheduled edit', async () => {
