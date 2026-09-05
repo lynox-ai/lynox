@@ -207,6 +207,46 @@ describe('mintContractFromSteps', () => {
     ])).toBeUndefined();
   });
 
+  // The case above varies the method, the host AND the path at once, so it
+  // refuses whichever factor you delete from the product — no single one is
+  // attributable to it. This holds the method fixed so the HOST factor has a
+  // witness of its own: without `hosts.size` the product is 1 x 2 = 2, which
+  // equals the two performed calls, and the widening `POST b.example.com/one`
+  // would mint.
+  it('refuses when two hosts and two paths span more than the steps perform', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://a.example.com/one', method: 'POST' }),
+      httpStep('s2', { url: 'https://b.example.com/two', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
+  // `contractGrants` matches hostname and pathname only, so a minted contract
+  // says nothing about the scheme or the port. These two refusals are what keep
+  // "the pattern denotes exactly the literal it came from" true rather than
+  // merely intended: without the first, a contract derived from an https step
+  // also grants the cleartext downgrade; without the second, one derived from
+  // :8443 also grants :9999 — a different service on the same host.
+  it('refuses a write to a cleartext URL, which the grant could not distinguish', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'http://api.example.com/orders', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
+  it('refuses a write to an explicit port, which the grant does not carry', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://api.example.com:8443/orders', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
+  // The parameter check sees `{{ params.x }}` and nothing else. A step-output
+  // reference names no parameter, so without its own refusal the template text
+  // itself becomes the path pattern.
+  it('refuses a URL templated from an earlier step, which names no parameter', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://api.example.com/{{ s0.result }}', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
   it('still mints for several paths on one host, where the product IS the steps', () => {
     const c = mintContractFromSteps([
       httpStep('s1', { url: 'https://api.example.com/one', method: 'POST' }),

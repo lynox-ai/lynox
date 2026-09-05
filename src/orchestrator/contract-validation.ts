@@ -179,21 +179,49 @@ export function mintContractFromSteps(steps: InlinePipelineStep[] | undefined): 
     // fleet-wide grant the validator rejects — refuse the whole contract rather
     // than mint a partial one that silently omits a write the workflow performs.
     if (typeof rawUrl !== 'string') return undefined;
+    // A `{{ … }}` marker means the URL is not literal, and only ONE of its two
+    // forms is caught above: `{{ params.x }}` names a parameter, a step-output
+    // reference (`{{ s0.result }}`) names none, so the parameter check never sees
+    // it. Minting from it stores the percent-encoded template TEXT as the pattern,
+    // which can never match the URL the step resolves at run time — fail-closed,
+    // but a grant that reads as granted and is not. Refuse instead of storing it.
+    if (rawUrl.includes('{{')) return undefined;
     let parsed: URL;
     try {
       parsed = new URL(rawUrl);
     } catch {
       return undefined;
     }
-    // The minter writes these patterns and `contractGrants` reads them as GLOBS
-    // (`globToRegex`: `*`, `**`, `?`, `[…]`). A literal URL is allowed to contain
-    // those characters — `new URL('https://a*b.example.com/x')` parses, hostname
-    // `a*b.example.com` — and the grant would then match a WIDER set than the
-    // step it was derived from, silently. Deriving from steps is only sound while
-    // the derived pattern denotes exactly the literal it came from, so refuse
-    // rather than escape: a real endpoint does not carry glob metacharacters, and
-    // refusing keeps the failure in the one place that already means "a human has
-    // to say what is allowed".
+    // `contractGrants` matches the resolved `hostname` and `pathname` and NOTHING
+    // else — never the scheme, never the port. A contract minted from
+    // `https://api.example.com:8443/orders` would therefore equally grant
+    // `http://api.example.com:9999/orders`: a downgrade to cleartext, and a
+    // different service on the same host. No step performs either. The matcher is
+    // not the place to fix that — it shipped in B1 and other callers depend on its
+    // shape — so the minter refuses the two axes it cannot express, which is what
+    // keeps the sentence below true instead of merely intended.
+    if (parsed.protocol !== 'https:') return undefined;
+    if (parsed.port !== '') return undefined;
+
+    // Those patterns are read as GLOBS, and exactly ONE glob character is both
+    // reachable and widening: `*`. `new URL('https://a*b.example.com/x')` parses
+    // with hostname `a*b.example.com`, and the grant would then match a wider set
+    // than the step it came from, silently.
+    //
+    // `GLOB_META` refuses `?`, `[` and `]` as well, and the honest reason is not
+    // the one this comment used to give. `globToRegex` ESCAPES `[` and `]`, so
+    // they are not metacharacters at all; a literal `?` cannot reach `hostname` or
+    // `pathname` because it opens the query. What `[`/`]` DO reach is an IPv6
+    // literal (`https://[::1]/x` → hostname `[::1]`), and `contractGrants` strips
+    // those brackets before matching — so minting the bracketed form yields a
+    // pattern that can never match: a grant that reads as granted and is not.
+    // Refusing says that at mint time rather than at 3am. (Corrected 2026-09-05
+    // after the claim was measured against `globToRegex`.)
+    //
+    // Deriving a right from steps is only sound while the derived pattern denotes
+    // exactly the literal it came from, so refuse rather than escape: a real
+    // endpoint does not carry glob metacharacters, and refusing keeps the failure
+    // in the one place that already means "a human has to say what is allowed".
     if (GLOB_META.test(parsed.hostname) || GLOB_META.test(parsed.pathname)) return undefined;
     methods.add(rawMethod as HttpMethod);
     hosts.add(parsed.hostname);

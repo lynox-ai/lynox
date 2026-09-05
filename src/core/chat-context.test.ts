@@ -57,8 +57,15 @@ describe('resolveChatContext (Slice C context-injection seam)', () => {
 
   // The reader that makes the origin field more than a stored value. Without it
   // the provenance is written and never surfaced — the shape `inquiry` has had
-  // for a while: one writer, no reader. Mutation: hard-code the origin to
-  // 'reviewed' in mintContractFromSteps → the first of these fails.
+  // for a while: one writer, no reader.
+  //
+  // The mutation that kills this lives in the READER: make `contractNote` fall
+  // through to the neutral ' · contract-governed' for 'authorship'. Mutating
+  // `mintContractFromSteps` kills nothing in this file — these tests build their
+  // contract literal and never call the minter. (Corrected 2026-09-05; the
+  // comment named the minter, and that mutation was measured to kill zero tests
+  // here. A comment that teaches a wrong mutation is worse than none: the next
+  // reader runs it, sees green, and concludes the test is weak.)
   it('tells the model an authorship-derived grant was NOT reviewed', () => {
     const contract: CapabilityContract = {
       version: 1, origin: 'authorship', grantedTools: ['http_request'], httpMethods: ['POST'],
