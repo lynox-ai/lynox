@@ -570,6 +570,32 @@ if $mode_meta || $mode_files; then
     #
     # ACMR: a file the range only DELETES is not scanned. Its content is leaving,
     # and firing there would block the very commit that removes a name.
+    # THE RANGE, and why it is not `--not --remotes=origin`.
+    #
+    # A two-base (criss-cross) merge can make `git merge-base` pick the base that
+    # re-includes a commit already on origin/main, and this half has no escape
+    # hatch — the pragma and the allow-list belong to the tree scan below. The
+    # obvious repair is to take the commits that are on no remote at all. It was
+    # measured rather than adopted, and the measurement says no:
+    #
+    #   ordinary branch, origin present   identical commit set — buys nothing
+    #   origin refs absent                merge-base form: 0 commits
+    #                                     --not --remotes: the ENTIRE history
+    #   tracking ref stale                scans more than the push contains
+    #
+    # The second row is the disqualifying one. A repo with no fetched origin refs
+    # — a fresh worktree before its first fetch, a differently named remote — would
+    # scan every commit that ever existed on every push: minutes in the hook, and
+    # any name anywhere in history blocks every push permanently. That is the
+    # "unpushable hook teaches --no-verify" failure this file warns about, traded
+    # for a case that could not be reproduced here (one criss-cross construction
+    # was attempted; merge-base landed on the name-carrying commit itself, so both
+    # forms excluded it — the adversarial report of it stands unmatched, not
+    # refuted).
+    #
+    # If the false positive is ever OBSERVED, the guarded form is one line away:
+    # use `--not --remotes=origin` only when that exclusion set is non-empty, and
+    # fall back to the merge-base range when it is not.
     files_revs=''
     if ! files_revs="$(git --no-replace-objects rev-list "${meta_base}..${meta_head}" 2>/dev/null)"; then
       echo "❌ public-repo-guard: cannot resolve ${meta_base}..${meta_head}." >&2
