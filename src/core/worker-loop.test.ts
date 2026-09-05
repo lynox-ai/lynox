@@ -1822,6 +1822,76 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     expect(store.getPending(SESSION_ID)).toBeUndefined(); // slot is free again
   });
 
+  // 13 — after stop(), a SECOND question must be refused, not parked. Found by
+  // the delta round on the fix commit: `stop()` clears activeTasks, so looking
+  // the entry up per call made the aborted-check see `undefined`, and the wait
+  // then ran with NO signal — an unabortable park for the full TTL. Worse than
+  // what it replaced: before the drain fix the same case threw
+  // PromptConflictError, i.e. loud. Mutation: look `active` up inside the
+  // closure again → this hangs.
+  it('refuses a second question after stop() instead of parking it forever', async () => {
+    let second: string | undefined;
+    const store = makeRealStore();
+    const session = {
+      sessionId: SESSION_ID,
+      _recreateAgent: vi.fn(),
+      promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
+      run: vi.fn(async () => {
+        await session.promptUser!('First?', ['Yes', 'No']);   // parked, then stopped
+        second = await session.promptUser!('Second?', ['Yes', 'No']);
+        return 'Done.';
+      }),
+    };
+    const engine = makeEngine({
+      taskManager: makeTaskManager([makeTask()]),
+      session: session as unknown as Session,
+      promptStore: store,
+    });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    closers.unshift(() => { loop.stop(); });
+    await loop.tick();
+    await settle(() => store.getPending(SESSION_ID) !== undefined);
+    loop.stop();
+    await settle(() => second !== undefined);
+    expect(second).toBe('__dismissed__');
+    // and nothing was left parked behind it
+    expect(store.getPending(SESSION_ID)).toBeUndefined();
+  });
+
+  // 14 — the drain must not be able to break the cancellation it is cleaning up
+  // after. `Engine.shutdown()` stops the loop and later closes the history DB,
+  // so `expirePrompt` can land on a closed handle; letting that escape would
+  // reject promptUser and leave the wait unsettled — the very failure this
+  // change removes. Mutation: drop the try/catch → this hangs.
+  it('still settles the wait when the drain throws', async () => {
+    const real = makeRealStore();
+    const store = new Proxy(real, {
+      get(t, prop, r) {
+        if (prop === 'expirePrompt') return () => { throw new Error('database connection is not open'); };
+        return Reflect.get(t, prop, r) as unknown;
+      },
+    }) as PromptStore;
+    let answer: string | undefined;
+    const session = {
+      sessionId: SESSION_ID,
+      _recreateAgent: vi.fn(),
+      promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
+      run: vi.fn(async () => { answer = await session.promptUser!('Allow?', ['Yes', 'No']); return 'Done.'; }),
+    };
+    const engine = makeEngine({
+      taskManager: makeTaskManager([makeTask()]),
+      session: session as unknown as Session,
+      promptStore: store,
+    });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    closers.unshift(() => { loop.stop(); });
+    await loop.tick();
+    await settle(() => real.getPending(SESSION_ID) !== undefined);
+    loop.stop();
+    await settle(() => answer !== undefined);
+    expect(answer).toBe('__dismissed__');
+  });
+
   // 8 — the TTL is INHERITED, not merely available. The store having a 24h
   // expiry and this path benefiting from it are two claims; only the second one
   // matters here, and nothing else in this file tests it. An expired prompt has

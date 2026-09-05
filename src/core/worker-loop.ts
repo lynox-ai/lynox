@@ -558,6 +558,14 @@ export class WorkerLoop {
     // prompt — `POST /api/sessions/:id/reply` -> `answerUser` — only ever knew
     // about store rows. Going through the store INHERITS all four rather than
     // re-implementing them.
+    // Captured ONCE, here, where `executeTask` has just put the entry in the map
+    // (both entry points — `tick` and `runTriggerNow` — go through it). Looking
+    // it up per call instead was a real defect: `stop()` CLEARS the map, so a
+    // second `ask_user` after a cancellation found `undefined`, skipped the
+    // aborted-check below, and then waited with NO signal — an unabortable park
+    // for the full 24h TTL. The entry object outlives the map entry, which is
+    // exactly what makes the cancellation observable after a `stop()`.
+    const active = this.activeTasks.get(task.id);
     session.promptUser = async (rawQuestion: string | PromptText, options?: string[]): Promise<string> => {
       // Resolved at ASK time, not at wiring time: `Engine._promptStore` starts
       // null and is assigned during init (engine.ts:1101), and is set back to
@@ -569,7 +577,6 @@ export class WorkerLoop {
       // here and the flattened form is the honest one. This is the ONE
       // difference from the HTTP path that is deliberate, not a gap.
       const question = flattenPrompt(rawQuestion);
-      const active = this.activeTasks.get(task.id);
       // Already cancelled: `waitForSettled` would settle 'aborted' at once, but
       // only AFTER this inserted a row and pushed a high-priority question at a
       // user whose task is gone. Refuse before either side effect.
@@ -608,17 +615,28 @@ export class WorkerLoop {
         // very next `ask_user` throws `PromptConflictError` out of this closure;
         // and it stays answerable for its full TTL with nobody awaiting the
         // answer — the shape `WallClockBudget`'s docstring cites as issue #77.
-        // Drain it, exactly as the HTTP takeover path does. Idempotent, so an
-        // already-`expired` outcome costs one no-op UPDATE.
-        promptStore.expirePrompt(promptId);
+        // Drain it, the same call the HTTP takeover path makes. Idempotent, so
+        // an already-`expired` outcome costs one no-op UPDATE.
+        //
+        // SWALLOWED, and not defensively: this runs on the CANCELLATION path,
+        // and `Engine.shutdown()` calls `stop()` and later closes the history
+        // DB — so the write can land on a closed handle and throw. Letting that
+        // escape would reject `promptUser` and leave the agent's wait unsettled,
+        // i.e. the failure this whole change removes, re-introduced by its own
+        // cleanup. `http-api.ts` swallows the same call for the same reason and
+        // names the cost in its comment: the row may survive to its TTL. A
+        // leaked row is strictly better than a wedged wait.
+        try { promptStore.expirePrompt(promptId); } catch { /* closing/closed DB — the wait must still settle */ }
         return DISMISSED_ANSWER;
       } finally {
         if (active) {
           active.pendingPromptId = undefined;
           // Only re-arm while this entry is still the live one. `stop()` clears
-          // the map, and `executeTask`'s own finally can only clear a timer it
-          // can still reach through it — so resuming a dropped entry arms a
-          // timer nothing will ever clear.
+          // the map, and `executeTask`'s finally can only clear a timer it can
+          // still reach through it — so resuming a dropped entry arms a timer
+          // that no longer has an owner. It is `unref()`d and its fire is a
+          // no-op on an already-aborted controller, so this is hygiene, not a
+          // behaviour fix; the mutation that removes it survives by design.
           if (this.activeTasks.get(task.id) === active) active.resumeDeadline();
         }
       }
