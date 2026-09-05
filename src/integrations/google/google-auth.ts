@@ -24,6 +24,21 @@ interface TokenData {
    * so this stays absent there and the direct path below is the only one.
    */
   refresh_handle?: string;
+  /**
+   * The OAuth client id this token was minted under — recorded ONLY where this
+   * process performed the exchange itself and Google accepted that id.
+   *
+   * It exists to tell two things apart that Google reports identically. See
+   * `reclassifyForeignGrant`: an `invalid_grant` means "the user revoked" and
+   * also "you are presenting a token minted by a different client", and without
+   * the minting id the second one is indistinguishable from the first — so it
+   * deletes a living grant.
+   *
+   * Absent means UNKNOWN, and unknown is not a mismatch: tokens the control
+   * plane minted (`setTokens`) and every blob written before this field existed
+   * carry nothing, and must keep behaving exactly as they did.
+   */
+  client_id?: string;
 }
 
 /**
@@ -243,8 +258,16 @@ function validateControlPlaneRefresh(json: unknown): OAuthRefreshResponse {
  */
 const MAX_CP_TOKEN_LIFETIME_MS = 24 * 60 * 60 * 1000;
 
-/** Validate a token response from Google and convert to TokenData. */
-function validateTokenResponse(json: unknown): TokenData {
+/**
+ * Validate a token response from Google and convert to TokenData.
+ *
+ * `mintedBy` is the client id this process posted to get this response, and is
+ * recorded on the token. It is a parameter rather than a field read inside
+ * because the only honest value is the one the caller actually presented: the
+ * refresh path reuses this function without minting anything, and stamping the
+ * currently-configured id there would assert a provenance nobody measured.
+ */
+function validateTokenResponse(json: unknown, mintedBy?: string | undefined): TokenData {
   if (typeof json !== 'object' || json === null) {
     throw new Error('Invalid token response: not an object');
   }
@@ -261,6 +284,7 @@ function validateTokenResponse(json: unknown): TokenData {
     refresh_token: typeof data['refresh_token'] === 'string' ? data['refresh_token'] : '',
     expires_at: Date.now() + (data['expires_in'] as number) * 1000,
     scopes: scope ? scope.split(' ') : [],
+    ...(mintedBy ? { client_id: mintedBy } : {}),
   };
 }
 
@@ -354,9 +378,14 @@ const CLIENT_MISCONFIGURED_COOLDOWN_MS = 300_000;
  * separates failures by their `error` CODE, not by their cause. A wrong client
  * *secret* surfaces as `invalid_client` and is covered. A syntactically valid
  * but WRONG client *id* authenticates fine and makes Google reject the token as
- * foreign — reported as `invalid_grant`, indistinguishable here from a real
- * revocation, because `TokenData` does not record the id that minted it. That
- * case still deletes. Closing it needs the minting `client_id` persisted.
+ * foreign — reported as `invalid_grant`, indistinguishable *here* from a real
+ * revocation, because the body carries nothing that separates them.
+ *
+ * That second case is no longer decided here. It is decided one step later, by
+ * `reclassifyForeignGrant`, which compares the id recorded at minting time
+ * against the one we just presented — the comparison this function has no
+ * access to. This one stays a pure function of the response, which is what
+ * makes it testable against Google's wire format alone.
  */
 
 function classifyRefreshFailure(httpStatus: number, body: string): RefreshFailureKind {
@@ -380,6 +409,43 @@ function classifyRefreshFailure(httpStatus: number, body: string): RefreshFailur
   // 4xx with a JSON body naming neither code → unknown failure mode.
   // Conservative default: keep the token.
   return 'transient';
+}
+
+/**
+ * Separate "the user revoked the grant" from "we presented the token to the
+ * wrong client" — the two cases `classifyRefreshFailure` cannot tell apart.
+ *
+ * Google answers `invalid_grant` to both. A wrong client *secret* fails earlier
+ * and louder (`invalid_client`, handled since core#1252); a wrong client *id*
+ * that is syntactically valid authenticates fine, and Google then rejects the
+ * refresh token as foreign to that client. The response is identical to a real
+ * revocation, so the only thing that separates them is the id recorded when the
+ * token was minted — which is why this takes the ids rather than the body.
+ *
+ * Three states, and only ONE of them changes the outcome:
+ *
+ * - **unknown** (either id absent) → unchanged. A control-plane-minted token
+ *   and every blob predating `client_id` land here. Treating unknown as a
+ *   mismatch would keep genuinely revoked grants forever and make reconnecting
+ *   impossible — the opposite failure, and the more expensive one.
+ * - **equal** → unchanged. The token really is dead; deleting it is right.
+ * - **different** → `client-misconfigured`. The grant is intact; our
+ *   registration is what is wrong. Reusing that kind rather than adding one is
+ *   deliberate: its remedy already says exactly this ("Your Google connection
+ *   is intact … an operator corrects them"), and it arms the same cool-down.
+ *
+ * The wrong direction is worth naming because a fix aimed at one failure mode
+ * produces the other (`fb_overrule_swap`): being too eager here strands users
+ * with a dead token no reconnect clears, being too shy deletes living grants.
+ */
+function reclassifyForeignGrant(
+  failure: RefreshFailureKind,
+  mintedBy: string | undefined,
+  presentedBy: string | undefined,
+): RefreshFailureKind {
+  if (failure !== 'grant-revoked') return failure;
+  if (mintedBy === undefined || presentedBy === undefined) return failure;
+  return mintedBy === presentedBy ? failure : 'client-misconfigured';
 }
 
 function base64url(input: string | Buffer): string {
@@ -646,7 +712,7 @@ export class GoogleAuth {
           throw new Error(`Token exchange failed: ${response.status} ${text}`);
         }
 
-        this.tokenData = validateTokenResponse(await response.json());
+        this.tokenData = validateTokenResponse(await response.json(), clientId);
         saveTokenData(this.tokenData, this.vault);
       } finally {
         close();
@@ -704,7 +770,7 @@ export class GoogleAuth {
       throw new Error(`Token exchange failed: ${response.status} ${text}`);
     }
 
-    this.tokenData = validateTokenResponse(await response.json());
+    this.tokenData = validateTokenResponse(await response.json(), clientId);
     saveTokenData(this.tokenData, this.vault);
   }
 
@@ -761,7 +827,7 @@ export class GoogleAuth {
         });
 
         if (tokenRes.ok) {
-          this.tokenData = validateTokenResponse(await tokenRes.json());
+          this.tokenData = validateTokenResponse(await tokenRes.json(), clientId);
           saveTokenData(this.tokenData, this.vault);
           return;
         }
@@ -1021,7 +1087,17 @@ export class GoogleAuth {
       // Wipe the vault ONLY when the grant itself is gone. A bad client
       // secret (`invalid_client`) and a network blip both leave the user's
       // grant intact, so both keep the token — see `classifyRefreshFailure`.
-      const failure = classifyRefreshFailure(response.status, text);
+      //
+      // The second step is the one the response cannot decide: an `invalid_grant`
+      // from a client that did not mint this token is OUR misconfiguration, not
+      // a revocation. `this.clientId` is the id we just presented on the direct
+      // path; on the control-plane path it is `undefined` here anyway, and a
+      // CP-minted token records no minting id, so that path is left untouched.
+      const failure = reclassifyForeignGrant(
+        classifyRefreshFailure(response.status, text),
+        this.tokenData.client_id,
+        this.clientId,
+      );
       // Chosen ONCE, here, where `cp` says which client is actually invalid.
       // Not a new failure KIND, so not a new `REFRESH_FAILURE_REMEDY` entry:
       // the same classification with a different audience. On the direct path
@@ -1066,9 +1142,18 @@ export class GoogleAuth {
     // as `invalid_grant` — indistinguishable from a real revocation, so it would
     // delete a living grant. Drop it; a fresh claim seals a new one.
     const rotated = refreshed.refresh_token !== '' && refreshed.refresh_token !== this.tokenData.refresh_token;
-    // Preserve refresh_token and scopes from previous auth if not returned
+    // Preserve refresh_token and scopes from previous auth if not returned.
+    //
+    // `client_id` is stamped here too, and this line is what makes the foreign-
+    // grant check reach ALREADY-CONNECTED installs: their stored blob predates
+    // the field, so it is UNKNOWN and the check stands down forever. A direct
+    // refresh that Google just accepted under `this.clientId` is proof that this
+    // pair owns the token — the same evidence the mint sites record, arriving
+    // later. Without it the fix would only ever protect connections made after
+    // it shipped, which is the smaller half of the fleet.
     this.tokenData = {
       ...this.tokenData,
+      ...(this.clientId ? { client_id: this.clientId } : {}),
       access_token: refreshed.access_token,
       refresh_token: refreshed.refresh_token || this.tokenData.refresh_token,
       expires_at: refreshed.expires_at,
