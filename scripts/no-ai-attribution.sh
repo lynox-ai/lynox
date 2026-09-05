@@ -68,10 +68,34 @@ check_range() {
   local base="${1:-}" head="${2:-}"
   [ -n "$base" ] && [ -n "$head" ] || usage
 
-  local bad=0
-  local sha
+  local bad=0 scanned=0
+  local sha revs
   # `git rev-list base..head` — only the commits this PR ADDS.
-  for sha in $(git rev-list "${base}..${head}" 2>/dev/null); do
+  #
+  # Captured WITH ITS STATUS rather than interpolated into the `for` header. In
+  # that position the exit code belongs to the loop, not to git: an unresolvable
+  # base exits 128 with an empty list, the body never runs, and this function
+  # reported `clean ✓ (0 commits scanned)` and exit 0 on a range it could not
+  # read. Measured on a fixture with identical substrate — the same
+  # trailer-bearing commit gave exit 1 against a resolvable base and exit 0
+  # against an unresolvable one. This check is REQUIRED in both repos, so that
+  # direction of failure hands out a green tick for an unscanned range.
+  #
+  # `exit 2`, not 1: "could not run" is a different fact from "found something"
+  # and from "clean". Same three-way split `scripts/lib/guard-file-list.sh`
+  # makes for the file-listing guards. Its helpers are not reused here on
+  # purpose — they wrap `git ls-files`, and their refusal says "could not list
+  # the files to scan", which would name the wrong cause for a commit range.
+  if ! revs="$(git rev-list "${base}..${head}" 2>&1)"; then
+    {
+      echo "❌ no-ai-attribution: could not enumerate ${base}..${head}."
+      echo "   ${revs}"
+      echo "   Refusing to report a clean range this check could not read."
+    } >&2
+    exit 2
+  fi
+  for sha in $revs; do
+    scanned=$((scanned + 1))
     if git show -s --format='%B' "$sha" | grep -qiE "$PATTERN"; then
       if [ "$bad" -eq 0 ]; then
         echo ""
@@ -101,7 +125,10 @@ EOF
     exit 1
   fi
 
-  echo "no-ai-attribution: clean ✓ ($(git rev-list --count "${base}..${head}" 2>/dev/null || echo 0) commits scanned)"
+  # Counted in the loop, not by a second `rev-list --count`: that call carried
+  # its own `|| echo 0`, so a failure printed the same "0 commits scanned" the
+  # bug above produced. One enumeration, one number, both already validated.
+  echo "no-ai-attribution: clean ✓ (${scanned} commits scanned)"
   exit 0
 }
 

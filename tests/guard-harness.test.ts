@@ -239,10 +239,25 @@ const GATES: Readonly<Record<string, GateEntry>> = {
   'public-repo-guard': { kind: 'covered' },
   'drift-guard': { kind: 'covered' },
   'positioning-guard': { kind: 'covered' },
+  // The reason below was true and aimed past the defect. This harness starves a
+  // guard of its whole TREE, and security-scan does refuse that. What it did not
+  // refuse was a single missing member of its hardcoded wrap list: the `-f` test
+  // sat inside the grep condition, so a path that had gone dropped out of the set
+  // and the loop printed its tick for a set one file short. Measured 2026-09-05 —
+  // six of seven existed; google-gmail.ts went with its tool in 1a5eacbd (#180),
+  // four months earlier. Fixed, and covered by tests/security-scan.test.ts, which
+  // drives the real script against a fixture tree and asserts every member is
+  // load-bearing rather than only the one that happened to go.
+  //
+  // The stripped exit moved 1 → 2 as a RESULT of that fix, and the change is the
+  // improvement, not a side effect: outside a source tree the old script fell
+  // through to its own exit 1, claiming it had found a violation when what it had
+  // was no tree to look at. This harness caught the move on the first run.
   'security-scan': {
     kind: 'exempt',
-    reason: 'refuses rather than reporting clean when its source tree is absent',
-    expectStrippedExit: 1,
+    reason:
+      'refuses rather than reporting clean when its source tree is absent — the starvation THIS harness models, and it now answers 2 rather than 1, because "there is no tree" is not a finding. The other door, a single absent member of its hardcoded wrap list, is not reachable from here and is covered by tests/security-scan.test.ts',
+    expectStrippedExit: 2,
   },
   'default-on-inventory': {
     kind: 'exempt',
@@ -270,9 +285,19 @@ const GATES: Readonly<Record<string, GateEntry>> = {
       'takes its commit range as arguments and enumerates no tree, and refuses a call that does not supply both — same shape as no-ai-attribution below. NOT exempt from exiting 0 after checking nothing: with no pattern configured it does exactly that, deliberately, and the comment above says so',
     expectStrippedExit: 2,
   },
+  // Same correction as security-scan above. The probe invokes this script with NO
+  // arguments, so what it proved was the `usage` path — and the old reason
+  // described only the `strip` verb, which takes a file. The `check` verb takes a
+  // commit RANGE, and an unresolvable base was exactly the starvation this harness
+  // models, reached through a door the probe cannot open: `git rev-list` sat in a
+  // `for` header with its status discarded, so it exited 0 with
+  // `clean ✓ (0 commits scanned)` on a range it could not read — on a check that
+  // is REQUIRED in both repos. Fixed, and covered by tests/no-ai-attribution.test.ts
+  // with both halves of an identical-substrate pair.
   'no-ai-attribution': {
     kind: 'exempt',
-    reason: 'takes a commit-message file as an argument; it enumerates no tree and refuses a call without one',
+    reason:
+      'enumerates no tree: `strip` takes a commit-message file and `check` takes a commit range, both as arguments, and a call with neither is refused — which is what this probe exercises. It is NOT exempt from the class: the range door is covered by tests/no-ai-attribution.test.ts, where an unreadable range exits 2 instead of reporting clean',
     expectStrippedExit: 2,
   },
   'hex-guard': {
@@ -416,7 +441,11 @@ describe('gate coverage', () => {
         expect(res.status, `exemption reason claims exit ${entry.expectStrippedExit}: ${entry.reason}`)
           .toBe(entry.expectStrippedExit);
         if (entry.expectStrippedStderr) {
-          expect(`${res.stdout}${res.stderr}`, `${name} must SAY why it refused, not merely exit`)
+          // `res.stderr` alone: `RunResult` declares no `stdout` and `runFull` never
+          // sets one, so the old `${res.stdout}` interpolated the literal string
+          // "undefined" into every haystack. Harmless only because the one message
+          // it guards is on stderr — and invisible because tests are outside tsc.
+          expect(res.stderr, `${name} must SAY why it refused, not merely exit`)
             .toMatch(entry.expectStrippedStderr);
         }
       } finally {
