@@ -615,17 +615,23 @@ export class WorkerLoop {
         // very next `ask_user` throws `PromptConflictError` out of this closure;
         // and it stays answerable for its full TTL with nobody awaiting the
         // answer — the shape `WallClockBudget`'s docstring cites as issue #77.
-        // Drain it, the same call the HTTP takeover path makes. Idempotent, so
-        // an already-`expired` outcome costs one no-op UPDATE.
+        // Drain the row. Idempotent and scoped `WHERE status='pending'`, so an
+        // already-`expired` outcome costs one no-op UPDATE and a concurrent
+        // answer is never overwritten.
         //
-        // SWALLOWED, and not defensively: this runs on the CANCELLATION path,
-        // and `Engine.shutdown()` calls `stop()` and later closes the history
-        // DB — so the write can land on a closed handle and throw. Letting that
-        // escape would reject `promptUser` and leave the agent's wait unsettled,
-        // i.e. the failure this whole change removes, re-introduced by its own
-        // cleanup. `http-api.ts` swallows the same call for the same reason and
-        // names the cost in its comment: the row may survive to its TTL. A
-        // leaked row is strictly better than a wedged wait.
+        // The throw is SWALLOWED, and the reason is specific to where this sits.
+        // It runs on the CANCELLATION path, and `Engine.shutdown()` calls
+        // `stop()` and later closes the history DB — so the write can land on a
+        // closed handle. By this point the wait has already settled, so a throw
+        // would not re-park it; what it WOULD do is reject `promptUser`, turning
+        // a clean cancellation into a failed tool call for an agent that is
+        // being torn down anyway. A row that survives to its TTL is the cheaper
+        // outcome.
+        //
+        // (The HTTP takeover path faces the same hazard and answers it by
+        // ORDERING instead — it aborts before the bookkeeping, so a store throw
+        // cannot leave its run parked. That option is not available here,
+        // because here the abort is what ended the wait in the first place.)
         try { promptStore.expirePrompt(promptId); } catch { /* closing/closed DB — the wait must still settle */ }
         return DISMISSED_ANSWER;
       } finally {
