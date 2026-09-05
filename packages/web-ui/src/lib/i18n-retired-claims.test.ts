@@ -12,67 +12,120 @@ import { fileURLToPath } from 'node:url';
  * when SearXNG does not land, and `http_request` is registered unconditionally
  * too. There is no default self-host path on which only inference leaves.
  *
- * WHY THIS FILE WAS REWRITTEN (2026-09-05). Its first version looked for two
- * NAMED KEYS and forbade four LITERAL STRINGS in them. `config.provider_desc`
- * was a third key carrying a fifth wording of the same claim — "Daten bleiben
- * immer lokal — nur die Inferenz nutzt den Provider." / "Your data stays local —
- * only inference uses the provider." — and was structurally unreachable. The PR
- * that repaired three wordings in this very file walked past the fourth, and so
- * did the test it shipped.
+ * WHY THIS FILE WAS REWRITTEN. Its first version looked for two NAMED KEYS and
+ * forbade four LITERAL STRINGS in them. `config.provider_desc` was a third key
+ * carrying a fifth wording of the same claim, and was structurally unreachable —
+ * the PR that repaired three wordings in this very file walked past the fourth,
+ * and so did the test it shipped. The most dangerous place is the one the fix
+ * lives in.
  *
- * That is the lesson worth keeping: **the most dangerous place is the one the fix
- * lives in.** A set drawn by FORM (known strings) or by LOCATION (known keys)
- * cannot contain a member nobody had seen; a set drawn by the CLAIM can. So the
- * question this file asks is no longer "does this sentence appear?" but "does any
- * string assert that only inference leaves the host?", and it asks it of every
- * line in the table.
+ * ⚠ WHAT THIS IS, STATED HONESTLY. It is NOT a detector "by claim" — nothing
+ * built out of regular expressions reads meaning. It matches CLAIM SHAPES over a
+ * corpus, and its coverage IS that corpus. The first draft of this rewrite called
+ * itself claim-based; an adversary asked for wordings that assert the claim and
+ * slip through, and produced **31 on the first pass** — `device`, `laptop`, `box`,
+ * `Rechner`, `Gerät`, `Umgebung`, `Installation`, subjects other than "data",
+ * `goes out` instead of `leaves`. The vocabulary lists below exist because of
+ * that, and they are still lists: **a wording nobody has written down yet will
+ * pass.** The honest bound is "everything we have ever seen, plus what one
+ * adversarial pass could invent", and the correct response to a new one is to add
+ * it here, not to assume it cannot exist.
  *
- * MEASURED IN BOTH DIRECTIONS, because widening a claim detector is how it starts
- * firing on true sentences — the sibling pattern in the private repo had to be
- * narrowed once after it hit honest prose about data centres. Every wording ever
- * retired as this claim must match, and a list of sentences that are TRUE must
- * not. Both lists are asserted below; neither is decoration.
+ * MEASURED IN BOTH DIRECTIONS, because widening is how a claim detector starts
+ * failing on true copy. The same adversarial pass produced eight FALSE ALARMS,
+ * and the sharpest one was the honest correction itself — "Nur die Inferenz
+ * erreicht deinen LLM-Anbieter — Websuche und HTTP-Tool gehen woanders hin"
+ * names the very egress the claim forgets, and the first draft rejected it. A
+ * guard that reds correct copy is a guard someone deletes. Every case below is
+ * asserted in both directions.
  *
  * The sources are read as text, like `preset-cards-i18n.test.ts` does, so this
  * does not depend on a Svelte-aware import of the runes module.
  */
 
+/*
+ * Vocabularies, so a widening happens in ONE place instead of inside five
+ * regexes — the shape that let `machine` be covered while `laptop` was not.
+ */
+const HOST_EN =
+	'(networks?|hosts?|machines?|systems?|servers?|devices?|laptops?|computers?|boxes|box|hardware|infrastructure|premises)';
+const HOST_DE =
+	'(Netzwerke?|Netze[sn]?|Netz|Hosts?|Maschinen?|Systeme?n?|Servern?|Server|Rechnern?|Rechner|Ger(ä|ae)te?n?|Umgebungen?|Umgebung|Installationen?|Installation|Infrastrukturen?|Infrastruktur)';
 /**
- * The claim, decomposed into the ways it gets asserted. A hit on any arm is a hit
- * on the claim. Arms are named so a failure says WHICH assertion fired rather
- * than only that something did.
- *
- * Two rules hold these together and both were learned from a false alarm:
- *  - every noun list carries `\b`, so `Netz` does not match inside
- *    `Hostingzentrum` and `Daten` does not match inside `Audiodaten`;
- *  - every arm names the SUBJECT it is about. An arm without one matched
- *    "Keine Daten verlassen das Rechenzentrum in Zürich", which is an accurate
- *    statement about the managed offering.
+ * The possessor decides who the sentence is about. `your host` is the self-host
+ * claim; `our servers in Zurich` is an accurate statement about what WE run.
+ */
+const YOURS_EN = '(your|the|this|that)';
+const YOURS_DE = '(dein|deine|deinen|deinem|das|den|die|der)';
+/** A trailing manner clause turns "nothing leaves" into a claim about HOW, not WHETHER. */
+const MANNER =
+	'(?![^.]{0,40}\\b(unencrypted|without|encrypted|ohne|verschl(ü|ue)sselt|unverschl(ü|ue)sselt)\\b)';
+/**
+ * Checked on the span BETWEEN the egress verb and the host noun, not from the
+ * start of the sentence: in "Nothing leaves the servers in our Zurich data
+ * centre" the `our` is thirty characters in, and a sentence-anchored lookahead
+ * did not reach it — the first attempt at this exclusion missed that sentence
+ * and kept the false alarm.
+ */
+const NOT_OURS = '(?![^.]{0,60}\\b(our|unsere[rnms]?|unser)\\b)';
+
+/**
+ * The claim, decomposed into the shapes it gets asserted in. A hit on any arm is
+ * a hit. Arms are named so a failure says WHICH shape fired, not only that
+ * something did.
  */
 const CLAIM_ARMS: ReadonlyArray<readonly [string, RegExp]> = [
 	[
 		'only-X-leaves',
-		/only thing that (ever )?leaves|sole thing that leaves|Einzige, was[^.]{0,40}(Netzwerke?|Netze[sn]?|Netz|Hosts?|Maschinen?|Systeme?n?|Servern?)\b[^.]{0,20}verlässt/i,
+		new RegExp(
+			`(only|sole) thing that (ever )?(leaves|goes out|exits)[^.]{0,40}\\b(inference|model|provider|prompt|API)` +
+				`|Einzige, was[^.]{0,40}${HOST_DE}\\b[^.]{0,20}(verl(ä|ae)sst|verlassen)[^.]{0,30}\\b(Inferenz|Modell|Provider|Anbieter|Prompt|API)` +
+				`|einzige ausgehende [^.]{0,20}ist[^.]{0,30}\\b(Inferenz|Modell|Provider|Anbieter|API)`,
+			'i',
+		),
 	],
 	[
 		'nothing-leaves',
-		/(nothing|no data|zero data)[^.]{0,25}leaves?[^.]{0,10}(your|the|this)\s+(networks?|hosts?|machines?|systems?|servers?)\b|(Null|Keine) Daten verlassen[^.]{0,15}(dein|deine|das|den)?\s*(Netzwerke?|Netze[sn]?|Netz|Hosts?|Maschinen?|Systeme?n?|Servern?)\b|(verlässt nichts|nichts verlässt)[^.]{0,25}(Netzwerke?|Netze[sn]?|Netz|Hosts?|Maschinen?|Systeme?n?|Servern?)\b/i,
+		new RegExp(
+			`${MANNER}(nothing|no (data|prompts?|content|files?)|zero (data|prompts?))\\b[^.]{0,25}\\b(leaves?|leave|goes? out|exits?|is (sent|transmitted))\\b${NOT_OURS}[^.]{0,15}${YOURS_EN}\\s+${HOST_EN}\\b` +
+				`|${MANNER}\\b(your|the) (data|prompts?|content|files?)\\b[^.]{0,20}\\bnever (leaves?|goes out|exits?)\\b${NOT_OURS}[^.]{0,15}${YOURS_EN}\\s+${HOST_EN}\\b` +
+				`|${MANNER}(Null|Keine) (Daten|Inhalte|Prompts?|Dateien)\\b[^.]{0,20}(verlassen|verl(ä|ae)sst|gehen [^.]{0,10}raus)\\b${NOT_OURS}[^.]{0,15}${YOURS_DE}\\s*${HOST_DE}\\b` +
+				`|${MANNER}(verl(ä|ae)sst nichts|nichts verl(ä|ae)sst)\\b${NOT_OURS}[^.]{0,25}${YOURS_DE}?\\s*${HOST_DE}\\b` +
+				`|${MANNER}\\b(Deine|Ihre) (Daten|Inhalte)\\b[^.]{0,25}(verlassen|verl(ä|ae)sst)\\b[^.]{0,20}\\bnie\\b`,
+			'i',
+		),
 	],
-	['runs-everything-locally', /runs everything locally|l(ä|ae)uft alles lokal/i],
+	[
+		'runs-everything-locally',
+		/(?![^.]{0,40}\b(was|soweit|angeht|betrifft)\b)(runs everything locally|l(ä|ae)uft alles lokal|everything runs on your own \w+|alles bleibt bei dir)/i,
+	],
 	[
 		'only-provider-receives',
-		/only your chosen[^.]{0,40}receives prompts|nur dein gewählter[^.]{0,40}erhält Prompts|only communicates with the LLM provider|kommuniziert[^.]{0,20}ausschliesslich mit[^.]{0,30}LLM-Anbieter/i,
+		/only your chosen[^.]{0,40}receives prompts|nur dein gew(ä|ae)hlter[^.]{0,40}erh(ä|ae)lt Prompts|only communicates with the LLM provider|kommuniziert[^.]{0,20}ausschliesslich mit[^.]{0,30}LLM-Anbieter|talks? to exactly one thing[^.]{0,30}(internet|provider)|spricht[^.]{0,20}mit genau einem (Dienst|Anbieter)|does ?n['’]?o?t go anywhere but[^.]{0,30}(LLM|provider)/i,
+	],
+	[
+		'data-stays-local',
+		new RegExp(
+			`(?![^.]{0,30}\\b(stored|gespeichert|storage)\\b)` +
+				`\\b(your |the )?(data|content|prompts?) stays? (local|on-prem|on your \\w+)\\b` +
+				`|(?![^.]{0,30}\\b(gespeichert|Speicher)\\b)\\b(Daten|Inhalte)\\b[^.]{0,20}\\bbleiben\\b[^.]{0,15}\\b(lokal|on-prem)\\b`,
+			'i',
+		),
 	],
 	/*
-	 * The two arms `config.provider_desc` fell through. `data stays local` and
-	 * `Daten bleiben … lokal` are the claim with the subject left unqualified —
-	 * the word boundary is what keeps `Audiodaten bleiben lokal` (true, scoped)
-	 * out of it.
+	 * The claim is about what leaves the HOST. "Only inference reaches the provider"
+	 * is TRUE — it is the shape the registry prescribes for the correction — so this
+	 * arm requires an egress object rather than firing on "only … inference".
 	 */
-	['data-stays-local', /\b(your |the )?data stays local\b|\bDaten\b[^.]{0,20}\bbleiben\b[^.]{0,15}\blokal\b/i],
 	[
 		'only-inference',
-		/only[^.]{0,10}\binference\b[^.]{0,20}(uses|reaches|goes to|touches|leaves)\b|\bnur\b[^.]{0,10}\bInferenz\b[^.]{0,20}(nutzt|erreicht|verlässt|geht an|braucht)\b/i,
+		new RegExp(
+			`\\bonly[^.]{0,15}\\b(inference|model|provider) (call|request)?[^.]{0,10}\\b(leaves?|goes out|exits?)\\b[^.]{0,15}${YOURS_EN}\\s+${HOST_EN}\\b` +
+				`|\\bonly[^.]{0,15}\\binference\\b[^.]{0,20}\\bleaves\\b` +
+				`|\\bnur\\b[^.]{0,20}\\b(Inferenz|Modellaufruf|Modell-Aufruf|Provider-Call)\\b[^.]{0,20}(verl(ä|ae)sst|geht [^.]{0,10}(raus|nach aussen))\\b` +
+				`|Ausser dem (Inferenz|Modell)[^.]{0,20}geht nichts nach aussen`,
+			'i',
+		),
 	],
 ];
 
@@ -83,47 +136,57 @@ export function claimArmFor(text: string): string | null {
 }
 
 /**
- * Every wording removed as this claim, with where it came from — collected from
- * the pull requests that removed them, not invented. The last two are the pair
- * that prompted this rewrite.
- */
-const RETIRED_WORDINGS: ReadonlyArray<readonly [string, string]> = [
-	['trust page, DE note', 'LLaMA, Qwen oder Mistral lokal. Null Daten verlassen dein Netzwerk.'],
-	['trust page, EN note', 'Run LLaMA, Qwen, or Mistral locally. Zero data leaves your network.'],
-	['landing card, EN', 'lynox stays on your infrastructure — only your chosen LLM provider receives prompts.'],
-	['trust page, DE prose', 'Das Einzige, was diesen Host verlässt, ist der Inferenz-Call an den LLM-Anbieter.'],
-	['trust page, DE Ollama', 'zeigst du auf ein Ollama on-prem, verlässt nichts dein Netz.'],
-	['trust page, EN prose', 'The only thing that leaves that host is the inference call to whichever LLM provider you pointed lynox at.'],
-	['trust page, EN Ollama', 'point at an on-prem Ollama and nothing leaves your network.'],
-	['sub-processors, EN', 'When you run lynox on your own infrastructure, the software only communicates with the LLM provider whose API key you configure.'],
-	['sub-processors, DE', 'Wenn du lynox auf deiner eigenen Infrastruktur betreibst, kommuniziert die Software ausschliesslich mit dem von dir konfigurierten LLM-Anbieter.'],
-	['voice hint, EN', 'With whisper.cpp nothing leaves your machine.'],
-	['voice settings, EN', 'With whisper.cpp it runs everything locally.'],
-	['voice settings, DE', 'Mit whisper.cpp läuft alles lokal.'],
-	['model catalog residency', 'Your machine — nothing leaves the host'],
-	['Art. 30 record, search', 'SearXNG runs as local Docker sidecar (no data leaves the host).'],
-	['plural EN, must survive the word boundary', 'Nothing leaves the hosts you run this on.'],
-	['plural DE, must survive the word boundary', 'Keine Daten verlassen deine Systeme.'],
-	['model catalog notes', 'Local models via Ollama — nothing leaves your machine.'],
-	['config.provider_desc, DE (this PR)', 'Wohin werden KI-Anfragen gesendet? Daten bleiben immer lokal — nur die Inferenz nutzt den Provider.'],
-	['config.provider_desc, EN (this PR)', 'Where are AI requests sent? Your data stays local — only inference uses the provider.'],
-];
-
-/**
- * Constructed, and labelled as such: every wording above trips at least two arms,
- * so deleting either of the two arms added for `config.provider_desc` left the
- * suite green. An arm no case separates is an arm nobody can show is doing
- * anything — it survives every mutation and reads as coverage.
+ * Everything that must be caught, with provenance.
  *
- * Each row below is a plausible phrasing of the same claim that trips exactly ONE
- * arm, which is what makes that arm killable. They are not presented as sentences
- * anyone shipped; the list above holds those, and its provenance stays clean.
+ * `shipped` rows are wordings that were actually removed as this claim, taken
+ * from the pull requests that removed them. `probe` rows come from one
+ * adversarial pass whose only brief was "write copy that asserts this claim and
+ * slips through" — they were misses when they were written, which is what makes
+ * them worth keeping.
  */
-const ARM_SEPARATORS: ReadonlyArray<readonly [string, string, string]> = [
-	['data-stays-local', 'EN, no "only inference" half', 'Your data stays local.'],
-	['data-stays-local', 'DE, no "only inference" half', 'Deine Daten bleiben lokal.'],
-	['only-inference', 'EN, no "stays local" half', 'Only inference ever leaves the machine.'],
-	['only-inference', 'DE, no "stays local" half', 'Nur die Inferenz verlässt den Rechner.'],
+const MUST_CATCH: ReadonlyArray<readonly ['shipped' | 'probe', string]> = [
+	['shipped', 'LLaMA, Qwen oder Mistral lokal. Null Daten verlassen dein Netzwerk.'],
+	['shipped', 'Run LLaMA, Qwen, or Mistral locally. Zero data leaves your network.'],
+	['shipped', 'lynox stays on your infrastructure — only your chosen LLM provider receives prompts.'],
+	['shipped', 'Das Einzige, was diesen Host verlässt, ist der Inferenz-Call an den LLM-Anbieter.'],
+	['shipped', 'zeigst du auf ein Ollama on-prem, verlässt nichts dein Netz.'],
+	['shipped', 'The only thing that leaves that host is the inference call to whichever LLM provider you pointed lynox at.'],
+	['shipped', 'point at an on-prem Ollama and nothing leaves your network.'],
+	['shipped', 'When you run lynox on your own infrastructure, the software only communicates with the LLM provider whose API key you configure.'],
+	['shipped', 'Wenn du lynox auf deiner eigenen Infrastruktur betreibst, kommuniziert die Software ausschliesslich mit dem von dir konfigurierten LLM-Anbieter.'],
+	['shipped', 'With whisper.cpp nothing leaves your machine.'],
+	['shipped', 'With whisper.cpp it runs everything locally.'],
+	['shipped', 'Mit whisper.cpp läuft alles lokal.'],
+	['shipped', 'Your machine — nothing leaves the host'],
+	['shipped', 'SearXNG runs as local Docker sidecar (no data leaves the host).'],
+	['shipped', 'Nothing leaves the hosts you run this on.'],
+	['shipped', 'Keine Daten verlassen deine Systeme.'],
+	['shipped', 'Local models via Ollama — nothing leaves your machine.'],
+	['shipped', 'Wohin werden KI-Anfragen gesendet? Daten bleiben immer lokal — nur die Inferenz nutzt den Provider.'],
+	['shipped', 'Where are AI requests sent? Your data stays local — only inference uses the provider.'],
+	['probe', 'Nothing ever leaves your device — only the model call goes to the provider.'],
+	['probe', 'Your data never leaves the machine; only the inference request is sent out.'],
+	['probe', 'With whisper.cpp nothing leaves your laptop.'],
+	['probe', 'Nothing leaves the hardware you run this on.'],
+	['probe', 'Zero prompts leave your network.'],
+	['probe', 'The only thing that ever goes out is the inference call.'],
+	['probe', 'Your data stays on-prem — only the provider call goes out.'],
+	['probe', 'Only the model call leaves the host; everything else is handled on your box.'],
+	['probe', 'Self-hosted installs talk to exactly one thing on the internet: your LLM provider.'],
+	['probe', 'When you host lynox, your content doesn’t go anywhere but to the LLM you chose.'],
+	['probe', 'Everything runs on your own hardware; only the model request leaves it.'],
+	['probe', 'Keine Daten verlassen deinen Rechner.'],
+	['probe', 'Keine Daten verlassen dein Gerät.'],
+	['probe', 'Keine Daten verlassen deine Umgebung.'],
+	['probe', 'Keine Daten verlassen deine Installation.'],
+	['probe', 'Deine Daten verlassen dein System nie — nur die Anfrage ans Modell geht raus.'],
+	['probe', 'Nur der Modellaufruf verlässt deinen Server, sonst nichts.'],
+	['probe', 'Inhalte bleiben immer lokal — nur der Provider-Call geht raus.'],
+	['probe', 'Nichts verlässt deinen Rechner ausser dem Modell-Aufruf an den Anbieter.'],
+	['probe', 'Ausser dem Inferenz-Aufruf geht nichts nach aussen.'],
+	['probe', 'Der einzige ausgehende Verkehr ist der Aufruf an deinen LLM-Anbieter.'],
+	['probe', 'Alles bleibt bei dir — einzig der Aufruf ans Sprachmodell geht nach aussen.'],
+	['probe', 'Selbstgehostet spricht lynox mit genau einem Dienst im Internet: deinem LLM-Anbieter.'],
 ];
 
 /**
@@ -131,37 +194,46 @@ const ARM_SEPARATORS: ReadonlyArray<readonly [string, string, string]> = [
  * purpose: a false alarm on correct copy turns a required check red for the wrong
  * reason, which is how a guard gets deleted instead of fixed.
  *
- * The last two encode a distinction the registry draws explicitly — the inference
- * call may legitimately be described as lasting only for that request. Saying how
- * LONG it lasts is not saying it is the only thing that goes out.
+ * `false-alarm` rows are the ones an adversarial pass caught this detector firing
+ * on. The last of them is the one that matters most — it names the web search and
+ * the HTTP tool, which is exactly the honesty the retired claim was missing, and
+ * an earlier draft rejected it.
  */
-const HONEST_WORDINGS: ReadonlyArray<readonly [string, string]> = [
-	['voice hint DE, live', 'Lokal via whisper.cpp verlässt kein Audio dein System.'],
-	['voice hint EN, live', 'With whisper.cpp the audio stays on your machine.'],
-	['catalog residency, live', 'Your machine — the model call stays on the host'],
-	['catalog notes, live', 'Local models via Ollama — the model call stays on your machine.'],
-	['config.provider_desc DE, live (this PR)', 'Wohin werden KI-Anfragen gesendet? Der Provider erhält den Inferenz-Aufruf; was sonst nach aussen geht, hängt von deiner Konfiguration ab und davon, was der Agent tut.'],
-	['config.provider_desc EN, live (this PR)', 'Where are AI requests sent? The provider receives the inference call; what else goes out depends on your configuration and on what the agent does.'],
-	['container prose', 'Der Container verlässt das Rechenzentrum nie; er wird dort gebaut und dort betrieben.'],
-	['backup prose', 'Kein Backup verlässt das Schweizer Rechenzentrum, in dem die Instanz läuft.'],
-	['residency DE', 'Keine Daten verlassen das Rechenzentrum in Zürich.'],
-	['residency EN', 'No data leaves the EU region for managed instances.'],
-	['residency EN, contractual', 'No customer data leaves the data centre without an SCC in place.'],
-	['scoped honesty DE', 'Die Modelle laufen lokal; was sonst noch nach aussen geht, hängt von deiner Installation ab.'],
-	['scoped honesty EN', 'With whisper.cpp no audio leaves your machine.'],
-	['compound noun DE', 'Nichts verlässt das Hostingzentrum in Zürich.'],
-	['compound noun EN', 'Nothing leaves your hosting provider without an SCC.'],
-	['noun boundary DE', 'Keine Daten verlassen das Hostingzentrum in Zürich.'],
-	['noun boundary EN', 'Nothing leaves the hosting cluster unencrypted.'],
-	['scoped subject DE, word boundary', 'Deine Audiodaten bleiben lokal.'],
-	['duration, not exclusivity DE', 'Der Inferenz-Aufruf dauert nur so lange wie die Anfrage.'],
-	['duration, not exclusivity EN', 'The inference call lasts only for that request.'],
+const MUST_CLEAR: ReadonlyArray<readonly ['honest' | 'false-alarm', string]> = [
+	['honest', 'Lokal via whisper.cpp verlässt kein Audio dein System.'],
+	['honest', 'With whisper.cpp the audio stays on your machine.'],
+	['honest', 'Your machine — the model call stays on the host'],
+	['honest', 'Local models via Ollama — the model call stays on your machine.'],
+	['honest', 'Wohin werden KI-Anfragen gesendet? Der Provider erhält den Inferenz-Aufruf; was sonst nach aussen geht, hängt von deiner Konfiguration ab und davon, was der Agent tut.'],
+	['honest', 'Where are AI requests sent? The provider receives the inference call; what else goes out depends on your configuration and on what the agent does.'],
+	['honest', 'Der Container verlässt das Rechenzentrum nie; er wird dort gebaut und dort betrieben.'],
+	['honest', 'Kein Backup verlässt das Schweizer Rechenzentrum, in dem die Instanz läuft.'],
+	['honest', 'Keine Daten verlassen das Rechenzentrum in Zürich.'],
+	['honest', 'No data leaves the EU region for managed instances.'],
+	['honest', 'No customer data leaves the data centre without an SCC in place.'],
+	['honest', 'Die Modelle laufen lokal; was sonst noch nach aussen geht, hängt von deiner Installation ab.'],
+	['honest', 'With whisper.cpp no audio leaves your machine.'],
+	['honest', 'Nichts verlässt das Hostingzentrum in Zürich.'],
+	['honest', 'Nothing leaves your hosting provider without an SCC.'],
+	['honest', 'Keine Daten verlassen das Hostingzentrum in Zürich.'],
+	['honest', 'Nothing leaves the hosting cluster unencrypted.'],
+	['honest', 'Deine Audiodaten bleiben lokal.'],
+	['honest', 'Der Inferenz-Aufruf dauert nur so lange wie die Anfrage.'],
+	['honest', 'The inference call lasts only for that request.'],
+	['false-alarm', 'Keine Daten verlassen unsere Server in Zürich.'],
+	['false-alarm', 'Nothing leaves the servers in our Zurich data centre.'],
+	['false-alarm', 'No data leaves your server without an audit-log entry.'],
+	['false-alarm', 'Nothing leaves the host unencrypted — TLS 1.3 on every hop.'],
+	['false-alarm', 'Deine Daten bleiben lokal gespeichert, bis du sie löschst.'],
+	['false-alarm', 'Bei whisper.cpp läuft alles lokal, was die Transkription angeht.'],
+	['false-alarm', 'Das Einzige, was dein Netz verlässt, ist verschlüsselt.'],
+	['false-alarm', 'Nur die Inferenz erreicht deinen LLM-Anbieter — Websuche und HTTP-Tool gehen woanders hin.'],
 ];
 
 describe('i18n — the "only inference leaves" claim stays retired', () => {
 	const i18n = readFileSync(fileURLToPath(new URL('./i18n.svelte.ts', import.meta.url)), 'utf8');
-	// The model catalog renders its own residency notes (LLMSettings.svelte :1262/:1295) and is
-	// not on the private repo's watch list, so it is scanned here too.
+	// The model catalog renders its own residency notes (LLMSettings.svelte) and is not on the
+	// private repo's watch list, so it is scanned here too.
 	const catalog = readFileSync(
 		fileURLToPath(new URL('../../../../src/core/llm/catalog.ts', import.meta.url)),
 		'utf8',
@@ -171,28 +243,41 @@ describe('i18n — the "only inference leaves" claim stays retired', () => {
 		['llm/catalog.ts', catalog],
 	];
 
-	describe('the detector catches every wording that was retired as this claim', () => {
-		for (const [where, text] of RETIRED_WORDINGS) {
-			it(`catches ${where}`, () => {
+	describe('catches every wording that asserts the claim', () => {
+		for (const [origin, text] of MUST_CATCH) {
+			it(`[${origin}] ${text.slice(0, 60)}`, () => {
 				expect(claimArmFor(text), text).not.toBeNull();
 			});
 		}
 	});
 
-	describe('each arm is carried by a case no other arm covers', () => {
-		for (const [arm, where, text] of ARM_SEPARATORS) {
-			it(`${arm} — ${where}`, () => {
-				expect(claimArmFor(text), text).toBe(arm);
+	describe('leaves true sentences alone', () => {
+		for (const [origin, text] of MUST_CLEAR) {
+			it(`[${origin}] ${text.slice(0, 60)}`, () => {
+				expect(claimArmFor(text), text).toBeNull();
 			});
 		}
 	});
 
-	describe('the detector leaves true sentences alone', () => {
-		for (const [where, text] of HONEST_WORDINGS) {
-			it(`clears ${where}`, () => {
-				expect(claimArmFor(text), text).toBeNull();
-			});
-		}
+	/*
+	 * The anti-survivor property, enforced rather than hand-maintained.
+	 *
+	 * An earlier draft added two arms that no case separated: every wording that had
+	 * really shipped tripped at least two arms, so deleting either left the suite green
+	 * and neither could be shown to do anything. That was patched with four constructed
+	 * sentences carrying one arm each — a crutch for a corpus that was too small. The
+	 * adversarial rows made the crutch unnecessary AND let the property be checked
+	 * directly, which also covers every arm somebody adds later.
+	 */
+	it('every arm carries at least one case no other arm covers', () => {
+		const orphansIfRemoved = (i: number): number => {
+			const rest = CLAIM_ARMS.filter((_, j) => j !== i);
+			return MUST_CATCH.filter(([, t]) => !rest.some(([, rx]) => rx.test(t))).length;
+		};
+		const dead = CLAIM_ARMS.map(([name], i) => [name, orphansIfRemoved(i)] as const).filter(
+			([, n]) => n === 0,
+		);
+		expect(dead, 'arms no case depends on — unkillable, and they read as coverage').toEqual([]);
 	});
 
 	it('reads sources that actually contain the table — the scan is not passing on an empty read', () => {
@@ -207,11 +292,10 @@ describe('i18n — the "only inference leaves" claim stays retired', () => {
 	});
 
 	/*
-	 * The claim detector above can only assert ABSENCE. These pin the PRESENCE of the
-	 * replacements, and they are not redundant: core#1305 merged after core#1306 and carried
-	 * the old voice string back in — a branch cut before the fix, touching the same file. An
-	 * absence check would have caught that one because the old wording returned; a
-	 * replacement that is simply deleted, or reworded into something vague, trips nothing.
+	 * The arms can only assert ABSENCE, and absence cannot tell a correction from a
+	 * deletion: copy reworded into something vague trips nothing at all. These pin the
+	 * PRESENCE of the replacements. #1305 merged after #1306 and carried the old voice
+	 * string back in — a branch cut before the fix, touching the same file.
 	 */
 	const lineWith = (key: string): string | undefined =>
 		i18n.split('\n').find((l) => l.includes(`'${key}'`));
@@ -239,9 +323,8 @@ describe('i18n — the "only inference leaves" claim stays retired', () => {
 			expect(scan(text)).toEqual([]);
 		});
 
-		// A sentence wrapped across lines is invisible to a per-line scan. The private repo's
-		// guard learned this the hard way and reads a whitespace-joined buffer as well; the
-		// `[^.]{0,N}` bounds in every arm keep a join from stitching two sentences together.
+		// A sentence wrapped across lines is invisible to a per-line scan. The `[^.]{0,N}`
+		// bounds in every arm keep a join from stitching two sentences together.
 		it(`no wrapped sentence in ${name} asserts it either`, () => {
 			expect(claimArmFor(text.replace(/\s+/gu, ' '))).toBeNull();
 		});
