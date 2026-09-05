@@ -92,6 +92,50 @@ const RETIRED_FRAGMENTS: readonly string[] = [
 	'nur die inferenz nutzt den provider',
 ];
 
+/**
+ * A retired phrase must match as a PHRASE, not as the prefix of a longer word.
+ *
+ * The first version compared with `includes()`, and `nothing leaves the host` is
+ * a prefix of `nothing leaves the hosting …`. Measured against what shipped:
+ * "Nothing leaves the hosting cluster unencrypted", "Nothing leaves the hosting
+ * provider without an SCC" and "Nothing leaves the hostname resolver" all fired.
+ * All three are TRUE, none of them reuses the retracted phrase, and a required
+ * check that reds correct copy is the one that gets deleted rather than fixed.
+ *
+ * ⚠ This is a different thing from the deliberate behaviour below it: a sentence
+ * that repairs a retracted phrase by appending exceptions ("nothing leaves your
+ * machine EXCEPT …") still ships the retracted phrase and still fails, on
+ * purpose. `hosting` is not that — it is a different word that happens to start
+ * with one.
+ *
+ * Only a TRAILING boundary is added. A leading one would be inert: every
+ * fragment starts at a word start already, and the failure measured here is
+ * entirely about what follows.
+ */
+/**
+ * One fragment as a phrase pattern.
+ *
+ * Extracted rather than inlined so the ESCAPING can be tested. No fragment in the
+ * list above contains a regex metacharacter today, so removing the escape survives
+ * every case built from that list — an equivalent mutant, and an untested line.
+ * Called directly with a metacharacter, it is neither.
+ */
+export function phraseRe(fragment: string): RegExp {
+	// The fragment is data, not a pattern — escape it before it becomes one, or an
+	// entry containing `.` or `(` would quietly match more than itself.
+	return new RegExp(`${fragment.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}\\b`, 'i');
+}
+
+const FRAGMENT_RE: ReadonlyArray<readonly [string, RegExp]> = RETIRED_FRAGMENTS.map((f) => [
+	f,
+	phraseRe(f),
+]);
+
+/** The retired fragments a text carries, as phrases. */
+function fragmentsIn(text: string): string[] {
+	return FRAGMENT_RE.filter(([, rx]) => rx.test(text)).map(([f]) => f);
+}
+
 describe('i18n — retired disclosure wordings stay retired', () => {
 	const i18n = readFileSync(fileURLToPath(new URL('./i18n.svelte.ts', import.meta.url)), 'utf8');
 	// The model catalog renders its own residency notes (LLMSettings.svelte) and is not on the
@@ -111,6 +155,54 @@ describe('i18n — retired disclosure wordings stay retired', () => {
 		expect(catalog.length).toBeGreaterThan(10_000);
 	});
 
+	/*
+	 * Both directions of the boundary, because a matcher change can only be judged
+	 * by what it still catches AND what it stops catching.
+	 */
+	describe('matches a retired phrase as a phrase', () => {
+		// Every fragment must still match ITSELF. Trivial to satisfy and not
+		// trivial to keep: it is the control on the escaping, which turns each
+		// fragment into a pattern. A future entry containing `.` or `(` that came
+		// out mangled would show up here and nowhere else.
+		for (const f of RETIRED_FRAGMENTS) {
+			it(`still catches: ${f}`, () => {
+				expect(fragmentsIn(`prose before ${f} and prose after`)).toContain(f);
+			});
+		}
+
+		// The false-alarm direction, measured on what shipped before this fix: all
+		// three fired, all three are TRUE, and none of them reuses the retracted
+		// phrase. `host` was matching inside `hosting` and `hostname`.
+		for (const honest of [
+			'Nothing leaves the hosting cluster unencrypted.',
+			'Nothing leaves the hosting provider without an SCC.',
+			'Nothing leaves the hostname resolver.',
+		]) {
+			it(`leaves alone: ${honest}`, () => {
+				expect(fragmentsIn(honest)).toEqual([]);
+			});
+		}
+
+		// And the behaviour that is NOT a false alarm and must survive the fix: a
+		// retracted phrase with exceptions bolted on still ships the retracted
+		// phrase. Narrowing the list to let this through is the step this file's
+		// header closes the door on.
+		// The escaping, exercised where it can actually fail. Unescaped, `.` is
+		// "any character" and the phrase would match a sentence that does not
+		// contain it — a fragment matching more than itself is the direction that
+		// turns this list into false alarms on copy nobody wrote.
+		it('treats a fragment as text, not as a pattern', () => {
+			expect(phraseRe('acme v1.0 leaves').test('acme v1.0 leaves')).toBe(true);
+			expect(phraseRe('acme v1.0 leaves').test('acme v1x0 leaves')).toBe(false);
+		});
+
+		it('still catches a retracted phrase repaired with an "except" clause', () => {
+			expect(
+				fragmentsIn('Nothing leaves your machine except the inference call and the web search.'),
+			).toContain('nothing leaves your machine');
+		});
+	});
+
 	it('would find a retired fragment if a source carried one — positive control on the scan', () => {
 		const planted = `${i18n}\n\t'planted.key': { de: 'Daten bleiben immer lokal.', en: 'x' },`;
 		expect(scan(planted)).not.toHaveLength(0);
@@ -123,8 +215,8 @@ describe('i18n — retired disclosure wordings stay retired', () => {
 
 		// A sentence wrapped across lines is invisible to a per-line scan.
 		it(`carries none across a line break in ${name} either`, () => {
-			const joined = text.replace(/\s+/gu, ' ').toLowerCase();
-			expect(RETIRED_FRAGMENTS.filter((f) => joined.includes(f))).toEqual([]);
+			const joined = text.replace(/\s+/gu, ' ');
+			expect(fragmentsIn(joined)).toEqual([]);
 		});
 	}
 
@@ -160,8 +252,7 @@ describe('i18n — retired disclosure wordings stay retired', () => {
 function scan(source: string): string[] {
 	const out: string[] = [];
 	source.split('\n').forEach((line, i) => {
-		const lower = line.toLowerCase();
-		for (const f of RETIRED_FRAGMENTS) if (lower.includes(f)) out.push(`${i + 1}:${f}`);
+		for (const f of fragmentsIn(line)) out.push(`${i + 1}:${f}`);
 	});
 	return out;
 }
