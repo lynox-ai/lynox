@@ -92,13 +92,19 @@ describe('GoogleAuth', () => {
   });
 
   describe('getAccessToken', () => {
-    function makeVaultWithExpiredTokens() {
+    /**
+     * `mintedBy` writes the `client_id` a stored token was minted under.
+     * Omitting it is the pre-existing shape — a blob written before the field
+     * existed — and every caller that omits it is asserting the UNKNOWN case.
+     */
+    function makeVaultWithExpiredTokens(mintedBy?: string) {
       const store = new Map<string, string>();
       store.set('GOOGLE_OAUTH_TOKENS', JSON.stringify({
         access_token: 'old-token-aaaaaaaa',
         refresh_token: 'refresh-token-bbbbbbbb',
         expires_at: Date.now() - 1000,
         scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        ...(mintedBy ? { client_id: mintedBy } : {}),
       }));
       return {
         get: vi.fn((key: string) => store.get(key) ?? null),
@@ -229,6 +235,140 @@ describe('GoogleAuth', () => {
       // leaves `tokenData` set would keep the instance falsely authenticated
       // until the process restarts.
       expect(vaultAuth.isAuthenticated()).toBe(false);
+    });
+
+    // The three tests below are ONE claim in three states, and they only mean
+    // something together: an `invalid_grant` must delete when the token was
+    // minted by the client presenting it, must NOT delete when it was minted by
+    // a different one, and must keep deleting when nobody knows. Drop any one
+    // and the remaining two are satisfied by a swap in the other direction —
+    // "never delete" passes the first alone, "always delete" passes the last two.
+    it('KEEPS the token when invalid_grant comes back under a DIFFERENT client id', async () => {
+      const vault = makeVaultWithExpiredTokens('minting-client-id');
+      const vaultAuth = new GoogleAuth({
+        clientId: 'a-different-client-id',
+        clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ error: 'invalid_grant', error_description: 'Token has been expired or revoked' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+
+      // Asserting the REMEDY, not merely the absence of a delete: the point is
+      // that this is re-read as our misconfiguration. A test that only checked
+      // "not deleted" would also pass if the refresh had silently become a
+      // transient failure, which would tell the user to retry forever.
+      await expect(vaultAuth.getAccessToken()).rejects.toThrow(/Your Google connection is intact/);
+      expect(vault.delete).not.toHaveBeenCalled();
+      expect(vaultAuth.isAuthenticated()).toBe(true);
+    });
+
+    it('names BOTH ways out of a foreign grant, because it cannot tell a typo from a rotation', async () => {
+      // The generic `client-misconfigured` text says the credentials are not
+      // valid and an operator should correct them. After a DELIBERATE client
+      // change that is false twice over — the credentials are fine, and the fix
+      // is to reconnect. Nothing here can distinguish the two causes, so the
+      // text has to carry both; asserting on it is what stops a later edit from
+      // collapsing this back onto the generic sentence.
+      const vault = makeVaultWithExpiredTokens('the-previous-client');
+      const vaultAuth = new GoogleAuth({
+        clientId: 'the-current-client',
+        clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: 'invalid_grant' }), {
+          status: 400, headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      const err = await vaultAuth.getAccessToken().catch((e: unknown) => e as Error);
+      expect(err.message).toMatch(/different Google client/);
+      expect(err.message).toMatch(/Restore the previous client/);
+      expect(err.message).toMatch(/reconnect the account/);
+      // And NOT the generic operator text, which would send them after a
+      // credential that is not broken.
+      expect(err.message).not.toMatch(/are not valid/);
+    });
+
+    it('treats an EMPTY stored client id as unknown, not as a mismatch', async () => {
+      // Every writer gates its stamp on truthiness, so `''` can only reach the
+      // blob by hand or through an older writer. Reading it as "minted by the
+      // empty client" makes it differ from every real id and keeps a revoked
+      // token for good — the same swap this change exists to avoid, arriving
+      // through the comparison instead of through the delete.
+      //
+      // The stored side, not the configured one: a configured `clientId: ''` is
+      // refused by `requireOwnPair` long before the refresh answers, so that
+      // direction has no reachable case to pin.
+      const store = new Map<string, string>();
+      store.set('GOOGLE_OAUTH_TOKENS', JSON.stringify({
+        access_token: 'old-token-aaaaaaaa',
+        refresh_token: 'refresh-token-bbbbbbbb',
+        expires_at: Date.now() - 1000,
+        scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        client_id: '',
+      }));
+      const vault = {
+        get: vi.fn((k: string) => store.get(k) ?? null),
+        set: vi.fn((k: string, v: string) => { store.set(k, v); }),
+        delete: vi.fn((k: string) => store.delete(k)),
+      };
+      const vaultAuth = new GoogleAuth({
+        clientId: 'a-real-client-id',
+        clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: 'invalid_grant' }), {
+          status: 400, headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+      await expect(vaultAuth.getAccessToken()).rejects.toThrow(/invalid_grant/);
+      expect(vault.delete).toHaveBeenCalledWith('GOOGLE_OAUTH_TOKENS');
+    });
+
+    it('STILL deletes when invalid_grant comes back under the SAME client id', async () => {
+      const vault = makeVaultWithExpiredTokens('the-one-client-id');
+      const vaultAuth = new GoogleAuth({
+        clientId: 'the-one-client-id',
+        clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ error: 'invalid_grant', error_description: 'Token has been expired or revoked' }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+      await expect(vaultAuth.getAccessToken()).rejects.toThrow(/invalid_grant/);
+      expect(vault.delete).toHaveBeenCalledWith('GOOGLE_OAUTH_TOKENS');
+      expect(vaultAuth.isAuthenticated()).toBe(false);
+    });
+
+    it('records the minting client id on a successful refresh, so an existing token stops being unknown', async () => {
+      // Without this the fix reaches only connections made after it shipped:
+      // every blob already in a vault predates the field, reads as UNKNOWN, and
+      // the comparison stands down for good.
+      const vault = makeVaultWithExpiredTokens();
+      const vaultAuth = new GoogleAuth({
+        clientId: 'the-configured-client-id',
+        clientSecret: 'test-secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ access_token: 'fresh-token-cccccccc', expires_in: 3600, scope: 'https://www.googleapis.com/auth/gmail.readonly' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+      await vaultAuth.getAccessToken();
+
+      const written = vault.set.mock.calls.at(-1)?.[1];
+      expect(written).toBeDefined();
+      expect(JSON.parse(written as string).client_id).toBe('the-configured-client-id');
     });
 
     // The two transient tests above send NON-JSON bodies at 5xx/429, so they
@@ -463,6 +603,163 @@ describe('GoogleAuth', () => {
     });
   });
 
+  // ── The three minting flows, one test each ──────────────────────────────
+  // Three tests rather than one, because the thing being pinned is a call
+  // ARGUMENT at three separate sites: `validateTokenResponse(json, clientId)`.
+  // A single test kills the mutation "stop stamping inside the helper" but
+  // leaves "drop the argument at THIS site" alive at the other two — and the
+  // site that rots is never the one that got the test.
+  describe('the minting client id is recorded on every flow that mints', () => {
+    // Belt for the device-flow case: its `try/finally` restores real timers on a
+    // thrown assertion, but not if the test aborts before reaching the block —
+    // and a leaked fake clock turns every later test in the file into a mystery.
+    afterEach(() => { vi.useRealTimers(); });
+
+    function vaultSpy() {
+      const store = new Map<string, string>();
+      return {
+        get: vi.fn((k: string) => store.get(k) ?? null),
+        set: vi.fn((k: string, v: string) => { store.set(k, v); }),
+        delete: vi.fn((k: string) => store.delete(k)),
+      };
+    }
+    const okToken = () => new Response(
+      JSON.stringify({
+        access_token: 'minted-token-dddddddd',
+        refresh_token: 'minted-refresh-eeeeeeee',
+        expires_in: 3600,
+        scope: 'https://www.googleapis.com/auth/gmail.readonly',
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+    const storedClientId = (vault: ReturnType<typeof vaultSpy>): unknown => {
+      const last = vault.set.mock.calls.at(-1)?.[1];
+      return JSON.parse(last as string).client_id;
+    };
+
+    it('a fresh grant ends the suppression window, as a claim already did', async () => {
+      // `setTokens` clears the cool-down on a fresh grant; the three minting
+      // flows did not, and this change makes that gap reachable: a mismatch now
+      // ARMS the window, and the self-host way out of a mismatch is to re-consent
+      // through exactly these flows. Without this the user's reconnect worked and
+      // the next call still answered "suppressed" for up to five minutes.
+      // Seeded BEFORE construction: `GoogleAuth` loads the vault in its
+      // constructor, so a mock installed afterwards is never read.
+      const store = new Map<string, string>();
+      store.set('GOOGLE_OAUTH_TOKENS', JSON.stringify({
+        access_token: 'old-token-aaaaaaaa',
+        refresh_token: 'refresh-token-bbbbbbbb',
+        expires_at: Date.now() - 1000,
+        scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        client_id: 'the-previous-client',
+      }));
+      const vault = {
+        get: vi.fn((k: string) => store.get(k) ?? null),
+        set: vi.fn((k: string, v: string) => { store.set(k, v); }),
+        delete: vi.fn((k: string) => store.delete(k)),
+      };
+      const a = new GoogleAuth({
+        clientId: 'the-current-client',
+        clientSecret: 's',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      // Arm the window through the foreign-grant path.
+      mockFetch.mockResolvedValueOnce(new Response(
+        JSON.stringify({ error: 'invalid_grant' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
+      ));
+      await expect(a.getAccessToken()).rejects.toThrow(/different Google client/);
+      await expect(a.getAccessToken()).rejects.toThrow(/suppressed/);
+
+      // Re-consent, and the window must be gone — not merely expired.
+      //
+      // The minted token is deliberately SHORT-LIVED. A full-hour token would
+      // make the next `getAccessToken()` serve it straight from memory without
+      // ever entering `_doRefresh`, so the suppression check would go untouched
+      // and this test would pass whether or not the window was cleared. It read
+      // as coverage and was measured as a survivor; the expiry is what turns it
+      // into an assertion.
+      mockFetch.mockResolvedValueOnce(new Response(
+        JSON.stringify({
+          access_token: 'minted-token-dddddddd',
+          refresh_token: 'minted-refresh-eeeeeeee',
+          expires_in: 1,
+          scope: 'https://www.googleapis.com/auth/gmail.readonly',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+      await a.exchangeRedirectCode('fresh-code', 'https://example.test/cb');
+
+      mockFetch.mockResolvedValueOnce(new Response(
+        JSON.stringify({
+          access_token: 'post-reconnect-token',
+          expires_in: 3600,
+          scope: 'https://www.googleapis.com/auth/gmail.readonly',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+      expect(await a.getAccessToken()).toBe('post-reconnect-token');
+    });
+
+    it('exchangeRedirectCode — the flow the web UI drives', async () => {
+      const vault = vaultSpy();
+      const a = new GoogleAuth({
+        clientId: 'redirect-flow-client',
+        clientSecret: 's',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(okToken());
+      await a.exchangeRedirectCode('the-code', 'https://example.test/cb');
+      expect(storedClientId(vault)).toBe('redirect-flow-client');
+    });
+
+    it('startLocalAuth — the self-host CLI flow', async () => {
+      const vault = vaultSpy();
+      const a = new GoogleAuth({
+        clientId: 'local-flow-client',
+        clientSecret: 's',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      const { authUrl, waitForCode } = await a.startLocalAuth();
+      const handler = (mockServerInstance as Record<string, unknown>)['_handler'] as (req: unknown, res: unknown) => void;
+      const state = new URL(authUrl).searchParams.get('state');
+      handler({ url: `/?code=test-code&state=${state}` }, { writeHead: vi.fn(), end: vi.fn() });
+      mockFetch.mockResolvedValueOnce(okToken());
+      await waitForCode();
+      expect(storedClientId(vault)).toBe('local-flow-client');
+    });
+
+    it('startDeviceFlow — the headless flow', async () => {
+      const vault = vaultSpy();
+      const a = new GoogleAuth({
+        clientId: 'device-flow-client',
+        clientSecret: 's',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      mockFetch.mockResolvedValueOnce(new Response(
+        JSON.stringify({
+          device_code: 'dc', user_code: 'uc',
+          verification_url: 'https://example.test/d', expires_in: 300, interval: 1,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+      const { waitForAuth } = await a.startDeviceFlow();
+      mockFetch.mockResolvedValueOnce(okToken());
+
+      // The poll floor is 5s (`DEVICE_POLL_INTERVAL_MS`), above vitest's default
+      // timeout, so the wait is driven rather than slept through.
+      vi.useFakeTimers();
+      try {
+        const pending = waitForAuth();
+        await vi.advanceTimersByTimeAsync(6_000);
+        await pending;
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(storedClientId(vault)).toBe('device-flow-client');
+    });
+  });
+
   describe('getAccountInfo', () => {
     it('returns empty info when not authenticated', () => {
       const info = auth.getAccountInfo();
@@ -589,6 +886,39 @@ describe('GoogleAuth', () => {
         delete: vi.fn(),
       };
     }
+
+    it('rejects token data with a non-string client_id', () => {
+      // Checked like every other field rather than trusted through the cast. A
+      // non-string compares unequal to any real client id, so the blob would be
+      // read as permanently foreign and its grant kept forever — a corrupt field
+      // turning into a policy. Refusing the blob is the same answer the four
+      // fields above already give.
+      const vault = createMockVault({
+        access_token: 'tok', refresh_token: 'ref',
+        expires_at: Date.now() + 3_600_000, scopes: [],
+        client_id: 42,
+      });
+      const a = new GoogleAuth({
+        clientId: 'id', clientSecret: 'secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      expect(a.isAuthenticated()).toBe(false);
+    });
+
+    it('accepts token data with no client_id at all — the pre-existing shape', () => {
+      // The counterpart, so the check above cannot be "fixed" by rejecting the
+      // absent case too: every blob written before this field existed has none,
+      // and refusing those would log the whole fleet out.
+      const vault = createMockVault({
+        access_token: 'tok', refresh_token: 'ref',
+        expires_at: Date.now() + 3_600_000, scopes: [],
+      });
+      const a = new GoogleAuth({
+        clientId: 'id', clientSecret: 'secret',
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+      });
+      expect(a.isAuthenticated()).toBe(true);
+    });
 
     it('rejects token data with non-number expires_at', () => {
       const vault = createMockVault({
@@ -992,6 +1322,21 @@ describe('setTokens — OAuth claim fixture (contract §2.3 #5)', () => {
     expect(stored).toEqual(fixture);
   });
 
+  it('records NO minting client id — the control plane minted these, not this instance', async () => {
+    // The assertion above already fails if a `client_id` appears here, but it
+    // fails as "the blob is not the claim" and invites the repair of adding the
+    // field to the fixture. This one names the reason, so that repair reads as
+    // wrong: `setTokens` is reached only by `POST /api/google/claim-managed`
+    // (the sole non-test caller), where lynox's BROKER client minted the token.
+    // Stamping this instance's own `clientId` would assert a provenance nobody
+    // measured — and `reclassifyForeignGrant` would then read a real revocation
+    // as a client mismatch and keep a dead token forever.
+    const { auth: vaultAuth, vault } = makeVaultAuth();
+    await vaultAuth.setTokens(fixture as unknown as Parameters<GoogleAuth['setTokens']>[0]);
+    const stored = JSON.parse(vault.set.mock.calls[0]![1] as string) as Record<string, unknown>;
+    expect(stored['client_id']).toBeUndefined();
+  });
+
   for (const field of ['access_token', 'refresh_token', 'expires_at', 'scopes'] as const) {
     it(`rejects the body when \`${field}\` is renamed away (the silent-drift probe)`, async () => {
       const { auth: vaultAuth } = makeVaultAuth();
@@ -1311,6 +1656,27 @@ describe('refresh through the control plane (the client secret stays there)', ()
       ok: false, status: 400, text: async () => JSON.stringify({ error: 'invalid_grant' }),
     });
 
+    await expect(authWith(vault).getAccessToken()).rejects.toThrow(/400/);
+    expect(vault.delete).toHaveBeenCalledWith('GOOGLE_OAUTH_TOKENS');
+  });
+
+  it('still deletes on a CP revocation even if the blob carries a foreign client id', async () => {
+    // The foreign-grant comparison must not run on this path. lynox's broker
+    // client minted this token, so measuring it against THIS instance's id
+    // answers a question nobody asked — and answering it would reclassify a real
+    // revocation as a misconfiguration and keep a dead grant for good.
+    //
+    // The blob below is not reachable in production (a handle-bearing token is
+    // only ever written by `setTokens`, which records no client id) — that is
+    // the point: the invariant is enforced here rather than argued from Google's
+    // behaviour, so a later writer cannot quietly make it reachable.
+    setEnv(true);
+    const vault = vaultWith({ refresh_handle: 'sealed-handle-1', client_id: 'a-foreign-client-id' });
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 400, text: async () => JSON.stringify({ error: 'invalid_grant' }),
+    });
+
+    // `authWith` configures `test-id`, which differs from the stamped id above.
     await expect(authWith(vault).getAccessToken()).rejects.toThrow(/400/);
     expect(vault.delete).toHaveBeenCalledWith('GOOGLE_OAUTH_TOKENS');
   });
