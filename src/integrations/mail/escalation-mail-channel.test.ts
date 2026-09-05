@@ -97,12 +97,15 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
   it.each([
     ['zwei Adressen', `${CHEF}, evil@angreifer.example`],
     ['Adresse ohne @', 'chef'],
-    // Pins EXACT membership. A containment or prefix test would let these
-    // through, and both were live mutants: `some(a => x.includes(a))` really
-    // delivers to the look-alike domain below.
+    // Pins EXACT membership, and each line names the mutant it kills — the
+    // three are not interchangeable:
+    //   look-alike domain  → kills `some(a => x.includes(a))`, which was a live
+    //                        mutant and really delivers to this address
+    //   sub-address        → kills the same, from the left
+    //   longer local part  → kills a domain-only comparison
     ['eine Look-alike-Domain', 'chef@betrieb.example.angreifer.example'],
-    ['einen laengeren local part', 'chef2@betrieb.example'],
     ['eine Sub-Adresse des Eintrags', 'x.chef@betrieb.example'],
+    ['einen laengeren local part', 'chef2@betrieb.example'],
   ])('refuses %s', async (_label, recipient) => {
     expect(await channel().send(msg({ recipient }))).toBe(false);
     expect(sendMail).not.toHaveBeenCalled();
@@ -117,6 +120,46 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
     const ch = new EscalationMailChannel({ registry, allowedRecipients: [`Chef <${CHEF}>`] });
     expect(await ch.send(msg({ recipient: CHEF }))).toBe(true);
     expect(wireInput()['to']).toEqual([{ address: CHEF }]);
+  });
+
+  it('refuses an allowlist entry holding two addresses instead of expanding it', async () => {
+    // The same string is refused on the way in, so accepting it in the config
+    // would make one direction of the same value stricter than the other.
+    const ch = new EscalationMailChannel({ registry, allowedRecipients: [`${CHEF}, zweit@betrieb.example`] });
+    expect(await ch.send(msg({ recipient: CHEF }))).toBe(false);
+    expect(await ch.send(msg({ recipient: 'zweit@betrieb.example' }))).toBe(false);
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+
+  it('says so once when a configured list yields no usable entry', async () => {
+    // A configured-but-unusable list otherwise refuses every message with
+    // "not in the allowlist", which reads like a rejected recipient.
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    });
+    try {
+      new EscalationMailChannel({ registry, allowedRecipients: ['chef', 'auch-keine-adresse'] });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines.filter((l) => l.includes('none usable'))).toHaveLength(1);
+  });
+
+  it('stays quiet when the list is simply empty', async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    });
+    try {
+      new EscalationMailChannel({ registry, allowedRecipients: [] });
+      new EscalationMailChannel({ registry });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(lines).toEqual([]);
   });
 
   it('mails the ALLOWLIST ENTRY, never the string the message supplied', async () => {
@@ -181,13 +224,17 @@ describe('EscalationMailChannel — through the real router', () => {
       const router = new NotificationRouter();
       router.register(channel());
 
+      // Filtered on the router's own prefix: asserting the whole stderr stream
+      // would go red on any unrelated node warning inside the spy's window.
+      const routerLines = (): string[] => warnings.filter((w) => w.includes('[notification-router]'));
+
       await router.notify(msg());
       expect(sendMail).not.toHaveBeenCalled();
-      expect(warnings).toEqual([]);
+      expect(routerLines()).toEqual([]);
 
       await router.notify(msg({ recipient: CHEF }));
       expect(sendMail).toHaveBeenCalledTimes(1);
-      expect(warnings).toEqual([]);
+      expect(routerLines()).toEqual([]);
     } finally {
       spy.mockRestore();
     }
