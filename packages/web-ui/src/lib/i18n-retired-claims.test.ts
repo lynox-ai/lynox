@@ -58,6 +58,18 @@ import { fileURLToPath } from 'node:url';
  * Every entry is a phrase that was published and then retracted. That is the
  * whole membership rule, and it is why this list has no false-alarm direction to
  * measure: none of these can be a true statement about the engine as shipped.
+ *
+ * ⚠ ONE CONSEQUENCE, STATED SO IT IS NOT LATER FOUND AS A BUG. This forbids
+ * REUSING a retracted phrase, not asserting a claim. So a sentence that repairs
+ * one by appending exceptions — "Nothing leaves your machine except the inference
+ * call, the web search and the HTTP tool", "Mit whisper.cpp läuft alles lokal,
+ * ausser der Websuche" — still fails here, because it still ships the retracted
+ * phrase, and the second one contradicts itself besides. That is deliberate: the
+ * fix is to write the sentence from what egress DEPENDS ON ("What leaves your
+ * machine: the inference call, a web search when the agent searches, …"), which
+ * is the shape the retirement prescribes anyway. Narrowing this list to let an
+ * "except" clause through would be the first step back toward judging meaning,
+ * and that road is closed for the reason in the header.
  */
 const RETIRED_FRAGMENTS: readonly string[] = [
 	'nothing leaves your machine',
