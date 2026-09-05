@@ -97,7 +97,13 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
   it.each([
     ['zwei Adressen', `${CHEF}, evil@angreifer.example`],
     ['Adresse ohne @', 'chef'],
-  ])('refuses %s rather than letting nodemailer reinterpret it', async (_label, recipient) => {
+    // Pins EXACT membership. A containment or prefix test would let these
+    // through, and both were live mutants: `some(a => x.includes(a))` really
+    // delivers to the look-alike domain below.
+    ['eine Look-alike-Domain', 'chef@betrieb.example.angreifer.example'],
+    ['einen laengeren local part', 'chef2@betrieb.example'],
+    ['eine Sub-Adresse des Eintrags', 'x.chef@betrieb.example'],
+  ])('refuses %s', async (_label, recipient) => {
     expect(await channel().send(msg({ recipient }))).toBe(false);
     expect(sendMail).not.toHaveBeenCalled();
   });
@@ -105,6 +111,21 @@ describe('EscalationMailChannel — the allowlist is the boundary', () => {
   it('accepts a display-name form and mails the bare address', async () => {
     expect(await channel().send(msg({ recipient: `Chef <${CHEF}>` }))).toBe(true);
     expect(wireInput()['to']).toEqual([{ address: CHEF }]);
+  });
+
+  it('accepts a display-name form in the ALLOWLIST too', async () => {
+    const ch = new EscalationMailChannel({ registry, allowedRecipients: [`Chef <${CHEF}>`] });
+    expect(await ch.send(msg({ recipient: CHEF }))).toBe(true);
+    expect(wireInput()['to']).toEqual([{ address: CHEF }]);
+  });
+
+  it('mails the ALLOWLIST ENTRY, never the string the message supplied', async () => {
+    // Checking one value and sending another is the gap. `banKer` case-folds
+    // onto the entry, so it passes the check — and must not be what ships,
+    // because for a domain a case-fold can be a different IDNA label.
+    const ch = new EscalationMailChannel({ registry, allowedRecipients: ['chef@banker.example'] });
+    expect(await ch.send(msg({ recipient: 'chef@banKer.example' }))).toBe(true);
+    expect(wireInput()['to']).toEqual([{ address: 'chef@banker.example' }]);
   });
 });
 
@@ -114,15 +135,18 @@ describe('EscalationMailChannel — outcomes', () => {
     sendMail.mockResolvedValue({ ok: true, result: {}, followupId: null });
   });
 
-  it('treats an unaddressed message as handled, so the router logs nothing', async () => {
-    // The ordinary case under `notify()` fan-out. Reporting it as a failure
-    // would emit a router stderr line on every unrelated notification.
+  it('reports an unaddressed message as handled', async () => {
+    // The ordinary case under `notify()` fan-out. That this actually keeps the
+    // router quiet is a separate claim and is measured in the router block —
+    // this one only pins the boolean.
     expect(await channel().send(msg())).toBe(true);
     expect(sendMail).not.toHaveBeenCalled();
   });
 
-  it.each([[''], ['   ']])('treats a blank recipient (%j) as unaddressed', async (recipient) => {
-    expect(await channel().send(msg({ recipient }))).toBe(true);
+  it.each([[''], ['   ']])('reports a blank recipient (%j) instead of calling it handled', async (recipient) => {
+    // A blank string is a FAILED attempt to address, not an absent one — a
+    // caller whose recipient plumbing ran dry must not be told "handled".
+    expect(await channel().send(msg({ recipient }))).toBe(false);
     expect(sendMail).not.toHaveBeenCalled();
   });
 
@@ -143,15 +167,49 @@ describe('EscalationMailChannel — through the real router', () => {
     sendMail.mockResolvedValue({ ok: true, result: {}, followupId: null });
   });
 
-  it('delivers an addressed message and ignores an unaddressed one', async () => {
-    const router = new NotificationRouter();
-    router.register(channel());
+  it('stays silent on an unrelated notification and delivers an addressed one', async () => {
+    // Without the stderr assertion this block is strictly weaker than the
+    // direct tests — it stayed green under two mutations that they kill. The
+    // router's warning line is the observable the `true` return exists for, so
+    // it is the thing worth asserting here.
+    const warnings: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      warnings.push(String(chunk));
+      return true;
+    });
+    try {
+      const router = new NotificationRouter();
+      router.register(channel());
 
-    await router.notify(msg());
-    expect(sendMail).not.toHaveBeenCalled();
+      await router.notify(msg());
+      expect(sendMail).not.toHaveBeenCalled();
+      expect(warnings).toEqual([]);
 
-    await router.notify(msg({ recipient: CHEF }));
-    expect(sendMail).toHaveBeenCalledTimes(1);
+      await router.notify(msg({ recipient: CHEF }));
+      expect(sendMail).toHaveBeenCalledTimes(1);
+      expect(warnings).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('makes the router complain when an addressed message is refused', async () => {
+    // The counterpart: without it, "stays silent" would also pass for a channel
+    // that is silent about everything, including a real refusal.
+    const warnings: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      warnings.push(String(chunk));
+      return true;
+    });
+    try {
+      const router = new NotificationRouter();
+      router.register(channel());
+      await router.notify(msg({ recipient: 'fremd@anderswo.example' }));
+      expect(sendMail).not.toHaveBeenCalled();
+      expect(warnings.some((w) => w.includes('[notification-router]'))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

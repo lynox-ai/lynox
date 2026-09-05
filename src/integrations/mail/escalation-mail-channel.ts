@@ -27,6 +27,20 @@
  * honest form of that, because the alternative is a default address chosen by
  * whoever wired it up.
  *
+ * ⚠ What this does NOT cover, stated because it is easy to read the paragraph
+ * above as covering it: only the ADDRESS half. The subject and body are still
+ * model-written and unconfirmed — the guards also exist against that, and an
+ * allowlist does not answer it. Two consequences worth knowing before wiring
+ * this up. `prompts.ts` tells the model it reaches the operator through
+ * "exactly these surfaces and no others" and that email goes out "only via the
+ * `mail_send` tool, and only after the user has confirmed it". That sentence
+ * is still TRUE while this channel is registered nowhere — it stops being true
+ * at the registration, not at the build, and the prompt line belongs in the
+ * same change as the registration, because a rule the model has learnt and
+ * that no longer holds is worse than a missing one. And a model that knows an
+ * escalation is mailed can address the outside world through its wording: the
+ * allowlist bounds WHERE, not WHAT. Neither is settled here.
+ *
  * ── What it deliberately does NOT do ──────────────────────────────────────
  *
  * It writes no answer path into the mail. Whether the recipient may reply by
@@ -60,12 +74,23 @@ export interface EscalationMailChannelOptions {
 export class EscalationMailChannel implements NotificationChannel {
   readonly name = 'escalation-mail';
   private readonly registry: MailRegistry;
-  private readonly allowed: ReadonlySet<string>;
+  /** normalised form → the entry as the operator wrote it. */
+  private readonly allowed: ReadonlyMap<string, string>;
   private readonly account: string | undefined;
 
   constructor(opts: EscalationMailChannelOptions) {
     this.registry = opts.registry;
-    this.allowed = new Set((opts.allowedRecipients ?? []).map(normaliseAddress));
+    const allowed = new Map<string, string>();
+    for (const entry of opts.allowedRecipients ?? []) {
+      // Parse the ENTRIES too, so `Chef <chef@betrieb.example>` in the config
+      // matches a plain `chef@betrieb.example` in a message. Without this an
+      // operator's display-name form would match nothing and the channel would
+      // refuse everything, silently and for a reason nobody would guess.
+      for (const parsed of parseAddressList(entry)) {
+        allowed.set(normaliseAddress(parsed.address), parsed.address);
+      }
+    }
+    this.allowed = allowed;
     this.account = opts.account;
   }
 
@@ -81,26 +106,42 @@ export class EscalationMailChannel implements NotificationChannel {
    *
    * A message that IS addressed but names an address outside the allowlist is
    * the opposite — it is the case the allowlist exists for, so it is reported.
+   *
+   * The `true` for an unaddressed message means HANDLED, not delivered, and
+   * that distinction leaves this class: `NotificationRouter.sendTo()` returns
+   * this boolean to its caller unchanged, and at least one caller throttles on
+   * it (`integrations/inbox/notifier.ts`). Anyone reaching this channel through
+   * `sendTo` rather than `notify` is asking a different question than the one
+   * answered here.
    */
   async send(msg: NotificationMessage): Promise<boolean> {
-    const raw = msg.recipient?.trim();
-    if (!raw) return true;
+    const raw = msg.recipient;
+    if (raw === undefined) return true;
 
-    // Parse rather than trust. A bare `{ address: raw }` skips `parseAddress`
-    // and hands the string to nodemailer, where "a@b.example, evil@x.example"
-    // becomes a single mailbox at the ATTACKER's domain and a bare "chef"
-    // becomes a local user on the relay. Silent misdelivery is worse than a
-    // refusal, so anything that is not exactly one address is refused.
+    // Parse rather than trust: a bare `{ address: raw }` would hand the whole
+    // string to the provider, and a comma-separated or bare-word value is not
+    // an address in the sense this check assumes. Anything that is not exactly
+    // one address is refused, because silent misdelivery is worse than a
+    // refusal. (An empty string lands here rather than in the `undefined`
+    // branch above: it is a FAILED attempt to address, not an absent one, and
+    // reporting it as handled would hide a broken caller.)
     const parsed = parseAddressList(raw);
     if (parsed.length !== 1) {
       process.stderr.write(`[escalation-mail] refusing: not exactly one address\n`);
       return false;
     }
-    const address = parsed[0]!.address;
-    if (!this.allowed.has(normaliseAddress(address))) {
+    // Look the entry up and send THE ENTRY, never the message's own string.
+    // Checking one value and sending another is the gap this closes: a string
+    // that merely case-folds onto an entry would pass the check and be
+    // delivered as typed, and for a domain that is a different IDNA label.
+    // Now the delivered value always comes from the operator's list, so the
+    // message can only SELECT a recipient — it can never supply one.
+    const entry = this.allowed.get(normaliseAddress(parsed[0]!.address));
+    if (entry === undefined) {
       process.stderr.write(`[escalation-mail] refusing: recipient not in the allowlist\n`);
       return false;
     }
+    const address = entry;
 
     try {
       const result = await sendMail(this.registry, {
