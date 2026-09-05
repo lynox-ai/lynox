@@ -201,3 +201,27 @@ describe('mintContractFromSteps', () => {
     expect(validateContractAgainstSteps({ capabilityContract, steps })).toBeNull();
   });
 });
+
+describe('mintContractFromSteps — glob metacharacters in a literal URL', () => {
+  const httpStep = (id: string, template: Record<string, unknown>): InlinePipelineStep =>
+    ({ id, task: 'call it', tool: 'http_request', input_template: template });
+
+  // The patterns this function writes are read back as GLOBS. A literal URL may
+  // legally contain `*`, so a derived pattern could match a wider set than the
+  // step it came from — which destroys the only property that makes deriving
+  // from steps sound. Mutation: drop the GLOB_META check → both of these fail.
+  it('refuses a host carrying a glob metacharacter', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://a*b.example.com/orders', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+
+  it('refuses a path carrying a glob metacharacter', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://api.example.com/a*b', method: 'POST' }),
+    ])).toBeUndefined();
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://api.example.com/x[1]', method: 'POST' }),
+    ])).toBeUndefined();
+  });
+});

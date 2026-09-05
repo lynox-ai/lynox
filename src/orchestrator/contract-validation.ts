@@ -110,6 +110,10 @@ export function validateContractAgainstSteps(planned: {
  *  contract has any reason to grant. Mirrors `WRITE_METHODS` in `http.ts`. */
 const MINTABLE_WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
+/** Characters `globToRegex` gives meaning to. A pattern containing one no longer
+ *  denotes the literal it was derived from. */
+const GLOB_META = /[*?[\]]/;
+
 /**
  * Derive a capability contract from a workflow's steps — the producer Slice B1
  * left out ("no product path writes a contract onto a saved workflow yet").
@@ -163,6 +167,16 @@ export function mintContractFromSteps(steps: InlinePipelineStep[] | undefined): 
     } catch {
       return undefined;
     }
+    // The minter writes these patterns and `contractGrants` reads them as GLOBS
+    // (`globToRegex`: `*`, `**`, `?`, `[…]`). A literal URL is allowed to contain
+    // those characters — `new URL('https://a*b.example.com/x')` parses, hostname
+    // `a*b.example.com` — and the grant would then match a WIDER set than the
+    // step it was derived from, silently. Deriving from steps is only sound while
+    // the derived pattern denotes exactly the literal it came from, so refuse
+    // rather than escape: a real endpoint does not carry glob metacharacters, and
+    // refusing keeps the failure in the one place that already means "a human has
+    // to say what is allowed".
+    if (GLOB_META.test(parsed.hostname) || GLOB_META.test(parsed.pathname)) return undefined;
     methods.add(rawMethod as HttpMethod);
     hosts.add(parsed.hostname);
     paths.add(parsed.pathname);
