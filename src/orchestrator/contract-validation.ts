@@ -134,6 +134,21 @@ const GLOB_META = /[*?[\]]/;
  *
  * Returns `undefined` when there is nothing to grant, when any step's call is
  * parameterised, or when a write target is not a literal absolute URL.
+ *
+ * ⚠ DELIBERATELY UNWIRED. No product path calls this, and that is the decision,
+ * not an oversight — do not "finish" it by hooking it into the two sites that
+ * stamp `confirmedAt`. A security pass on exactly that wiring found two reasons,
+ * both about the INPUT rather than this function:
+ *   - a call the http consent gate DENIED is still recorded as a step
+ *     (`process-capture.ts:365` filters internal tools only, and a tool-call
+ *     record carries no error flag), so minting would turn a refusal into a
+ *     standing grant;
+ *   - the `inputTemplate` a step carries is written by a MODEL from sanitised
+ *     tool OUTPUT (`process-capture.ts:184`), so injected content can choose the
+ *     URL that would become grant-defining.
+ * A derived grant inherits the trust level of whatever authored the steps, and
+ * that is not the user. What a contract may be derived FROM is a converged-PRD
+ * question; this function is the part that was answerable at the code.
  */
 export function mintContractFromSteps(steps: InlinePipelineStep[] | undefined): CapabilityContract | undefined {
   if (!steps || steps.length === 0) return undefined;
@@ -149,6 +164,9 @@ export function mintContractFromSteps(steps: InlinePipelineStep[] | undefined): 
   const methods = new Set<HttpMethod>();
   const hosts = new Set<string>();
   const paths = new Set<string>();
+  // What the steps ACTUALLY perform, kept alongside the three sets the contract
+  // type can express — see the exactness check below.
+  const performed = new Set<string>();
 
   for (const step of steps) {
     if (step.tool !== 'http_request') continue;
@@ -180,9 +198,21 @@ export function mintContractFromSteps(steps: InlinePipelineStep[] | undefined): 
     methods.add(rawMethod as HttpMethod);
     hosts.add(parsed.hostname);
     paths.add(parsed.pathname);
+    performed.add(`${rawMethod} ${parsed.hostname} ${parsed.pathname}`);
   }
 
   if (methods.size === 0) return undefined; // read-only workflow — nothing to grant
+
+  // A contract holds methods, hosts and paths as INDEPENDENT lists, and
+  // `contractGrants` matches each separately — so the grant is their CROSS
+  // PRODUCT. With one host that is exactly the steps; with two hosts and two
+  // paths it is four combinations for two steps, and the two the workflow never
+  // performs are a widening nobody asked for. The step agent picks its own tool
+  // arguments, so that widening is reachable. Mint only where the product
+  // collapses onto what the steps actually do — anything else is a set of
+  // endpoints a human would have to approve one by one, which is the same line
+  // the parameter check draws.
+  if (methods.size * hosts.size * paths.size !== performed.size) return undefined;
 
   return {
     version: 1,

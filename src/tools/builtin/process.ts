@@ -4,7 +4,6 @@ import { estimatePipelineCost } from '../../core/dag-planner.js';
 import { storePipeline, getPipeline } from './pipeline.js';
 import { getErrorMessage, logErrorChain } from '../../core/utils.js';
 import { randomUUID } from 'node:crypto';
-import { mintContractFromSteps } from '../../orchestrator/contract-validation.js';
 import { inferPipelineMode } from '../../orchestrator/human-in-the-loop.js';
 import { assertPlannedPipelineIsValid } from '../../orchestrator/validate.js';
 
@@ -162,14 +161,6 @@ function promoteExistingWorkflow(input: SaveWorkflowInput, agent: IAgent): strin
     // Run gate). An IMPORTED workflow deliberately does NOT get this — its steps
     // are attacker-authorable, so it stays inert until the user reviews it.
     confirmedAt: new Date().toISOString(),
-    // Mint the grant on the SAME grounds the confirm above rests on, so the two
-    // can never drift apart. `origin: 'authorship'` records that nobody reviewed
-    // it — see `ContractOrigin`. Returns undefined for anything not fully
-    // literal, which leaves unattended writes denied exactly as today.
-    ...(() => {
-      const contract = mintContractFromSteps(existing.steps);
-      return contract ? { capabilityContract: contract } : {};
-    })(),
     // A plan_task pipeline carries no capture parameters; preserve any the
     // source already had (legacy rows backfill to []).
     parameters: existing.parameters ?? [],
@@ -295,11 +286,6 @@ async function saveSessionWorkflow(input: SaveWorkflowInput, agent: IAgent): Pro
       // and saw these steps. Lets the workflow run unattended (cron + library
       // Run gate); an IMPORTED workflow stays unconfirmed until reviewed.
       confirmedAt: new Date().toISOString(),
-      // Same grounds as the confirm above; see the plan_task site.
-      ...(() => {
-        const contract = mintContractFromSteps(pipelineSteps);
-        return contract ? { capabilityContract: contract } : {};
-      })(),
       // Captured sessions don't carry ask_user/ask_secret today; infer the
       // interaction mode by step inspection so the contract stays honest.
       mode: inferPipelineMode(pipelineSteps),

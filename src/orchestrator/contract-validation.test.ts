@@ -184,13 +184,36 @@ describe('mintContractFromSteps', () => {
     expect(mintContractFromSteps([httpStep('s1', { url: '/relative/only', method: 'POST' })])).toBeUndefined();
   });
 
-  it('covers every write method and host the workflow actually uses', () => {
+  it('covers several writes while the grant still denotes exactly them', () => {
+    // Two methods on ONE endpoint: the cross product is 1 × 1 × 2 = 2, which is
+    // exactly what the steps do, so the grant is exact and gets minted.
     const c = mintContractFromSteps([
-      httpStep('s1', { url: 'https://a.example.com/one', method: 'POST' }),
-      httpStep('s2', { url: 'https://b.example.com/two', method: 'PATCH' }),
+      httpStep('s1', { url: 'https://api.example.com/orders', method: 'POST' }),
+      httpStep('s2', { url: 'https://api.example.com/orders', method: 'PATCH' }),
     ]);
     expect(c!.httpMethods.sort()).toEqual(['PATCH', 'POST']);
-    expect(c!.hostPatterns.sort()).toEqual(['a.example.com', 'b.example.com']);
+    expect(c!.hostPatterns).toEqual(['api.example.com']);
+  });
+
+  // The contract holds methods/hosts/paths as INDEPENDENT lists and the guard
+  // matches each separately, so the grant is their cross product. Two hosts and
+  // two paths is four combinations for two steps — and the two the workflow
+  // never performs would be granted. Mutation: drop the exactness check → this
+  // mints and the widening ships.
+  it('refuses when the cross product would grant a combination no step performs', () => {
+    expect(mintContractFromSteps([
+      httpStep('s1', { url: 'https://a.example.com/one', method: 'POST' }),
+      httpStep('s2', { url: 'https://b.example.com/two', method: 'PATCH' }),
+    ])).toBeUndefined();
+  });
+
+  it('still mints for several paths on one host, where the product IS the steps', () => {
+    const c = mintContractFromSteps([
+      httpStep('s1', { url: 'https://api.example.com/one', method: 'POST' }),
+      httpStep('s2', { url: 'https://api.example.com/two', method: 'POST' }),
+    ]);
+    expect(c!.pathPatterns.sort()).toEqual(['/one', '/two']);
+    expect(c!.hostPatterns).toEqual(['api.example.com']);
   });
 
   // The mint and the save gate must agree: a contract this produces has to
