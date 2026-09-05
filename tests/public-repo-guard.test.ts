@@ -19,7 +19,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -512,12 +512,62 @@ describe('public-repo-guard — private-name class', () => {
         // found something", and the exit code is the only place a caller can tell
         // them apart.
         expect(r.code).toBe(2);
-        expect(r.out).toMatch(/CONFIGURED BUT EMPTY/);
+        expect(r.out).toMatch(/CONFIGURED BUT UNUSABLE/);
         // It must NOT read as a hit — a reader seeing the hit message would go
         // looking for a name that is not there.
         expect(r.out).not.toMatch(/private name in the message of commit/);
       });
     }
+
+    // The three states above are all "readable and yields nothing". These two are
+    // the other half of the same class — present, NOT readable — and they are the
+    // worse half: the file has real names in it. Deciding presence with `-r` put
+    // them on the ABSENT path, where the class printed SKIPPED and exited 0 on a
+    // commit carrying a name it was armed against. Found in review, 2026-09-05.
+    it('refuses with exit 2 when an armed list cannot be READ', () => {
+      const base = commit('Add the base file');
+      const head = commit(`Fix the export for ${FICTIONAL_NAME}`);
+      mkdirSync(join(dir, '.lynox'), { recursive: true });
+      const list = join(dir, '.lynox', 'private-names.re');
+      writeFileSync(list, `${FICTIONAL_NAME}\n`);
+      chmodSync(list, 0o000);
+      const r = run(['check-meta', base, head]);
+      chmodSync(list, 0o644);
+
+      expect(r.code).toBe(2);
+      expect(r.out).toMatch(/CONFIGURED BUT UNUSABLE/);
+      // The cause is named, and it is the read — not the "every line is a
+      // comment" wording, which would send the operator to the wrong place.
+      expect(r.out).toMatch(/cannot be READ/);
+      expect(r.out).not.toMatch(/SKIPPED/);
+    });
+
+    it('refuses with exit 2 when the list is a DANGLING symlink', () => {
+      // Not `-e`, so presence has to test `-L` as well: somebody who symlinked
+      // the path configured the class, whatever the link now points at.
+      const base = commit('Add the base file');
+      const head = commit(`Fix the export for ${FICTIONAL_NAME}`);
+      mkdirSync(join(dir, '.lynox'), { recursive: true });
+      symlinkSync(join(dir, 'no-such-list.re'), join(dir, '.lynox', 'private-names.re'));
+      const r = run(['check-meta', base, head]);
+
+      expect(r.code).toBe(2);
+      expect(r.out).toMatch(/CONFIGURED BUT UNUSABLE/);
+      expect(r.out).not.toMatch(/SKIPPED/);
+    });
+
+    it('refuses with exit 2 when neither HOME nor the override resolves a path', () => {
+      // The path then collapses to `/.lynox/private-names.re`, which is nobody's
+      // list. Its absence says nothing about whether the class is armed, so
+      // standing down is a guess — and the guess fails open.
+      const base = commit('Add the base file');
+      const head = commit(`Fix the export for ${FICTIONAL_NAME}`);
+      const r = run(['check-meta', base, head], { HOME: '' });
+
+      expect(r.code).toBe(2);
+      expect(r.out).toMatch(/UNRESOLVABLE/);
+      expect(r.out).not.toMatch(/SKIPPED/);
+    });
 
     it('still stands down, exit 0, when the file is ABSENT', () => {
       // The other half, and the reason this is not simply "fail when unarmed":
@@ -921,7 +971,7 @@ describe('public-repo-guard — private-name pattern source and preflight', () =
 
     const r = run(['check-meta', base, head]);
     expect(r.code).toBe(2);
-    expect(r.out).toContain('CONFIGURED BUT EMPTY');
+    expect(r.out).toContain('CONFIGURED BUT UNUSABLE');
     expect(r.out).not.toContain('private name in the message of commit');
   });
 
