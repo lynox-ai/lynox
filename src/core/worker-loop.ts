@@ -18,6 +18,20 @@ import type { TriggerRecord, PromptText } from '../types/index.js';
 import { flattenPrompt } from './prompt-value.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
 import { reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling } from './session-budget.js';
+// Pure budget arithmetic, no I/O. It lives under src/server/ because the HTTP
+// handler was its first consumer; src/core/ is the better home now that there
+// are two, and the move is deliberately NOT made here because it would edit
+// http-api.ts, which core#1196 holds. `src/core/config.ts` already imports
+// across the same seam, so this is precedented rather than novel.
+import { WallClockBudget } from '../server/wall-clock-budget.js';
+
+/** The canonical "the human did not answer" value. Spelled the same in
+ *  `http-api.ts` (which calls it "the canonical skip marker") and in
+ *  `onboarding-promotion.ts` (`ONBOARDING_SKIP_MARKER`), and recognised by
+ *  `ask-user.ts`. It is a fourth literal copy, which is itself drift — hoisting
+ *  all four to one exported constant is a follow-up, kept out of this change
+ *  because it would edit http-api.ts (held by core#1196). */
+const DISMISSED_ANSWER = '__dismissed__';
 
 const DEFAULT_INTERVAL_MS = 60_000; // 1 minute
 const MAX_TASK_RESULT_CHARS = 4000; // truncate for notifications
@@ -105,14 +119,20 @@ export interface WorkerTaskContext {
   startedAt: number;
 }
 
-/** Active task state including abort control and optional pending user input. */
+/** Active task state: abort control, the PAUSABLE execution deadline, and the
+ *  store id of the prompt this task is currently parked on. */
 export interface ActiveTask {
   controller: AbortController;
-  pendingInput?: {
-    question: string;
-    options?: string[] | undefined;
-    resolve: (answer: string) => void;
-  } | undefined;
+  /** Session the task's agent runs under. The prompt store and the existing
+   *  `POST /api/sessions/:id/reply` route are both addressed by it, which is
+   *  why a store-backed background prompt needs no answer route of its own. */
+  promptSessionId?: string | undefined;
+  /** Store id of the prompt this task is parked on; undefined while computing. */
+  pendingPromptId?: string | undefined;
+  /** Stop the execution deadline while parked on a human, and re-arm after.
+   *  Human think-time must not consume the task's compute budget. */
+  pauseDeadline: () => void;
+  resumeDeadline: () => void;
 }
 
 /** Access the current worker task context from anywhere in the async call chain. */
@@ -165,10 +185,14 @@ export class WorkerLoop {
       this.timer = null;
     }
     for (const [, active] of this.activeTasks) {
-      if (active.pendingInput) {
-        active.pendingInput.resolve('Task cancelled.');
-        active.pendingInput = undefined;
-      }
+      // No `resolve('Task cancelled.')` here any more. That string was handed to
+      // a parked agent in the slot a USER ANSWER occupies, where it is not
+      // distinguishable from one — the same failure `onboarding-promotion.ts`
+      // guards with `ONBOARDING_SKIP_MARKER` after a control-flow string was
+      // promoted as a literal fact. The wait is now a store prompt awaited with
+      // this controller's signal, so aborting IS the cancellation and the waiter
+      // observes `status: 'aborted'`.
+      active.pauseDeadline();
       active.controller.abort();
     }
     this.activeTasks.clear();
@@ -182,20 +206,25 @@ export class WorkerLoop {
     return this.activeTasks.size;
   }
 
-  /** Resolve a pending user-input request for a background task. Returns true if resolved. */
+  /** Resolve a pending user-input request for a background task. Returns true if resolved.
+   *  Now a thin adapter over the prompt store: the same `answerUser` the HTTP
+   *  reply route calls, so this method and the route settle the SAME row instead
+   *  of two parallel mechanisms. It had zero callers for as long as it owned its
+   *  own in-memory resolver. */
   resolveTaskInput(taskId: string, answer: string): boolean {
-    const active = this.activeTasks.get(taskId);
-    if (!active?.pendingInput) return false;
-    active.pendingInput.resolve(answer);
-    active.pendingInput = undefined;
-    return true;
+    const promptId = this.activeTasks.get(taskId)?.pendingPromptId;
+    if (promptId === undefined) return false;
+    return this.engine.getPromptStore()?.answerUser(promptId, answer) ?? false;
   }
 
   /** Get pending input request for a task, if any. */
   getTaskPendingInput(taskId: string): { question: string; options?: string[] | undefined } | undefined {
-    const active = this.activeTasks.get(taskId);
-    if (!active?.pendingInput) return undefined;
-    return { question: active.pendingInput.question, options: active.pendingInput.options };
+    const promptId = this.activeTasks.get(taskId)?.pendingPromptId;
+    if (promptId === undefined) return undefined;
+    const row = this.engine.getPromptStore()?.getById(promptId);
+    if (!row) return undefined;
+    const options = row.options_json ? (JSON.parse(row.options_json) as string[]) : undefined;
+    return { question: row.question, options };
   }
 
   /**
@@ -287,11 +316,46 @@ export class WorkerLoop {
 
   private async executeTask(task: TriggerRecord): Promise<void> {
     const controller = new AbortController();
-    this.activeTasks.set(task.id, { controller });
 
-    // Node.js AbortSignal.timeout() — hard kill after taskTimeoutMs
-    const timeoutSignal = AbortSignal.timeout(this.taskTimeoutMs);
-    timeoutSignal.addEventListener('abort', () => controller.abort(), { once: true });
+    // The execution deadline. It used to be `AbortSignal.timeout()` wired to
+    // `controller.abort()` — and NOTHING read `controller.signal`: measured 0
+    // occurrences of `.signal` in this file against four in `agent.ts`. The
+    // deadline fired into the void. The signal now has a real consumer (the
+    // prompt wait below), so `stop()` reaches a task parked on a human instead
+    // of leaving it awaiting a promise nobody can settle.
+    //
+    // PAUSABLE, and that is load-bearing rather than tidy: `ask_user` is exempt
+    // from the per-tool cap (`Agent.TOOL_TIMEOUT_EXEMPT`), so while a task is
+    // parked this deadline is the only clock that could fire. Unpaused it would
+    // abort the run mid-question — the exact failure `WallClockBudget` was
+    // written for on the HTTP path (its docstring cites issue #77: the human
+    // answers, the run is already gone). Human think-time must not consume
+    // compute budget.
+    //
+    // NOTE ON REACH: the timer aborts the controller, which today ends a WAIT.
+    // It does not kill a computing run — that needs `session.abort()`, and
+    // enabling it is a separate, measured decision: on one production instance
+    // 1 of 17 pipeline runs and 1 of 58 headless runs ran past this 5-minute
+    // default, the longest being 15.2 minutes AND SUCCEEDING. Turning a bound
+    // on that has never fired would abort work that completes today.
+    const budget = new WallClockBudget(this.taskTimeoutMs);
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    const armDeadline = (): void => {
+      deadlineTimer = setTimeout(() => controller.abort(), budget.arm(Date.now()));
+      deadlineTimer.unref();
+    };
+    const pauseDeadline = (): void => {
+      if (deadlineTimer === undefined) return;
+      clearTimeout(deadlineTimer);
+      deadlineTimer = undefined;
+      budget.pause(Date.now());
+    };
+    const resumeDeadline = (): void => {
+      if (deadlineTimer !== undefined) return;
+      armDeadline();
+    };
+    armDeadline();
+    this.activeTasks.set(task.id, { controller, pauseDeadline, resumeDeadline });
 
     // AsyncLocalStorage — per-task context for logging/tracing
     const taskCtx: WorkerTaskContext = {
@@ -390,11 +454,16 @@ export class WorkerLoop {
         taskManager.recordTaskRun(task.id, errorMsg, status);
       }
 
-      // If task had pending input, it was interrupted while waiting
+      // If the task was parked on a human it was interrupted while waiting.
+      // It used to be RESOLVED with 'Task failed while waiting for your
+      // response.' — a sentence delivered into the slot a user answer occupies,
+      // which the model cannot tell from an answer. Aborting the controller
+      // ends the store wait as `aborted` instead, a state the caller reads as
+      // a non-answer.
       const active = this.activeTasks.get(task.id);
-      if (active?.pendingInput) {
-        active.pendingInput.resolve('Task failed while waiting for your response.');
-        active.pendingInput = undefined;
+      if (active) {
+        active.pauseDeadline();
+        active.controller.abort();
       }
 
       // Only notify on FINAL failure (all retries exhausted)
@@ -411,6 +480,9 @@ export class WorkerLoop {
         });
       }
     } finally {
+      // Clear the deadline timer before dropping the entry — `pauseDeadline` is
+      // idempotent and is the only handle on it once the map entry is gone.
+      this.activeTasks.get(task.id)?.pauseDeadline();
       this.activeTasks.delete(task.id);
     }
   }
@@ -481,28 +553,61 @@ export class WorkerLoop {
     const workerProfile = this.engine.getUserConfig().worker_profile;
     session._recreateAgent({ maxIterations: WORKER_MAX_ITERATIONS, autonomy: 'autonomous', profile: workerProfile });
 
-    // Wire promptUser so background tasks can ask questions via notifications
-    session.promptUser = (rawQuestion: string | PromptText, options?: string[]): Promise<string> => {
+    // Wire promptUser through the PROMPT STORE — the same surface the HTTP path
+    // uses (`insertAskUser` -> `waitForSettled`). It used to be a bare Promise
+    // whose `resolve` sat in memory under `activeTasks`, and that second,
+    // poorer copy is what made a background question unanswerable: no
+    // persistence, no 24h expiry, no abort, and an answer method
+    // (`resolveTaskInput`) with zero callers because the route that settles a
+    // prompt — `POST /api/sessions/:id/reply` -> `answerUser` — only ever knew
+    // about store rows. Going through the store INHERITS all four rather than
+    // re-implementing them.
+    session.promptUser = async (rawQuestion: string | PromptText, options?: string[]): Promise<string> => {
+      // Resolved at ASK time, not at wiring time: `Engine._promptStore` starts
+      // null and is assigned during init (engine.ts:1101), and is set back to
+      // null if that init fails — so a store captured when the task started
+      // could be stale in both directions.
+      const promptStore = this.engine.getPromptStore();
       // A background task surfaces through a notification body, which is plain
       // text with no renderer — so the frame/value split has nothing to protect
-      // here and the flattened form is the honest one.
+      // here and the flattened form is the honest one. This is the ONE
+      // difference from the HTTP path that is deliberate, not a gap.
       const question = flattenPrompt(rawQuestion);
-      return new Promise<string>((resolve) => {
-        const active = this.activeTasks.get(task.id);
-        if (active) {
-          active.pendingInput = { question, options, resolve };
-        }
-        void this.notificationRouter.notify({
-          title: `\u2753 ${task.title}`,
-          body: question,
-          taskId: task.id,
-          priority: 'high',
-          // Deep-link to the asking thread so a tap opens the conversation where
-          // the answer is expected (sw.js routes `data.threadId` \u2192 `/app?thread=\u2026`).
-          data: { threadId: session.sessionId },
-          inquiry: { question, options },
-        });
+      const active = this.activeTasks.get(task.id);
+      if (!promptStore) {
+        // No store: no durable park and no way to answer. The canonical marker
+        // is the honest outcome — hanging would be worse, and a prose sentence
+        // would land in the slot an answer occupies.
+        return DISMISSED_ANSWER;
+      }
+      const promptId = promptStore.insertAskUser(session.sessionId, question, options);
+      if (active) {
+        active.promptSessionId = session.sessionId;
+        active.pendingPromptId = promptId;
+        // Park the execution deadline: from here until the prompt settles the
+        // clock must not run, or the human's think-time eats the task's budget.
+        active.pauseDeadline();
+      }
+      void this.notificationRouter.notify({
+        title: `\u2753 ${task.title}`,
+        body: question,
+        taskId: task.id,
+        priority: 'high',
+        // Deep-link to the asking thread so a tap opens the conversation where
+        // the answer is expected (sw.js routes `data.threadId` \u2192 `/app?thread=\u2026`).
+        // `promptId` rides along so a client can settle this exact row.
+        data: { threadId: session.sessionId, promptId },
+        inquiry: { question, options },
       });
+      try {
+        const outcome = await promptStore.waitForSettled(promptId, active?.controller.signal);
+        return outcome.status === 'answered' ? (outcome.row.answer ?? DISMISSED_ANSWER) : DISMISSED_ANSWER;
+      } finally {
+        if (active) {
+          active.pendingPromptId = undefined;
+          active.resumeDeadline();
+        }
+      }
     };
 
     const prompt = task.description && task.description.trim() !== task.title.trim()
