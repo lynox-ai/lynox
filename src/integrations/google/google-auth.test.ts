@@ -672,9 +672,33 @@ describe('GoogleAuth', () => {
       await expect(a.getAccessToken()).rejects.toThrow(/suppressed/);
 
       // Re-consent, and the window must be gone — not merely expired.
-      mockFetch.mockResolvedValueOnce(okToken());
+      //
+      // The minted token is deliberately SHORT-LIVED. A full-hour token would
+      // make the next `getAccessToken()` serve it straight from memory without
+      // ever entering `_doRefresh`, so the suppression check would go untouched
+      // and this test would pass whether or not the window was cleared. It read
+      // as coverage and was measured as a survivor; the expiry is what turns it
+      // into an assertion.
+      mockFetch.mockResolvedValueOnce(new Response(
+        JSON.stringify({
+          access_token: 'minted-token-dddddddd',
+          refresh_token: 'minted-refresh-eeeeeeee',
+          expires_in: 1,
+          scope: 'https://www.googleapis.com/auth/gmail.readonly',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
       await a.exchangeRedirectCode('fresh-code', 'https://example.test/cb');
-      expect(await a.getAccessToken()).toBe('minted-token-dddddddd');
+
+      mockFetch.mockResolvedValueOnce(new Response(
+        JSON.stringify({
+          access_token: 'post-reconnect-token',
+          expires_in: 3600,
+          scope: 'https://www.googleapis.com/auth/gmail.readonly',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+      expect(await a.getAccessToken()).toBe('post-reconnect-token');
     });
 
     it('exchangeRedirectCode — the flow the web UI drives', async () => {
