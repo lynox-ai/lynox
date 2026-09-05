@@ -18,6 +18,21 @@ export interface NotificationMessage {
     options?: string[] | undefined;
   } | undefined;
   /**
+   * Who this message is FOR, when it is for one named person rather than for
+   * whoever is watching the instance. Channel-specific address form; the
+   * escalation mail channel reads it as an email address.
+   *
+   * Deliberately its own field and NOT a key in `data`: `data` is passthrough
+   * that web-push serialises straight into the browser payload, so an address
+   * parked there would ship a person's email to every subscribed browser of
+   * the instance. Addressing is not payload.
+   *
+   * Absent is the normal case and means "not addressed" — `notify()` fans out
+   * to every channel, so a channel that delivers to a person must refuse a
+   * message without this field rather than guess a default recipient.
+   */
+  recipient?: string | undefined;
+  /**
    * Channel-specific passthrough data — e.g. the inbox notifier sets
    * `{ itemId: '<inbox-row-id>' }` so the service worker's
    * `notificationclick` handler can deep-link to the affected mail.
