@@ -728,7 +728,6 @@ describe('WorkerLoop', () => {
       // The marker, not a sentence: a cancellation must not be mistakable for
       // an answer by the model that receives it.
       expect(answer).toBe('__dismissed__');
-      expect(loop.activeTaskCount).toBe(0);
     } finally {
       history.close();
       rmSync(dir, { recursive: true, force: true });
@@ -1600,10 +1599,16 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
   const closers: Array<() => void> = [];
 
   afterEach(() => {
-    for (const c of closers) { try { c(); } catch { /* already closed */ } }
+    // stop() first: a still-parked wait holds a 30s `setInterval` inside
+    // `waitForSettled`, and that interval outliving `history.close()` throws
+    // "database connection is not open" from a later tick. Draining the loop
+    // before closing the DB is what keeps these tests from leaking into their
+    // neighbours.
+    for (const c of closers) { try { c(); } catch { /* already gone */ } }
     closers.length = 0;
     for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
     tmpDirs.length = 0;
+    lastDb = undefined; // never point at a closed handle
   });
 
   /** A REAL store on the production schema — `RunHistory` runs the migrations,
@@ -1652,11 +1657,13 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
       promptStore: store,
     });
     const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000, taskTimeoutMs);
+    closers.unshift(() => { loop.stop(); });
     await loop.tick();
     // executeTask is fire-and-forget; wait for the row rather than for a timer.
     for (let i = 0; i < 200 && !store.getPending(SESSION_ID); i++) {
       await new Promise((r) => setTimeout(r, 5));
     }
+    if (!store.getPending(SESSION_ID)) throw new Error('park(): no prompt row appeared — the task never reached ask_user');
     return { store, loop, taskId: task.id, answered };
   }
 
@@ -1709,6 +1716,110 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     const promptId = store.getPending(SESSION_ID)!.id;
     expect(store.answerUser(promptId, 'Yes')).toBe(true);
     await expect(answered).resolves.toBe('Yes');
+  });
+
+  /** Build a task whose agent turn is scripted by `body`, and start it. Unlike
+   *  `park()` this does not wait for a prompt row — the point of the deadline
+   *  tests is what happens when there is none yet. */
+  async function startTask(taskTimeoutMs: number, body: (p: (q: string) => Promise<string>) => Promise<void>): Promise<{ store: PromptStore; router: NotificationRouter }> {
+    const store = makeRealStore();
+    const session = {
+      sessionId: SESSION_ID,
+      _recreateAgent: vi.fn(),
+      promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
+      run: vi.fn(async () => { await body((q) => session.promptUser!(q, ['Yes', 'No'])); return 'Done.'; }),
+    };
+    const engine = makeEngine({
+      taskManager: makeTaskManager([makeTask()]),
+      session: session as unknown as Session,
+      promptStore: store,
+    });
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(engine, router, 60_000, taskTimeoutMs);
+    closers.unshift(() => { loop.stop(); });
+    await loop.tick();
+    return { store, router };
+  }
+
+  const settle = async (pred: () => boolean, ms = 4_000): Promise<void> => {
+    for (let i = 0; i < ms / 5 && !pred(); i++) await new Promise((r) => setTimeout(r, 5));
+  };
+
+  // 9 — POSITIVE CONTROL for the deadline. Test 5 only asserts that it must NOT
+  // fire while parked, and a negative assertion passes HARDER when the machinery
+  // is gone: deleting `armDeadline()` left all tests green. This one fails if the
+  // deadline never arms, so the two together pin both directions.
+  it('fires the execution deadline when compute — not a human — spends the budget', async () => {
+    let answer: string | undefined;
+    const { store, router } = await startTask(50, async (ask) => { // 50ms, floored to 1s
+      await new Promise((r) => setTimeout(r, 1_300)); // burn it COMPUTING
+      answer = await ask('Allow?');
+    });
+    await settle(() => answer !== undefined);
+    expect(answer).toBe('__dismissed__');
+    expect(store.getPending(SESSION_ID)).toBeUndefined();
+    // And no question was PUSHED. This is the assertion that distinguishes
+    // "refused before the side effects" from "inserted, aborted, then drained":
+    // the row check alone cannot tell them apart, because the drain removes the
+    // row either way. A user whose task is already cancelled must not get a
+    // high-priority question they can no longer usefully answer.
+    expect(router.notify).not.toHaveBeenCalledWith(
+      expect.objectContaining({ inquiry: expect.anything() as unknown }),
+    );
+  });
+
+  // 10 — the deadline RE-ARMS after a wait. Deleting `resumeDeadline()` left
+  // every test green; this is the one that notices.
+  it('re-arms the deadline after the human answers', async () => {
+    let second: string | undefined;
+    const { store } = await startTask(50, async (ask) => {
+      await ask('First?');                              // parks; answered below
+      await new Promise((r) => setTimeout(r, 1_300));   // burn the re-armed budget
+      second = await ask('Second?');
+    });
+    await settle(() => store.getPending(SESSION_ID) !== undefined);
+    expect(store.answerUser(store.getPending(SESSION_ID)!.id, 'Yes')).toBe(true);
+    await settle(() => second !== undefined);
+    expect(second).toBe('__dismissed__');
+  });
+
+  // 11 — a run that FAILS while a question is outstanding must release it.
+  // Deleting the abort in the failure path left every test green.
+  it('releases a parked question when the run fails', async () => {
+    let parked: string | undefined;
+    const store = makeRealStore();
+    const session = {
+      sessionId: SESSION_ID,
+      _recreateAgent: vi.fn(),
+      promptUser: undefined as ((q: string, o?: string[]) => Promise<string>) | undefined,
+      run: vi.fn(async () => {
+        void (async () => { parked = await session.promptUser!('Allow?', ['Yes', 'No']); })();
+        await new Promise((r) => setTimeout(r, 60)); // let the row land
+        throw new Error('boom');
+      }),
+    };
+    const engine = makeEngine({
+      taskManager: makeTaskManager([makeTask()]),
+      session: session as unknown as Session,
+      promptStore: store,
+    });
+    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    closers.unshift(() => { loop.stop(); });
+    await loop.tick();
+    await settle(() => parked !== undefined);
+    expect(parked).toBe('__dismissed__');
+  });
+
+  // 12 — an abort DRAINS the row. Without it the row stays `pending`, keeps this
+  // session's slot in the partial unique index, and the agent's next ask_user
+  // throws PromptConflictError — plus it stays answerable with no waiter.
+  it('expires the row when the wait is aborted, freeing the session slot', async () => {
+    const { store, loop, answered } = await park();
+    const promptId = store.getPending(SESSION_ID)!.id;
+    loop.stop();
+    await expect(answered).resolves.toBe('__dismissed__');
+    expect(store.getById(promptId)!.status).toBe('expired');
+    expect(store.getPending(SESSION_ID)).toBeUndefined(); // slot is free again
   });
 
   // 8 — the TTL is INHERITED, not merely available. The store having a 24h

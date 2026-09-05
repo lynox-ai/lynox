@@ -123,10 +123,6 @@ export interface WorkerTaskContext {
  *  store id of the prompt this task is currently parked on. */
 export interface ActiveTask {
   controller: AbortController;
-  /** Session the task's agent runs under. The prompt store and the existing
-   *  `POST /api/sessions/:id/reply` route are both addressed by it, which is
-   *  why a store-backed background prompt needs no answer route of its own. */
-  promptSessionId?: string | undefined;
   /** Store id of the prompt this task is parked on; undefined while computing. */
   pendingPromptId?: string | undefined;
   /** Stop the execution deadline while parked on a human, and re-arm after.
@@ -317,12 +313,12 @@ export class WorkerLoop {
   private async executeTask(task: TriggerRecord): Promise<void> {
     const controller = new AbortController();
 
-    // The execution deadline. It used to be `AbortSignal.timeout()` wired to
-    // `controller.abort()` — and NOTHING read `controller.signal`: measured 0
-    // occurrences of `.signal` in this file against four in `agent.ts`. The
-    // deadline fired into the void. The signal now has a real consumer (the
-    // prompt wait below), so `stop()` reaches a task parked on a human instead
-    // of leaving it awaiting a promise nobody can settle.
+    // The execution deadline. It used to be an `AbortSignal.timeout()` wired to
+    // `controller.abort()` while nothing in this file ever read the signal, so
+    // the deadline fired into the void. The invariant that matters now: the
+    // signal has a consumer — the prompt wait below — so `stop()` reaches a task
+    // parked on a human instead of leaving it awaiting a promise nobody can
+    // settle.
     //
     // PAUSABLE, and that is load-bearing rather than tidy: `ask_user` is exempt
     // from the per-tool cap (`Agent.TOOL_TIMEOUT_EXEMPT`), so while a task is
@@ -574,6 +570,10 @@ export class WorkerLoop {
       // difference from the HTTP path that is deliberate, not a gap.
       const question = flattenPrompt(rawQuestion);
       const active = this.activeTasks.get(task.id);
+      // Already cancelled: `waitForSettled` would settle 'aborted' at once, but
+      // only AFTER this inserted a row and pushed a high-priority question at a
+      // user whose task is gone. Refuse before either side effect.
+      if (active?.controller.signal.aborted === true) return DISMISSED_ANSWER;
       if (!promptStore) {
         // No store: no durable park and no way to answer. The canonical marker
         // is the honest outcome — hanging would be worse, and a prose sentence
@@ -582,7 +582,6 @@ export class WorkerLoop {
       }
       const promptId = promptStore.insertAskUser(session.sessionId, question, options);
       if (active) {
-        active.promptSessionId = session.sessionId;
         active.pendingPromptId = promptId;
         // Park the execution deadline: from here until the prompt settles the
         // clock must not run, or the human's think-time eats the task's budget.
@@ -601,11 +600,26 @@ export class WorkerLoop {
       });
       try {
         const outcome = await promptStore.waitForSettled(promptId, active?.controller.signal);
-        return outcome.status === 'answered' ? (outcome.row.answer ?? DISMISSED_ANSWER) : DISMISSED_ANSWER;
+        if (outcome.status === 'answered') return outcome.row.answer ?? DISMISSED_ANSWER;
+        // An ABORTED wait leaves the row `pending` — `waitForSettled` resolves
+        // off the signal without touching it. Two consequences, both real: the
+        // row keeps this session's slot in the partial unique index
+        // (`pending_prompts(session_id) WHERE status='pending'`), so the agent's
+        // very next `ask_user` throws `PromptConflictError` out of this closure;
+        // and it stays answerable for its full TTL with nobody awaiting the
+        // answer — the shape `WallClockBudget`'s docstring cites as issue #77.
+        // Drain it, exactly as the HTTP takeover path does. Idempotent, so an
+        // already-`expired` outcome costs one no-op UPDATE.
+        promptStore.expirePrompt(promptId);
+        return DISMISSED_ANSWER;
       } finally {
         if (active) {
           active.pendingPromptId = undefined;
-          active.resumeDeadline();
+          // Only re-arm while this entry is still the live one. `stop()` clears
+          // the map, and `executeTask`'s own finally can only clear a timer it
+          // can still reach through it — so resuming a dropped entry arms a
+          // timer nothing will ever clear.
+          if (this.activeTasks.get(task.id) === active) active.resumeDeadline();
         }
       }
     };
