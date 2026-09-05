@@ -632,7 +632,18 @@ export class WorkerLoop {
         // ORDERING instead — it aborts before the bookkeeping, so a store throw
         // cannot leave its run parked. That option is not available here,
         // because here the abort is what ended the wait in the first place.)
-        try { promptStore.expirePrompt(promptId); } catch { /* closing/closed DB — the wait must still settle */ }
+        try {
+          promptStore.expirePrompt(promptId);
+        } catch (err: unknown) {
+          // Silent would hide the cases that are NOT a shutdown: `stop()` is a
+          // public method and can run with the DB wide open, where a failure
+          // here means SQLITE_BUSY or schema drift and leaves a pending row
+          // answerable with no reader. One line, because the wait must settle
+          // either way and a teardown is the wrong place to throw.
+          process.stderr.write(
+            `[lynox:worker] prompt drain failed for ${task.id}: ${err instanceof Error ? err.message : String(err)}\n`,
+          );
+        }
         return DISMISSED_ANSWER;
       } finally {
         if (active) {

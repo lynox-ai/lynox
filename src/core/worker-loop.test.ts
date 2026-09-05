@@ -1828,7 +1828,8 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
   // then ran with NO signal — an unabortable park for the full TTL. Worse than
   // what it replaced: before the drain fix the same case threw
   // PromptConflictError, i.e. loud. Mutation: look `active` up inside the
-  // closure again → this hangs.
+  // closure again → this FAILS (the answer stays undefined past the poll), it
+  // does not hang.
   it('refuses a second question after stop() instead of parking it forever', async () => {
     let second: string | undefined;
     const store = makeRealStore();
@@ -1847,22 +1848,36 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
       session: session as unknown as Session,
       promptStore: store,
     });
-    const loop = new WorkerLoop(engine, makeNotificationRouter(), 60_000);
+    const router = makeNotificationRouter();
+    const loop = new WorkerLoop(engine, router, 60_000);
     closers.unshift(() => { loop.stop(); });
     await loop.tick();
     await settle(() => store.getPending(SESSION_ID) !== undefined);
     loop.stop();
     await settle(() => second !== undefined);
     expect(second).toBe('__dismissed__');
-    // and nothing was left parked behind it
     expect(store.getPending(SESSION_ID)).toBeUndefined();
+    // THE assertion that pins the guard. The three other fixes mask its absence
+    // between them: with `active` captured the second wait gets a real, already
+    // aborted signal and settles at once, and the drain then removes the row —
+    // so both checks above stay green without the guard. What no other fix can
+    // undo is the PUSH: a cancelled user must not be handed a second
+    // high-priority question. (Third time in this PR that two fixes made each
+    // other unobservable and only a different observation level separated them.)
+    expect(router.notify).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        inquiry: expect.objectContaining({ question: 'Second?' }) as { question: string },
+      }),
+    );
   });
 
   // 14 — the drain must not be able to break the cancellation it is cleaning up
   // after. `Engine.shutdown()` stops the loop and later closes the history DB,
-  // so `expirePrompt` can land on a closed handle; letting that escape would
-  // reject promptUser and leave the wait unsettled — the very failure this
-  // change removes. Mutation: drop the try/catch → this hangs.
+  // so `expirePrompt` can land on a closed handle. The wait has already settled
+  // by then, so a throw would not re-park it — it would reject `promptUser`,
+  // turning a clean cancellation into a failed tool call. Mutation: drop the
+  // try/catch → this FAILS (the settle poll times out and the answer is
+  // undefined); it does not hang.
   it('still settles the wait when the drain throws', async () => {
     const real = makeRealStore();
     const store = new Proxy(real, {
