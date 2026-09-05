@@ -285,6 +285,21 @@ const GATES: Readonly<Record<string, GateEntry>> = {
       'takes its commit range as arguments and enumerates no tree, and refuses a call that does not supply both — same shape as no-ai-attribution below. NOT exempt from exiting 0 after checking nothing: with no pattern configured it does exactly that, deliberately, and the comment above says so',
     expectStrippedExit: 2,
   },
+  // The other surface of the same class, and the exemption is the same one for
+  // the same reason: the range arrives as arguments, so there is no tree to
+  // starve. What it does enumerate — the files each commit in the range touches —
+  // it enumerates through `git diff-tree`, whose failure it does NOT swallow: an
+  // unresolvable range exits 1 rather than reporting a clean scan, and an empty
+  // one says "NO files" instead of "clean ✓". Both are covered directly in
+  // tests/public-repo-guard.test.ts, along with the fail-open this shares with
+  // the meta half: no pattern configured means it stands down and exits 0, which
+  // is deliberate, has no CI twin, and is an operator duty no check here replaces.
+  'public-repo-guard-files': {
+    kind: 'exempt',
+    reason:
+      'takes its commit range as arguments and enumerates no tree; a call that does not supply both refs is refused. NOT exempt from the class: the range door is covered in tests/public-repo-guard.test.ts, where an unresolvable range exits 1 and an empty one announces that it scanned nothing rather than reporting clean',
+    expectStrippedExit: 2,
+  },
   // Same correction as security-scan above. The probe invokes this script with NO
   // arguments, so what it proved was the `usage` path — and the old reason
   // described only the `strip` verb, which takes a file. The `check` verb takes a
@@ -351,6 +366,15 @@ const EXEMPT_COMMAND: Readonly<Record<string, { cmd: string; args: string[] }>> 
   'public-repo-guard-meta': {
     cmd: 'bash',
     args: [join(repoRoot, 'scripts/public-repo-guard.sh'), 'check-meta', 'HEAD'],
+  },
+  // Half-given range, for the same reason as the line above and measured the same
+  // way: a FULL range would return whatever the operator's list happens to be on
+  // the machine running the suite, so the probe would answer differently in CI
+  // than on a laptop. The argument-count refusal is decided before any pattern
+  // lookup and is therefore the same answer everywhere.
+  'public-repo-guard-files': {
+    cmd: 'bash',
+    args: [join(repoRoot, 'scripts/public-repo-guard.sh'), 'check-files', 'HEAD'],
   },
   'no-ai-attribution': { cmd: 'bash', args: [join(repoRoot, 'scripts/no-ai-attribution.sh')] },
   'hex-guard': { cmd: 'bash', args: [join(repoRoot, 'packages/web-ui/scripts/hex-guard.sh')] },

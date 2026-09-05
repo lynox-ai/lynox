@@ -328,20 +328,25 @@ SOFT='engine\.lynox\.cloud|control\.lynox\.cloud'
 
 usage() {
   echo "usage: public-repo-guard.sh [--staged]" >&2
-  echo "       public-repo-guard.sh check-meta <base-ref> <head-ref>" >&2
+  echo "       public-repo-guard.sh check-meta  <base-ref> <head-ref>" >&2
+  echo "       public-repo-guard.sh check-files <base-ref> <head-ref>" >&2
   exit 2
 }
 
 mode_staged=false
 mode_meta=false
+mode_files=false
 meta_base=''
 meta_head=''
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --staged)              mode_staged=true ;;
-    check-meta)
-      mode_meta=true
+    check-meta|check-files)
+      case "$1" in
+        check-meta)  mode_meta=true ;;
+        check-files) mode_files=true ;;
+      esac
       meta_base="${2:-}"
       meta_head="${3:-}"
       [ -n "$meta_base" ] && [ -n "$meta_head" ] || usage
@@ -358,6 +363,16 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# Both subcommands are ONE class over two surfaces, so they must not be given at
+# once: they share `meta_base`/`meta_head`, and a second occurrence silently
+# overwrites the first one's refs. Refusing is the same category as any other
+# usage error — a way of having looked at something other than what was asked.
+if $mode_meta && $mode_files; then
+  echo "public-repo-guard: give check-meta OR check-files, not both — they share" >&2
+  echo "   one pair of refs and the second would overwrite the first." >&2
+  usage
+fi
 
 # The PREFLIGHT runs inside the check-meta path below, not out here. The tree scan
 # never touches the name list, so letting a malformed ~/.lynox/private-names.re
@@ -376,9 +391,15 @@ done
 #
 # As everywhere in this class, no matched text is printed: a commit is named by
 # its short SHA alone, never by its subject line.
-if $mode_meta; then
+if $mode_meta || $mode_files; then
   meta_hits=0
   meta_commits=0
+  file_hits=0
+  files_scanned=0
+  # The label is chosen ONCE, from the mode, rather than written into each
+  # message: two subcommands sharing this block is exactly the shape where a
+  # copied string ends up naming the other one.
+  if $mode_meta; then class_label='check-meta'; else class_label='check-files'; fi
   names_active=false
   if [ -n "$PRIVATE_NAMES_RE" ]; then
     # exit 2, not 1: a preflight refusal is "the gate never looked", which is
@@ -438,7 +459,7 @@ if $mode_meta; then
     echo "    To arm it, put one regex per line in ${PRIVATE_NAMES_FILE}."
   fi
 
-  if $names_active; then
+  if $names_active && $mode_meta; then
     # The range is resolved FIRST, and a failure to resolve it is fatal.
     #
     # Written as `for sha in $(git rev-list … 2>/dev/null)` this could not fail:
@@ -511,6 +532,177 @@ if $mode_meta; then
     done
   fi
 
+  # check-files — the PATHS and CONTENT of the files this range adds or changes.
+  #
+  # WHY THIS EXISTS. Until now the class scanned commit messages "and nothing
+  # else", so a file named after a customer, or holding their name in its body,
+  # reached this PUBLIC repo untouched as long as the message stayed neutral. The
+  # name then sits in a path and in a blob, which is the same permanence problem
+  # the message half was built for and a wider surface.
+  #
+  # ⛔ WHY IT MUST NEVER GET A CI TWIN, and this is load-bearing rather than a
+  # preference. An earlier version of this class DID scan the tree, in CI, and
+  # every defect it had came from that: a public Actions log must not print a
+  # name, so it withheld the matching line, then had to withhold the path too,
+  # and the withholding used the same grep as the detection — so it was blind
+  # exactly where the detection was blind. It was removed for that.
+  #
+  # This one reports the path and says which surface matched, because it runs at
+  # PRE-PUSH on the operator's own machine, where the list is already theirs. That
+  # is the whole reason the withholding machinery is absent, and it is only true
+  # while no workflow invokes this subcommand. `tests/public-repo-guard.test.ts`
+  # asserts that none does; keep it that way, or reintroduce the withholding and
+  # every defect that came with it.
+  if $names_active && $mode_files; then
+    # PER COMMIT, not base-against-head — and that is the difference between
+    # scanning what SHIPS and scanning what SURVIVES.
+    #
+    # `git diff base head` compares two TREES, so a file added early in the range
+    # and deleted later is absent from both ends and never listed. Its blob is
+    # still in the range and still gets pushed: measured on a three-commit branch
+    # (seed / add / remove), `git diff --name-only base head` returns one path
+    # while `git rev-list --objects base..head` still finds the deleted file's
+    # blob. A tree diff would have reported that branch clean and pushed the name.
+    #
+    # So every commit is walked and every blob it introduces is scanned. A file
+    # touched three times is scanned three times, which is right: those are three
+    # distinct blobs, and all three ship.
+    #
+    # ACMR: a file the range only DELETES is not scanned. Its content is leaving,
+    # and firing there would block the very commit that removes a name.
+    # THE RANGE, and why it is not `--not --remotes=origin`.
+    #
+    # A two-base (criss-cross) merge can make `git merge-base` pick the base that
+    # re-includes a commit already on origin/main, and this half has no escape
+    # hatch — the pragma and the allow-list belong to the tree scan below. The
+    # obvious repair is to take the commits that are on no remote at all. It was
+    # measured rather than adopted, and the measurement says no:
+    #
+    #   ordinary branch, origin present   identical commit set — buys nothing
+    #   origin refs absent                merge-base form: 0 commits
+    #                                     --not --remotes: the ENTIRE history
+    #   tracking ref stale                scans more than the push contains
+    #
+    # The second row is the disqualifying one. A repo with no fetched origin refs
+    # — a fresh worktree before its first fetch, a differently named remote — would
+    # scan every commit that ever existed on every push: minutes in the hook, and
+    # any name anywhere in history blocks every push permanently. That is the
+    # "unpushable hook teaches --no-verify" failure this file warns about, traded
+    # for a case that could not be reproduced here (one criss-cross construction
+    # was attempted; merge-base landed on the name-carrying commit itself, so both
+    # forms excluded it — the adversarial report of it stands unmatched, not
+    # refuted).
+    #
+    # If the false positive is ever OBSERVED, the guarded form is one line away:
+    # use `--not --remotes=origin` only when that exclusion set is non-empty, and
+    # fall back to the merge-base range when it is not.
+    files_revs=''
+    if ! files_revs="$(git --no-replace-objects rev-list "${meta_base}..${meta_head}" 2>/dev/null)"; then
+      echo "❌ public-repo-guard: cannot resolve ${meta_base}..${meta_head}." >&2
+      echo "   Refusing to report a clean range that was never walked. In CI this" >&2
+      echo "   usually means the checkout is too shallow — it needs fetch-depth: 0." >&2
+      exit 1
+    fi
+    blob="$(mktemp)"
+    file_list="$(mktemp)"
+    for sha in $files_revs; do
+      # -z because git QUOTES any path holding a non-ASCII byte, which is how a
+      # path-based check silently skips the file it was written for (the tree scan
+      # further down carries the same note, and the same measurement).
+      #
+      # The listing goes to a FILE, never through `$( )`. Command substitution
+      # strips NUL bytes — bash discards them outright — so `-z` output captured
+      # into a variable arrives as one run-on string, the `read -d ''` loop sees a
+      # single "path", and every real path after the first is skipped while the
+      # count still says 1. Choosing `-z` forces choosing a file.
+      #
+      # `--root` so a range that includes an initial commit is scanned rather
+      # than silently empty: diff-tree against no parent prints nothing without it.
+      #
+      # `--cc` for the same reason one commit further along: diff-tree against a
+      # MERGE prints NOTHING without it, and the guard then reports `clean ✓
+      # (N file(s) scanned)` with N quietly omitting the merge — no starvation
+      # warning either, because the sibling commits supplied the count. Measured:
+      # a conflict resolved by typing a name into the merge commit listed 0 files,
+      # and `--cc` lists it. That is not an exotic path; resolving a conflict by
+      # hand is the single most ordinary way a real name gets typed into a repo.
+      # `--cc` lists what the merge itself introduced — the files that differ from
+      # EVERY parent — so an ordinary merge does not re-scan the branch it merges
+      # (those commits are in the range on their own, or are already public).
+      # On a non-merge it behaves like a plain diff; measured, not assumed.
+      #
+      # `T` in the filter, because a TYPE CHANGE is neither A nor M. A regular
+      # file replaced by a symlink whose TARGET names a customer — or a symlink
+      # replaced by a regular file full of prose — is status `T`, listed nowhere,
+      # and both shipped clean before this. `D` stays out: a deleted file's
+      # content is leaving.
+      git --no-replace-objects diff-tree --no-commit-id --root --cc -r --name-only \
+        --diff-filter=ACMRT -z "$sha" > "$file_list" 2>/dev/null || true
+      while IFS= read -r -d '' f; do
+        [ -n "$f" ] || continue
+        files_scanned=$((files_scanned + 1))
+        # PATH FIRST, and it is not a nicety: no content grep ever sees a file
+        # NAME, so `<customer>-businessplan.html` full of neutral prose is
+        # invisible to a content-only scan. That shape is what prompted this half.
+        if printf '%s' "$f" | grep -qEi "$PRIVATE_NAMES_RE"; then
+          echo "❌ private name in the PATH: ${f}  (commit ${sha:0:9})"
+          file_hits=$((file_hits + 1))
+          continue
+        fi
+        # CONTENT, read from the COMMIT that introduced this version rather than
+        # from HEAD or the working copy. At HEAD the file may no longer exist —
+        # which is the add-then-delete case above — and the worktree is not
+        # necessarily what is being pushed.
+        #
+        # Written to a file rather than piped into grep. `git cat-file blob … |
+        # grep -q` looks equivalent and is not: grep exits at the first match, git
+        # keeps writing, and past the pipe buffer it dies of SIGPIPE — with
+        # `pipefail` the pipeline then reports 141 and the `if` reads it as NO
+        # MATCH. That is measured on the commit-message half of this same class,
+        # where a large message with the name in its first line was missed on
+        # every run. A large file is the same shape.
+        if git --no-replace-objects cat-file -e "${sha}:${f}" 2>/dev/null; then
+          git --no-replace-objects cat-file blob "${sha}:${f}" > "$blob" 2>/dev/null || true
+          # No -I, so a name sitting in raw bytes is still found. That is worth
+          # having and it is NOT the coverage an earlier version of this comment
+          # claimed: it named "a PDF, a spreadsheet, an image with the name in its
+          # metadata", and PDF text streams and every OOXML part are DEFLATE
+          # compressed, so a literal grep finds nothing in them. Measured — a PDF
+          # and a .gz carrying the name both passed clean, while an uncompressed
+          # store in a zip was caught. What this covers is uncompressed binary;
+          # a compressed carrier is out of reach of any lexical scan and is
+          # stated here rather than implied away.
+          if grep -qEi "$PRIVATE_NAMES_RE" "$blob"; then
+            echo "❌ private name in the CONTENT of: ${f}  (commit ${sha:0:9})"
+            file_hits=$((file_hits + 1))
+          fi
+        fi
+      done < "$file_list"
+    done
+    rm -f "$blob" "$file_list"
+  fi
+
+  if [ "$file_hits" -gt 0 ]; then
+    cat >&2 <<'EOF'
+
+A customer or third-party name reached a file in this PUBLIC repo — in its path,
+its contents, or both.
+
+⚠ Deleting the file in a NEW commit does not fix this. The scan walks every
+commit in the range, so a blob that was added and later removed is still found —
+because it is still pushed. The name has to come out of the HISTORY:
+
+    git rebase -i <base>          # drop or edit the commit that added it
+    git commit --amend            # if it was the last commit
+
+Then rename the file or describe the case neutrally in it — "a prod thread", "a
+managed instance" — and keep the material in the private repo.
+
+Do NOT bypass this check.
+EOF
+    exit 1
+  fi
+
   if [ "$meta_hits" -gt 0 ]; then
     cat >&2 <<'EOF'
 
@@ -539,13 +731,24 @@ EOF
     # looks exactly like a range nothing was read from. The status check above
     # catches an UNRESOLVABLE range, not an empty one, so say it out loud rather
     # than let "clean ✓" imply a walk.
-    if [ "$meta_commits" -eq 0 ]; then
-      echo "⚠️  public-repo-guard (check-meta): the range held NO commits — nothing was"
-      echo "    scanned. Check that ${meta_base}..${meta_head} is the range you meant."
+    if $mode_meta; then
+      if [ "$meta_commits" -eq 0 ]; then
+        echo "⚠️  public-repo-guard (check-meta): the range held NO commits — nothing was"
+        echo "    scanned. Check that ${meta_base}..${meta_head} is the range you meant."
+      fi
+      echo "public-repo-guard (check-meta): clean ✓ (${meta_commits} commit(s) scanned)"
+    else
+      # Same reason as the commit counter: zero files is a real state (a range
+      # that only changes messages, or an empty range) and it must not be able to
+      # look like a scan that ran.
+      if [ "$files_scanned" -eq 0 ]; then
+        echo "⚠️  public-repo-guard (check-files): the range added or changed NO files —"
+        echo "    nothing was scanned. Check that ${meta_base}..${meta_head} is the range you meant."
+      fi
+      echo "public-repo-guard (check-files): clean ✓ (${files_scanned} file(s) scanned, path + content)"
     fi
-    echo "public-repo-guard (check-meta): clean ✓ (${meta_commits} commit(s) scanned)"
   else
-    echo "public-repo-guard (check-meta): class inactive — nothing scanned."
+    echo "public-repo-guard (${class_label}): class inactive — nothing scanned."
   fi
   exit 0
 fi

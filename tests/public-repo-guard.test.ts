@@ -19,12 +19,14 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync, chmodSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync, chmodSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT = fileURLToPath(new URL('../scripts/public-repo-guard.sh', import.meta.url));
+/** The repo this test file lives in — used to assert a property about the workflows. */
+const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 /** Assembled so this file is not itself a leak marker. */
 const VENDOR = ['cli', 'proxy', 'api'].join('');
@@ -1019,5 +1021,352 @@ describe('public-repo-guard — private-name pattern source and preflight', () =
     for (const good of ['Foo (AG|GmbH)', '\\bsmith\\b', '[Nn]ordberg', 'a[|]b', 'van\\s+der\\s+Meer']) {
       expect(run(['check-meta', base, head], { __PATTERN__: good }).code).toBe(0);
     }
+  });
+});
+
+/**
+ * check-files — the PATHS and CONTENT of the files a range introduces.
+ *
+ * The class used to scan commit messages "and nothing else", so a file named
+ * after a customer, or carrying the name in its body, reached this PUBLIC repo
+ * untouched as long as the message stayed neutral. Both halves are the same
+ * class over two surfaces and share the arming, the preflight and the stand-down.
+ *
+ * Every case here runs BOTH directions. A widened name pattern that starts
+ * firing on ordinary files is the failure that gets a guard deleted rather than
+ * fixed, so the must-not-fire half is not decoration.
+ *
+ * The name is fictional and assembled at runtime, and the list is written into a
+ * scratch HOME — the operator's real list never enters this repo, which is the
+ * rule the class exists to keep.
+ */
+describe('public-repo-guard — private names in files (check-files)', () => {
+  function commitAll(subject: string): string {
+    execFileSync('git', ['commit', '-q', '-m', subject], {
+      cwd: dir,
+      env: {
+        ...GIT_ENV,
+        GIT_AUTHOR_NAME: 't',
+        GIT_AUTHOR_EMAIL: 't@t.t',
+        GIT_COMMITTER_NAME: 't',
+        GIT_COMMITTER_EMAIL: 't@t.t',
+      },
+    });
+    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, env: GIT_ENV, encoding: 'utf8' }).trim();
+  }
+
+  /** A baseline commit, so every case has a range that is not rooted at nothing. */
+  function baseline(): string {
+    commitFile('README.md', 'baseline\n');
+    return commitAll('baseline');
+  }
+
+  function runFiles(base: string, head: string, env: Record<string, string> = {}): Run {
+    return run(['check-files', base, head], { __PATTERN__: FICTIONAL_NAME, ...env });
+  }
+
+  describe('fires', () => {
+    it('on a name in the CONTENT of an added file', () => {
+      const base = baseline();
+      commitFile('docs/note.md', `A note about ${FICTIONAL_NAME_CAPITALISED} and its plan.\n`);
+      const head = commitAll('add a note');
+
+      const r = runFiles(base, head);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('docs/note.md');
+    });
+
+    it('on a name in the PATH, with content that says nothing', () => {
+      // The shape the class was missing: no content grep ever sees a file NAME,
+      // so a neutral document under a named path was invisible.
+      const base = baseline();
+      commitFile(`docs/${FICTIONAL_NAME}-businessplan.html`, '<p>nothing sensitive at all</p>\n');
+      const head = commitAll('add a document');
+
+      const r = runFiles(base, head);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('PATH');
+    });
+
+    it('on a file that carries the name in both path and content', () => {
+      const base = baseline();
+      commitFile(`${FICTIONAL_NAME}-notes.txt`, `${FICTIONAL_NAME_CAPITALISED} said yes.\n`);
+      const head = commitAll('notes');
+
+      expect(runFiles(base, head).code).toBe(1);
+    });
+
+    it('on a file ADDED and then DELETED inside the range — the blob still ships', () => {
+      // A tree diff (base against head) cannot see this: the file is absent from
+      // both ends. Its blob is still pushed, so a later `git rm` does not fix it
+      // and the message says so. This is why the scan walks commits, not trees.
+      const base = baseline();
+      commitFile('gone.md', `${FICTIONAL_NAME_CAPITALISED}\n`);
+      commitAll('add it');
+      execFileSync('git', ['rm', '-q', 'gone.md'], { cwd: dir, env: GIT_ENV });
+      const head = commitAll('remove it again');
+
+      const r = runFiles(base, head);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('gone.md');
+      expect(r.out).toContain('does not fix this');
+    });
+
+    it('on a name at the start of a LARGE file, where a pipe would lose it', () => {
+      // Not a size test — a pipeline-shape test. `git cat-file blob … | grep -q`
+      // exits at the first match, git keeps writing, and past the pipe buffer it
+      // dies of SIGPIPE; with `pipefail` the pipeline reports 141 and the caller
+      // reads it as NO MATCH. Small inputs are unaffected, which is what makes
+      // the bug ship. The same shape was measured on the commit-message half.
+      // 2 MB with the name in the first line, so a piped implementation fails
+      // here and the temp-file one does not.
+      const base = baseline();
+      commitFile('big.md', `${FICTIONAL_NAME_CAPITALISED}\n${'filler filler filler\n'.repeat(100_000)}`);
+      const head = commitAll('a large file');
+
+      expect(runFiles(base, head).code).toBe(1);
+    });
+
+    it('on a ROOT commit inside the range, which diff-tree otherwise prints nothing for', () => {
+      // A range can contain a commit with no parent — an orphan branch pushed
+      // against main is the ordinary way to get one. `git diff-tree <root>` emits
+      // NOTHING without `--root`, so the whole commit is skipped and the scan
+      // reports clean. The flag was a survivor until this case existed: no other
+      // range here reaches a parentless commit.
+      const base = baseline();
+      execFileSync('git', ['checkout', '-q', '--orphan', 'orphan'], { cwd: dir, env: GIT_ENV });
+      execFileSync('git', ['rm', '-rq', '--cached', '.'], { cwd: dir, env: GIT_ENV });
+      commitFile('orphan-doc.md', `${FICTIONAL_NAME_CAPITALISED} is in here.\n`);
+      const head = commitAll('orphan root commit');
+
+      const r = runFiles(base, head);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('orphan-doc.md');
+    });
+
+    it('on a name typed into a MERGE commit while resolving a conflict', () => {
+      // diff-tree against a merge prints NOTHING without --cc, so the merge
+      // contributed zero files and the scan reported "clean ✓ (N file(s))" with
+      // N supplied by the sibling commits — no starvation warning either.
+      // Resolving a conflict by hand is the most ordinary way a real name gets
+      // typed into a repo, which is what makes this the worst of the holes an
+      // adversarial pass found.
+      const base = baseline();
+      execFileSync('git', ['checkout', '-qb', 'side'], { cwd: dir, env: GIT_ENV });
+      commitFile('c.txt', 'CLIENT: side\n');
+      commitAll('side');
+      execFileSync('git', ['checkout', '-q', '-'], { cwd: dir, env: GIT_ENV });
+      commitFile('c.txt', 'CLIENT: main\n');
+      commitAll('mainline');
+      try {
+        execFileSync('git', ['merge', '-q', 'side'], { cwd: dir, env: GIT_ENV });
+      } catch {
+        // The conflict is the point of the fixture.
+      }
+      commitFile('c.txt', `CLIENT: ${FICTIONAL_NAME_CAPITALISED}\n`);
+      const head = commitAll('resolve the conflict');
+
+      const r = runFiles(base, head);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('c.txt');
+    });
+
+    it('on a TYPE CHANGE — a file that becomes a symlink naming the customer', () => {
+      // Status `T` is neither A nor M, so `--diff-filter=ACMR` listed it nowhere
+      // and both directions shipped clean: a regular file replaced by a symlink
+      // whose TARGET carries the name, and a symlink replaced by a regular file
+      // full of prose.
+      const base = baseline();
+      commitFile('ref.txt', 'plain file\n');
+      commitAll('a plain file');
+      rmSync(join(dir, 'ref.txt'));
+      symlinkSync(`../${FICTIONAL_NAME}-prod-notes/secret.md`, join(dir, 'ref.txt'));
+      execFileSync('git', ['add', '--', 'ref.txt'], { cwd: dir, env: GIT_ENV });
+      const head = commitAll('turn it into a symlink');
+
+      const r = runFiles(base, head);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('ref.txt');
+    });
+
+    it('on a path whose bytes are non-ASCII, which git would otherwise quote away', () => {
+      // Without `-z` git renders such a path as an escaped, quoted string; the
+      // loop then reads a literal that matches no file and the scan skips it
+      // while reporting clean. Same measurement as the tree scan's own note.
+      const base = baseline();
+      commitFile(`docs/Übersicht-${FICTIONAL_NAME}.md`, 'neutral\n');
+      const head = commitAll('umlaut path');
+
+      expect(runFiles(base, head).code).toBe(1);
+    });
+  });
+
+  describe('does not fire', () => {
+    it('on a file that existed at the base and is only DELETED by the range', () => {
+      // Its content is leaving the repo. Firing here would block the very commit
+      // that removes a name, which is the opposite of what the class wants.
+      commitFile('README.md', 'baseline\n');
+      commitFile('pre.md', `${FICTIONAL_NAME_CAPITALISED}\n`);
+      const base = commitAll('seed with the file already present');
+      execFileSync('git', ['rm', '-q', 'pre.md'], { cwd: dir, env: GIT_ENV });
+      const head = commitAll('remove it');
+
+      expect(runFiles(base, head).code).toBe(0);
+    });
+
+    it('on a file whose PATH carries the name and which the range DELETES', () => {
+      // This is the case that makes `--diff-filter=ACMR` load-bearing, and it was
+      // missing: with the filter widened to include D, the earlier delete case
+      // still passed, because the file no longer exists at that commit and the
+      // content read simply finds nothing. The PATH check has no such guard — it
+      // reads the listing directly — so a deletion would fire on the very commit
+      // that removes the name, and the only way out would be to bypass the hook.
+      commitFile('README.md', 'baseline\n');
+      commitFile(`${FICTIONAL_NAME}-plan.md`, 'neutral prose\n');
+      const base = commitAll('seed with a named path already present');
+      execFileSync('git', ['rm', '-q', `${FICTIONAL_NAME}-plan.md`], { cwd: dir, env: GIT_ENV });
+      const head = commitAll('remove the named file');
+
+      expect(runFiles(base, head).code).toBe(0);
+    });
+
+    it('on substrings that merely contain the name', () => {
+      // The word boundary lives in the operator's pattern, not here — this case
+      // exists so a pattern change that drops it is visible. A near-miss has
+      // already happened once in this class, on a brand written with spaces.
+      //
+      // Both continuations are WORD characters, and that is the whole fixture.
+      // The first draft used `<name>-adjacent`, which is not a near miss at all:
+      // a hyphen IS a word boundary, so `\bname\b` matches it and the case
+      // failed. The fixture was wrong in the direction that invites loosening
+      // the guard to make a test pass.
+      const base = baseline();
+      commitFile('near.md', `The ${FICTIONAL_NAME}ish hypothesis and ${FICTIONAL_NAME}oration.\n`);
+      const head = commitAll('near miss');
+
+      expect(runFiles(base, head, { __PATTERN__: `\\b${FICTIONAL_NAME}\\b` }).code).toBe(0);
+    });
+
+    it('on an ordinary file with no name anywhere', () => {
+      const base = baseline();
+      commitFile('ordinary.md', 'ordinary text about ordinary things\n');
+      const head = commitAll('ordinary');
+
+      expect(runFiles(base, head).code).toBe(0);
+    });
+  });
+
+  describe('says what it did rather than implying it', () => {
+    it('names an empty range instead of reporting a clean scan of nothing', () => {
+      const base = baseline();
+
+      const r = runFiles(base, base);
+      expect(r.code).toBe(0);
+      expect(r.out).toContain('NO files');
+    });
+
+    it('stands down visibly when no list is configured', () => {
+      const base = baseline();
+      commitFile('x.md', `${FICTIONAL_NAME_CAPITALISED}\n`);
+      const head = commitAll('x');
+
+      // No `__PATTERN__`: nothing is written into the scratch HOME.
+      const r = run(['check-files', base, head]);
+      expect(r.code).toBe(0);
+      expect(r.out).toContain('SKIPPED');
+    });
+
+    it('refuses when the list is configured but yields nothing', () => {
+      // exit 2 = "the gate never looked", which must stay distinct from 1 = "the
+      // gate found something". Same arming block as check-meta, so this asserts
+      // the sharing rather than a second implementation.
+      const base = baseline();
+      commitFile('x.md', `${FICTIONAL_NAME_CAPITALISED}\n`);
+      const head = commitAll('x');
+
+      const r = run(['check-files', base, head], { __PATTERN__: '# only a comment' });
+      expect(r.code).toBe(2);
+      expect(r.out).toContain('CONFIGURED BUT UNUSABLE');
+    });
+
+    it('refuses a range it cannot resolve rather than calling it clean', () => {
+      const base = baseline();
+
+      const r = runFiles('deadbeefdeadbeefdeadbeefdeadbeefdeadbeef', base);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('cannot resolve');
+    });
+
+    it('refuses both subcommands at once — they share one pair of refs', () => {
+      const base = baseline();
+
+      const r = run(['check-meta', base, base, 'check-files', base, base]);
+      expect(r.code).toBe(2);
+    });
+  });
+
+  /**
+   * ⛔ THE STRUCTURAL SAFETY PROPERTY, and it is the reason this half can print
+   * paths at all.
+   *
+   * An earlier tree-scanning version of this class ran in CI, where a public
+   * Actions log must not print a name. It therefore withheld the matching line,
+   * then had to withhold the path too, and the withholding used the same grep as
+   * the detection — so it was blind exactly where the detection was blind. It was
+   * removed for that.
+   *
+   * This half reports plainly because it runs at PRE-PUSH on the operator's own
+   * machine, where the list is already theirs. That is only true while no
+   * workflow invokes it. This asserts it, so wiring it into CI fails here instead
+   * of quietly printing a customer name into a public log.
+   */
+  /**
+   * The whole of `.github`, recursively — not just the workflow YAML files. A
+   * composite action lives at `.github/actions/<name>/action.yml`, and a workflow
+   * can call a script that calls this; the narrow first version saw neither.
+   *
+   * (Written without a glob on purpose: a `<star><slash>` inside a block comment
+   * closes it, which is exactly how the first draft of this comment turned the
+   * rest of the file into code.)
+   *
+   * It still cannot see an arbitrary indirection, said here rather than left to
+   * be found: it catches the ways this would plausibly be wired, not every way it
+   * could be.
+   */
+  function invokersUnder(root: string): string[] {
+    const found: string[] = [];
+    const walk = (d: string): void => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (/\.(ya?ml|sh|mjs|js)$/u.test(e.name) && /check-['"]?files/u.test(readFileSync(p, 'utf8'))) {
+          found.push(p.slice(root.length));
+        }
+      }
+    };
+    walk(root);
+    return found;
+  }
+
+  it('finds an invoker wherever it is wired — positive control on the walk', () => {
+    // Without this the recursion and the quote-tolerant match are unfalsifiable:
+    // the real `.github` has no offender, so narrowing the walk back to
+    // the workflow directory alone passed unchanged. A planted composite action
+    // and a called script are what make the widening a tested decision.
+    const root = mkdtempSync(join(tmpdir(), 'prg-wf-'));
+    mkdirSync(join(root, 'actions', 'probe'), { recursive: true });
+    writeFileSync(
+      join(root, 'actions', 'probe', 'action.yml'),
+      "runs:\n  steps:\n    - run: bash scripts/public-repo-guard.sh check-files A B\n",
+    );
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    writeFileSync(join(root, 'scripts', 'ci.sh'), "public-repo-guard.sh check-'files' \"$A\" \"$B\"\n");
+
+    expect(invokersUnder(root).sort()).toHaveLength(2);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('is invoked by nothing under .github — printing paths is safe only locally', () => {
+    expect(invokersUnder(join(REPO_ROOT, '.github'))).toEqual([]);
   });
 });
