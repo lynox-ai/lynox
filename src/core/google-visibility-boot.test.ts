@@ -6,7 +6,26 @@ import { Engine } from './engine.js';
 import { reloadConfig } from './config.js';
 import type { LynoxConfig } from '../types/index.js';
 import { GOOGLE_NOT_CONNECTED } from '../integrations/google/not-connected.js';
+import { GOOGLE_PROMPT_SUFFIX } from './prompts.js';
+import type { Session } from './session.js';
 import type { IAgent } from '../types/index.js';
+
+/**
+ * The system prompt a Session handed its Agent.
+ *
+ * Read through a cast because both hops are private, and deliberately from the
+ * REAL objects rather than a mocked Agent constructor: the neighbouring suite
+ * that mocks it (`session-disabled-tools-invariant.test.ts`) has to stub the
+ * whole dependency tree to do so, and the thing under test here is the wiring,
+ * which a stub would make unobservable — the same reason this file is unmocked.
+ */
+function promptOf(session: Session): string {
+  const agent = (session as unknown as { agent: { systemPrompt?: string } | null }).agent;
+  if (typeof agent?.systemPrompt !== 'string') {
+    throw new Error('no system prompt on the session agent — the probe broke, this is not a pass');
+  }
+  return agent.systemPrompt;
+}
 
 /**
  * Visibility is not availability (PRD Stage 1 §3.2).
@@ -110,6 +129,108 @@ describe('Engine boot — the Google tools are visible before a credential exist
     const ok = await engine.reloadGoogle();
     expect(ok, 'the fixture must reach the credential branch, or the mutation cannot run').toBe(true);
     expect(engine.getRegistry().version - before, 'reloadGoogle must register nothing').toBe(0);
+  });
+
+  it('a DISCONNECT leaves the four registered and makes them refuse again', async () => {
+    // The other half of the test above, and the one the register row named as
+    // uncovered. That one boots WITH a pair so `reloadGoogle()` gets past its
+    // early return — which means it only ever exercises the credential branch.
+    // The `if (!pair)` branch, i.e. a disconnect, was asserted nowhere: that the
+    // tools survive it was the design (PRD Stage 1 §3.3 — "clearing the
+    // credential is the whole of disconnect; the registry is not touched") and
+    // nothing held the design in place.
+    //
+    // MUTATION THIS KILLS: remove `this._googleAuth = null` from the `!pair`
+    // branch of `reloadGoogle()`. The tools resolve the auth per call, so a
+    // disconnect that leaves the instance behind keeps them answering as if
+    // still connected — the refusal assertion below is what fails.
+    //
+    // ⚠ The `version` assertion is NOT the killing one and is not claimed to be:
+    // `ToolRegistry` has no `unregister`, so "unregisters on disconnect" is not
+    // constructible today. It is here to state the invariant, so that adding a
+    // removal API later has something to break.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-gvis-disconnect-'));
+    dirs.push(dir);
+    for (const k of ENV_KEYS) setEnv(k, undefined);
+    setEnv('LYNOX_DATA_DIR', dir);
+    setEnv('GOOGLE_CLIENT_ID', 'connected-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'connected-secret');
+    reloadConfig();
+    const engine = new Engine({} as LynoxConfig);
+    engines.push(engine);
+    await engine.init();
+    expect(engine.getGoogleAuth(), 'the fixture must start CONNECTED, or there is nothing to disconnect').not.toBeNull();
+
+    const before = engine.getRegistry().version;
+    setEnv('GOOGLE_CLIENT_ID', undefined);
+    setEnv('GOOGLE_CLIENT_SECRET', undefined);
+    reloadConfig();
+    const ok = await engine.reloadGoogle();
+    expect(ok, 'the fixture must reach the DISCONNECT branch this time').toBe(false);
+
+    const names = engine.getRegistry().getEntries().map(e => e.definition.name);
+    for (const t of GOOGLE_TOOLS) {
+      expect(names, `${t} must survive a disconnect`).toContain(t);
+    }
+    expect(engine.getRegistry().version - before, 'a disconnect must not touch the registry').toBe(0);
+
+    const entries = engine.getRegistry().getEntries();
+    for (const t of GOOGLE_TOOLS) {
+      const entry = entries.find(e => e.definition.name === t);
+      const handler = (entry as unknown as { handler: (i: unknown, a: IAgent) => Promise<string> }).handler;
+      await expect(handler({ action: 'list' }, {} as IAgent), `${t} must refuse again after a disconnect`)
+        .resolves.toBe(GOOGLE_NOT_CONNECTED);
+    }
+  });
+
+  it('the prompt suffix keys on the GRANT, not on the registration', async () => {
+    // The third key of the fork decision (PRD Stage 1 §3.2/§3.3): registration
+    // hangs on nothing, construction on the first claim, and the SUFFIX on the
+    // grant. The first two are pinned above; this one was not. Measured before
+    // writing it: `GOOGLE_PROMPT_SUFFIX` has five occurrences repo-wide, and the
+    // only two in tests are `cost-regression.test.ts`, which uses it as a
+    // token-budget literal and never asserts the condition — so deleting the
+    // `isAuthenticated()` guard at `session.ts` left the suite green.
+    //
+    // MUTATION THIS KILLS: drop the guard, i.e. append the suffix
+    // unconditionally. The suffix tells the model four tools are usable and the
+    // model believes it; on an unconnected tenant that is a false capability
+    // claim, not a cosmetic one.
+    //
+    // Both directions, because either one alone is satisfied by a swap: "never
+    // append" passes the negative case, "always append" passes the positive.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-gvis-suffix-'));
+    dirs.push(dir);
+    for (const k of ENV_KEYS) setEnv(k, undefined);
+    setEnv('LYNOX_DATA_DIR', dir);
+    setEnv('GOOGLE_CLIENT_ID', 'suffix-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'suffix-secret');
+    reloadConfig();
+    const engine = new Engine({} as LynoxConfig);
+    engines.push(engine);
+    await engine.init();
+
+    // A credential RESOLVES here, and there is still no grant. That is the case
+    // the row cares about: keying the suffix on the credential instead of the
+    // grant would look correct on a self-host box and be wrong on every tenant
+    // that has entered a client pair but not yet consented.
+    const google = engine.getGoogleAuth();
+    expect(google, 'a pair must resolve, or this tests the wrong branch').not.toBeNull();
+    expect(google!.isAuthenticated(), 'resolved is not connected').toBe(false);
+    const before = engine.createSession();
+    expect(promptOf(before), 'no grant ⇒ no suffix').not.toContain(GOOGLE_PROMPT_SUFFIX);
+
+    // Now a grant, through the public entry point rather than a seeded vault
+    // blob — `setTokens` is what the managed claim calls.
+    await google!.setTokens({
+      access_token: 'granted-access-token',
+      refresh_token: 'granted-refresh-token',
+      expires_at: Date.now() + 3_600_000,
+      scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+    });
+    expect(google!.isAuthenticated(), 'the grant must land, or the positive case proves nothing').toBe(true);
+    const after = engine.createSession();
+    expect(promptOf(after), 'a grant ⇒ the suffix').toContain(GOOGLE_PROMPT_SUFFIX);
   });
 });
 
