@@ -120,6 +120,28 @@ HARD_LOCAL_TOOLING="cli[-_. ]?proxy|local[-_. ]?eval[-_. ]?key|${_org}|127\.0\.0
 # doing in practice.
 PRIVATE_NAMES_FILE="${LYNOX_PRIVATE_NAMES_RE_FILE:-${HOME:-}/.lynox/private-names.re}"
 PRIVATE_NAMES_RE=""
+# Whether the operator ever SET THIS UP, which is a different question from whether
+# it currently works — and the two used to give the same answer.
+#
+# PRESENCE is `-e || -L`, deliberately NOT `-r`. Reading decides whether the list
+# WORKS; it must not also decide whether the list EXISTS, or every unreadable one
+# reports as never configured — mode 000, root-owned after a sudo edit, a dangling
+# symlink. That is the same conflation this file exists to close, in its worst
+# form: a list with real names in it, silently unscanned, green tick. `-L` is
+# there because a dangling symlink is not `-e`, and somebody who symlinked the
+# path plainly configured it.
+PRIVATE_NAMES_FILE_PRESENT=false
+if [ -e "$PRIVATE_NAMES_FILE" ] || [ -L "$PRIVATE_NAMES_FILE" ]; then
+  PRIVATE_NAMES_FILE_PRESENT=true
+fi
+# An unresolvable path is its own state: with neither the override nor HOME set
+# the string collapses to `/.lynox/private-names.re`, which is not the operator's
+# list and whose absence says nothing about whether they armed the class. Standing
+# down there is a guess, and the guess fails open.
+PRIVATE_NAMES_PATH_UNRESOLVED=false
+if [ -z "${LYNOX_PRIVATE_NAMES_RE_FILE:-}" ] && [ -z "${HOME:-}" ]; then
+  PRIVATE_NAMES_PATH_UNRESOLVED=true
+fi
 if [ -r "$PRIVATE_NAMES_FILE" ]; then
   # `#` comments and blanks dropped, surrounding whitespace and a stray CR
   # trimmed, the rest joined into one alternation.
@@ -365,6 +387,52 @@ if $mode_meta; then
     # alone — which let a mutation survive a case that asserted only the code.
     preflight_names_re || exit 2
     names_active=true
+  elif $PRIVATE_NAMES_FILE_PRESENT; then
+    # THE FILE IS THERE AND YIELDS NOTHING. That is not "never set up", it is
+    # "set up and broken", and until now the two printed the same line and both
+    # exited 0 — so a list that had been commented out, indented, or emptied read
+    # exactly like a machine that had never been armed.
+    #
+    # It is not hypothetical: on 2026-09-04 this file held 34 lines of which 33
+    # were comments, the alternation came out 0 characters long, and the class had
+    # been reporting a green tick on every push for as long as that was true.
+    #
+    # And there was no visible tell at all, which is worse than a missed one.
+    # The 23s sibling is the TREE scan — a different job that runs whatever this
+    # list contains, so its duration cannot separate the two states. The only
+    # comparison that could is this class armed against this class dead, over the
+    # same range, and it does not: measured 2026-09-05, three runs each, dead
+    # 0.029-0.033s against armed 0.049-0.061s. Hundredths apart, and both read as
+    # instant on a green line.
+    #
+    # exit 2, the preflight code: "the gate never looked", distinct from 1 = "the
+    # gate found something". A missing file still exits 0 below, because standing
+    # down for someone who never configured the class is the documented behaviour
+    # and blocking their push would only teach --no-verify.
+    echo "❌ public-repo-guard: private-name list is CONFIGURED BUT UNUSABLE." >&2
+    echo "   ${PRIVATE_NAMES_FILE} is there and yields no pattern." >&2
+    # The cause is NOT asserted here. An earlier draft said "every line is a
+    # comment, blank, or whitespace-only", which is one of three ways to get an
+    # empty result — the read can also fail (unreadable file, a directory at the
+    # path), and the message then named a cause it had not checked.
+    if [ ! -r "$PRIVATE_NAMES_FILE" ]; then
+      echo "   It cannot be READ — check the mode and the owner." >&2
+    else
+      echo "   Every line is a comment, blank, or whitespace-only." >&2
+    fi
+    echo "   The class would otherwise report a clean scan on every commit while" >&2
+    echo "   checking nothing." >&2
+    echo "   Fix: put one regex per line." >&2
+    echo "   Deleting the file also clears this — that stands the class down for" >&2
+    echo "   good, so do it deliberately, not to unblock a push." >&2
+    exit 2
+  elif $PRIVATE_NAMES_PATH_UNRESOLVED; then
+    echo "❌ public-repo-guard: private-name list path is UNRESOLVABLE." >&2
+    echo "   Neither LYNOX_PRIVATE_NAMES_RE_FILE nor HOME is set, so the path is" >&2
+    echo "   \`${PRIVATE_NAMES_FILE}\` — not the operator's list. Whether the class" >&2
+    echo "   is armed cannot be decided here, and guessing fails open." >&2
+    echo "   Fix: set HOME, or point LYNOX_PRIVATE_NAMES_RE_FILE at the list." >&2
+    exit 2
   else
     echo "⚠️  public-repo-guard: private-name class SKIPPED — no pattern configured."
     echo "    To arm it, put one regex per line in ${PRIVATE_NAMES_FILE}."

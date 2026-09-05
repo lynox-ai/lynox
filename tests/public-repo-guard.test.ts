@@ -19,7 +19,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync, mkdirSync, symlinkSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -471,6 +471,129 @@ describe('public-repo-guard — private-name class', () => {
     return run(['check-meta', base, head], { __PATTERN__: FICTIONAL_NAME, ...env });
   }
 
+  /**
+   * CONFIGURED-BUT-EMPTY is its own state, and until 2026-09-04 it was not.
+   *
+   * The list is operator-local, so the guard cannot validate its CONTENT — but it
+   * can tell "never set up" from "set up and yielding nothing", and those need
+   * opposite answers. Standing down for someone who never configured the class is
+   * right; standing down for a list that has been commented out, indented, or
+   * emptied is the class reporting a clean scan while checking nothing.
+   *
+   * Not hypothetical: the real file held 34 lines of which 33 were comments, the
+   * alternation came out empty, and the tick was green on every push for as long
+   * as that was true. There was no visible tell either: the 23s sibling is the
+   * TREE scan, a different job that runs whatever this list contains, and this
+   * class armed against this class dead is hundredths apart over the same range
+   * (measured 2026-09-05, three runs each: 0.029-0.033s dead, 0.049-0.061s
+   * armed). Which is why nothing here asserts a duration — the number that
+   * would have to separate the states does not.
+   */
+  describe('the pattern list is present but yields nothing', () => {
+    // The comments-only form has its own case further down, which carries the
+    // original empty-alternation rationale. These are the other ways a list
+    // arrives dead — same verdict, different spelling.
+    const EMPTY_FORMS: ReadonlyArray<readonly [string, string]> = [
+      ['blank lines', '\n\n'],
+      ['whitespace only', '   \n\t\n'],
+      ['an indented comment', '   # indented, which the trim turns into a comment\n'],
+    ];
+    for (const [label, body] of EMPTY_FORMS) {
+      it(`refuses with exit 2 when the file is ${label}`, () => {
+        const base = commit('Add the base file');
+        const head = commit(`Fix the export for ${FICTIONAL_NAME}`);
+        // Written directly rather than through `__PATTERN__`, which appends a
+        // newline and so cannot express "yields nothing".
+        mkdirSync(join(dir, '.lynox'), { recursive: true });
+        writeFileSync(join(dir, '.lynox', 'private-names.re'), body);
+        const r = run(['check-meta', base, head]);
+
+        // 2, not 1: "the gate never looked" is a different answer from "the gate
+        // found something", and the exit code is the only place a caller can tell
+        // them apart.
+        expect(r.code).toBe(2);
+        expect(r.out).toMatch(/CONFIGURED BUT UNUSABLE/);
+        // It must NOT read as a hit — a reader seeing the hit message would go
+        // looking for a name that is not there.
+        expect(r.out).not.toMatch(/private name in the message of commit/);
+      });
+    }
+
+    // The three states above are all "readable and yields nothing". These two are
+    // the other half of the same class — present, NOT readable — and they are the
+    // worse half: the file has real names in it. Deciding presence with `-r` put
+    // them on the ABSENT path, where the class printed SKIPPED and exited 0 on a
+    // commit carrying a name it was armed against. Found in review, 2026-09-05.
+    it('refuses with exit 2 when an armed list cannot be READ', () => {
+      const base = commit('Add the base file');
+      const head = commit(`Fix the export for ${FICTIONAL_NAME}`);
+      mkdirSync(join(dir, '.lynox'), { recursive: true });
+      const list = join(dir, '.lynox', 'private-names.re');
+      writeFileSync(list, `${FICTIONAL_NAME}\n`);
+      chmodSync(list, 0o000);
+      const r = run(['check-meta', base, head]);
+      chmodSync(list, 0o644);
+
+      expect(r.code).toBe(2);
+      expect(r.out).toMatch(/CONFIGURED BUT UNUSABLE/);
+      // The cause is named, and it is the read — not the "every line is a
+      // comment" wording, which would send the operator to the wrong place.
+      expect(r.out).toMatch(/cannot be READ/);
+      expect(r.out).not.toMatch(/SKIPPED/);
+    });
+
+    it('refuses with exit 2 when the list is a DANGLING symlink', () => {
+      // Not `-e`, so presence has to test `-L` as well: somebody who symlinked
+      // the path configured the class, whatever the link now points at.
+      const base = commit('Add the base file');
+      const head = commit(`Fix the export for ${FICTIONAL_NAME}`);
+      mkdirSync(join(dir, '.lynox'), { recursive: true });
+      symlinkSync(join(dir, 'no-such-list.re'), join(dir, '.lynox', 'private-names.re'));
+      const r = run(['check-meta', base, head]);
+
+      expect(r.code).toBe(2);
+      expect(r.out).toMatch(/CONFIGURED BUT UNUSABLE/);
+      expect(r.out).not.toMatch(/SKIPPED/);
+    });
+
+    it('refuses with exit 2 when neither HOME nor the override resolves a path', () => {
+      // The path then collapses to `/.lynox/private-names.re`, which is nobody's
+      // list. Its absence says nothing about whether the class is armed, so
+      // standing down is a guess — and the guess fails open.
+      const base = commit('Add the base file');
+      const head = commit(`Fix the export for ${FICTIONAL_NAME}`);
+      const r = run(['check-meta', base, head], { HOME: '' });
+
+      expect(r.code).toBe(2);
+      expect(r.out).toMatch(/UNRESOLVABLE/);
+      expect(r.out).not.toMatch(/SKIPPED/);
+    });
+
+    it('still stands down, exit 0, when the file is ABSENT', () => {
+      // The other half, and the reason this is not simply "fail when unarmed":
+      // blocking a push for someone who never configured the class teaches
+      // --no-verify, which costs more than the class is worth. Deleting the file
+      // is the documented way to stand it down deliberately.
+      const base = commit('Add the base file');
+      const head = commit(`Fix the export for ${FICTIONAL_NAME}`);
+      const r = run(['check-meta', base, head]);
+
+      expect(r.code).toBe(0);
+      expect(r.out).toMatch(/SKIPPED/);
+    });
+
+    it('an armed list still fires — the refusal did not disarm the class', () => {
+      // The positive control. Without it, a build that refused EVERY invocation
+      // would pass all four cases above.
+      const base = commit('Add the base file');
+      const head = commit(`Fix the export for ${FICTIONAL_NAME}`);
+      const r = runMeta(base, head);
+
+      expect(r.code).toBe(1);
+      expect(r.out).toMatch(/private name in the message of commit/);
+    });
+  });
+
   it('fires on a private name in a commit message, naming only the SHA', () => {
     const base = commit('Add the base file');
     const head = commit(`Fix the export for ${FICTIONAL_NAME}`);
@@ -830,17 +953,26 @@ describe('public-repo-guard — private-name pattern source and preflight', () =
     expect(r.out).not.toContain('empty line');
   });
 
-  it('treats a comments-only file as no pattern at all', () => {
-    // Such a file collapses to an empty alternation, and an empty pattern
-    // matches everything. It has to read as "absent" instead.
+  it('refuses a comments-only file instead of scanning with an empty pattern', () => {
+    // The original hazard is unchanged and still the reason this case exists:
+    // such a file collapses to an empty alternation, and an empty pattern matches
+    // EVERYTHING — scanning with it would report every commit as a hit.
+    //
+    // What changed on 2026-09-04 is the exit, not the analysis. This used to read
+    // as "absent": a warning and a stand-down, exit 0. That avoided the
+    // false-positive storm and bought a worse failure — the class reporting a
+    // clean scan forever while checking nothing, which is what the real list did
+    // for as long as its 33 lines stayed commented out.
+    //
+    // "Match everything" and "silently pass" are not the only two options.
+    // Refusing does neither: nothing is scanned, and the operator is told.
     const { base, head } = commitNamed();
     writeList('# nothing yet\n\n');
 
-    // Collapses to an empty alternation, and an empty pattern matches
-    // everything. It has to read as "absent" — a warning and a stand-down.
     const r = run(['check-meta', base, head]);
-    expect(r.code).toBe(0);
-    expect(r.out).toContain('SKIPPED');
+    expect(r.code).toBe(2);
+    expect(r.out).toContain('CONFIGURED BUT UNUSABLE');
+    expect(r.out).not.toContain('private name in the message of commit');
   });
 
   it('rejects a pattern that matches an empty line', () => {
