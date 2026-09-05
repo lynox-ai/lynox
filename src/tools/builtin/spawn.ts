@@ -881,7 +881,7 @@ async function executeThinker(
           durationMs: Date.now() - childStart,
           // Same column on the terminal-failure path: a child that made 60 calls
           // and then died must not read as "0 tools", which is exactly the
-          // misreading that started this whole investigation (war, 2026-08-10).
+          // misreading that started this whole investigation (a customer instance, 2026-08-10).
           toolCallCount: childAgent?.getRecordedToolCallCount() ?? 0,
           status: childAborted ? 'aborted' : 'failed',
           stopReason: childAborted ? 'aborted' : (err instanceof Error ? err.message.slice(0, 200) : 'error'),

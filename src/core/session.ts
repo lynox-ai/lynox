@@ -1301,7 +1301,7 @@ export class Session {
             // case: a 28-minute run that made 60 http_request calls and died on
             // the per-run cost ceiling was recorded as 0 tool calls, and the first
             // reading of the day blamed a runaway loop rather than a ceiling that
-            // cut off genuine work (war, 2026-08-10).
+            // cut off genuine work (a customer instance, 2026-08-10).
             //
             // This is now this run's OWN tool calls and nothing else. The
             // caveat that stood here — that the count came off a process-global

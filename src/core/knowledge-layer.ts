@@ -1594,7 +1594,7 @@ export class KnowledgeLayer implements IKnowledgeLayer {
     // eraseByPattern).
     //
     // §0.1 (mirror P0): the reap is NOT swallowed. The whole fleet runs
-    // memory_graph_reads=true (rafael/cat/war since 2026-07-08), so a swallowed reap
+    // memory_graph_reads=true (rafael/cat and one customer instance since 2026-07-08), so a swallowed reap
     // leaves the "deleted" content still recallable from engine.db — a silent erasure
     // FAILURE, and not self-healing (a re-run finds the legacy rows already inactive
     // → ids=[] → the stub is never revisited). So a failed reap: (1) emits a hard,
