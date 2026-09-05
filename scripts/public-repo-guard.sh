@@ -377,9 +377,15 @@ if $mode_meta; then
     #
     # It is not hypothetical: on 2026-09-04 this file held 34 lines of which 33
     # were comments, the alternation came out 0 characters long, and the class had
-    # been reporting a green tick on every push for as long as that was true. The
-    # runtime told the story to anyone who looked at it — 0.03s against 23s for
-    # the sibling class — but the tick did not, and a tick is what people read.
+    # been reporting a green tick on every push for as long as that was true.
+    #
+    # And there was no visible tell at all, which is worse than a missed one.
+    # The 23s sibling is the TREE scan — a different job that runs whatever this
+    # list contains, so its duration cannot separate the two states. The only
+    # comparison that could is this class armed against this class dead, over the
+    # same range, and it does not: measured 2026-09-05, three runs each, dead
+    # 0.029-0.033s against armed 0.049-0.061s. Hundredths apart, and both read as
+    # instant on a green line.
     #
     # exit 2, the preflight code: "the gate never looked", distinct from 1 = "the
     # gate found something". A missing file still exits 0 below, because standing

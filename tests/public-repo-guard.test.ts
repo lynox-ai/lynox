@@ -482,8 +482,12 @@ describe('public-repo-guard — private-name class', () => {
    *
    * Not hypothetical: the real file held 34 lines of which 33 were comments, the
    * alternation came out empty, and the tick was green on every push for as long
-   * as that was true. The only visible tell was the runtime — 0.03s against 23s
-   * for the sibling class — and nobody reads a duration on a green line.
+   * as that was true. There was no visible tell either: the 23s sibling is the
+   * TREE scan, a different job that runs whatever this list contains, and this
+   * class armed against this class dead is hundredths apart over the same range
+   * (measured 2026-09-05, three runs each: 0.029-0.033s dead, 0.049-0.061s
+   * armed). Which is why nothing here asserts a duration — the number that
+   * would have to separate the states does not.
    */
   describe('the pattern list is present but yields nothing', () => {
     // The comments-only form has its own case further down, which carries the
