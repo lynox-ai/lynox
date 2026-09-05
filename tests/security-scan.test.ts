@@ -69,6 +69,24 @@ describe('security-scan — a list member that vanishes must not vanish from the
     expect(r.out).toContain('is in the wrap list but does not exist');
     // The tick must NOT have been printed for a set that was one file short.
     expect(r.out).not.toContain('External tools wrap untrusted content');
+    // Nor may it report a FINDING for the same absent file. Checking existence
+    // after the grep produces both lines at once — correct exit code, correct
+    // refusal text, and a fabricated wrapping violation against a file that is
+    // not there. That conflates exactly the two facts this refusal exists to keep
+    // apart: "could not run" and "found something".
+    expect(r.out).not.toContain('missing wrapUntrustedData');
+  });
+
+  // `-f`, not `-e`: a directory where a source file belongs is a stale list, not a
+  // wrapping finding. With `-e` the entry passes the existence test and the grep
+  // then reports it as unwrapped ("Is a directory").
+  it('a directory in a source file position is staleness, not a finding', () => {
+    fixture(['src/integrations/google/google-docs.ts']);
+    mkdirSync(join(root, 'src/integrations/google/google-docs.ts'), { recursive: true });
+    const r = run();
+    expect(r.code).toBe(2);
+    expect(r.out).toContain('is in the wrap list but does not exist');
+    expect(r.out).not.toContain('missing wrapUntrustedData');
   });
 
   it('every member is load-bearing, not just the one that happened to go', () => {
@@ -101,5 +119,9 @@ describe('security-scan — a list member that vanishes must not vanish from the
     const r = run();
     expect(r.code).not.toBe(2);
     expect(r.out).toContain('missing wrapUntrustedData or wrapChannelMessage');
+    // And the tick must be absent — the symmetric assertion the missing-member
+    // test already makes. Dropping `WRAP_OK=false` prints the ❌ and the ✓ one
+    // after the other, and only this line notices.
+    expect(r.out).not.toContain('External tools wrap untrusted content');
   });
 });

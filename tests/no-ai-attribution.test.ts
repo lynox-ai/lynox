@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -171,6 +171,67 @@ describe('no-ai-attribution — the range it was asked to scan', () => {
     expect(r.out).toContain('Refusing to report a clean range this check could not read');
     // git's own words are passed through, so the reader sees WHICH end failed.
     expect(r.out).toMatch(/Invalid revision range|unknown revision|ungültig|Schwerwiegend/i);
+  });
+
+  // A foreign mutation round walked through three doors this block did not cover.
+  // None was a defect — the script already behaved correctly in all three — but an
+  // uncovered correct behaviour is a deletable one.
+
+  // Narrowing the refusal to `status -eq 128` survived every test above, because
+  // 128 is the only status the fixture can produce. Under any other failure the
+  // narrowed version walks git's ERROR MESSAGE as if its words were SHAs and
+  // reports them as commits scanned.
+  it('any failed enumeration refuses — not only the one status the fixture produces', () => {
+    const bin = join(repo, 'stub-bin');
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, 'git'),
+      '#!/bin/sh\nif [ "$1" = "rev-list" ]; then echo "error: some other failure mode" >&2; exit 129; fi\nexec /usr/bin/git "$@"\n',
+      { encoding: 'utf-8', mode: 0o755 });
+    let code = 0; let out = '';
+    try {
+      out = execFileSync('bash', [SCRIPT, 'check', 'aaa', 'bbb'],
+        { cwd: repo, encoding: 'utf-8', stdio: 'pipe', env: { ...process.env, PATH: `${bin}:${process.env['PATH'] ?? ''}` } });
+    } catch (err) {
+      const e = err as { status?: number; stdout?: string; stderr?: string };
+      code = e.status ?? -1; out = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+    }
+    expect(code, 'a non-128 failure must refuse too').toBe(2);
+    expect(out).toContain('could not enumerate');
+    expect(out).not.toContain('commits scanned');
+  });
+
+  // The sibling guard's harness probe is a deliberately HALF-given range and its
+  // exemption argues for that choice; this script's probe passes no arguments at
+  // all, so the half-range door was unpinned on the very guard whose range door
+  // this change fixes. `check main` resolves `main..` as `main..HEAD` — a walk
+  // that succeeds and answers for the wrong range.
+  it('half a range is refused, not silently completed from HEAD', () => {
+    let code = 0; let out = '';
+    try {
+      out = execFileSync('bash', [SCRIPT, 'check', 'main'], { cwd: repo, encoding: 'utf-8', stdio: 'pipe' });
+    } catch (err) {
+      const e = err as { status?: number; stdout?: string; stderr?: string };
+      code = e.status ?? -1; out = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+    }
+    expect(code).toBe(2);
+    expect(out).toContain('usage:');
+    expect(out).not.toContain('commits scanned');
+  });
+
+  // The refusal belongs on stderr, where a caller that pipes stdout still sees it.
+  // On stdout it lands in the same stream as `clean ✓`, which is the stream a
+  // reader scans for the verdict.
+  it('the refusal goes to stderr, not into the stream that carries the verdict', () => {
+    const head = git('rev-parse', 'HEAD');
+    let stdout = ''; let stderr = '';
+    try {
+      execFileSync('bash', [SCRIPT, 'check', UNRESOLVABLE, head], { cwd: repo, encoding: 'utf-8', stdio: 'pipe' });
+    } catch (err) {
+      const e = err as { stdout?: string; stderr?: string };
+      stdout = e.stdout ?? ''; stderr = e.stderr ?? '';
+    }
+    expect(stderr).toContain('Refusing to report a clean range');
+    expect(stdout).not.toContain('Refusing to report a clean range');
   });
 
   it('a range that resolves and is empty still passes, with a real count', () => {

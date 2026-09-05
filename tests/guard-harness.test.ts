@@ -441,7 +441,11 @@ describe('gate coverage', () => {
         expect(res.status, `exemption reason claims exit ${entry.expectStrippedExit}: ${entry.reason}`)
           .toBe(entry.expectStrippedExit);
         if (entry.expectStrippedStderr) {
-          expect(`${res.stdout}${res.stderr}`, `${name} must SAY why it refused, not merely exit`)
+          // `res.stderr` alone: `RunResult` declares no `stdout` and `runFull` never
+          // sets one, so the old `${res.stdout}` interpolated the literal string
+          // "undefined" into every haystack. Harmless only because the one message
+          // it guards is on stderr — and invisible because tests are outside tsc.
+          expect(res.stderr, `${name} must SAY why it refused, not merely exit`)
             .toMatch(entry.expectStrippedStderr);
         }
       } finally {
