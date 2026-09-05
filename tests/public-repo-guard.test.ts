@@ -1144,6 +1144,51 @@ describe('public-repo-guard — private names in files (check-files)', () => {
       expect(r.out).toContain('orphan-doc.md');
     });
 
+    it('on a name typed into a MERGE commit while resolving a conflict', () => {
+      // diff-tree against a merge prints NOTHING without --cc, so the merge
+      // contributed zero files and the scan reported "clean ✓ (N file(s))" with
+      // N supplied by the sibling commits — no starvation warning either.
+      // Resolving a conflict by hand is the most ordinary way a real name gets
+      // typed into a repo, which is what makes this the worst of the holes an
+      // adversarial pass found.
+      const base = baseline();
+      execFileSync('git', ['checkout', '-qb', 'side'], { cwd: dir, env: GIT_ENV });
+      commitFile('c.txt', 'CLIENT: side\n');
+      commitAll('side');
+      execFileSync('git', ['checkout', '-q', '-'], { cwd: dir, env: GIT_ENV });
+      commitFile('c.txt', 'CLIENT: main\n');
+      commitAll('mainline');
+      try {
+        execFileSync('git', ['merge', '-q', 'side'], { cwd: dir, env: GIT_ENV });
+      } catch {
+        // The conflict is the point of the fixture.
+      }
+      commitFile('c.txt', `CLIENT: ${FICTIONAL_NAME_CAPITALISED}\n`);
+      const head = commitAll('resolve the conflict');
+
+      const r = runFiles(base, head);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('c.txt');
+    });
+
+    it('on a TYPE CHANGE — a file that becomes a symlink naming the customer', () => {
+      // Status `T` is neither A nor M, so `--diff-filter=ACMR` listed it nowhere
+      // and both directions shipped clean: a regular file replaced by a symlink
+      // whose TARGET carries the name, and a symlink replaced by a regular file
+      // full of prose.
+      const base = baseline();
+      commitFile('ref.txt', 'plain file\n');
+      commitAll('a plain file');
+      rmSync(join(dir, 'ref.txt'));
+      symlinkSync(`../${FICTIONAL_NAME}-prod-notes/secret.md`, join(dir, 'ref.txt'));
+      execFileSync('git', ['add', '--', 'ref.txt'], { cwd: dir, env: GIT_ENV });
+      const head = commitAll('turn it into a symlink');
+
+      const r = runFiles(base, head);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain('ref.txt');
+    });
+
     it('on a path whose bytes are non-ASCII, which git would otherwise quote away', () => {
       // Without `-z` git renders such a path as an escaped, quoted string; the
       // loop then reads a literal that matches no file and the scan skips it
@@ -1275,12 +1320,53 @@ describe('public-repo-guard — private names in files (check-files)', () => {
    * workflow invokes it. This asserts it, so wiring it into CI fails here instead
    * of quietly printing a customer name into a public log.
    */
-  it('is invoked by no GitHub workflow — printing paths is safe only locally', () => {
-    const workflows = join(REPO_ROOT, '.github', 'workflows');
-    const offenders = readdirSync(workflows)
-      .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
-      .filter((f) => readFileSync(join(workflows, f), 'utf8').includes('check-files'));
+  /**
+   * The whole of `.github`, recursively — not just the workflow YAML files. A
+   * composite action lives at `.github/actions/<name>/action.yml`, and a workflow
+   * can call a script that calls this; the narrow first version saw neither.
+   *
+   * (Written without a glob on purpose: a `<star><slash>` inside a block comment
+   * closes it, which is exactly how the first draft of this comment turned the
+   * rest of the file into code.)
+   *
+   * It still cannot see an arbitrary indirection, said here rather than left to
+   * be found: it catches the ways this would plausibly be wired, not every way it
+   * could be.
+   */
+  function invokersUnder(root: string): string[] {
+    const found: string[] = [];
+    const walk = (d: string): void => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (/\.(ya?ml|sh|mjs|js)$/u.test(e.name) && /check-['"]?files/u.test(readFileSync(p, 'utf8'))) {
+          found.push(p.slice(root.length));
+        }
+      }
+    };
+    walk(root);
+    return found;
+  }
 
-    expect(offenders).toEqual([]);
+  it('finds an invoker wherever it is wired — positive control on the walk', () => {
+    // Without this the recursion and the quote-tolerant match are unfalsifiable:
+    // the real `.github` has no offender, so narrowing the walk back to
+    // the workflow directory alone passed unchanged. A planted composite action
+    // and a called script are what make the widening a tested decision.
+    const root = mkdtempSync(join(tmpdir(), 'prg-wf-'));
+    mkdirSync(join(root, 'actions', 'probe'), { recursive: true });
+    writeFileSync(
+      join(root, 'actions', 'probe', 'action.yml'),
+      "runs:\n  steps:\n    - run: bash scripts/public-repo-guard.sh check-files A B\n",
+    );
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    writeFileSync(join(root, 'scripts', 'ci.sh'), "public-repo-guard.sh check-'files' \"$A\" \"$B\"\n");
+
+    expect(invokersUnder(root).sort()).toHaveLength(2);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('is invoked by nothing under .github — printing paths is safe only locally', () => {
+    expect(invokersUnder(join(REPO_ROOT, '.github'))).toEqual([]);
   });
 });

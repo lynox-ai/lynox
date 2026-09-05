@@ -592,8 +592,26 @@ if $mode_meta || $mode_files; then
       #
       # `--root` so a range that includes an initial commit is scanned rather
       # than silently empty: diff-tree against no parent prints nothing without it.
-      git --no-replace-objects diff-tree --no-commit-id --root -r --name-only \
-        --diff-filter=ACMR -z "$sha" > "$file_list" 2>/dev/null || true
+      #
+      # `--cc` for the same reason one commit further along: diff-tree against a
+      # MERGE prints NOTHING without it, and the guard then reports `clean ✓
+      # (N file(s) scanned)` with N quietly omitting the merge — no starvation
+      # warning either, because the sibling commits supplied the count. Measured:
+      # a conflict resolved by typing a name into the merge commit listed 0 files,
+      # and `--cc` lists it. That is not an exotic path; resolving a conflict by
+      # hand is the single most ordinary way a real name gets typed into a repo.
+      # `--cc` lists what the merge itself introduced — the files that differ from
+      # EVERY parent — so an ordinary merge does not re-scan the branch it merges
+      # (those commits are in the range on their own, or are already public).
+      # On a non-merge it behaves like a plain diff; measured, not assumed.
+      #
+      # `T` in the filter, because a TYPE CHANGE is neither A nor M. A regular
+      # file replaced by a symlink whose TARGET names a customer — or a symlink
+      # replaced by a regular file full of prose — is status `T`, listed nowhere,
+      # and both shipped clean before this. `D` stays out: a deleted file's
+      # content is leaving.
+      git --no-replace-objects diff-tree --no-commit-id --root --cc -r --name-only \
+        --diff-filter=ACMRT -z "$sha" > "$file_list" 2>/dev/null || true
       while IFS= read -r -d '' f; do
         [ -n "$f" ] || continue
         files_scanned=$((files_scanned + 1))
@@ -619,10 +637,15 @@ if $mode_meta || $mode_files; then
         # every run. A large file is the same shape.
         if git --no-replace-objects cat-file -e "${sha}:${f}" 2>/dev/null; then
           git --no-replace-objects cat-file blob "${sha}:${f}" > "$blob" 2>/dev/null || true
-          # No -I. Skipping binaries would drop exactly the carriers this class
-          # cares about — a PDF, a spreadsheet, an image with the name in its
-          # metadata — and binary is where a name is least likely to be noticed
-          # by a human reader.
+          # No -I, so a name sitting in raw bytes is still found. That is worth
+          # having and it is NOT the coverage an earlier version of this comment
+          # claimed: it named "a PDF, a spreadsheet, an image with the name in its
+          # metadata", and PDF text streams and every OOXML part are DEFLATE
+          # compressed, so a literal grep finds nothing in them. Measured — a PDF
+          # and a .gz carrying the name both passed clean, while an uncompressed
+          # store in a zip was caught. What this covers is uncompressed binary;
+          # a compressed carrier is out of reach of any lexical scan and is
+          # stated here rather than implied away.
           if grep -qEi "$PRIVATE_NAMES_RE" "$blob"; then
             echo "❌ private name in the CONTENT of: ${f}  (commit ${sha:0:9})"
             file_hits=$((file_hits + 1))
