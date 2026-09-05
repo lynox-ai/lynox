@@ -60,6 +60,25 @@ pre-push:
       skip:
         - merge
         - rebase
+    public-repo-guard-files:
+      # The same class over the other surface: the PATHS and CONTENT of the files
+      # this push adds. The message half above cannot see them, so a file named
+      # after a customer — or holding the name in its body — reached this PUBLIC
+      # repo untouched as long as the message stayed neutral.
+      #
+      # ⛔ This runs at pre-push and MUST have no CI twin. It prints the offending
+      # path, which is only safe on the operator's own machine; a public Actions
+      # log printing a customer name is the exact failure that got an earlier
+      # tree-scanning version of this class deleted. tests/public-repo-guard.test.ts
+      # asserts that no workflow invokes `check-files` — keep it that way.
+      #
+      # Same range expression, same fallback, same reasons as the block above:
+      # `|| echo HEAD` yields an empty range that the guard reports as "NO files"
+      # rather than blocking a clone that has no local origin/main.
+      run: bash scripts/public-repo-guard.sh check-files "$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD)" HEAD
+      skip:
+        - merge
+        - rebase
     drift-guard:
       # Catch the mechanizable slices of doc/code drift gitleaks + public-repo-
       # guard don't: committed merge-conflict markers, removed features (Telegram
