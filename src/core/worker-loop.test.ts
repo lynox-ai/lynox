@@ -1610,12 +1610,14 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
    *  so this fixture cannot drift from the table the engine actually writes.
    *  (Three test files hand-copy the DDL instead; that copy is the thing this
    *  avoids.) */
+  let lastDb: import('better-sqlite3').Database | undefined;
   function makeRealStore(): PromptStore {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-wl-prompt-'));
     tmpDirs.push(dir);
     const history = new RunHistory(join(dir, 'history.db'));
     closers.push(() => { history.close(); });
-    return new PromptStore(history.getDb());
+    lastDb = history.getDb();
+    return new PromptStore(lastDb);
   }
 
   const SESSION_ID = 'thread-worker-test';
@@ -1707,6 +1709,23 @@ describe('WorkerLoop — background prompt via PromptStore', () => {
     const promptId = store.getPending(SESSION_ID)!.id;
     expect(store.answerUser(promptId, 'Yes')).toBe(true);
     await expect(answered).resolves.toBe('Yes');
+  });
+
+  // 8 — the TTL is INHERITED, not merely available. The store having a 24h
+  // expiry and this path benefiting from it are two claims; only the second one
+  // matters here, and nothing else in this file tests it. An expired prompt has
+  // to resume the run — that is the whole reason the store is the answer to a
+  // hang. Mutation: re-ask on expiry instead of returning the marker (a
+  // plausible implementation) → the run never finishes and this fails.
+  it('resumes a parked task when its prompt expires', async () => {
+    const { store, answered } = await park();
+    const promptId = store.getPending(SESSION_ID)!.id;
+    // Backdate the row rather than waiting 24h; `expireOld` then emits for it
+    // and every waiter re-evaluates (prompt-store.ts:evaluate).
+    lastDb!.prepare(`UPDATE pending_prompts SET expires_at = datetime('now','-1 hour') WHERE id = ?`).run(promptId);
+    expect(store.expireOld()).toBeGreaterThan(0);
+    await expect(answered).resolves.toBe('__dismissed__');
+    expect(store.getById(promptId)!.status).toBe('expired');
   });
 
   // 7 — the NO-STORE path. Found by a surviving mutation: every other test
