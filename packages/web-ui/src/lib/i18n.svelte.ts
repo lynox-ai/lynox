@@ -1372,7 +1372,7 @@ const translations: Record<string, Record<Locale, string>> = {
 	'config.bugsink_managed_always_on': { de: 'Bei Managed-Instanzen sind Fehlerberichte grundsätzlich aktiv (Hetzner, Deutschland, PII entfernt). Siehe DPIA für Details.', en: 'Error reports are always active on Managed instances (Hetzner, Germany, PII scrubbed). See the DPIA for details.' },
 
 	'config.provider': { de: 'LLM Provider', en: 'LLM Provider' },
-	'config.provider_desc': { de: 'Wohin werden KI-Anfragen gesendet? Daten bleiben immer lokal — nur die Inferenz nutzt den Provider.', en: 'Where are AI requests sent? Your data stays local — only inference uses the provider.' },
+	'config.provider_desc': { de: 'Wohin werden KI-Anfragen gesendet? Der Provider erhält den Inferenz-Aufruf; was sonst nach aussen geht, hängt von deiner Konfiguration ab und davon, was der Agent tut.', en: 'Where are AI requests sent? The provider receives the inference call; what else goes out depends on your configuration and on what the agent does.' },
 	'config.provider_anthropic': { de: 'Claude (Anthropic)', en: 'Claude (Anthropic)' },
 	'config.provider_vertex': { de: 'Claude (Vertex AI) — EU-Datenresidenz', en: 'Claude (Vertex AI) — EU data residency' },
 	'config.provider_custom': { de: 'Custom Proxy — experimentell', en: 'Custom Proxy — experimental' },
