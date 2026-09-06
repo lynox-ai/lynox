@@ -630,11 +630,18 @@ describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
    *  six unrelated-looking assertion errors instead of one clear one. Rewinding needs
    *  BOTH halves: drop the version rows AND undo what those migrations did, or the
    *  re-run hits an already-applied DDL (SQLite has no ADD COLUMN IF NOT EXISTS).
-   *  Adding a migration above v11? Undo its DDL here too. Forgetting is LOUD on its
-   *  own — the re-run hits the already-applied statement and throws (`duplicate column
-   *  name`), in every test in this describe — so this helper needs no self-check, and
-   *  an earlier draft's `expect(head).toBe(10)` was removed as a tautology: the DELETE
-   *  above makes that true unconditionally, whether or not the undo was added. */
+   *  ⚠ ADDING A MIGRATION ABOVE v11? UNDO ITS EFFECT HERE, AND NOTHING WILL REMIND YOU.
+   *  Whether a lapse is loud depends entirely on the migration's SHAPE, so this is
+   *  stated rather than guarded:
+   *    · `ALTER TABLE … ADD COLUMN` or an unguarded `CREATE TABLE` → the re-run hits
+   *      the already-applied statement and throws. Loud, in every test here.
+   *    · `CREATE {TABLE,INDEX} IF NOT EXISTS`, or a guarded `INSERT … WHERE NOT
+   *      EXISTS` — which is what v11 itself is — → the re-run is a silent no-op, the
+   *      rewind never happened, and these tests quietly run against the wrong schema.
+   *  An earlier draft asserted `MAX(version) === 10` and called it a positive control.
+   *  It was a tautology: the DELETE above makes that true whether or not the undo was
+   *  added. It was removed rather than kept, because a check that cannot fail reads as
+   *  protection and is worse than an admitted gap. */
   const openAtV10 = (p: string): void => {
     const e = new EngineDb(p, '');
     e.getDb().exec(`

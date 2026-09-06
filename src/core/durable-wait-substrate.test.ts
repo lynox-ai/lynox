@@ -149,13 +149,18 @@ describe('durable wait state — the substrate (§0 E1a/E4/T3/E5)', () => {
 
   it('A12 — the sweep returns the longest-waiting trigger first', () => {
     // The ORDER BY is a fairness property: a caller that processes a slice of the
-    // result must not starve the trigger that has been waiting longest. With a
-    // single seeded row no ordering assertion can fail, so it takes two.
+    // result must not starve the trigger that has been waiting longest. Two rows
+    // are needed for any ordering assertion to be able to fail — and they are
+    // INSERTED IN THE OPPOSITE ORDER on purpose. Seeded oldest-first, an unordered
+    // scan returns them in rowid order, which is already the expected answer: the
+    // test then passes with the ORDER BY deleted entirely and only catches a
+    // REVERSED one. Inserting newest-first makes insertion order and expected
+    // order disagree, so both mutants fail.
     const { history } = make();
-    seedTrigger(history, 'older', PAST);
     seedTrigger(history, 'newer', PAST);
-    history.updateTrigger('older', { status: 'waiting', waitingUntil: '2026-02-01T00:00:00.000Z' });
+    seedTrigger(history, 'older', PAST);
     history.updateTrigger('newer', { status: 'waiting', waitingUntil: '2026-03-01T00:00:00.000Z' });
+    history.updateTrigger('older', { status: 'waiting', waitingUntil: '2026-02-01T00:00:00.000Z' });
 
     expect(history.getExpiredWaitingTriggers(NOW).map(t => t.id)).toEqual(['older', 'newer']);
   });
