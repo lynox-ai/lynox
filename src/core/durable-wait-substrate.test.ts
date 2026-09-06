@@ -71,6 +71,37 @@ describe('durable wait state — the substrate (§0 E1a/E4/T3/E5)', () => {
     expect(cols.map(c => c.name)).toContain('trigger_id');
   });
 
+  it('adds both columns to a database created before this wave', () => {
+    // A pre-existing pair does not get the columns from the CREATE — it gets them
+    // from the ladder, on the first open that runs the new migration. A migration
+    // appended to the WRONG ladder (there are two tables named `triggers`, in two
+    // files and two databases) passes every query test above and fails only here.
+    //
+    // Constructed directly rather than through `Engine.init()`, which is both the
+    // house pattern for a migration test (engine-db.test.ts) and cheaper: the
+    // ladder runs in the store constructor, so a boot would exercise the same code
+    // one heavy Engine later. `durable-wait-boot.test.ts` carries the boot claim.
+    const dir = mkdtempSync(join(tmpdir(), 'lynox-wait-upg-'));
+    tmpDirs.push(dir);
+    const before = new EngineDb(join(dir, 'engine.db'));
+    const beforeHistory = new RunHistory(join(dir, 'history.db'));
+    before.getDb().exec("DELETE FROM schema_version WHERE version >= 12; ALTER TABLE triggers DROP COLUMN waiting_until;");
+    beforeHistory.getDb().exec("DELETE FROM schema_version WHERE version >= 53; ALTER TABLE pending_prompts DROP COLUMN trigger_id;");
+    const cols = (db: import('better-sqlite3').Database, table: string): string[] =>
+      (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name);
+    expect(cols(before.getDb(), 'triggers')).not.toContain('waiting_until');          // the rewind took
+    expect(cols(beforeHistory.getDb(), 'pending_prompts')).not.toContain('trigger_id'); // both halves
+    before.close();
+    beforeHistory.close();
+
+    const after = new EngineDb(join(dir, 'engine.db'));
+    engines.push(after);
+    const afterHistory = new RunHistory(join(dir, 'history.db'));
+    histories.push(afterHistory);
+    expect(cols(after.getDb(), 'triggers')).toContain('waiting_until');
+    expect(cols(afterHistory.getDb(), 'pending_prompts')).toContain('trigger_id');
+  });
+
   it('the pointer is on the PROMPT side only — triggers gains no prompt column (E4b)', () => {
     // The direction is the decision, not an implementation detail: a second pointer
     // on the trigger side would re-open the cross-file lookup this design avoids.

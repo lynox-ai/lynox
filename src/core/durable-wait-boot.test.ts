@@ -83,43 +83,4 @@ describe('Engine boot — a trigger parked by a previous process survives the re
       .toEqual(['parked-across-boot']);
   });
 
-  it('adds both columns to a database created before this wave', async () => {
-    // A pre-existing engine.db/history.db pair does not get the columns from the
-    // CREATE — it gets them from the ladder, on the boot that first runs the new
-    // migration. A migration appended to the wrong ladder (there are two tables
-    // named `triggers`, in two different files) passes every store-level test and
-    // fails exactly here.
-    prevDataDir = process.env['LYNOX_DATA_DIR'];
-    const dir = mkdtempSync(join(tmpdir(), 'lynox-wait-upgrade-'));
-    dirs.push(dir);
-
-    const oldEngineDb = new EngineDb(join(dir, 'engine.db'));
-    const oldHistory = new RunHistory(join(dir, 'history.db'));
-    // Rewind both ladders past the two new migrations and drop the columns again,
-    // reproducing the on-disk shape of an instance that has never seen this wave.
-    oldEngineDb.getDb().exec("DELETE FROM schema_version WHERE version >= 12; ALTER TABLE triggers DROP COLUMN waiting_until;");
-    oldHistory.getDb().exec("DELETE FROM schema_version WHERE version >= 53; ALTER TABLE pending_prompts DROP COLUMN trigger_id;");
-    const triggerCols = (): string[] => (oldEngineDb.getDb().prepare('PRAGMA table_info(triggers)').all() as { name: string }[]).map(c => c.name);
-    expect(triggerCols()).not.toContain('waiting_until'); // the rewind really took
-    oldHistory.close();
-    oldEngineDb.close();
-
-    process.env['LYNOX_DATA_DIR'] = dir;
-    reloadConfig();
-    const engine = new Engine({} as LynoxConfig);
-    engines.push(engine);
-    await engine.init();
-
-    const db = engine.getRunHistory()!.getDb();
-    expect((db.prepare('PRAGMA table_info(pending_prompts)').all() as { name: string }[]).map(c => c.name))
-      .toContain('trigger_id');
-
-    const upgraded = new EngineDb(join(dir, 'engine.db'));
-    try {
-      expect((upgraded.getDb().prepare('PRAGMA table_info(triggers)').all() as { name: string }[]).map(c => c.name))
-        .toContain('waiting_until');
-    } finally {
-      upgraded.close();
-    }
-  });
 });
