@@ -650,6 +650,11 @@ export class TaskManager {
     return this.history.getExpiredWaitingTriggers(now);
   }
 
+  /** Every parked trigger, deadline or not (§0 A10) — the tick's re-arm pass. */
+  getWaitingTriggers(): TriggerRecord[] {
+    return this.history.getWaitingTriggers();
+  }
+
   /** End a parked trigger's wait, exactly once (§0 A6). */
   endWait(id: string, to: Exclude<TriggerStatus, 'waiting'>): boolean {
     return this.history.endTriggerWait(id, to);

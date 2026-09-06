@@ -1113,8 +1113,10 @@ export class Engine {
       try {
         const { PromptStore } = await import('./prompt-store.js');
         this._promptStore = new PromptStore(this.runHistory.getDb());
-        // Expire any prompts left pending from a previous engine run
-        this._promptStore.expireAll();
+        // Expire prompts left pending from a previous engine run — except the
+        // ones a trigger is parked on, which are exactly the questions whose
+        // answers are allowed to arrive in a later process (§0 A1/A2).
+        this._promptStore.expireUnparked();
         // Periodic cleanup every 5 minutes
         this._promptCleanupTimer = setInterval(() => {
           this._promptStore?.expireOld();

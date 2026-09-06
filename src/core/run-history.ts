@@ -712,7 +712,7 @@ const MIGRATIONS: string[] = [
 
   // v27: Multi-question (tabs) support + unicity per session + partial-answer
   // persistence for reconnect-mid-batch. Any pending prompts from v26 and
-  // earlier are expired — on a cold start the engine calls expireAll()
+  // earlier are expired — on a cold start the engine calls expireUnparked()
   // anyway, so this is a no-op in practice but makes the UNIQUE index safe
   // to add.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (27);
@@ -1057,8 +1057,10 @@ const MIGRATIONS: string[] = [
   // Unlike the tasks rebuilds (v31/v42), this DROPs and recreates instead of
   // INSERT..SELECT-preserving rows: pending_prompts is EPHEMERAL — a pending
   // prompt is bound to a live SSE connection that a restart already severed,
-  // and the engine calls expireAll() on every cold boot (see v27), so no row
-  // here outlives the restart that runs this migration. Dropping is therefore
+  // and the engine calls expireUnparked() on every cold boot (see v27), so no
+  // row here outlives the restart that runs this migration — with the single
+  // exception added later for a trigger's parked question, which by definition
+  // did not exist when this migration ran. Dropping is therefore
   // lossless in practice AND robust to a partial-schema DB (DROP IF EXISTS
   // tolerates a table that a minimal seed never created).
   `INSERT OR IGNORE INTO schema_version (version) VALUES (43);
@@ -1254,7 +1256,7 @@ const MIGRATIONS: string[] = [
   // part. `triggers` lives in engine.db, `pending_prompts` here in history.db;
   // they are separate SQLite files and the tree has no ATTACH, so neither a
   // foreign key nor a JOIN is available in either direction. What decides the side
-  // is `expireAll()` (prompt-store.ts), which the engine runs on every cold boot
+  // is `expireUnparked()` (prompt-store.ts), which the engine runs on every cold boot
   // and which today expires all `status='pending'` rows unconditionally: with the
   // pointer here, the exception that lets a parked trigger's question survive a
   // restart is a purely local predicate on this table. On the trigger side it
@@ -1263,15 +1265,12 @@ const MIGRATIONS: string[] = [
   // A SOFT reference, like `triggers.last_run_id` pointing the other way across
   // the same file boundary: no FK, no ON DELETE.
   //
-  // ⚠ THE COLUMN IS ALL THAT LANDS HERE. Nothing reads it yet: `expireAll()`
-  // (prompt-store.ts) still expires every `status='pending'` row on cold boot,
-  // unconditionally, exactly as v27 and v43 describe — so today a parked
-  // trigger's question does NOT survive a restart. The boot exception that will
-  // read this column is a later slice; this migration only makes it possible to
-  // write one without a second table rebuild. When it lands, note that a trigger
-  // deleted while parked leaves a pointer to nothing, and the exception must not
-  // keep such a row alive past its own `expires_at` — which the 5-minute
-  // `expireOld()` sweep (engine.ts) enforces independently.
+  // The boot exception that reads this column landed in wave 3: `expireUnparked()`
+  // (prompt-store.ts) skips `trigger_id IS NOT NULL` at both lifecycle boundaries,
+  // so a parked trigger's question now survives a restart. What v27 and v43 say
+  // above still holds for every other row. A trigger deleted while parked leaves
+  // a pointer to nothing, and such a row is bounded by its own `expires_at`,
+  // which the 5-minute `expireOld()` sweep (engine.ts) enforces independently.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
    ALTER TABLE pending_prompts ADD COLUMN trigger_id TEXT;`,
 ];
@@ -2919,6 +2918,11 @@ export class RunHistory {
     waitingUntil?: string | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
     return this._requireTriggerStore().updateFields(id, params, opts);
+  }
+
+  /** Durable wait state (§0 A10): every parked trigger, deadline or not. */
+  getWaitingTriggers(): TriggerRecord[] {
+    return this._triggerStore?.getWaiting() ?? [];
   }
 
   /** Durable wait state (§0 A6): end a wait, exactly once. Conditional on the

@@ -236,7 +236,7 @@ export class PromptStore {
   private _stmtGetPending: Database.Statement | undefined;
   private _stmtGetById: Database.Statement | undefined;
   private _stmtExpireOld: Database.Statement | undefined;
-  private _stmtExpireAll: Database.Statement | undefined;
+  private _stmtExpireUnparked: Database.Statement | undefined;
   private _stmtSetPartial: Database.Statement | undefined;
 
   constructor(db: Database.Database) {
@@ -542,12 +542,32 @@ export class PromptStore {
     return result.changes;
   }
 
-  /** Expire ALL pending prompts (used on engine restart). */
-  expireAll(): number {
+  /**
+   * Expire every pending prompt EXCEPT the ones a trigger is parked on
+   * (§0 A1/A2). Called at both process lifecycle boundaries — boot and
+   * shutdown — and the exception has to hold at both, or the one that runs
+   * first defeats the other.
+   *
+   * Named for what it does rather than for what it used to do. It was
+   * `expireAll`, and it really did expire all: a prompt is bound to a live SSE
+   * connection that a restart has already severed, so keeping one meant keeping
+   * a question nobody could answer. A trigger's question is the exception,
+   * because the answer does not have to arrive in the same process — the run
+   * that asked is gone, and the trigger is what remembers.
+   *
+   * The predicate is purely local (`trigger_id IS NULL`), which is the whole
+   * reason §0 put the pointer on this side: `triggers` lives in engine.db, this
+   * table in history.db, and there is no ATTACH anywhere in the tree.
+   *
+   * What keeps a surviving prompt from living forever is its own `expires_at`,
+   * which the 5-minute `expireOld()` sweep still enforces, and the trigger's
+   * `waiting_until`, which the WorkerLoop tick enforces. Neither is skipped here.
+   */
+  expireUnparked(): number {
     const rows = this.db
-      .prepare(`SELECT id FROM pending_prompts WHERE status = 'pending'`)
+      .prepare(`SELECT id FROM pending_prompts WHERE status = 'pending' AND trigger_id IS NULL`)
       .all() as { id: string }[];
-    const result = this._getExpireAllStmt().run();
+    const result = this._getExpireUnparkedStmt().run();
     for (const row of rows) this._emitSettled(row.id);
     return result.changes;
   }
@@ -576,6 +596,40 @@ export class PromptStore {
       .run(triggerId);
     for (const row of rows) this._emitSettled(row.id);
     return result.changes;
+  }
+
+  /**
+   * The answered question a trigger is still parked on (§0 A10), if there is one.
+   *
+   * This single row carries everything the re-armed run needs and is the reason
+   * no third column was added for it (§0 E4 forbids a speculative resume
+   * column): `session_id` is the thread the question was asked in, `question`
+   * and `answer` are what the new run has to be told. Answering updates a
+   * database row and nothing else — `prompt-store.ts` writes to `pending_prompts`
+   * and to no other table — so a thread does NOT carry the answer by itself, and
+   * a run that only reused the thread id would see its own old question with no
+   * reply under it.
+   */
+  getAnsweredForTrigger(triggerId: string): PendingPromptRow | undefined {
+    return this.db
+      .prepare(`SELECT * FROM pending_prompts WHERE trigger_id = ? AND status = 'answered' LIMIT 1`)
+      .get(triggerId) as PendingPromptRow | undefined;
+  }
+
+  /**
+   * Detach a prompt from its trigger — the answer has been handed to a run and
+   * is that trigger's business no longer.
+   *
+   * Conditional on the pointer still being set, so it claims the answer exactly
+   * once, the same shape `TriggerStore.endWait` uses for the same reason. Without
+   * it the row stays `answered` with a live pointer and every later scheduled run
+   * of that trigger would be handed the same stale reply. The status is left
+   * `answered` because it was answered; what changes is only whose business it is.
+   */
+  releaseTrigger(promptId: string): boolean {
+    return this.db
+      .prepare(`UPDATE pending_prompts SET trigger_id = NULL WHERE id = ? AND trigger_id IS NOT NULL`)
+      .run(promptId).changes > 0;
   }
 
   /** Expire a single pending prompt by id. Used when a /run handler is
@@ -710,11 +764,11 @@ export class PromptStore {
     `));
   }
 
-  private _getExpireAllStmt(): Database.Statement {
-    return (this._stmtExpireAll ??= this.db.prepare(`
+  private _getExpireUnparkedStmt(): Database.Statement {
+    return (this._stmtExpireUnparked ??= this.db.prepare(`
       UPDATE pending_prompts
       SET status = 'expired'
-      WHERE status = 'pending'
+      WHERE status = 'pending' AND trigger_id IS NULL
     `));
   }
 }
