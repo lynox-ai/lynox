@@ -1322,6 +1322,22 @@ describe('setTokens — OAuth claim fixture (contract §2.3 #5)', () => {
     expect(stored).toEqual(fixture);
   });
 
+  it('a claim WITH an email stores it — driven directly, because the fixture cannot', async () => {
+    // The golden fixture carries no `email`: its serializer is the control
+    // plane, which does not emit one until W6, and a fixture with a field its
+    // serializer does not produce is hand-written (`fixtures/README.md`). So the
+    // storing behaviour is driven from a constructed body instead. Without this
+    // test, deleting the field from `setTokens` leaves the whole suite green —
+    // measured, not assumed: the fixture was the only thing exercising it.
+    const { auth: vaultAuth, vault } = makeVaultAuth();
+    await vaultAuth.setTokens({
+      ...(fixture as Record<string, unknown>),
+      email: 'test-user@accounts.invalid',
+    } as unknown as Parameters<GoogleAuth['setTokens']>[0]);
+    const stored = JSON.parse(vault.set.mock.calls[0]![1] as string) as Record<string, unknown>;
+    expect(stored['email'], 'a claim that carries an address must keep it').toBe('test-user@accounts.invalid');
+  });
+
   it('a claim WITHOUT an email stores no email key — absent means unknown', async () => {
     // The contract calls `email` optional, and optional here means a grant made
     // before Stage 1 asked for `openid email`.
