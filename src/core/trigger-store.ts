@@ -624,6 +624,13 @@ export class TriggerStore {
    * decides whether a wait that already started may END. A trigger disabled (or
    * un-confirmed) while parked would otherwise stay `waiting` with no path out.
    *
+   * ⚠ THAT IS ONLY SAFE WHILE THE CALLER ENDS A WAIT AND DOES NOT START A RUN. The
+   * consent gate on `getDue` is the primary enforcement of the human first-run
+   * confirm for `run_agent` — the injection-amplification hole. A caller that
+   * dispatched off THIS query would route around it. The sweep's job is the
+   * terminal write; anything that makes a trigger due again belongs on the path
+   * that goes back through `getDue`, gate included.
+   *
    * `waiting_until IS NOT NULL` is redundant against `<= ?` in SQLite (NULL never
    * compares true) and is kept as an explicit statement of the invariant: a row in
    * `waiting` without a deadline is a bug, and this query must not silently treat
