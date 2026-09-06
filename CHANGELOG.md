@@ -25,9 +25,13 @@
   verification but no annual CASA assessment. **Existing connections are not
   touched** — the change applies to the next consent.
 
-- **The `full` mode requests three scopes more than it did**: `openid`,
-  `userinfo.email` and `calendar.freebusy`. Everything it asked for before, it
-  still asks for. The bundle is deliberately NOT the union of the three
+- **The `full` mode requests three scopes more and one fewer.** Added:
+  `openid`, `userinfo.email`, `calendar.freebusy`. Dropped: **`gmail.modify`**
+  — measured, nothing writes a Gmail label, trashes a message or calls
+  `messages.modify`; the provider only lists, searches, fetches and sends, and
+  reads `labelIds` out of a list response, all of which `gmail.readonly`
+  authorises. An existing connection keeps whatever it was granted; the change
+  applies to the next consent. The bundle is deliberately NOT the union of the three
   classification sets — a request bundle has to stay minimal, because Google's
   verification requires "the least amount of access … necessary" and a scope no
   code path exercises is by definition not necessary. `mail.google.com/`,

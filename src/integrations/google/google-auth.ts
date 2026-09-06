@@ -287,7 +287,6 @@ export const FULL_SCOPES: readonly string[] = [
   SCOPES.CALENDAR_READONLY,
   SCOPES.GMAIL_SEND,
   SCOPES.GMAIL_READONLY,
-  SCOPES.GMAIL_MODIFY,
   SCOPES.DRIVE,
   SCOPES.DRIVE_READONLY,
 ];
@@ -305,8 +304,14 @@ export const FULL_SCOPES: readonly string[] = [
  *
  * The scopes deliberately absent, and what would put them back:
  *  - `gmail.compose`, `gmail.metadata`, `mail.google.com/` — nothing drafts,
- *    reads metadata-only, or needs delete rights. `gmail.readonly` and
- *    `gmail.modify` already cover what `OAuthGmailProvider` does.
+ *    reads metadata-only, or needs delete rights.
+ *  - `gmail.modify` — measured: `OAuthGmailProvider` lists, searches, fetches
+ *    and sends, and reads `labelIds` OUT of a list response. It never writes a
+ *    label, trashes, or calls `messages.modify`, so `gmail.readonly` alone
+ *    covers the reading half. This entry was in the table for one commit with
+ *    `gmail.readonly`'s evidence string copied into it — which is how a scope
+ *    with no consumer passed a test whose whole job is to catch that. The test
+ *    now requires each evidence string to belong to exactly one scope.
  *  - `calendar.calendarlist.readonly` — D9 dropped `list_calendars`; the
  *    calendar id stays a parameter the user names.
  *  - `drive.metadata.readonly` — accepted if a tenant already holds it, but
@@ -324,7 +329,6 @@ export const FULL_SCOPE_CONSUMERS: Readonly<Record<string, { file: string; evide
   [SCOPES.DRIVE_READONLY]: { file: 'src/integrations/google/google-drive.ts', evidence: 'SCOPES.DRIVE_READONLY' },
   [SCOPES.GMAIL_SEND]: { file: 'src/integrations/mail/providers/oauth-gmail.ts', evidence: "gmailPost<GmailSendResponse>('messages/send'" },
   [SCOPES.GMAIL_READONLY]: { file: 'src/integrations/mail/providers/oauth-gmail.ts', evidence: 'gmailGet<GmailListResponse>' },
-  [SCOPES.GMAIL_MODIFY]: { file: 'src/integrations/mail/providers/oauth-gmail.ts', evidence: 'gmailGet<GmailListResponse>' },
 };
 
 /** Default scopes for initial auth — the CASA-free standard set. */

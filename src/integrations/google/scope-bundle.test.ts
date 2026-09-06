@@ -43,6 +43,20 @@ describe('the full-consent bundle stays minimal', () => {
     }
   });
 
+  it('no two scopes lean on the same evidence', () => {
+    // The gap that shipped one scope with no consumer: the existence check
+    // greps a substring in a named file, so copying a neighbour's evidence
+    // string satisfies it. `gmail.modify` did exactly that for one commit —
+    // it borrowed `gmail.readonly`'s reader and passed a test whose whole job
+    // is to catch a scope nothing exercises.
+    const seen = new Map<string, string>();
+    for (const [scope, { file, evidence }] of Object.entries(FULL_SCOPE_CONSUMERS)) {
+      const key = `${file}::${evidence}`;
+      expect(seen.has(key), `${scope} reuses ${seen.get(key) ?? ''}'s evidence`).toBe(false);
+      seen.set(key, scope);
+    }
+  });
+
   it('the detector can tell a real consumer from a missing one', () => {
     // Positive control on the anchoring, which is the part that could silently
     // over-match, and on the file read itself — this suite must NOT be running

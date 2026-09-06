@@ -7312,14 +7312,20 @@ describe('LynoxHTTPApi', () => {
       // one exists — it is the only one that observes the promise cache.
       let release: (() => void) | undefined;
       const gate = new Promise<void>((r) => { release = r; });
+      let entered = 0;
       mockCpFetch.mockImplementation(async () => {
+        // A SECOND entry can only happen under the implementation this test
+        // rejects, so it releases the gate itself. That makes the failing case
+        // deterministic instead of a race against the timer below — the timer
+        // now only bounds the PASSING case, where it can never turn a red into
+        // a green.
+        if (++entered >= 2) release?.();
         await gate;
         return { ok: true, json: async () => ({ configured: true }) };
       });
 
       const inFlight = [jsonFetch('/api/google/status'), jsonFetch('/api/google/status'), jsonFetch('/api/google/status')];
-      // Give all three a chance to reach the probe before any can finish.
-      await new Promise((r) => setTimeout(r, 30));
+      await new Promise((r) => setTimeout(r, 300));
       release?.();
       const bodies = await Promise.all((await Promise.all(inFlight)).map((r) => r.json() as Promise<Record<string, unknown>>));
 
