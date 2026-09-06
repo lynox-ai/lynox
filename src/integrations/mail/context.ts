@@ -446,8 +446,13 @@ export class MailContext {
    */
   private hasMailboxScope(): boolean {
     if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return false;
-    // Any of the three Gmail read scopes authorises `messages.list`/`get`;
-    // `gmail.send` does NOT, which is the whole point of asking per scope.
+    // Three of the Gmail read scopes; `gmail.send` is not among them, which is
+    // the whole point of asking per scope rather than per connection.
+    //
+    // `gmail.metadata` is EXCLUDED on purpose, not forgotten: it authorises
+    // `messages.list`/`get`, but `OAuthGmailProvider` fetches with
+    // `format=full`, which metadata-only access cannot serve. Admitting it
+    // would move the 403 from the list to the read instead of preventing it.
     return this.googleAuth.hasScope(SCOPES.GMAIL_READONLY)
       || this.googleAuth.hasScope(SCOPES.GMAIL_MODIFY)
       || this.googleAuth.hasScope(SCOPES.MAIL_GOOGLE_COM);
@@ -457,10 +462,21 @@ export class MailContext {
     if (account.authType === 'oauth_google') {
       if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return null;
       if (!this.hasMailboxScope()) {
-        // ONE line, at init, not one per poll. The row stays — it is the
-        // user's mailbox and it comes back the moment the scope does — but no
-        // provider is registered, so nothing polls it into a 403 loop.
-        console.warn(`[lynox:mail] "${account.address}" is connected through Google but the grant carries no Gmail read scope — skipping. Connect the mailbox over IMAP, or re-consent with full access.`);
+        // ONE line, at init, not one per poll. The row STAYS — it is the
+        // user's mailbox — but no provider is registered, so nothing polls it
+        // into a 403 loop.
+        //
+        // ⚠ And it does NOT come back by itself when the scope arrives:
+        // `_buildProvider` runs from `init()` only, and nothing re-runs it on
+        // a token change. `listAccounts()` re-evaluates live, so the card's
+        // badge clears at once — the provider attaches on the next engine
+        // start. Saying "it works again immediately" here would be the
+        // pleasant version, and it is not what the code does.
+        //
+        // The address is deliberately NOT logged: this is the only place in
+        // the engine where a real mailbox address would reach stdout, and a
+        // container log is not where it belongs.
+        console.warn(`[lynox:mail] account "${account.id}" is connected through Google but the grant carries no Gmail read scope — skipping. Connect the mailbox over IMAP, or re-consent with full access.`);
         return null;
       }
       return new OAuthGmailProvider(account, this.googleAuth);

@@ -1682,10 +1682,11 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.google_grant_stays': { de: 'Deine Google-Freigabe für lynox bleibt bestehen. Du kannst sie jederzeit unter myaccount.google.com/permissions entfernen.', en: 'Your Google grant for lynox stays in place. You can remove it any time at myaccount.google.com/permissions.' },
 
 	// Mail — a Google mailbox whose grant carries no Gmail read scope.
-	// ⚠ The surrounding Mail card is hardcoded EN (a known gap, PRD §3.7). These
-	// three are translated because they are the ones a user hits when their
-	// mailbox stops working, and a dead-end in the wrong language is worse than
-	// an English label on a working card.
+	// ⚠ The Mail card's three sibling BADGES are hardcoded EN (`DEFAULT`,
+	// `NEEDS PASSWORD`, `RECEIVE-ONLY`); the rest of the card is translated.
+	// These three are translated because they are the ones a user meets when
+	// their mailbox stops working, and a dead end in the wrong language is worse
+	// than an English label on a working control.
 	'mail.needs_mailbox_scope_badge': { de: 'KEIN POSTFACH-ZUGRIFF', en: 'NO MAILBOX ACCESS' },
 	'mail.needs_mailbox_scope_hint': { de: 'Die Google-Verbindung erlaubt kein Lesen von Gmail, dieses Postfach bleibt daher leer. Verbinde es stattdessen per IMAP:', en: 'The Google connection does not permit reading Gmail, so this mailbox stays empty. Connect it over IMAP instead:' },
 	'mail.needs_mailbox_scope_link': { de: 'App-Passwort einrichten', en: 'set up an app password' },

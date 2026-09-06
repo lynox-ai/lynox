@@ -15,7 +15,9 @@
   or `mail.google.com/`. Without one, no provider is registered (one log line at
   init, not one per poll) and no placeholder mailbox row is created. **An
   existing row is kept** — it is the user's mailbox and it works again the moment
-  the scope is there.
+  the scope is there — **on the next start of the instance**, because nothing
+  re-registers a mail provider at runtime. The card's badge clears immediately,
+  since it is computed per request.
 - The mail card names the reason and the way out: a *no mailbox access* badge and
   a link to the app-password guide, in both languages. An account that is listed
   and does nothing reads as a fault in lynox rather than as a permission the

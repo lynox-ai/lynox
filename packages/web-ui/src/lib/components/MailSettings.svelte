@@ -33,7 +33,6 @@
 	interface AccountTypeDescriptor {
 		type: MailAccountType;
 		receiveOnly: boolean;
-		warning?: 'needs_mailbox_scope';
 		defaultPersona: string;
 	}
 	interface AccountView {

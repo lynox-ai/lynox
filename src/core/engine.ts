@@ -1625,8 +1625,14 @@ export class Engine {
     // Provider-agnostic Mail integration (IMAP/SMTP + OAuth-Gmail).
     // Always initialised when a vault is available — the state DB is cheap
     // and supports zero accounts. Tools are registered when the context has
-    // a vault to bind credentials to. reloadMail() is the runtime path for
-    // account add/remove after startup.
+    // a vault to bind credentials to.
+    //
+    // ⚠ There is NO `reloadMail()`. This comment named one until 2026-09-06,
+    // and it is why a reviewer and an author both assumed a runtime path
+    // existed: account add/remove goes through `MailContext.addAccount`, and
+    // NOTHING re-runs the provider registration after startup — so a grant
+    // that gains a Gmail scope re-attaches its provider on the next engine
+    // start, not on the token change.
     //
     // googleAuth is passed through so OAuth-Gmail accounts coexist with IMAP
     // in the same registry. MailContext.init() runs a boot migration that

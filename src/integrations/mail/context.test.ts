@@ -1060,6 +1060,57 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
     } finally { await c.close(); }
   });
 
+  it('the card clears immediately on re-consent, but the provider does NOT re-attach', async () => {
+    // The honest shape of the recovery, asserted rather than described.
+    // `listAccounts()` computes the warning per request, so the badge goes the
+    // moment the scope arrives. `_buildProvider` runs from `init()` only and
+    // nothing re-runs it, so mail does not flow until the next engine start.
+    //
+    // Written because the first version of this wave claimed in a public
+    // CHANGELOG that it "works again the moment the scope is there". It does
+    // not, and no test said so.
+    stateDb.upsertAccount(GOOGLE_ROW);
+    let scopes: string[] = [...STAGE_1];
+    const live = {
+      isAuthenticated: () => true,
+      hasScope: (s: string) => scopes.includes(s),
+      getAccessToken: async () => 'token',
+    };
+    const c = new MailContext(stateDb, backend, undefined, {}, live as never);
+    try {
+      await c.init();
+      expect(c.listAccounts().find(a => a.id === 'goog')?.warning).toBe('needs_mailbox_scope');
+      expect(c.registry.list()).toEqual([]);
+
+      // …the user re-consents, in the same process.
+      scopes = [...READONLY];
+      expect(c.listAccounts().find(a => a.id === 'goog')?.warning,
+        'the badge is computed per request, so it clears at once').toBeUndefined();
+      expect(c.registry.list(),
+        'and the provider still is not attached — that needs the next init').toEqual([]);
+
+      // ⚠ A second `init()` on the SAME context does not attach it either, and
+      // that is the guard rather than the behaviour: `init()` returns early on
+      // `this.initialized`. Measured — asserting on it would have been a test
+      // of the idempotence flag wearing the name of a recovery test.
+      await c.init();
+      expect(c.registry.list(), 'a second init() is a documented no-op').toEqual([]);
+    } finally { await c.close(); }
+
+    // A restart is a NEW context over the same state DB. That is the path that
+    // attaches it, and it is what makes the assertion above about TIMING
+    // rather than about something being broken.
+    const restarted = new MailContext(stateDb, backend, undefined, {}, {
+      isAuthenticated: () => true,
+      hasScope: (s: string) => (READONLY as readonly string[]).includes(s),
+      getAccessToken: async () => 'token',
+    } as never);
+    try {
+      await restarted.init();
+      expect(restarted.registry.list().length, 'a restart attaches it').toBe(1);
+    } finally { await restarted.close(); }
+  });
+
   it('tells the card WHY the account is there and does nothing', async () => {
     stateDb.upsertAccount(GOOGLE_ROW);
     const c = ctxWith(STAGE_1);
