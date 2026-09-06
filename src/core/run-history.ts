@@ -1244,6 +1244,36 @@ const MIGRATIONS: string[] = [
   // the main agent raises, where the cause is on screen anyway.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (52);
    ALTER TABLE pending_prompts ADD COLUMN origin_json TEXT;`,
+
+  // v53 (durable wait state, PRD-DURABLE-WAIT-STATE §0 E4b): which trigger, if
+  // any, is parked on this prompt. NULL for every question the agent raises in a
+  // normal chat turn — the overwhelming majority — and set only when the asking
+  // run belongs to a trigger.
+  //
+  // The pointer sits on the PROMPT side, and the direction is the load-bearing
+  // part. `triggers` lives in engine.db, `pending_prompts` here in history.db;
+  // they are separate SQLite files and the tree has no ATTACH, so neither a
+  // foreign key nor a JOIN is available in either direction. What decides the side
+  // is `expireAll()` (prompt-store.ts), which the engine runs on every cold boot
+  // and which today expires all `status='pending'` rows unconditionally: with the
+  // pointer here, the exception that lets a parked trigger's question survive a
+  // restart is a purely local predicate on this table. On the trigger side it
+  // would need the cross-file lookup that does not exist.
+  //
+  // A SOFT reference, like `triggers.last_run_id` pointing the other way across
+  // the same file boundary: no FK, no ON DELETE.
+  //
+  // ⚠ THE COLUMN IS ALL THAT LANDS HERE. Nothing reads it yet: `expireAll()`
+  // (prompt-store.ts) still expires every `status='pending'` row on cold boot,
+  // unconditionally, exactly as v27 and v43 describe — so today a parked
+  // trigger's question does NOT survive a restart. The boot exception that will
+  // read this column is a later slice; this migration only makes it possible to
+  // write one without a second table rebuild. When it lands, note that a trigger
+  // deleted while parked leaves a pointer to nothing, and the exception must not
+  // keep such a row alive past its own `expires_at` — which the 5-minute
+  // `expireOld()` sweep (engine.ts) enforces independently.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
+   ALTER TABLE pending_prompts ADD COLUMN trigger_id TEXT;`,
 ];
 
 export class RunHistory {
@@ -2883,8 +2913,19 @@ export class RunHistory {
     assignee?: string | undefined;
     nextRunAt?: string | null | undefined;
     scheduleCron?: string | null | undefined;
+    /** Durable wait state (§0 E4a/G2): the parked deadline. This is the write path
+     *  the park uses — `TaskManager.update` is NOT, and must not become, one: it
+     *  validates against VALID_STATUSES and rejects `waiting` by design. */
+    waitingUntil?: string | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
     return this._requireTriggerStore().updateFields(id, params, opts);
+  }
+
+  /** Durable wait state (§0 E5/A12): parked triggers whose wait has run out. The
+   *  WorkerLoop tick's second query, beside {@link getDueTriggers} — which no longer
+   *  returns a parked trigger at all. Empty when no trigger store is wired. */
+  getExpiredWaitingTriggers(now?: string): TriggerRecord[] {
+    return this._triggerStore?.getExpiredWaiting(now) ?? [];
   }
 
   getTask(id: string, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): TaskRecord | undefined {

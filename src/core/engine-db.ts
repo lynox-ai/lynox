@@ -710,6 +710,33 @@ const MIGRATIONS: string[] = [
        OR EXISTS (SELECT 1 FROM subjects)
        OR EXISTS (SELECT 1 FROM knowledge_entries)
        OR EXISTS (SELECT 1 FROM memories));`,
+
+  // v12 (durable wait state, PRD-DURABLE-WAIT-STATE §0 E4a): how long a trigger
+  // that parked on an unanswered question may keep waiting. NULL on every existing
+  // row and on every trigger that is not parked — the column is written only by the
+  // park and read only by the expiry sweep, so an instance that never parks a
+  // trigger behaves exactly as before.
+  //
+  // ⚠ ADD COLUMN on the LIVE `triggers` table — the one this ladder creates in v1.
+  // A second table of the same name exists in the history.db ladder
+  // (run-history.ts v42) and that one carries `CHECK(status IN (...))`; which of
+  // the two a search shows first depends on the tool. This table has no CHECK on
+  // `status`, which is why the new `waiting` status needs no table rebuild, and
+  // ADD COLUMN here has two precedents (v3 `effect`, v6 `confirmed_at`).
+  //
+  // NOT indexed, and the honest reason is that there is nothing to measure yet.
+  // The sweep filters `status` and `waiting_until`, neither of which any index
+  // covers, so it scans the WHOLE `triggers` table — not just the parked rows.
+  // What is bounded by the number of simultaneously unanswered questions is how
+  // many rows it MATCHES, which is a different quantity and does not justify
+  // skipping an index. What justifies it here is that this migration ships no
+  // caller: the query is wired to the WorkerLoop in a later slice, and the cost
+  // is a scan per tick over a table whose size is an instance's whole trigger
+  // list. Revisit it there, with a number. An index is a forward migration and
+  // cheap to add; the COLUMN is the part that is hard to take back, since this
+  // ladder is forward-only and has no down path.
+  `INSERT OR IGNORE INTO schema_version (version) VALUES (12);
+   ALTER TABLE triggers ADD COLUMN waiting_until TEXT;`,
 ];
 
 /**
