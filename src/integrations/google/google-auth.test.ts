@@ -792,6 +792,196 @@ describe('GoogleAuth', () => {
     });
   });
 
+  /**
+   * §3.10's hook, driven through the REAL credential.
+   *
+   * ⚠ The boot test proves the engine HANDS IN a hook. That is not the same
+   * claim, and the difference is measurable: with only the boot test, deleting
+   * the `_announceTokenChange` call from either funnel survived every suite —
+   * the engine test replaces `createGoogleAuth` with a mock and then calls the
+   * captured hook itself, so the credential never fires it. Handed in ≠ called.
+   */
+  describe('onTokenChange — the credential announces its own writes', () => {
+    function vaultStub() {
+      const store = new Map<string, string>();
+      return {
+        store,
+        get: vi.fn((key: string) => store.get(key) ?? null),
+        set: vi.fn((key: string, value: string) => { store.set(key, value); }),
+        delete: vi.fn((key: string) => store.delete(key)),
+      };
+    }
+    type Change = { reason: string; tokenData: { scopes: readonly string[]; email?: string | undefined } | null };
+
+    it('fires `grant` on a claim, with the scopes and the address', async () => {
+      const seen: Change[] = [];
+      const vault = vaultStub();
+      const a = new GoogleAuth({
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+        onTokenChange: (e) => { seen.push(e as Change); },
+      });
+      await a.setTokens({
+        access_token: 'access-token-aaaaaaaa', refresh_token: 'refresh-token-bbbbbbbb', expires_at: Date.now() + 60_000,
+        scopes: ['https://www.googleapis.com/auth/calendar.events'], email: 'a@b.c',
+      });
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.reason).toBe('grant');
+      expect(seen[0]?.tokenData?.email).toBe('a@b.c');
+      expect(seen[0]?.tokenData?.scopes).toEqual(['https://www.googleapis.com/auth/calendar.events']);
+      // The vault write happened too — the announcement is a mirror of a real
+      // write, not a substitute for one.
+      expect(vault.store.has('GOOGLE_OAUTH_TOKENS')).toBe(true);
+    });
+
+    it('fires `disconnect` with a null payload, AFTER the vault delete', async () => {
+      const seen: Change[] = [];
+      const vault = vaultStub();
+      // ⚠ RECORDED inside the hook, asserted OUTSIDE it. `_announceTokenChange`
+      // swallows what the hook throws — by design, so a metadata mirror cannot
+      // fail a token write — which means an `expect` in here is not an
+      // assertion at all: it is caught and logged. Measured: with the assert
+      // inline, moving the announcement in front of the vault delete SURVIVED
+      // the whole suite.
+      let tokenStillInVaultAtAnnounce: boolean | undefined;
+      const a = new GoogleAuth({
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+        onTokenChange: (e) => {
+          seen.push(e as Change);
+          tokenStillInVaultAtAnnounce = vault.store.has('GOOGLE_OAUTH_TOKENS');
+        },
+      });
+      await a.setTokens({ access_token: 'access-token-aaaaaaaa', refresh_token: 'refresh-token-bbbbbbbb', expires_at: Date.now() + 60_000, scopes: ['s'] });
+      seen.length = 0;
+      a.disconnect();
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.reason).toBe('disconnect');
+      expect(seen[0]?.tokenData).toBeNull();
+      // The material is already gone when the mirror is told, so a consumer
+      // that re-reads the vault from the hook cannot find a token this event
+      // says is removed.
+      expect(tokenStillInVaultAtAnnounce, 'announced before the vault delete').toBe(false);
+    });
+
+    it('a throwing hook does not fail the token write', async () => {
+      const vault = vaultStub();
+      const a = new GoogleAuth({
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+        onTokenChange: () => { throw new Error('mirror is down'); },
+      });
+      // Row = metadata, vault = material. Failing a consent that Google already
+      // granted because a bookkeeping row could not be written trades the one
+      // for the other.
+      await expect(a.setTokens({ access_token: 'access-token-aaaaaaaa', refresh_token: 'refresh-token-bbbbbbbb', expires_at: Date.now() + 60_000, scopes: ['s'] }))
+        .resolves.toBeUndefined();
+      expect(vault.store.has('GOOGLE_OAUTH_TOKENS')).toBe(true);
+      expect(a.isAuthenticated()).toBe(true);
+    });
+
+    it('is forwarded by `createGoogleAuth`, not dropped on the way through', async () => {
+      // The factory used to name every option by hand. A field omitted there is
+      // silent: the credential builds, the hook never arrives, and the boot
+      // test still passes because it inspects the options it PASSED IN.
+      const { createGoogleAuth } = await import('./index.js');
+      const seen: Change[] = [];
+      const vault = vaultStub();
+      const a = createGoogleAuth({
+        vault: vault as unknown as import('../../core/secret-vault.js').SecretVault,
+        onTokenChange: (e) => { seen.push(e as Change); },
+      });
+      await a.setTokens({ access_token: 'access-token-aaaaaaaa', refresh_token: 'refresh-token-bbbbbbbb', expires_at: Date.now() + 60_000, scopes: ['s'] });
+      expect(seen.map((e) => e.reason)).toEqual(['grant']);
+    });
+
+    it('fires `refresh`, not `grant`, when a real refresh replaces the token', async () => {
+      // The REASON is what §3.10 keys `granted_at` on: a refresh replaces an
+      // access token under an authorisation that already exists. Announcing it
+      // as a grant would move the consent timestamp on every refresh, and the
+      // engine-side test cannot see it — that one calls the hook with a reason
+      // it chose itself. Measured: hardcoding `reason = "grant"` in the funnel
+      // survived every other test in this file.
+      const store = new Map<string, string>();
+      store.set('GOOGLE_OAUTH_TOKENS', JSON.stringify({
+        access_token: 'old-token-aaaaaaaa',
+        refresh_token: 'refresh-token-bbbbbbbb',
+        expires_at: Date.now() - 1000,
+        scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+      }));
+      const seen: Change[] = [];
+      const vaultAuth = new GoogleAuth({
+        clientId: 'test-id',
+        clientSecret: 'test-secret',
+        vault: {
+          get: vi.fn((k: string) => store.get(k) ?? null),
+          set: vi.fn((k: string, v: string) => { store.set(k, v); }),
+          delete: vi.fn((k: string) => store.delete(k)),
+        } as unknown as import('../../core/secret-vault.js').SecretVault,
+        onTokenChange: (e) => { seen.push(e as Change); },
+      });
+      mockFetch.mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            access_token: 'fresh-token-cccccccc',
+            expires_in: 3600,
+            scope: 'https://www.googleapis.com/auth/gmail.readonly',
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+      await vaultAuth.getAccessToken();
+      expect(seen.map((e) => e.reason)).toEqual(['refresh']);
+    });
+
+    it('fires `refresh` on the CP-BROKERED path too, not only the direct one', async () => {
+      // Two refresh implementations exist and each has its own
+      // `_persistTokens` call. Covering one and calling the pair done is how a
+      // second write site drifts — the brokered path is the one every managed
+      // tenant takes.
+      const store = new Map<string, string>();
+      store.set('GOOGLE_OAUTH_TOKENS', JSON.stringify({
+        access_token: 'old-token-aaaaaaaa',
+        refresh_token: 'refresh-token-bbbbbbbb',
+        refresh_handle: 'sealed-handle-dddddddd',
+        expires_at: Date.now() - 1000,
+        scopes: ['https://www.googleapis.com/auth/calendar.events'],
+      }));
+      const seen: Change[] = [];
+      vi.stubEnv('LYNOX_MANAGED_CONTROL_PLANE_URL', 'https://cp.example.test');
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-refresh');
+      vi.stubEnv('LYNOX_HTTP_SECRET', 'instance-secret-eeeeeeee');
+      try {
+        const brokered = new GoogleAuth({
+          vault: {
+            get: vi.fn((k: string) => store.get(k) ?? null),
+            set: vi.fn((k: string, v: string) => { store.set(k, v); }),
+            delete: vi.fn((k: string) => store.delete(k)),
+          } as unknown as import('../../core/secret-vault.js').SecretVault,
+          onTokenChange: (e) => { seen.push(e as Change); },
+        });
+        mockFetch.mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              access_token: 'cp-fresh-token-ffffffff',
+              expires_at: Date.now() + 3_600_000,
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          ),
+        );
+        await brokered.getAccessToken();
+        expect(seen.map((e) => e.reason)).toEqual(['refresh']);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('says nothing when no hook was given', async () => {
+      // The control: a credential built without one must not throw on write.
+      const vault = vaultStub();
+      const a = new GoogleAuth({ vault: vault as unknown as import('../../core/secret-vault.js').SecretVault });
+      await expect(a.setTokens({ access_token: 'access-token-aaaaaaaa', refresh_token: 'refresh-token-bbbbbbbb', expires_at: Date.now() + 60_000, scopes: ['s'] }))
+        .resolves.toBeUndefined();
+    });
+  });
+
   describe('SCOPES', () => {
     it('exports all scope constants', () => {
       expect(SCOPES.GMAIL_READONLY).toBe('https://www.googleapis.com/auth/gmail.readonly');
