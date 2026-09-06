@@ -351,7 +351,22 @@ function measureStaticPrefixTokens(): number {
 // +291 and was cut to +184 with the effect re-verified on the exact shipped text.
 // Whether the "offer what exists" half earns its share is pinned by tests but has
 // no behaviour measurement of its own.
-const STATIC_PREFIX_BUDGET = 23817;
+// +77 (2026-09-06): "Cite what you fetched" in GROUNDING_PROMPT_BLOCK.
+// The FINDING is measured, the EFFECT is not, and the difference matters here.
+// Measured: one prod thread made 39 `web_research` calls and the answers carried
+// zero markdown links and one bare URL. The tool results hold the URLs; the user
+// never sees tool results. So every researched price and address arrived
+// unattributable — indistinguishable, from where the reader sits, from a fact
+// the model made up, which the rest of this same block spends paragraphs
+// forbidding. It also decides whether the UI half of that fix does anything: a
+// renderer that styles links cannot style links the model does not write.
+// NOT measured: that a model in fact emits more links because of this sentence.
+// That needs a cross-provider eval, not a unit test, and none was run — unlike
+// the bash entry above, which carries a real before/after.
+// Cut from +187 to +77 across two rewrites, on the exact shipped text: the
+// examples went, the rationale stayed, because the rationale is the half a model
+// can generalise from.
+const STATIC_PREFIX_BUDGET = 23894;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a
