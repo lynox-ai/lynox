@@ -254,7 +254,12 @@ export class MailContext {
 
   private handler: MailWatcherHandler;
   private initialized = false;
-  /** Google rows skipped this init for want of a Gmail read scope — see `_buildProvider`. */
+  /**
+   * Google rows skipped this init for want of a Gmail read scope — see
+   * `_buildProvider`. Per context and never reset: `init()` returns early on
+   * `initialized`, so it runs once. A reset line here survived every mutation
+   * because it could not run twice, which made it dead rather than untested.
+   */
   private _skippedGoogleMailboxes = 0;
 
   constructor(
@@ -345,7 +350,6 @@ export class MailContext {
    */
   async init(): Promise<void> {
     if (this.initialized) return;
-    this._skippedGoogleMailboxes = 0;
     this.initialized = true;
 
     // Boot migration must run BEFORE the provider loop so the new row is
@@ -459,10 +463,14 @@ export class MailContext {
     // Three of the Gmail read scopes; `gmail.send` is not among them, which is
     // the whole point of asking per scope rather than per connection.
     //
-    // `gmail.metadata` is EXCLUDED on purpose, not forgotten: it authorises
-    // `messages.list`/`get`, but `OAuthGmailProvider` fetches with
-    // `format=full`, which metadata-only access cannot serve. Admitting it
-    // would move the 403 from the list to the read instead of preventing it.
+    // `gmail.metadata` is EXCLUDED on purpose, not forgotten — and the reason
+    // is narrower than "the provider needs full messages", which was the first
+    // version of this comment and is false: `envelopesFor` really does fetch
+    // `format=metadata` (`oauth-gmail.ts › envelopesFor`), so listing a mailbox
+    // would work. `fetch` asks for `format=full` (`oauth-gmail.ts › fetch`),
+    // which metadata-only access cannot serve. Admitting the scope would
+    // therefore register a provider that lists mail nobody can open — a worse
+    // failure than refusing, because it looks like it works.
     return this.googleAuth.hasScope(SCOPES.GMAIL_READONLY)
       || this.googleAuth.hasScope(SCOPES.GMAIL_MODIFY)
       || this.googleAuth.hasScope(SCOPES.MAIL_GOOGLE_COM);
