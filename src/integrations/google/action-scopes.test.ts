@@ -225,13 +225,26 @@ describe('the broker set: every action either works or refuses with a remedy', (
       .handler({ action: 'list' }, agent()) as string;
     expect(listed).toContain('only files lynox created');
 
-    // A refusal or an error is not a result to qualify — appending a scope note
-    // to "Error: …" reads as though the error were about coverage.
+    // A refusal is not a result to qualify. (It never reaches the annotator —
+    // the scope gate returns first — so this half is a boundary statement, not
+    // the one the guard exists for.)
     mockFetch.mockReset();
     const refused = await (createDriveTool(() => auth([])) as ToolEntry)
       .handler({ action: 'search', query: 'q' }, agent()) as string;
     expect(refused).toContain('requires one of these Google permissions');
     expect(refused).not.toContain('only files lynox created');
+
+    // ⚠ THIS is what the guard is for, and without it the mutation that
+    // removes the guard survived: a search that FAILS upstream returns
+    // `Error: Search failed (…)`, and appending a coverage note to it reads as
+    // though the failure were about coverage. It is not — it is a 500.
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({ ok: false, status: 500, json: async () => ({}), text: async () => '' });
+    const failed = await (createDriveTool(() => auth([SCOPES.DRIVE_FILE])) as ToolEntry)
+      .handler({ action: 'search', query: 'q' }, agent()) as string;
+    expect(failed).toContain('Search failed');
+    expect(failed, 'an upstream failure must not be dressed as a coverage limit')
+      .not.toContain('only files lynox created');
   });
 
   it('an unknown action is not silently admitted by the gate', async () => {
