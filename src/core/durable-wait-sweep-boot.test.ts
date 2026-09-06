@@ -89,36 +89,4 @@ describe('Engine boot — the expiry sweep collects a wait no process is holding
     expect(prompts.answerUser(promptId, 'too late')).toBe(false);
   });
 
-  it('leaves a wait that has NOT run out alone', async () => {
-    // The other direction. Without it the sweep could be "end every parked
-    // trigger on the next tick" and the assertions above would all still pass —
-    // while every question a live run is waiting on gets killed within a minute.
-    prevDataDir = process.env['LYNOX_DATA_DIR'];
-    const dir = mkdtempSync(join(tmpdir(), 'lynox-sweep-boot-live-'));
-    dirs.push(dir);
-
-    const seedEngineDb = new EngineDb(join(dir, 'engine.db'));
-    const seedHistory = new RunHistory(join(dir, 'history.db'));
-    seedHistory.setVerbGraph(seedEngineDb);
-    seedHistory.insertTrigger({
-      id: 'still-waiting', title: 'Asked a moment ago', source: 'cron', effect: 'run_agent',
-      scheduleCron: '0 9 * * *', nextRunAt: '2026-01-01T09:00:00.000Z',
-      confirmedAt: '2026-01-01T00:00:00.000Z',
-    });
-    seedHistory.updateTrigger('still-waiting', {
-      status: 'waiting', waitingUntil: new Date(Date.now() + 3600_000).toISOString(),
-    });
-    seedHistory.close();
-    seedEngineDb.close();
-
-    process.env['LYNOX_DATA_DIR'] = dir;
-    reloadConfig();
-    const engine = new Engine({} as LynoxConfig);
-    engines.push(engine);
-    await engine.init();
-    engine.startWorkerLoop(60 * 60_000);
-    await engine.getWorkerLoop()!.tick();
-
-    expect(engine.getRunHistory()!.getTrigger('still-waiting')?.status).toBe('waiting');
-  });
 });

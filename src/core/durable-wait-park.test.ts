@@ -462,6 +462,24 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
 
   // ── A12 / E6: the sweep ──────────────────────────────────────────────────
 
+  it('A12 — a tick leaves a wait that has NOT run out alone', async () => {
+    // The other direction of the sweep, without which it could be "end every
+    // parked trigger on the next tick" and every test above would still pass —
+    // while every question a live run is waiting on died within a minute.
+    //
+    // At the TICK level rather than through a real Engine boot: the boot file
+    // proves the wiring once, and a second boot only to re-assert a predicate
+    // costs the suite a heavy Engine. That is not free — this file's siblings
+    // share a 10s budget and one of them already runs at most of it.
+    const h = makeHarness();
+    await h.parked;
+
+    await h.loop.tick();
+
+    expect(h.history.getTrigger('trg-1')?.status).toBe('waiting');
+    expect(h.prompts.getPending('thread-park')?.status).toBe('pending');
+  });
+
   it('A12/E6 — a tick settles the prompt FIRST, then ends the abandoned wait', async () => {
     const h = makeHarness();
     await h.parked;
