@@ -490,9 +490,36 @@ export class TriggerStore {
     if (params.title !== undefined || params.description !== undefined) {
       sets.push('confirmed_at = NULL');
     }
-    if (params.status !== undefined) { sets.push('status = ?'); values.push(params.status); }
+    if (params.status !== undefined) {
+      sets.push('status = ?');
+      values.push(params.status);
+    }
     if (params.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(params.nextRunAt || null); }
-    if (params.waitingUntil !== undefined) { sets.push('waiting_until = ?'); values.push(params.waitingUntil || null); }
+    // `waiting_until` is assigned AT MOST ONCE, and that is not tidiness.
+    //
+    // A status write that is not `waiting` ENDS a wait as far as this row is
+    // concerned, so the deadline has to go with it: `complete()`, `reopen()` and
+    // `update()` write a status unconditionally and have no way to pass a
+    // deadline, and without this they leave `waiting_until` set on a row that is
+    // no longer parked. Nothing sweeps such a row — the sweep keys on the status —
+    // so it is inert rather than dangerous, but the two columns disagree and
+    // anything later keying on the deadline alone would read it as parked.
+    //
+    // An earlier version expressed that as a SECOND `waiting_until = NULL` in the
+    // status branch, which produced `SET waiting_until = NULL, waiting_until = ?`
+    // whenever a caller supplied both. SQLite applies the textually LAST clause,
+    // so the clear lost — measured, not assumed. No caller combines them today, so
+    // the invariant held by coincidence rather than by construction, which is the
+    // kind of thing that stops being true when someone adds a caller.
+    //
+    // Which one wins when both are given: the clear. A deadline asked for
+    // alongside a terminal status is a contradiction, and the safe reading of a
+    // contradiction is the one that cannot leave a row looking parked.
+    const clearsWait = params.status !== undefined && params.status !== WAITING;
+    if (clearsWait || params.waitingUntil !== undefined) {
+      sets.push('waiting_until = ?');
+      values.push(clearsWait ? null : (params.waitingUntil || null));
+    }
     if (params.scheduleCron !== undefined) {
       sets.push("condition_json = json_set(condition_json, '$.schedule_cron', ?)");
       values.push(params.scheduleCron || null);
@@ -610,6 +637,41 @@ export class TriggerStore {
        ORDER BY next_run_at ASC`,
     ).all(now, WAITING) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
+  }
+
+  /**
+   * End a wait exactly once — the only CONDITIONAL way out of `waiting`, and the
+   * reason A6 needs no check in front of it.
+   *
+   * ⚠ Not the only way out, and an earlier version of this comment claimed it was.
+   * `TaskManager.complete()` and `.update()` write a status unconditionally
+   * through {@link updateFields}, which gates on nothing — so a human marking a
+   * parked trigger `completed` takes it out of `waiting` without coming through
+   * here. That path predates this wave (it could always end a RUNNING trigger the
+   * same way) and it is left alone; what this wave adds is the deadline, and
+   * `updateFields` now clears that alongside any non-`waiting` status so the two
+   * columns cannot disagree. What such a bypass does NOT do is settle the pending
+   * prompt — the run stays blocked until its own wait resolves.
+   *
+   * The `status = 'waiting'` in the WHERE is the whole mechanism. Two callers
+   * race by construction: the run's own `finally`, which un-parks when its wait
+   * settles, and the expiry sweep, which ends a trigger a dead process left
+   * parked. Both may fire for the same row; the second one to arrive matches no
+   * row and reports false. A read-then-write would have a window between the two
+   * halves, and the two callers do not share a transaction — they may not even
+   * share a process.
+   *
+   * `waiting_until` is cleared in the same statement rather than left behind: a
+   * deadline outliving its status would make the row look parked to anything
+   * that keys on the column alone.
+   *
+   * The target status excludes `waiting` at the type level, because "ending" a
+   * wait into another wait is not a thing this method can mean.
+   */
+  endWait(id: string, to: Exclude<TriggerStatus, 'waiting'>): boolean {
+    return this.db.prepare(
+      "UPDATE triggers SET status = ?, waiting_until = NULL, updated_at = datetime('now') WHERE id = ? AND status = ?",
+    ).run(to, id, WAITING).changes > 0;
   }
 
   /**

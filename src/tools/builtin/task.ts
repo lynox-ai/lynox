@@ -1,4 +1,4 @@
-import type { ToolEntry, IAgent, TaskPriority, TaskStatus, MemoryScopeRef } from '../../types/index.js';
+import type { ToolEntry, IAgent, TaskPriority, TaskStatus, TriggerStatus, MemoryScopeRef } from '../../types/index.js';
 import { parseScopeString } from '../../core/scope-resolver.js';
 import { detectInjectionAttempt } from '../../core/data-boundary.js';
 import { logErrorChain } from '../../core/utils.js';
@@ -331,7 +331,13 @@ export const taskListTool: ToolEntry<TaskListInput> = {
       type: 'object' as const,
       properties: {
         scope: { type: 'string', description: 'Filter by scope ("client:acme"). Omit for all active scopes.' },
-        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed'], description: 'Filter by status' },
+        // `waiting` is READABLE but not SETTABLE, and the split is deliberate.
+        // A parked trigger renders as `[waiting]` in the lines below, so without
+        // it here the model can see a state it cannot ask for — the one shape a
+        // filter enum must never have. `task_update`'s enum (above) does NOT get
+        // it: parking is the engine's to do, and `TaskManager.update` rejects the
+        // value outright.
+        status: { type: 'string', enum: ['open', 'in_progress', 'completed', 'failed', 'waiting'], description: 'Filter by status. `waiting` = a trigger paused on an unanswered question.' },
         assignee: { type: 'string', description: 'Filter by assignee: "user", "lynox", or custom name' },
         due: { type: 'string', enum: ['today', 'week', 'overdue'], description: 'Filter by due date range' },
         limit: { type: 'number', description: 'Max results. Default: 20' },
@@ -376,13 +382,19 @@ export const taskListTool: ToolEntry<TaskListInput> = {
     // tables. task_list shows the agent's FULL picture — its own scheduled
     // triggers plus the user-TODOs. An explicit assignee filter narrows:
     // triggers are all 'lynox', so a non-lynox assignee filter drops them.
-    const todos = managerRef.list({
-      status: input.status as TaskStatus | undefined,
-      assignee: input.assignee,
-      scope,
-    });
+    // No user-TODO is ever parked — `waiting` lives on the trigger type only
+    // (§0 E1a). Filtering for it must therefore return NO todos, which is not the
+    // same as passing the value down: `list` types its filter `TaskStatus`, and
+    // casting a non-member through it would be a lie that happens to work.
+    const todos = input.status === 'waiting'
+      ? []
+      : managerRef.list({
+        status: input.status as TaskStatus | undefined,
+        assignee: input.assignee,
+        scope,
+      });
     const triggers = input.assignee === undefined || input.assignee === 'lynox'
-      ? managerRef.listTriggers({ status: input.status as TaskStatus | undefined, scope })
+      ? managerRef.listTriggers({ status: input.status as TriggerStatus | undefined, scope })
       : [];
     // Triggers FIRST: the agent's active scheduled work is fewer rows and more
     // relevant to surface. Appending them after the todos would let an install

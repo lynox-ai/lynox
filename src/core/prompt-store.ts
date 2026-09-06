@@ -51,6 +51,13 @@ export interface PendingPromptRow {
    * every prompt the main agent raises, where the thread already shows the
    * cause. Restored by /pending-prompt so a reload keeps the provenance. */
   origin_json: string | null;
+  /** The trigger whose run raised this prompt (v53) — the durable half of the
+   *  pairing that used to live only in a notification payload and a promise in
+   *  memory. NULL for every prompt raised in a chat turn, which is nearly all of
+   *  them, and for every pre-v53 row. A SOFT reference across a database
+   *  boundary (`triggers` is in engine.db): no FK, no JOIN, and a dangling value
+   *  reads as "no trigger is waiting on this". */
+  trigger_id: string | null;
   answer: string | null;
   answer_saved: number | null;
   /** Non-NULL when the secret answer was a server-side rejection rather
@@ -252,10 +259,14 @@ export class PromptStore {
     multiSelect?: boolean,
     segments?: readonly PromptSegment[],
     origin?: PromptOrigin,
+    /** Set only by the WorkerLoop, when the asking run belongs to a trigger.
+     *  Every other caller leaves it undefined. */
+    triggerId?: string,
   ): string {
     return this._insert({
       sessionId,
       promptType: 'ask_user',
+      triggerId,
       question,
       optionsJson: options ? JSON.stringify(options) : null,
       questionsJson: null,
@@ -358,6 +369,11 @@ export class PromptStore {
     multiSelect: boolean;
     payloadJson: string | null;
     origin?: PromptOrigin | undefined;
+    /** Written INSIDE the insert, not by a follow-up UPDATE: between the two
+     *  there would be a window in which the row exists without its pointer, and
+     *  that window is exactly when a concurrent boot expiry must be able to tell
+     *  a parked question apart from an ordinary one. */
+    triggerId?: string | undefined;
   }, retry = false): string {
     const id = randomUUID();
     const expiresAt = new Date(Date.now() + PROMPT_TTL_MS).toISOString();
@@ -379,6 +395,7 @@ export class PromptStore {
         args.multiSelect ? 1 : null,
         args.payloadJson,
         args.origin ? JSON.stringify(args.origin) : null,
+        args.triggerId ?? null,
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -535,6 +552,32 @@ export class PromptStore {
     return result.changes;
   }
 
+  /**
+   * Settle every pending prompt a given trigger raised (§0 E6). Best-effort by
+   * design: the caller is the expiry sweep, whose job is to END a wait, and a
+   * prompt row that cannot be settled must not stop it — the alternative is a
+   * trigger that waits forever because its paperwork failed.
+   *
+   * The ORDER matters and is why this exists as its own step. `answerUser` only
+   * checks `status='pending' AND expires_at > now`, so a row left pending after
+   * its trigger was ended stays answerable, and an answer arriving then would
+   * revive a trigger the sweep had just finished. Settling first closes that.
+   * The reverse order would leave a zombie instead of a dead prompt row.
+   *
+   * Returns how many rows it settled; 0 is normal (the run may have drained its
+   * own row already).
+   */
+  expirePendingForTrigger(triggerId: string): number {
+    const rows = this.db
+      .prepare(`SELECT id FROM pending_prompts WHERE trigger_id = ? AND status = 'pending'`)
+      .all(triggerId) as { id: string }[];
+    const result = this.db
+      .prepare(`UPDATE pending_prompts SET status = 'expired' WHERE trigger_id = ? AND status = 'pending'`)
+      .run(triggerId);
+    for (const row of rows) this._emitSettled(row.id);
+    return result.changes;
+  }
+
   /** Expire a single pending prompt by id. Used when a /run handler is
    * superseded by a fresh /run for the same session: the previous run is
    * stuck on `waitForSettled`, so the only way to drain it is to mark its
@@ -616,8 +659,8 @@ export class PromptStore {
       INSERT INTO pending_prompts
         (id, session_id, prompt_type, question, options_json, questions_json, segments_json,
          secret_name, secret_key_type, answer, answer_saved, status, expires_at, multi_select,
-         payload_json, origin_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         payload_json, origin_json, trigger_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `));
   }
 

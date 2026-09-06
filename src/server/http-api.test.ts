@@ -1598,6 +1598,7 @@ describe('LynoxHTTPApi', () => {
         multi_select INTEGER,
         payload_json TEXT,
         origin_json TEXT,
+        trigger_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -1686,6 +1687,7 @@ describe('LynoxHTTPApi', () => {
         multi_select INTEGER,
         payload_json TEXT,
         origin_json TEXT,
+        trigger_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -1800,6 +1802,7 @@ describe('LynoxHTTPApi', () => {
         multi_select INTEGER,
         payload_json TEXT,
         origin_json TEXT,
+        trigger_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         answered_at TEXT,
@@ -2247,6 +2250,7 @@ describe('LynoxHTTPApi', () => {
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         origin_json TEXT,
+        trigger_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -2356,6 +2360,7 @@ describe('LynoxHTTPApi', () => {
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         origin_json TEXT,
+        trigger_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();
@@ -4508,6 +4513,7 @@ describe('LynoxHTTPApi', () => {
         partial_answers_json TEXT, secret_name TEXT, secret_key_type TEXT,
         answer TEXT, answer_saved INTEGER, answer_error TEXT, multi_select INTEGER, payload_json TEXT,
         origin_json TEXT,
+        trigger_id TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','answered','expired')),
         created_at TEXT NOT NULL DEFAULT (datetime('now')), answered_at TEXT, expires_at TEXT NOT NULL
       )`).run();

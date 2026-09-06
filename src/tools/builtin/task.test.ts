@@ -676,3 +676,21 @@ describe('Task Tools', () => {
     });
   });
 });
+
+describe('task tools — `waiting` is readable, not settable (§0 E1a)', () => {
+  const statusEnum = (entry: typeof taskListTool | typeof taskUpdateTool): string[] | undefined =>
+    (entry.definition.input_schema.properties as Record<string, { enum?: string[] }>)['status']?.enum;
+
+  it('task_list can FILTER by waiting', () => {
+    // Without this the model sees `[waiting]` rendered in the lines task_list
+    // returns and has no way to ask for it — a state visible but unaskable.
+    expect(statusEnum(taskListTool)).toContain('waiting');
+  });
+
+  it('task_update cannot SET waiting', () => {
+    // The other half, and the one that keeps parking the engine's own business.
+    // `TaskManager.update` rejects the value at runtime too; this keeps the model
+    // from being invited to try in the first place.
+    expect(statusEnum(taskUpdateTool)).not.toContain('waiting');
+  });
+});

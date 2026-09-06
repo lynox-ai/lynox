@@ -366,7 +366,23 @@ function measureStaticPrefixTokens(): number {
 // Cut from +187 to +77 across two rewrites, on the exact shipped text: the
 // examples went, the rationale stayed, because the rationale is the half a model
 // can generalise from.
-const STATIC_PREFIX_BUDGET = 23894;
+// +19 (23894 → 23913): `waiting` joins task_list's status enum, with a sentence
+// saying what it means. Measured in halves rather than claimed: the enum VALUE
+// alone is +3, the sentence is the other +16.
+//
+// Why the +16 is bought and not cut. A parked trigger renders as `[waiting]` in
+// the lines task_list returns (`formatTaskLine`), so the model meets the value
+// whether or not the schema explains it — and an enum member with no gloss is
+// one a model narrates by guessing. The value it would guess wrong about is one
+// a user is asking after ("why hasn't my report run?"). Keeping the filterable
+// value without the sentence saves 16 tokens by making the other 3 misleading.
+//
+// What was cut, on the same reasoning applied honestly: the first draft added
+// "you cannot set it, only filter by it" — 21 more tokens spent forbidding
+// something the model cannot express, because `task_update`'s enum does not
+// offer the value and TaskManager.update throws on it. A refusal the schema
+// already makes unreachable is not worth a per-turn line.
+const STATIC_PREFIX_BUDGET = 23913;
 
 /**
  * How far ABOVE the measurement the budget may sit before the ratchet is a
