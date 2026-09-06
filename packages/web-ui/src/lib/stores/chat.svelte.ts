@@ -113,8 +113,13 @@ export interface ChatMessage {
 	 *  back into model context (so a resume cannot re-inject the untrusted wording). */
 	knowledgeWrites?: KnowledgeWriteChip[];
 	/** Set on a synthetic marker bubble inserted when the engine auto-compacts
-	 *  the conversation — renders as an inline "conversation compacted" divider. */
-	compactionNote?: { previousPercent: number };
+	 *  the conversation — renders as an inline "conversation compacted" divider.
+	 *  The occupancy pair is what the compaction actually DID, in tokens, and is
+	 *  optional because an older engine does not send it — the divider then names
+	 *  no numbers rather than inventing them. It is the honest alternative to a
+	 *  progress percentage: compaction is one blocking summarizer call, so there
+	 *  is no intermediate state a progress bar could be reporting. */
+	compactionNote?: { previousPercent: number; occupancyBefore?: number; occupancyAfter?: number };
 	/** B-full: a display-only failure note persisted for a failed turn. The
 	 *  engine sends a structured code (not prose) so the UI renders a localized
 	 *  banner; `detail` is a sanitized provider-error snippet. Present only on
@@ -2083,7 +2088,11 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			compactionOffer = null;
 			// Persistent inline marker in the transcript — a 5s toast alone
 			// left users unsure whether compaction had lost their context.
-			messages.push({ role: 'assistant', content: '', compactionNote: { previousPercent: prevPct ?? 0 } });
+			messages.push({ role: 'assistant', content: '', compactionNote: {
+				previousPercent: prevPct ?? 0,
+				...(typeof data['occupancyBefore'] === 'number' ? { occupancyBefore: data['occupancyBefore'] } : {}),
+				...(typeof data['occupancyAfter'] === 'number' ? { occupancyAfter: data['occupancyAfter'] } : {}),
+			} });
 			addToast(t('context.compacted').replace('{pct}', String(prevPct ?? '?')), 'info', 5000);
 			break;
 		}
@@ -2460,13 +2469,21 @@ export async function compactNow(): Promise<{ ok: boolean; error?: string }> {
 			const detail = await res.text().catch(() => `HTTP ${res.status}`);
 			return { ok: false, error: detail };
 		}
-		const data = await res.json() as { ok: boolean; summary: string };
+		const data = await res.json() as { ok: boolean; summary: string; occupancyBefore?: number; occupancyAfter?: number };
 		// Show the same visible marker as an auto-compaction so a user-triggered
 		// compaction is transparent in the transcript (the manual /compact path has
 		// no active SSE to stream context_compacted). The server also persisted it.
 		if (data.ok) {
 			const prevPct = contextBudget?.usagePercent ?? 0;
-			messages.push({ role: 'assistant', content: '', compactionNote: { previousPercent: prevPct } });
+			messages.push({ role: 'assistant', content: '', compactionNote: {
+				previousPercent: prevPct,
+				// `typeof === 'number'`, matching the SSE branch — not `!== undefined`.
+				// The declared type says `number | undefined`, and a looser check lets
+				// a non-number through and makes that declaration a runtime lie. Today
+				// the only reader guards for itself; the next one might not.
+				...(typeof data.occupancyBefore === 'number' ? { occupancyBefore: data.occupancyBefore } : {}),
+				...(typeof data.occupancyAfter === 'number' ? { occupancyAfter: data.occupancyAfter } : {}),
+			} });
 		}
 		// Reset local state so the UI reflects the compacted server-side view.
 		contextBudget = null;

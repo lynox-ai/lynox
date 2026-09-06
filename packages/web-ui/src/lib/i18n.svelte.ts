@@ -1031,6 +1031,7 @@ const translations: Record<string, Record<Locale, string>> = {
 
 	// Context management
 	'context.compacted': { de: 'Kontext automatisch komprimiert (war {pct}% voll)', en: 'Context auto-compacted (was {pct}% full)' },
+	'context.compacted_delta_tooltip': { de: 'Belegter Kontext vor und nach dem Komprimieren', en: 'Context occupied before and after compacting' },
 	'context.compacted_marker': { de: 'Konversation komprimiert — ältere Nachrichten wurden zusammengefasst. Artefakte, Entscheidungen und der rote Faden bleiben erhalten; du arbeitest nahtlos weiter.', en: 'Conversation compacted — earlier messages were summarized. Artifacts, decisions and the through-line are kept; you continue seamlessly.' },
 
 	// Onboarding (kept for web-ui setup hints)

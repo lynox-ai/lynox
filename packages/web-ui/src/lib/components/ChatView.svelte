@@ -68,6 +68,7 @@
 	import { getApiBase, getDemoMode } from '../config.svelte.js';
 	import { isDiagnosticsEnabled } from '../stores/diagnostics.svelte.js';
 	import { formatTurnTokens, formatUsageMetaParts } from '../stores/chat-usage.js';
+	import { formatCompactionDelta } from '../stores/compaction-result.js';
 	import { taskPreview } from '../stores/follow-ups.js';
 	import { batchTotals, foldToolRows, worstStatus } from '../stores/chat-attribution.js';
 	import { formatCost } from '../format.js';
@@ -2303,6 +2304,37 @@
 			     overflows (scroll-fades the clipped edge) instead of truncating;
 			     the action icons stay pinned right, outside this scroll box. -->
 			<div class="flex-1 min-w-0 flex items-center gap-1.5 overflow-x-auto scrollbar-none whitespace-nowrap text-[11px] font-mono text-text-subtle" use:scrollFade>
+			{#if isLast && ctxBudget}
+			{@const pct = Math.min(ctxBudget.usagePercent, 100)}
+			<!-- Color intensity rides the cost-aware `budgetPercent` (how close the
+			     thread is to a compaction, cost-wise) when the engine sends it;
+			     falls back to the window-fill `pct` when it's absent (older /
+			     non-lazy engines) so the chip looks EXACTLY as before (#78b). The
+			     DISPLAYED number stays `pct` (honest window-fill) either way — no
+			     second number, per rafael's call that a raw cost-% contradicts the
+			     window meter on large-window models.
+			     It leads the line rather than trailing it (2026-09-06): the line
+			     scrolls horizontally on mobile, and the one segment a user checks
+			     mid-thread — how full the context is — was the one that scrolled
+			     out of view first. The Σ figure it used to sit beside is a per-turn
+			     SUM and can exceed the window; keeping the two adjacent is what
+			     stops them reading as one broken number, and they stay adjacent
+			     with the order reversed. -->
+			{@const colorPct = ctxBudget.budgetPercent !== undefined ? Math.min(ctxBudget.budgetPercent, 100) : pct}
+			{@const barColor = colorPct >= 75 ? 'bg-danger' : colorPct >= 60 ? 'bg-warning' : 'bg-accent'}
+			{@const txtColor = colorPct >= 75 ? 'text-danger' : colorPct >= 60 ? 'text-warning' : 'text-text-subtle'}
+			<span
+				class="inline-flex items-center gap-1 shrink-0"
+				title="{t('chat.ctx_occupancy_tooltip')} · {ctxBudget.totalTokens.toLocaleString()} / {ctxBudget.maxTokens.toLocaleString()}"
+			>
+				<span class="hidden sm:inline text-[10px] text-text-subtle/60">{t('chat.ctx_occupancy_label')}</span>
+				<span class="w-10 h-1 rounded-full bg-border overflow-hidden">
+					<span class="block {barColor} h-full rounded-full transition-all duration-500" style="width: {pct}%"></span>
+				</span>
+				<span class="text-[10px] {txtColor}">{pct}%</span>
+			</span>
+			{#if usage}<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{/if}
+			{/if}
 				{#if usage}
 					<span
 						class="shrink-0 cursor-help underline decoration-dotted decoration-text-subtle/40 underline-offset-2"
@@ -2315,30 +2347,6 @@
 							>{part.text}</span><span class="sr-only">{part.title}</span>{:else}<span class="shrink-0">{part.text}</span>{/if}
 					{/each}
 				{/if}
-		{#if isLast && ctxBudget}
-			{@const pct = Math.min(ctxBudget.usagePercent, 100)}
-			<!-- Color intensity rides the cost-aware `budgetPercent` (how close the
-			     thread is to a compaction, cost-wise) when the engine sends it;
-			     falls back to the window-fill `pct` when it's absent (older /
-			     non-lazy engines) so the chip looks EXACTLY as before (#78b). The
-			     DISPLAYED number stays `pct` (honest window-fill) either way — no
-			     second number, per rafael's call that a raw cost-% contradicts the
-			     window meter on large-window models. -->
-			{@const colorPct = ctxBudget.budgetPercent !== undefined ? Math.min(ctxBudget.budgetPercent, 100) : pct}
-			{@const barColor = colorPct >= 75 ? 'bg-danger' : colorPct >= 60 ? 'bg-warning' : 'bg-accent'}
-			{@const txtColor = colorPct >= 75 ? 'text-danger' : colorPct >= 60 ? 'text-warning' : 'text-text-subtle'}
-			{#if usage}<span class="shrink-0 text-text-subtle/40" aria-hidden="true">·</span>{/if}
-			<span
-				class="inline-flex items-center gap-1 shrink-0"
-				title="{t('chat.ctx_occupancy_tooltip')} · {ctxBudget.totalTokens.toLocaleString()} / {ctxBudget.maxTokens.toLocaleString()}"
-			>
-				<span class="hidden sm:inline text-[10px] text-text-subtle/60">{t('chat.ctx_occupancy_label')}</span>
-				<span class="w-10 h-1 rounded-full bg-border overflow-hidden">
-					<span class="block {barColor} h-full rounded-full transition-all duration-500" style="width: {pct}%"></span>
-				</span>
-				<span class="text-[10px] {txtColor}">{pct}%</span>
-			</span>
-			{/if}
 			</div>
 		{/if}
 		<div class="ml-auto flex items-center gap-1">
@@ -2658,6 +2666,16 @@
 					<div class="flex items-start gap-2 text-[13px] md:text-[11px] border-l-2 border-accent/30 pl-3 py-1 md:py-0.5" role="status">
 						<svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5 md:h-3 md:w-3 shrink-0 text-accent/60 mt-px" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M6 12h12M9 17h6" /></svg>
 						<span class="text-text-subtle">{t('context.compacted_marker')}</span>
+						{#if formatCompactionDelta(msg.compactionNote.occupancyBefore, msg.compactionNote.occupancyAfter)}
+							<!-- What the compaction DID, not how far along it was. A
+							     progress figure would have to be invented; this pair is
+							     measured, and it is the same measurement the ledger row
+							     records. Absent on an older engine — then the marker
+							     simply says a compaction happened. -->
+							<span class="shrink-0 font-mono tabular-nums text-text-subtle/70" title={t('context.compacted_delta_tooltip')}>
+								{formatCompactionDelta(msg.compactionNote.occupancyBefore, msg.compactionNote.occupancyAfter)}
+							</span>
+						{/if}
 					</div>
 				{:else if msg.note}
 					<!-- B-full failure note (display-only, survives reload). Localized
@@ -3603,7 +3621,22 @@
 					class="ml-auto shrink-0 rounded-[var(--radius-sm)] border border-current/40 px-2 py-0.5 text-[11px] font-medium hover:bg-current/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
 					title={isStreaming ? t('chat.context_auto_compact_imminent') : t('chat.compact_now')}
 				>
-					{compacting ? t('chat.compact_in_progress') : t('chat.compact_now')}
+					{#if compacting}
+						<!-- Indeterminate on purpose. The user asked for compaction to
+						     be visible "as a percentage if need be", and a percentage
+						     is the one thing this cannot honestly be: the manual path
+						     is a single blocking POST and the auto path emits nothing
+						     until it is finished, so there is no intermediate state a
+						     number could report. A pulse says "working" without
+						     claiming to know how far along it is; the RESULT, which is
+						     measured, appears on the transcript marker afterwards. -->
+						<span class="inline-flex items-center gap-1.5">
+							<span class="inline-block h-1.5 w-1.5 rounded-full bg-current motion-safe:animate-pulse" aria-hidden="true"></span>
+							{t('chat.compact_in_progress')}
+						</span>
+					{:else}
+						{t('chat.compact_now')}
+					{/if}
 				</button>
 			</div>
 		</div>
