@@ -928,3 +928,258 @@ describe('MailContext — persisted default flag', () => {
   });
 
 });
+
+/**
+ * PRD Stage 1 §3.7 — the mail boundary.
+ *
+ * A Google CONNECTION and a Google MAILBOX are two different things, and until
+ * this wave both gates asked the same question (`isAuthenticated()`). That was
+ * invisible while the default consent set granted `gmail.readonly` to every
+ * connection. It stops being invisible on a set that grants Calendar and
+ * Drive-file access and no Gmail at all — and D7 made that the default.
+ */
+describe('MailContext — a Google connection is not a Gmail mailbox', () => {
+  // ⚠ The id is the one the boot migration really builds — `gmail-` plus the
+  // address with its `@` replaced. A hand-picked short id (`goog`) hid a real
+  // defect for one round: logging `account.id` "instead of the address" logs
+  // the address in a costume, and a test with a made-up id cannot see it.
+  const GOOGLE_ROW = {
+    ...GMAIL_ACCOUNT,
+    id: 'gmail-someone-gmail.com',
+    address: 'someone@gmail.com',
+    authType: 'oauth_google' as const,
+  };
+
+  /**
+   * A connected Google account holding exactly `scopes`.
+   *
+   * `getAccessToken` is a spy because it is the only observable the migration
+   * gate has: without it, "no row was created" is satisfied just as well by a
+   * profile fetch that failed — which is what happens in a test with no
+   * network. The mutation that removes the gate then survives.
+   */
+  function googleAuth(scopes: readonly string[]): { auth: unknown; tokenCalls: () => number } {
+    let calls = 0;
+    return {
+      auth: {
+        isAuthenticated: () => true,
+        hasScope: (s: string) => scopes.includes(s),
+        getAccessToken: async () => { calls++; return 'token'; },
+      },
+      tokenCalls: () => calls,
+    };
+  }
+  const STAGE_1 = [
+    'openid',
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/calendar.events',
+    'https://www.googleapis.com/auth/calendar.freebusy',
+    'https://www.googleapis.com/auth/drive.file',
+  ];
+  const READONLY = ['https://www.googleapis.com/auth/gmail.readonly'];
+
+  let lastTokenCalls: () => number = () => 0;
+  function ctxWith(scopes: readonly string[]): MailContext {
+    const g = googleAuth(scopes);
+    lastTokenCalls = g.tokenCalls;
+    return new MailContext(stateDb, backend, undefined, {}, g.auth as never);
+  }
+
+  it('registers NO provider for a Google row when the grant has no Gmail read scope', async () => {
+    stateDb.upsertAccount(GOOGLE_ROW);
+    const c = ctxWith(STAGE_1);
+    try {
+      await c.init();
+      // The row survives — it is the user's mailbox and it comes back the
+      // moment the scope does. What must not happen is a registered provider
+      // polling it into a 403 loop.
+      expect(c.registry.list()).toEqual([]);
+      expect(c.watcher.size).toBe(0);
+      expect(stateDb.listAccounts().map(a => a.id)).toContain(GOOGLE_ROW.id);
+    } finally { await c.close(); }
+  });
+
+  it('registers the provider once a Gmail read scope IS granted — the control', async () => {
+    // Without this the assertion above is satisfied by a build that registers
+    // nothing at all for `oauth_google`.
+    stateDb.upsertAccount(GOOGLE_ROW);
+    const c = ctxWith(READONLY);
+    try {
+      await c.init();
+      expect(c.registry.list().length).toBe(1);
+    } finally { await c.close(); }
+  });
+
+  it('accepts gmail.modify and mail.google.com as mailbox scopes too', async () => {
+    // Three scopes authorise `messages.list`/`get`. Naming only the first would
+    // refuse a legitimate BYO grant — the mirror of the defect this wave fixes.
+    for (const scope of [
+      'https://www.googleapis.com/auth/gmail.modify',
+      'https://mail.google.com/',
+    ]) {
+      const c = ctxWith([scope]);
+      try {
+        stateDb.upsertAccount(GOOGLE_ROW);
+        await c.init();
+        expect(c.registry.list().length, `${scope} must authorise the mailbox`).toBe(1);
+      } finally { await c.close(); }
+    }
+  });
+
+  it('does NOT accept gmail.send as a mailbox scope', async () => {
+    // Sending is not reading. A grant that can send and not read would build a
+    // provider whose every fetch 403s.
+    stateDb.upsertAccount(GOOGLE_ROW);
+    const c = ctxWith(['https://www.googleapis.com/auth/gmail.send']);
+    try {
+      await c.init();
+      expect(c.registry.list()).toEqual([]);
+    } finally { await c.close(); }
+  });
+
+  it('creates no Google row, and does not even ASK Google, when the grant cannot read a mailbox', async () => {
+    // The migration must stop BEFORE the profile fetch: `users.getProfile` is
+    // itself authorised by a Gmail read scope, so without one this spends a 403
+    // on every init to learn what the grant already says.
+    //
+    // ⚠ The row assertion alone is not enough and was measured to be not
+    // enough: with no network the profile fetch fails anyway, so "no row" holds
+    // whether the gate is there or not, and removing the gate SURVIVED. The
+    // token call is the observable that separates the two.
+    const c = ctxWith(STAGE_1);
+    try {
+      await c.init();
+      expect(stateDb.listAccounts().filter(a => a.authType === 'oauth_google')).toEqual([]);
+      expect(lastTokenCalls(), 'the migration must not reach for a token it cannot use').toBe(0);
+    } finally { await c.close(); }
+  });
+
+  it('DOES ask Google once the scope is there — the control on the line above', async () => {
+    // Without this, a build that never runs the migration at all satisfies the
+    // assertion above just as well.
+    const c = ctxWith(READONLY);
+    try {
+      await c.init();
+      expect(lastTokenCalls()).toBeGreaterThan(0);
+    } finally { await c.close(); }
+  });
+
+  it('the card clears immediately on re-consent, but the provider does NOT re-attach', async () => {
+    // The honest shape of the recovery, asserted rather than described.
+    // `listAccounts()` computes the warning per request, so the badge goes the
+    // moment the scope arrives. `_buildProvider` runs from `init()` only and
+    // nothing re-runs it, so mail does not flow until the next engine start.
+    //
+    // Written because the first version of this wave claimed in a public
+    // CHANGELOG that it "works again the moment the scope is there". It does
+    // not, and no test said so.
+    stateDb.upsertAccount(GOOGLE_ROW);
+    let scopes: string[] = [...STAGE_1];
+    const live = {
+      isAuthenticated: () => true,
+      hasScope: (s: string) => scopes.includes(s),
+      getAccessToken: async () => 'token',
+    };
+    const c = new MailContext(stateDb, backend, undefined, {}, live as never);
+    try {
+      await c.init();
+      expect(c.listAccounts().find(a => a.id === GOOGLE_ROW.id)?.warning).toBe('needs_mailbox_scope');
+      expect(c.registry.list()).toEqual([]);
+
+      // …the user re-consents, in the same process.
+      scopes = [...READONLY];
+      expect(c.listAccounts().find(a => a.id === GOOGLE_ROW.id)?.warning,
+        'the badge is computed per request, so it clears at once').toBeUndefined();
+      expect(c.registry.list(),
+        'and the provider still is not attached — that needs the next init').toEqual([]);
+
+      // ⚠ A second `init()` on the SAME context does not attach it either, and
+      // that is the guard rather than the behaviour: `init()` returns early on
+      // `this.initialized`. Measured — asserting on it would have been a test
+      // of the idempotence flag wearing the name of a recovery test.
+      await c.init();
+      expect(c.registry.list(), 'a second init() is a documented no-op').toEqual([]);
+    } finally { await c.close(); }
+
+    // A restart is a NEW context over the same state DB. That is the path that
+    // attaches it, and it is what makes the assertion above about TIMING
+    // rather than about something being broken.
+    const restarted = new MailContext(stateDb, backend, undefined, {}, {
+      isAuthenticated: () => true,
+      hasScope: (s: string) => (READONLY as readonly string[]).includes(s),
+      getAccessToken: async () => 'token',
+    } as never);
+    try {
+      await restarted.init();
+      expect(restarted.registry.list().length, 'a restart attaches it').toBe(1);
+    } finally { await restarted.close(); }
+  });
+
+  it('names the account in the log without printing the address', async () => {
+    // This is the only place in the engine where a real mailbox address could
+    // reach stdout, and a container log on a managed instance is not where it
+    // belongs. The line still has to identify WHICH account, or it is useless
+    // to the operator it is written for.
+    stateDb.upsertAccount(GOOGLE_ROW);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const c = ctxWith(STAGE_1);
+    try {
+      await c.init();
+      const lines = warn.mock.calls.map(a => String(a[0]));
+      const mine = lines.filter(l => l.includes('[lynox:mail]'));
+      expect(mine, 'the skip must say something at all').toHaveLength(1);
+      expect(mine[0], 'and it must say how many').toContain('1 mailbox');
+      // Neither the address NOR the id, because a migrated Google id is the
+      // address with its `@` replaced — the local part travels either way.
+      expect(mine[0]).not.toContain(GOOGLE_ROW.address);
+      expect(mine[0]).not.toContain(GOOGLE_ROW.id);
+      expect(mine[0]).not.toContain('someone');
+      expect(mine[0]).not.toContain('@');
+
+      // ONE line, at init — not one per read. §3.7 asks for exactly this, and
+      // the difference is a quiet log versus a line for every card refresh.
+      c.listAccounts(); c.listAccounts(); c.listAccounts();
+      expect(warn.mock.calls.map(a => String(a[0])).filter(l => l.includes('[lynox:mail]')),
+        'reading the accounts must not log').toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+      await c.close();
+    }
+  });
+
+  it('tells the card WHY the account is there and does nothing', async () => {
+    stateDb.upsertAccount(GOOGLE_ROW);
+    const c = ctxWith(STAGE_1);
+    try {
+      await c.init();
+      const view = c.listAccounts().find(a => a.id === GOOGLE_ROW.id);
+      expect(view?.warning).toBe('needs_mailbox_scope');
+    } finally { await c.close(); }
+  });
+
+  it('carries no warning once the scope is there, and none on an IMAP row', async () => {
+    stateDb.upsertAccount(GOOGLE_ROW);
+    stateDb.upsertAccount(GMAIL_ACCOUNT);
+    const c = ctxWith(READONLY);
+    try {
+      await c.init();
+      expect(c.listAccounts().find(a => a.id === GOOGLE_ROW.id)?.warning).toBeUndefined();
+      expect(c.listAccounts().find(a => a.authType === 'imap')?.warning).toBeUndefined();
+    } finally { await c.close(); }
+  });
+
+  it('never marks an IMAP row, even when the Google grant cannot read a mailbox', async () => {
+    // The warning is about a GOOGLE mailbox. Dropping the `authType` half of
+    // the condition marks every IMAP account too — an app-password mailbox that
+    // works perfectly would be labelled broken because of an unrelated Google
+    // connection. Measured: without this case that mutation survived.
+    stateDb.upsertAccount(GMAIL_ACCOUNT);
+    const c = ctxWith(STAGE_1);
+    try {
+      await c.init();
+      const imap = c.listAccounts().find(a => a.authType === 'imap');
+      expect(imap, 'the IMAP fixture must be present, or this asserts nothing').toBeDefined();
+      expect(imap?.warning).toBeUndefined();
+    } finally { await c.close(); }
+  });
+});

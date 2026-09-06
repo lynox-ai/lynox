@@ -19,6 +19,7 @@
 
 import type { ToolEntry } from '../../types/index.js';
 import type { GoogleAuth } from '../google/google-auth.js';
+import { SCOPES } from '../google/scopes.js';
 import type { MailCredentialBackend } from './auth/app-password.js';
 import { MailCredentialStore, vaultKeyForAccount } from './auth/app-password.js';
 import { ImapSmtpProvider } from './providers/imap-smtp.js';
@@ -83,6 +84,15 @@ export interface MailAccountView {
   persona: string;
   /** True if this type is hard-blocked from sending. */
   receiveOnly: boolean;
+  /**
+   * Why this account is present but not working, when that is the case.
+   *
+   * `needs_mailbox_scope`: the row is a Google mailbox and the connected grant
+   * carries no Gmail read scope. Without this the card shows an account that
+   * silently does nothing, which reads as a bug in lynox rather than as a
+   * permission the connection never asked for.
+   */
+  warning?: 'needs_mailbox_scope' | undefined;
 }
 
 /**
@@ -244,6 +254,13 @@ export class MailContext {
 
   private handler: MailWatcherHandler;
   private initialized = false;
+  /**
+   * Google rows skipped this init for want of a Gmail read scope — see
+   * `_buildProvider`. Per context and never reset: `init()` returns early on
+   * `initialized`, so it runs once. A reset line here survived every mutation
+   * because it could not run twice, which made it dead rather than untested.
+   */
+  private _skippedGoogleMailboxes = 0;
 
   constructor(
     stateDb: MailStateDb,
@@ -351,6 +368,13 @@ export class MailContext {
       }
     }
 
+    if (this._skippedGoogleMailboxes > 0) {
+      // One line for the whole init, not one per account and not one per poll.
+      // The remedy is the same for every affected mailbox, so naming them adds
+      // nothing an operator can act on — and would put addresses in a log.
+      console.warn(`[lynox:mail] ${this._skippedGoogleMailboxes} mailbox(es) connected through Google were skipped: the grant carries no Gmail read scope. Connect them over IMAP, or re-consent with full access.`);
+    }
+
     // Restore the persisted default. If the DB has a row marked is_default=1
     // and that provider registered successfully, promote it. Otherwise, fall
     // back to the first registered provider (matches pre-v6 first-wins
@@ -421,9 +445,57 @@ export class MailContext {
    * GoogleAuth absent for an oauth_google row) — the caller skips that
    * account but continues with the rest.
    */
+  /**
+   * Can the connected Google account actually be read as a MAILBOX?
+   *
+   * A connection and a mailbox are two different things, and until Stage 1 they
+   * were the same question here: both gates below asked `isAuthenticated()`.
+   * That was invisible while the default consent set granted `gmail.readonly`
+   * to every connection — it stops being invisible on a set that grants
+   * Calendar and Drive-file access and no Gmail at all, where the provider
+   * builds happily and every Gmail call comes back 403, in a loop, with the
+   * watcher retrying.
+   *
+   * The scope is the question, not the connection.
+   */
+  private hasMailboxScope(): boolean {
+    if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return false;
+    // Three of the Gmail read scopes; `gmail.send` is not among them, which is
+    // the whole point of asking per scope rather than per connection.
+    //
+    // `gmail.metadata` is EXCLUDED on purpose, not forgotten — and the reason
+    // is narrower than "the provider needs full messages", which was the first
+    // version of this comment and is false: `envelopesFor` really does fetch
+    // `format=metadata` (`oauth-gmail.ts › envelopesFor`), so listing a mailbox
+    // would work. `fetch` asks for `format=full` (`oauth-gmail.ts › fetch`),
+    // which metadata-only access cannot serve. Admitting the scope would
+    // therefore register a provider that lists mail nobody can open — a worse
+    // failure than refusing, because it looks like it works.
+    return this.googleAuth.hasScope(SCOPES.GMAIL_READONLY)
+      || this.googleAuth.hasScope(SCOPES.GMAIL_MODIFY)
+      || this.googleAuth.hasScope(SCOPES.MAIL_GOOGLE_COM);
+  }
+
   private async _buildProvider(account: MailAccountConfig): Promise<MailProvider | null> {
     if (account.authType === 'oauth_google') {
       if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return null;
+      if (!this.hasMailboxScope()) {
+        // The row STAYS — it is the user's mailbox — but no provider is
+        // registered, so nothing polls it into a 403 loop.
+        //
+        // ⚠ And it does NOT come back by itself when the scope arrives:
+        // `_buildProvider` runs from `init()` only, and nothing re-runs it on
+        // a token change. `listAccounts()` re-evaluates live, so the card's
+        // badge clears at once — the provider attaches when a new
+        // `MailContext` is built, i.e. on the next engine start.
+        //
+        // Counted here, reported ONCE by `init()`. Nothing identifying is
+        // logged, and `account.id` would not have been safe either: a migrated
+        // Google row's id is `gmail-` plus the address with its `@` replaced,
+        // so logging the id logs the address in a costume.
+        this._skippedGoogleMailboxes++;
+        return null;
+      }
       return new OAuthGmailProvider(account, this.googleAuth);
     }
     if (account.authType === 'imap') {
@@ -449,6 +521,10 @@ export class MailContext {
    */
   private async _migrateOAuthGmailRow(): Promise<void> {
     if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return;
+    // Before the profile fetch, not after: `users.getProfile` is itself
+    // authorised by a Gmail read scope, so without one this would spend a 403
+    // on every init to learn what the grant already says.
+    if (!this.hasMailboxScope()) return;
 
     // Fetch the *current* Google account email up front. Doing this before
     // the early-return lets us detect a disconnect→reconnect-with-different-
@@ -673,6 +749,9 @@ export class MailContext {
       authType: account.authType,
       persona: personaFor(account),
       receiveOnly: isReceiveOnlyType(account.type),
+      ...(account.authType === 'oauth_google' && !this.hasMailboxScope()
+        ? { warning: 'needs_mailbox_scope' as const }
+        : {}),
     }));
   }
 

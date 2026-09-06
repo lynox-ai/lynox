@@ -310,6 +310,25 @@ describe('OAuthGmailProvider — search', () => {
 });
 
 describe('OAuthGmailProvider — send', () => {
+  it('asks for gmail.send specifically, not for whatever scope is handy', async () => {
+    // The blanket `hasScope: () => false` below cannot tell WHICH scope was
+    // asked for, so pointing the gate at another one survives it — measured.
+    // A grant that can READ but not send must still be refused.
+    const auth = makeAuth({
+      hasScope: vi.fn().mockImplementation((s: string) => s === 'https://www.googleapis.com/auth/gmail.readonly'),
+    } as Partial<GoogleAuth>);
+    const provider = new OAuthGmailProvider(makeAccount(), auth);
+    const err = await provider.send({
+      to: [{ address: 'b@example.com' }],
+      subject: 's',
+      text: 't',
+    }).catch(e => e as MailError);
+    expect(err).toBeInstanceOf(MailError);
+    expect(err.code).toBe('unsupported');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(auth.hasScope).toHaveBeenCalledWith('https://www.googleapis.com/auth/gmail.send');
+  });
+
   it('refuses without gmail.send scope', async () => {
     const auth = makeAuth({ hasScope: vi.fn().mockReturnValue(false) } as Partial<GoogleAuth>);
     const provider = new OAuthGmailProvider(makeAccount(), auth);

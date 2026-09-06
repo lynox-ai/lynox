@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Fixed: a Google connection without Gmail access no longer looks like a broken mailbox
+
+- A Google *connection* and a Google *mailbox* are two different things, and
+  until now the mail path asked the same question for both — is Google
+  connected. That was invisible while the default consent set granted
+  `gmail.readonly` to every connection; it stops being invisible now that the
+  default set grants Calendar and Drive-file access and no Gmail at all. On such
+  a connection the mail provider was built anyway and every Gmail call came back
+  403, on every poll.
+- The gate is now the scope, not the connection: `gmail.readonly`, `gmail.modify`
+  or `mail.google.com/`. Without one, no provider is registered (one log line at
+  init, not one per poll) and no placeholder mailbox row is created. **An
+  existing row is kept** — it is the user's mailbox and it works again the moment
+  the scope is there — **on the next start of the instance**, because nothing
+  re-registers a mail provider at runtime. The card's badge clears immediately,
+  since it is computed per request. The log line names no mailbox: one line per
+  start, with a count.
+- The mail card names the reason and the way out: a *no mailbox access* badge and
+  a link to the app-password guide, in both languages. An account that is listed
+  and does nothing reads as a fault in lynox rather than as a permission the
+  connection never asked for.
+
 ### Added: a `connections` row that follows the Google grant
 
 - A Google connection now registers itself in the `connections` table —
