@@ -799,8 +799,8 @@ describe('RunHistory migration v44 — legacy verb-def teardown (Foundation Rewo
     // migrated forward through the latest version (v45 metrics S5b'-c, v46 threads-anchor,
     // v47 model_tier_source, v48 trigger_origin, v49 provenance-backfill marker,
     // v50 wire_snapshots extended-debug-capture, v51 prompt frame/value segments,
-    // v52 prompt origin):
-    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(52);
+    // v52 prompt origin, v53 pending_prompts.trigger_id — durable wait state):
+    expect((db.prepare('SELECT MAX(version) v FROM schema_version').get() as { v: number }).v).toBe(53);
     // v45 landed the relocated metrics table:
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='metrics'").get())
       .toEqual({ name: 'metrics' });

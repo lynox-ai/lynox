@@ -225,6 +225,21 @@ export interface ProcessRecord {
 // === Task Management ===
 
 export type TaskStatus = 'open' | 'in_progress' | 'completed' | 'failed';
+
+/** A TRIGGER's status. The four {@link TaskStatus} values plus `waiting` — the
+ *  parked state of a trigger whose run asked a question and is waiting for the
+ *  answer (PRD-DURABLE-WAIT-STATE §0 E1a).
+ *
+ *  `waiting` is ENGINE-ONLY and the widening is deliberately confined to this
+ *  type. It is NOT in `VALID_STATUSES` (task-manager.ts), NOT in the task tool's
+ *  status enums, and NOT a value any caller may pass to `TaskManager.update` —
+ *  that still rejects it as an invalid status, which is the intended contract.
+ *  It is written on the engine's own path (`history.updateTrigger` →
+ *  `TriggerStore.updateFields`) and read back by the store's queries.
+ *
+ *  Widening {@link TaskStatus} itself would have widened {@link TaskRecord.status}
+ *  along with it — the USER-TODO, which has no parked state and must not gain one. */
+export type TriggerStatus = TaskStatus | 'waiting';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
 /** A USER-TODO — project-management work lynox tracks FOR the user (the
@@ -274,7 +289,7 @@ export interface TriggerRecord {
   id: string;
   title: string;
   description: string;
-  status: TaskStatus;
+  status: TriggerStatus;
   assignee: string | null;      // 'lynox' for fired rows (kept for parity)
   scope_type: string;
   scope_id: string;
@@ -289,6 +304,10 @@ export interface TriggerRecord {
   last_run_at?: string | undefined;
   last_run_result?: string | undefined;
   last_run_status?: string | undefined;
+  /** When a parked trigger stops waiting (ISO-8601). Set only while `status` is
+   *  `waiting`; undefined otherwise. Written by the park, read by the expiry
+   *  sweep — see {@link TriggerStatus}. */
+  waiting_until?: string | undefined;
   watch_config?: string | undefined;
   max_retries?: number | undefined;
   retry_count?: number | undefined;

@@ -1,6 +1,15 @@
 import type Database from 'better-sqlite3';
 import type { EngineDb } from './engine-db.js';
-import type { TriggerRecord, TriggerSource, TriggerEffect } from '../types/pipeline.js';
+import type { TriggerRecord, TriggerSource, TriggerEffect, TriggerStatus } from '../types/pipeline.js';
+
+/**
+ * The parked status, as a typed constant rather than a SQL literal, so the two
+ * queries that partition the table on it (`getDue` excludes it, `getExpiredWaiting`
+ * selects it) are bound to {@link TriggerStatus} at compile time: dropping `waiting`
+ * from that union breaks this line rather than silently leaving two string literals
+ * behind that no longer name a reachable state.
+ */
+const WAITING: TriggerStatus = 'waiting';
 
 /**
  * TriggerStore — the write/read layer over the engine.db `triggers` table
@@ -174,6 +183,7 @@ interface TriggerFullDbRow {
   created_at: string;
   updated_at: string;
   confirmed_at: string | null;
+  waiting_until: string | null;
 }
 
 /** The full column list the S3e read methods SELECT (order matches TriggerFullDbRow). */
@@ -181,7 +191,7 @@ const TRIGGER_READ_COLS =
   `id, title, description, source, effect, condition_json, target_workflow_id, params_json,
    scope_type, scope_id, status, enabled, next_run_at, last_run_at, last_run_result,
    last_run_status, notification_channel, max_retries, retry_count, created_at, updated_at,
-   confirmed_at`;
+   confirmed_at, waiting_until`;
 
 /**
  * Pure INVERSE of {@link triggerRecordToRow}: map an engine.db `triggers` row onto
@@ -221,6 +231,7 @@ export function triggerDbRowToRecord(row: TriggerFullDbRow): TriggerRecord {
     last_run_at: row.last_run_at ?? undefined,
     last_run_result: row.last_run_result ?? undefined,
     last_run_status: row.last_run_status ?? undefined,
+    waiting_until: row.waiting_until ?? undefined,
     source: row.source as TriggerSource,
     effect: row.effect as TriggerEffect,
     watch_config: watchConfig,
@@ -461,6 +472,10 @@ export class TriggerStore {
     assignee?: string | undefined;
     nextRunAt?: string | null | undefined;
     scheduleCron?: string | null | undefined;
+    /** Durable wait state (§0 E4a): the parked deadline. Empty-string/null clears
+     *  it, mirroring `nextRunAt` — un-parking must be able to remove the deadline,
+     *  not just move it, or a trigger that resumed early would still be swept. */
+    waitingUntil?: string | null | undefined;
   }, opts?: { scopeFilter?: Array<{ type: string; id: string }> | undefined }): boolean {
     const sets: string[] = [];
     const values: unknown[] = [];
@@ -477,6 +492,7 @@ export class TriggerStore {
     }
     if (params.status !== undefined) { sets.push('status = ?'); values.push(params.status); }
     if (params.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(params.nextRunAt || null); }
+    if (params.waitingUntil !== undefined) { sets.push('waiting_until = ?'); values.push(params.waitingUntil || null); }
     if (params.scheduleCron !== undefined) {
       sets.push("condition_json = json_set(condition_json, '$.schedule_cron', ?)");
       values.push(params.scheduleCron || null);
@@ -569,6 +585,16 @@ export class TriggerStore {
    * WorkerLoop dispatch adds a defense-in-depth backstop. `run_workflow` keeps its
    * own {@link PlannedPipeline.confirmedAt} gate (in executePipeline);
    * `backup`/`notify` are deterministic → never gated here.
+   *
+   * WAIT GATE (durable wait state, §0 T3/A3): a PARKED trigger is not due. Its
+   * `next_run_at` still points at the run that parked it, so without this clause
+   * every tick would re-fire a trigger that is waiting for an answer — the
+   * repeated-LLM-output failure. Added to the existing DENYLIST rather than
+   * rewriting it as an allowlist: the `status != 'failed' OR schedule_cron` term
+   * above is what keeps a failed cron trigger auto-recovering, and an allowlist of
+   * the statuses we happen to remember would drop it (task-manager.test.ts covers
+   * exactly that row). Bound as a parameter off {@link WAITING}, not written as a
+   * SQL literal, so the query and the type cannot drift apart.
    */
   getDue(now: string = new Date().toISOString()): TriggerRecord[] {
     const rows = this.db.prepare(
@@ -578,10 +604,40 @@ export class TriggerStore {
          AND next_run_at <= ?
          AND enabled != 0
          AND status != 'completed'
+         AND status != ?
          AND (status != 'failed' OR json_extract(condition_json, '$.schedule_cron') IS NOT NULL)
          AND NOT (effect = 'run_agent' AND confirmed_at IS NULL)
        ORDER BY next_run_at ASC`,
-    ).all(now) as TriggerFullDbRow[];
+    ).all(now, WAITING) as TriggerFullDbRow[];
+    return rows.map(triggerDbRowToRecord);
+  }
+
+  /**
+   * The other half of the partition {@link getDue} opens (§0 E5/A12): every PARKED
+   * trigger whose wait has run out. After the wait gate above, `getDue` is blind to
+   * a waiting trigger — so without this query no loop in the engine would ever see
+   * one again and a parked trigger would wait forever. The caller is the WorkerLoop
+   * tick, as a second query beside `getDueTriggers`.
+   *
+   * Deliberately NOT gated on `enabled` or on the `run_agent` consent gate, unlike
+   * `getDue`. Both of those decide whether a trigger may START a run; this one only
+   * decides whether a wait that already started may END. A trigger disabled (or
+   * un-confirmed) while parked would otherwise stay `waiting` with no path out.
+   *
+   * `waiting_until IS NOT NULL` is redundant against `<= ?` in SQLite (NULL never
+   * compares true) and is kept as an explicit statement of the invariant: a row in
+   * `waiting` without a deadline is a bug, and this query must not silently treat
+   * it as expired.
+   */
+  getExpiredWaiting(now: string = new Date().toISOString()): TriggerRecord[] {
+    const rows = this.db.prepare(
+      `SELECT ${TRIGGER_READ_COLS}
+       FROM triggers
+       WHERE status = ?
+         AND waiting_until IS NOT NULL
+         AND waiting_until <= ?
+       ORDER BY waiting_until ASC`,
+    ).all(WAITING, now) as TriggerFullDbRow[];
     return rows.map(triggerDbRowToRecord);
   }
 
