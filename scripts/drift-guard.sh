@@ -47,13 +47,20 @@ REMOVED='[Tt]elegram|[Ww]hats[Aa]pp|MCP[ -]server'
 
 # C: backtick path prefixes treated as real repo paths to verify.
 #
-# The optional `:1010` / `:1010-1042` tail is not decoration: `file:line` is the
-# dominant citation form in the register and in these scripts' own comments, and
-# the character class here excluded `:` — so `` `src/core/agent.ts:1010` `` matched
-# NOTHING and every such citation went unchecked, while the bare
+# The optional `:1010` / `:1010-1042` tail: the character class excluded `:`, so
+# `` `src/core/agent.ts:1010` `` matched NOTHING while the bare
 # `` `src/core/agent.ts` `` was verified. A guard over one spelling is blind to
-# every other, and this one was blind to the form people actually write.
-# Measured 2026-09-06 against /usr/bin/grep, both forms, before the change.
+# every other.
+#
+# ⚠ The value here is PROSPECTIVE, and the first version of this comment claimed
+# otherwise. It said `file:line` was "the dominant citation form in the register" —
+# but the register lives in the pro repo (0 tracked files matching /register/i
+# here), and in the 36 files class C actually scans (`*CLAUDE.md`, `*README.md`,
+# `docs/src/content/docs/*`) the count is 65 bare and **0** file:line. Measured
+# 2026-09-06 with a positive control, i.e. a real zero rather than a blind grep.
+# So this closes a blind spot before it is used, which is the right time for a
+# guard — but no citation in scope is unchecked today, and saying so was borrowing
+# a measurement's credibility for a claim it did not support.
 PATH_RE='`(src|packages|scripts|tests|docs)/[A-Za-z0-9_./-]+(:[0-9]+(-[0-9]+)?)?`'
 
 is_excluded() {
@@ -159,11 +166,16 @@ while IFS= read -r -d '' f; do
     while IFS= read -r p; do
       [ -n "$p" ] || continue
       path="${p//\`/}"
-      # Drop a `:line` / `:line-line` citation tail before the existence check —
-      # the PATH is what must exist, the line number is a pointer into it. Matched
-      # exactly (digits, optional range, anchored at the end) rather than cutting at
-      # the first colon, so a path that legitimately contains one is untouched.
-      [[ $path =~ ^(.*):[0-9]+(-[0-9]+)?$ ]] && path="${BASH_REMATCH[1]}"
+      # A `:line` / `:line-line` citation tail is a pointer INTO the file, so the
+      # path half is what must exist. But a colon is legal in a POSIX filename, and
+      # `src/foo.ts:12` is byte-identical as a name and as a citation — so the whole
+      # token is tried FIRST. Without that order the strip invents a dead path for a
+      # live file: measured 2026-09-06, a tracked `src/foo.ts:12` cited as itself
+      # went from 0 dead-path reports to 1. Cheaper to ask than to guess, and it
+      # costs one `exists_path` on a form that occurs ~never.
+      if ! exists_path "$path"; then
+        [[ $path =~ ^(.*):[0-9]+(-[0-9]+)?$ ]] && path="${BASH_REMATCH[1]}"
+      fi
       # Skip globs / placeholders.
       case "$path" in *'<'*|*'>'*|*'*'*|*'{'*|*'…'*|*' '*) continue ;; esac
       if ! exists_path "$path"; then
