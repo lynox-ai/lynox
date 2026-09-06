@@ -946,12 +946,23 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
     authType: 'oauth_google' as const,
   };
 
-  /** A connected Google account holding exactly `scopes`. */
-  function googleAuth(scopes: readonly string[]): unknown {
+  /**
+   * A connected Google account holding exactly `scopes`.
+   *
+   * `getAccessToken` is a spy because it is the only observable the migration
+   * gate has: without it, "no row was created" is satisfied just as well by a
+   * profile fetch that failed — which is what happens in a test with no
+   * network. The mutation that removes the gate then survives.
+   */
+  function googleAuth(scopes: readonly string[]): { auth: unknown; tokenCalls: () => number } {
+    let calls = 0;
     return {
-      isAuthenticated: () => true,
-      hasScope: (s: string) => scopes.includes(s),
-      getAccessToken: async () => 'token',
+      auth: {
+        isAuthenticated: () => true,
+        hasScope: (s: string) => scopes.includes(s),
+        getAccessToken: async () => { calls++; return 'token'; },
+      },
+      tokenCalls: () => calls,
     };
   }
   const STAGE_1 = [
@@ -963,8 +974,11 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
   ];
   const READONLY = ['https://www.googleapis.com/auth/gmail.readonly'];
 
+  let lastTokenCalls: () => number = () => 0;
   function ctxWith(scopes: readonly string[]): MailContext {
-    return new MailContext(stateDb, backend, undefined, {}, googleAuth(scopes) as never);
+    const g = googleAuth(scopes);
+    lastTokenCalls = g.tokenCalls;
+    return new MailContext(stateDb, backend, undefined, {}, g.auth as never);
   }
 
   it('registers NO provider for a Google row when the grant has no Gmail read scope', async () => {
@@ -1019,14 +1033,30 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
     } finally { await c.close(); }
   });
 
-  it('creates no Google row at all when the grant cannot read a mailbox', async () => {
+  it('creates no Google row, and does not even ASK Google, when the grant cannot read a mailbox', async () => {
     // The migration must stop BEFORE the profile fetch: `users.getProfile` is
     // itself authorised by a Gmail read scope, so without one this spends a 403
     // on every init to learn what the grant already says.
+    //
+    // ⚠ The row assertion alone is not enough and was measured to be not
+    // enough: with no network the profile fetch fails anyway, so "no row" holds
+    // whether the gate is there or not, and removing the gate SURVIVED. The
+    // token call is the observable that separates the two.
     const c = ctxWith(STAGE_1);
     try {
       await c.init();
       expect(stateDb.listAccounts().filter(a => a.authType === 'oauth_google')).toEqual([]);
+      expect(lastTokenCalls(), 'the migration must not reach for a token it cannot use').toBe(0);
+    } finally { await c.close(); }
+  });
+
+  it('DOES ask Google once the scope is there — the control on the line above', async () => {
+    // Without this, a build that never runs the migration at all satisfies the
+    // assertion above just as well.
+    const c = ctxWith(READONLY);
+    try {
+      await c.init();
+      expect(lastTokenCalls()).toBeGreaterThan(0);
     } finally { await c.close(); }
   });
 
@@ -1047,8 +1077,22 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
     try {
       await c.init();
       expect(c.listAccounts().find(a => a.id === 'goog')?.warning).toBeUndefined();
-      // An IMAP row must never carry it, whatever the Google grant says.
       expect(c.listAccounts().find(a => a.authType === 'imap')?.warning).toBeUndefined();
+    } finally { await c.close(); }
+  });
+
+  it('never marks an IMAP row, even when the Google grant cannot read a mailbox', async () => {
+    // The warning is about a GOOGLE mailbox. Dropping the `authType` half of
+    // the condition marks every IMAP account too — an app-password mailbox that
+    // works perfectly would be labelled broken because of an unrelated Google
+    // connection. Measured: without this case that mutation survived.
+    stateDb.upsertAccount(GMAIL_ACCOUNT);
+    const c = ctxWith(STAGE_1);
+    try {
+      await c.init();
+      const imap = c.listAccounts().find(a => a.authType === 'imap');
+      expect(imap, 'the IMAP fixture must be present, or this asserts nothing').toBeDefined();
+      expect(imap?.warning).toBeUndefined();
     } finally { await c.close(); }
   });
 });
