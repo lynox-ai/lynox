@@ -4,6 +4,8 @@ import type { OAuthRefreshRequest, OAuthRefreshResponse } from '../../contract/h
 import { createSign, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { SecretVault } from '../../core/secret-vault.js';
+import { googleFetch, cpFetch } from '../../core/connector-egress.js';
+import type { HostPolicyContext } from '../../core/network-guard.js';
 
 // === Types ===
 
@@ -135,6 +137,18 @@ export interface GoogleAuthOptions {
   vault?: SecretVault | undefined;
   /** Override default OAuth scopes. Defaults to READ_ONLY_SCOPES. */
   scopes?: string[] | undefined;
+  /**
+   * The live host-policy view (`network_policy` + the operator floor), so every
+   * call this object makes is subject to the instance's egress policy
+   * (PRD Stage 1 §3.8). The engine hands in its ToolContext, which satisfies
+   * this structurally and is mutated in place — so a policy change at runtime
+   * is seen here without re-creating the credential.
+   *
+   * Optional, and `undefined` means "no policy configured" — the same meaning
+   * it carries on every other egress surface. A caller that constructs this
+   * object outside an engine keeps today's behaviour.
+   */
+  hostPolicy?: HostPolicyContext | undefined;
 }
 
 export interface DeviceFlowPrompt {
@@ -543,6 +557,14 @@ export class GoogleAuth {
   private readonly serviceAccountKeyPath: string | undefined;
   private readonly vault: SecretVault | undefined;
   private readonly configuredScopes: readonly string[] | undefined;
+  /**
+   * Read by the four tool modules and by the mail provider, which make their
+   * own Google calls with this object's access token — they need the same
+   * policy view, and this object is the one thing every one of them already
+   * holds. Public so they can read it; there is no setter, so nothing can widen
+   * an instance's egress after construction.
+   */
+  readonly hostPolicy: HostPolicyContext | undefined;
   private tokenData: TokenData | null = null;
   private serviceAccountKey: ServiceAccountKey | null = null;
   private refreshInFlight: Promise<void> | null = null;
@@ -574,7 +596,7 @@ export class GoogleAuth {
    */
   private async refreshDirect(refreshToken: string): Promise<Response> {
     const { clientId, clientSecret } = this.requireOwnPair('a direct token refresh');
-    return fetch(TOKEN_URL, {
+    return googleFetch(TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -584,7 +606,7 @@ export class GoogleAuth {
         grant_type: 'refresh_token',
       }),
       signal: AbortSignal.timeout(30_000),
-    });
+    }, this.hostPolicy);
   }
 
   private requireOwnPair(caller: string): { clientId: string; clientSecret: string } {
@@ -604,6 +626,7 @@ export class GoogleAuth {
     this.serviceAccountKeyPath = options.serviceAccountKeyPath;
     this.vault = options.vault;
     this.configuredScopes = options.scopes;
+    this.hostPolicy = options.hostPolicy;
     this.tokenData = loadTokenData(this.vault);
   }
 
@@ -761,7 +784,7 @@ export class GoogleAuth {
       try {
         const code = await codePromise;
         // Exchange code for tokens
-        const response = await fetch(TOKEN_URL, {
+        const response = await googleFetch(TOKEN_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({
@@ -772,7 +795,7 @@ export class GoogleAuth {
             redirect_uri: redirectUri,
           }),
           signal: AbortSignal.timeout(30_000),
-        });
+        }, this.hostPolicy);
 
         if (!response.ok) {
           const text = await response.text();
@@ -818,7 +841,7 @@ export class GoogleAuth {
    */
   async exchangeRedirectCode(code: string, redirectUri: string): Promise<void> {
     const { clientId, clientSecret } = this.requireOwnPair('exchangeRedirectCode');
-    const response = await fetch(TOKEN_URL, {
+    const response = await googleFetch(TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -829,7 +852,7 @@ export class GoogleAuth {
         redirect_uri: redirectUri,
       }),
       signal: AbortSignal.timeout(30_000),
-    });
+    }, this.hostPolicy);
 
     if (!response.ok) {
       const text = await response.text();
@@ -848,7 +871,7 @@ export class GoogleAuth {
     const { clientId, clientSecret } = this.requireOwnPair('startDeviceFlow');
     const requestedScopes = scopes ?? this.configuredScopes ?? DEFAULT_SCOPES;
 
-    const response = await fetch(DEVICE_AUTH_URL, {
+    const response = await googleFetch(DEVICE_AUTH_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -856,7 +879,7 @@ export class GoogleAuth {
         scope: requestedScopes.join(' '),
       }),
       signal: AbortSignal.timeout(30_000),
-    });
+    }, this.hostPolicy);
 
     if (!response.ok) {
       const text = await response.text();
@@ -879,7 +902,7 @@ export class GoogleAuth {
       while (Date.now() < deadline) {
         await new Promise(r => setTimeout(r, pollInterval));
 
-        const tokenRes = await fetch(TOKEN_URL, {
+        const tokenRes = await googleFetch(TOKEN_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({
@@ -889,7 +912,7 @@ export class GoogleAuth {
             grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
           }),
           signal: AbortSignal.timeout(30_000),
-        });
+        }, this.hostPolicy);
 
         if (tokenRes.ok) {
           this._acceptMintedTokens(await tokenRes.json(), clientId);
@@ -940,12 +963,12 @@ export class GoogleAuth {
   async revoke(): Promise<void> {
     if (this.tokenData?.access_token) {
       try {
-        await fetch(REVOKE_URL, {
+        await googleFetch(REVOKE_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: new URLSearchParams({ token: this.tokenData.access_token }),
           signal: AbortSignal.timeout(10_000),
-        });
+        }, this.hostPolicy);
       } catch {
         // Best-effort revocation
       }
@@ -1130,20 +1153,25 @@ export class GoogleAuth {
     }
 
     const response = cp && handle
-      ? await fetch(`${cp.url}/internal/oauth/google/refresh`, {
+      ? await cpFetch(`${cp.url}/internal/oauth/google/refresh`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-instance-secret': cp.secret },
           body: JSON.stringify({
             instance_id: cp.instanceId,
             refresh_handle: handle,
           } satisfies OAuthRefreshRequest),
-          // Do not follow redirects: `fetch` replays request headers on a
-          // same-origin hop and this request carries the instance secret. A 3xx
-          // arrives as `!response.ok` below and is classified as transient, so
-          // a CP that starts redirecting degrades instead of leaking.
-          redirect: 'manual',
+          // Redirects are not followed, and since §3.8 that is enforced by
+          // `cpFetch` rather than requested here: it goes through `fetchPinned`,
+          // which has no redirect handling at all. The `redirect: 'manual'`
+          // that used to sit on this line became inert with that change, and an
+          // inert option on a security-relevant call reads as the protection it
+          // no longer is. The reason is unchanged: this request carries the
+          // instance secret, `CROSS_ORIGIN_DROP_HEADERS` has no entry for
+          // `x-instance-secret`, and a 3xx arrives as `!response.ok` below and
+          // is classified as transient — so a CP that starts redirecting
+          // degrades instead of leaking.
           signal: AbortSignal.timeout(30_000),
-        })
+        }, this.hostPolicy)
       : await this.refreshDirect(this.tokenData.refresh_token);
 
     if (!response.ok) {
@@ -1337,7 +1365,7 @@ export class GoogleAuth {
 
     const jwt = createServiceAccountJWT(this.serviceAccountKey, this.configuredScopes ?? DEFAULT_SCOPES);
 
-    const response = await fetch(this.serviceAccountKey.token_uri, {
+    const response = await googleFetch(this.serviceAccountKey.token_uri, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -1345,7 +1373,7 @@ export class GoogleAuth {
         assertion: jwt,
       }),
       signal: AbortSignal.timeout(30_000),
-    });
+    }, this.hostPolicy);
 
     if (!response.ok) {
       const text = await response.text();

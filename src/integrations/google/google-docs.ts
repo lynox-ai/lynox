@@ -6,6 +6,7 @@ import type { DocsDocument } from './google-docs-format.js';
 import { docsToMarkdown, markdownToHtml } from './google-docs-format.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapChannelMessage } from '../../core/data-boundary.js';
+import { googleFetch } from '../../core/connector-egress.js';
 
 // === Types ===
 
@@ -33,7 +34,7 @@ const WRITE_ACTIONS = new Set(['create', 'append', 'replace']);
 
 async function docsFetch(auth: GoogleAuth, url: string, options?: RequestInit): Promise<Response> {
   const token = await auth.getAccessToken();
-  const response = await fetch(url, {
+  const response = await googleFetch(url, {
     ...options,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -41,7 +42,7 @@ async function docsFetch(auth: GoogleAuth, url: string, options?: RequestInit): 
       ...options?.headers,
     },
     signal: options?.signal ?? AbortSignal.timeout(30_000),
-  });
+  }, auth.hostPolicy);
   return response;
 }
 
@@ -188,7 +189,7 @@ async function handleCreate(auth: GoogleAuth, input: DocsInput): Promise<string>
   ].join('\r\n');
 
   const token = await auth.getAccessToken();
-  const response = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+  const response = await googleFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -196,7 +197,7 @@ async function handleCreate(auth: GoogleAuth, input: DocsInput): Promise<string>
     },
     body,
     signal: AbortSignal.timeout(30_000),
-  });
+  }, auth.hostPolicy);
 
   if (!response.ok) {
     const text = await response.text();

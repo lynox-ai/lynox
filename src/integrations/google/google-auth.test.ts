@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { generateKeyPairSync } from 'node:crypto';
 import { GoogleAuth, SCOPES, READ_ONLY_SCOPES, WRITE_SCOPES } from './google-auth.js';
 // The fixture VALUE, not the fixture FILE: `node:fs` is mocked in this file, so
@@ -49,6 +49,20 @@ vi.mock('../../core/atomic-write.js', () => ({
   writeFileAtomicSync: vi.fn(),
   ensureDirSync: vi.fn().mockReturnValue('/tmp/test-lynox'),
 }));
+
+vi.mock('node:dns/promises', () => ({
+  default: { lookup: vi.fn(async () => dnsLookupStub()) },
+}));
+
+import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
+
+// §3.8 moved this module's calls onto the connector egress surface, so they now
+// go through the pinned transport instead of `globalThis.fetch`. The bridge
+// hands them back to the stub these tests already install; the policy gate is
+// NOT bypassed. See the helper for why this is adapted rather than rewritten.
+let restorePinnedFetchBridge: (() => void) | undefined;
+beforeAll(() => { restorePinnedFetchBridge = installPinnedFetchBridge(); });
+afterAll(() => { restorePinnedFetchBridge?.(); });
 
 describe('GoogleAuth', () => {
   let auth: GoogleAuth;
@@ -1492,8 +1506,14 @@ describe('refresh through the control plane (the client secret stays there)', ()
     // pins `url` by equality, so it could never fail on its own. Counting the
     // calls can.
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    // The secret must not be replayed to a redirect target either.
-    expect(init.redirect, 'the CP request must not follow redirects').toBe('manual');
+    // The secret must not be replayed to a redirect target either. This used to
+    // assert `init.redirect === 'manual'` — the REQUEST for the property. Since
+    // §3.8 the property is enforced by `cpFetch` (which uses `fetchPinned`, a
+    // transport with no redirect handling), so the option is gone and asserting
+    // it would pin a request nobody honours. The next test drives the EFFECT: a
+    // 302 from the control plane surfaces as a 302 instead of being followed,
+    // and it fails against any implementation that routes this call through the
+    // redirect-following helper.
     expect((init.headers as Record<string, string>)['x-instance-secret']).toBe('instance-secret-value');
     const body = JSON.parse(String(init.body)) as Record<string, unknown>;
     expect(body).toEqual({ instance_id: 'inst-1', refresh_handle: 'sealed-handle-1' });

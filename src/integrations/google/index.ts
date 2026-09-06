@@ -25,6 +25,8 @@ export interface GoogleToolsOptions {
   vault?: import('../../core/secret-vault.js').SecretVault | undefined;
   /** Override default OAuth scopes. Defaults to read-only. */
   scopes?: string[] | undefined;
+  /** Live host-policy view, so every Google call obeys `network_policy` (§3.8). */
+  hostPolicy?: import('../../core/network-guard.js').HostPolicyContext | undefined;
 }
 
 /**
@@ -40,6 +42,7 @@ export function createGoogleAuth(options: GoogleToolsOptions): GoogleAuth {
     serviceAccountKeyPath: options.serviceAccountKeyPath,
     vault: options.vault,
     scopes: options.scopes,
+    hostPolicy: options.hostPolicy,
   });
 }
 

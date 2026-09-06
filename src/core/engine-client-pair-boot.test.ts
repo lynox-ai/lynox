@@ -126,7 +126,18 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
       serviceAccountKeyPath: '/tmp/sa-key.json',
       vault: expect.anything(),
       scopes: ['https://www.googleapis.com/auth/calendar.events'],
+      // §3.8 threads the live host-policy view in, so every Google call obeys
+      // `network_policy`. `expect.anything()` here keeps the strict shape's real
+      // property (an EXTRA argument still fails); the identity is asserted on
+      // the next line, because that is the part a snapshot would break.
+      hostPolicy: expect.anything(),
     });
+    // Identity, not equality: a `{ ...this._toolContext }` snapshot deep-equals
+    // the context and would pass the block above, while freezing the policy at
+    // boot — an operator's later `deny-all` would then not reach Google at all.
+    // Mutation: spread the context at the call site ⇒ this must fail.
+    expect(captured.calls.at(-1)?.hostPolicy, 'the LIVE context, not a copy')
+      .toBe(engine.getToolContext());
     // The BOOT path has its own registration loop, and deleting it survived
     // every suite until this line — the reload fix closed only the other copy.
     expect(engine.registry.find(PROBE_TOOL), 'the boot must register the built tools').toBeDefined();

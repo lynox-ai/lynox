@@ -1,8 +1,21 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MailContext, type AddAccountInput } from './context.js';
 import { MailStateDb } from './state.js';
 import { MailError, type MailAccountConfig } from './provider.js';
 import type { MailCredentialBackend } from './auth/app-password.js';
+import { installPinnedFetchBridge, dnsLookupStub } from '../../../tests/helpers/pinned-fetch-bridge.js';
+
+vi.mock('node:dns/promises', () => ({
+  default: { lookup: vi.fn(async () => dnsLookupStub()) },
+}));
+
+// §3.8 moved the Gmail profile probe onto the connector egress surface, so it
+// now goes through the pinned transport instead of `globalThis.fetch`. The
+// bridge hands it back to the stub this file already installs; the policy gate
+// is NOT bypassed. See the helper for why this is adapted rather than rewritten.
+let restorePinnedFetchBridge: (() => void) | undefined;
+beforeAll(() => { restorePinnedFetchBridge = installPinnedFetchBridge(); });
+afterAll(() => { restorePinnedFetchBridge?.(); });
 
 // ── Backend fake (Map-backed vault) ───────────────────────────────────────
 

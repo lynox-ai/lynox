@@ -7,7 +7,7 @@ import type { ToolContext } from '../../core/tool-context.js';
 import { resolveGuardedAckHosts } from '../../core/tool-context.js';
 import { isFeatureEnabled } from '../../core/features.js';
 import { fetchPinned, flattenHeaders, redirectHopHeaders, isCrossOriginHop, assertHostPolicy } from '../../core/network-guard.js';
-import type { EgressSurface } from '../../core/network-guard.js';
+import type { EgressCall, HostPolicyContext } from '../../core/network-guard.js';
 import { contractGrants } from '../permission-guard.js';
 import { isEndpointAcked, isVettedEgressHost } from '../../core/llm/endpoint-allowlist.js';
 import { isProtectedSecretWrite } from '../../core/secret-store.js';
@@ -165,10 +165,16 @@ function shouldRewriteToGet(status: number, method: string): boolean {
 export async function fetchWithValidatedRedirects(
   url: string,
   init: RequestInit,
-  // Which egress surface this ride is — REQUIRED so the `guarded` policy can
-  // open discovery reads while gating full-control targets (no safe default).
-  surface: EgressSurface,
-  ctx?: ToolContext | undefined,
+  // Which egress surface this ride is, AND the allowance it is entitled to —
+  // REQUIRED so the `guarded` policy can open discovery reads while gating
+  // full-control targets and admitting a connector to its own hosts (no safe
+  // default). Re-applied per redirect hop, so an allowed host cannot 302 to a
+  // forbidden one on any surface.
+  call: EgressCall,
+  // Only the host-policy fields are read here. Typed as the narrow structural
+  // interface rather than ToolContext so a connector caller — which holds a
+  // policy, not a tool context — can pass one without inventing the rest.
+  ctx?: HostPolicyContext | undefined,
   // Slice B: for a capability-contract-governed write, every redirect hop must
   // ALSO stay within the contract — `isDangerous`/the consent gate only saw the
   // ORIGINAL url, so without this a 307/308 to another (network-allow-listed)
@@ -176,10 +182,6 @@ export async function fetchWithValidatedRedirects(
   // Returns true if the hop is permitted. Omitted for non-contract calls (no
   // redirect-behaviour change).
   redirectGuard?: ((nextUrl: string, method: string) => boolean) | undefined,
-  // Union of connected api_profiles' human-accepted egress hosts, consulted only
-  // for a full-control surface under `guarded`. Computed in the handler (where
-  // the ApiStore resolves) and re-checked here per redirect hop.
-  guardedAckHosts?: ReadonlySet<string> | undefined,
   // An engine-attached credential header whose name is NOT in the fixed
   // cross-origin drop set. `CROSS_ORIGIN_DROP_HEADERS` covers Authorization,
   // Cookie and the common `X-Api-Key`/`X-Auth-Token` spellings, but an
@@ -206,7 +208,7 @@ export async function fetchWithValidatedRedirects(
   let headers = flattenHeaders(init.headers);
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
-    assertHostPolicy(currentUrl, surface, ctx, guardedAckHosts);
+    assertHostPolicy(currentUrl, call, ctx);
     const requestInit: RequestInit = {
       ...init,
       method,
@@ -1055,7 +1057,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
     const guardedAckHosts = resolveGuardedAckHosts(toolContext);
     if (toolContext?.networkPolicy === 'guarded') {
       try {
-        assertHostPolicy(input.url, 'full-control', toolContext, guardedAckHosts);
+        assertHostPolicy(input.url, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext);
       } catch (err) {
         if (err instanceof Error && err.message.startsWith('Blocked:')) {
           blockedFriendly(err.message);
@@ -1177,7 +1179,7 @@ export const httpRequestTool: ToolEntry<HttpRequestInput> = {
             contractGrants('http_request', { url: nextUrl, method: redirectMethod }, contract)
         : undefined;
       const { response, finalUrl: finalRequestUrl } = await Promise.race([
-        fetchWithValidatedRedirects(input.url, opts, 'full-control', toolContext, redirectGuard, guardedAckHosts, attachedAuthSlot),
+        fetchWithValidatedRedirects(input.url, opts, { surface: 'full-control', ackHosts: guardedAckHosts }, toolContext, redirectGuard, attachedAuthSlot),
         wallTimeout,
       ]);
       const status = `${response.status} ${response.statusText}`;

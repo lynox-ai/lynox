@@ -53,7 +53,7 @@ export async function fetchIcsFeed(url: string, ctx?: ToolContext | undefined): 
       // `discovery`, not `full-control`: this is a read of a subscribed feed, the same shape as
       // fetching a page, and it should stay reachable under a `guarded` egress policy without
       // the operator having to allow-list a full-control target.
-      'discovery',
+      { surface: 'discovery' },
       ctx,
     ));
   } catch {

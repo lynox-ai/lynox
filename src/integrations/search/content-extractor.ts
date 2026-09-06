@@ -37,7 +37,7 @@ const MAX_REDIRECTS = 5;
  * lives in one place. `ToolContext` structurally satisfies HostPolicyContext.
  */
 export function assertEgressAllowed(rawUrl: string, ctx?: ToolContext | undefined): void {
-  assertHostPolicy(rawUrl, 'discovery', ctx);
+  assertHostPolicy(rawUrl, { surface: 'discovery' }, ctx);
 }
 
 // --- Fetch with redirect validation ---

@@ -42,6 +42,7 @@ import {
   type MailWatchOptions,
 } from '../provider.js';
 import { decodeBytes, bodyQuarantinePlaceholder } from './charset.js';
+import { googleFetch } from '../../../core/connector-egress.js';
 
 const GMAIL_BASE = 'https://gmail.googleapis.com/gmail/v1/users/me';
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -937,21 +938,21 @@ export class OAuthGmailProvider implements MailProvider {
 
   private async gmailGet<T>(path: string): Promise<T> {
     const headers = await this.authHeaders();
-    const res = await globalThis.fetch(`${GMAIL_BASE}/${path}`, {
+    const res = await googleFetch(`${GMAIL_BASE}/${path}`, {
       headers,
       signal: AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), this.aborter.signal]),
-    });
+    }, this.googleAuth.hostPolicy);
     return await this.parseResponse<T>(res, `GET ${path}`);
   }
 
   private async gmailPost<T>(path: string, body: unknown): Promise<T> {
     const headers = await this.authHeaders();
-    const res = await globalThis.fetch(`${GMAIL_BASE}/${path}`, {
+    const res = await googleFetch(`${GMAIL_BASE}/${path}`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
       signal: AbortSignal.any([AbortSignal.timeout(REQUEST_TIMEOUT_MS), this.aborter.signal]),
-    });
+    }, this.googleAuth.hostPolicy);
     return await this.parseResponse<T>(res, `POST ${path}`);
   }
 

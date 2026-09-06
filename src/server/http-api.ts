@@ -67,6 +67,7 @@ import { LynoxUserConfigSchema } from '../types/schemas.js';
 import { ALL_MEMORY_BLOCK_IDS } from '../types/memory.js';
 import { evaluateEndpointBootGate, describeDisclosure } from '../core/llm/endpoint-allowlist.js';
 import { redactConfigForResponse } from '../core/secret-fields.js';
+import { cpFetch } from '../core/connector-egress.js';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -6866,7 +6867,10 @@ export class LynoxHTTPApi {
       }
 
       try {
-        const claimRes = await fetch(`${controlPlaneUrl}/internal/oauth/google/claim`, {
+        // cpFetch, not googleFetch: this posts to the CONTROL PLANE, not to
+        // Google. Routing it through the Google host set would refuse the CP
+        // host and break the claim on every `guarded` tenant (§3.8).
+        const claimRes = await cpFetch(`${controlPlaneUrl}/internal/oauth/google/claim`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -6876,7 +6880,7 @@ export class LynoxHTTPApi {
             instance_id: instanceId,
             claim_nonce: claimNonce,
           } satisfies OAuthClaimRequest),
-        });
+        }, google.hostPolicy);
 
         if (!claimRes.ok) {
           const data = (await claimRes.json().catch(() => ({}))) as Record<string, unknown>;

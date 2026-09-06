@@ -24,6 +24,7 @@ import type {
   NetworkPolicy,
   StepHint,
 } from '../types/index.js';
+import type { HostPolicyContext } from './network-guard.js';
 
 /** Provider for cross-session HTTP rate limiting (implemented by RunHistory). */
 export interface ToolCallCountProvider {
@@ -175,6 +176,26 @@ export function applyHttpRateLimits(
  */
 export function applyEnforceHttps(ctx: ToolContext, enforce: boolean): void {
   ctx.enforceHttps = enforce;
+}
+
+/**
+ * Narrow a ToolContext to the host-policy fields `assertHostPolicy` reads.
+ *
+ * This is the ONE place the conformance is asserted, and it is a compile-time
+ * assertion rather than a comment. `HostPolicyContext` used to be described in
+ * prose as "structurally satisfied by ToolContext" — a claim nothing checked,
+ * which was tolerable while only the agent's own HTTP tools consulted it. Since
+ * PRD Stage 1 §3.8 it also gates a CREDENTIALED surface (every Google call), so
+ * a field silently dropped from ToolContext would not be a lint-level tidiness
+ * problem: it would change what the guard can see, on the path that carries the
+ * tenant's grant.
+ *
+ * Runtime no-op by construction. The value is the type error it produces when
+ * ToolContext stops satisfying the interface — remove `enforceHttps` from
+ * ToolContext and `tsc` fails here.
+ */
+export function hostPolicyOf(ctx: ToolContext): HostPolicyContext {
+  return ctx;
 }
 
 /**
