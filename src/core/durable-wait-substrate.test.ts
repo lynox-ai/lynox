@@ -136,6 +136,30 @@ describe('durable wait state — the substrate (§0 E1a/E4/T3/E5)', () => {
     expect(history.getExpiredWaitingTriggers(NOW)).toEqual([]);
   });
 
+  it('A12 — a deadline of exactly `now` counts as run out, not as still waiting', () => {
+    // The boundary is `<=`, and one tick either way is the difference between a
+    // trigger that ends on time and one that waits a whole cadence longer. Every
+    // other case here is strictly past, so `<=` → `<` would survive them all.
+    const { history } = make();
+    seedTrigger(history, 'parked-1', PAST);
+    history.updateTrigger('parked-1', { status: 'waiting', waitingUntil: NOW });
+
+    expect(history.getExpiredWaitingTriggers(NOW).map(t => t.id)).toEqual(['parked-1']);
+  });
+
+  it('A12 — the sweep returns the longest-waiting trigger first', () => {
+    // The ORDER BY is a fairness property: a caller that processes a slice of the
+    // result must not starve the trigger that has been waiting longest. With a
+    // single seeded row no ordering assertion can fail, so it takes two.
+    const { history } = make();
+    seedTrigger(history, 'older', PAST);
+    seedTrigger(history, 'newer', PAST);
+    history.updateTrigger('older', { status: 'waiting', waitingUntil: '2026-02-01T00:00:00.000Z' });
+    history.updateTrigger('newer', { status: 'waiting', waitingUntil: '2026-03-01T00:00:00.000Z' });
+
+    expect(history.getExpiredWaitingTriggers(NOW).map(t => t.id)).toEqual(['older', 'newer']);
+  });
+
   it('the two queries PARTITION a parked trigger — it is in exactly one, always', () => {
     // The invariant the pair exists for. getDue going blind to `waiting` is only
     // safe because something else sees it; if both queries ever miss the same row

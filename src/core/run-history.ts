@@ -1261,10 +1261,17 @@ const MIGRATIONS: string[] = [
   // would need the cross-file lookup that does not exist.
   //
   // A SOFT reference, like `triggers.last_run_id` pointing the other way across
-  // the same file boundary: no FK, no ON DELETE. A trigger deleted while parked
-  // leaves a pointer to nothing, and that row then survives the boot expiry it
-  // would otherwise have been caught by — but only until its own `expires_at`,
-  // which the 5-minute `expireOld()` sweep (engine.ts) still enforces.
+  // the same file boundary: no FK, no ON DELETE.
+  //
+  // ⚠ THE COLUMN IS ALL THAT LANDS HERE. Nothing reads it yet: `expireAll()`
+  // (prompt-store.ts) still expires every `status='pending'` row on cold boot,
+  // unconditionally, exactly as v27 and v43 describe — so today a parked
+  // trigger's question does NOT survive a restart. The boot exception that will
+  // read this column is a later slice; this migration only makes it possible to
+  // write one without a second table rebuild. When it lands, note that a trigger
+  // deleted while parked leaves a pointer to nothing, and the exception must not
+  // keep such a row alive past its own `expires_at` — which the 5-minute
+  // `expireOld()` sweep (engine.ts) enforces independently.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (53);
    ALTER TABLE pending_prompts ADD COLUMN trigger_id TEXT;`,
 ];

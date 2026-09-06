@@ -724,11 +724,17 @@ const MIGRATIONS: string[] = [
   // `status`, which is why the new `waiting` status needs no table rebuild, and
   // ADD COLUMN here has two precedents (v3 `effect`, v6 `confirmed_at`).
   //
-  // Deliberately NOT indexed. The sweep filters `status = 'waiting' AND
-  // waiting_until <= now`, and the rows it can match are bounded by the number of
-  // simultaneously unanswered questions. If that stops being true an index is a
-  // forward migration; the column is the part that is hard to take back, since
-  // this ladder is forward-only and has no down path.
+  // NOT indexed, and the honest reason is that there is nothing to measure yet.
+  // The sweep filters `status` and `waiting_until`, neither of which any index
+  // covers, so it scans the WHOLE `triggers` table — not just the parked rows.
+  // What is bounded by the number of simultaneously unanswered questions is how
+  // many rows it MATCHES, which is a different quantity and does not justify
+  // skipping an index. What justifies it here is that this migration ships no
+  // caller: the query is wired to the WorkerLoop in a later slice, and the cost
+  // is a scan per tick over a table whose size is an instance's whole trigger
+  // list. Revisit it there, with a number. An index is a forward migration and
+  // cheap to add; the COLUMN is the part that is hard to take back, since this
+  // ladder is forward-only and has no down path.
   `INSERT OR IGNORE INTO schema_version (version) VALUES (12);
    ALTER TABLE triggers ADD COLUMN waiting_until TEXT;`,
 ];

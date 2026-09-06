@@ -630,8 +630,11 @@ describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
    *  six unrelated-looking assertion errors instead of one clear one. Rewinding needs
    *  BOTH halves: drop the version rows AND undo what those migrations did, or the
    *  re-run hits an already-applied DDL (SQLite has no ADD COLUMN IF NOT EXISTS).
-   *  Adding a migration above v11? Undo it here too, and the assertion below will say
-   *  so out loud if you don't. */
+   *  Adding a migration above v11? Undo its DDL here too. Forgetting is LOUD on its
+   *  own — the re-run hits the already-applied statement and throws (`duplicate column
+   *  name`), in every test in this describe — so this helper needs no self-check, and
+   *  an earlier draft's `expect(head).toBe(10)` was removed as a tautology: the DELETE
+   *  above makes that true unconditionally, whether or not the undo was added. */
   const openAtV10 = (p: string): void => {
     const e = new EngineDb(p, '');
     e.getDb().exec(`
@@ -639,11 +642,7 @@ describe('EngineDb v11 — onboarding backfill for pre-W1 instances', () => {
       DELETE FROM onboarding_flags;
       ALTER TABLE triggers DROP COLUMN waiting_until;   -- v12
     `);
-    const head = (e.getDb().prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number }).v;
     e.close();
-    // Positive control on the fixture itself: without it, a future migration turns
-    // this whole describe green-against-nothing rather than red.
-    expect(head, 'openAtV10 did not rewind — undo the newest migration here too').toBe(10);
   };
 
   // THE case this migration exists for. MUTATION: drop the v11 entry → an instance that
