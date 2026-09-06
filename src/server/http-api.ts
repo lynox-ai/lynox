@@ -3674,7 +3674,15 @@ export class LynoxHTTPApi {
       const b = body as Record<string, unknown> | null;
       const focus = typeof b?.['focus'] === 'string' ? b['focus'] : undefined;
       const result = await session.compact(focus);
-      jsonResponse(res, 200, { ok: result.success, summary: result.summary });
+      // The occupancy pair travels on the manual path too: this route is a
+      // blocking request with no SSE, so without it the UI would have to show
+      // the user something it made up, or nothing at all.
+      jsonResponse(res, 200, {
+        ok: result.success,
+        summary: result.summary,
+        ...(result.occupancyBefore !== undefined ? { occupancyBefore: result.occupancyBefore } : {}),
+        ...(result.occupancyAfter !== undefined ? { occupancyAfter: result.occupancyAfter } : {}),
+      });
     }));
 
     // Mid-thread model re-pick (arc:model-selector P1, §5.1b) — the "continue a

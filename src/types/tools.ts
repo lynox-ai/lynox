@@ -208,7 +208,10 @@ export type StreamEvent =
       // fill) reads this field instead of re-deriving it from totalTokens/maxTokens.
       budgetPercent?: number | undefined; agent: string }
   | { type: 'changeset_ready'; fileCount: number; agent: string }
-  | { type: 'context_compacted'; summary: string; previousUsagePercent: number; agent: string }
+  // `occupancyBefore`/`occupancyAfter` are optional because an older engine on
+  // the other side of this wire does not send them; the UI falls back to naming
+  // no numbers rather than guessing at them.
+  | { type: 'context_compacted'; summary: string; previousUsagePercent: number; occupancyBefore?: number; occupancyAfter?: number; agent: string }
   | { type: 'compaction_offer'; usagePercent: number; agent: string }
 
   // DK-UX: a durable-knowledge write happened this turn. A CLIENT-ONLY signal for the

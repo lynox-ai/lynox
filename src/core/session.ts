@@ -111,6 +111,23 @@ const DEFAULT_COMPACTION_TOKEN_BUDGET = 150_000;
  *  tier — cutting the summary call's cost roughly 4x. CP-tunable via
  *  `compaction_model`; provider-agnostic (resolved through `resolveTierModel`,
  *  never a hard-coded model id). */
+/**
+ * What a compaction did, in tokens.
+ *
+ * `occupancyBefore`/`occupancyAfter` are present only on success, and they are
+ * the SAME measurements the ledger row records — taken once and reported twice,
+ * so the run history and the UI cannot disagree about what happened. They exist
+ * because the honest thing to show a user about a compaction is its RESULT; a
+ * progress percentage would have to be invented, since the compaction is a
+ * single blocking summarizer call with no intermediate state to report.
+ */
+export interface CompactionResult {
+  success: boolean;
+  summary: string;
+  occupancyBefore?: number;
+  occupancyAfter?: number;
+}
+
 const DEFAULT_COMPACTION_MODEL: ModelTier = 'fast';
 
 /** Thrown by `run()` when an `internal: true` run (only compaction, today) is
@@ -1460,7 +1477,7 @@ export class Session {
    * reset messages, and inject the summary as synthetic context.
    * Used by CLI /compact command and auto-compaction.
    */
-  async compact(focus?: string, opts?: { confirmScope?: boolean; trigger?: 'auto' | 'manual' }): Promise<{ success: boolean; summary: string }> {
+  async compact(focus?: string, opts?: { confirmScope?: boolean; trigger?: 'auto' | 'manual' }): Promise<CompactionResult> {
     // Phase 2 Context Hygiene: do NOT clear the blob store here. Blobs retained
     // at earlier compactions are CARRIED FORWARD so a `recall_tool_result` still
     // works two+ compactions later (the old clear-on-every-compaction hard-
@@ -1647,6 +1664,9 @@ export class Session {
       // run active when compaction fired (the triggering user run for auto; null
       // for a manual /compact with no run in progress) — captured at the top
       // before the summary run nulled currentRunId.
+      // Measured once and reported twice: the ledger row and the UI must not be
+      // able to disagree about what this compaction did.
+      const occAfter = this.agent ? Math.round(this.agent.getEstimatedOccupancyTokens()) : 0;
       const runHistory = this.engine.getRunHistory();
       if (runHistory) {
         try {
@@ -1655,7 +1675,7 @@ export class Session {
             ...(compactionRunId ? { runId: compactionRunId } : {}),
             trigger: opts?.trigger ?? 'manual',
             occupancyBefore: occBefore,
-            occupancyAfter: this.agent ? Math.round(this.agent.getEstimatedOccupancyTokens()) : 0,
+            occupancyAfter: occAfter,
             messagesBefore: preCompactionMessages.length,
             messagesAfter: this.agent ? this.agent.getMessages().length : 0,
             summaryChars: summary.length,
@@ -1663,7 +1683,7 @@ export class Session {
         } catch { /* fire-and-forget */ }
       }
       rearmTaint();
-      return { success: true, summary };
+      return { success: true, summary, occupancyBefore: occBefore, occupancyAfter: occAfter };
     }
     rearmTaint();
     return { success: false, summary: '' };
@@ -1787,6 +1807,8 @@ export class Session {
             type: 'context_compacted',
             summary: result.summary,
             previousUsagePercent: usagePercent,
+            ...(result.occupancyBefore !== undefined ? { occupancyBefore: result.occupancyBefore } : {}),
+            ...(result.occupancyAfter !== undefined ? { occupancyAfter: result.occupancyAfter } : {}),
             agent: this.agent.name,
           });
         }
