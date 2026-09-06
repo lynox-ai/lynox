@@ -154,29 +154,31 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
 
   afterEach(async () => {
     // Drain BEFORE closing. `tick()` dispatches fire-and-forget, so a run can
-    // still be inside `recordTaskRun` when a test body ends; closing the sqlite
-    // handle under it produces an unhandled rejection that belongs to no test
-    // and shows up as a non-zero exit with every test reported green.
-    // The timeout resolves to a SENTINEL, not to an empty list. Returning `[]`
-    // made the assertion below pass trivially in exactly the case it exists for:
-    // a run still in flight past the budget: `[].filter(...)` is empty, the
-    // expectation holds, and the handles then close under the run anyway. The
-    // timeout is the finding, so it has to be able to fail.
-    const TIMED_OUT = Symbol('drain-timeout');
-    const drained = await Promise.race([
-      Promise.allSettled(inFlight.splice(0)),
-      new Promise<typeof TIMED_OUT>(r => setTimeout(() => r(TIMED_OUT), 10_000)),
-    ]);
-    expect(drained, 'a dispatched run had not finished 10s after the test body — the '
-      + 'sqlite handles are about to close under it').not.toBe(TIMED_OUT);
-    // `allSettled` discards outcomes, so an unguarded drain turns a genuine
-    // failure inside a dispatched run into a green suite. The drain runs BEFORE
-    // the handles close, so a rejection here is a real one, not teardown noise.
-    const rejected = (drained as PromiseSettledResult<unknown>[])
-      .filter((r): r is PromiseRejectedResult => r.status === 'rejected');
-    expect(rejected.map(r => String(r.reason))).toEqual([]);
-    for (const c of closers.splice(0)) c();
-    for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    // still be inside `recordTaskRun` when a test body ends, and closing the
+    // sqlite handle under it raises an unhandled rejection belonging to no test:
+    // a non-zero exit with every test reported green.
+    //
+    // `Promise.all`, no race, no budget of our own — and that is the third shape
+    // this drain has had. A hand-rolled race has to pick a number, and both
+    // numbers were wrong in different ways: resolving the timeout to `[]` made
+    // the assertion behind it pass trivially in exactly the case it existed for,
+    // and resolving it to a sentinel at 10s tied vitest's own `hookTimeout`, so
+    // the generic "Hook timed out" won the race and the diagnostic never
+    // printed. Waiting plainly delegates the deadline to the runner, which
+    // already owns one and names the hook when it fires. `all` rather than
+    // `allSettled` for the same reason: a rejected run should surface with its
+    // own reason, not be counted and re-asserted.
+    //
+    // Cleanup goes in `finally`. It sat after the assertion, so a drain that
+    // failed skipped it — leaving a live handle for the NEXT test's teardown to
+    // close under, which is the exact hazard this block exists to prevent, just
+    // moved onto an unrelated test.
+    try {
+      await Promise.all(inFlight.splice(0));
+    } finally {
+      for (const c of closers.splice(0)) c();
+      for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // ── T2 / A8 / A11: what the park writes ──────────────────────────────────
