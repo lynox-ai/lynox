@@ -19,6 +19,7 @@ import {
 	type ContentBlock,
 } from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
+import { turnEndSettlesTools, promptCreatedAtMs, lostPromptRecheckVerdict } from './prompt-liveness.js';
 import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody, parseReviewFailure, carryKnowledgeWrites, allKnowledgeWrites, queueEntriesToChips, anchorKnowledgeChips, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
@@ -824,6 +825,57 @@ function mapApiError(status: number, detail: string): string {
 function hasAnyPendingPrompt(): boolean {
 	return pendingPermission !== null || pendingTabsPrompt !== null
 		|| pendingSecretPrompt !== null || pendingMailConnect !== null;
+}
+
+/** How long to wait before asking the server whether a prompt exists that this
+ *  tab never heard about. Long enough to be invisible next to a question parked
+ *  on a human, short enough that nobody stares at a dead screen. */
+const LOST_PROMPT_RECHECK_MS = 12_000;
+let promptRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Ask the server for a pending prompt this tab may never have been told about.
+ *
+ * The `prompt` SSE event is written straight to the response socket and is the
+ * ONLY run event that never enters the RunBuffer — `EmittedStreamEvent` has no
+ * `prompt` member — so `GET /runs/:id/stream?since=` can replay every
+ * `tool_call` and `turn_end` around it but never the question itself. The
+ * server's own comment calls the write "best-effort (client may not be
+ * connected)". Lose it once — a suspended mobile tab, a proxy that buffers, a
+ * socket that died between the check and the write — and the question is
+ * invisible forever while SQLite holds it `pending` for 24h.
+ *
+ * What made that a trap rather than a delay: the user sees no form, types into
+ * the normal composer instead, and that is a NEW run — which takes over the
+ * session, aborts the old one and dismisses the very prompt they were trying to
+ * answer. Then it repeats. Observed on a prod thread 2026-09-06; a reload fixed
+ * it, because page load is one of the three one-shot `checkPendingPrompt()`
+ * callers. This makes that recovery automatic instead of something the user has
+ * to guess at.
+ *
+ * Scheduled on `turn_end` with `stop_reason: 'tool_use'` — the one moment the
+ * client knows tools are about to run, so one of them may be about to park on a
+ * human. Re-arms itself while the run is alive, and stops on its own when the
+ * run ends, when a newer run claims the stream (`streamEpoch`), or as soon as a
+ * prompt is actually known. Cheap by construction: one local GET, and only
+ * while a run is in flight with no prompt on screen.
+ */
+function scheduleLostPromptRecheck(): void {
+	if (promptRecheckTimer !== null) return;
+	const epoch = streamEpoch;
+	const tick = (): void => {
+		promptRecheckTimer = null;
+		const verdict = lostPromptRecheckVerdict({
+			epochAtSchedule: epoch,
+			currentEpoch: streamEpoch,
+			isStreaming,
+			hasPendingPrompt: hasAnyPendingPrompt(),
+		});
+		if (verdict === 'stop') return;
+		if (verdict === 'ask') void checkPendingPrompt();
+		promptRecheckTimer = setTimeout(tick, LOST_PROMPT_RECHECK_MS);
+	};
+	promptRecheckTimer = setTimeout(tick, LOST_PROMPT_RECHECK_MS);
 }
 
 /**
@@ -1719,11 +1771,32 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// `msg` is always the right turn's message here. If the SSE
 			// stream's ordering ever weakens, flip the iteration to a
 			// run-id / message-id lookup.
-			if (msg.toolCalls) {
+			//
+			// ...except for ONE stop_reason, and the premise above is exactly
+			// where it breaks. `turn_end` is emitted from the model stream the
+			// moment a stop_reason arrives (`core/src/core/stream.ts`), and
+			// `stop_reason: 'tool_use'` means the opposite of "turn finished":
+			// the agent dispatches the tools AFTERWARDS
+			// (`core/src/core/agent.ts`, `if (response.stop_reason ===
+			// 'tool_use')`). So on that one reason the results provably have
+			// NOT arrived, and flipping here paints a green ✓ on a tool that
+			// is still running — worst on `ask_user`, which is not slow but
+			// parked on a human, so the check mark says "answered" over a
+			// question nobody has seen. Observed 2026-09-06 on a prod thread.
+			//
+			// The 05-15 ghost-cleanup this block exists for lives on every
+			// OTHER stop_reason (`end_turn`, `max_tokens`, `stop_sequence`),
+			// where the turn really is over and anything still spinning really
+			// is a dropped `tool_result`.
+			const turnStop = typeof data['stop_reason'] === 'string' ? data['stop_reason'] : undefined;
+			if (msg.toolCalls && turnEndSettlesTools(turnStop)) {
 				for (const tc of msg.toolCalls) {
 					if (tc.status === 'running') tc.status = 'done';
 				}
 			}
+			// Same signal, the other consequence: tools are about to run, so one
+			// of them may park on a human whose `prompt` event never arrives.
+			if (turnStop === 'tool_use') scheduleLostPromptRecheck();
 			// Use actual model from this turn (may differ from session default due to Haiku downgrade)
 			const turnModel = typeof data['model'] === 'string' ? data['model'] : sessionModel;
 			if (turnModel && turnModel !== sessionModel) sessionModel = turnModel;
@@ -2232,13 +2305,25 @@ export async function checkPendingPrompt(): Promise<void> {
 		// Restored the same way for every kind: a prompt that named its workflow
 		// while the stream was live must still name it after a reload (v52).
 		const origin = originFromPending(data['origin']);
+		// The countdown is `timeoutMs - (now - receivedAt)`, so `receivedAt` has
+		// to mean "when the prompt was CREATED", not "when this tab learned of
+		// it". Stamping `Date.now()` here restarts the clock on every reload:
+		// a prompt three hours into its 24h TTL rendered as 23:59:49 (observed
+		// 2026-09-06), i.e. the UI promises time the prompt does not have, and
+		// promises it again after each refresh. The server already sends
+		// `createdAt` — a SQLite `datetime()` string in UTC without a zone
+		// suffix, which `Date.parse` would otherwise read as LOCAL time, so
+		// normalise before parsing. Falls back to now when absent or unparseable
+		// (an old engine, a malformed row): a restarted clock is wrong, but a
+		// NaN one renders nothing at all.
+		const createdAt = promptCreatedAtMs(data['createdAt'], Date.now());
 		if (promptType === 'ask_user' && kind === 'tabs' && Array.isArray(data['questions'])) {
 			pendingTabsPrompt = {
 				promptId: String(data['promptId'] ?? ''),
 				questions: data['questions'] as TabsPromptQuestion[],
 				partialAnswers: Array.isArray(data['partialAnswers']) ? (data['partialAnswers'] as (string | null)[]) : undefined,
 				timeoutMs: data['timeoutMs'] as number | undefined,
-				receivedAt: Date.now(),
+				receivedAt: createdAt,
 				origin,
 			};
 		} else if (promptType === 'ask_user') {
@@ -2247,7 +2332,7 @@ export async function checkPendingPrompt(): Promise<void> {
 				segments: parsePromptSegments(data['segments']),
 				options: data['options'] as string[] | undefined,
 				timeoutMs: data['timeoutMs'] as number | undefined,
-				receivedAt: Date.now(),
+				receivedAt: createdAt,
 				promptId: data['promptId'] as string | undefined,
 				// Restore multi-select pills on reconnect (v33) — without this the
 				// prompt degraded to single-select after a reload mid-prompt.
