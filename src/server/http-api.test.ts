@@ -119,6 +119,8 @@ const mockSetWorkflowConfirmedAt = vi.fn().mockReturnValue(true);
 const mockGoogleIsAuthenticated = vi.fn().mockReturnValue(false);
 const mockGoogleStartRedirectAuth = vi.fn().mockReturnValue({ authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=test-state', state: 'test-state' });
 const mockGoogleExchangeRedirectCode = vi.fn().mockResolvedValue(undefined);
+const mockGoogleRevoke = vi.fn().mockResolvedValue(undefined);
+const mockGoogleDisconnect = vi.fn();
 const mockGoogleAuth = {
   isAuthenticated: mockGoogleIsAuthenticated,
   startRedirectAuth: mockGoogleStartRedirectAuth,
@@ -127,7 +129,21 @@ const mockGoogleAuth = {
   startDeviceFlow: vi.fn(),
   getScopes: vi.fn().mockReturnValue([]),
   getTokenExpiry: vi.fn().mockReturnValue(null),
+  revoke: mockGoogleRevoke,
+  disconnect: mockGoogleDisconnect,
 };
+
+/**
+ * The control-plane transport, stubbed so the broker probe can be steered.
+ * Mocked rather than stubbed at `globalThis.fetch`: `cpFetch` asserts the host
+ * policy BEFORE it fetches, and this test is about the route's behaviour, not
+ * about re-testing the egress gate (which has its own suite).
+ */
+const mockCpFetch = vi.fn();
+vi.mock('../core/connector-egress.js', async (importActual) => ({
+  ...(await importActual<typeof import('../core/connector-egress.js')>()),
+  cpFetch: (...args: unknown[]) => mockCpFetch(...args),
+}));
 
 const mockSessionInstance = {
   run: mockSessionRun,
@@ -7192,6 +7208,251 @@ describe('LynoxHTTPApi', () => {
           vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
         }
       });
+    });
+  });
+
+  /**
+   * PRD Stage 1 §3.3 / §3.6 / D12. The route used to open with
+   * `if (!google) return { available: false }` — and on a brokered tenant no
+   * `GoogleAuth` exists until the first successful claim, so every field the
+   * card needs was unreachable in exactly the state the card is for.
+   */
+  describe('Google status route — broker availability and connection state are two levels', () => {
+    /** The engine the API booted, so per-test overrides can be installed. */
+    function engineRef(): Record<string, ReturnType<typeof vi.fn>> {
+      return (api as unknown as { engine: Record<string, ReturnType<typeof vi.fn>> }).engine;
+    }
+
+    let restore: (() => void)[] = [];
+    function override(name: string, impl: unknown): void {
+      const e = engineRef();
+      const orig = e[name];
+      e[name] = vi.fn().mockImplementation(impl as () => unknown);
+      restore.push(() => { e[name] = orig as ReturnType<typeof vi.fn>; });
+    }
+
+    beforeEach(() => {
+      restore = [];
+      // The probe cache lives on the API instance and this suite shares one.
+      (api as unknown as { _brokerProbe: unknown })._brokerProbe = null;
+      mockCpFetch.mockReset();
+      mockCpFetch.mockResolvedValue({ ok: true, json: async () => ({ configured: true }) });
+      vi.stubEnv('LYNOX_MANAGED_CONTROL_PLANE_URL', 'https://cp.example.com');
+    });
+    afterEach(() => {
+      for (const r of restore) r();
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', '');
+    });
+
+    it('answers the brokered tenant that has not claimed yet — every field, not `available:false`', async () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-42');
+      override('getGoogleAuth', () => null);
+      override('getGoogleClientSource', () => null);
+
+      const res = await jsonFetch('/api/google/status');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      // This is the row §6 owes. Under the old early return the response was
+      // `{available:false}` and every assertion below was unreachable.
+      expect(body['available']).toBe(false);
+      expect(body['authenticated']).toBe(false);
+      expect(body['managed_broker']).toBe(true);
+      expect(body['broker_available']).toBe(true);
+      expect(body['mode']).toBeNull();
+      expect(body['client_source']).toBeNull();
+    });
+
+    it('does not classify a managed tenant with its OWN client as brokered', async () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-42');
+      override('getGoogleClientSource', () => 'vault');
+
+      const body = await (await jsonFetch('/api/google/status')).json() as Record<string, unknown>;
+      // Keyed on the control-plane identity alone this row would read `true`,
+      // and every managed BYO tenant would be refused at `/auth` (D13).
+      expect(body['managed_broker']).toBe(false);
+      expect(body['client_source']).toBe('vault');
+      // …and it still learns the broker exists, because the switch-back needs it.
+      expect(body['broker_available']).toBe(true);
+    });
+
+    it('treats an EMPTY instance marker as not provisioned', async () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', '');
+      override('getGoogleClientSource', () => null);
+
+      const body = await (await jsonFetch('/api/google/status')).json() as Record<string, unknown>;
+      // `!== undefined` would read a half-written env file as "managed" and put
+      // a self-host box into a broker mode whose button goes nowhere.
+      expect(body['managed_broker']).toBe(false);
+      expect(body['broker_available']).toBe(false);
+      expect(mockCpFetch).not.toHaveBeenCalled();
+    });
+
+    it('probes the control plane at most once per 60 s', async () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-42');
+      await jsonFetch('/api/google/status');
+      await jsonFetch('/api/google/status');
+      await jsonFetch('/api/google/status');
+      // The CP rate-limits this route to 30/min PER IP and tenants share egress
+      // IPs, so an uncached probe spends the fleet's budget on one card.
+      expect(mockCpFetch).toHaveBeenCalledTimes(1);
+      expect(mockCpFetch.mock.calls[0]?.[1]).toBe('/oauth/google/status');
+    });
+
+    it('answers 200 with broker_available:false when the probe fails', async () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-42');
+      override('getGoogleClientSource', () => null);
+      mockCpFetch.mockRejectedValue(new Error('Blocked: network access denied'));
+
+      const res = await jsonFetch('/api/google/status');
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body['broker_available']).toBe(false);
+      // A card that offers a button which cannot work is worse than one that
+      // says the connection is still being set up — and a 500 here would take
+      // the whole card down with it.
+      expect(body['managed_broker']).toBe(true);
+    });
+
+    it('reports a CP that has no Google client as unavailable', async () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-42');
+      mockCpFetch.mockResolvedValue({ ok: true, json: async () => ({ configured: false }) });
+      const body = await (await jsonFetch('/api/google/status')).json() as Record<string, unknown>;
+      expect(body['broker_available']).toBe(false);
+    });
+
+    it('computes the mode server-side from the granted scopes', async () => {
+      mockGoogleIsAuthenticated.mockReturnValue(true);
+      mockGoogleAuth.getAccountInfo.mockReturnValue({
+        scopes: [
+          'openid',
+          'https://www.googleapis.com/auth/userinfo.email',
+          'https://www.googleapis.com/auth/calendar.events',
+          'https://www.googleapis.com/auth/calendar.freebusy',
+          'https://www.googleapis.com/auth/drive.file',
+        ],
+        expiresAt: null,
+        hasRefreshToken: true,
+      });
+      try {
+        const body = await (await jsonFetch('/api/google/status')).json() as Record<string, unknown>;
+        expect(body['mode']).toBe('standard');
+      } finally {
+        mockGoogleIsAuthenticated.mockReturnValue(false);
+        mockGoogleAuth.getAccountInfo.mockReturnValue({});
+      }
+    });
+
+    it('calls an old grant `legacy` rather than forcing it into a named mode', async () => {
+      mockGoogleIsAuthenticated.mockReturnValue(true);
+      mockGoogleAuth.getAccountInfo.mockReturnValue({
+        scopes: ['https://www.googleapis.com/auth/gmail.readonly'],
+        expiresAt: null, hasRefreshToken: true,
+      });
+      try {
+        const body = await (await jsonFetch('/api/google/status')).json() as Record<string, unknown>;
+        expect(body['mode']).toBe('legacy');
+      } finally {
+        mockGoogleIsAuthenticated.mockReturnValue(false);
+        mockGoogleAuth.getAccountInfo.mockReturnValue({});
+      }
+    });
+  });
+
+  describe('POST /api/google/auth — the broker predicate decides who is refused', () => {
+    function engineRef(): Record<string, ReturnType<typeof vi.fn>> {
+      return (api as unknown as { engine: Record<string, ReturnType<typeof vi.fn>> }).engine;
+    }
+    let restore: (() => void)[] = [];
+    function override(name: string, impl: unknown): void {
+      const e = engineRef();
+      const orig = e[name];
+      e[name] = vi.fn().mockImplementation(impl as () => unknown);
+      restore.push(() => { e[name] = orig as ReturnType<typeof vi.fn>; });
+    }
+    beforeEach(() => {
+      restore = [];
+      // The redirect flow is the managed one; without an ORIGIN the route falls
+      // back to the device flow, which is a different question.
+      vi.stubEnv('ORIGIN', 'https://test.example.com');
+      mockGoogleStartRedirectAuth.mockReturnValue({
+        authUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=test-state',
+        state: 'test-state',
+      });
+    });
+    afterEach(() => {
+      for (const r of restore) r();
+      vi.unstubAllEnvs();
+      vi.stubEnv('LYNOX_HTTP_SECRET', TEST_SECRET);
+      vi.stubEnv('LYNOX_TRUST_PROXY', 'true');
+      vi.stubEnv('LYNOX_ALLOW_PLAIN_HTTP', 'true');
+    });
+
+    it('refuses a brokered tenant with 400 managed_broker', async () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-42');
+      override('getGoogleClientSource', () => null);
+
+      const res = await jsonFetch('/api/google/auth', { method: 'POST', body: JSON.stringify({ scopeMode: 'full' }) });
+      expect(res.status).toBe(400);
+      expect((await res.json() as { error?: string }).error).toBe('managed_broker');
+      expect(mockGoogleStartRedirectAuth).not.toHaveBeenCalled();
+    });
+
+    it('lets a managed tenant with its OWN client through — the row that a CP-identity predicate breaks', async () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst-42');
+      override('getGoogleClientSource', () => 'vault');
+
+      const res = await jsonFetch('/api/google/auth', { method: 'POST', body: JSON.stringify({ scopeMode: 'standard' }) });
+      expect(res.status).toBe(200);
+      expect(mockGoogleStartRedirectAuth).toHaveBeenCalled();
+    });
+
+    it('lets a self-host box with an EMPTY marker and no pair through', async () => {
+      vi.stubEnv('LYNOX_MANAGED_INSTANCE_ID', '');
+      override('getGoogleClientSource', () => null);
+
+      // Neither `source === "env"` nor the CP identity observes this case; only
+      // the emptiness of the marker does.
+      const res = await jsonFetch('/api/google/auth', { method: 'POST', body: JSON.stringify({}) });
+      expect(res.status).toBe(200);
+    });
+
+    it('requests the standard set by default and the full set on demand', async () => {
+      mockGoogleStartRedirectAuth.mockClear();
+      await jsonFetch('/api/google/auth', { method: 'POST', body: JSON.stringify({}) });
+      const standard = mockGoogleStartRedirectAuth.mock.calls[0]?.[1] as string[];
+      expect(standard).toContain('https://www.googleapis.com/auth/drive.file');
+      // The whole point of the default set: no scope in it costs a CASA audit.
+      expect(standard).not.toContain('https://www.googleapis.com/auth/gmail.readonly');
+      expect(standard).not.toContain('https://www.googleapis.com/auth/drive');
+
+      mockGoogleStartRedirectAuth.mockClear();
+      await jsonFetch('/api/google/auth', { method: 'POST', body: JSON.stringify({ scopeMode: 'full' }) });
+      const full = mockGoogleStartRedirectAuth.mock.calls[0]?.[1] as string[];
+      expect(full).toContain('https://www.googleapis.com/auth/drive');
+      expect(full.length).toBeGreaterThan(standard.length);
+    });
+  });
+
+  describe('POST /api/google/disconnect — D12 drops the grant without revoking it', () => {
+    it('clears the local token and issues no revoke request to Google', async () => {
+      mockGoogleRevoke.mockClear();
+      mockGoogleDisconnect.mockClear();
+
+      const res = await jsonFetch('/api/google/disconnect', { method: 'POST' });
+      expect(res.status).toBe(200);
+      expect(mockGoogleDisconnect).toHaveBeenCalledTimes(1);
+      // The grant is the USER's and revoking it is irreversible. A test written
+      // on the old trigger (`/revoke`) goes green against an implementation
+      // that revokes on the switch-back path anyway.
+      expect(mockGoogleRevoke).not.toHaveBeenCalled();
+    });
+
+    it('/api/google/revoke still revokes — the control that keeps the line above meaningful', async () => {
+      mockGoogleRevoke.mockClear();
+      mockGoogleDisconnect.mockClear();
+      await jsonFetch('/api/google/revoke', { method: 'POST' });
+      expect(mockGoogleRevoke).toHaveBeenCalledTimes(1);
+      expect(mockGoogleDisconnect).not.toHaveBeenCalled();
     });
   });
 

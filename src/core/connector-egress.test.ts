@@ -525,17 +525,21 @@ describe('source: every authenticated Google call goes through the helper', () =
     expect(offenders).toEqual([]);
   });
 
-  it('all 16 Google sites and both control-plane sites are accounted for', () => {
+  it('all 16 Google sites and all 3 control-plane sites are accounted for', () => {
     // The count is the PRD's, re-measured here rather than trusted: 12 in
     // `integrations/google/`, 3 Gmail-API fetches in `mail/`, 1 in
-    // `core/backup-upload-gdrive.ts`. Plus the two control-plane calls, which
+    // `core/backup-upload-gdrive.ts`. Plus the control-plane calls, which
     // are deliberately NOT in the Google set — routing them through
     // GOOGLE_API_HOSTS would refuse the CP host and break every brokered
     // refresh in the fleet.
+    //
+    // The CP count went 2 → 3 with the `broker_available` probe on
+    // `GET /api/google/status`: the claim POST, the refresh POST, and now the
+    // probe. A new CP call is exactly what this number exists to make visible.
     const count = (re: RegExp): number => callers
       .reduce((n, f) => n + (f.code.match(re)?.length ?? 0), 0);
     expect(count(/\bgoogleFetch\s*\(/g)).toBe(16);
-    expect(count(/\bcpFetch\s*\(/g)).toBe(2);
+    expect(count(/\bcpFetch\s*\(/g)).toBe(3);
   });
 
   it('every one of those sites passes a POLICY, not `undefined`', () => {

@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+### Changed — BREAKING (integrators): the Google scope sets are re-cut
+
+- **`READ_ONLY_SCOPES` and `WRITE_SCOPES` are removed** from the package's
+  public exports. They were a read/write split, and Google's own split is
+  non-sensitive / sensitive / restricted — the two do not line up. `drive.file`
+  is a *write* scope that costs no verification at all, and it sat in neither
+  list; an export named `READ_ONLY_SCOPES` returning write scopes was going to
+  mislead somebody eventually.
+
+  Replaced by `STANDARD_SCOPES`, `SENSITIVE_EXTRA_SCOPES`, `RESTRICTED_SCOPES`
+  and `FULL_SCOPES` (the union). Nothing that was accepted before is rejected
+  now: every one of the twelve previously-valid scopes is still in the union,
+  pinned by a test, because a narrowed allowlist breaks a re-consent for anyone
+  carrying one of them in `google_oauth_scopes`.
+
+- **The default consent set changed**, and this is user-visible at the Google
+  consent screen. It was the five `*.readonly` scopes (Gmail, Sheets, Drive,
+  Calendar, Docs); it is now `openid`, `userinfo.email`, `calendar.events`,
+  `calendar.freebusy` and `drive.file`. The point of the new set is that no
+  scope in it is *restricted* by Google's classification, so it needs app
+  verification but no annual CASA assessment. **Existing connections are not
+  touched** — the change applies to the next consent.
+
+- **The `full` mode now requests more than it did**: standard plus every
+  sensitive and restricted scope, which adds `mail.google.com/`,
+  `gmail.compose`, `gmail.metadata`, `drive.metadata.readonly`, `calendar` and
+  `calendar.calendarlist.readonly`. Users choosing `full` will see a heavier
+  consent screen than before. No lynox tool consumes the four Gmail entries
+  today; the mode means "everything this client may ever need without a second
+  consent".
+
+### Changed: every Google tool action is gated on the scope it actually calls with
+
+- Read actions were gated by nothing. That was invisible while the default set
+  granted every read scope, and it stops being invisible on a connection that
+  grants Calendar and Drive-file access only: a `google_sheets read` there was
+  authorised by nothing lynox had asked for, so it reached Google and returned
+  a bare 403 body into the conversation. Each tool now declares one scope table
+  over its own actions, and an action with no authorising scope refuses before
+  the request, naming the missing scope and where this connection can widen it.
+
+- Two consequences worth knowing: `google_calendar free_busy` now requires
+  `calendar.freebusy`, `calendar.readonly` or `calendar` — `calendar.events`
+  does **not** authorise `freebusy.query`, and a grant holding only that scope
+  used to fail at Google instead. And `google_drive move`/`share` continue to
+  require full `drive` rather than `drive.file`, because both take an arbitrary
+  file id that `drive.file` does not reach.
+
 ### Changed — BREAKING (operators): `network_policy` now covers Google
 
 - **A tenant on `network_policy = deny-all` loses their connected Google account,

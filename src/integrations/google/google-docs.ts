@@ -2,6 +2,7 @@ import type { ToolEntry, IAgent } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
 import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
+import { refuseUnlessScoped } from './action-scopes.js';
 import type { DocsDocument } from './google-docs-format.js';
 import { docsToMarkdown, markdownToHtml } from './google-docs-format.js';
 import { getErrorMessage } from '../../core/utils.js';
@@ -28,7 +29,25 @@ interface BatchUpdateResponse {
 // === Constants ===
 
 const DOCS_BASE = 'https://docs.googleapis.com/v1/documents';
-const WRITE_ACTIONS = new Set(['create', 'append', 'replace']);
+/**
+ * The scopes each action's own API call accepts — see `action-scopes.ts`.
+ * `documents.get` also accepts Drive scopes, but only for a document the app
+ * itself created (`drive.file`); an arbitrary `document_id` is not covered, so
+ * reading keeps requiring a Docs scope.
+ */
+const ACTION_SCOPES: Record<DocsInput['action'], readonly string[]> = {
+  read: [SCOPES.DOCS_READONLY, SCOPES.DOCS],
+  create: [SCOPES.DOCS],
+  append: [SCOPES.DOCS],
+  replace: [SCOPES.DOCS],
+};
+
+const ACTION_DESCRIPTIONS: Record<DocsInput['action'], string> = {
+  read: 'Reading a document',
+  create: 'Creating a document',
+  append: 'Appending to a document',
+  replace: 'Replacing text in a document',
+};
 
 // === Helpers ===
 
@@ -110,9 +129,13 @@ export function createDocsTool(getAuth: () => GoogleAuth | null): ToolEntry<Docs
       const auth = getAuth();
       if (!auth) return GOOGLE_NOT_CONNECTED;
       try {
-        // Check write scope
-        if (WRITE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.DOCS)) {
-          return `Error: This action requires document write permissions. Grant access in Settings → Channels → Google.`;
+        // `hasOwn`, not a truthiness check on the lookup: `input.action` is
+        // typed but arrives from the model, so an unrecognised value is
+        // reachable at runtime and must fall through to the unknown-action
+        // error below rather than be silently admitted.
+        if (Object.hasOwn(ACTION_SCOPES, input.action)) {
+          const refusal = refuseUnlessScoped(auth, ACTION_SCOPES[input.action], ACTION_DESCRIPTIONS[input.action]);
+          if (refusal) return refusal;
         }
 
         // Write actions confirmation is owned by the permission guard

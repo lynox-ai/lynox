@@ -14,17 +14,32 @@
 import { getApiBase } from '../../config.svelte.js';
 import { t } from '../../i18n.svelte.js';
 import { addToast } from '../toast.svelte.js';
+import {
+	scopeMismatch,
+	toggleForServerMode,
+	type ScopeMode,
+	type ServerScopeMode,
+} from './google-scope-labels.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export interface GoogleStatus {
+	/** A Google credential exists in the engine. NOT "the broker is reachable". */
 	available: boolean;
 	authenticated?: boolean;
 	scopes?: string[];
 	expiresAt?: string | null;
 	hasRefreshToken?: boolean;
+	/** Which source supplied the client pair; `null` on a brokered tenant. */
+	client_source?: 'vault' | 'env' | 'config' | null;
+	/** Provisioned instance AND no client pair of its own. */
+	managed_broker?: boolean;
+	/** The control plane holds a Google client. Says nothing about consent. */
+	broker_available?: boolean;
+	/** Server-computed: the client cannot see the per-tenant scope override. */
+	mode?: ServerScopeMode | null;
 }
 
 export interface DeviceFlow {
@@ -32,7 +47,8 @@ export interface DeviceFlow {
 	userCode: string;
 }
 
-export type ScopeMode = 'readonly' | 'full';
+export type { ScopeMode, ServerScopeMode, ServiceGrant } from './google-scope-labels.js';
+export { grantedServices } from './google-scope-labels.js';
 
 // ---------------------------------------------------------------------------
 // State
@@ -47,10 +63,20 @@ let googleClientId = $state('');
 let googleClientSecret = $state('');
 let googleCredSaving = $state(false);
 let googleCredSaved = $state(false);
-let scopeMode = $state<ScopeMode>('readonly');
+let scopeMode = $state<ScopeMode>('standard');
+/**
+ * Has the USER moved the toggle since the status was loaded?
+ *
+ * A mismatch is an expression of intent, not an observation. Deriving it from
+ * the grant alone — which is what `detectScopeMode` did — made every legacy
+ * connection render a permanent "re-authorize" prompt for a change nobody
+ * asked for.
+ */
+let scopeModeTouched = $state(false);
 
 // Managed-broker state
 let managedGoogleClaiming = $state(false);
+let switchingToManaged = $state(false);
 
 // Auth-poll handle — module-scoped so multiple consumers can clear it.
 let authPollInterval: ReturnType<typeof setInterval> | null = null;
@@ -97,36 +123,36 @@ export function getScopeMode(): ScopeMode {
 }
 export function setScopeMode(m: ScopeMode): void {
 	scopeMode = m;
+	scopeModeTouched = true;
 }
 export function isManagedGoogleClaiming(): boolean {
 	return managedGoogleClaiming;
 }
-
-// ---------------------------------------------------------------------------
-// Scope helpers — detect current scope mode from granted scopes
-// ---------------------------------------------------------------------------
-
-const WRITE_SCOPE_PREFIX = [
-	'.send',
-	'.modify',
-	'/spreadsheets',
-	'/drive',
-	'/calendar.events',
-	'/documents',
-];
-
-export function detectScopeMode(scopes: string[]): ScopeMode {
-	return scopes.some((s) =>
-		WRITE_SCOPE_PREFIX.some((w) => s.includes(w) && !s.includes('.readonly')),
-	)
-		? 'full'
-		: 'readonly';
+export function isSwitchingToManaged(): boolean {
+	return switchingToManaged;
 }
 
-/** `true` when the granted scopes don't match the user's current toggle. */
+// ---------------------------------------------------------------------------
+// Scope helpers — what the GRANT actually says
+// ---------------------------------------------------------------------------
+
+/**
+ * `true` only after the USER changed the toggle away from what is granted.
+ *
+ * `legacy` is deliberately not a mismatch: nothing was chosen, so there is
+ * nothing to reconcile until the user picks a mode.
+ */
 export function isScopeMismatch(): boolean {
-	if (!googleStatus?.authenticated || !googleStatus.scopes) return false;
-	return detectScopeMode(googleStatus.scopes) !== scopeMode;
+	return scopeMismatch({
+		touched: scopeModeTouched,
+		authenticated: googleStatus?.authenticated === true,
+		serverMode: googleStatus?.mode,
+		toggle: scopeMode,
+	});
+}
+
+export function getServerScopeMode(): ServerScopeMode | null {
+	return googleStatus?.mode ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,9 +165,12 @@ export async function loadGoogleStatus(): Promise<void> {
 		const res = await fetch(`${getApiBase()}/google/status`);
 		if (!res.ok) throw new Error();
 		googleStatus = (await res.json()) as GoogleStatus;
-		if (googleStatus?.scopes?.length) {
-			scopeMode = detectScopeMode(googleStatus.scopes);
-		}
+		// The server decides the mode; the client only parks the toggle on it.
+		// A `legacy` grant parks at `standard` and is NOT a mismatch — see
+		// `isScopeMismatch`. Loading a status is not an act of intent, so the
+		// touched flag resets here.
+		scopeMode = toggleForServerMode(googleStatus?.mode);
+		scopeModeTouched = false;
 	} catch {
 		googleStatus = null;
 	}
@@ -275,18 +304,71 @@ export async function revokeGoogle(): Promise<void> {
 	await loadGoogleStatus();
 }
 
+/**
+ * Delete the stored client pair, checking BOTH deletions.
+ *
+ * `fetch` rejects only on a network error, so the previous `Promise.all` with
+ * no `res.ok` check reported success when one DELETE answered 500 and the
+ * other 200 — leaving a half-deleted pair behind and telling the user it was
+ * gone. Returns whether the pair is actually gone; callers must not proceed on
+ * `false`.
+ */
+async function deleteClientPair(): Promise<boolean> {
+	const [id, secret] = await Promise.all([
+		fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_ID`, { method: 'DELETE' }),
+		fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_SECRET`, { method: 'DELETE' }),
+	]);
+	return id.ok && secret.ok;
+}
+
 export async function resetGoogleCredentials(): Promise<void> {
 	try {
-		await Promise.all([
-			fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_ID`, { method: 'DELETE' }),
-			fetch(`${getApiBase()}/secrets/GOOGLE_CLIENT_SECRET`, { method: 'DELETE' }),
-		]);
+		if (!(await deleteClientPair())) {
+			addToast(t('integrations.google_switch_failed'), 'error', 10000);
+			await loadGoogleStatus();
+			return;
+		}
 		await fetch(`${getApiBase()}/google/reload`, { method: 'POST' });
 		flow = null;
 		googleCredSaved = false;
 		await loadGoogleStatus();
 	} catch {
 		addToast(t('common.save_failed'), 'error');
+	}
+}
+
+/**
+ * D12 — give up this tenant's own Google client and land on the managed one.
+ *
+ * Order matters and is the whole safety argument: the local tokens go first
+ * (they are worthless once the pair they were minted under is gone), then the
+ * vault pair, and BOTH deletions are checked. Nothing is revoked at Google —
+ * see `GoogleAuth.disconnect`. The confirm that names the two costs lives in
+ * the card; this function is the destructive half and must not be reachable
+ * without it.
+ */
+export async function switchToManagedGoogle(): Promise<boolean> {
+	switchingToManaged = true;
+	try {
+		const dropped = await fetch(`${getApiBase()}/google/disconnect`, { method: 'POST' });
+		if (!dropped.ok) {
+			addToast(t('integrations.google_switch_failed'), 'error', 10000);
+			return false;
+		}
+		if (!(await deleteClientPair())) {
+			addToast(t('integrations.google_switch_failed'), 'error', 10000);
+			return false;
+		}
+		await fetch(`${getApiBase()}/google/reload`, { method: 'POST' });
+		flow = null;
+		googleCredSaved = false;
+		return true;
+	} catch {
+		addToast(t('integrations.google_switch_failed'), 'error', 10000);
+		return false;
+	} finally {
+		switchingToManaged = false;
+		await loadGoogleStatus();
 	}
 }
 

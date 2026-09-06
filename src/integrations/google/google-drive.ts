@@ -2,6 +2,7 @@ import type { ToolEntry, IAgent, PromptText } from '../../types/index.js';
 import type { GoogleAuth } from './google-auth.js';
 import { SCOPES } from './google-auth.js';
 import { GOOGLE_NOT_CONNECTED } from './not-connected.js';
+import { refuseUnlessScoped } from './action-scopes.js';
 import { getErrorMessage } from '../../core/utils.js';
 import { wrapChannelMessage } from '../../core/data-boundary.js';
 import { pv } from '../../core/prompt-value.js';
@@ -56,8 +57,34 @@ const EXPORT_MIME_MAP: Record<string, string> = {
 };
 
 const CONFIRM_ACTIONS = new Set(['upload', 'create_doc', 'move', 'share']);
-const WRITE_SCOPE_ACTIONS = new Set(['upload', 'create_doc']);
-const FULL_SCOPE_ACTIONS = new Set(['move', 'share']);
+/**
+ * The scopes each action's own API call accepts — see `action-scopes.ts`.
+ *
+ * `move` and `share` keep requiring FULL `drive` even though `files.update`
+ * and `permissions.create` also accept `drive.file`: both take an arbitrary
+ * `file_id`, and `drive.file` reaches only files this app created or the user
+ * picked. Widening them to `drive.file` would make the gate pass and the call
+ * still fail — a decided narrowing, not an oversight.
+ */
+const ACTION_SCOPES: Record<DriveInput['action'], readonly string[]> = {
+  search: [SCOPES.DRIVE_FILE, SCOPES.DRIVE_READONLY, SCOPES.DRIVE, SCOPES.DRIVE_METADATA_READONLY],
+  list: [SCOPES.DRIVE_FILE, SCOPES.DRIVE_READONLY, SCOPES.DRIVE, SCOPES.DRIVE_METADATA_READONLY],
+  read: [SCOPES.DRIVE_FILE, SCOPES.DRIVE_READONLY, SCOPES.DRIVE],
+  upload: [SCOPES.DRIVE_FILE, SCOPES.DRIVE],
+  create_doc: [SCOPES.DRIVE_FILE, SCOPES.DRIVE],
+  move: [SCOPES.DRIVE],
+  share: [SCOPES.DRIVE],
+};
+
+const ACTION_DESCRIPTIONS: Record<DriveInput['action'], string> = {
+  search: 'Searching Drive',
+  list: 'Listing Drive files',
+  read: 'Reading a Drive file',
+  upload: 'Uploading a file',
+  create_doc: 'Creating a Google Doc',
+  move: 'Moving a file',
+  share: 'Sharing a file',
+};
 
 // === Helpers ===
 
@@ -164,11 +191,13 @@ export function createDriveTool(getAuth: () => GoogleAuth | null): ToolEntry<Dri
       if (!auth) return GOOGLE_NOT_CONNECTED;
       try {
         // Check scopes
-        if (WRITE_SCOPE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.DRIVE_FILE)) {
-          return `Error: This action requires drive.file scope. Grant access in Settings → Channels → Google.`;
-        }
-        if (FULL_SCOPE_ACTIONS.has(input.action) && !auth.hasScope(SCOPES.DRIVE)) {
-          return `Error: This action requires full Drive scope. Grant access in Settings → Channels → Google.`;
+        // `hasOwn`, not a truthiness check on the lookup: `input.action` is
+        // typed but arrives from the model, so an unrecognised value is
+        // reachable at runtime and must fall through to the unknown-action
+        // error below rather than be silently admitted.
+        if (Object.hasOwn(ACTION_SCOPES, input.action)) {
+          const refusal = refuseUnlessScoped(auth, ACTION_SCOPES[input.action], ACTION_DESCRIPTIONS[input.action]);
+          if (refusal) return refusal;
         }
 
         // Confirmation — fail-safe: block if no prompt available

@@ -1654,6 +1654,29 @@ const translations: Record<string, Record<Locale, string>> = {
 	'integrations.scope_change_hint': { de: 'Erneute Google-Autorisierung nötig, um die Berechtigungen zu ändern.', en: 'Re-authorization with Google required to change permissions.' },
 	'integrations.scope_label_read': { de: 'Lesen', en: 'Read' },
 	'integrations.scope_label_readwrite': { de: 'Lesen & Schreiben', en: 'Read & Write' },
+	// A per-SCOPE label, because "Read & Write" was derived from
+	// `s.includes('/drive') && !s.includes('.readonly')` — which `drive.file`
+	// satisfies. The card then promised full Drive read-write access next to a
+	// consent screen that had granted access to lynox's own files only.
+	'integrations.scope_label_drive_file': { de: 'Dateien, die lynox anlegt', en: 'Files lynox creates' },
+	'integrations.scope_label_calendar_events': { de: 'Termine lesen & schreiben', en: 'Read & write events' },
+	'integrations.scope_label_freebusy': { de: 'Frei/Belegt', en: 'Free/busy' },
+	'integrations.scope_standard': { de: 'Standard', en: 'Standard' },
+	'integrations.scope_mode_legacy': { de: 'Diese Verbindung wurde mit einem älteren Berechtigungssatz erteilt.', en: 'This connection was granted with an older permission set.' },
+
+	// Managed broker card
+	'integrations.google_broker_connect': { de: 'Mit Google verbinden', en: 'Connect with Google' },
+	'integrations.google_broker_desc': { de: 'lynox fragt Kalender und die Dateien, die lynox für dich anlegt. Kein eigener Google-Cloud-Zugang nötig.', en: 'lynox asks for your calendar and the files lynox creates for you. No Google Cloud project of your own required.' },
+	'integrations.google_broker_unavailable': { de: 'Die verwaltete Google-Verbindung wird gerade eingerichtet — noch nicht verfügbar.', en: 'Managed Google connection is being set up — not available yet.' },
+	'integrations.google_advanced': { de: 'Erweitert — eigenen Google-Cloud-Client verwenden', en: 'Advanced — use your own Google Cloud client' },
+
+	// D12 — switching a BYO connection back to the managed one
+	'integrations.google_switch_to_managed': { de: 'Zur verwalteten Verbindung wechseln', en: 'Switch to the managed connection' },
+	'integrations.google_switch_confirm_title': { de: 'Eigenen Google-Client entfernen?', en: 'Remove your own Google client?' },
+	'integrations.google_switch_confirm_body': { de: 'Deine Client-ID und dein Client-Secret werden gelöscht, danach verbindest du dich über lynox. Zwei Dinge davor: die Zustimmung über lynox kann fehlschlagen, solange die App noch nicht verifiziert ist (Google lässt dann höchstens 100 Konten zu). Und zurück geht es nur, indem du das Client-Paar erneut aus der Google Console einträgst und die Zustimmung wiederholst.', en: 'Your Client ID and Client Secret are deleted, and you then connect through lynox. Two things first: the lynox consent can fail while the app is unverified (Google allows at most 100 accounts until then). And getting back means re-entering the client pair from the Google Console and consenting again.' },
+	'integrations.google_switch_confirm_yes': { de: 'Wechseln', en: 'Switch' },
+	'integrations.google_switch_failed': { de: 'Der Wechsel ist unvollständig — mindestens ein Löschvorgang ist fehlgeschlagen. Die Verbindung wurde NICHT umgestellt.', en: 'The switch is incomplete — at least one deletion failed. The connection was NOT switched over.' },
+	'integrations.google_grant_stays': { de: 'Deine Google-Freigabe für lynox bleibt bestehen. Du kannst sie jederzeit unter myaccount.google.com/permissions entfernen.', en: 'Your Google grant for lynox stays in place. You can remove it any time at myaccount.google.com/permissions.' },
 
 	// Push Notifications
 	'integrations.push_notifications': { de: 'Push-Benachrichtigungen', en: 'Push Notifications' },
