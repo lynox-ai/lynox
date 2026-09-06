@@ -126,11 +126,21 @@ test.describe('composer stays pinned', () => {
 			pane.scrollTop = 200;
 			// scrollTop succeeds on overflow:hidden too (programmatic scrolling
 			// ignores overflow), so assert the pane is genuinely USER-scrollable.
-			return { top: pane.scrollTop, overflowY: getComputedStyle(pane).overflowY };
+			return {
+				top: pane.scrollTop,
+				overflowY: getComputedStyle(pane).overflowY,
+				overscrollY: getComputedStyle(pane).overscrollBehaviorY,
+			};
 		});
 
 		expect(scrolled.top).toBeGreaterThan(0);
 		expect(scrolled.overflowY).toBe('auto');
+		// Overscroll at the transcript's ends must not chain into ancestors —
+		// chaining is the touch-gesture path by which a swipe on the chat used
+		// to move the shell around the pinned composer on iOS. Headless
+		// Chromium cannot perform the chaining gesture itself, so this pins the
+		// computed style (the whole behavior surface CSS controls here).
+		expect(scrolled.overscrollY).toBe('contain');
 	});
 
 	test('the stack block itself stays reachable (scrollable), not clipped away', async ({ page }) => {
@@ -177,5 +187,162 @@ test.describe('composer stays pinned', () => {
 		});
 
 		expect(canScroll).toBe(true);
+	});
+
+	// ── iOS scroll-displacement class (reported again 2026-09-06) ─────────
+	// On an iPhone the composer could be dragged upward, opening whitespace
+	// between it and the status bar — while a drag on the status bar moved
+	// nothing. The asymmetry is structural: the status bar has NO scrollable
+	// ancestor (every box from it to <html> is overflow hidden/clip), while
+	// the composer had exactly one — AppShell's page slot (`overflow-y-auto`).
+	// The fix removes that scroller on pages that own their scrolling
+	// (ChatView declares `data-owns-scroll`; the slot flips to `overflow:
+	// clip` via app.css) and converts the shell's structural containers from
+	// `hidden` to `clip`, because iOS WebKit will also scroll an
+	// overflow:HIDDEN ancestor programmatically to reveal a focused input —
+	// `clip` is the only overflow value that refuses scrolling from everyone.
+	//
+	// LIMIT, stated plainly: headless Chromium has no visual viewport
+	// dynamics, no on-screen keyboard, and (measured 2026-08-09, note above)
+	// no wheel path that scrolls the slot. These tests therefore verify that
+	// the DISPLACEMENT TARGET IS GONE — no ancestor of the composer accepts a
+	// scroll, by gesture or by code — not that an iPhone stops exhibiting the
+	// symptom. That verification only exists on a real device.
+
+	/** Force real overflow into the shell slot, try to scroll it, restore.
+	 *  The forced overflow is the point: without it scrollTop clamps to 0
+	 *  under EVERY overflow value and the probe cannot discriminate clip
+	 *  from auto/hidden (programmatic scroll works on hidden AND auto). */
+	async function probeSlotScroll(page: Page, px: number): Promise<{ moved: number; overflowY: string }> {
+		return await page.evaluate((px) => {
+			const slot = document.querySelector('[data-app-shell-slot]') as HTMLElement | null;
+			if (!slot) throw new Error('page slot not found');
+			const tall = document.createElement('div');
+			tall.style.minHeight = '4000px';
+			slot.appendChild(tall);
+			slot.scrollTop = px;
+			const moved = slot.scrollTop;
+			const overflowY = getComputedStyle(slot).overflowY;
+			tall.remove();
+			slot.scrollTop = 0;
+			return { moved, overflowY };
+		}, px);
+	}
+
+	test('the shell slot is not a scroll container on the chat route', async ({ page }) => {
+		await page.setViewportSize({ width: 390, height: 844 });
+		await page.goto('/app');
+		await page.waitForLoadState('networkidle');
+		await expect(page.locator('textarea').first()).toBeVisible();
+
+		const probe = await probeSlotScroll(page, 200);
+
+		// `clip` — not `auto` (the pre-fix scroller the iPhone drag engaged)
+		// and not `hidden` (still a scroll container; the scrollTop write
+		// above would stick on it).
+		expect(probe.overflowY).toBe('clip');
+		expect(probe.moved).toBe(0);
+	});
+
+	test('the inbox slot is not a scroll container either', async ({ page }) => {
+		// Same defect class, second member: InboxTriagePane pins the triage
+		// footer to the bottom edge, so InboxView also declares
+		// `data-owns-scroll` (its list/reading/triage panes self-scroll).
+		await page.setViewportSize({ width: 390, height: 844 });
+		await page.goto('/app/inbox');
+		await page.waitForLoadState('networkidle');
+
+		const probe = await probeSlotScroll(page, 200);
+		expect(probe.overflowY).toBe('clip');
+		expect(probe.moved).toBe(0);
+	});
+
+	test('no shell ancestor of the composer accepts scroll displacement', async ({ page }) => {
+		await page.setViewportSize({ width: 390, height: 844 });
+		await page.goto('/app');
+		await page.waitForLoadState('networkidle');
+		await expect(page.locator('textarea').first()).toBeVisible();
+
+		const results = await page.evaluate(() => {
+			const textarea = document.querySelector('textarea');
+			if (!textarea) throw new Error('composer textarea not found');
+			const out: Array<{ tag: string; overflowY: string; userScrollable: boolean; displaced: number }> = [];
+			// Walk the REAL ancestor chain of the FOCUSED ELEMENT (the textarea
+			// — iOS keyboard-avoidance scrolls ancestors of the focused input,
+			// nearest first) up to <body>. body itself is excluded: its only
+			// in-flow child is the fixed shell, which never contributes scroll
+			// height — an assumption, not a guarantee; if body ever gains an
+			// in-flow child this walk must extend to it. For each ancestor,
+			// force overflow and try to displace it the way keyboard-avoidance
+			// does — programmatically. Every box on this chain exists to clip,
+			// never to scroll; any one that moves is the whitespace bug's next
+			// home.
+			let el: HTMLElement | null = textarea.parentElement;
+			while (el && el !== document.body) {
+				const cs = getComputedStyle(el);
+				const tall = document.createElement('div');
+				tall.style.minHeight = '4000px';
+				el.appendChild(tall);
+				el.scrollTop = 100;
+				const displaced = el.scrollTop;
+				tall.remove();
+				el.scrollTop = 0;
+				out.push({
+					// getAttribute, not className: className is SVGAnimatedString
+					// on SVG elements and .split would turn a real regression
+					// into an opaque TypeError. Keep enough classes to tell
+					// look-alike DIVs apart in the failure message.
+					tag: el.tagName + '.' + (el.getAttribute('class') ?? '').split(' ').slice(0, 3).join('.'),
+					overflowY: cs.overflowY,
+					userScrollable: cs.overflowY === 'auto' || cs.overflowY === 'scroll',
+					displaced,
+				});
+				el = el.parentElement;
+			}
+			return out;
+		});
+
+		for (const r of results) {
+			// No user-scrollable ancestor: the drag gesture has no target.
+			expect(r.userScrollable, `${r.tag} is user-scrollable`).toBe(false);
+			// No programmatically scrollable ancestor either: WebKit's
+			// keyboard-avoidance has no target. This is what kills a revert of
+			// any single overflow-clip-safe back to overflow-hidden.
+			expect(r.displaced, `${r.tag} accepted scrollTop`).toBe(0);
+		}
+		// Identity check, not just cardinality: the chain must actually contain
+		// the protective clip boxes (textarea wrapper, slot, inner row, main,
+		// right column, body row, shell root = 7). A refactor that reverts or
+		// merges one away shrinks this count and fails here even though the
+		// per-element asserts above cannot see a box that left the chain.
+		const clipCount = results.filter((r) => r.overflowY === 'clip').length;
+		expect(clipCount, `clip boxes in chain: ${results.map((r) => r.tag).join(' > ')}`).toBeGreaterThanOrEqual(7);
+
+		// Past the last inner scroller the chain ends at the document, which
+		// must refuse to rubber-band. html and body each declare
+		// `overscroll-behavior: none` — independently, not redundantly:
+		// body->viewport propagation only applies while html computes `auto`.
+		// Computed style is the surface CSS controls here; the bounce itself
+		// only exists on a touch device.
+		const rootOverscroll = await page.evaluate(() => [
+			getComputedStyle(document.documentElement).overscrollBehaviorY,
+			getComputedStyle(document.body).overscrollBehaviorY,
+		]);
+		expect(rootOverscroll).toEqual(['none', 'none']);
+	});
+
+	test('the shell slot still scrolls a document-shaped route', async ({ page }) => {
+		// The counter-direction: the :has(> [data-owns-scroll]) switch must not
+		// clip pages that RELY on the slot (SettingsIndex renders plain
+		// content and owns no scroller). Kills the "clip the slot everywhere"
+		// mutation that the generic some-div-scrolls test above would survive.
+		await page.setViewportSize({ width: 390, height: 844 });
+		await page.goto('/app/settings');
+		await page.waitForLoadState('networkidle');
+
+		const probe = await probeSlotScroll(page, 150);
+
+		expect(probe.overflowY).toBe('auto');
+		expect(probe.moved).toBeGreaterThan(0);
 	});
 });

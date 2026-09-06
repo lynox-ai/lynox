@@ -510,11 +510,17 @@
 	});
 </script>
 
-<div class="fixed inset-0 flex flex-col overflow-hidden bg-bg" style="padding-top: env(safe-area-inset-top);">
+<!-- Shell chrome uses `overflow-clip-safe` (clip, not hidden) on every
+	structural container: these boxes exist to clip, never to scroll, and on iOS
+	WebKit an overflow:hidden box is still a scroll container that focusing the
+	chat composer can displace (keyboard avoidance scrolls it, no user gesture
+	scrolls it back — the composer detaches and whitespace opens above the
+	status bar). `clip` removes the scroll container instead of hiding it. -->
+<div class="fixed inset-0 flex flex-col overflow-clip-safe bg-bg" style="padding-top: env(safe-area-inset-top);">
 	<!-- Body: sidebar (full height) + right column.
 		`relative` anchors the md+ icon-rail, which is absolutely positioned so it
 		can expand into a flyover ON HOVER without reflowing the right column. -->
-	<div class="relative flex flex-1 min-h-0 overflow-hidden">
+	<div class="relative flex flex-1 min-h-0 overflow-clip-safe">
 		<!-- Mobile overlay -->
 		{#if sidebarOpen}
 			<button
@@ -800,7 +806,7 @@
 		></div>
 
 		<!-- Right column: header + main content -->
-		<div class="flex-1 min-w-0 flex flex-col overflow-hidden">
+		<div class="flex-1 min-w-0 flex flex-col overflow-clip-safe">
 			<!-- Header (above chat area) -->
 			<header class="flex items-center justify-between h-12 px-4 border-b border-border bg-bg shrink-0">
 				<!-- Left: hamburger (mobile) + logo -->
@@ -976,10 +982,24 @@
 				</div>
 			{/if}
 
-			<!-- Main Content -->
-			<main class="flex-1 min-w-0 flex flex-col overflow-hidden">
-				<div class="flex-1 min-h-0 flex overflow-hidden">
-					<div class="flex-1 min-w-0 overflow-y-auto scrollbar-none">
+			<!-- Main Content. `min-h-0` is load-bearing next to `overflow-clip-safe`:
+				`hidden` made this a scroll container, which zeroed the flex item's
+				automatic minimum size; `clip` does not, so without an explicit
+				min-height the content-based minimum reapplies and a tall page grows
+				this column to content height (measured: composer at y=1718 in an
+				844px viewport). -->
+			<main class="flex-1 min-h-0 min-w-0 flex flex-col overflow-clip-safe">
+				<div class="flex-1 min-h-0 flex overflow-clip-safe">
+					<!-- The page slot: the ONE scroller for document-shaped pages.
+						A page whose root declares `data-owns-scroll` (the chat, which
+						pins the composer to the bottom edge and scrolls only its
+						transcript) switches this slot to `overflow: clip` via the
+						[data-app-shell-slot]:has(…) rule in app.css — a bottom-pinned
+						composer inside a scrollable ancestor is exactly what iOS
+						WebKit drags upward (touch scroll-chaining + keyboard
+						avoidance), opening whitespace between composer and status
+						bar. -->
+					<div data-app-shell-slot class="flex-1 min-w-0 overflow-y-auto scrollbar-none">
 						{@render children()}
 					</div>
 

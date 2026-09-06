@@ -2416,8 +2416,17 @@
 	{/if}
 {/snippet}
 
+<!-- `data-owns-scroll`: tells AppShell's page slot that this page scrolls
+	itself (the transcript below is the one scroller) and the slot must stop
+	being a scroll container (see [data-app-shell-slot]:has(…) in app.css).
+	Without it the slot's own `overflow-y-auto` is a scrollable ancestor of the
+	composer, and on iOS a touch drag on the composer (or WebKit's
+	keyboard-avoidance when its textarea focuses) scrolls the slot: the composer
+	block rides up and dead whitespace opens above the status bar, which sits
+	outside the slot and stays put — the exact asymmetry reported from the
+	iPhone PWA. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="relative flex h-full flex-col" ondragover={handleDragOver}>
+<div data-owns-scroll class="relative flex h-full flex-col" ondragover={handleDragOver}>
 	{#if isDragging}
 		<!-- Drag-n-drop overlay. Covers the whole chat so a file dropped
 		     anywhere lands in the composer (same path as the paperclip + paste).
@@ -2440,9 +2449,15 @@
 	{/if}
 	<!-- Messages — wrapped in a relative flex column so the floating
 	     scroll-to-bottom button can anchor to the viewport's lower-right
-	     without overlapping the composer below. -->
+	     without overlapping the composer below.
+	     `overscroll-y-contain` on the transcript: keeps the transcript's own
+	     iOS rubber-band (unlike `none`) while refusing to chain overscroll
+	     into ancestors. With the whole ancestor chain clip and the document
+	     overscroll-locked this is belt-and-suspenders, not load-bearing —
+	     it stays so the transcript's overscroll semantics remain local even
+	     if an ancestor becomes scrollable again someday. -->
 	<div class="relative flex min-h-0 flex-1 flex-col">
-	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
+	<div class="flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-y-contain px-4 py-6 md:px-6" bind:this={messagesEl} onscroll={onMessagesScroll}>
 		{#if messages.length === 0 && !isStreaming}
 			<div class="flex h-full items-center justify-center">
 				{#if hasApiKey === false}
@@ -3738,7 +3753,13 @@
 						<path stroke-linecap="round" stroke-linejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
 					</svg>
 				</button>
-				<div class="flex-1 flex items-end rounded-2xl md:rounded-[var(--radius-md)] border border-border/50 md:border-border bg-bg overflow-hidden">
+				<!-- `overflow-clip-safe` (not hidden): this is the focused textarea's
+				     NEAREST ancestor, the first box iOS keyboard-avoidance would try
+				     to scroll. It never overflows today (autoResize pins the textarea
+				     height), but as `hidden` it would become a displacement vector the
+				     moment anything gives it scrollable overflow — clip cannot be
+				     scrolled by anyone. `min-w-0` pairs with clip (see app.css). -->
+				<div class="flex-1 min-w-0 flex items-end rounded-2xl md:rounded-[var(--radius-md)] border border-border/50 md:border-border bg-bg overflow-clip-safe">
 					<textarea
 						bind:this={textareaEl}
 						bind:value={inputText}
