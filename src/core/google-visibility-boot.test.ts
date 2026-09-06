@@ -62,6 +62,29 @@ describe('Engine boot — the Google tools are visible before a credential exist
     reloadConfig();
   });
 
+  /**
+   * A boot with a client pair in env — i.e. a credential RESOLVES.
+   *
+   * Not "connected": a resolved pair is not a grant, and the two tests below
+   * depend on exactly that distinction. The sibling helper had no counterpart
+   * and the same six lines were pasted at each call site; a third copy is where
+   * they start to drift.
+   */
+  async function bootWithCredential(prefix: string): Promise<Engine> {
+    const dir = mkdtempSync(join(tmpdir(), `lynox-gvis-${prefix}-`));
+    dirs.push(dir);
+    for (const k of ENV_KEYS) setEnv(k, undefined);
+    setEnv('LYNOX_DATA_DIR', dir);
+    setEnv('GOOGLE_CLIENT_ID', `${prefix}-id`);
+    setEnv('GOOGLE_CLIENT_SECRET', `${prefix}-secret`);
+    reloadConfig();
+    const engine = new Engine({} as LynoxConfig);
+    engines.push(engine);
+    await engine.init();
+    expect(engine.getGoogleAuth(), 'a credential must RESOLVE, or the test drives the wrong branch').not.toBeNull();
+    return engine;
+  }
+
   async function bootWithoutCredential(): Promise<Engine> {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-gvis-'));
     dirs.push(dir);
@@ -112,18 +135,11 @@ describe('Engine boot — the Google tools are visible before a credential exist
     //
     // MUTATION THIS KILLS: put the `for (const tool of tools) register(tool)` loop
     // back into `reloadGoogle()`.
-    const dir = mkdtempSync(join(tmpdir(), 'lynox-gvis-reload-'));
-    dirs.push(dir);
-    for (const k of ENV_KEYS) setEnv(k, undefined);
-    setEnv('LYNOX_DATA_DIR', dir);
     // A real pair, so `reloadGoogle()` gets PAST its early return — without one
     // the mutation above would not execute and the test would prove nothing.
-    setEnv('GOOGLE_CLIENT_ID', 'reload-id');
-    setEnv('GOOGLE_CLIENT_SECRET', 'reload-secret');
-    reloadConfig();
-    const engine = new Engine({} as LynoxConfig);
-    engines.push(engine);
-    await engine.init();
+    // That is what `bootWithCredential` supplies, and its own assertion is the
+    // guard against this fixture silently losing the pair.
+    const engine = await bootWithCredential('reload');
 
     const before = engine.getRegistry().version;
     const ok = await engine.reloadGoogle();
@@ -149,17 +165,34 @@ describe('Engine boot — the Google tools are visible before a credential exist
     // `ToolRegistry` has no `unregister`, so "unregisters on disconnect" is not
     // constructible today. It is here to state the invariant, so that adding a
     // removal API later has something to break.
-    const dir = mkdtempSync(join(tmpdir(), 'lynox-gvis-disconnect-'));
-    dirs.push(dir);
-    for (const k of ENV_KEYS) setEnv(k, undefined);
-    setEnv('LYNOX_DATA_DIR', dir);
-    setEnv('GOOGLE_CLIENT_ID', 'connected-id');
-    setEnv('GOOGLE_CLIENT_SECRET', 'connected-secret');
-    reloadConfig();
-    const engine = new Engine({} as LynoxConfig);
-    engines.push(engine);
-    await engine.init();
-    expect(engine.getGoogleAuth(), 'the fixture must start CONNECTED, or there is nothing to disconnect').not.toBeNull();
+    //
+    // ⚠ SCOPE: this is the SELF-HOST disconnect — a pair was configured and is
+    // taken away. It deliberately does not bless the same nulling for a BROKERED
+    // tenant, which has no pair by construction and whose credential is built on
+    // the claim: there `POST /api/google/reload` reaches the same branch and
+    // destroys a working credential. That is a separate, open defect, and this
+    // test must not be read as holding it in place.
+    const engine = await bootWithCredential('disconnect');
+
+    // BOTH directions, for the same reason the suffix test below gives. Asserting
+    // only the refusal AFTER the disconnect passes identically under an
+    // implementation where the tools never resolved at ALL — measured, not
+    // supposed: memoising the resolver at `engine.ts › registerGoogleTools`
+    // (registration runs BEFORE the pair resolve, so the captured value is null)
+    // leaves this file green, and 223 tests under `src/integrations/google` with
+    // it. That is the hazard `integrations/google/index.ts` documents in prose
+    // ("re-read on every call, not memoised") and nothing measured.
+    const handlerFor = (name: string): (i: unknown, a: IAgent) => Promise<string> => {
+      const entry = engine.getRegistry().getEntries().find(e => e.definition.name === name);
+      expect(entry, `${name} must exist`).toBeDefined();
+      return (entry as unknown as { handler: (i: unknown, a: IAgent) => Promise<string> }).handler;
+    };
+    for (const t of GOOGLE_TOOLS) {
+      // A pair resolves and there is no grant, so this answers "Not
+      // authenticated" — a different string, reached without a network call.
+      await expect(handlerFor(t)({ action: 'list' }, {} as IAgent), `${t} must NOT refuse while connected`)
+        .resolves.not.toBe(GOOGLE_NOT_CONNECTED);
+    }
 
     const before = engine.getRegistry().version;
     setEnv('GOOGLE_CLIENT_ID', undefined);
@@ -167,6 +200,10 @@ describe('Engine boot — the Google tools are visible before a credential exist
     reloadConfig();
     const ok = await engine.reloadGoogle();
     expect(ok, 'the fixture must reach the DISCONNECT branch this time').toBe(false);
+    // The source goes with the credential. Without this, dropping the
+    // `_googleClientSource` assignment survives, and `getGoogleClientSource()` /
+    // `isManagedBrokerPair()` keep reporting a pair that is gone.
+    expect(engine.getGoogleClientSource(), 'the client source must go with the credential').toBeNull();
 
     const names = engine.getRegistry().getEntries().map(e => e.definition.name);
     for (const t of GOOGLE_TOOLS) {
@@ -174,11 +211,8 @@ describe('Engine boot — the Google tools are visible before a credential exist
     }
     expect(engine.getRegistry().version - before, 'a disconnect must not touch the registry').toBe(0);
 
-    const entries = engine.getRegistry().getEntries();
     for (const t of GOOGLE_TOOLS) {
-      const entry = entries.find(e => e.definition.name === t);
-      const handler = (entry as unknown as { handler: (i: unknown, a: IAgent) => Promise<string> }).handler;
-      await expect(handler({ action: 'list' }, {} as IAgent), `${t} must refuse again after a disconnect`)
+      await expect(handlerFor(t)({ action: 'list' }, {} as IAgent), `${t} must refuse again after a disconnect`)
         .resolves.toBe(GOOGLE_NOT_CONNECTED);
     }
   });
@@ -186,11 +220,14 @@ describe('Engine boot — the Google tools are visible before a credential exist
   it('the prompt suffix keys on the GRANT, not on the registration', async () => {
     // The third key of the fork decision (PRD Stage 1 §3.2/§3.3): registration
     // hangs on nothing, construction on the first claim, and the SUFFIX on the
-    // grant. The first two are pinned above; this one was not. Measured before
-    // writing it: `GOOGLE_PROMPT_SUFFIX` has five occurrences repo-wide, and the
-    // only two in tests are `cost-regression.test.ts`, which uses it as a
-    // token-budget literal and never asserts the condition — so deleting the
-    // `isAuthenticated()` guard at `session.ts` left the suite green.
+    // grant. The first two are pinned above; this one was not. Measured on the
+    // tree this branch forked from (`550e37a3`, before these tests existed):
+    // `GOOGLE_PROMPT_SUFFIX` had FIVE occurrences under `src`, and the only two
+    // in tests were `cost-regression.test.ts`, which uses it as a token-budget
+    // literal and never asserts the condition — so deleting the
+    // `isAuthenticated()` guard at `session.ts` left the suite green. The count
+    // is bound to that SHA on purpose: written in the present tense it would be
+    // falsified by this very file, which takes it to nine.
     //
     // MUTATION THIS KILLS: drop the guard, i.e. append the suffix
     // unconditionally. The suffix tells the model four tools are usable and the
@@ -199,16 +236,7 @@ describe('Engine boot — the Google tools are visible before a credential exist
     //
     // Both directions, because either one alone is satisfied by a swap: "never
     // append" passes the negative case, "always append" passes the positive.
-    const dir = mkdtempSync(join(tmpdir(), 'lynox-gvis-suffix-'));
-    dirs.push(dir);
-    for (const k of ENV_KEYS) setEnv(k, undefined);
-    setEnv('LYNOX_DATA_DIR', dir);
-    setEnv('GOOGLE_CLIENT_ID', 'suffix-id');
-    setEnv('GOOGLE_CLIENT_SECRET', 'suffix-secret');
-    reloadConfig();
-    const engine = new Engine({} as LynoxConfig);
-    engines.push(engine);
-    await engine.init();
+    const engine = await bootWithCredential('suffix');
 
     // A credential RESOLVES here, and there is still no grant. That is the case
     // the row cares about: keying the suffix on the credential instead of the
