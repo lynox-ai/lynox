@@ -15,6 +15,33 @@ import { fileURLToPath } from 'node:url';
  */
 
 /**
+ * Blank out the CONTENTS of string and template literals, keeping the source's
+ * shape and line count.
+ *
+ * Without this the brace counter below is not counting braces, it is counting
+ * characters that look like braces: a single `const s = '{';` inside a funnel
+ * inflates the depth so that method never closes, every later call is
+ * attributed to it, and the guard returns "no offenders" for a file full of
+ * them. Not an adversarial case — one string literal is enough.
+ */
+function maskLiterals(src: string): string {
+  let out = '';
+  let quote: string | null = null;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]!;
+    if (quote) {
+      if (c === '\\') { out += '  '; i++; continue; }
+      if (c === quote) { quote = null; out += c; continue; }
+      out += c === '\n' ? '\n' : ' ';
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') { quote = c; out += c; continue; }
+    out += c;
+  }
+  return out;
+}
+
+/**
  * The offenders in a TypeScript source: calls to the raw persistence helpers
  * from anywhere but the two funnels.
  *
@@ -22,18 +49,26 @@ import { fileURLToPath } from 'node:url';
  * signature") is wrong in both directions: a call in the NEXT method is
  * skipped, and a method named `_persistTokensLegacy` shields everything inside
  * it because the name is a prefix of the real one. This tracks the enclosing
- * method by brace depth instead, and it is the ONE predicate — the control
- * below runs this same function rather than a copy of it that can drift.
+ * method by brace depth over literal-masked source instead, and it is the ONE
+ * predicate — the control below runs this same function rather than a copy of
+ * it that can drift.
+ *
+ * ⚠ It THROWS when the depth does not return to zero. A counter that ends
+ * unbalanced has mis-attributed something, and the honest answer there is "I
+ * cannot tell you", not an empty offender list that reads like a clean file.
  */
 export function tokenWriteOffenders(src: string): string[] {
-  const stripped = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const stripped = maskLiterals(
+    src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+       .replace(/^([ \t]*)\/\/.*$/gm, '$1'),
+  );
   const FUNNELS = new Set(['_persistTokens', '_dropTokens']);
   const lines = stripped.split('\n');
+  const rawLines = src.split('\n');
   const offenders: string[] = [];
   let depth = 0;
   let methodStack: { name: string; depth: number }[] = [];
   for (const [i, line] of lines.entries()) {
-    // A method header at this depth opens a new scope on the next `{`.
     const header = /^\s*(?:private\s+|public\s+|protected\s+|static\s+|async\s+)*([A-Za-z_$][\w$]*)\s*\(/.exec(line);
     const opens = (line.match(/\{/g) ?? []).length;
     const closes = (line.match(/\}/g) ?? []).length;
@@ -42,10 +77,13 @@ export function tokenWriteOffenders(src: string): string[] {
       && !/^\s*(export\s+)?function\s+(save|delete)TokenData/.test(line)) {
       const enclosing = methodStack.at(-1)?.name ?? '<top-level>';
       // Exact name, not a prefix: `_persistTokensLegacy` is a different method.
-      if (!FUNNELS.has(enclosing)) offenders.push(`${i + 1} [${enclosing}]: ${line.trim()}`);
+      if (!FUNNELS.has(enclosing)) offenders.push(`${i + 1} [${enclosing}]: ${rawLines[i]?.trim() ?? ''}`);
     }
     depth += opens - closes;
     methodStack = methodStack.filter((m) => m.depth < depth);
+  }
+  if (depth !== 0) {
+    throw new Error(`token-write scan: brace depth ended at ${depth}, not 0 — the scan cannot attribute calls to methods and must not report a clean file`);
   }
   return offenders;
 }
@@ -63,6 +101,35 @@ describe('every token write announces itself', () => {
 
   it('saveTokenData and deleteTokenData are called ONLY from the funnels', () => {
     expect(tokenWriteOffenders(src), 'a token write outside the funnel skips the connection row').toEqual([]);
+  });
+
+  it('a brace inside a STRING does not disable the scan', () => {
+    // The accident that made the previous version useless: one `'{'` inside a
+    // funnel inflated the depth, that method never closed, and every later
+    // call was attributed to it — so the guard returned "clean" for a file
+    // full of offenders.
+    const withLiteral = [
+      'class X {',
+      '  private _persistTokens(): void {',
+      "    const s = '{';",
+      '    void s;',
+      '    saveTokenData(this.tokenData, this.vault);',
+      '  }',
+      '  private somethingElse(): void {',
+      '    saveTokenData(this.tokenData, this.vault);',
+      '  }',
+      '}',
+    ].join('\n');
+    const found = tokenWriteOffenders(withLiteral);
+    expect(found).toHaveLength(1);
+    expect(found[0]).toContain('somethingElse');
+  });
+
+  it('refuses to answer when its own counting did not balance', () => {
+    // A counter that ends unbalanced has mis-attributed something. An empty
+    // offender list would then read exactly like a clean file — which is the
+    // failure mode this whole file exists against, one level up.
+    expect(() => tokenWriteOffenders('class X { private a(): void { }')).toThrow(/brace depth ended/);
   });
 
   it('the engine names the vault slot from the leaf module, not a copy', () => {
