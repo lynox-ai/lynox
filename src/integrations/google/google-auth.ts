@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import type { SecretVault } from '../../core/secret-vault.js';
 import { googleFetch, cpFetch } from '../../core/connector-egress.js';
 import type { HostPolicyContext } from '../../core/network-guard.js';
+import { GOOGLE_OAUTH_TOKENS_KEY } from './vault-keys.js';
 
 // === Types ===
 
@@ -192,7 +193,7 @@ const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const DEVICE_AUTH_URL = 'https://oauth2.googleapis.com/device/code';
 const REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
-export const VAULT_TOKEN_KEY = 'GOOGLE_OAUTH_TOKENS';
+export const VAULT_TOKEN_KEY = GOOGLE_OAUTH_TOKENS_KEY;
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000; // Refresh 5 min before expiry
 const LOCALHOST_TIMEOUT_MS = 120_000; // 2 min to complete browser auth
 const DEVICE_POLL_INTERVAL_MS = 5_000; // Poll every 5s for device flow

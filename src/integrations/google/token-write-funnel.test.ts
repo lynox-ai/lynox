@@ -65,6 +65,24 @@ describe('every token write announces itself', () => {
     expect(tokenWriteOffenders(src), 'a token write outside the funnel skips the connection row').toEqual([]);
   });
 
+  it('the engine names the vault slot from the leaf module, not a copy', () => {
+    // Two owners of one string is how a rename desyncs a row from the slot it
+    // names. One owner, and the engine's Google loading stays lazy.
+    const engineSrc = readFileSync(fileURLToPath(new URL('../../core/engine.ts', import.meta.url)), 'utf8');
+    expect(engineSrc).toContain("from '../integrations/google/vault-keys.js'");
+    expect(engineSrc, 'the literal must not be re-typed in the engine')
+      .not.toMatch(/vaultKeys:\s*\['GOOGLE_OAUTH_TOKENS'\]/);
+    // …and the engine must not import the integration itself at module scope:
+    // `google-auth.ts` reaches node:http, node:crypto and the egress guard, and
+    // every other Google import here is a dynamic `await import(...)`.
+    const staticGoogleImports = engineSrc.match(/^import .*integrations\/google.*$/gm) ?? [];
+    expect(staticGoogleImports).toHaveLength(1);
+    expect(staticGoogleImports[0]).toContain('vault-keys.js');
+    // Positive control on the scan: it reads real source and the pattern CAN match.
+    expect(engineSrc.length).toBeGreaterThan(50_000);
+    expect(/^import .*integrations\/google.*$/m.test("import { X } from '../integrations/google/google-auth.js';")).toBe(true);
+  });
+
   it('the SAME predicate sees the shapes a proximity rule would miss', () => {
     // A rule that has never fired is a rule nobody has tested — and these are
     // the two shapes the previous, line-distance version let through.

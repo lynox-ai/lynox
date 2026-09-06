@@ -112,7 +112,7 @@ import { WorkerLoop } from './worker-loop.js';
 import { Session } from './session.js';
 import type { SessionOptions } from './session.js';
 import { resolveClientPair, isManagedBrokerPair, GOOGLE_CLIENT_PAIR, type ClientPairSource, type ClientPairSources } from './google-client-pair.js';
-import { VAULT_TOKEN_KEY as GOOGLE_VAULT_TOKEN_KEY } from '../integrations/google/google-auth.js';
+import { GOOGLE_OAUTH_TOKENS_KEY } from '../integrations/google/vault-keys.js';
 
 /**
  * Per-run metadata passed to lifecycle hooks.
@@ -2287,8 +2287,11 @@ export class Engine {
         granted_at: grantedAt,
       }),
       // The constant, not a copy of its value: a rename would otherwise
-      // desync the row from the slot it names, with no signal anywhere.
-      vaultKeys: [GOOGLE_VAULT_TOKEN_KEY],
+      // desync the row from the slot it names, with no signal anywhere. Read
+      // from a LEAF module — importing it from `google-auth.ts` would be the
+      // engine's only static Google import and would pull the integration,
+      // `node:http` and the egress guard into startup.
+      vaultKeys: [GOOGLE_OAUTH_TOKENS_KEY],
       status: 'active',
     });
   }
