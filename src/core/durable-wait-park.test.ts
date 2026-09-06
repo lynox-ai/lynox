@@ -93,7 +93,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
           const answering = session.promptUser!('Which client?', ['Acme', 'Globex']);
           // Give the closure a turn to insert + park before the test looks.
           await new Promise(r => setImmediate(r));
-          promptId = prompts.getPending('thread-park')?.id;
+          promptId = prompts.getPending(session.sessionId)?.id;
           signalParked();
           return `answered: ${await answering}`;
         })();
@@ -105,7 +105,16 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const createdWith: Array<{ sessionId?: string } | undefined> = [];
     const engine = {
       getTaskManager: () => manager,
-      createSession: (o?: { sessionId?: string }) => { createdWith.push(o); return session as unknown as Session; },
+      // Honours the `sessionId` it is handed. A mock that always answered
+      // 'thread-park' made "same thread" untestable in BEHAVIOUR — the only
+      // assertion left was on the options object — and it also made the second
+      // dispatch collide with the first run's still-pending question on the
+      // per-session unique index.
+      createSession: (o?: { sessionId?: string }) => {
+        createdWith.push(o);
+        session.sessionId = o?.sessionId ?? 'thread-park';
+        return session as unknown as Session;
+      },
       getPromptStore: () => prompts,
       getRunHistory: () => history,
       getUserConfig: () => ({}),
@@ -142,8 +151,10 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     }
 
     releases.push(() => {
-      const pending = prompts.getPending('thread-park');
-      if (pending) prompts.expirePrompt(pending.id);
+      for (const thread of ['thread-park', 'thread-dead']) {
+        const pending = prompts.getPending(thread);
+        if (pending) prompts.expirePrompt(pending.id);
+      }
     });
 
     const loop = new WorkerLoop(engine, router, 60_000);
@@ -661,6 +672,32 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
 
   // ── A7 / A10: what the answer decides ───────────────────────────────────
 
+  /**
+   * The state a dead process leaves: a trigger still `waiting`, and its question
+   * ANSWERED with the pointer intact because no run was there to consume it.
+   *
+   * Built directly rather than by answering the harness's live question — which
+   * is what an earlier version of these tests did, and it stopped being the same
+   * state the moment the in-process answer path started releasing the pointer.
+   * Answering a question someone is waiting for is precisely NOT the case A10
+   * exists for.
+   */
+  function seedAnsweredPark(h: Harness, id: string, thread: string, q: string, a: string): string {
+    h.history.insertTrigger({
+      id, title: `Ask (${id})`, source: 'cron', effect: 'run_agent',
+      // FUTURE `next_run_at` on purpose. Seeding it in the past makes the
+      // trigger due whether or not the re-arm moves it, and the mutation that
+      // re-arms without stamping a new time then changes nothing observable —
+      // measured, it survived exactly that fixture.
+      scheduleCron: '0 9 * * *', nextRunAt: '2099-06-01T00:00:00.000Z',
+      confirmedAt: '2020-01-01T00:00:00.000Z',
+    });
+    h.history.updateTrigger(id, { status: 'waiting', waitingUntil: '2099-01-01T00:00:00.000Z' });
+    const promptId = h.prompts.insertAskUser(thread, q, undefined, undefined, undefined, undefined, id);
+    expect(h.prompts.answerUser(promptId, a), 'fixture guard: the answer must land').toBe(true);
+    return promptId;
+  }
+
   it('A7 — a run whose question went unanswered does NOT report success', async () => {
     // The failure this whole arc started from. `DISMISSED_ANSWER` is a RETURN
     // VALUE: the agent gets `'__dismissed__'`, reasons on it, produces something,
@@ -695,15 +732,11 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
   it('A10 — an answer makes a parked trigger due again', async () => {
     const h = makeHarness();
     await h.parked;
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
-    await waitUntil('the run to un-park', () => h.history.getTrigger('trg-1')?.status !== 'waiting');
-    // Put it back in the parked state a DEAD process would have left: answered
-    // question, trigger still waiting, nobody running it.
-    h.history.updateTrigger('trg-1', { status: 'waiting', waitingUntil: '2099-01-01T00:00:00.000Z' });
+    seedAnsweredPark(h, 'trg-dead', 'thread-dead', 'Which client?', 'Acme');
 
     await h.loop.tick();
 
-    const after = h.history.getTrigger('trg-1');
+    const after = h.history.getTrigger('trg-dead');
     expect(after?.status).toBe('open');
     expect(after?.waiting_until).toBeUndefined();
     expect(new Date(after!.next_run_at!).getTime()).toBeLessThanOrEqual(Date.now());
@@ -715,20 +748,19 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // thread. Drop the answer from the input and this is what fails.
     const h = makeHarness();
     await h.parked;
-    const promptId = h.promptIdOf()!;
-    h.prompts.answerUser(promptId, 'Globex');
-    await waitUntil('the run to un-park', () => h.history.getTrigger('trg-1')?.status !== 'waiting');
-    h.history.updateTrigger('trg-1', {
-      status: 'waiting', waitingUntil: '2099-01-01T00:00:00.000Z', nextRunAt: '2020-01-01T00:00:00.000Z',
-    });
+    const promptId = seedAnsweredPark(h, 'trg-dead', 'thread-dead', 'Which client?', 'Globex');
 
     await h.loop.tick();   // re-arms it
     await h.loop.tick();   // dispatches it
     await waitUntil('the second run to start', () => h.dispatches() >= 2);
 
     const secondPrompt = String(h.sessionRunArgs()[1]?.[0] ?? '');
-    expect(secondPrompt).toContain('Which client?');
-    expect(secondPrompt).toContain('Globex');
+    // The ASSOCIATION, not two loose substrings. Asserting each separately let a
+    // mutation that swaps the two interpolations pass — the re-armed agent would
+    // be told the answer was the question and the question was the answer, with
+    // every test green.
+    expect(secondPrompt).toMatch(/<asked>\s*Which client\?\s*<\/asked>/);
+    expect(secondPrompt).toMatch(/<answer>\s*Globex\s*<\/answer>/);
     // And the answer is claimed exactly once — a later scheduled run must not be
     // handed the same reply again.
     expect(h.prompts.getById(promptId)?.trigger_id).toBeNull();
@@ -741,17 +773,13 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // survived until this test existed.
     const h = makeHarness();
     await h.parked;
-    h.prompts.answerUser(h.promptIdOf()!, 'Globex');
-    await waitUntil('the run to un-park', () => h.history.getTrigger('trg-1')?.status !== 'waiting');
-    h.history.updateTrigger('trg-1', {
-      status: 'waiting', waitingUntil: '2099-01-01T00:00:00.000Z', nextRunAt: '2020-01-01T00:00:00.000Z',
-    });
+    seedAnsweredPark(h, 'trg-dead', 'thread-dead', 'Which client?', 'Globex');
 
     await h.loop.tick();
     await h.loop.tick();
     await waitUntil('the second run to start', () => h.dispatches() >= 2);
 
-    expect(h.sessionOpts()[1]?.sessionId).toBe('thread-park');
+    expect(h.sessionOpts()[1]?.sessionId).toBe('thread-dead');
     expect(h.sessionOpts()[0]?.sessionId, 'a first run has no thread to continue').toBeUndefined();
   });
 
@@ -762,18 +790,81 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // until this test existed.
     const h = makeHarness();
     await h.parked;
-    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
-    await waitUntil('the run to un-park', () => h.history.getTrigger('trg-1')?.status !== 'waiting');
-    h.history.updateTrigger('trg-1', {
-      status: 'waiting', waitingUntil: '2099-01-01T00:00:00.000Z', nextRunAt: '2099-06-01T00:00:00.000Z',
-    });
+    seedAnsweredPark(h, 'trg-dead', 'thread-dead', 'Which client?', 'Acme');
     const lost = vi.spyOn(h.manager, 'endWait').mockReturnValue(false);
 
     await h.loop.tick();
 
-    expect(lost).toHaveBeenCalledWith('trg-1', 'open');           // the pass DID see it
-    expect(h.history.getTrigger('trg-1')?.next_run_at).toBe('2099-06-01T00:00:00.000Z');
+    expect(lost).toHaveBeenCalledWith('trg-dead', 'open');        // the pass DID see it
+    expect(h.history.getTrigger('trg-dead')?.next_run_at).toBe('2099-06-01T00:00:00.000Z');
     lost.mockRestore();
+  });
+
+  it('an answer consumed in-process detaches its prompt, so a SECOND question is not confused for it', async () => {
+    // The chain this closes: a run asks twice. Q1 is answered in-process and the
+    // run reads it directly. If that row stays attached, the tick's re-arm pass
+    // finds an ANSWERED row for a trigger that is now parked on Q2, ends Q2's
+    // wait while the run is still genuinely waiting on it, and stamps it due —
+    // and a restart before Q2 settles leaves it `open`, so Q2's real answer can
+    // never re-arm anything.
+    const h = makeHarness();
+    await h.parked;
+    const q1 = h.promptIdOf()!;
+
+    h.prompts.answerUser(q1, 'Acme');
+    await waitUntil('the run to consume the answer', () => h.prompts.getById(q1)?.trigger_id === null);
+
+    expect(h.prompts.getById(q1)?.status).toBe('answered');   // still answered
+    expect(h.prompts.getById(q1)?.trigger_id).toBeNull();     // but no longer the trigger's
+  });
+
+  it('an answered prompt nobody came for is detached on its own clock', async () => {
+    // The bound on the durable pointer. After the re-arm the row is `answered`
+    // with the pointer live, waiting for a dispatch that may never come — the
+    // trigger can be disabled, its consent revoked, or deleted outright, and
+    // nothing across the two databases would ever release it.
+    const h = makeHarness();
+    await h.parked;
+    const promptId = seedAnsweredPark(h, 'trg-dead', 'thread-dead', 'Which client?', 'Acme');
+    // Backdate it past its own expiry — the shape an unclaimed answer reaches.
+    h.history.getDb().prepare("UPDATE pending_prompts SET expires_at = '2020-01-01T00:00:00.000Z' WHERE id = ?").run(promptId);
+
+    h.prompts.expireOld();
+
+    expect(h.prompts.getById(promptId)?.trigger_id).toBeNull();
+    expect(h.prompts.getById(promptId)?.status, 'it WAS answered — that does not change').toBe('answered');
+  });
+
+  it('but an answer still within its window keeps its pointer', async () => {
+    // Without this the detach could be unconditional and the feature would never
+    // deliver an answer at all.
+    const h = makeHarness();
+    await h.parked;
+    const promptId = seedAnsweredPark(h, 'trg-dead', 'thread-dead', 'Which client?', 'Acme');
+
+    h.prompts.expireOld();
+
+    expect(h.prompts.getById(promptId)?.trigger_id).toBe('trg-dead');
+  });
+
+  it('a secret-shaped answer is MASKED before it enters the prompt', async () => {
+    // The live path already does this: `agent.ts` runs an `ask_user` reply through
+    // `maskSecretPatterns` before the model sees it again, because an ask_user
+    // reply is exactly where someone pastes an API key. Here the same text lands
+    // in the OPENING task prose of an autonomous turn — a stronger position than
+    // the tool result it replaces — so it cannot have less protection.
+    const h = makeHarness();
+    await h.parked;
+    const key = `sk-ant-${'A'.repeat(40)}`;
+    seedAnsweredPark(h, 'trg-dead', 'thread-dead', 'Which key?', `it is ${key} thanks`);
+
+    await h.loop.tick();
+    await h.loop.tick();
+    await waitUntil('the second run to start', () => h.dispatches() >= 2);
+
+    const secondPrompt = String(h.sessionRunArgs()[1]?.[0] ?? '');
+    expect(secondPrompt).not.toContain(key);
+    expect(secondPrompt).toContain('***AAAA');   // masked, not dropped
   });
 
   // ── Auflage 1: recurring is OUT of wave 1, and the test pins today's shape ──

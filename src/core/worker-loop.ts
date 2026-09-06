@@ -16,6 +16,7 @@ import type { Engine } from './engine.js';
 import type { NotificationRouter } from './notification-router.js';
 import type { TriggerRecord, PromptText } from '../types/index.js';
 import { flattenPrompt } from './prompt-value.js';
+import { maskSecretPatterns } from './secret-store.js';
 import { WORKER_PROMPT_SUFFIX } from './prompts.js';
 import { reservePersistentBudget, releasePersistentBudget, getSessionCostCeiling } from './session-budget.js';
 // Pure budget arithmetic, no I/O. It lives under src/server/ because the HTTP
@@ -777,7 +778,21 @@ export class WorkerLoop {
       });
       try {
         const outcome = await promptStore.waitForSettled(promptId, active?.controller.signal);
-        if (outcome.status === 'answered') return outcome.row.answer ?? DISMISSED_ANSWER;
+        if (outcome.status === 'answered') {
+          // The answer has been consumed HERE, by the run that was waiting for
+          // it, so it is this trigger's business no longer — exactly as when the
+          // re-arm path hands one to a new run.
+          //
+          // Not symmetry for its own sake. A run may ask more than once, and each
+          // ask re-parks the trigger. Leaving this row attached means the tick's
+          // re-arm pass finds an ANSWERED row for a trigger that is parked on the
+          // NEXT question, ends that wait while the run is still genuinely waiting
+          // on it, and stamps the trigger due. `activeTasks` stops a duplicate
+          // dispatch, but the row is then `open` rather than `waiting`, so a
+          // restart before the second question settles loses its answer for good.
+          promptStore.releaseTrigger(promptId);
+          return outcome.row.answer ?? DISMISSED_ANSWER;
+        }
         // An ABORTED wait leaves the row `pending` — `waitForSettled` resolves
         // off the signal without touching it. Two consequences, both real: the
         // row keeps this session's slot in the partial unique index
@@ -863,7 +878,21 @@ export class WorkerLoop {
     // reply forever. Losing it once beats carrying it always.
     let prompt = base;
     if (answered) {
-      prompt = `${base}\n\nYou asked: ${answered.question}\nThe answer was: ${answered.answer ?? ''}`;
+      // MASKED and DELIMITED, both for the same reason the live path does it.
+      //
+      // On the in-process path this exact answer comes back as a `tool_result`
+      // block — structurally marked as data — and `agent.ts` runs it through
+      // `maskSecretPatterns` first, because an `ask_user` reply is where someone
+      // pastes an API key. Here the same text becomes part of the opening task
+      // prose of an autonomous turn, which is the strongest position in the
+      // prompt, so it needs at least what the weaker position already got.
+      // Without the mask a secret-shaped answer reaches the model where the live
+      // path would have caught it; without the fences a crafted answer can open
+      // what reads as a second operator-authored task.
+      const q = maskSecretPatterns(answered.question);
+      const a = maskSecretPatterns(answered.answer ?? '');
+      prompt = `${base}\n\nA question you asked earlier has been answered.\n`
+        + `<asked>\n${q}\n</asked>\n<answer>\n${a}\n</answer>`;
       this.engine.getPromptStore()?.releaseTrigger(answered.id);
     }
 
