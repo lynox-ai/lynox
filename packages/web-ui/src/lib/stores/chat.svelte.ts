@@ -2352,8 +2352,12 @@ export async function compactNow(): Promise<{ ok: boolean; error?: string }> {
 			const prevPct = contextBudget?.usagePercent ?? 0;
 			messages.push({ role: 'assistant', content: '', compactionNote: {
 				previousPercent: prevPct,
-				...(data.occupancyBefore !== undefined ? { occupancyBefore: data.occupancyBefore } : {}),
-				...(data.occupancyAfter !== undefined ? { occupancyAfter: data.occupancyAfter } : {}),
+				// `typeof === 'number'`, matching the SSE branch — not `!== undefined`.
+				// The declared type says `number | undefined`, and a looser check lets
+				// a non-number through and makes that declaration a runtime lie. Today
+				// the only reader guards for itself; the next one might not.
+				...(typeof data.occupancyBefore === 'number' ? { occupancyBefore: data.occupancyBefore } : {}),
+				...(typeof data.occupancyAfter === 'number' ? { occupancyAfter: data.occupancyAfter } : {}),
 			} });
 		}
 		// Reset local state so the UI reflects the compacted server-side view.

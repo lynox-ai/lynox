@@ -4789,6 +4789,59 @@ describe('LynoxHTTPApi', () => {
       }, { noKnowledgeStore: true });
     });
 
+    /**
+     * ⭐ The WIRE, not the source. `POST /api/sessions/:id/compact` had no HTTP
+     * test at all, and this PR widens its response body. The other new tests are
+     * unit tests of the formatters plus source guards over Svelte files — none
+     * of which can show that the server actually puts these fields on the
+     * response. That gap sits on the exact file that trips the security gate.
+     */
+    it('⭐ POST /compact returns the occupancy pair the session measured', async () => {
+      const ssRef = (api as unknown as { sessionStore: { get: (id: string) => unknown } }).sessionStore;
+      const origGet = ssRef.get;
+      ssRef.get = (id: string): unknown => (id === 'compact-wire'
+        ? { compact: async () => ({ success: true, summary: 'S', occupancyBefore: 163492, occupancyAfter: 2606 }) }
+        : origGet.call(ssRef, id));
+      try {
+        const res = await jsonFetch('/api/sessions/compact-wire/compact', {
+          method: 'POST', body: JSON.stringify({}),
+        });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({
+          ok: true, summary: 'S', occupancyBefore: 163492, occupancyAfter: 2606,
+        });
+      } finally {
+        ssRef.get = origGet;
+      }
+    });
+
+    /**
+     * ⭐ The other direction, and the one a careless spread would break: an
+     * engine path that reports no occupancy must omit the fields rather than
+     * send `undefined`/`null`. The client renders nothing when either is
+     * missing, and a null would defeat its `typeof === 'number'` guard by
+     * looking present.
+     */
+    it('⭐ POST /compact omits the pair entirely when the session did not report it', async () => {
+      const ssRef = (api as unknown as { sessionStore: { get: (id: string) => unknown } }).sessionStore;
+      const origGet = ssRef.get;
+      ssRef.get = (id: string): unknown => (id === 'compact-bare'
+        ? { compact: async () => ({ success: true, summary: 'S' }) }
+        : origGet.call(ssRef, id));
+      try {
+        const res = await jsonFetch('/api/sessions/compact-bare/compact', {
+          method: 'POST', body: JSON.stringify({}),
+        });
+        expect(res.status).toBe(200);
+        const body = await res.json() as Record<string, unknown>;
+        expect(body).toMatchObject({ ok: true, summary: 'S' });
+        expect('occupancyBefore' in body).toBe(false);
+        expect('occupancyAfter' in body).toBe(false);
+      } finally {
+        ssRef.get = origGet;
+      }
+    });
+
     it('a TAINTED live session routes the answers to pending_review, not user_asserted', async () => {
       await withStores(async (ps, ks) => {
         const start = await (await jsonFetch('/api/onboarding/knowledge/start', {

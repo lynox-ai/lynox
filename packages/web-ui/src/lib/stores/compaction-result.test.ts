@@ -116,14 +116,21 @@ describe('the compaction result is wired from engine to marker', () => {
 		const manual = STORE.slice(STORE.indexOf('export async function compactNow'));
 		const manualBody = manual.slice(0, manual.indexOf('\n}'));
 		expect(manualBody).toContain('{ occupancyBefore: data.occupancyBefore }');
+		// and it must be a TYPE check, not a presence check
+		expect(manualBody).toContain("typeof data.occupancyBefore === 'number'");
 		expect(manualBody).toContain('{ occupancyAfter: data.occupancyAfter }');
 	});
 
 	// The in-progress state is indeterminate by design; a percentage here would
 	// have to be invented. Guards against someone "improving" it into a number.
 	it('shows an indeterminate pulse while compacting, not a figure', () => {
-		const btn = VIEW.slice(VIEW.indexOf("t('chat.compact_in_progress')") - 900);
-		const region = btn.slice(0, btn.indexOf('</button>'));
+		// Anchored on the button's own markup rather than a character offset: a
+		// `- 900` slice is a distance, and a comment added inside the button moves
+		// it silently. Bounded backwards from the label to the opening tag.
+		const labelAt = VIEW.indexOf("t('chat.compact_in_progress')");
+		expect(labelAt).toBeGreaterThan(-1);
+		const openAt = VIEW.lastIndexOf('<button', labelAt);
+		const region = VIEW.slice(openAt, VIEW.indexOf('</button>', labelAt));
 		expect(region).toContain('motion-safe:animate-pulse');
 		expect(region).toContain('{#if compacting}');
 		// And no percentage snuck into the in-progress branch.
