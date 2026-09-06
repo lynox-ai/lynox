@@ -22,6 +22,59 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('source attribution in the grounding block', () => {
+  /**
+   * ⭐ Asserted on the RENDERED constant, not on the source file. The block is a
+   * template literal, and the first attempt at this rule landed OUTSIDE it — a
+   * grep over `prompts.ts` would have found the sentence and reported success
+   * while no model ever received it. Reading the exported value is the only
+   * form of this check that can tell those two apart.
+   */
+  it('⭐ tells the model to carry research URLs into the answer as links', () => {
+    expect(GROUNDING_PROMPT_BLOCK).toContain('Cite what you fetched');
+    expect(GROUNDING_PROMPT_BLOCK).toContain('markdown link');
+  });
+
+  it('⭐ names the tools whose results actually carry URLs', () => {
+    // With the backticks intact — an unescaped one would have terminated the
+    // literal, which is how the first attempt failed to compile.
+    expect(GROUNDING_PROMPT_BLOCK).toContain('`web_research`');
+    expect(GROUNDING_PROMPT_BLOCK).toContain('`http_request`');
+  });
+
+  /**
+   * The reason the rule exists, kept in the prompt because it is the part the
+   * model has to understand: the user cannot see tool results, so an unsourced
+   * researched fact is indistinguishable from an invented one.
+   */
+  it('says why — the user never sees the tool result', () => {
+    expect(GROUNDING_PROMPT_BLOCK).toContain('never sees tool results');
+  });
+
+  /**
+   * The failure modes a bare "cite your sources" invites: linking a search
+   * page nobody read, or assembling a plausible URL — which the same block
+   * already forbids as fabrication.
+   */
+  it('rules out linking a search-results page nobody read', () => {
+    expect(GROUNDING_PROMPT_BLOCK).toContain('never a search-results page');
+  });
+
+  // Bounded on purpose: the rule names the PAGE THE MODEL READ, so it cannot be
+  // satisfied by linking something plausible. The wording was cut hard for the
+  // static-prefix budget (see cost-regression.test.ts) — what survived is the
+  // part a model can generalise from.
+  it('anchors the link to the page actually read', () => {
+    expect(GROUNDING_PROMPT_BLOCK).toContain('the URL of the page you read');
+  });
+
+  // The block ships to sub-agents too (spawn.ts), so the rule must live here
+  // rather than in SYSTEM_PROMPT — and SYSTEM_PROMPT embeds it.
+  it('reaches the main system prompt as well', () => {
+    expect(SYSTEM_PROMPT).toContain('Cite what you fetched');
+  });
+});
+
 describe('proactiveDeepGuidance — feature-gated proactive deep escalation', () => {
   it('is OFF (empty) when the proactive-deep flag is off', () => {
     expect(proactiveDeepGuidance({ proactiveDeep: false, proactiveDeepAnthropic: false, deepSlotProvider: 'openai' })).toBe('');
