@@ -267,6 +267,11 @@ export class Engine {
   private _taskManager: import('./task-manager.js').TaskManager | null = null;
   private _hooks: LynoxHooks[] = [];
   private _toolContext: ToolContext;
+  /**
+   * The connection registry, when there is an `engineDb` to hold it. `null` on
+   * an engine without one, and every consumer must no-op rather than assume.
+   */
+  private _connectionStore: import('./connection-store.js').ConnectionStore | null = null;
   private _googleAuth: import('../integrations/google/google-auth.js').GoogleAuth | null = null;
   /** Which source supplied the Google client pair — the UI routes the card on it. */
   private _googleClientSource: ClientPairSource | null = null;
@@ -1353,6 +1358,12 @@ export class Engine {
         // JSON files remain on disk as a rollback backup).
         const { ConnectionStore } = await import('./connection-store.js');
         const connStore = new ConnectionStore(this.engineDb);
+        // Retained on the engine, not only handed to the api-store. It used to
+        // be a local `const` that went out of scope the moment this block
+        // ended, so §3.10's token-change handler had nothing to call — the
+        // estimate that said "the store is already on the engine" was measuring
+        // a reachability that did not exist.
+        this._connectionStore = connStore;
         this._apiStore.importFromDirectoryIfNeeded(apisDir, connStore);
         loaded = this._apiStore.loadFromConnections(connStore);
         this._apiStore.setConnectionStore(connStore);
@@ -1604,19 +1615,7 @@ export class Engine {
     this._googleClientSource = googlePair?.source ?? null;
     if (googlePair) {
       try {
-        const { createGoogleAuth } = await import('../integrations/google/index.js');
-        this._googleAuth = createGoogleAuth({
-          clientId: googlePair.clientId,
-          clientSecret: googlePair.clientSecret,
-          serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
-          vault: this.secretVault ?? undefined,
-          scopes: this.userConfig.google_oauth_scopes,
-          // The live host-policy view (§3.8). `_toolContext` is created once in
-          // the constructor and mutated in place, so this reference keeps
-          // seeing the CURRENT policy — a snapshot would freeze the value this
-          // credential was built under.
-          hostPolicy: hostPolicyOf(this._toolContext),
-        });
+        this._googleAuth = await this._createGoogleAuth(googlePair);
       } catch {
         // Google Workspace init failed — non-critical, continue without it
       }
@@ -2180,17 +2179,93 @@ export class Engine {
     if (this._googleAuth) return this._googleAuth;
     if (!process.env['LYNOX_MANAGED_INSTANCE_ID']) return null;
     try {
-      const { createGoogleAuth } = await import('../integrations/google/index.js');
-      this._googleAuth = createGoogleAuth({
-        serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
-        vault: this.secretVault ?? undefined,
-        scopes: this.userConfig.google_oauth_scopes,
-        hostPolicy: hostPolicyOf(this._toolContext),
-      });
+      this._googleAuth = await this._createGoogleAuth(null);
       return this._googleAuth;
     } catch {
       return null;
     }
+  }
+
+  /**
+   * The `connections` row for Google — a mirror of the credential, written
+   * from the ONE hook every token write and delete now goes through
+   * (PRD Stage 1 §3.10, D8).
+   *
+   * **Row = metadata, vault = material**, the split the `api` rows already use.
+   * The row records what the connection IS; the token stays in its vault slot
+   * and is named here only by key. Nothing reads the row yet — Stage 1 writes
+   * the slot so a later push source has a plug-point, and moves nothing.
+   *
+   * The id is the CONSTANT `google`, not the address: one vault slot, no PII in
+   * a primary key, and a reconnect under a different account updates the row
+   * instead of orphaning the old one.
+   */
+  /**
+   * Build a `GoogleAuth` with everything the engine owes it — including the
+   * §3.10 token-change hook.
+   *
+   * There are three construction sites (init, `reloadGoogle`, and the CLAIM
+   * path after the §3.2 fork), and the claim one is the flow Stage 1 exists
+   * for. A hook attached at two of three would leave the connection row
+   * unwritten for exactly the brokered tenant, and nothing would say so. So the
+   * options are assembled once, here, and a fourth site gets them by calling
+   * this rather than by remembering.
+   */
+  private async _createGoogleAuth(
+    pair: { clientId: string; clientSecret: string } | null,
+  ): Promise<import('../integrations/google/google-auth.js').GoogleAuth> {
+    const { createGoogleAuth } = await import('../integrations/google/index.js');
+    return createGoogleAuth({
+      ...(pair ? { clientId: pair.clientId, clientSecret: pair.clientSecret } : {}),
+      serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
+      vault: this.secretVault ?? undefined,
+      scopes: this.userConfig.google_oauth_scopes,
+      // The live host-policy view (§3.8). `_toolContext` is created once in the
+      // constructor and mutated in place, so this reference keeps seeing the
+      // CURRENT policy — a snapshot would freeze the value this credential was
+      // built under.
+      hostPolicy: hostPolicyOf(this._toolContext),
+      onTokenChange: (event) => { this._onGoogleTokenChange(event); },
+    });
+  }
+
+  private _onGoogleTokenChange(
+    event: import('../integrations/google/google-auth.js').GoogleTokenChange,
+  ): void {
+    const store = this._connectionStore;
+    if (!store) return;
+    if (event.reason === 'disconnect' || event.tokenData === null) {
+      store.remove('google', 'google');
+      return;
+    }
+    // `granted_at` marks the CONSENT, so a refresh must not rewrite it — a
+    // refresh replaces an access token under an authorisation that already
+    // exists, and a timestamp that moves on every refresh answers "when was
+    // this last used", which is a different question nobody asked.
+    const existing = event.reason === 'refresh' ? store.get('google') : undefined;
+    const grantedAt = (() => {
+      if (!existing) return new Date().toISOString();
+      try {
+        const prev = JSON.parse(existing.configJson) as { granted_at?: unknown };
+        return typeof prev.granted_at === 'string' ? prev.granted_at : new Date().toISOString();
+      } catch {
+        return new Date().toISOString();
+      }
+    })();
+    store.upsert({
+      id: 'google',
+      kind: 'google',
+      name: event.tokenData.email ?? 'Google',
+      subjectId: null,
+      direction: 'outbound',
+      configJson: JSON.stringify({
+        scopes: event.tokenData.scopes,
+        client_source: this._googleClientSource,
+        granted_at: grantedAt,
+      }),
+      vaultKeys: ['GOOGLE_OAUTH_TOKENS'],
+      status: 'active',
+    });
   }
 
   getGoogleAuth(): import('../integrations/google/google-auth.js').GoogleAuth | null { return this._googleAuth; }
@@ -2250,15 +2325,7 @@ export class Engine {
       return false;
     }
     try {
-      const { createGoogleAuth } = await import('../integrations/google/index.js');
-      this._googleAuth = createGoogleAuth({
-        clientId: pair.clientId,
-        clientSecret: pair.clientSecret,
-        serviceAccountKeyPath: process.env['GOOGLE_SERVICE_ACCOUNT_KEY'],
-        vault: this.secretVault ?? undefined,
-        scopes: this.userConfig.google_oauth_scopes,
-        hostPolicy: hostPolicyOf(this._toolContext),
-      });
+      this._googleAuth = await this._createGoogleAuth(pair);
       return true;
     } catch {
       return false;

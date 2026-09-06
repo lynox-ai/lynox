@@ -149,6 +149,32 @@ export interface GoogleAuthOptions {
    * object outside an engine keeps today's behaviour.
    */
   hostPolicy?: HostPolicyContext | undefined;
+  /**
+   * Announce that the stored grant changed, so a mirror of it elsewhere can
+   * follow (PRD Stage 1 §3.10 — the `connections` row).
+   *
+   * It is a MIRROR, not a gate: the vault write has already happened when this
+   * fires, and a throw from here is swallowed. Row = metadata, vault =
+   * material; a hook that could veto a token write would invert that.
+   *
+   * `tokenData` is `null` exactly on `disconnect`.
+   */
+  onTokenChange?: ((event: GoogleTokenChange) => void) | undefined;
+}
+
+/** Why the stored grant changed. `grant` is a NEW authorisation; `refresh`
+ *  replaces the access token under an existing one, so it must not be treated
+ *  as a new consent. */
+export type GoogleTokenChangeReason = 'grant' | 'refresh' | 'disconnect';
+
+export interface GoogleTokenChange {
+  reason: GoogleTokenChangeReason;
+  /** The stored grant after the change, or `null` when it was removed. */
+  tokenData: {
+    readonly scopes: readonly string[];
+    readonly email?: string | undefined;
+    readonly expires_at: number;
+  } | null;
 }
 
 export interface DeviceFlowPrompt {
@@ -719,6 +745,7 @@ export class GoogleAuth {
   private readonly serviceAccountKeyPath: string | undefined;
   private readonly vault: SecretVault | undefined;
   private readonly configuredScopes: readonly string[] | undefined;
+  private readonly onTokenChange: ((event: GoogleTokenChange) => void) | undefined;
   /**
    * Read by the four tool modules and by the mail provider, which make their
    * own Google calls with this object's access token — they need the same
@@ -788,6 +815,7 @@ export class GoogleAuth {
     this.serviceAccountKeyPath = options.serviceAccountKeyPath;
     this.vault = options.vault;
     this.configuredScopes = options.scopes;
+    this.onTokenChange = options.onTokenChange;
     this.hostPolicy = options.hostPolicy;
     this.tokenData = loadTokenData(this.vault);
   }
@@ -881,7 +909,7 @@ export class GoogleAuth {
     // window kept refusing for up to five minutes after the user had already
     // done the one thing that fixes it.
     this._clientMisconfigured = null;
-    saveTokenData(this.tokenData, this.vault);
+    this._persistTokens('grant');
   }
 
   /**
@@ -902,7 +930,7 @@ export class GoogleAuth {
   private _acceptMintedTokens(json: unknown, mintedBy: string): void {
     this.tokenData = validateTokenResponse(json, mintedBy);
     this._clientMisconfigured = null;
-    saveTokenData(this.tokenData, this.vault);
+    this._persistTokens('grant');
   }
 
   /**
@@ -1148,8 +1176,51 @@ export class GoogleAuth {
         // Best-effort revocation
       }
     }
+    this._dropTokens();
+  }
+
+  /**
+   * Persist the current grant AND announce it — the only way this class writes
+   * a token.
+   *
+   * The funnel is the point. §3.10's connection row mirrors the credential, and
+   * a mirror updated at four of five write sites is worse than no mirror: it
+   * looks maintained. Every `saveTokenData` call in this file goes through
+   * here, and a source test refuses a new one that does not.
+   */
+  private _persistTokens(reason: 'grant' | 'refresh'): void {
+    // Throws rather than returning quietly: every caller sets `tokenData`
+    // immediately above, so reaching here without one is a bug, and a silent
+    // skip would lose a token the caller believes is saved.
+    if (!this.tokenData) throw new Error('_persistTokens called with no token data');
+    saveTokenData(this.tokenData, this.vault);
+    this._announceTokenChange(reason);
+  }
+
+  /** Drop the current grant AND announce it — the only way this class clears one. */
+  private _dropTokens(): void {
     this.tokenData = null;
     deleteTokenData(this.vault);
+    this._announceTokenChange('disconnect');
+  }
+
+  private _announceTokenChange(reason: GoogleTokenChangeReason): void {
+    if (!this.onTokenChange) return;
+    try {
+      this.onTokenChange({
+        reason,
+        tokenData: this.tokenData === null ? null : {
+          scopes: this.tokenData.scopes,
+          email: this.tokenData.email,
+          expires_at: this.tokenData.expires_at,
+        },
+      });
+    } catch (err: unknown) {
+      // Swallowed on purpose, and loudly. The token is already in the vault;
+      // failing the OAuth flow because a metadata mirror threw would trade the
+      // material for the bookkeeping.
+      console.warn(`[lynox] Google token-change hook failed (${reason}): ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -1166,8 +1237,7 @@ export class GoogleAuth {
    * ending the grant IS what the user asked for.
    */
   disconnect(): void {
-    this.tokenData = null;
-    deleteTokenData(this.vault);
+    this._dropTokens();
   }
 
   /**
@@ -1407,8 +1477,7 @@ export class GoogleAuth {
           ? CP_CLIENT_MISCONFIGURED_REMEDY
           : REFRESH_FAILURE_REMEDY[failure];
       if (failure === 'grant-revoked') {
-        this.tokenData = null;
-        deleteTokenData(this.vault);
+        this._dropTokens();
       } else if (failure === 'client-misconfigured') {
         // The remedy is stored with the deadline so every suppressed attempt in
         // the window repeats THIS answer, not the generic one. Two texts about
@@ -1430,7 +1499,7 @@ export class GoogleAuth {
         // an hour later, with nothing pointing back to here.
         ...(body.refresh_handle ? { refresh_handle: body.refresh_handle } : {}),
       };
-      saveTokenData(this.tokenData, this.vault);
+      this._persistTokens('refresh');
       return;
     }
 
@@ -1459,7 +1528,7 @@ export class GoogleAuth {
       scopes: refreshed.scopes.length > 0 ? refreshed.scopes : this.tokenData.scopes,
     };
     if (rotated) delete this.tokenData.refresh_handle;
-    saveTokenData(this.tokenData, this.vault);
+    this._persistTokens('refresh');
   }
 
   private _loadServiceAccountKey(): ServiceAccountKey {

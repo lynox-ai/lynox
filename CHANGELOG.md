@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added: a `connections` row that follows the Google grant
+
+- A Google connection now registers itself in the `connections` table —
+  `id: 'google'`, the granted scopes, which source supplied the client pair, and
+  when consent was given. Nothing reads it yet: the row is the plug-point a
+  later Google push source needs (`triggers.source_connection_id`), and this
+  release writes the slot and moves nothing. The token stays in its vault slot;
+  the row names it by key and holds no material.
+- `GoogleAuthOptions` gains `onTokenChange`, which fires on a new grant, on a
+  refresh and on a disconnect. It is a mirror, not a gate: the vault write has
+  already happened when it fires, and a throw from the hook is logged and
+  swallowed rather than failing an OAuth flow that succeeded.
+- `granted_at` records the CONSENT and is not rewritten on a refresh — a
+  timestamp that moved on every refresh would answer "when was this last used",
+  which is a different question.
+
 ### Changed — BREAKING (integrators): the Google scope sets are re-cut
 
 - **`READ_ONLY_SCOPES` and `WRITE_SCOPES` are removed** from the package's

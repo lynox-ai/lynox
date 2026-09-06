@@ -1,5 +1,6 @@
 export { GoogleAuth, SCOPES, STANDARD_SCOPES, SENSITIVE_EXTRA_SCOPES, RESTRICTED_SCOPES, FULL_SCOPES } from './google-auth.js';
-export type { GoogleAuthOptions, DeviceFlowPrompt, LocalAuthResult } from './google-auth.js';
+export type { GoogleAuthOptions, DeviceFlowPrompt, LocalAuthResult, GoogleTokenChange, GoogleTokenChangeReason } from './google-auth.js';
+import type { GoogleAuthOptions } from './google-auth.js';
 // Gmail no longer ships as a standalone tool — it surfaces via the unified
 // mail tools (mail_triage, mail_search, mail_read, mail_send, mail_reply)
 // once the Gmail OAuth row appears in the mail registry. See OAuthGmailProvider.
@@ -17,17 +18,15 @@ import { createDriveTool } from './google-drive.js';
 import { createCalendarTool } from './google-calendar.js';
 import { createDocsTool } from './google-docs.js';
 
-export interface GoogleToolsOptions {
-  /** Absent on a brokered tenant — see `GoogleAuthOptions`. */
-  clientId?: string | undefined;
-  clientSecret?: string | undefined;
-  serviceAccountKeyPath?: string | undefined;
-  vault?: import('../../core/secret-vault.js').SecretVault | undefined;
-  /** Override default OAuth scopes. Defaults to read-only. */
-  scopes?: string[] | undefined;
-  /** Live host-policy view, so every Google call obeys `network_policy` (§3.8). */
-  hostPolicy?: import('../../core/network-guard.js').HostPolicyContext | undefined;
-}
+/**
+ * ⚠ An ALIAS, not a copy. It was a hand-maintained duplicate of
+ * `GoogleAuthOptions` with a by-hand forwarding list in `createGoogleAuth`
+ * below, so every new option had to be added in three places and a forgotten
+ * one was silent — the option simply never arrived. §3.10's `onTokenChange`
+ * would have been the first casualty: the credential would build, the hook
+ * would be dropped, and the connection row would never be written.
+ */
+export type GoogleToolsOptions = GoogleAuthOptions;
 
 /**
  * Build the GoogleAuth instance. Needs a resolved client pair.
@@ -36,14 +35,9 @@ export interface GoogleToolsOptions {
  * before the credential does, so the two can no longer be created together.
  */
 export function createGoogleAuth(options: GoogleToolsOptions): GoogleAuth {
-  return new GoogleAuth({
-    clientId: options.clientId,
-    clientSecret: options.clientSecret,
-    serviceAccountKeyPath: options.serviceAccountKeyPath,
-    vault: options.vault,
-    scopes: options.scopes,
-    hostPolicy: options.hostPolicy,
-  });
+  // Forwarded whole. Naming the fields one by one is what made a dropped
+  // option possible in the first place.
+  return new GoogleAuth(options);
 }
 
 /**

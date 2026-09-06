@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Engine } from './engine.js';
@@ -131,6 +132,12 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
       // property (an EXTRA argument still fails); the identity is asserted on
       // the next line, because that is the part a snapshot would break.
       hostPolicy: expect.anything(),
+      // §3.10's token-change hook, threaded at every construction site so the
+      // `connections` row follows the credential. Same treatment as
+      // `hostPolicy`: presence in the strict shape (an EXTRA argument still
+      // fails), behaviour on its own below — presence alone is satisfied by
+      // `() => {}`, which is the whole failure mode this wave exists against.
+      onTokenChange: expect.any(Function),
     });
     // Identity, not equality: a `{ ...this._toolContext }` snapshot deep-equals
     // the context and would pass the block above, while freezing the policy at
@@ -141,6 +148,153 @@ describe('Engine boot — the Google client pair is resolved from ONE source', (
     // The BOOT path has its own registration loop, and deleting it survived
     // every suite until this line — the reload fix closed only the other copy.
     expect(engine.registry.find(PROBE_TOOL), 'the boot must register the built tools').toBeDefined();
+  });
+
+  it('the boot hook writes the connection row, and a refresh keeps granted_at', async () => {
+    freshDataDir('cp-row');
+    setEnv('GOOGLE_CLIENT_ID', 'env-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'env-secret');
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    const engine = await boot();
+
+    // The hook the boot actually handed in — not one this test constructs. A
+    // test that calls its own handler proves the handler, never the wiring.
+    const hook = captured.calls.at(-1)?.onTokenChange as
+      ((e: { reason: string; tokenData: { scopes: string[]; email?: string; expires_at: number } | null }) => void) | undefined;
+    expect(hook, 'the boot must hand in a token-change hook').toBeDefined();
+
+    const store = (engine as unknown as { _connectionStore: {
+      get(id: string): { name: string; kind: string; configJson: string; vaultKeys: string[] } | undefined;
+    } | null })._connectionStore;
+    expect(store, 'the store must be RETAINED — it used to go out of scope').not.toBeNull();
+    expect(store!.get('google'), 'no row before a grant').toBeUndefined();
+
+    hook!({ reason: 'grant', tokenData: { scopes: ['s1'], email: 'a@b.c', expires_at: 1 } });
+    const row = store!.get('google');
+    expect(row?.kind).toBe('google');
+    expect(row?.name).toBe('a@b.c');
+    expect(row?.vaultKeys).toEqual(['GOOGLE_OAUTH_TOKENS']);
+    const granted = (JSON.parse(row!.configJson) as { granted_at: string; scopes: string[]; client_source: string }).granted_at;
+    expect(granted).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect((JSON.parse(row!.configJson) as { client_source: string }).client_source).toBe('env');
+
+    // A refresh replaces an access token under an authorisation that already
+    // exists. Rewriting `granted_at` here would answer "when was this last
+    // used", which is a different question — and nothing would say so.
+    hook!({ reason: 'refresh', tokenData: { scopes: ['s1', 's2'], email: 'a@b.c', expires_at: 2 } });
+    const after = store!.get('google');
+    expect((JSON.parse(after!.configJson) as { granted_at: string }).granted_at).toBe(granted);
+    expect((JSON.parse(after!.configJson) as { scopes: string[] }).scopes).toEqual(['s1', 's2']);
+
+    hook!({ reason: 'disconnect', tokenData: null });
+    expect(store!.get('google'), 'the row goes with the grant').toBeUndefined();
+  });
+
+  it('the row id is CONSTANT, so a reconnect under another account leaves no orphan', async () => {
+    freshDataDir('cp-row-id');
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    setEnv('GOOGLE_CLIENT_ID', 'env-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'env-secret');
+    const engine = await boot();
+    const hook = captured.calls.at(-1)?.['onTokenChange'] as
+      ((e: { reason: string; tokenData: { scopes: string[]; email?: string; expires_at: number } | null }) => void);
+    const store = (engine as unknown as { _connectionStore: {
+      get(id: string): { name: string } | undefined;
+      getByKind(kind: string): { id: string }[];
+    } | null })._connectionStore!;
+
+    hook({ reason: 'grant', tokenData: { scopes: ['s'], email: 'first@x.y', expires_at: 1 } });
+    hook({ reason: 'grant', tokenData: { scopes: ['s'], email: 'second@x.y', expires_at: 2 } });
+    // Keying on the address would leave `first@x.y` standing forever with a
+    // vault slot that no longer holds its token — one slot, one row.
+    expect(store.getByKind('google').map((r) => r.id)).toEqual(['google']);
+    expect(store.get('google')?.name).toBe('second@x.y');
+  });
+
+  it('a disconnect removes the row even if the event still carries a grant', async () => {
+    freshDataDir('cp-row-stale');
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    setEnv('GOOGLE_CLIENT_ID', 'env-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'env-secret');
+    const engine = await boot();
+    const hook = captured.calls.at(-1)?.['onTokenChange'] as
+      ((e: { reason: string; tokenData: { scopes: string[]; email?: string; expires_at: number } | null }) => void);
+    const store = (engine as unknown as { _connectionStore: { get(id: string): unknown } | null })._connectionStore!;
+
+    hook({ reason: 'grant', tokenData: { scopes: ['s'], expires_at: 1 } });
+    expect(store.get('google')).toBeDefined();
+    // The handler reads the REASON, not only the payload. Keyed on the payload
+    // alone, announcing before clearing `tokenData` would leave the row behind
+    // — and the ordering inside `_dropTokens` is not something a consumer of
+    // the event should have to know.
+    hook({ reason: 'disconnect', tokenData: { scopes: ['s'], expires_at: 1 } });
+    expect(store.get('google'), 'the reason alone must be enough').toBeUndefined();
+  });
+
+  /**
+   * §3.10's failure mode, named in the PRD: *"a hook missing at the claim site
+   * means the D8 connection row is never written for the flow Stage 1 exists
+   * for"*. Presence at two of three sites looks like coverage and is not, so
+   * this drives each site and asserts the hook it handed in actually WRITES.
+   */
+  it('all THREE construction sites hand in a working hook — boot, reload, claim', async () => {
+    type Hook = (e: { reason: string; tokenData: { scopes: string[]; email?: string; expires_at: number } | null }) => void;
+    const grant = { reason: 'grant', tokenData: { scopes: ['s'], email: 'x@y.z', expires_at: 1 } };
+    function rowAfterLastHook(engine: Engine): unknown {
+      const opts = captured.calls.at(-1);
+      expect(opts, 'this site must call the auth factory at all').toBeDefined();
+      const hook = opts?.['onTokenChange'] as Hook | undefined;
+      expect(hook, 'this site handed in NO token-change hook').toBeDefined();
+      const store = (engine as unknown as { _connectionStore: { get(id: string): unknown } | null })._connectionStore;
+      hook!(grant);
+      return store?.get('google');
+    }
+
+    // ── 1. boot, with a pair
+    freshDataDir('cp-three-boot');
+    captured.calls.length = 0;
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    setEnv('GOOGLE_CLIENT_ID', 'env-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'env-secret');
+    const booted = await boot();
+    expect(rowAfterLastHook(booted), 'boot site').toBeDefined();
+
+    // ── 2. reloadGoogle, after the pair appears
+    freshDataDir('cp-three-reload');
+    captured.calls.length = 0;
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    const reloaded = await boot();
+    expect(captured.calls, 'no pair at boot ⇒ no construction').toHaveLength(0);
+    setEnv('GOOGLE_CLIENT_ID', 'late-id');
+    setEnv('GOOGLE_CLIENT_SECRET', 'late-secret');
+    expect(await reloaded.reloadGoogle()).toBe(true);
+    expect(rowAfterLastHook(reloaded), 'reload site').toBeDefined();
+
+    // ── 3. ensureGoogleAuth — the CLAIM path, and the one the PRD warns about.
+    // A brokered tenant resolves NO pair, so this site is the only one that
+    // ever builds its credential.
+    freshDataDir('cp-three-claim');
+    captured.calls.length = 0;
+    setEnv('LYNOX_VAULT_KEY', 'test-vault-key-for-boot-0000000000');
+    setEnv('LYNOX_MANAGED_INSTANCE_ID', 'inst_claim');
+    const brokered = await boot();
+    expect(captured.calls, 'a brokered tenant builds nothing at boot').toHaveLength(0);
+    expect(await brokered.ensureGoogleAuth()).not.toBeNull();
+    expect(rowAfterLastHook(brokered), 'claim site').toBeDefined();
+  });
+
+  it('the engine builds a Google credential in exactly ONE place', () => {
+    // The behavioural test above covers the three sites that exist TODAY. This
+    // is the membership half: a fourth site would pass it silently, because a
+    // test can only drive paths somebody wrote it for. Comments are stripped so
+    // the sentence above cannot satisfy the count.
+    const src = readFileSync(fileURLToPath(new URL('./engine.ts', import.meta.url)), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    const direct = src.match(/\bcreateGoogleAuth\s*\(/g) ?? [];
+    expect(direct, 'every site must go through `_createGoogleAuth`').toHaveLength(1);
+    // Positive control: the scan reads real source, not an empty string.
+    expect(src).toContain('_createGoogleAuth');
+    expect((src.match(/\bthis\._createGoogleAuth\s*\(/g) ?? []).length).toBeGreaterThanOrEqual(3);
   });
 
   it('an env pair on a provisioned instance is the managed broker', async () => {
