@@ -169,6 +169,31 @@ describe('the broker set: every action either works or refuses with a remedy', (
     expect(r).not.toContain('your own Google Cloud client');
   });
 
+  it('honours the scopes lynox ACCEPTS but never requests', async () => {
+    // `calendar` and `drive.metadata.readonly` are in the acceptance allowlist
+    // and deliberately outside the request bundle: a tenant can already hold
+    // them from an older grant or a hand-written `google_oauth_scopes`. If the
+    // gate did not list them, that tenant would be refused a call Google would
+    // have authorised — the mirror image of the unbraked-read defect.
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ items: [], calendars: {} }) });
+    for (const input of [{ action: 'list_events' }, { action: 'free_busy' }] as Record<string, unknown>[]) {
+      const r = await (createCalendarTool(() => auth([SCOPES.CALENDAR])) as ToolEntry).handler(input, agent()) as string;
+      expect(isScopeRefusal(r), `calendar must authorise ${String(input['action'])}`).toBe(false);
+    }
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ files: [] }) });
+    const r = await (createDriveTool(() => auth([SCOPES.DRIVE_METADATA_READONLY])) as ToolEntry)
+      .handler({ action: 'search', query: 'q' }, agent()) as string;
+    expect(isScopeRefusal(r)).toBe(false);
+    // Control: the same scope does NOT unlock a write.
+    mockFetch.mockReset();
+    const write = await (createDriveTool(() => auth([SCOPES.DRIVE_METADATA_READONLY])) as ToolEntry)
+      .handler({ action: 'upload', file_name: 'f', content: 'c' }, agent()) as string;
+    expect(isScopeRefusal(write)).toBe(true);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it('an unknown action is not silently admitted by the gate', async () => {
     mockFetch.mockReset();
     const r = await (createSheetsTool(() => auth([])) as ToolEntry)
