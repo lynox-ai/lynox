@@ -19,6 +19,7 @@
 
 import type { ToolEntry } from '../../types/index.js';
 import type { GoogleAuth } from '../google/google-auth.js';
+import { SCOPES } from '../google/scopes.js';
 import type { MailCredentialBackend } from './auth/app-password.js';
 import { MailCredentialStore, vaultKeyForAccount } from './auth/app-password.js';
 import { ImapSmtpProvider } from './providers/imap-smtp.js';
@@ -83,6 +84,15 @@ export interface MailAccountView {
   persona: string;
   /** True if this type is hard-blocked from sending. */
   receiveOnly: boolean;
+  /**
+   * Why this account is present but not working, when that is the case.
+   *
+   * `needs_mailbox_scope`: the row is a Google mailbox and the connected grant
+   * carries no Gmail read scope. Without this the card shows an account that
+   * silently does nothing, which reads as a bug in lynox rather than as a
+   * permission the connection never asked for.
+   */
+  warning?: 'needs_mailbox_scope' | undefined;
 }
 
 /**
@@ -421,9 +431,38 @@ export class MailContext {
    * GoogleAuth absent for an oauth_google row) — the caller skips that
    * account but continues with the rest.
    */
+  /**
+   * Can the connected Google account actually be read as a MAILBOX?
+   *
+   * A connection and a mailbox are two different things, and until Stage 1 they
+   * were the same question here: both gates below asked `isAuthenticated()`.
+   * That was invisible while the default consent set granted `gmail.readonly`
+   * to every connection — it stops being invisible on a set that grants
+   * Calendar and Drive-file access and no Gmail at all, where the provider
+   * builds happily and every Gmail call comes back 403, in a loop, with the
+   * watcher retrying.
+   *
+   * The scope is the question, not the connection.
+   */
+  private hasMailboxScope(): boolean {
+    if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return false;
+    // Any of the three Gmail read scopes authorises `messages.list`/`get`;
+    // `gmail.send` does NOT, which is the whole point of asking per scope.
+    return this.googleAuth.hasScope(SCOPES.GMAIL_READONLY)
+      || this.googleAuth.hasScope(SCOPES.GMAIL_MODIFY)
+      || this.googleAuth.hasScope(SCOPES.MAIL_GOOGLE_COM);
+  }
+
   private async _buildProvider(account: MailAccountConfig): Promise<MailProvider | null> {
     if (account.authType === 'oauth_google') {
       if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return null;
+      if (!this.hasMailboxScope()) {
+        // ONE line, at init, not one per poll. The row stays — it is the
+        // user's mailbox and it comes back the moment the scope does — but no
+        // provider is registered, so nothing polls it into a 403 loop.
+        console.warn(`[lynox:mail] "${account.address}" is connected through Google but the grant carries no Gmail read scope — skipping. Connect the mailbox over IMAP, or re-consent with full access.`);
+        return null;
+      }
       return new OAuthGmailProvider(account, this.googleAuth);
     }
     if (account.authType === 'imap') {
@@ -449,6 +488,10 @@ export class MailContext {
    */
   private async _migrateOAuthGmailRow(): Promise<void> {
     if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return;
+    // Before the profile fetch, not after: `users.getProfile` is itself
+    // authorised by a Gmail read scope, so without one this would spend a 403
+    // on every init to learn what the grant already says.
+    if (!this.hasMailboxScope()) return;
 
     // Fetch the *current* Google account email up front. Doing this before
     // the early-return lets us detect a disconnect→reconnect-with-different-
@@ -673,6 +716,9 @@ export class MailContext {
       authType: account.authType,
       persona: personaFor(account),
       receiveOnly: isReceiveOnlyType(account.type),
+      ...(account.authType === 'oauth_google' && !this.hasMailboxScope()
+        ? { warning: 'needs_mailbox_scope' as const }
+        : {}),
     }));
   }
 

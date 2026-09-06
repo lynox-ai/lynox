@@ -199,36 +199,10 @@ const LOCALHOST_TIMEOUT_MS = 120_000; // 2 min to complete browser auth
 const DEVICE_POLL_INTERVAL_MS = 5_000; // Poll every 5s for device flow
 const DEVICE_TIMEOUT_MS = 300_000; // 5 min to complete device auth
 
-// Scope constants
-//
-// Every scope lynox will ever accept lives here, and the three sets below
-// partition it by GOOGLE's classification — not by read/write, which is what
-// the removed `READ_ONLY_SCOPES`/`WRITE_SCOPES` pair claimed and got wrong
-// (it listed `drive.file`, a write scope, under neither, and an alias named
-// READ_ONLY that returns write scopes lies to every caller).
-export const SCOPES = {
-  OPENID: 'openid',
-  USERINFO_EMAIL: 'https://www.googleapis.com/auth/userinfo.email',
-  GMAIL_READONLY: 'https://www.googleapis.com/auth/gmail.readonly',
-  GMAIL_SEND: 'https://www.googleapis.com/auth/gmail.send',
-  GMAIL_MODIFY: 'https://www.googleapis.com/auth/gmail.modify',
-  GMAIL_COMPOSE: 'https://www.googleapis.com/auth/gmail.compose',
-  GMAIL_METADATA: 'https://www.googleapis.com/auth/gmail.metadata',
-  MAIL_GOOGLE_COM: 'https://mail.google.com/',
-  SHEETS_READONLY: 'https://www.googleapis.com/auth/spreadsheets.readonly',
-  SHEETS: 'https://www.googleapis.com/auth/spreadsheets',
-  DRIVE_READONLY: 'https://www.googleapis.com/auth/drive.readonly',
-  DRIVE_FILE: 'https://www.googleapis.com/auth/drive.file',
-  DRIVE: 'https://www.googleapis.com/auth/drive',
-  DRIVE_METADATA_READONLY: 'https://www.googleapis.com/auth/drive.metadata.readonly',
-  CALENDAR_READONLY: 'https://www.googleapis.com/auth/calendar.readonly',
-  CALENDAR_EVENTS: 'https://www.googleapis.com/auth/calendar.events',
-  CALENDAR_FREEBUSY: 'https://www.googleapis.com/auth/calendar.freebusy',
-  CALENDAR: 'https://www.googleapis.com/auth/calendar',
-  CALENDAR_LIST_READONLY: 'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
-  DOCS_READONLY: 'https://www.googleapis.com/auth/documents.readonly',
-  DOCS: 'https://www.googleapis.com/auth/documents',
-} as const;
+// Scope constants live in a leaf module — see `scopes.ts` for why. Re-exported
+// here so every existing importer keeps its path.
+export { SCOPES } from './scopes.js';
+import { SCOPES } from './scopes.js';
 
 /**
  * The default consent set — every scope in it is NON-SENSITIVE or SENSITIVE,

@@ -21,6 +21,9 @@
 // logic here.
 
 import type { GoogleAuth } from '../../google/google-auth.js';
+// The leaf, not `google-auth.js`: this module holds `GoogleAuth` as a TYPE and
+// must not pull the integration into the mail graph to name one scope.
+import { SCOPES } from '../../google/scopes.js';
 import {
   MailError,
   type MailAccountConfig,
@@ -725,7 +728,7 @@ export class OAuthGmailProvider implements MailProvider {
 
   async send(input: MailSendInput): Promise<MailSendResult> {
     if (this.closed) throw new MailError('connection_failed', 'Provider closed');
-    if (!this.googleAuth.hasScope('https://www.googleapis.com/auth/gmail.send')) {
+    if (!this.googleAuth.hasScope(SCOPES.GMAIL_SEND)) {
       throw new MailError('unsupported', 'Gmail send requires the gmail.send scope. Grant write access in Settings → Channels → Google.');
     }
     const fromAddress = await this.resolveFromAddress();

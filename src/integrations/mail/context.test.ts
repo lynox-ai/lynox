@@ -928,3 +928,127 @@ describe('MailContext — persisted default flag', () => {
   });
 
 });
+
+/**
+ * PRD Stage 1 §3.7 — the mail boundary.
+ *
+ * A Google CONNECTION and a Google MAILBOX are two different things, and until
+ * this wave both gates asked the same question (`isAuthenticated()`). That was
+ * invisible while the default consent set granted `gmail.readonly` to every
+ * connection. It stops being invisible on a set that grants Calendar and
+ * Drive-file access and no Gmail at all — and D7 made that the default.
+ */
+describe('MailContext — a Google connection is not a Gmail mailbox', () => {
+  const GOOGLE_ROW = {
+    ...GMAIL_ACCOUNT,
+    id: 'goog',
+    address: 'someone@gmail.com',
+    authType: 'oauth_google' as const,
+  };
+
+  /** A connected Google account holding exactly `scopes`. */
+  function googleAuth(scopes: readonly string[]): unknown {
+    return {
+      isAuthenticated: () => true,
+      hasScope: (s: string) => scopes.includes(s),
+      getAccessToken: async () => 'token',
+    };
+  }
+  const STAGE_1 = [
+    'openid',
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/calendar.events',
+    'https://www.googleapis.com/auth/calendar.freebusy',
+    'https://www.googleapis.com/auth/drive.file',
+  ];
+  const READONLY = ['https://www.googleapis.com/auth/gmail.readonly'];
+
+  function ctxWith(scopes: readonly string[]): MailContext {
+    return new MailContext(stateDb, backend, undefined, {}, googleAuth(scopes) as never);
+  }
+
+  it('registers NO provider for a Google row when the grant has no Gmail read scope', async () => {
+    stateDb.upsertAccount(GOOGLE_ROW);
+    const c = ctxWith(STAGE_1);
+    try {
+      await c.init();
+      // The row survives — it is the user's mailbox and it comes back the
+      // moment the scope does. What must not happen is a registered provider
+      // polling it into a 403 loop.
+      expect(c.registry.list()).toEqual([]);
+      expect(c.watcher.size).toBe(0);
+      expect(stateDb.listAccounts().map(a => a.id)).toContain('goog');
+    } finally { await c.close(); }
+  });
+
+  it('registers the provider once a Gmail read scope IS granted — the control', async () => {
+    // Without this the assertion above is satisfied by a build that registers
+    // nothing at all for `oauth_google`.
+    stateDb.upsertAccount(GOOGLE_ROW);
+    const c = ctxWith(READONLY);
+    try {
+      await c.init();
+      expect(c.registry.list().length).toBe(1);
+    } finally { await c.close(); }
+  });
+
+  it('accepts gmail.modify and mail.google.com as mailbox scopes too', async () => {
+    // Three scopes authorise `messages.list`/`get`. Naming only the first would
+    // refuse a legitimate BYO grant — the mirror of the defect this wave fixes.
+    for (const scope of [
+      'https://www.googleapis.com/auth/gmail.modify',
+      'https://mail.google.com/',
+    ]) {
+      const c = ctxWith([scope]);
+      try {
+        stateDb.upsertAccount(GOOGLE_ROW);
+        await c.init();
+        expect(c.registry.list().length, `${scope} must authorise the mailbox`).toBe(1);
+      } finally { await c.close(); }
+    }
+  });
+
+  it('does NOT accept gmail.send as a mailbox scope', async () => {
+    // Sending is not reading. A grant that can send and not read would build a
+    // provider whose every fetch 403s.
+    stateDb.upsertAccount(GOOGLE_ROW);
+    const c = ctxWith(['https://www.googleapis.com/auth/gmail.send']);
+    try {
+      await c.init();
+      expect(c.registry.list()).toEqual([]);
+    } finally { await c.close(); }
+  });
+
+  it('creates no Google row at all when the grant cannot read a mailbox', async () => {
+    // The migration must stop BEFORE the profile fetch: `users.getProfile` is
+    // itself authorised by a Gmail read scope, so without one this spends a 403
+    // on every init to learn what the grant already says.
+    const c = ctxWith(STAGE_1);
+    try {
+      await c.init();
+      expect(stateDb.listAccounts().filter(a => a.authType === 'oauth_google')).toEqual([]);
+    } finally { await c.close(); }
+  });
+
+  it('tells the card WHY the account is there and does nothing', async () => {
+    stateDb.upsertAccount(GOOGLE_ROW);
+    const c = ctxWith(STAGE_1);
+    try {
+      await c.init();
+      const view = c.listAccounts().find(a => a.id === 'goog');
+      expect(view?.warning).toBe('needs_mailbox_scope');
+    } finally { await c.close(); }
+  });
+
+  it('carries no warning once the scope is there, and none on an IMAP row', async () => {
+    stateDb.upsertAccount(GOOGLE_ROW);
+    stateDb.upsertAccount(GMAIL_ACCOUNT);
+    const c = ctxWith(READONLY);
+    try {
+      await c.init();
+      expect(c.listAccounts().find(a => a.id === 'goog')?.warning).toBeUndefined();
+      // An IMAP row must never carry it, whatever the Google grant says.
+      expect(c.listAccounts().find(a => a.authType === 'imap')?.warning).toBeUndefined();
+    } finally { await c.close(); }
+  });
+});

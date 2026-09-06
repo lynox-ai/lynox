@@ -33,6 +33,7 @@
 	interface AccountTypeDescriptor {
 		type: MailAccountType;
 		receiveOnly: boolean;
+		warning?: 'needs_mailbox_scope';
 		defaultPersona: string;
 	}
 	interface AccountView {
@@ -48,6 +49,7 @@
 		authType: 'imap' | 'oauth_google' | 'oauth_microsoft';
 		persona: string;
 		receiveOnly: boolean;
+		warning?: 'needs_mailbox_scope';
 	}
 	interface TestResult {
 		ok: boolean;
@@ -459,10 +461,27 @@
 								{#if account.authType === 'imap' && !account.hasCredentials}
 									<span class="rounded bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-warning">NEEDS PASSWORD</span>
 								{/if}
+								{#if account.warning === 'needs_mailbox_scope'}
+									<span class="rounded bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-warning">{t('mail.needs_mailbox_scope_badge')}</span>
+								{/if}
 							</div>
 							<div class="truncate text-xs text-text-muted">
 								{account.address} · {account.preset} · <strong>{account.type}</strong>{#if account.receiveOnly} <span class="ml-1 rounded bg-warning/20 px-1 text-[10px] font-medium text-warning">RECEIVE-ONLY</span>{/if}
 							</div>
+							{#if account.warning === 'needs_mailbox_scope'}
+								<!-- Says what is wrong and what to do. Without the second half a
+								     user reads it as a lynox fault: the account is listed, it does
+								     nothing, and the permission it needs was never asked for. -->
+								<div class="mt-1 text-[11px] text-warning">
+									{t('mail.needs_mailbox_scope_hint')}
+									<a
+										href="https://docs.lynox.ai/integrations/mail/#app-password"
+										target="_blank"
+										rel="noopener noreferrer"
+										class="underline hover:no-underline"
+									>{t('mail.needs_mailbox_scope_link')}</a>
+								</div>
+							{/if}
 							{#if account.persona && !account.receiveOnly}
 								<div class="mt-0.5 truncate text-[10px] text-text-subtle italic">
 									{account.persona}
