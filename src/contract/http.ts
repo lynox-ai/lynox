@@ -296,6 +296,13 @@ export interface OAuthClaimResponse {
    * ⚠ It is NOT an identifier. Google addresses change, and two grants for the
    * same mailbox can differ in case and dots; nothing may key on this. The one
    * thing that identifies a connection is the connection row itself (§3.10).
+   *
+   * ⚠ DELIBERATELY ABSENT FROM `fixtures/oauth-claim-response.json` until the
+   * control plane emits it (wave W6). The fixture's serializer IS the control
+   * plane (`fixtures/README.md`), so a fixture carrying a field the CP does not
+   * yet produce is hand-written — the one thing that file forbids. It also
+   * breaks the CP's own pair test, which asserts the key set whole: an added
+   * key is drift, and the engine's parser would not know to expect it.
    */
   email?: string;
 }

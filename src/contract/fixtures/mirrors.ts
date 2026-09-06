@@ -117,7 +117,6 @@ export const TYPED_MIRRORS: Record<string, unknown> = {
       'https://scopes.example.invalid/auth/test-read',
       'https://scopes.example.invalid/auth/test-write',
     ],
-    email: 'test-user@accounts.invalid',
   } satisfies OAuthClaimResponse,
   'model-profile.json': {
     provider: 'openai',

@@ -5,6 +5,5 @@
   "scopes": [
     "https://scopes.example.invalid/auth/test-read",
     "https://scopes.example.invalid/auth/test-write"
-  ],
-  "email": "test-user@accounts.invalid"
+  ]
 }
