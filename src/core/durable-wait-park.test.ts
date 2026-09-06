@@ -905,6 +905,27 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
 
     const secondPrompt = String(h.sessionRunArgs()[1]?.[0] ?? '');
     expect(secondPrompt).not.toContain('hunter2-correct-horse');
+    // Masked, not blanked. Asserting only the absence would also pass for a
+    // `mask()` that returned the empty string, which would take the answer with
+    // it — the run would be told nothing and ask again.
+    expect(secondPrompt).toContain('***orse');
+    expect(secondPrompt).toContain('Which password?');
+  });
+
+  it('a PENDING question is never detached, even by the unconditional teardown', async () => {
+    // The `finally` detaches on every exit, including the ones where settling
+    // the row failed — the abort path swallows a throw from `expirePrompt` and
+    // names SQLITE_BUSY as a reason. Detaching there would orphan a question that
+    // is still pending and still answerable: no run could ever be handed its
+    // answer, which is precisely what §0 A2 keeps the pointer for.
+    const h = makeHarness();
+    await h.parked;
+    const promptId = h.promptIdOf()!;
+    expect(h.prompts.getById(promptId)?.status).toBe('pending');   // fixture guard
+
+    expect(h.prompts.releaseTrigger(promptId)).toBe(false);
+
+    expect(h.prompts.getById(promptId)?.trigger_id).toBe('trg-1');
   });
 
   // ── Auflage 1: recurring is OUT of wave 1, and the test pins today's shape ──

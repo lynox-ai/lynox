@@ -661,10 +661,23 @@ export class PromptStore {
    * it the row stays `answered` with a live pointer and every later scheduled run
    * of that trigger would be handed the same stale reply. The status is left
    * `answered` because it was answered; what changes is only whose business it is.
+   *
+   * ⚠ And conditional on the row being SETTLED, which is the half that cannot be
+   * left to the caller. The caller is a `finally`, so it runs on every exit
+   * including the ones where settling the row FAILED — the abort path drains its
+   * row with `expirePrompt` and swallows a throw, naming SQLITE_BUSY and schema
+   * drift as reasons. A detach that fired there would orphan a question that is
+   * still `pending` and still answerable: nothing would ever hand its answer to a
+   * run again, which is the exact loss §0 A2 exists to prevent. Expressed here
+   * rather than as a re-check at the call site, because a re-check is another
+   * duty a later caller can forget and has a window this does not.
    */
   releaseTrigger(promptId: string): boolean {
     return this.db
-      .prepare(`UPDATE pending_prompts SET trigger_id = NULL WHERE id = ? AND trigger_id IS NOT NULL`)
+      .prepare(
+        `UPDATE pending_prompts SET trigger_id = NULL
+         WHERE id = ? AND trigger_id IS NOT NULL AND status != 'pending'`,
+      )
       .run(promptId).changes > 0;
   }
 
