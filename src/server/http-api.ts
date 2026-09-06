@@ -6870,7 +6870,7 @@ export class LynoxHTTPApi {
         // cpFetch, not googleFetch: this posts to the CONTROL PLANE, not to
         // Google. Routing it through the Google host set would refuse the CP
         // host and break the claim on every `guarded` tenant (§3.8).
-        const claimRes = await cpFetch(`${controlPlaneUrl}/internal/oauth/google/claim`, {
+        const claimRes = await cpFetch(controlPlaneUrl, '/internal/oauth/google/claim', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

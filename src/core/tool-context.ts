@@ -181,18 +181,20 @@ export function applyEnforceHttps(ctx: ToolContext, enforce: boolean): void {
 /**
  * Narrow a ToolContext to the host-policy fields `assertHostPolicy` reads.
  *
- * This is the ONE place the conformance is asserted, and it is a compile-time
- * assertion rather than a comment. `HostPolicyContext` used to be described in
- * prose as "structurally satisfied by ToolContext" — a claim nothing checked,
- * which was tolerable while only the agent's own HTTP tools consulted it. Since
- * PRD Stage 1 §3.8 it also gates a CREDENTIALED surface (every Google call), so
- * a field silently dropped from ToolContext would not be a lint-level tidiness
- * problem: it would change what the guard can see, on the path that carries the
- * tenant's grant.
+ * This is where the conformance is DECLARED, not the only place it is enforced,
+ * and the difference is worth being accurate about: eight other call sites pass
+ * a bare `ToolContext` where a `HostPolicyContext` is expected, so tsc already
+ * fails at each of them if a field goes missing. Measured — making
+ * `enforceHttps` optional produces nine errors, of which this function is one.
  *
- * Runtime no-op by construction. The value is the type error it produces when
- * ToolContext stops satisfying the interface — remove `enforceHttps` from
- * ToolContext and `tsc` fails here.
+ * What it adds is a HOME for the claim. `HostPolicyContext` used to be described
+ * in prose as "structurally satisfied by ToolContext", a claim nothing checked;
+ * the enforcement was real but incidental, spread across callers that could all
+ * be refactored away without anyone noticing the guarantee had gone with them.
+ * Since PRD Stage 1 §3.8 the interface also gates a CREDENTIALED surface, which
+ * is why it gets a stated obligation rather than an emergent one.
+ *
+ * Runtime no-op by construction. The value is the type error.
  */
 export function hostPolicyOf(ctx: ToolContext): HostPolicyContext {
   return ctx;

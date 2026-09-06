@@ -1775,7 +1775,7 @@ describe('refresh through the control plane (the client secret stays there)', ()
 
   // What this pins is the CLASSIFICATION of a 3xx, not that redirects are
   // unfollowed — a mock returns `ok:false` regardless, so it cannot show that;
-  // the `init.redirect` assertion above is what pins the request itself. The
+  // the call-count assertion above is what pins the request itself. The
   // classification still matters: a redirecting CP is an outage, and reading it
   // as a revoked grant would delete the token.
   it('treats a redirect from the control plane as transient, not as a revocation', async () => {

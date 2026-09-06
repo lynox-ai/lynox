@@ -236,8 +236,12 @@ export function assertHostPolicy(
       // Workspace call plus this instance's control-plane calls
       // (engine-init.ts and the `network_policy` doc in types/config.ts state
       // the same scope; all three move together or two of them lie).
-      // Still outside it: the LLM provider call, push, error reporting, IMAP/
-      // SMTP mail, and anything a shell command starts.
+      // Still outside it: the LLM provider call, push notifications, error
+      // reporting, IMAP/SMTP mail, voice transcribe/TTS, and anything a shell
+      // command starts. This list is
+      // stated identically in engine-init.ts and types/config.ts; a review found
+      // all three carrying DIFFERENT lists in the very change that introduced
+      // the sentence claiming they move together.
       //
       // The user-visible consequence is a release note, not a diff line: a
       // tenant on `deny-all` newly loses Google — INCLUDING Gmail-over-OAuth,

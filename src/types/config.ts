@@ -617,18 +617,26 @@ export interface LynoxUserConfig {
    *
    * SCOPE — this is NOT a full process air-gap, and the scope WIDENED: Google
    * Workspace and the Drive backup upload used to be outside it and are now
-   * inside. It does NOT gate: the LLM provider call (separate client), mail
-   * IMAP/SMTP, push notifications, voice transcribe/TTS, or error reporting —
-   * each is its own separately-configured egress surface. A cross-integration
-   * air-gap is a separate control.
+   * inside. It does NOT gate: the LLM provider call (separate client), push
+   * notifications, error reporting, IMAP/SMTP mail, voice transcribe/TTS, or
+   * anything a shell command starts — each is its own separately-configured
+   * egress surface. A cross-integration air-gap is a separate control.
    *
    * ⚠ What that costs you if you have already set 'deny-all': a connected
    * Google account stops working, INCLUDING Gmail read/send over OAuth, which
    * an earlier version of this comment named as out of scope. Under
-   * 'allow-list' you can restore it by listing the Google API hosts; under
-   * 'deny-all' there is no such lever — switch to 'guarded', which admits a
+   * 'deny-all' there is no lever — switch to 'guarded', which admits a
    * connected integration to its own provider while still gating the surfaces a
    * prompt-injected agent can aim.
+   *
+   * Under 'allow-list' you restore it by listing the Google API hosts — AND, on
+   * a lynox-hosted instance, the control plane's own hostname. 'allow-list' is
+   * uniform across surfaces: it consults only this list, never an integration's
+   * own host set. A hosted instance refreshes its Google token through the
+   * control plane rather than through Google, so a list carrying only the
+   * Google hosts works until the access token expires and then stops, with a
+   * network-policy error rather than an auth one. The refresh fails before the
+   * response is read, so the grant is not touched.
    *
    * The allow-list is AUTHORITATIVE: it is NOT auto-extended by configured API
    * profiles, because `api_setup` is agent-callable and auto-trusting profile

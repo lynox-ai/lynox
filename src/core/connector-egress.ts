@@ -38,12 +38,17 @@ import type { HostPolicyContext } from './network-guard.js';
 /**
  * The hosts the engine actually FETCHES for a Google grant.
  *
- * Drawn from the fetch targets, not from the word "google": `docs.google.com`
- * and `drive.google.com` appear in this repo only inside strings shown to the
- * user after a document is created, and `accounts.google.com` is the consent
- * URL a browser opens — none of the three is a fetch target, so none belongs
- * here. A host set drawn over "everything Google-looking" would admit reach
- * this code does not need.
+ * Drawn from the fetch targets, not from the word "google". `docs.google.com`
+ * appears in production code twice, both times inside a string shown to the
+ * user after a document is created; `accounts.google.com` is the consent URL a
+ * browser opens, not something this process fetches. Neither belongs here. A
+ * host set drawn over "everything Google-looking" would admit reach this code
+ * does not need.
+ *
+ * (`drive.google.com` was named here too until a review checked it: it occurs
+ * in production code ZERO times — only in a test fixture's `webViewLink`. An
+ * example that does not exist is worse than no example, because the next reader
+ * greps for it and concludes the comment is about a different codebase.)
  *
  * `oauth2.googleapis.com` covers refresh, revoke, the device-flow poll and the
  * service-account assertion; the service-account `token_uri` is pinned to that
@@ -105,6 +110,16 @@ export async function googleFetch(
  * routing it through the redirect-following helper would have silently undone
  * it, and under the DEFAULT `allow-all` policy nothing would have complained.
  *
+ * ⚠ It takes the configured control-plane BASE and a PATH, separately, and it
+ * builds the request out of them. That shape is load-bearing rather than
+ * stylistic: the host set has to come from a value the request cannot choose.
+ * The first version of this helper took a single `url` and derived the host set
+ * from it, so the `guarded` check compared the request's host with itself and
+ * admitted every host there is — a control that reads as one and enforces
+ * nothing. Not reachable from model input at either of today's call sites (both
+ * build from `LYNOX_MANAGED_CONTROL_PLANE_URL`), which is exactly why no test
+ * and no review of the CALL SITES would ever have shown it.
+ *
  * ⚠ The host set is built from `hostname`, NOT from `host`. `assertHostPolicy`
  * matches against `URL.hostname`, which carries no port; `URL.host` carries one
  * whenever the URL has one. A set built from `host` would therefore miss its
@@ -112,15 +127,45 @@ export async function googleFetch(
  * every non-443 deployment — and the failure would be a blocked brokered
  * refresh under `guarded`, i.e. the exact outage this surface exists to avoid.
  *
+ * ⚠ Under `allow-list` the connector is NOT admitted by its own host set — that
+ * policy is uniform across surfaces by design, so the OPERATOR must list the
+ * control-plane host. A managed tenant on `allow-list` that lists only the
+ * Google hosts keeps working until its access token expires and then loses the
+ * brokered refresh. The release note says so; this comment exists so the next
+ * reader does not "fix" it here.
+ *
  * With no hops to re-check, one gate before the single request is the whole of
  * the policy check — `fetchPinned` still does the DNS-resolve + rebind-safe
  * connection pinning underneath it.
  */
 export async function cpFetch(
-  url: string,
+  base: string,
+  path: string,
   init: RequestInit,
   ctx: HostPolicyContext | undefined,
 ): Promise<Response> {
-  assertHostPolicy(url, { surface: 'connector', hosts: new Set([new URL(url).hostname]) }, ctx);
+  // The allowance comes from `base` — the CONFIGURED control plane — and the
+  // request comes from `path`. Two independent values, which is the whole point:
+  // an earlier version took one `url` and built the host set out of that same
+  // url, so `hosts.has(hostname)` compared a value with itself and passed for
+  // every host on earth. It read exactly like a check.
+  const baseHost = new URL(base).hostname;
+  const url = `${base.replace(/\/+$/, '')}${path}`;
+  // Independent re-derivation, not a rebuild of the same expression: if `path`
+  // is anything other than a path — an absolute URL, a protocol-relative `//x`,
+  // anything that moves the authority — the parse lands on a different host and
+  // this refuses before the policy is even consulted. Fail-closed, because the
+  // request that follows carries this instance's secret.
+  if (new URL(url).hostname !== baseHost) {
+    throw new Error(`Blocked: control-plane path "${path}" resolves off the configured control plane`);
+  }
+  // `baseHost`, not `new URL(url).hostname` — even though the guard above has
+  // just established that the two are equal, which makes the choice provably
+  // unobservable here (a mutation swapping them survives the whole suite, and
+  // that is the correct result rather than a hole). It is written this way so
+  // the ORIGIN of the allowance stays visible: it comes from the configured
+  // control plane, not from the request. Whoever deletes the guard above must
+  // not be able to read this line as still checking something — it would not be.
+  assertHostPolicy(url, { surface: 'connector', hosts: new Set([baseHost]) }, ctx);
   return fetchPinned(url, init);
 }

@@ -98,8 +98,9 @@ export function configureBudgetAndRateLimits(
   // backup as out of scope and no longer can. Covered: http_request, api_setup,
   // web_research (query + content), every authenticated Google Workspace call
   // (incl. Gmail-over-OAuth and the Drive backup upload), and this instance's
-  // control-plane calls. Still out of scope: the LLM provider call, push, error
-  // reporting, IMAP/SMTP mail, voice. The same scope is stated in
+  // control-plane calls. Still out of scope: the LLM provider call, push
+  // notifications, error reporting, IMAP/SMTP mail, voice transcribe/TTS, and
+  // anything a shell command starts. The same list is stated in
   // network-guard.ts's deny-all case and in the `network_policy` doc comment.
   // The three move together: whoever edits one and not the others leaves two
   // statements behind that claim the opposite.

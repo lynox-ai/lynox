@@ -1153,7 +1153,7 @@ export class GoogleAuth {
     }
 
     const response = cp && handle
-      ? await cpFetch(`${cp.url}/internal/oauth/google/refresh`, {
+      ? await cpFetch(cp.url, '/internal/oauth/google/refresh', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-instance-secret': cp.secret },
           body: JSON.stringify({

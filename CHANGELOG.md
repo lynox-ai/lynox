@@ -27,9 +27,21 @@
 
   **If you are on `deny-all` and use Google:** switch to `guarded`, which admits
   a connected integration to its own provider while still gating the surfaces a
-  prompt-injected agent can aim. On `allow-list`, add `www.googleapis.com`,
-  `sheets.googleapis.com`, `docs.googleapis.com`, `gmail.googleapis.com` and
-  `oauth2.googleapis.com` to `network_allowed_hosts`.
+  prompt-injected agent can aim.
+
+  **On `allow-list`**, add `www.googleapis.com`, `sheets.googleapis.com`,
+  `docs.googleapis.com`, `gmail.googleapis.com` and `oauth2.googleapis.com` to
+  `network_allowed_hosts`.
+
+  ⚠ **On a lynox-hosted instance, add your control plane's hostname as well.**
+  `allow-list` is uniform across every egress surface by design — it consults
+  only your list, never an integration's own hosts — and a hosted instance
+  refreshes its Google token through the control plane, not through Google. List
+  the five Google hosts and nothing else and everything keeps working until the
+  access token expires, typically within the hour; after that the refresh is
+  refused and Google stops working with a network-policy error. The token itself
+  is not lost: a policy-blocked refresh fails before the response is read, so
+  nothing is classified as revoked.
 
   A refresh blocked by policy fails *before* the response is read, so no token
   is classified as revoked and nothing is deleted — a policy change cannot cost
