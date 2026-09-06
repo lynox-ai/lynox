@@ -184,7 +184,8 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // failed skipped it — leaving a live handle for the NEXT test's teardown to
     // close under, which is the exact hazard this block exists to prevent, just
     // moved onto an unrelated test.
-    // All three lists are SNAPSHOTTED before the wait, not spliced inside the
+    // All four lists — runs, closers, temp dirs and releases — are SNAPSHOTTED
+    // before the wait, not spliced inside the
     // `finally`. vitest's hook timeout does not cancel the hook body: on a hang
     // it fails the test and moves on while this continues as a zombie, and a
     // zombie that spliced the shared arrays later would close the NEXT test's
@@ -194,7 +195,15 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const toClose = closers.splice(0);
     const toRemove = tmpDirs.splice(0);
     for (const release of releases.splice(0)) {
-      try { release(); } catch { /* the store may already be closed */ }
+      try {
+        release();
+      } catch (err: unknown) {
+        // Narrow enough to be worth a line: a release that throws leaves its run
+        // parked, and the only remaining signal is the hook timeout ten seconds
+        // later, which names the hook and not the reason. Mirrors the production
+        // teardown in worker-loop.ts, which logs for the same reason.
+        process.stderr.write(`[test] release failed: ${err instanceof Error ? err.message : String(err)}\n`);
+      }
     }
     try {
       await Promise.all(runs);
