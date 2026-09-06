@@ -312,10 +312,17 @@ export class WorkerLoop {
             //
             // Recording it as the failed run it was puts it back through the same
             // branch logic that schedules every other outcome — next occurrence for
-            // cron, interval for watch, `next_run_at = NULL` for a one-shot. Ordered
-            // AFTER `endWait` on purpose: `recordTaskRun` withholds status writes
-            // from a parked trigger (§0 T1), so calling it first would skip the very
-            // scheduling this needs.
+            // cron, interval for watch, `next_run_at = NULL` for a one-shot.
+            //
+            // INSIDE the `if`, and that placement is the point. An earlier comment
+            // here said the ORDER mattered because `recordTaskRun` withholds status
+            // writes from a parked trigger and would otherwise skip the scheduling.
+            // That was false: the guard withholds only the STATUS, and `next_run_at`
+            // is written either way, so both orders leave the same row. The real
+            // reason is exactly-once — `endWait` resolves the race against a live
+            // run's own un-park, so only the caller that WON it may write a run
+            // result. Recording first would stamp a failed run onto a trigger
+            // another party had already finished.
             try {
               taskManager.recordTaskRun(parked.id, WAIT_EXPIRED_RESULT, 'failed');
             } catch (err: unknown) {

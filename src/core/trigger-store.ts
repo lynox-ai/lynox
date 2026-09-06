@@ -490,7 +490,18 @@ export class TriggerStore {
     if (params.title !== undefined || params.description !== undefined) {
       sets.push('confirmed_at = NULL');
     }
-    if (params.status !== undefined) { sets.push('status = ?'); values.push(params.status); }
+    if (params.status !== undefined) {
+      sets.push('status = ?');
+      values.push(params.status);
+      // A status write that is not `waiting` ENDS a wait as far as this row is
+      // concerned, so the deadline goes with it. Without this, `complete()` and
+      // `update()` — which write a status unconditionally and have no way to pass
+      // `waitingUntil` — leave `waiting_until` set on a row that is no longer
+      // parked. Nothing sweeps such a row (the sweep keys on the status), so it is
+      // inert rather than dangerous; it is still a row whose two columns disagree,
+      // and anything later keying on the deadline alone would read it as parked.
+      if (params.status !== WAITING) sets.push('waiting_until = NULL');
+    }
     if (params.nextRunAt !== undefined) { sets.push('next_run_at = ?'); values.push(params.nextRunAt || null); }
     if (params.waitingUntil !== undefined) { sets.push('waiting_until = ?'); values.push(params.waitingUntil || null); }
     if (params.scheduleCron !== undefined) {
@@ -613,8 +624,18 @@ export class TriggerStore {
   }
 
   /**
-   * End a wait — the ONE way a trigger leaves `waiting`, and the reason A6's
-   * "exactly once" needs no check in front of it.
+   * End a wait exactly once — the only CONDITIONAL way out of `waiting`, and the
+   * reason A6 needs no check in front of it.
+   *
+   * ⚠ Not the only way out, and an earlier version of this comment claimed it was.
+   * `TaskManager.complete()` and `.update()` write a status unconditionally
+   * through {@link updateFields}, which gates on nothing — so a human marking a
+   * parked trigger `completed` takes it out of `waiting` without coming through
+   * here. That path predates this wave (it could always end a RUNNING trigger the
+   * same way) and it is left alone; what this wave adds is the deadline, and
+   * `updateFields` now clears that alongside any non-`waiting` status so the two
+   * columns cannot disagree. What such a bypass does NOT do is settle the pending
+   * prompt — the run stays blocked until its own wait resolves.
    *
    * The `status = 'waiting'` in the WHERE is the whole mechanism. Two callers
    * race by construction: the run's own `finally`, which un-parks when its wait

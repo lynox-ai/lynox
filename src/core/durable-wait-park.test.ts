@@ -24,6 +24,8 @@ import type { NotificationRouter } from './notification-router.js';
 describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
   const tmpDirs: string[] = [];
   const closers: Array<() => void> = [];
+  /** Every session-run promise a harness started, drained before teardown. */
+  const inFlight: Array<Promise<unknown>> = [];
 
   interface Harness {
     loop: WorkerLoop;
@@ -35,6 +37,8 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     /** The prompt id the run raised, once it has. */
     promptIdOf: () => string | undefined;
     run: Promise<void>;
+    /** How many agent turns the loop has dispatched for this trigger. */
+    dispatches: () => number;
   }
 
   /** A worker loop whose single trigger's run asks one question and waits.
@@ -43,7 +47,7 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
    *  only way to tell "read the row back" apart from "compute 24h yourself":
    *  both produce the same instant to the millisecond, so an equality assertion
    *  between them passes either way. A value no clock would produce does not. */
-  function makeHarness(opts?: { doctorExpiry?: string }): Harness {
+  function makeHarness(opts?: { doctorExpiry?: string; unreadableRow?: boolean }): Harness {
     const dir = mkdtempSync(join(tmpdir(), 'lynox-park-'));
     tmpDirs.push(dir);
     const history = new RunHistory(join(dir, 'history.db'));
@@ -93,6 +97,21 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
       notify: vi.fn().mockResolvedValue(undefined),
     } as unknown as NotificationRouter;
 
+    if (opts?.unreadableRow === true) {
+      // The park reads the row back to learn its deadline. If that read yields
+      // nothing there is no deadline to park against — and a trigger parked
+      // without one is invisible to the sweep, i.e. it would wait forever.
+      // ONCE, and only for the park's own read-back. Mocking it for every call
+      // also breaks `waitForSettled`, which resolves at once against a row it
+      // cannot see — the run then resumes and its `finally` un-parks, so the
+      // test observes the state AFTER the whole cycle and cannot tell "never
+      // parked" from "parked and immediately released". Measured: the mutation
+      // that deletes this branch survived exactly that version of the test.
+      const realGetById = prompts.getById.bind(prompts);
+      vi.spyOn(prompts, 'getById')
+        .mockImplementationOnce(() => undefined)
+        .mockImplementation((id: string) => realGetById(id));
+    }
     if (opts?.doctorExpiry !== undefined) {
       const doctored = opts.doctorExpiry;
       const real = prompts.getById.bind(prompts);
@@ -104,7 +123,17 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
 
     const loop = new WorkerLoop(engine, router, 60_000);
     const run = loop.tick();
-    return { loop, history, prompts, manager, parked, promptIdOf: () => promptId, run };
+    // The run mock's returned promise is exactly what `executeStandard` awaits,
+    // so draining it drains the whole post-run chain (un-park, recordTaskRun).
+    void run.then(() => {
+      const last = session.run.mock.results.at(-1);
+      if (last?.type === 'return') inFlight.push(Promise.resolve(last.value));
+    });
+    return {
+      loop, history, prompts, manager, parked, run,
+      promptIdOf: () => promptId,
+      dispatches: () => session.run.mock.calls.length,
+    };
   }
 
   /**
@@ -123,7 +152,15 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     }
   }
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Drain BEFORE closing. `tick()` dispatches fire-and-forget, so a run can
+    // still be inside `recordTaskRun` when a test body ends; closing the sqlite
+    // handle under it produces an unhandled rejection that belongs to no test
+    // and shows up as a non-zero exit with every test reported green.
+    await Promise.race([
+      Promise.allSettled(inFlight.splice(0)),
+      new Promise(r => setTimeout(r, 3000)),
+    ]);
     for (const c of closers.splice(0)) c();
     for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
@@ -175,6 +212,25 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     await h.run;
   });
 
+  it('does NOT park when the deadline cannot be read back', async () => {
+    // The safe direction, and the branch a mutation would otherwise walk right
+    // past. Not parking degrades to the in-memory wait this slice replaced — the
+    // run still blocks on its question — whereas parking without a deadline
+    // creates a trigger no sweep can ever collect.
+    const h = makeHarness({ unreadableRow: true });
+    await h.parked;
+
+    expect(h.history.getTrigger('trg-1')?.status).not.toBe('waiting');
+    expect(h.history.getTrigger('trg-1')?.waiting_until).toBeUndefined();
+    expect(h.manager.getExpiredWaitingTriggers('2099-01-01T00:00:00.000Z')).toEqual([]);
+
+    // and the run is still genuinely waiting — not parked is not the same as
+    // not waiting, which is the whole point of the fallback.
+    expect(h.prompts.getPending('thread-park')?.status).toBe('pending');
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    await h.run;
+  });
+
   // ── A6: the wait ends, once ──────────────────────────────────────────────
 
   it('A6 — an answer ends the wait and the trigger is due-able again', async () => {
@@ -198,6 +254,75 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     expect(h.manager.endWait('trg-1', 'failed')).toBe(true);
     expect(h.manager.endWait('trg-1', 'open')).toBe(false);   // the sweep and the run both fire
     expect(h.history.getTrigger('trg-1')?.status).toBe('failed');
+
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    await h.run;
+  });
+
+  it('a status write from OUTSIDE takes the deadline with it', async () => {
+    // `endWait` is the only CONDITIONAL way out of `waiting`, not the only way.
+    // `TaskManager.complete()` and `.update()` write a status unconditionally and
+    // cannot pass a deadline, so before this the row was left `completed` WITH a
+    // `waiting_until` — two columns disagreeing about whether it is parked.
+    // Found by review after the PR body claimed the opposite.
+    const h = makeHarness();
+    await h.parked;
+    expect(h.history.getTrigger('trg-1')?.waiting_until).toBeDefined(); // fixture guard
+
+    h.manager.complete('trg-1');
+
+    const after = h.history.getTrigger('trg-1');
+    expect(after?.status).toBe('completed');
+    expect(after?.waiting_until).toBeUndefined();
+
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    await h.run;
+  });
+
+  it('but re-asserting `waiting` WITHOUT a deadline leaves the existing one alone', async () => {
+    // The other direction, and the case that actually separates the two
+    // implementations. Passing `waitingUntil` alongside makes the test pass even
+    // if the clear were unconditional — the later assignment simply wins — so the
+    // discriminator is a status write that does NOT carry a deadline. Measured:
+    // the earlier version of this test survived exactly that mutation.
+    //
+    // Leaving it alone is also what `undefined` means everywhere else in
+    // `updateFields`: absent field, column untouched.
+    const h = makeHarness();
+    await h.parked;
+    const parkedUntil = h.history.getTrigger('trg-1')?.waiting_until;
+    expect(parkedUntil).toBeDefined(); // fixture guard
+
+    h.history.updateTrigger('trg-1', { status: 'waiting' });
+
+    expect(h.history.getTrigger('trg-1')?.waiting_until).toBe(parkedUntil);
+
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
+    await h.run;
+  });
+
+  it('reopening a parked trigger does NOT dispatch a second run of it', async () => {
+    // The property the whole "do not gate complete()/reopen()/update()" decision
+    // rests on, so it gets a test rather than an argument. Those three write a
+    // status unconditionally, so a human CAN take a parked trigger back to `open`
+    // while its run is still blocked on the question — deliberately: it is the
+    // only way to release a trigger nobody is going to answer. `getDue`s wait
+    // gate then stops excluding it, and the row still carries a past
+    // `next_run_at`, so the next tick looks like it should fire it again.
+    //
+    // It does not, because `activeTasks` still holds the id for the whole of
+    // `executeTask` — the parked run is inside it. Gating the three writers
+    // instead would have removed the release valve to fix a problem that is
+    // already closed one layer down.
+    const h = makeHarness();
+    await h.parked;
+    expect(h.dispatches()).toBe(1);
+
+    h.manager.reopen('trg-1');
+    expect(h.history.getTrigger('trg-1')?.status).toBe('open');
+    await h.loop.tick();
+
+    expect(h.dispatches()).toBe(1);
 
     h.prompts.answerUser(h.promptIdOf()!, 'Acme');
     await h.run;
@@ -284,6 +409,9 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     // for its full TTL, and an answer arriving after the sweep would revive a
     // trigger the sweep had just ended.
     expect(h.prompts.getById(promptId)?.status).toBe('expired');
+    // The count is the only signal that a settle DID something; nothing reads it
+    // in production, so without this it could return a constant.
+    expect(h.prompts.expirePendingForTrigger('trg-1')).toBe(0); // already settled
     expect(h.prompts.answerUser(promptId, 'too late')).toBe(false);
 
     await h.run;
@@ -324,6 +452,37 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     settle.mockRestore();
     end.mockRestore();
 
+    await h.run;
+  });
+
+  it('the LOSER of the endWait race writes no run result', async () => {
+    // Why `recordTaskRun` sits INSIDE `if (endWait(...))`. An earlier comment
+    // claimed the order mattered for scheduling; it does not — the parked guard
+    // withholds only the status and `next_run_at` is written either way, so both
+    // orders leave the same row, and a mutation that swapped them survived.
+    //
+    // The real reason is exactly-once: `endWait` is what resolves the race with a
+    // live run's own un-park, so only the winner may stamp a result. Here the
+    // race is decided against the sweep before it runs.
+    // The race has to be lost BETWEEN the query and the write. Ending the wait
+    // before the tick does not reproduce it: `endWait` clears the deadline too,
+    // so the sweep's query stops returning the row and the loser path is never
+    // entered at all — measured, an earlier version of this test asserted
+    // against a loop body that never ran.
+    const h = makeHarness();
+    await h.parked;
+    h.history.updateTrigger('trg-1', { waitingUntil: '2020-01-01T00:00:00.000Z' });
+    const lost = vi.spyOn(h.manager, 'endWait').mockReturnValue(false);
+    const recorded = vi.spyOn(h.manager, 'recordTaskRun');
+
+    await h.loop.tick();
+
+    expect(lost).toHaveBeenCalledWith('trg-1', 'failed'); // the sweep DID see it
+    expect(recorded).not.toHaveBeenCalled();              // and wrote nothing
+    lost.mockRestore();
+    recorded.mockRestore();
+
+    h.prompts.answerUser(h.promptIdOf()!, 'Acme');
     await h.run;
   });
 
