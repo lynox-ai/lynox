@@ -50,6 +50,8 @@ const OBVIOUSLY_FAKE: RegExp[] = [
   /^TEST-[A-Z0-9-]{1,15}$/,          // canonical fake tokens / run ids (≤20 chars total)
   /^test-[a-z0-9-]{1,15}$/,          // fake model ids
   /^https:\/\/[a-z0-9.-]+\.invalid(?:\/[a-z0-9./-]*)?$/, // RFC-2606 reserved hosts
+  /^[a-z0-9.-]+@[a-z0-9.-]+\.invalid$/, // fake addresses — same RFC-2606 device as the hosts above,
+                                        // anchored on `.invalid` so a real domain cannot slip through
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,       // ISO timestamps
   /^0\.0\.0-test$/,                  // fake version
   /^(?:ok|hosted|managed|managed_pro|balanced|deep|fast|stripe-billing|openai|balance|none|unfunded)$/, // contract literals (vocab + shapes + http)
