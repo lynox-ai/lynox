@@ -12,7 +12,17 @@ lynox integrates with Google Workspace to read and write your business data. Onc
 You need a Google Cloud project with OAuth 2.0 credentials. This takes about 5 minutes.
 
 :::note
-This setup applies to **all deployments** — self-hosted, Docker, and managed hosting (lynox.cloud). Each user creates their own Google Cloud project, so no Google security audit is needed.
+This setup is for **your own Google Cloud project** — self-hosted, Docker, or managed hosting where you
+prefer to bring your own OAuth client. Each project is separate, so no Google security audit of lynox is
+involved.
+:::
+
+:::tip[On lynox.cloud you can skip all of it]
+Managed instances can connect through lynox's own Google client: one button on the Google card, no Cloud
+project, no client ID. The consent then asks for a deliberately narrow set — calendar events, free/busy,
+and the Drive files lynox itself creates. If you need more than that (reading Gmail, editing existing
+spreadsheets, full Drive), bring your own client with the setup below; the card offers it under
+*Advanced*.
 :::
 
 ### 1. Create a Google Cloud project
@@ -157,58 +167,92 @@ The Web UI detects your deployment and uses the correct flow automatically.
 
 ## Access Level
 
-The Web UI offers a toggle between two access levels:
+The card offers two named levels. They are **not** "read" and "write" — Google's own axis is how much
+data a scope exposes, which is why full calendar access including deletion is only *sensitive* while a
+headers-only mailbox scope is *restricted*.
 
-| Level | What it includes |
-|-------|-----------------|
-| **Read only** (default) | Read Gmail, Sheets, Drive, Calendar, Docs |
-| **Full access** | Everything above + send email, create events, edit sheets/docs, upload files |
+| Level | What it asks Google for | What that costs |
+|-------|-------------------------|-----------------|
+| **Standard** (default) | Your identity and email address, calendar events, free/busy, and the Drive files lynox creates (`drive.file`) | App verification. **No CASA assessment** — nothing in this set is restricted. |
+| **Full** | Standard, plus Sheets, Docs, Calendar and Gmail-send, plus Gmail reading and full Drive | Verification **and** an annual CASA security assessment, because it includes restricted scopes. |
 
-You can switch the access level anytime in Settings → Integrations → Google Workspace. Changing the level requires re-authorization with Google (one click).
+**What Standard does not include, so nothing here is a surprise later:** no Gmail access of any kind, no
+access to spreadsheets or documents you did not create through lynox, and no access to Drive files lynox
+did not create. Asking lynox to read an existing spreadsheet on a Standard connection is refused with the
+scope it would need, not attempted and failed.
 
-For advanced use, scopes can also be set via config:
+**Choosing Full changes where your mail comes from.** Full includes a Gmail read scope, and lynox then
+reads that mailbox over the Google connection instead of over IMAP. If you have the mailbox connected as
+IMAP as well, that is the switch to be aware of.
+
+Switching levels requires re-authorising with Google. A connection made before these two levels existed
+keeps working and shows as *legacy* — nothing changes until you pick a level.
+
+For advanced use, scopes can be set directly. The **accepted** list is wider than the two levels above,
+for two different reasons — and only the first is about you:
+
+- **Scopes lynox used to request.** A connection made before the levels existed keeps working; nothing
+  it was granted is rejected now.
+- **Scopes lynox has never requested but Google classifies**, such as `gmail.metadata` or the blanket
+  `calendar`. They are accepted if your grant already carries them; lynox will not ask for them.
+
+Anything outside that list is rejected:
 
 ```json
 {
   "google_oauth_scopes": [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/calendar.events"
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/drive.file"
   ]
 }
 ```
 
 ## What You Can Do
 
-### Gmail
+### Gmail — only on a **Full** connection
 
-Once you've connected Google, your Gmail mailbox automatically appears in **Settings → Integrations → Mail** alongside any IMAP/SMTP accounts. The same mail tools (`mail_triage`, `mail_search`, `mail_read`, `mail_send`, `mail_reply`) work across all mailboxes — there is no separate Gmail tool.
+Gmail is **not** part of the Standard set. On a Full connection your Gmail mailbox appears in
+**Settings → Integrations → Mail** alongside any IMAP/SMTP accounts, and the same mail tools
+(`mail_triage`, `mail_search`, `mail_read`, `mail_send`, `mail_reply`) work across all of them — there is
+no separate Gmail tool. On a Standard connection the mailbox is not registered at all and the card says
+so; connect it over IMAP with an app password instead.
 
 - *"What's in my inbox today?"* (spans Gmail + IMAP if you have both)
 - *"Find emails from [contact] about [topic]"*
 - *"Draft a reply to the last email from [name]"*
-- *"Send a follow-up to [contact]"* (requires write scope)
+- *"Send a follow-up to [contact]"*
 
-### Google Sheets
+### Google Sheets — only on a **Full** connection
+
+Standard grants no Sheets access. A read on a Standard connection is refused naming the scope it needs.
 
 - *"Summarize the Q1 revenue sheet"*
-- *"Add a row to my expenses tracker"* (requires write scope)
+- *"Add a row to my expenses tracker"*
 - *"Compare last month's numbers with this month"*
 
-### Google Drive
+### Google Drive — files lynox created, unless you go Full
 
-- *"Find the proposal document from last week"*
-- *"Summarize the PDF in my Drive called [name]"*
+Standard grants `drive.file`, which reaches only what lynox itself created or you explicitly picked.
+Searches say so in their result rather than reporting an empty Drive.
 
-### Google Calendar
+- *"Find the proposal document from last week"* (only if lynox created it)
+- *"Summarize the PDF in my Drive called [name]"* (same)
+
+### Google Calendar — in the Standard set
+
+Creating, moving and deleting events needs **no** upgrade: `calendar.events` is part of Standard. Each
+change is confirmed before it happens.
 
 - *"What meetings do I have tomorrow?"*
-- *"Schedule a call with [name] next Tuesday at 10am"* (requires write scope)
-- *"Block 2 hours for deep work this afternoon"* (requires write scope)
+- *"Schedule a call with [name] next Tuesday at 10am"*
+- *"Block 2 hours for deep work this afternoon"*
 
-### Google Docs
+### Google Docs — only on a **Full** connection
+
+Standard grants no Docs access at all, reading included.
 
 - *"Summarize the meeting notes in [document]"*
-- *"Update the project status section"* (requires write scope)
+- *"Update the project status section"*
 
 ## Token Storage
 

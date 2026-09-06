@@ -29,6 +29,7 @@
 		isScopeMismatch,
 		getServerScopeMode,
 		grantedServices,
+		driveIsAppFilesOnly,
 		loadGoogleStatus,
 		saveGoogleCredentials,
 		startGoogleAuth,
@@ -60,6 +61,14 @@
 		switchConfirmOpen = false;
 		if (await switchToManagedGoogle()) await startManagedGoogleOAuth();
 	}
+
+	/**
+	 * `drive.file` is a WRITE scope that reaches nothing but what lynox created,
+	 * so a card that says "Drive" without this reads as access to the whole one.
+	 * The rule lives in the store, where it can be tested — an inline `$derived`
+	 * is a rule nobody can drive.
+	 */
+	const showDriveAppFilesNote = $derived(driveIsAppFilesOnly(getGoogleStatus()?.scopes ?? []));
 
 	let showAdvancedCredentials = $state(false);
 
@@ -296,6 +305,19 @@
 						{isConnecting() ? t('integrations.connecting') : t('integrations.reconnect_google')}
 					</button>
 					<p class="text-xs text-warning">{t('integrations.scope_change_hint')}</p>
+				{/if}
+				{#if showDriveAppFilesNote}
+					<!-- The remedy for a narrow Drive grant lives on the CARD, not in the
+					     tool string: it differs per tenant, and a tool string is read by
+					     the model rather than by the person who can act on it. Branched on
+					     BROKER MODE — a brokered connection cannot widen its grant here at
+					     all, so telling it to "switch to Full" would point at a control it
+					     does not render. -->
+					<p class="text-xs text-text-subtle">
+						{isBroker
+							? t('integrations.drive_app_files_only_broker')
+							: t('integrations.drive_app_files_only_byo')}
+					</p>
 				{/if}
 				{#if getGoogleStatus()?.scopes && getGoogleStatus()!.scopes!.length > 0}
 					<!-- One line per product, labelled per SCOPE. The label used to be

@@ -31,6 +31,25 @@ export const GOOGLE_SCOPE_IDS = {
 
 const S = GOOGLE_SCOPE_IDS;
 
+/**
+ * Drive is granted, but only for the files lynox itself creates.
+ *
+ * All three conditions matter and each one has been wrong in a draft:
+ *  - `drive.file` must be PRESENT, or there is no Drive access to qualify and
+ *    the note would appear on a connection with no Drive at all;
+ *  - full `drive` and `drive.readonly` must both be ABSENT, because either one
+ *    reaches the rest of the Drive and the note would then be false.
+ */
+export function driveIsAppFilesOnly(scopes: readonly string[]): boolean {
+	const held = new Set(scopes);
+	return held.has(S.DRIVE_FILE)
+		&& !held.has(S.DRIVE)
+		&& !held.has(S.DRIVE_READONLY)
+		// Accepted but never requested; it still sees every file's metadata, so
+		// the note would be false. Kept in step with `google-drive.ts › withScopeNote`.
+		&& !held.has(S.DRIVE_METADATA_READONLY);
+}
+
 export interface ServiceGrant {
 	/** The product name, shown verbatim. */
 	name: string;
