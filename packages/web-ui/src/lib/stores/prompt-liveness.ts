@@ -23,6 +23,15 @@
  * a ✓ on work still in flight. Worst on `ask_user`, which is not slow but parked
  * on a human: the check mark reads as "answered" over a question nobody has
  * been shown.
+ *
+ * `tool_use` is the only reason held back, and NOT because the others are proof
+ * the run is over — `max_tokens` continues the same run (`agent.ts` pushes a
+ * continuation turn and re-enters the loop), and a provider on the
+ * OpenAI-compatible wire can report `length` after emitting complete tool calls,
+ * which the adapter maps to `max_tokens`. It is held back because `tool_use` is
+ * the one reason where the client can PROVE nothing has finished. Everywhere
+ * else the settle stays as it was, and the run's `done`/`error` handler is what
+ * guarantees no spinner outlives the run.
  */
 export function turnEndSettlesTools(stopReason: string | undefined): boolean {
 	return stopReason !== 'tool_use';
@@ -49,7 +58,13 @@ export function turnEndSettlesTools(stopReason: string | undefined): boolean {
 export function promptCreatedAtMs(raw: unknown, now: number): number {
 	if (typeof raw !== 'string' || raw === '') return now;
 	const parsed = Date.parse(zoneQualify(raw));
-	return Number.isFinite(parsed) ? parsed : now;
+	if (!Number.isFinite(parsed)) return now;
+	// Clamped to `now` because the two clocks are different machines'. If the
+	// browser's runs behind the server's, `now - createdAt` goes negative and the
+	// countdown renders MORE than the timeout — 26:00:00 on a two-hour skew. The
+	// caller clamps the low end only, so without this the fix would close the
+	// over-promise on one side and open it on the other.
+	return Math.min(parsed, now);
 }
 
 /**
@@ -70,18 +85,46 @@ export function zoneQualify(raw: string): string {
 	return /[Zz]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`;
 }
 
+/**
+ * Whether {@link lostPromptRecheckVerdict}'s timer must be (re-)armed.
+ *
+ * The obvious guard — "a timer is pending, so do nothing" — skips the run that
+ * needs the recheck most. A timer left over from the previous run blocks the
+ * arm, then dies on its own epoch check without re-arming, and the follow-up
+ * run is left with no recheck at all. That is precisely the sequence this
+ * feature exists for: a lost prompt is what makes the user send again, and
+ * sending again is what starts the follow-up run. Measured against a faithful
+ * transcription of the scheduler: zero GETs issued across 52s of a second run.
+ *
+ * So the question is not "is a timer pending" but "is a timer pending FOR THIS
+ * RUN" — an older one is replaced, not deferred to.
+ */
+export function shouldArmRecheck(state: {
+	timerPending: boolean;
+	timerEpoch: number;
+	currentEpoch: number;
+}): boolean {
+	return !(state.timerPending && state.timerEpoch === state.currentEpoch);
+}
+
 /** What the lost-prompt recheck should do when its timer fires. */
 export type RecheckVerdict = 'ask' | 'wait' | 'stop';
 
 /**
  * Whether to ask the server for a prompt this tab may never have heard about.
  *
- * The `prompt` SSE event is the only run event that never enters the RunBuffer
- * (`EmittedStreamEvent` has no `prompt` member), so the `?since=` replay that
- * recovers every `tool_call` and `turn_end` cannot recover the question itself.
- * The server writes it straight to the socket and says so: "best-effort (client
- * may not be connected)". Lose it once and the question is invisible while
- * SQLite holds it `pending` for 24h.
+ * `prompt` never enters the RunBuffer — `EmittedStreamEvent` has no `prompt`
+ * member — so the `?since=` replay that recovers every `tool_call` and
+ * `turn_end` cannot recover the question itself. The server writes it straight
+ * to the socket and says so: "best-effort (client may not be connected)". Lose
+ * it once and the question is invisible while SQLite holds it `pending` for 24h.
+ *
+ * It is NOT the only event written that way — `prompt_tabs`, `secret_prompt` and
+ * `mail_connect_prompt` bypass the buffer identically, and none of the three is
+ * even a member of the `StreamEvent` union. Every one of them carries the same
+ * defect. The recheck covers all four, because `checkPendingPrompt` restores
+ * whichever kind the server has pending; that breadth is deliberate, not a
+ * side effect of a claim about `prompt` being special.
  *
  * - `stop` — a newer run owns the stream, or this one ended. Do not re-arm;
  *   the run that replaced us schedules its own.

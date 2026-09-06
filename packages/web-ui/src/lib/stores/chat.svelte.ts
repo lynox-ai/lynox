@@ -19,7 +19,7 @@ import {
 	type ContentBlock,
 } from './chat-attribution.js';
 import { parseFollowUps, followUpsFromToolInput, stripFollowUpsFromHistory, type FollowUpSuggestion } from './follow-ups.js';
-import { turnEndSettlesTools, promptCreatedAtMs, lostPromptRecheckVerdict } from './prompt-liveness.js';
+import { turnEndSettlesTools, promptCreatedAtMs, lostPromptRecheckVerdict, shouldArmRecheck } from './prompt-liveness.js';
 import { projectKnowledgeWrite, performRetire, performReview, reviewRequestBody, parseReviewFailure, carryKnowledgeWrites, allKnowledgeWrites, queueEntriesToChips, anchorKnowledgeChips, type KnowledgeWriteChip } from './knowledge-chip.js';
 import { setContext, clearContext } from './context-panel.svelte.js';
 import { loadThreads } from './threads.svelte.js';
@@ -827,21 +827,35 @@ function hasAnyPendingPrompt(): boolean {
 		|| pendingSecretPrompt !== null || pendingMailConnect !== null;
 }
 
+/** Clear the spinner on any tool call the stream left `running`.
+ *  Used where the RUN is over (`done`, `error`) and on a `turn_end` whose stop
+ *  reason really ended the turn — never on `tool_use`, where the tools have not
+ *  run yet. */
+function settleRunningToolCalls(msg: { toolCalls?: { status?: string }[] }): void {
+	if (!msg.toolCalls) return;
+	for (const tc of msg.toolCalls) {
+		if (tc.status === 'running') tc.status = 'done';
+	}
+}
+
 /** How long to wait before asking the server whether a prompt exists that this
  *  tab never heard about. Long enough to be invisible next to a question parked
  *  on a human, short enough that nobody stares at a dead screen. */
 const LOST_PROMPT_RECHECK_MS = 12_000;
 let promptRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+/** streamEpoch the pending timer was armed for; -1 when none is armed. */
+let promptRecheckEpoch = -1;
 
 /**
  * Ask the server for a pending prompt this tab may never have been told about.
  *
- * The `prompt` SSE event is written straight to the response socket and is the
- * ONLY run event that never enters the RunBuffer — `EmittedStreamEvent` has no
- * `prompt` member — so `GET /runs/:id/stream?since=` can replay every
- * `tool_call` and `turn_end` around it but never the question itself. The
- * server's own comment calls the write "best-effort (client may not be
- * connected)". Lose it once — a suspended mobile tab, a proxy that buffers, a
+ * The `prompt` SSE event is written straight to the response socket and never
+ * enters the RunBuffer — `EmittedStreamEvent` has no `prompt` member — so
+ * `GET /runs/:id/stream?since=` can replay every `tool_call` and `turn_end`
+ * around it but never the question itself. The server's own comment calls the
+ * write "best-effort (client may not be connected)". `prompt_tabs`,
+ * `secret_prompt` and `mail_connect_prompt` are written the same way and carry
+ * the same defect; the recheck covers all four. Lose it once — a suspended mobile tab, a proxy that buffers, a
  * socket that died between the check and the write — and the question is
  * invisible forever while SQLite holds it `pending` for 24h.
  *
@@ -861,8 +875,17 @@ let promptRecheckTimer: ReturnType<typeof setTimeout> | null = null;
  * while a run is in flight with no prompt on screen.
  */
 function scheduleLostPromptRecheck(): void {
-	if (promptRecheckTimer !== null) return;
+	// Bail only for a timer belonging to THIS run. Comparing against null alone
+	// made the recheck skip the run that needs it most: a timer left pending by
+	// the previous run blocks the arm here, then dies on its own epoch check
+	// WITHOUT re-arming — so the follow-up run gets no recheck at all. That is
+	// exactly the sequence this fix exists for (a lost prompt makes the user
+	// send again, which starts the follow-up run), so it would have failed in
+	// its own reproduction.
+	if (!shouldArmRecheck({ timerPending: promptRecheckTimer !== null, timerEpoch: promptRecheckEpoch, currentEpoch: streamEpoch })) return;
+	cancelLostPromptRecheck();
 	const epoch = streamEpoch;
+	promptRecheckEpoch = epoch;
 	const tick = (): void => {
 		promptRecheckTimer = null;
 		const verdict = lostPromptRecheckVerdict({
@@ -876,6 +899,15 @@ function scheduleLostPromptRecheck(): void {
 		promptRecheckTimer = setTimeout(tick, LOST_PROMPT_RECHECK_MS);
 	};
 	promptRecheckTimer = setTimeout(tick, LOST_PROMPT_RECHECK_MS);
+}
+
+/** Drop any pending recheck. Called on thread switch and new chat: this is
+ *  module state that outlives a thread, and unlike the `$state` fields around
+ *  it, the detach-reset guard's own regex cannot see a plain `let`. */
+function cancelLostPromptRecheck(): void {
+	if (promptRecheckTimer !== null) clearTimeout(promptRecheckTimer);
+	promptRecheckTimer = null;
+	promptRecheckEpoch = -1;
 }
 
 /**
@@ -1789,11 +1821,7 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			// where the turn really is over and anything still spinning really
 			// is a dropped `tool_result`.
 			const turnStop = typeof data['stop_reason'] === 'string' ? data['stop_reason'] : undefined;
-			if (msg.toolCalls && turnEndSettlesTools(turnStop)) {
-				for (const tc of msg.toolCalls) {
-					if (tc.status === 'running') tc.status = 'done';
-				}
-			}
+			if (turnEndSettlesTools(turnStop)) settleRunningToolCalls(msg);
 			// Same signal, the other consequence: tools are about to run, so one
 			// of them may park on a human whose `prompt` event never arrives.
 			if (turnStop === 'tool_use') scheduleLostPromptRecheck();
@@ -1945,6 +1973,16 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 			break;
 		}
 		case 'done': {
+			// Last stop for a tool call the stream never resolved. `turn_end` no
+			// longer settles on `stop_reason: 'tool_use'` (the tools run after it),
+			// which leaves the genuinely unresolved ones to be cleared here — and
+			// there are real paths that produce a `tool_result` WITHOUT emitting
+			// one: an excluded or unknown tool, a denied permission, an unresolved
+			// secret, a failed schema validation, a rejected dispatch, the parallel
+			// cap. Before, `turn_end` swept those up as a side effect. Without a
+			// sweep at the end of the RUN, a spinner would turn forever — and it is
+			// persisted, so a reload would not clear it either.
+			settleRunningToolCalls(msg);
 			// Engine echoes the authoritative per-run total on the `done` event via
 			// `session.getLastRunUsage()` — the same value persisted to RunHistory
 			// (`cost_usd`) and surfaced in `/api/history/cost/daily`. Adopt it as
@@ -1993,6 +2031,8 @@ function handleSSEEvent(type: string, data: Record<string, unknown>, idx: number
 		}
 		case 'error': {
 			retryStatus = null;
+			// Same reasoning as `done`: the run is over, so nothing is still running.
+			settleRunningToolCalls(msg);
 			// Agent sends { message: '...' }, http-api catch sends { error: '...' }
 			// Upstream LLM provider errors (e.g. Mistral 401 unauthorized) arrive here
 			// once the SSE stream is open — without explicit UI surfacing the user
@@ -2762,6 +2802,7 @@ export function downloadExport(format: 'md' | 'json'): void {
 
 export function newChat() {
 	// Thread persists in DB — just detach from current session
+	cancelLostPromptRecheck();
 	messages = [];
 	sessionId = null;
 	isStreaming = false;
@@ -3093,6 +3134,7 @@ export async function resumeThread(threadId: string): Promise<void> {
 	messages = localMessages;
 	sessionId = threadId;
 	chatError = null;
+	cancelLostPromptRecheck();
 	isStreaming = false;
 	streamingActivity = 'idle';
 	streamingToolName = null;
