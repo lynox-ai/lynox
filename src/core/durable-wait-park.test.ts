@@ -618,9 +618,14 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
 
     await expect(h.loop.tick()).resolves.toBeUndefined();
 
-    expect(stderr.mock.calls.some(c => String(c[0]).includes('wait sweep failed'))).toBe(true);
+    // Restored BEFORE the assertions, because neither spy gates them and a
+    // failing assertion would otherwise leave `process.stderr.write` stubbed for
+    // the rest of the file — swallowing the diagnostics of every later test, at
+    // the exact moment something has already gone wrong.
+    const wrote = stderr.mock.calls.map(c => String(c[0]));
     boom.mockRestore();
     stderr.mockRestore();
+    expect(wrote.some(line => line.includes('wait sweep failed'))).toBe(true);
 
     h.prompts.answerUser(h.promptIdOf()!, 'Acme');
     await h.run;
@@ -926,7 +931,8 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const h = makeHarness();
     await h.parked;
     const promptId = h.promptIdOf()!;
-    expect(h.prompts.getById(promptId)?.status).toBe('pending');   // fixture guard
+    expect(h.prompts.getById(promptId)?.status).toBe('pending');           // fixture guard
+    expect(h.history.getTrigger('trg-1')?.status).toBe('waiting');         // and the park really happened
     const settleFails = vi.spyOn(h.prompts, 'expirePrompt').mockImplementation(() => {
       throw new Error('database is locked');
     });
@@ -935,10 +941,13 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     h.loop.stop();
     await waitUntil('the aborted run to finish', () => h.dispatches() > 0 && h.history.getTrigger('trg-1')?.status !== 'waiting');
 
-    expect(h.prompts.getById(promptId)?.status, 'the settle really did fail').toBe('pending');
-    expect(h.prompts.getById(promptId)?.trigger_id).toBe('trg-1');
+    // Read the state, THEN restore, THEN assert — a failing assertion must not
+    // leave stderr stubbed for the rest of the file.
+    const row = h.prompts.getById(promptId);
     settleFails.mockRestore();
     stderr.mockRestore();
+    expect(row?.status, 'the settle really did fail').toBe('pending');
+    expect(row?.trigger_id).toBe('trg-1');
   });
 
   // ── Auflage 1: recurring is OUT of wave 1, and the test pins today's shape ──
