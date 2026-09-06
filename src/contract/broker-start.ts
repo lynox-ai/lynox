@@ -17,8 +17,14 @@
  *
  *     sig = HMAC-SHA256(key = HMAC-SHA256(secret, BROKER_START_PURPOSE), payload)
  *
- * in its own code, with its own timing-safe compare, and is pair-tested against
- * the golden fixture `fixtures/broker-start-token.json`. The split is not
+ * in its own code, with its own timing-safe compare. ⚠ The golden fixture
+ * `fixtures/broker-start-token.json` that pins those bytes across the repo
+ * boundary does NOT exist yet: a fixture is generated from a real serializer
+ * (`fixtures/README.md`), and the serializer is the minting route, which lands
+ * with the engine half of this wave. Until then the only thing pinning the
+ * format is the literal in `tests/contract-broker-start.test.ts`, which binds
+ * ONE side. Saying so beats a comment that describes a pair test nobody wrote.
+ * The split is not
  * cosmetic: what both sides MUST agree on byte-for-byte is the payload and the
  * framing, and that is what this file fixes. A shared HMAC helper would fix the
  * same bytes and drag a runtime dependency into a directory two repos compile
@@ -83,6 +89,21 @@ export interface BrokerStartToken {
  * from one tenant starts a flow naming another.
  */
 export function brokerStartPayload(parts: { instanceId: string; ts: number; nonce: string }): string {
+  // The instance id is OPAQUE by contract (`env-registry.ts`), so it may contain
+  // the separator and this function must not assume otherwise. What makes the
+  // decomposition unique anyway is that the two fields AFTER it are constrained:
+  // `nonce` is fixed-length hex and `ts` is digits only, so a reader taking the
+  // last two dot-separated fields recovers all three parts whatever the id holds.
+  //
+  // That argument fails the moment `ts` can carry a dot — `{id: 'tenant.5', ts: 3}`
+  // and `{id: 'tenant', ts: 5.3}` produce the SAME bytes, and one tenant's token
+  // then verifies for another. Rejecting a non-integer here is what keeps the
+  // uniqueness claim true; it throws rather than coercing because the only caller
+  // is a minting site of ours, where a fractional timestamp is a bug to see now,
+  // not a value to round.
+  if (!Number.isInteger(parts.ts) || parts.ts < 0) {
+    throw new Error('brokerStartPayload: ts must be a non-negative integer (unix seconds)');
+  }
   return `${BROKER_START_VERSION}.${parts.instanceId}.${parts.ts}.${parts.nonce}`;
 }
 

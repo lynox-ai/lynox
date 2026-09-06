@@ -39,6 +39,25 @@ describe('brokerStartPayload — the exact bytes both sides sign', () => {
     expect(a, 'a token minted for one instance must not sign for another').not.toBe(b);
   });
 
+  it('REFUSES a non-integer ts — the collision that survives the separator', () => {
+    // The instance id is opaque by contract and may contain the separator, so
+    // uniqueness rests on the two fields after it being constrained. A
+    // fractional ts breaks exactly that: `{id:'tenant.5', ts:3}` and
+    // `{id:'tenant', ts:5.3}` are the same bytes, and one tenant's signature
+    // then verifies for another. Found by the refuter on this PR, not by me.
+    expect(() => brokerStartPayload({ instanceId: 't', ts: 5.3, nonce: NONCE })).toThrow(/non-negative integer/);
+    expect(() => brokerStartPayload({ instanceId: 't', ts: -1, nonce: NONCE })).toThrow(/non-negative integer/);
+    expect(() => brokerStartPayload({ instanceId: 't', ts: Number.NaN, nonce: NONCE })).toThrow(/non-negative integer/);
+  });
+
+  it('stays unique when the OPAQUE instance id contains the separator', () => {
+    // The pair the refuter used, now that ts must be an integer: these must
+    // differ, and the one that used to collide cannot be constructed at all.
+    const a = brokerStartPayload({ instanceId: 'tenant.5', ts: 3, nonce: NONCE });
+    const b = brokerStartPayload({ instanceId: 'tenant', ts: 53, nonce: NONCE });
+    expect(a).not.toBe(b);
+  });
+
   it('separates its fields — without a separator two tenants share one payload', () => {
     // The pair is chosen so the CONCATENATION collides and the separated form
     // does not: 'a' + '11' and 'a1' + '1' are both `a11`. An earlier version of
