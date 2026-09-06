@@ -26,6 +26,12 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
   const closers: Array<() => void> = [];
   /** Every session-run promise a harness started, drained before teardown. */
   const inFlight: Array<Promise<unknown>> = [];
+  /** Releases whatever question a harness's run is parked on, so teardown can
+   *  drain it. Registered by the harness, called unconditionally in `afterEach`
+   *  — a test body's own release would be SKIPPED by a failing assertion above
+   *  it, and the run would then hang until vitest's hook timeout, turning one
+   *  clear assertion failure into that failure plus a 10s timeout. */
+  const releases: Array<() => void> = [];
 
   interface Harness {
     loop: WorkerLoop;
@@ -121,6 +127,11 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
       });
     }
 
+    releases.push(() => {
+      const pending = prompts.getPending('thread-park');
+      if (pending) prompts.expirePrompt(pending.id);
+    });
+
     const loop = new WorkerLoop(engine, router, 60_000);
     const run = loop.tick();
     // The run mock's returned promise is exactly what `executeStandard` awaits,
@@ -182,6 +193,9 @@ describe('durable wait state — the park (§0 T1/T2/A5/A6/A8/A11/A12)', () => {
     const runs = inFlight.splice(0);
     const toClose = closers.splice(0);
     const toRemove = tmpDirs.splice(0);
+    for (const release of releases.splice(0)) {
+      try { release(); } catch { /* the store may already be closed */ }
+    }
     try {
       await Promise.all(runs);
     } finally {
