@@ -46,7 +46,15 @@ SELF_EXCLUDE='scripts/drift-guard.sh .github/workflows/drift-guard.yml'
 REMOVED='[Tt]elegram|[Ww]hats[Aa]pp|MCP[ -]server'
 
 # C: backtick path prefixes treated as real repo paths to verify.
-PATH_RE='`(src|packages|scripts|tests|docs)/[A-Za-z0-9_./-]+`'
+#
+# The optional `:1010` / `:1010-1042` tail is not decoration: `file:line` is the
+# dominant citation form in the register and in these scripts' own comments, and
+# the character class here excluded `:` — so `` `src/core/agent.ts:1010` `` matched
+# NOTHING and every such citation went unchecked, while the bare
+# `` `src/core/agent.ts` `` was verified. A guard over one spelling is blind to
+# every other, and this one was blind to the form people actually write.
+# Measured 2026-09-06 against /usr/bin/grep, both forms, before the change.
+PATH_RE='`(src|packages|scripts|tests|docs)/[A-Za-z0-9_./-]+(:[0-9]+(-[0-9]+)?)?`'
 
 is_excluded() {
   local f="$1"
@@ -151,6 +159,11 @@ while IFS= read -r -d '' f; do
     while IFS= read -r p; do
       [ -n "$p" ] || continue
       path="${p//\`/}"
+      # Drop a `:line` / `:line-line` citation tail before the existence check —
+      # the PATH is what must exist, the line number is a pointer into it. Matched
+      # exactly (digits, optional range, anchored at the end) rather than cutting at
+      # the first colon, so a path that legitimately contains one is untouched.
+      [[ $path =~ ^(.*):[0-9]+(-[0-9]+)?$ ]] && path="${BASH_REMATCH[1]}"
       # Skip globs / placeholders.
       case "$path" in *'<'*|*'>'*|*'*'*|*'{'*|*'…'*|*' '*) continue ;; esac
       if ! exists_path "$path"; then

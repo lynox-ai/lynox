@@ -124,6 +124,67 @@ describe('drift-guard — fires on planted drift', () => {
   });
 });
 
+// `file:line` is the dominant citation form in the register and in these scripts'
+// own comments, and class C could not see it: PATH_RE excluded `:` from its
+// character class, so `` `src/core/agent.ts:1010` `` matched nothing while the bare
+// path was checked. A guard over one spelling is blind to every other — and this
+// one was blind to the form people actually write.
+describe('drift-guard — class C reads the citation form people use', () => {
+  // The fixture path is not arbitrary: class C scans `*CLAUDE.md`, `*README.md`
+  // and `docs/src/content/docs/*` only. A doc placed anywhere else is never read,
+  // and every assertion below would pass against a guard that does nothing.
+
+  it('⭐ THE POINT: a dead path cited as file:line is caught', () => {
+    stageFile('docs/src/content/docs/live.md', 'See `src/core/does-not-exist.ts:1010` for the wiring.\n');
+    expect(runGuard(), 'a dead file:line citation must fire').not.toBe(0);
+  });
+
+  it('a line RANGE is caught too', () => {
+    stageFile('docs/src/content/docs/live.md', 'See `src/core/does-not-exist.ts:1010-1042`.\n');
+    expect(runGuard()).not.toBe(0);
+  });
+
+  // The control that keeps the fix from being "fire on everything": the line
+  // number is a pointer INTO the file, not part of its name, so a LIVE path
+  // cited with one must stay clean.
+  it('the control: a LIVE path cited as file:line stays clean', () => {
+    stageFile('docs/src/content/docs/live.md', 'See `src/x.test.ts:1` and `src/x.test.ts:1-9`.\n');
+    expect(runGuard(), 'the line tail must be stripped before the existence check').toBe(0);
+  });
+
+  // The form that already worked must keep working — both directions, or the
+  // change could have traded one blindness for another.
+  it('the bare form still fires on a dead path', () => {
+    stageFile('docs/src/content/docs/live.md', 'See `src/core/does-not-exist.ts`.\n');
+    expect(runGuard()).not.toBe(0);
+  });
+
+  it('the bare form still passes on a live path', () => {
+    stageFile('docs/src/content/docs/live.md', 'See `src/x.test.ts`.\n');
+    expect(runGuard()).toBe(0);
+  });
+
+  // ⚠ The residual, stated rather than assumed away. A NON-numeric tail does not
+  // match the optional group, so the whole backticked token fails PATH_RE and the
+  // line is not scanned at all — exactly as before this change, which excluded `:`
+  // outright. Widening to any colon tail was considered and rejected: `src/foo.ts:
+  // see below` would then be read as a path, and a guard that invents references
+  // is worse than one that misses a rare spelling.
+  //
+  // The truncation risk this test was written for cannot arise: the strip is an
+  // anchored `:digits(-digits)?$` match, not a cut at the first colon. There is no
+  // input where it removes part of a name — which is why this asserts the scan
+  // boundary instead of a truncation that has no code path.
+  it('a non-numeric colon tail is NOT scanned — the known edge of class C', () => {
+    stageFile('docs/src/content/docs/live.md', 'See `src/core/does-not-exist.ts:notaline`.\n');
+    expect(runGuard(), 'unmatched by PATH_RE, so unscanned — the pre-existing edge').toBe(0);
+    // The contrast that makes it a boundary rather than a bug report: the same
+    // dead path WITH a numeric tail does fire.
+    stageFile('docs/src/content/docs/live.md', 'See `src/core/does-not-exist.ts:12`.\n');
+    expect(runGuard(), 'the numeric form is exactly what this change added').not.toBe(0);
+  });
+});
+
 describe('drift-guard — does NOT fire on benign trees', () => {
   it('exempts a removed-feature word inside an archive/ doc (B is archive-exempt)', () => {
     // The real archive-exemption assertion: class B skips */archive/*. Mutating
