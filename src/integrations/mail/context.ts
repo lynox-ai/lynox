@@ -254,6 +254,8 @@ export class MailContext {
 
   private handler: MailWatcherHandler;
   private initialized = false;
+  /** Google rows skipped this init for want of a Gmail read scope — see `_buildProvider`. */
+  private _skippedGoogleMailboxes = 0;
 
   constructor(
     stateDb: MailStateDb,
@@ -343,6 +345,7 @@ export class MailContext {
    */
   async init(): Promise<void> {
     if (this.initialized) return;
+    this._skippedGoogleMailboxes = 0;
     this.initialized = true;
 
     // Boot migration must run BEFORE the provider loop so the new row is
@@ -359,6 +362,13 @@ export class MailContext {
       } catch {
         // Non-fatal: one bad account should not block the rest
       }
+    }
+
+    if (this._skippedGoogleMailboxes > 0) {
+      // One line for the whole init, not one per account and not one per poll.
+      // The remedy is the same for every affected mailbox, so naming them adds
+      // nothing an operator can act on — and would put addresses in a log.
+      console.warn(`[lynox:mail] ${this._skippedGoogleMailboxes} mailbox(es) connected through Google were skipped: the grant carries no Gmail read scope. Connect them over IMAP, or re-consent with full access.`);
     }
 
     // Restore the persisted default. If the DB has a row marked is_default=1
@@ -462,21 +472,20 @@ export class MailContext {
     if (account.authType === 'oauth_google') {
       if (!this.googleAuth || !this.googleAuth.isAuthenticated()) return null;
       if (!this.hasMailboxScope()) {
-        // ONE line, at init, not one per poll. The row STAYS — it is the
-        // user's mailbox — but no provider is registered, so nothing polls it
-        // into a 403 loop.
+        // The row STAYS — it is the user's mailbox — but no provider is
+        // registered, so nothing polls it into a 403 loop.
         //
         // ⚠ And it does NOT come back by itself when the scope arrives:
         // `_buildProvider` runs from `init()` only, and nothing re-runs it on
         // a token change. `listAccounts()` re-evaluates live, so the card's
-        // badge clears at once — the provider attaches on the next engine
-        // start. Saying "it works again immediately" here would be the
-        // pleasant version, and it is not what the code does.
+        // badge clears at once — the provider attaches when a new
+        // `MailContext` is built, i.e. on the next engine start.
         //
-        // The address is deliberately NOT logged: this is the only place in
-        // the engine where a real mailbox address would reach stdout, and a
-        // container log is not where it belongs.
-        console.warn(`[lynox:mail] account "${account.id}" is connected through Google but the grant carries no Gmail read scope — skipping. Connect the mailbox over IMAP, or re-consent with full access.`);
+        // Counted here, reported ONCE by `init()`. Nothing identifying is
+        // logged, and `account.id` would not have been safe either: a migrated
+        // Google row's id is `gmail-` plus the address with its `@` replaced,
+        // so logging the id logs the address in a costume.
+        this._skippedGoogleMailboxes++;
         return null;
       }
       return new OAuthGmailProvider(account, this.googleAuth);

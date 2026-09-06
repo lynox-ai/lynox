@@ -939,9 +939,13 @@ describe('MailContext — persisted default flag', () => {
  * Drive-file access and no Gmail at all — and D7 made that the default.
  */
 describe('MailContext — a Google connection is not a Gmail mailbox', () => {
+  // ⚠ The id is the one the boot migration really builds — `gmail-` plus the
+  // address with its `@` replaced. A hand-picked short id (`goog`) hid a real
+  // defect for one round: logging `account.id` "instead of the address" logs
+  // the address in a costume, and a test with a made-up id cannot see it.
   const GOOGLE_ROW = {
     ...GMAIL_ACCOUNT,
-    id: 'goog',
+    id: 'gmail-someone-gmail.com',
     address: 'someone@gmail.com',
     authType: 'oauth_google' as const,
   };
@@ -991,7 +995,7 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
       // polling it into a 403 loop.
       expect(c.registry.list()).toEqual([]);
       expect(c.watcher.size).toBe(0);
-      expect(stateDb.listAccounts().map(a => a.id)).toContain('goog');
+      expect(stateDb.listAccounts().map(a => a.id)).toContain(GOOGLE_ROW.id);
     } finally { await c.close(); }
   });
 
@@ -1079,12 +1083,12 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
     const c = new MailContext(stateDb, backend, undefined, {}, live as never);
     try {
       await c.init();
-      expect(c.listAccounts().find(a => a.id === 'goog')?.warning).toBe('needs_mailbox_scope');
+      expect(c.listAccounts().find(a => a.id === GOOGLE_ROW.id)?.warning).toBe('needs_mailbox_scope');
       expect(c.registry.list()).toEqual([]);
 
       // …the user re-consents, in the same process.
       scopes = [...READONLY];
-      expect(c.listAccounts().find(a => a.id === 'goog')?.warning,
+      expect(c.listAccounts().find(a => a.id === GOOGLE_ROW.id)?.warning,
         'the badge is computed per request, so it clears at once').toBeUndefined();
       expect(c.registry.list(),
         'and the provider still is not attached — that needs the next init').toEqual([]);
@@ -1124,8 +1128,12 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
       const lines = warn.mock.calls.map(a => String(a[0]));
       const mine = lines.filter(l => l.includes('[lynox:mail]'));
       expect(mine, 'the skip must say something at all').toHaveLength(1);
-      expect(mine[0]).toContain('goog');
-      expect(mine[0], 'the address must not reach the log').not.toContain(GOOGLE_ROW.address);
+      expect(mine[0], 'and it must say how many').toContain('1 mailbox');
+      // Neither the address NOR the id, because a migrated Google id is the
+      // address with its `@` replaced — the local part travels either way.
+      expect(mine[0]).not.toContain(GOOGLE_ROW.address);
+      expect(mine[0]).not.toContain(GOOGLE_ROW.id);
+      expect(mine[0]).not.toContain('someone');
       expect(mine[0]).not.toContain('@');
 
       // ONE line, at init — not one per read. §3.7 asks for exactly this, and
@@ -1144,7 +1152,7 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
     const c = ctxWith(STAGE_1);
     try {
       await c.init();
-      const view = c.listAccounts().find(a => a.id === 'goog');
+      const view = c.listAccounts().find(a => a.id === GOOGLE_ROW.id);
       expect(view?.warning).toBe('needs_mailbox_scope');
     } finally { await c.close(); }
   });
@@ -1155,7 +1163,7 @@ describe('MailContext — a Google connection is not a Gmail mailbox', () => {
     const c = ctxWith(READONLY);
     try {
       await c.init();
-      expect(c.listAccounts().find(a => a.id === 'goog')?.warning).toBeUndefined();
+      expect(c.listAccounts().find(a => a.id === GOOGLE_ROW.id)?.warning).toBeUndefined();
       expect(c.listAccounts().find(a => a.authType === 'imap')?.warning).toBeUndefined();
     } finally { await c.close(); }
   });

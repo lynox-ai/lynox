@@ -17,7 +17,8 @@
   existing row is kept** — it is the user's mailbox and it works again the moment
   the scope is there — **on the next start of the instance**, because nothing
   re-registers a mail provider at runtime. The card's badge clears immediately,
-  since it is computed per request.
+  since it is computed per request. The log line names no mailbox: one line per
+  start, with a count.
 - The mail card names the reason and the way out: a *no mailbox access* badge and
   a link to the app-password guide, in both languages. An account that is listed
   and does nothing reads as a fault in lynox rather than as a permission the
